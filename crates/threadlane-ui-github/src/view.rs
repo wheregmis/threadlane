@@ -2924,6 +2924,11 @@ impl GitHubView {
                     &self.pr_reply_input
                 } else {
                     &self.pr_comment_input
+                })
+                .aria_label(if reply {
+                    "Reply to review comment"
+                } else {
+                    "New review comment"
                 })))
                 .children(
                     blocked

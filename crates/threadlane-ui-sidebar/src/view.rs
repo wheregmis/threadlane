@@ -342,6 +342,24 @@ fn same_history_row_identity(left: &HistoryRow, right: &HistoryRow) -> bool {
     }
 }
 
+/// Sidebar search predicate: matches title, id, project, branch, and
+/// directory name (all pre-lowercased by the caller).
+fn history_query_matches(
+    title: &str,
+    id: &str,
+    project_name: &str,
+    branch: &str,
+    dir_name: &str,
+    query: &str,
+) -> bool {
+    query.is_empty()
+        || title.contains(query)
+        || id.contains(query)
+        || project_name.contains(query)
+        || branch.contains(query)
+        || dir_name.contains(query)
+}
+
 fn flatten_history_sessions(
     mut sessions: Vec<(SessionInfo, SessionAttention)>,
     now: u64,
@@ -657,6 +675,7 @@ impl SidebarView {
                 Button::new("new-task-btn")
                     .icon(IconName::Plus)
                     .label("New task")
+                    .accessibility_label("Start a new task (⌘N)")
                     .outline()
                     .small()
                     .w_full()
@@ -691,7 +710,8 @@ impl SidebarView {
                         div().flex_1().child(
                             Input::new(&self.search_input)
                                 .appearance(false)
-                                .bordered(false),
+                                .bordered(false)
+                                .aria_label("Search sessions"),
                         ),
                     ),
             )
@@ -705,7 +725,13 @@ impl SidebarView {
                 state
                     .projects
                     .iter()
-                    .map(|project| (project.name.clone(), project.work_dir.clone()))
+                    .map(|project| {
+                        (
+                            project.name.clone(),
+                            project.work_dir.clone(),
+                            project.sessions.len(),
+                        )
+                    })
                     .collect::<Vec<_>>(),
                 state.sidebar_project_filter.clone(),
             )
@@ -715,8 +741,8 @@ impl SidebarView {
             .and_then(|selected| {
                 projects
                     .iter()
-                    .find(|(_, work_dir)| work_dir == selected)
-                    .map(|(name, _)| name.clone())
+                    .find(|(_, work_dir, _)| work_dir == selected)
+                    .map(|(name, _, _)| name.clone())
             })
             .unwrap_or_else(|| "All projects".into());
         let filter_model = self.model.clone();
@@ -732,7 +758,10 @@ impl SidebarView {
                 div().min_w_0().flex_1().child(
                     Button::new("sidebar-project-filter")
                         .icon(IconName::Folder)
-                        .label(selected_label)
+                        .label(selected_label.clone())
+                        .accessibility_label(format!(
+                            "Filter sessions by project: {selected_label}"
+                        ))
                         .tooltip("Filter sessions by project")
                         .dropdown_caret(true)
                         .selected(true)
@@ -740,8 +769,10 @@ impl SidebarView {
                         .justify_start()
                         .dropdown_menu(move |menu, _window, _cx| {
                             let all_model = filter_model.clone();
+                            let total_sessions: usize =
+                                projects.iter().map(|(_, _, count)| count).sum();
                             let mut menu = menu.item(
-                                PopupMenuItem::new("All projects")
+                                PopupMenuItem::new(format!("All projects · {total_sessions}"))
                                     .checked(selected_filter.is_none())
                                     .on_click(move |_event, _window, cx| {
                                         all_model.update(cx, |state, cx| {
@@ -753,11 +784,12 @@ impl SidebarView {
                                         });
                                     }),
                             );
-                            for (name, work_dir) in projects.clone() {
+                            for (name, work_dir, session_count) in projects.clone() {
                                 let model = filter_model.clone();
                                 let checked = selected_filter.as_ref() == Some(&work_dir);
-                                menu =
-                                    menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                                let item_label = format!("{name} · {session_count}");
+                                menu = menu.item(
+                                    PopupMenuItem::new(item_label).checked(checked).on_click(
                                         move |_event, _window, cx| {
                                             model.update(cx, |state, cx| {
                                                 controller::dispatch(
@@ -1011,30 +1043,6 @@ impl SidebarView {
         };
         let session_identity = sidebar_session_identity(session);
         let session_title = session_identity.title;
-        let session_tooltip = session.git_branch.as_ref().map_or_else(
-            || session_identity.tooltip.clone(),
-            |branch| format!("{}\nBranch: {branch}", session_identity.tooltip),
-        );
-
-        let work_dir = session.work_dir.clone();
-        let session_id = session.id.clone();
-        let model = self.model.clone();
-        let title_work_dir = session.work_dir.clone();
-        let title_session_id = session.id.clone();
-        let title_model = self.model.clone();
-        let context_work_dir = session.work_dir.clone();
-        let context_session_id = session.id.clone();
-        let context_model = self.model.clone();
-        let context_is_worktree = session.is_worktree;
-        let context_git_branch = session.git_branch.clone();
-        let copy_session_file = session.session_file.display().to_string();
-        let export_log_source = session.session_file.clone();
-        let export_trajectory_title = session.title.clone();
-        let quick_settle_model = self.model.clone();
-        let quick_settle_work_dir = session.work_dir.clone();
-        let quick_settle_session_id = session.id.clone();
-        let quick_settle_is_worktree = session.is_worktree;
-        let quick_settle_git_branch = session.git_branch.clone();
         let time_ago = format_time_ago(session.updated_at, now_unix_secs());
         let project = self
             .model
@@ -1049,14 +1057,73 @@ impl SidebarView {
             })
             .map(|project| project.name.clone())
             .unwrap_or_else(|| "Project".to_string());
+        // Rich hover card (Synara ThreadHoverCardContent pattern): keep the
+        // row to title + status, move project path, branch/worktree, recency,
+        // and attention detail into the tooltip.
+        let work_dir_display = session.work_dir.to_string_lossy().into_owned();
+        let branch_display = session.git_branch.as_deref().unwrap_or("no branch");
+        let worktree_display = if session.is_worktree {
+            if session.worktree_available {
+                "worktree"
+            } else {
+                "worktree unavailable"
+            }
+        } else {
+            "local checkout"
+        };
+        let session_tooltip = format!(
+            "{}\n{} · {}\nBranch: {branch_display} ({worktree_display})\n{} · {}",
+            session_identity.tooltip,
+            project,
+            work_dir_display,
+            time_ago,
+            attention.label(),
+        );
+
+        let work_dir = session.work_dir.clone();
+        let session_id = session.id.clone();
+        let model = self.model.clone();
+        let title_work_dir = session.work_dir.clone();
+        let title_session_id = session.id.clone();
+        let title_model = self.model.clone();
+        let context_work_dir = session.work_dir.clone();
+        let context_session_id = session.id.clone();
+        let context_model = self.model.clone();
+        let terminal_model = self.model.clone();
+        // A removed worktree's runtime dir no longer exists; fall back to
+        // the canonical project root so the shell always has a cwd.
+        let terminal_work_dir = if session.is_worktree && !session.worktree_available {
+            session.work_dir.clone()
+        } else {
+            session.runtime_work_dir.clone()
+        };
+        let context_is_worktree = session.is_worktree;
+        let context_git_branch = session.git_branch.clone();
+        let copy_session_file = session.session_file.display().to_string();
+        let export_log_source = session.session_file.clone();
+        let export_trajectory_title = session.title.clone();
+        let quick_settle_model = self.model.clone();
+        let quick_settle_work_dir = session.work_dir.clone();
+        let quick_settle_session_id = session.id.clone();
+        let quick_settle_is_worktree = session.is_worktree;
+        let quick_settle_git_branch = session.git_branch.clone();
 
         // Full-row screen-reader label: the inner title button only carries
-        // the title, so status, project, and recency live here. Keyboard
-        // users operate the row through its focusable title button (Tab,
-        // Enter to select); this label makes the row itself announce.
+        // the title, so status, project, branch, and recency live here.
+        // Keyboard users operate the row through its focusable title button
+        // (Tab, Enter to select); this label makes the row itself announce.
+        let branch_suffix = session
+            .git_branch
+            .as_deref()
+            .map(|branch| format!(", branch {branch}"))
+            .unwrap_or_default();
         let session_row_label = format!(
-            "{}, project {}, {}, {}",
-            session_title, project, attention.label(), time_ago,
+            "{}, project {}, {}, {}{}",
+            session_title,
+            project,
+            attention.label(),
+            time_ago,
+            branch_suffix,
         );
 
         let pr_info = session_pr_info(session, &self.model.read(cx).git_prs).cloned();
@@ -1110,6 +1177,11 @@ impl SidebarView {
                     )))
                     .icon(pr_icon)
                     .label(pr_label)
+                    .accessibility_label(format!(
+                        "Pull request #{}, {}",
+                        pr.number,
+                        pr_status_label(&pr)
+                    ))
                     .tooltip(tooltip)
                     .ghost()
                     .xsmall()
@@ -1160,6 +1232,9 @@ impl SidebarView {
                 )))
                 .icon(Icon::default().path("icons/git/branch.svg"))
                 .label("Not checked out")
+                .accessibility_label(format!(
+                    "Worktree unavailable for branch '{branch_display}', not checked out locally"
+                ))
                 .tooltip(tooltip)
                 .ghost()
                 .xsmall()
@@ -1295,6 +1370,16 @@ impl SidebarView {
                                                 div()
                                                     .text_xs()
                                                     .text_color(theme.muted_foreground)
+                                                    // Trailing-slot swap (Synara SidebarRowHoverActions
+                                                    // pattern): timestamp fades out when the hover
+                                                    // actions appear, so the 223px row never shows
+                                                    // both at once. Layout width is preserved for
+                                                    // stability; only visual crowding is removed.
+                                                    .opacity(1.0)
+                                                    .group_hover("session-card", |style| {
+                                                        style.opacity(0.0)
+                                                    })
+                                                    .when(is_active, |this| this.opacity(0.0))
                                                     .child(time_ago),
                                             ),
                                     )
@@ -1407,6 +1492,21 @@ impl SidebarView {
                         });
                     },
                 ))
+                .item(
+                    PopupMenuItem::new("Open Terminal Here").on_click({
+                        let terminal_model = terminal_model.clone();
+                        let terminal_work_dir = terminal_work_dir.clone();
+                        move |_event, _window, cx| {
+                            terminal_model.update(cx, |state, cx| {
+                                controller::dispatch(
+                                    state,
+                                    AppAction::OpenTerminalAt(terminal_work_dir.clone()),
+                                );
+                                cx.notify();
+                            });
+                        }
+                    }),
+                )
                 .item(
                     PopupMenuItem::new("Copy Session ID").on_click(move |_event, _window, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(copy_session_id.clone()));
@@ -1618,34 +1718,43 @@ impl SidebarView {
     fn build_history_rows(&self, state: &AppState, query: &str, now: u64) -> Vec<HistoryRow> {
         let mut sessions = Vec::new();
         let mut seen_sessions = std::collections::HashSet::new();
-        for session in state
-            .projects
-            .iter()
-            .filter(|project| {
-                state
-                    .sidebar_project_filter
-                    .as_ref()
-                    .is_none_or(|selected| &project.work_dir == selected)
-            })
-            .flat_map(|project| project.sessions.iter())
-        {
-            if !seen_sessions.insert((session.work_dir.clone(), session.id.clone())) {
-                continue;
+        for project in state.projects.iter().filter(|project| {
+            state
+                .sidebar_project_filter
+                .as_ref()
+                .is_none_or(|selected| &project.work_dir == selected)
+        }) {
+            let project_name = project.name.to_lowercase();
+            for session in project.sessions.iter() {
+                if !seen_sessions.insert((session.work_dir.clone(), session.id.clone())) {
+                    continue;
+                }
+                // Sidebar search matches title, id, project, branch, and
+                // directory name so filtered tasks stay findable by context.
+                if !history_query_matches(
+                    &session.title.to_lowercase(),
+                    &session.id.to_lowercase(),
+                    &project_name,
+                    &session.git_branch.as_deref().unwrap_or_default().to_lowercase(),
+                    &session
+                        .work_dir
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_lowercase(),
+                    query,
+                ) {
+                    continue;
+                }
+                let attention = state.session_attention(session);
+                if self
+                    .attention_filter
+                    .is_some_and(|filter| filter != attention)
+                {
+                    continue;
+                }
+                sessions.push((session.clone(), attention));
             }
-            if !query.is_empty()
-                && !session.title.to_lowercase().contains(query)
-                && !session.id.to_lowercase().contains(query)
-            {
-                continue;
-            }
-            let attention = state.session_attention(session);
-            if self
-                .attention_filter
-                .is_some_and(|filter| filter != attention)
-            {
-                continue;
-            }
-            sessions.push((session.clone(), attention));
         }
         flatten_history_sessions(sessions, now)
     }
@@ -1801,8 +1910,8 @@ impl SidebarView {
 #[cfg(test)]
 mod tests {
     use super::{
-        flatten_history_sessions, format_time_ago, pr_status_label, pr_status_tooltip,
-        same_history_row_identity, session_pr_info, sidebar_session_fingerprint,
+        flatten_history_sessions, format_time_ago, history_query_matches, pr_status_label,
+        pr_status_tooltip, same_history_row_identity, session_pr_info, sidebar_session_fingerprint,
         sidebar_session_identity, DateGroup, HistoryRow,
     };
     use threadlane_ui_state::{SessionAttention, SessionHealth, SessionInfo};
@@ -1986,6 +2095,33 @@ mod tests {
         assert_eq!(format_time_ago(100, 100), "Just now");
         assert_eq!(format_time_ago(41, 100), "Just now");
         assert_eq!(format_time_ago(40, 100), "1m ago");
+    }
+
+    #[test]
+    fn history_search_matches_context_beyond_title_and_id() {
+        assert!(history_query_matches("fix login", "abc", "mypi", "main", "mypi", ""));
+        assert!(history_query_matches("fix login", "abc", "mypi", "main", "mypi", "login"));
+        assert!(history_query_matches("fix login", "abc123", "mypi", "main", "mypi", "abc"));
+        assert!(history_query_matches("other", "abc", "mypi", "main", "mypi", "mypi"));
+        assert!(history_query_matches(
+            "other",
+            "abc",
+            "mypi",
+            "feature/search",
+            "mypi",
+            "search"
+        ));
+        assert!(history_query_matches(
+            "other",
+            "abc",
+            "mypi",
+            "main",
+            "checkout-dir",
+            "checkout"
+        ));
+        assert!(!history_query_matches(
+            "other", "abc", "mypi", "main", "mypi", "zzz"
+        ));
     }
 
     #[test]

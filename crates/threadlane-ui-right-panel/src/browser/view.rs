@@ -660,6 +660,7 @@ impl Render for BrowserView {
                             .child(
                                 Button::new(SharedString::from(format!("browser-tab-{id}")))
                                     .label(title.clone())
+                                    .accessibility_label(format!("Show browser tab {title}"))
                                     .tooltip(url.clone())
                                     .ghost()
                                     .xsmall()

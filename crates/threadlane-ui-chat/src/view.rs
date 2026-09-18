@@ -1090,7 +1090,10 @@ impl ChatListView {
                         .label("Review")
                         .ghost()
                         .small()
-                        .accessibility_label("Review uncommitted changes")
+                        .accessibility_label(format!(
+                            "Review {count} uncommitted {}",
+                            if count == 1 { "change" } else { "changes" }
+                        ))
                         .tooltip("Review all uncommitted changes in this workspace")
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::OpenWorkspaceReview), cx)
@@ -1156,6 +1159,9 @@ impl ChatListView {
                             .ghost()
                             .small()
                             .label(format!("Plan · {completed}/{total} · {current_step}"))
+                            .accessibility_label(format!(
+                                "Task plan, {completed} of {total} complete, current step: {current_step}"
+                            ))
                             .tooltip(format!("Show task plan · {current_step}"))
                             .max_w(rems(26.0))
                             .min_w_0()
@@ -2390,7 +2396,11 @@ impl ChatListView {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.background)
-                    .child(Input::new(&self.trajectory_search_input).appearance(false)),
+                    .child(
+                        Input::new(&self.trajectory_search_input)
+                            .appearance(false)
+                            .aria_label("Search trajectory"),
+                    ),
             );
         let tool_count = cache.summary.tool_count;
         let total_dur_ms = cache.summary.total_duration_ms;
@@ -4059,7 +4069,14 @@ impl ChatListView {
                     .then(|| {
                         self.question_inputs
                             .get(&key)
-                            .map(|input| div().w_full().child(Input::new(input).small()))
+                            .map(|input| {
+                                div().w_full().child(
+                                    Input::new(input).small().aria_label(format!(
+                                        "Custom answer for {}",
+                                        header
+                                    )),
+                                )
+                            })
                     })
                     .flatten();
                 div()
@@ -4853,6 +4870,7 @@ impl ChatListView {
             .enumerate()
             .map(|(index, image)| {
                 let name = image.display_name.clone();
+                let remove_label = format!("Remove {name}");
                 div()
                     .flex()
                     .items_center()
@@ -4883,10 +4901,10 @@ impl ChatListView {
                     .child(
                         Button::new(("remove-pasted-image", index))
                             .icon(IconName::Close)
-                            .accessibility_label("Remove image")
+                            .accessibility_label(remove_label.clone())
                             .xsmall()
                             .ghost()
-                            .tooltip("Remove image")
+                            .tooltip(remove_label)
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 if index < this.pasted_images.len() {
                                     this.pasted_images.remove(index);
@@ -5019,7 +5037,8 @@ impl ChatListView {
             .unwrap_or_else(|| selected_project_name.clone());
         let project_chip = Button::new("composer-project-chip")
             .icon(IconName::Folder)
-            .label(selected_project_name)
+            .label(selected_project_name.clone())
+            .accessibility_label(format!("Project: {selected_project_name}"))
             .dropdown_caret(true)
             .outline()
             .xsmall()
@@ -5086,6 +5105,14 @@ impl ChatListView {
                 Icon::new(IconName::SquareTerminal)
             })
             .label(work_mode_label)
+            .accessibility_label(format!(
+                "Execution location: {}",
+                match effective_work_mode {
+                    WorkMode::Local => "Local",
+                    WorkMode::Worktree => "Worktree",
+                }
+            ))
+            .tooltip("Where new tasks run: local checkout or an isolated worktree")
             .dropdown_caret(true)
             .outline()
             .xsmall()
@@ -5241,6 +5268,7 @@ impl ChatListView {
         let model_picker = Button::new("composer-model-picker")
             .small()
             .label(model_label.clone())
+            .accessibility_label(format!("Model: {model_label}"))
             .dropdown_caret(true)
             .ghost()
             .disabled(!has_models)
@@ -5412,6 +5440,7 @@ impl ChatListView {
         let effort_picker = Button::new("composer-reasoning-effort-picker")
             .icon(Icon::default().path("icons/effort.svg"))
             .label(reasoning_effort.label())
+            .accessibility_label(format!("Reasoning effort: {}", reasoning_effort.label()))
             .tooltip(format!("Reasoning effort: {}", reasoning_effort.label()))
             .dropdown_caret(true)
             .ghost()
@@ -5969,7 +5998,8 @@ impl ChatListView {
                             .child(
                                 Textarea::new(&self.input_state)
                                     .appearance(false)
-                                    .bordered(false),
+                                    .bordered(false)
+                                    .aria_label("Message the agent"),
                             ),
                     )
                     .child(
@@ -6075,7 +6105,13 @@ impl ChatListView {
                                     Button::new("send-btn")
                                         .small()
                                         .icon(IconName::ArrowUp)
-                                        .accessibility_label("Send message")
+                                        .accessibility_label(if needs_provider {
+                                            "Send message (connect a model provider in Settings first)"
+                                        } else if has_prompt {
+                                            "Send message (Enter)"
+                                        } else {
+                                            "Send message (type a message first)"
+                                        })
                                         .tooltip(if needs_provider {
                                             "Connect a model provider in Settings before sending"
                                         } else if has_prompt {

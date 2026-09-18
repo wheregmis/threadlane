@@ -393,18 +393,28 @@ impl RightPanelView {
         cx.notify();
     }
 
-    pub fn open_new_branch_dialog(&mut self, cx: &mut Context<Self>) {
+    pub fn open_new_branch_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_surface(Surface::Review, cx);
         self.new_branch_dialog_open = true;
         self.branch_popover_open = false;
+        // Synara ThreadWorktreeHandoffDialog pattern: autofocus the name
+        // input and select existing text so typing replaces it.
+        self.new_branch_name_input.update(cx, |input, cx| {
+            let len = input.value().len();
+            input.set_selected_range(0..len, cx);
+            input.focus(window, cx);
+        });
         cx.notify();
     }
 
-    pub fn open_merge_dialog(&mut self, cx: &mut Context<Self>) {
+    pub fn open_merge_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_surface(Surface::Review, cx);
         self.merge_dialog_open = true;
         self.merge_selected_branch = None;
         self.branch_popover_open = false;
+        self.merge_filter_input.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
         cx.notify();
     }
 
@@ -695,7 +705,7 @@ impl RightPanelView {
                 self.stash_files = None;
                 self.loading_stash_index = None;
             }
-            PanelEvent::MessageGenerated { project, result }
+            PanelEvent::MessageGenerated { project, result, diff_truncated }
                 if message_generated_matches_active_project(
                     &project,
                     self.model.read(cx).active_git_work_dir().as_deref(),
@@ -705,7 +715,11 @@ impl RightPanelView {
                 match result {
                     Ok(message) => {
                         self.generated_commit_message = Some(message);
-                        self.git_feedback = None;
+                        // Synara DiffTruncationWarning pattern: never present a
+                        // truncated diff as complete.
+                        self.git_feedback = diff_truncated.then(|| {
+                            "Partial diff — message generated from the first 24,000 characters.".into()
+                        });
                         self.pending_git_notifications
                             .push(Notification::success("Commit message generated."));
                     }
@@ -835,10 +849,12 @@ impl RightPanelView {
         self.git_message_pending = true;
         self.git_feedback = Some("Generating a commit message…".into());
         executor.spawn(async move {
-            let result = async {
+            let (result, diff_truncated) = async {
                 let diff = if selected_paths.len() == total_count {
-                    threadlane_git::commit_message_diff(&work_dir)
-                        .map_err(|error| error.to_string())?
+                    match threadlane_git::commit_message_diff(&work_dir) {
+                        Ok(diff) => diff,
+                        Err(error) => return (Err(error.to_string()), false),
+                    }
                 } else {
                     let mut diffs = Vec::new();
                     for path in &selected_paths {
@@ -850,7 +866,8 @@ impl RightPanelView {
                     }
                     diffs.join("\n")
                 };
-                let diff = if diff.chars().count() > 24_000 {
+                let diff_truncated = diff.chars().count() > 24_000;
+                let diff = if diff_truncated {
                     format!(
                         "{}\n\n[Diff truncated for message generation]",
                         diff.chars().take(24_000).collect::<String>()
@@ -858,20 +875,28 @@ impl RightPanelView {
                 } else {
                     diff
                 };
-                let raw = threadlane_coding_agent::credentials::provider_client_for(api_key, account_id)
-                    .generate_commit_message(&model, &diff)
-                    .await?;
+                let raw = match threadlane_coding_agent::credentials::provider_client_for(
+                    api_key,
+                    account_id,
+                )
+                .generate_commit_message(&model, &diff)
+                .await
+                {
+                    Ok(raw) => raw,
+                    Err(error) => return (Err(error.to_string()), diff_truncated),
+                };
                 let message = normalize_generated_commit_message(&raw);
                 if message.is_empty() {
-                    Err("The model returned an empty commit message.".to_string())
+                    (Err("The model returned an empty commit message.".to_string()), diff_truncated)
                 } else {
-                    Ok(message)
+                    (Ok(message), diff_truncated)
                 }
             }
             .await;
             let _ = tx.send(PanelEvent::MessageGenerated {
                 project: work_dir,
                 result,
+                diff_truncated,
             });
         });
         cx.notify();
@@ -1236,6 +1261,11 @@ impl RightPanelView {
             Some(_) => "No changes".into(),
             None => "Git status unavailable".into(),
         };
+        let has_changes = self
+            .git_status
+            .as_ref()
+            .map(|status| status.has_changes)
+            .unwrap_or(false);
         let file_context = self
             .document_title
             .clone()
@@ -1258,7 +1288,25 @@ impl RightPanelView {
                             .text_color(theme.muted_foreground)
                             .child(format!("· {branch}")),
                     )
-                    .child(div().text_color(theme.muted_foreground).child(git_state)),
+                    // Synara EnvironmentPanel "Changes" row pattern: expose an
+                    // explicit labeled Review entry when reliable change data
+                    // exists. Scope is workspace changes, not per-turn diffs.
+                    .when(has_changes, |this| {
+                        this.child(
+                            Button::new("open-review-from-context")
+                                .label(git_state.clone())
+                                .ghost()
+                                .xsmall()
+                                .accessibility_label(format!("Open Review, {}", git_state))
+                                .tooltip("Open Review (workspace changes)")
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.open_surface(Surface::Review, cx);
+                                })),
+                        )
+                    })
+                    .when(!has_changes, |this| {
+                        this.child(div().text_color(theme.muted_foreground).child(git_state.clone()))
+                    }),
             )
             .child(
                 div()
@@ -1464,6 +1512,11 @@ impl RightPanelView {
                                         .small()
                                         .label("Save")
                                         .icon(IconName::Check)
+                                        .accessibility_label(if is_dirty {
+                                            "Save the open document"
+                                        } else {
+                                            "No unsaved changes"
+                                        })
                                         .tooltip(if is_dirty {
                                             "Save the open document"
                                         } else {
@@ -1476,7 +1529,7 @@ impl RightPanelView {
                                 }))
                                 .child(
                                     Button::new("close-document")
-                        .accessibility_label("Close document")
+                                        .accessibility_label("Close document")
                                         .small()
                                         .ghost()
                                         .icon(IconName::Close)
@@ -1688,6 +1741,12 @@ impl RightPanelView {
             .map(|root| root.join(&path).display().to_string());
         let status = file.status_char().to_string();
         let context_path = path.clone();
+        // Highlight the file whose diff is currently open (Synara's file
+        // list keeps selection visible across refresh).
+        let is_open = self
+            .document_title
+            .as_deref()
+            .is_some_and(|title| title == format!("Review · {path}").as_str());
         div()
             .id(SharedString::from(format!("review-file-{path}")))
             .h_8()
@@ -1728,6 +1787,10 @@ impl RightPanelView {
                 Button::new(SharedString::from(format!("review-file-btn-{path}")))
                     .label(path.clone())
                     .icon(IconName::File)
+                    .accessibility_label(format!(
+                        "Review {path}, status {status}, {} additions, {} deletions",
+                        file.additions, file.deletions
+                    ))
                     .tooltip(format!(
                         "Review {path} · {status} · +{} −{}{}",
                         file.additions,
@@ -1743,11 +1806,29 @@ impl RightPanelView {
                     .min_w_0()
                     .overflow_hidden()
                     .justify_start()
+                    .selected(is_open)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_file_diff(path.clone(), cx);
                     })),
             )
             .child(div().text_xs().text_color(theme.muted_foreground).child(status))
+            .children((file.additions > 0 || file.deletions > 0).then(|| {
+                let mut stat = String::new();
+                if file.additions > 0 {
+                    stat.push_str(&format!("+{}", file.additions));
+                }
+                if file.deletions > 0 {
+                    if !stat.is_empty() {
+                        stat.push(' ');
+                    }
+                    stat.push_str(&format!("−{}", file.deletions));
+                }
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(stat)
+            }))
             .context_menu({
                 let path = context_path.clone();
                 let absolute_path = absolute_path.clone();
@@ -2038,7 +2119,7 @@ impl RightPanelView {
             .bg(theme.muted.opacity(0.3))
             .child(
                 Button::new("git-branch-selector-btn")
-                    .accessibility_label("Manage branches")
+                    .accessibility_label(format!("Manage branches, current branch {branch}"))
                     .ghost()
                     .small()
                     .selected(self.branch_popover_open)
@@ -2757,7 +2838,12 @@ impl RightPanelView {
                     .gap_1p5()
                     .child(
                         Button::new("stash-header-toggle")
-                            .accessibility_label("Show stashed changes")
+                            .accessibility_label(if is_expanded {
+                                "Hide stashed changes"
+                            } else {
+                                "Show stashed changes"
+                            })
+                            .tooltip(if is_expanded { "Collapse" } else { "Expand" })
                             .ghost().h_auto().w_full().p_0()
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.stash_expanded = !this.stash_expanded;
@@ -2990,6 +3076,16 @@ impl RightPanelView {
         } else {
             "Changes".to_string()
         };
+        let commit_count = self
+            .git_status
+            .as_ref()
+            .map(|status| status.recent_commits.len())
+            .unwrap_or(0);
+        let history_label = if commit_count > 0 {
+            format!("History ({commit_count})")
+        } else {
+            "History".to_string()
+        };
         let review_sub_tabs = div()
             .flex_none()
             .border_b_1()
@@ -3006,8 +3102,8 @@ impl RightPanelView {
                             .label(changes_label.clone())
                             .aria_label(format!("Changes, {} files, {} staged", total_changes, staged_in_tab)),
                         Tab::new()
-                            .label("History")
-                            .aria_label("History"),
+                            .label(history_label.clone())
+                            .aria_label(format!("History, {commit_count} recent commits")),
                     ])
                     .on_click(cx.listener(|this, ix, _window, cx| {
                         this.review_tab = if *ix == 0 {
@@ -3069,6 +3165,7 @@ impl RightPanelView {
                         c.summary.to_lowercase().contains(&filter_text)
                             || c.author_name.to_lowercase().contains(&filter_text)
                             || c.short_sha.to_lowercase().contains(&filter_text)
+                            || c.sha.to_lowercase().contains(&filter_text)
                     })
                     .collect()
             }
@@ -3103,6 +3200,19 @@ impl RightPanelView {
                             "No commits match your filter."
                         }),
                 )
+                .children((!filter_text.is_empty()).then(|| {
+                    Button::new("history-clear-filter")
+                        .label("Clear filter")
+                        .ghost()
+                        .small()
+                        .tooltip("Clear the commit filter")
+                        .on_click(cx.listener(|this, _event, window, cx| {
+                            this.history_filter_input.update(cx, |input, cx| {
+                                input.set_value("", window, cx);
+                            });
+                            cx.notify();
+                        }))
+                }))
                 .into_any_element()
         } else {
             let project = self.project.clone();
@@ -3535,9 +3645,8 @@ impl RightPanelView {
                             .outline()
                             .small()
                             .tooltip("Create a new branch…")
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.new_branch_dialog_open = true;
-                                cx.notify();
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.open_new_branch_dialog(window, cx);
                             })),
                     )
                     .child(
@@ -3566,10 +3675,8 @@ impl RightPanelView {
                         Button::new("quick-merge-banner")
                             .accessibility_label("Merge a branch…")
                             .ghost().h_auto().w_full().p_0()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.merge_dialog_open = true;
-                                this.merge_selected_branch = None;
-                                cx.notify();
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.open_merge_dialog(window, cx);
                             }))
                             .child(div().w_full().whitespace_normal()
                             .flex()
@@ -3645,7 +3752,11 @@ impl RightPanelView {
                 let rel_time = branch.relative_time.clone();
                 let branch_name_for_click = name.clone();
                 Button::new(SharedString::from(format!("branch-row-{}", name)))
-                    .accessibility_label(format!("Switch to branch {name}"))
+                    .accessibility_label(if is_current {
+                        format!("Current branch {name}, already checked out")
+                    } else {
+                        format!("Switch to branch {name}")
+                    })
                     .ghost().h_auto().w_full().p_0()
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         if !is_current {
@@ -3880,14 +3991,33 @@ impl RightPanelView {
                             .label("Cancel")
                             .ghost()
                             .small()
+                            // Synara busy guard: block dismiss while Git is running.
+                            .disabled(self.git_busy)
                             .on_click(cx.listener(|this, _event, _window, cx| {
+                                if this.git_busy {
+                                    return;
+                                }
                                 this.close_all_git_dialogs();
                                 cx.notify();
                             })),
                     )
                     .child(
                         Button::new("submit-new-branch-btn")
-                            .label("Create branch")
+                            .label(if name.is_empty() {
+                                "Create branch".to_string()
+                            } else {
+                                format!("Create {name}")
+                            })
+                            .accessibility_label(if name.is_empty() {
+                                "Create branch".to_string()
+                            } else {
+                                format!("Create branch {name}")
+                            })
+                            .tooltip(if name.is_empty() {
+                                "Enter a branch name".to_string()
+                            } else {
+                                format!("Create branch {name}")
+                            })
                             .primary()
                             .small()
                             .disabled(!can_create)
@@ -4100,7 +4230,11 @@ impl RightPanelView {
                             .label("Cancel")
                             .ghost()
                             .small()
+                            .disabled(self.git_busy)
                             .on_click(cx.listener(|this, _event, _window, cx| {
+                                if this.git_busy {
+                                    return;
+                                }
                                 this.close_all_git_dialogs();
                                 cx.notify();
                             })),
@@ -4205,14 +4339,22 @@ impl RightPanelView {
                                     .label("Cancel")
                                     .ghost()
                                     .small()
+                                    .disabled(self.git_busy)
                                     .on_click(cx.listener(|this, _event, _window, cx| {
+                                        if this.git_busy {
+                                            return;
+                                        }
                                         this.close_all_git_dialogs();
                                         cx.notify();
                                     })),
                             )
                             .child(
                                 Button::new("submit-switch-dialog-btn")
-                                    .label("Switch branch")
+                                    .label(format!("Switch to {target_branch}"))
+                                    .accessibility_label(format!(
+                                        "Switch to branch {target_branch}"
+                                    ))
+                                    .tooltip(format!("Check out {target_branch}"))
                                     .primary()
                                     .small()
                                     .disabled(self.git_busy)

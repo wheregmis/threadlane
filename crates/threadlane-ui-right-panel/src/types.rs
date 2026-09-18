@@ -258,6 +258,9 @@ pub enum PanelEvent {
     MessageGenerated {
         project: PathBuf,
         result: Result<String, String>,
+        /// True when the diff sent to the model was truncated at the size
+        /// limit (Synara DiffTruncationWarning pattern).
+        diff_truncated: bool,
     },
     ActionFinished {
         project: PathBuf,

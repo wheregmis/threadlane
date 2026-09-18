@@ -559,27 +559,27 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn open_git_new_branch(&mut self, cx: &mut Context<Self>) {
+    fn open_git_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
             cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
-            panel.open_new_branch_dialog(cx);
+            panel.open_new_branch_dialog(window, cx);
         });
         self.refresh_git_status(cx);
         cx.notify();
     }
 
-    fn open_git_merge(&mut self, cx: &mut Context<Self>) {
+    fn open_git_merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
             cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
-            panel.open_merge_dialog(cx);
+            panel.open_merge_dialog(window, cx);
         });
         self.refresh_git_status(cx);
         cx.notify();
@@ -776,8 +776,8 @@ impl WorkspaceView {
                 });
             }
             "git_branch" => self.open_git_branches(cx),
-            "git_new_branch" => self.open_git_new_branch(cx),
-            "git_merge" => self.open_git_merge(cx),
+            "git_new_branch" => self.open_git_new_branch(window, cx),
+            "git_merge" => self.open_git_merge(window, cx),
             "git_stash_pop" => {
                 self.open_git_review(cx);
                 self.right_panel.update(cx, |panel, cx| {
@@ -1190,8 +1190,8 @@ impl WorkspaceView {
                 "",
             ),
             (
-                "Switch Worktree…",
-                "Toggle between local and worktree mode",
+                "Toggle Worktree Mode",
+                "Toggle new-task execution between local and worktree mode",
                 "switch_worktree",
                 Icon::from(IconName::FolderOpen),
                 &["switch", "worktree", "mode", "local", "branch"],
@@ -1392,10 +1392,17 @@ impl WorkspaceView {
                 session_entries.push((project.work_dir.clone(), session.id.clone()));
                 let title = session.title.clone();
                 let project_name = project.name.clone();
+                // Mirror the sidebar search scope so palette lookup also
+                // matches the session branch when one is recorded.
+                let mut session_keywords =
+                    vec![project.name.clone(), session.id.clone()];
+                if let Some(branch) = session.git_branch.as_deref() {
+                    session_keywords.push(branch.to_string());
+                }
                 let item = CommandItem::new()
                     .label(title.clone())
                     .icon(IconName::SquareTerminal)
-                    .keywords([project.name.clone(), session.id.clone()])
+                    .keywords(session_keywords)
                     .child(move |_window, cx| {
                         let colors = cx.theme().colors;
                         v_flex()
@@ -1566,6 +1573,13 @@ impl WorkspaceView {
                 .label(format!("PR #{pr_num}"))
                 .ghost()
                 .xsmall()
+                .accessibility_label(if failing_checks > 0 {
+                    format!("PR #{pr_num} ({failing_checks} failing checks) — Open in browser")
+                } else if pending_checks > 0 {
+                    format!("PR #{pr_num} (CI in progress) — Open in browser")
+                } else {
+                    format!("PR #{pr_num} (CI passed) — Open in browser")
+                })
                 .tooltip(if failing_checks > 0 {
                     format!("PR #{pr_num} ({failing_checks} failing checks) — Open in browser")
                 } else if pending_checks > 0 {
@@ -1594,6 +1608,9 @@ impl WorkspaceView {
                             .label("Git")
                             .ghost()
                             .xsmall()
+                            .accessibility_label(format!(
+                                "{active_project} · {branch} — Switch or manage branches"
+                            ))
                             .tooltip(format!("{active_project} · {branch} — Switch or manage branches"))
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.open_git_branches(cx);
@@ -1604,6 +1621,10 @@ impl WorkspaceView {
                             .label(format!("{dirty_count} changed · +{additions} −{deletions}"))
                             .ghost()
                             .xsmall()
+                            .accessibility_label(format!(
+                                "{dirty_count} changed files, {additions} additions, \
+                                 {deletions} deletions — Review workspace changes"
+                            ))
                             .tooltip("Review workspace changes")
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.open_git_review(cx);
@@ -1622,6 +1643,7 @@ impl WorkspaceView {
                             .label("Model")
                             .ghost()
                             .xsmall()
+                            .accessibility_label(format!("Switch model · {model_name}"))
                             .tooltip(format!("Switch model · {model_name}"))
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.execute_palette_action("model", window, cx);
@@ -1638,6 +1660,11 @@ impl WorkspaceView {
                             .ghost()
                             .selected(self.bottom_panel_visible)
                             .xsmall()
+                            .accessibility_label(if self.bottom_panel_visible {
+                                "Hide terminal"
+                            } else {
+                                "Show terminal"
+                            })
                             .tooltip(if self.bottom_panel_visible {
                                 "Hide terminal"
                             } else {
@@ -1964,6 +1991,7 @@ impl Render for WorkspaceView {
                                 .ghost()
                                 .selected(is_selected)
                                 .xsmall()
+                                .accessibility_label(tab_tooltip.clone())
                                 .tooltip(tab_tooltip)
                                 .on_click(move |_event, window, cx| {
                                     if let Some(project) = &select_project {
@@ -2292,7 +2320,11 @@ impl Render for WorkspaceView {
             }))
             .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("right-panel-toggle")
-                        .accessibility_label("Toggle right panel")
+                        .accessibility_label(if self.right_panel_visible {
+                            "Hide right panel"
+                        } else {
+                            "Show right panel"
+                        })
                     .icon(IconName::PanelRight)
                     .tooltip(if self.right_panel_visible {
                         "Hide right panel"
@@ -2310,7 +2342,7 @@ impl Render for WorkspaceView {
             }))
             .children((workspace_page != WorkspacePage::Settings).then(|| {
                 Button::new("sidebar-collapse-toggle")
-                        .accessibility_label("Toggle sidebar")
+                        .accessibility_label(sidebar_tooltip)
                     .icon(IconName::PanelLeft)
                     .tooltip(sidebar_tooltip)
                     .ghost()

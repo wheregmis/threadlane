@@ -433,15 +433,21 @@ impl Render for DraftPrDialogView {
             )
             .child(draft_pr_field(
                 "Base branch",
-                Input::new(&self.base_input).disabled(created),
+                Input::new(&self.base_input)
+                    .aria_label("Base branch")
+                    .disabled(created),
             ))
             .child(draft_pr_field(
                 "Title",
-                Input::new(&self.title_input).disabled(created),
+                Input::new(&self.title_input)
+                    .aria_label("Pull request title")
+                    .disabled(created),
             ))
             .child(draft_pr_field(
                 "Description",
-                Textarea::new(&self.body_input).disabled(created),
+                Textarea::new(&self.body_input)
+                    .aria_label("Pull request description")
+                    .disabled(created),
             ))
             .children((!context_matches).then(|| {
                 div()
@@ -503,6 +509,7 @@ impl Render for DraftPrDialogView {
                         Button::new("check-draft-pr")
                             .label("Check again")
                             .outline()
+                            .tooltip("Re-check pull request status on GitHub")
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.start_request(true, window, cx);
                             }))

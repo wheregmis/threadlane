@@ -1754,7 +1754,13 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&input).mask_toggle()))
+                    .child(
+                        div().flex_1().child(
+                            Input::new(&input)
+                                .mask_toggle()
+                                .aria_label("GitHub Personal Access Token"),
+                        ),
+                    )
                     .child(
                         Button::new("save-github-token")
                             .label("Save")
@@ -2230,7 +2236,7 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&input).mask_toggle()))
+                    .child(div().flex_1().child(Input::new(&input).mask_toggle().aria_label(label)))
                     .child({
                         let input = input.clone();
                         let auth_tx = auth_tx.clone();
@@ -2909,8 +2915,8 @@ impl SettingsView {
                             .font_weight(FontWeight::MEDIUM)
                             .child("Custom agent"),
                     )
-                    .child(Input::new(&self.acp_name_input))
-                    .child(Input::new(&self.acp_command_input))
+                    .child(Input::new(&self.acp_name_input).aria_label("Custom agent name"))
+                    .child(Input::new(&self.acp_command_input).aria_label("Custom agent command"))
                     .child(
                         div()
                             .flex()
