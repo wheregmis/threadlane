@@ -3775,6 +3775,7 @@ impl ChatListView {
         }
         let theme = cx.theme().colors;
         let allows_always = request.scopes.contains(&threadlane_protocol::PermissionScope::Always);
+        let allows_session = request.scopes.contains(&threadlane_protocol::PermissionScope::Session);
         let action_button = |id: &'static str, label: &'static str, decision, primary: bool| {
             let request_id = request.id.clone();
             Button::new(id).label(label).small()
@@ -3794,6 +3795,8 @@ impl ChatListView {
             .child(div().flex().flex_wrap().justify_end().gap_2()
                 .child(action_button("details-deny", "Deny", threadlane_permission::PermissionDecision::Deny, false))
                 .child(action_button("details-allow-once", "Allow once", threadlane_permission::PermissionDecision::AllowOnce, true))
+                .when(allows_session, |row| row.child(action_button("details-allow-session", "Allow session", threadlane_permission::PermissionDecision::AllowSession, false)
+                    .debug_selector(|| "permission-details-session".into())))
                 .when(allows_always, |row| row.child(action_button("details-allow-always", "Always allow", threadlane_permission::PermissionDecision::AllowAlways, false)
                     .debug_selector(|| "permission-details-always".into()))))
             .into_any_element())
@@ -3804,6 +3807,7 @@ impl ChatListView {
         let session_id = state.active_session_id.as_ref()?;
         let request = state.pending_permissions.get(session_id)?.clone();
         let allows_always = request.scopes.contains(&threadlane_protocol::PermissionScope::Always);
+        let allows_session = request.scopes.contains(&threadlane_protocol::PermissionScope::Session);
         let theme = cx.theme().colors;
 
         let action_button = |id: &'static str,
@@ -3898,6 +3902,13 @@ impl ChatListView {
                             true,
                             false,
                         ))
+                        .when(allows_session, |row| row.child(action_button(
+                            "permission-allow-session",
+                            "Allow session",
+                            threadlane_permission::PermissionDecision::AllowSession,
+                            false,
+                            false,
+                        ).debug_selector(|| "permission-inline-session".into())))
                         .when(allows_always, |row| row.child(action_button(
                             "permission-allow-always",
                             "Always allow",
