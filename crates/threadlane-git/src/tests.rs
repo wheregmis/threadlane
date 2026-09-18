@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::tempdir;
 
@@ -1134,4 +1134,85 @@ fn worktree_lifecycle_and_listing() {
 
     remove_worktree(dir.path(), &worktree_dir, true).unwrap();
     assert!(!worktree_dir.exists());
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn init_repo(dir: &Path) {
+    run_git(dir, &["init", "-b", "main"]);
+    run_git(dir, &["config", "user.email", "test@example.com"]);
+    run_git(dir, &["config", "user.name", "Test"]);
+    run_git(dir, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("README.md"), "hi").unwrap();
+    run_git(dir, &["add", "."]);
+    run_git(dir, &["commit", "-m", "init"]);
+}
+
+#[test]
+fn orphaned_subagent_worktree_is_reused_when_clean() {
+    use crate::git::{create_worktree, list_worktrees, reclaim_subagent_worktree};
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let slot = dir
+        .path()
+        .join(".threadlane/worktrees/subagents/lane-1");
+    let branch = "threadlane/subagent-lane-1";
+    create_worktree(dir.path(), &slot, branch).unwrap();
+    // Simulate the crash: path+branch left behind, work clean.
+    assert!(reclaim_subagent_worktree(dir.path(), &slot, branch).unwrap());
+    assert!(list_worktrees(dir.path())
+        .unwrap()
+        .iter()
+        .any(|worktree| canonical(&worktree.path) == canonical(&slot)));
+}
+
+#[test]
+fn dirty_orphan_is_cleared_for_recreation() {
+    use crate::git::{create_worktree, list_worktrees, reclaim_subagent_worktree};
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let slot = dir
+        .path()
+        .join(".threadlane/worktrees/subagents/lane-2");
+    let branch = "threadlane/subagent-lane-2";
+    create_worktree(dir.path(), &slot, branch).unwrap();
+    std::fs::write(slot.join("README.md"), "modified in dead run").unwrap();
+    assert!(!reclaim_subagent_worktree(dir.path(), &slot, branch).unwrap());
+    // Slot cleared: provisioning recreates without "already used".
+    create_worktree(dir.path(), &slot, branch).unwrap();
+    assert!(list_worktrees(dir.path())
+        .unwrap()
+        .iter()
+        .any(|worktree| canonical(&worktree.path) == canonical(&slot)));
+}
+
+#[test]
+fn branch_checked_out_elsewhere_is_refused() {
+    use crate::git::{create_worktree, reclaim_subagent_worktree};
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let elsewhere = dir.path().join("elsewhere");
+    let branch = "threadlane/subagent-lane-3";
+    create_worktree(dir.path(), &elsewhere, branch).unwrap();
+    let slot = dir
+        .path()
+        .join(".threadlane/worktrees/subagents/lane-3");
+    let error = reclaim_subagent_worktree(dir.path(), &slot, branch).unwrap_err();
+    assert!(
+        error.to_string().contains("already checked out"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn reclaim_refuses_paths_outside_threadlane() {
+    use crate::git::reclaim_subagent_worktree;
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let outside = dir.path().join("outside");
+    let error =
+        reclaim_subagent_worktree(dir.path(), &outside, "threadlane/subagent-x").unwrap_err();
+    assert!(error.to_string().contains("outside .threadlane"));
 }

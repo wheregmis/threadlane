@@ -132,14 +132,29 @@ pub(crate) fn merge_and_save_project_registry_to(
                 (0, value) | (value, 0) => value,
                 (left, right) => left.min(right),
             };
+            // Newer side wins; a stale writer must never clobber a fresher
+            // record's session/task/name — but a missing value still fills
+            // from the other side, so a stale task id resurrects nothing
+            // while a genuine gap still heals. The id is content-derived
+            // from the path spelling, so the durable id always stays put to
+            // keep id-keyed lookups stable across spelling variants.
+            record.id = durable.id.clone();
             if durable.last_opened_at > record.last_opened_at {
                 record.last_opened_at = durable.last_opened_at;
-                record.last_session_id = durable.last_session_id.clone();
-            } else if record.last_session_id.is_none() {
-                record.last_session_id = durable.last_session_id.clone();
-            }
-            if record.last_selected_task_id.is_none() {
-                record.last_selected_task_id = durable.last_selected_task_id.clone();
+                if durable.last_session_id.is_some() {
+                    record.last_session_id = durable.last_session_id.clone();
+                }
+                if durable.last_selected_task_id.is_some() {
+                    record.last_selected_task_id = durable.last_selected_task_id.clone();
+                }
+                record.name = durable.name.clone();
+            } else {
+                if record.last_session_id.is_none() {
+                    record.last_session_id = durable.last_session_id.clone();
+                }
+                if record.last_selected_task_id.is_none() {
+                    record.last_selected_task_id = durable.last_selected_task_id.clone();
+                }
             }
             merged[index] = record;
         } else {
@@ -290,5 +305,67 @@ mod tests {
             .filter(|name| name.to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(residue.is_empty(), "unexpected files: {residue:?}");
+    }
+}
+
+#[cfg(test)]
+mod registry_merge_tests {
+    use super::*;
+
+    #[test]
+    fn stale_task_and_name_never_clobber_newer_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let mut durable = ProjectRecord::from_path(project);
+        durable.last_opened_at = 20;
+        durable.last_session_id = Some("session-2".into());
+        durable.last_selected_task_id = Some("task-new".into());
+        durable.name = "Fresh Name".into();
+        save_project_registry_to(dir.path(), &[durable.clone()]).unwrap();
+
+        // Stale writer with an older open time but its own task/name.
+        let mut stale = durable.clone();
+        stale.last_opened_at = 2;
+        stale.last_session_id = Some("session-1".into());
+        stale.last_selected_task_id = Some("task-old".into());
+        stale.name = "Stale Name".into();
+        merge_and_save_project_registry_to(dir.path(), &[stale]).unwrap();
+
+        let projects = load_project_registry_from(dir.path());
+        assert_eq!(projects[0].last_opened_at, 20);
+        assert_eq!(projects[0].last_session_id.as_deref(), Some("session-2"));
+        assert_eq!(
+            projects[0].last_selected_task_id.as_deref(),
+            Some("task-new")
+        );
+        assert_eq!(projects[0].name, "Fresh Name");
+        assert_eq!(projects[0].id, durable.id);
+    }
+
+    #[test]
+    fn newer_writer_wins_name_and_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let mut durable = ProjectRecord::from_path(project);
+        durable.last_opened_at = 2;
+        durable.last_selected_task_id = Some("task-old".into());
+        durable.name = "Old".into();
+        save_project_registry_to(dir.path(), &[durable.clone()]).unwrap();
+
+        let mut fresh = durable.clone();
+        fresh.last_opened_at = 20;
+        fresh.last_selected_task_id = Some("task-new".into());
+        fresh.name = "Renamed".into();
+        merge_and_save_project_registry_to(dir.path(), &[fresh]).unwrap();
+
+        let projects = load_project_registry_from(dir.path());
+        assert_eq!(
+            projects[0].last_selected_task_id.as_deref(),
+            Some("task-new")
+        );
+        assert_eq!(projects[0].name, "Renamed");
+        assert_eq!(projects[0].id, durable.id);
     }
 }

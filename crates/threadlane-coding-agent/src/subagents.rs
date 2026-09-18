@@ -955,8 +955,16 @@ async fn isolated_subagent_workspace(
         if status.has_changes {
             return Err("Parallel isolated subagents require a clean parent worktree (commit or stash staged, unstaged, and untracked changes first)".into());
         }
-        threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch)
-            .map_err(|error| error.to_string())?;
+        // Orphan recovery: a crashed/killed run leaves its deterministic
+        // path+branch behind, and retrying the lane would fail `worktree
+        // add` forever. Reclaim (reuse when clean) before creating.
+        let reusable =
+            threadlane_git::reclaim_subagent_worktree(&parent_work_dir, &worktree, &branch)
+                .map_err(|error| error.to_string())?;
+        if !reusable {
+            threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch)
+                .map_err(|error| error.to_string())?;
+        }
         Ok((worktree, branch))
     })
     .await
