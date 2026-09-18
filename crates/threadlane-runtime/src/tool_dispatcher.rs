@@ -101,6 +101,10 @@ struct CachedToolResult {
     path: Option<PathBuf>,
     /// File size + mtime at cache time, for external-mutation validation.
     fingerprint: Option<FileFingerprint>,
+    /// Canonicalized workspace root plus a bounded recursive sample, for
+    /// workspace-wide reads (`grep_search`, `list_dir`, `get_repo_map`)
+    /// whose inputs are the whole tree rather than one file.
+    tree: Option<(PathBuf, TreeFingerprint)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -118,6 +122,74 @@ fn fingerprint_file(path: &Path) -> Option<FileFingerprint> {
         size: metadata.len(),
         mtime_secs: duration.as_secs(),
         mtime_nanos: duration.subsec_nanos(),
+    })
+}
+
+/// Bounded recursive sample of a workspace tree: at most
+/// `TREE_FINGERPRINT_BUDGET` entries (relative path, size, mtime) hashed.
+/// A full walk of a huge repo per cache hit is unaffordable; a bounded
+/// sample still catches any external edit that touches a sampled path, and
+/// the version guard already covers in-loop mutations. Deterministic:
+/// entries sort before hashing.
+const TREE_FINGERPRINT_BUDGET: usize = 2048;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TreeFingerprint {
+    hash: u64,
+    sampled: usize,
+}
+
+fn fingerprint_tree(root: &Path) -> Option<TreeFingerprint> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // An unreadable root verifies nothing: report None so lookups evict
+    // rather than serve a tree that can no longer be sampled.
+    std::fs::metadata(&root).ok()?;
+    let mut stack = vec![root.clone()];
+    let mut samples: Vec<(PathBuf, u64, u64, u32)> = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if samples.len() >= TREE_FINGERPRINT_BUDGET {
+                break;
+            }
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let (secs, nanos) = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| {
+                    modified.duration_since(std::time::UNIX_EPOCH).ok()
+                })
+                .map(|duration| (duration.as_secs(), duration.subsec_nanos()))
+                .unwrap_or((0, 0));
+            let relative = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
+            samples.push((relative, metadata.len(), secs, nanos));
+        }
+        if samples.len() >= TREE_FINGERPRINT_BUDGET {
+            break;
+        }
+    }
+    samples.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = DefaultHasher::new();
+    for (relative, size, secs, nanos) in &samples {
+        relative.hash(&mut hasher);
+        size.hash(&mut hasher);
+        secs.hash(&mut hasher);
+        nanos.hash(&mut hasher);
+    }
+    Some(TreeFingerprint {
+        hash: hasher.finish(),
+        sampled: samples.len(),
     })
 }
 
@@ -152,9 +224,15 @@ fn tool_paths(name: &str, args: &str) -> Vec<String> {
 /// Resolve a tool path argument against the workspace root. Falls back to
 /// the raw path when there is no work dir — identity comparison only needs
 /// both sides resolved the same way.
+///
+/// Canonicalizes whenever the path exists so symlinked spellings (`/tmp`
+/// vs `/private/tmp`, symlinked parents) resolve identically on both the
+/// store and invalidate sides; otherwise a write through one spelling would
+/// never bust a read cached under the other.
 fn resolve_workspace_path(work_dir: Option<&Path>, path: &str) -> PathBuf {
-    match work_dir {
+    let joined = match work_dir {
         Some(root) => {
+            let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
             let candidate = Path::new(path);
             if candidate.is_absolute() {
                 candidate.to_path_buf()
@@ -163,7 +241,8 @@ fn resolve_workspace_path(work_dir: Option<&Path>, path: &str) -> PathBuf {
             }
         }
         None => PathBuf::from(path),
-    }
+    };
+    joined.canonicalize().unwrap_or(joined)
 }
 
 /// Tools pure enough to serve from cache: deterministic reads whose inputs
@@ -213,6 +292,15 @@ impl RepetitionCacheHandle {
                 return None;
             }
             let _ = work_dir;
+        } else if let Some((root, sampled)) = entry.tree.as_ref() {
+            // Workspace-wide reads (grep/list/map) depend on the whole tree:
+            // re-sample and evict on any drift. An unverifiable tree evicts
+            // too — serving blind is how stale search results happen.
+            if fingerprint_tree(root) != Some(*sampled) {
+                guard.entries.remove(&key);
+                return None;
+            }
+            let _ = work_dir;
         }
         Some((
             ToolOutput {
@@ -256,6 +344,15 @@ impl RepetitionCacheHandle {
                 } else {
                     (None, None)
                 };
+            // Workspace-wide reads pin the sampled tree so external edits
+            // (outside the tool loop, past the version guard) bust them.
+            let tree: Option<(PathBuf, TreeFingerprint)> = match name {
+                "grep_search" | "list_dir" | "get_repo_map" => work_dir.and_then(|root| {
+                    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+                    fingerprint_tree(&canonical).map(|sampled| (canonical, sampled))
+                }),
+                _ => None,
+            };
             guard.entries.insert(
                 (name.to_string(), args.to_string()),
                 CachedToolResult {
@@ -265,6 +362,7 @@ impl RepetitionCacheHandle {
                     images: output.images.clone(),
                     path,
                     fingerprint,
+                    tree,
                 },
             );
         }
@@ -1592,5 +1690,65 @@ mod tests {
         let all_defs = dispatcher.configured_tool_definitions();
         assert!(all_defs.iter().any(|d| d.name == "list_dir"));
         assert!(all_defs.iter().any(|d| d.name == "grep_search"));
+    }
+}
+
+#[cfg(test)]
+mod cache_freshness_tests {
+    use super::*;
+
+    fn output(text: &str) -> ToolOutput {
+        ToolOutput {
+            content: text.into(),
+            images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn external_tree_edit_busts_workspace_wide_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "aaa").unwrap();
+        let work_dir = Some(dir.path());
+        let cache = RepetitionCacheHandle::default();
+        cache.store("list_dir", r#"{"path":"."}"#, &output("a.rs"), false, work_dir);
+        assert!(cache.lookup("list_dir", r#"{"path":"."}"#, work_dir).is_some());
+        // External change anywhere in the tree (new file, same root mtime
+        // granularity aside) must not serve the stale listing.
+        std::fs::write(dir.path().join("b.rs"), "bbb").unwrap();
+        assert!(
+            cache.lookup("list_dir", r#"{"path":"."}"#, work_dir).is_none(),
+            "externally changed tree must re-execute list_dir"
+        );
+    }
+
+    #[test]
+    fn untouched_tree_keeps_workspace_wide_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "aaa").unwrap();
+        let work_dir = Some(dir.path());
+        let cache = RepetitionCacheHandle::default();
+        cache.store(
+            "grep_search",
+            r#"{"pattern":"aaa"}"#,
+            &output("a.rs:1:aaa"),
+            false,
+            work_dir,
+        );
+        assert!(cache
+            .lookup("grep_search", r#"{"pattern":"aaa"}"#, work_dir)
+            .is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_spellings_resolve_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("a.rs"), "aaa").unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+        let via_real = resolve_workspace_path(Some(&real), "a.rs");
+        let via_link = resolve_workspace_path(Some(&dir.path().join("link")), "a.rs");
+        assert_eq!(via_real, via_link);
     }
 }
