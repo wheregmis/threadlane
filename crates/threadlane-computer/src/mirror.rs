@@ -231,43 +231,43 @@ async fn feed_poll_loop() {
     let mut last_ok_ms = computer_live::now_ms();
     loop {
         tokio::time::sleep(Duration::from_millis(FEED_INTERVAL_MS)).await;
-        let target = {
+        let (target, watchers, since_activity_ms) = {
             let slot = lock_slot();
             let Some(target) = slot.target else {
                 return;
             };
-            let watchers = computer_live::watcher_count();
-            if should_exit(
-                watchers,
+            (
+                target,
+                computer_live::watcher_count(),
                 computer_live::now_ms().saturating_sub(slot.last_use_ms),
-            ) {
-                // Re-check under a fresh lock: a computer call may have landed
-                // since the snapshot, and it must find either a live task or
-                // a free slot — never a running flag with nobody behind it.
-                let mut slot = lock_slot();
-                let still_idle = slot.target.is_some_and(|current| {
-                    current == target
-                        && should_exit(
-                            watchers,
-                            computer_live::now_ms().saturating_sub(slot.last_use_ms),
-                        )
-                });
-                if !still_idle {
-                    continue;
-                }
-                slot.target = None;
-                computer_live::set_status(LiveStatus {
-                    running: false,
-                    target: Some(target.stream_target()),
-                    last_capture_ms: computer_live::now_ms(),
-                    interval_ms: 0,
-                    last_error: None,
-                    pointer: None,
-                });
-                return;
-            }
-            target
+            )
         };
+        if should_exit(watchers, since_activity_ms) {
+            // Re-check under a fresh lock: a computer call may have landed
+            // since the snapshot, and it must find either a live task or
+            // a free slot — never a running flag with nobody behind it.
+            let mut slot = lock_slot();
+            let still_idle = slot.target.is_some_and(|current| {
+                current == target
+                    && should_exit(
+                        watchers,
+                        computer_live::now_ms().saturating_sub(slot.last_use_ms),
+                    )
+            });
+            if !still_idle {
+                continue;
+            }
+            slot.target = None;
+            computer_live::set_status(LiveStatus {
+                running: false,
+                target: Some(target.stream_target()),
+                last_capture_ms: computer_live::now_ms(),
+                interval_ms: 0,
+                last_error: None,
+                pointer: None,
+            });
+            return;
+        }
         let started = computer_live::now_ms();
         let mut error = None;
         match capture_frame(target).await {
