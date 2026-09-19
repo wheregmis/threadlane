@@ -651,6 +651,29 @@ fn github_mutation_args_match_gh_contract_and_reject_invalid_input() {
 }
 
 #[test]
+fn github_issue_create_args_match_gh_contract() {
+    assert_eq!(
+        github_issue_create_args("Title", "Body").unwrap(),
+        vec!["issue", "create", "--title", "Title", "--body", "Body"]
+    );
+    assert!(github_issue_create_args(" ", "Body").is_err());
+}
+
+#[test]
+fn parses_gh_issue_create_output() {
+    assert_eq!(
+        parse_gh_issue_create_output("https://github.com/acme/project/issues/42\n").unwrap(),
+        42
+    );
+    assert_eq!(
+        parse_gh_issue_create_output("https://github.example.com/acme/project/issues/7\n").unwrap(),
+        7
+    );
+    assert!(parse_gh_issue_create_output("not an issue URL").is_err());
+    assert!(parse_gh_issue_create_output("https://github.com/acme/project/issues/0").is_err());
+}
+
+#[test]
 fn github_mutation_args_put_stored_token_only_in_environment() {
     let command = gh_command_with_token(
         Path::new("/tmp/project"),
