@@ -2,6 +2,20 @@ use std::ops::Range;
 
 use threadlane_ui_state::{ChatMessageInfo, MessageRole, ToolActivityInfo};
 
+pub fn current_turn_latest_tool(messages: &[ChatMessageInfo]) -> Option<&ToolActivityInfo> {
+    messages
+        .iter()
+        .rev()
+        .take_while(|message| {
+            // Optimistic queue/steer echoes do not start a new accepted turn.
+            message.role != MessageRole::User
+                || message.id.starts_with("queued-user-")
+                || message.id.starts_with("steered-user-")
+        })
+        .flat_map(|message| message.tool_activities.iter().rev())
+        .next()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptRow {
     Message(usize),

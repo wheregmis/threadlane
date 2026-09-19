@@ -563,6 +563,48 @@ fn grouped_tool_activities_borrows_in_order_and_hides_plan_updates() {
 }
 
 #[test]
+fn progress_summary_never_reuses_a_previous_turns_tool() {
+    let user = ChatMessageInfo {
+        id: "prompt".into(),
+        role: MessageRole::User,
+        content: "Follow up".into(),
+        tool_activities: vec![],
+        streaming: false,
+        reasoning_content: None,
+        reasoning_expanded: false,
+    };
+    let mut activity = user.clone();
+    activity.role = MessageRole::Assistant;
+    activity.content.clear();
+    activity.tool_activities.push(ToolActivityInfo {
+        id: "read".into(),
+        category: "Completed".into(),
+        title: "read_file".into(),
+        display_summary: "Read README.md".into(),
+        detail: "Old turn output".into(),
+        is_expanded: false,
+    });
+    let mut messages = vec![activity.clone(), user];
+    assert!(super::current_turn_latest_tool(&messages).is_none());
+    activity.tool_activities[0].id = "current".into();
+    messages.push(activity);
+    assert_eq!(
+        super::current_turn_latest_tool(&messages).unwrap().id,
+        "current"
+    );
+    for prefix in ["queued-user", "steered-user"] {
+        let mut pending = messages[1].clone();
+        pending.id = format!("{prefix}-session-3");
+        messages.push(pending);
+        assert_eq!(
+            super::current_turn_latest_tool(&messages).unwrap().id,
+            "current"
+        );
+    }
+    assert!(super::current_turn_latest_tool(&[]).is_none());
+}
+
+#[test]
 fn transcript_rows_group_consecutive_tool_only_messages() {
     let message = |id: &str, activity: bool| ChatMessageInfo {
         id: id.into(),

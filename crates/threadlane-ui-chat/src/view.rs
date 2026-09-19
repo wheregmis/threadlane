@@ -1392,15 +1392,7 @@ impl ChatListView {
                     .items_center()
                     .gap_2()
                     .py_1()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(rems(0.1875))
-                            .child(div().size(rems(0.28125)).rounded_full().bg(theme.primary))
-                            .child(div().size(rems(0.28125)).rounded_full().bg(theme.primary))
-                            .child(div().size(rems(0.28125)).rounded_full().bg(theme.primary)),
-                    )
+                    .child(Spinner::new().xsmall())
                     .child(
                         div()
                             .text_xs()
@@ -3326,22 +3318,13 @@ impl ChatListView {
                                     .enumerate()
                                     .map(|(idx, seg)| match seg {
                                         MarkdownSegment::Markdown(text) => {
-                                            if msg.streaming {
-                                                div()
-                                                    .w_full()
-                                                    .text_sm()
-                                                    .text_color(theme.foreground)
-                                                    .child(text)
-                                                    .into_any_element()
-                                            } else {
-                                                let markdown_state = self.markdown_state(
-                                                    format!("{}-seg-{}", msg.id, idx),
-                                                    &text,
-                                                    cx,
-                                                );
-                                                self.chat_markdown_view(&markdown_state)
-                                                    .into_any_element()
-                                            }
+                                            let markdown_state = self.markdown_state(
+                                                format!("{}-seg-{}", msg.id, idx),
+                                                &text,
+                                                cx,
+                                            );
+                                            self.chat_markdown_view(&markdown_state)
+                                                .into_any_element()
                                         }
                                         MarkdownSegment::CodeBlock {
                                             language,
@@ -6155,12 +6138,7 @@ impl ChatListView {
     fn render_progress_summary(&self, cx: &mut Context<Self>) -> AnyElement {
         let (summary, category, tool_detail, active_subagent_tasks) = {
             let state = self.model.read(cx);
-            let latest_tool = state
-                .messages
-                .iter()
-                .rev()
-                .flat_map(|message| message.tool_activities.iter().rev())
-                .next();
+            let latest_tool = current_turn_latest_tool(&state.messages);
             let active_subagents = state
                 .active_subagents()
                 .iter()
@@ -6180,7 +6158,7 @@ impl ChatListView {
                         tool.display_summary.clone()
                     }
                 })
-                .unwrap_or_else(|| "Preparing the next step".to_string());
+                .unwrap_or_else(|| "Generating response".to_string());
             let category = latest_tool
                 .map(|tool| tool.category.clone())
                 .unwrap_or_else(|| "Agent activity".to_string());
@@ -6190,6 +6168,14 @@ impl ChatListView {
             (summary, category, tool_detail, active_subagents)
         };
         let theme = cx.theme().colors;
+        let disclosure_label = format!(
+            "{} activity details: {summary}",
+            if self.progress_summary_expanded {
+                "Collapse"
+            } else {
+                "Expand"
+            }
+        );
         let subagent_count = active_subagent_tasks.len();
         let subagent_label = (subagent_count > 0).then(|| {
             format!(
@@ -6232,7 +6218,7 @@ impl ChatListView {
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
-                            .child("Working on:"),
+                            .child("Latest activity:"),
                     )
                     .child(
                         div()
@@ -6262,7 +6248,7 @@ impl ChatListView {
 
         container = container.child(
             Button::new("progress-summary-disclosure")
-                .accessibility_label(if self.progress_summary_expanded { "Collapse activity details" } else { "Expand activity details" })
+                .accessibility_label(disclosure_label)
                 .ghost().h_auto().w_full().p_0()
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_progress_summary(cx)))
                 .child(header_row.w_full()),
