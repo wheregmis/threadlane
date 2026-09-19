@@ -252,27 +252,46 @@ impl ModelProvider for OpenCodeGoClient {
         let base_url = Self::get_base_url();
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
-        let response = match self
-            .client
-            .post(&url)
-            .header(AUTHORIZATION, format!("Bearer {api_key}"))
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "text/event-stream")
-            .header(USER_AGENT, "threadlane/1.0")
-            .header("x-opencode-client", "threadlane")
-            .json(&payload)
-            .send()
-            .await
-        {
-            Ok(res) => res,
-            Err(err) => {
-                let _ = event_tx
-                    .send(StreamEvent::Error(format!(
-                        "OpenCode API request failed: {err}"
-                    )))
-                    .await;
-                return;
+        // Retry transient server failures only before a stream has started. Replaying
+        // a partially consumed stream could duplicate content or tool calls.
+        let mut retries = 0;
+        let response = loop {
+            let response = match self
+                .client
+                .post(&url)
+                .header(AUTHORIZATION, format!("Bearer {api_key}"))
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "text/event-stream")
+                .header(USER_AGENT, "threadlane/1.0")
+                .header("x-opencode-client", "threadlane")
+                .json(&payload)
+                .send()
+                .await
+            {
+                Ok(res) => res,
+                Err(err) => {
+                    let _ = event_tx
+                        .send(StreamEvent::Error(format!(
+                            "OpenCode API request failed: {err}"
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            if retries >= 2 || !matches!(response.status().as_u16(), 500 | 502 | 503 | 504) {
+                break response;
             }
+            tracing::warn!(
+                status = %response.status(),
+                retry = retries + 1,
+                "retrying transient OpenCode server failure"
+            );
+            drop(response);
+            tokio::select! {
+                _ = event_tx.closed() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1 << retries)) => {}
+            }
+            retries += 1;
         };
 
         if !response.status().is_success() {

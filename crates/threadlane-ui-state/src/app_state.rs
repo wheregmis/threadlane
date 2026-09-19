@@ -365,7 +365,15 @@ impl AppState {
                 .map(|model| model.id.clone())
                 .unwrap_or_default();
         }
-        self.set_reasoning_effort(self.reasoning_effort);
+        // Refreshing the catalog also runs during session switches, before
+        // hydration restores the destination session's settings. Do not use
+        // the settings setter here: it would persist the previous session's
+        // reasoning effort into the newly active session.
+        self.reasoning_effort = threadlane_provider::model_registry::effective_effort(
+            &self.selected_model,
+            self.reasoning_effort,
+            self.active_work_dir.as_deref(),
+        );
     }
 
     pub fn set_auto_address_pr_reviews_enabled(
