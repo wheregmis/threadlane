@@ -1852,15 +1852,41 @@ impl RightPanelView {
             )
             .child({
                 let status_color = match file.status_char() {
-                    'A' | '?' => theme.success, 'D' => theme.danger, 'R' => theme.link, _ => theme.warning,
+                    'A' | '?' => theme.success,
+                    'D' => theme.danger,
+                    'R' => theme.link,
+                    _ => theme.warning,
                 };
-                div().debug_selector(|| "review-file-status".into()).flex_none().text_xs()
-                    .font_weight(FontWeight::SEMIBOLD).text_color(status_color).child(status)
+                div()
+                    .debug_selector(|| "review-file-status".into())
+                    .flex_none()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(status_color)
+                    .child(status)
             })
             .children((file.additions > 0 || file.deletions > 0).then(|| {
-                div().debug_selector(|| "review-file-stats".into()).flex_none().flex().items_center().gap_1().text_xs()
-                    .children((file.additions > 0).then(|| div().text_color(theme.success).child(format!("+{}", file.additions))))
-                    .children((file.deletions > 0).then(|| div().text_color(theme.danger).child(format!("−{}", file.deletions))))
+                div()
+                    .debug_selector(|| "review-file-stats".into())
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .children(
+                        (file.additions > 0).then(|| {
+                            div()
+                                .text_color(theme.success)
+                                .child(format!("+{}", file.additions))
+                        }),
+                    )
+                    .children(
+                        (file.deletions > 0).then(|| {
+                            div()
+                                .text_color(theme.danger)
+                                .child(format!("\u{2212}{}", file.deletions))
+                        }),
+                    )
             }))
             .context_menu({
                 let path = context_path.clone();
@@ -2474,11 +2500,59 @@ impl RightPanelView {
         let staged_count = self.review_files.iter().filter(|f| f.staged).count();
         let unstaged_count = self.review_files.iter().filter(|f| f.unstaged).count();
         let has_staged = staged_count > 0;
-        let changes_summary = (total_files > 0).then(|| div().flex_none().flex().items_center().justify_between().px_3().py_1().border_b_1().border_color(theme.border).bg(theme.muted.opacity(0.08)).text_xs()
-            .child(div().flex().items_center().gap_2().child(div().text_color(theme.success).child(format!("+{total_additions}"))).child(div().text_color(theme.danger).child(format!("−{total_deletions}"))))
-            .child(div().flex().items_center().gap_2()
-                .child(div().text_color(if staged_count > 0 { theme.success } else { theme.muted_foreground }).child(format!("{staged_count} staged")))
-                .child(div().text_color(if unstaged_count > 0 { theme.warning } else { theme.muted_foreground }).child(format!("{unstaged_count} unstaged")))));
+        let changes_summary = (total_files > 0).then(|| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_3()
+                .py_1()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.muted.opacity(0.08))
+                .text_xs()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(theme.success)
+                                .child(format!("+{total_additions}")),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.danger)
+                                .child(format!("\u{2212}{total_deletions}")),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(if staged_count > 0 {
+                                    theme.success
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .child(format!("{staged_count} staged")),
+                        )
+                        .child(
+                            div()
+                                .text_color(if unstaged_count > 0 {
+                                    theme.warning
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .child(format!("{unstaged_count} unstaged")),
+                        ),
+                )
+        });
 
         let selection_bar = (total_files > 0).then(|| {
             let panel_sb = panel_entity.clone();
@@ -2627,7 +2701,18 @@ impl RightPanelView {
                 .justify_center()
                 .p_4()
                 .text_center()
-                .child(div().mb_2().size_8().flex().items_center().justify_center().rounded_full().bg(theme.success.opacity(0.12)).text_color(theme.success).child(Icon::new(IconName::Check)))
+                .child(
+                    div()
+                        .mb_2()
+                        .size_8()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme.success.opacity(0.12))
+                        .text_color(theme.success)
+                        .child(Icon::new(IconName::Check)),
+                )
                 .child(
                     div()
                         .text_sm()
