@@ -622,6 +622,14 @@ impl Render for BrowserView {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .px_1()
+                    .py(px(2.0))
+                    .rounded_md()
+                    .when(annotating, |bar| {
+                        bar.bg(cx.theme().warning.opacity(0.08))
+                            .border_1()
+                            .border_color(cx.theme().warning.opacity(0.25))
+                    })
                     .child(
                         Button::new("browser-back")
                             .icon(IconName::ArrowLeft)
@@ -693,8 +701,10 @@ impl Render for BrowserView {
                                 let selected = Some(id) == active_id;
                                 let title = tab_title(&url);
                                 div()
-                                    .flex()
+                                    .id(SharedString::from(format!("browser-tab-{id}")))
+                                    .group(SharedString::from(format!("browser-tab-group-{id}")))
                                     .flex_shrink_0()
+                                    .flex()
                                     .items_center()
                                     .rounded_md()
                                     .bg(if selected {
@@ -718,20 +728,29 @@ impl Render for BrowserView {
                                             }),
                                         ),
                                     )
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "browser-tab-close-{id}"
-                                        )))
-                                        .icon(IconName::Close)
-                                        .accessibility_label(format!("Close tab {title}"))
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(
-                                            cx.listener(move |this, _event, window, cx| {
-                                                this.close_tab(id, window, cx);
-                                            }),
-                                        ),
-                                    )
+                                    .child({
+                                        let is_active_tab = selected;
+                                        let group_name = SharedString::from(format!("browser-tab-group-{id}"));
+                                        div()
+                                            .when(!is_active_tab, |el| {
+                                                el.invisible()
+                                                    .group_hover(group_name, |el| el.visible())
+                                            })
+                                            .child(
+                                                Button::new(SharedString::from(format!(
+                                                    "browser-tab-close-{id}"
+                                                )))
+                                                .icon(IconName::Close)
+                                                .accessibility_label(format!("Close tab {title}"))
+                                                .ghost()
+                                                .xsmall()
+                                                .on_click(
+                                                    cx.listener(move |this, _event, window, cx| {
+                                                        this.close_tab(id, window, cx);
+                                                    }),
+                                                ),
+                                            )
+                                    })
                             })),
                     )
                     .child(
@@ -756,21 +775,78 @@ impl Render for BrowserView {
                 panel.child(
                     div()
                         .flex_none()
-                        .text_xs()
-                        .text_color(cx.theme().warning)
-                        .child("Click a page element — Esc cancels"),
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .px_1()
+                        .py_0p5()
+                        .rounded_md()
+                        .bg(cx.theme().warning.opacity(0.08))
+                        .child(
+                            div()
+                                .size_4()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(cx.theme().warning)
+                                .child(Icon::default().path("icons/crosshair.svg").xsmall()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(cx.theme().warning)
+                                .child("Click a page element \u{2014} Esc cancels"),
+                        ),
                 )
             })
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded_md()
-                    .overflow_hidden()
-                    .children(webview),
-            )
+            .when(self.tabs.is_empty(), |panel| {
+                panel.child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(IconName::Globe),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("No tabs open"),
+                                )
+                                .child(
+                                    Button::new("open-first-tab")
+                                        .label("New Tab")
+                                        .small()
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            this.open_tab(DEFAULT_URL, window, cx);
+                                        })),
+                                ),
+                        ),
+                )
+            })
+            .when(!self.tabs.is_empty(), |panel| {
+                panel.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .rounded_md()
+                        .overflow_hidden()
+                        .children(webview),
+                )
+            })
     }
 }
 
