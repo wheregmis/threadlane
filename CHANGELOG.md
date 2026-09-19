@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.1.18](https://github.com/wheregmis/threadlane/compare/v0.1.17...v0.1.18) (2026-09-19)
+
+
+### Features
+
+* act on UI elements by text with computer_interact ([4c67c34](https://github.com/wheregmis/threadlane/commit/4c67c3496c3594dd3d8846e8f78bd53d87b55d29))
+* add durable wall time to lifecycle records and run timing ([7fa2034](https://github.com/wheregmis/threadlane/commit/7fa203415983a27c9affb8728ea463425b046c24))
+* auto-record trajectories and surface browser routes ([a87bba9](https://github.com/wheregmis/threadlane/commit/a87bba99157952fc1b6fa97db7bfa89be14ed80a))
+* **browser:** enhance annotation mode, empty state, and tab interactions ([8c6b457](https://github.com/wheregmis/threadlane/commit/8c6b4579eb7fbc8c1c83cfb1256f54d12de217d2))
+* **chat:** add copy, edit, and retry actions with draft safeguards ([139c458](https://github.com/wheregmis/threadlane/commit/139c458aceae588deb75f5644615fdb660fbfd95))
+* drive computer use through the CUA driver ([947e3f6](https://github.com/wheregmis/threadlane/commit/947e3f666c33dffa79fd265f7dd724ead6841938))
+* expand OpenCode go models and scale chat sizing with rem units ([8c20001](https://github.com/wheregmis/threadlane/commit/8c2000135fe2738c2924e7b3c9f9cb2884174ab6))
+* explain mirror stalls and remember panel geometry ([5f950c2](https://github.com/wheregmis/threadlane/commit/5f950c267f1ca274d5bdcedaf574918139a49008))
+* GitHub issue create/close/labels/suggest in-app ([f2d732b](https://github.com/wheregmis/threadlane/commit/f2d732beb6e6c9c919a893455562c9f436d3dc99))
+* session-scoped computer approval ([9cf6aed](https://github.com/wheregmis/threadlane/commit/9cf6aed78036da0cc4d2b10b994bca729ee567a5))
+* **ui:** add composer skills chip and cache acp probe state ([75873e1](https://github.com/wheregmis/threadlane/commit/75873e1357af3a9a2c4d87fda6e79c3264103791))
+
+
+### Bug Fixes
+
+* ACP forward-compat - lenient plan/tool enums, unknown terminal ends tool, capped tool text, broader question rewrite ([46888e2](https://github.com/wheregmis/threadlane/commit/46888e24294de23562f73cf48112f1805162d464))
+* ACP runtime - bounded cancel, reactor-less cancel delivery, orphan tool journal, concurrent preload, advertised effort, question validation ([58a9140](https://github.com/wheregmis/threadlane/commit/58a914022fbee0fa51b52bdfafd23dd03def7132))
+* advertise-driven thought-signature gate, keep dropped tool results as text, pass through remote images ([02efac5](https://github.com/wheregmis/threadlane/commit/02efac5c7fdee864711d981728bb788367530444))
+* atomic skills save, updater zero-copy install, release lock covers all threadlane crates ([7af319a](https://github.com/wheregmis/threadlane/commit/7af319a881ae2ea78aba380328bba60383952d19))
+* browser tab-title test + narrow test imports to avoid macro recursion ([73ecab1](https://github.com/wheregmis/threadlane/commit/73ecab15f6a3b40cced54377ec005b59b90620dc))
+* **browser:** hide native webviews when the right panel is hidden ([95ed660](https://github.com/wheregmis/threadlane/commit/95ed660e0d227a7d03d12794d30ab9d1b1bb0d61))
+* cache freshness + canonical paths, loop detector hardening, image token accounting ([ad1b7e0](https://github.com/wheregmis/threadlane/commit/ad1b7e06ca9979e90cc1ef149e73cfb2630842da))
+* clarity and safety - composer caps, draft/path tooltips, terminal close confirm ([6985244](https://github.com/wheregmis/threadlane/commit/69852444c5c2b70cdfdc753440b86ceeb0dbbdb1))
+* **computer:** release feed slot lock before idle re-check ([f996adc](https://github.com/wheregmis/threadlane/commit/f996adce561d9262474ac0834cce4f1b5ea5a592))
+* **computer:** track the agent's virtual pointer in the live mirror ([eb249dc](https://github.com/wheregmis/threadlane/commit/eb249dc061c19a8e420150420a5b0a6abe4faeee))
+* **computer:** track the agent's virtual pointer in the live mirror ([ad399e9](https://github.com/wheregmis/threadlane/commit/ad399e940b0b62218c6d8f0541a12e97fdc7ca24))
+* effort-aware prewalk noop fast path, live requires_todo refresh ([b7ae3f4](https://github.com/wheregmis/threadlane/commit/b7ae3f4fca0f10008073962c4adddd4b13976bd2))
+* exclude inline image bytes from token estimates ([99500f1](https://github.com/wheregmis/threadlane/commit/99500f189378666d27b536caa2fae3a627a4cc7a))
+* GitHub list resilience - skip bad entries, surfaced review errors, rate-limit backoff ([5fc1c35](https://github.com/wheregmis/threadlane/commit/5fc1c358857b4a62fd8a90da477f8c13f0ae768f))
+* GitHub toolbar shares the header clearance token ([f2535c2](https://github.com/wheregmis/threadlane/commit/f2535c26052d60f00c988c76080a31a8377ddde5))
+* harness identity - RunContext attempt suffix, (run,call) tool ids, consecutive-only lane collapse, canonical hub key ([29c616a](https://github.com/wheregmis/threadlane/commit/29c616ae110214885121b60dc0c34ff53c1dee81))
+* interface nits - unified empty state, slash menu rhythm, pill scrim, compact empties ([a2be57a](https://github.com/wheregmis/threadlane/commit/a2be57a694b2a9a861e9b9c5e194e450f050fb65))
+* keyboard/a11y and docs honesty - question send guard, distinct palette icons, real shortcuts ([cf8347f](https://github.com/wheregmis/threadlane/commit/cf8347f1cac0770958ef3d39bb770db3f1f0e255))
+* live discovery merges into registry with TTL; project roots threaded to budgets ([12026f8](https://github.com/wheregmis/threadlane/commit/12026f8924627e75816b3fb6dd0653e5581f9103))
+* MCP multiplex + singleflight, editor/sidebar off UI thread, auth reactor hop, incremental memory validation ([3dc3b13](https://github.com/wheregmis/threadlane/commit/3dc3b1316fdeef39b279913653da37a7f4fcf329))
+* registry newer-wins merge + subagent worktree orphan reclamation ([1d014ce](https://github.com/wheregmis/threadlane/commit/1d014ce196f11270c125b1c4130d7c124efd2989))
+* render/event/launch paths degrade instead of panic ([5fd584d](https://github.com/wheregmis/threadlane/commit/5fd584ddc98d348ecae6470731ba1d3deda4924f))
+* retry transient OpenCode errors and avoid effort state overwrite ([0e1e75c](https://github.com/wheregmis/threadlane/commit/0e1e75c6d308c48dc20b1f3f7f091b0e4b20418c))
+* sidebar rows announce, archive discoverable, honest dialog copy ([08c006d](https://github.com/wheregmis/threadlane/commit/08c006d3e705ab7de7a657b8540d25d623330bda))
+* subagent hub - system kill notices, late broadcast replay, solo follow-ups, bounded inbox ([15018a5](https://github.com/wheregmis/threadlane/commit/15018a5c3f4131919c8b19621ea1ea3cb1b3dd51))
+* surface swallowed errors; poison-tolerant session locks ([4e3d4ea](https://github.com/wheregmis/threadlane/commit/4e3d4eacdd5be70c7a6babc2dff1a81a38f2c82a))
+* title routing skips antigravity/acp; fallback roster rebuilds on rotation ([65009f4](https://github.com/wheregmis/threadlane/commit/65009f4611af3903cbf8097856fbb017e3e6ef1c))
+* **ui-chat:** isolate progress summary tool status to current turn ([c80cb89](https://github.com/wheregmis/threadlane/commit/c80cb89fd269c5340b06547ee6930168bc329aed))
+* **ui:** improve accessibility labels and review workflow feedback ([c9c5cd9](https://github.com/wheregmis/threadlane/commit/c9c5cd90939540ba3eab27f350a050efca1f3261))
+* **ui:** move progress summary below transcript and allow effort change ([24bab6c](https://github.com/wheregmis/threadlane/commit/24bab6cac6f6d487906231a3dd217e2358ea42a4))
+* updater bundle allowlist; remove_session archives + dirty guard; surfaced cleanup errors ([b01f568](https://github.com/wheregmis/threadlane/commit/b01f568635baa7a4af40a9e4103fb33ddef71379))
+* validate computer window targets and prune stale mirror keys ([9a6d09f](https://github.com/wheregmis/threadlane/commit/9a6d09f4423d8ec8acb6ef4c77484f60dcb81f3e))
+* WASI state/scope/alloc safety + broker framing caps ([1550035](https://github.com/wheregmis/threadlane/commit/1550035872429bb044ac7061cab0065a9d43b356))
+
+
+### Performance Improvements
+
+* **git:** gate github requests and improve caching with backoff ([2092432](https://github.com/wheregmis/threadlane/commit/209243242ed6d6bc6e03ab151422c8e394d6e865))
+
 ## [0.1.17](https://github.com/wheregmis/threadlane/compare/v0.1.16...v0.1.17) (2026-09-18)
 
 
