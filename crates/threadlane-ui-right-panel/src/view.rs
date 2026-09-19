@@ -1744,6 +1744,9 @@ impl RightPanelView {
         let panel_entity = cx.entity().clone();
 
         let path = file.path.clone();
+        let (directory, filename) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
+        let filename = filename.to_owned();
+        let directory = directory.to_owned();
         let path_for_chk = path.clone();
         let is_selected = self.selected_files.contains(&path);
         let absolute_path = self
@@ -1796,7 +1799,33 @@ impl RightPanelView {
             )
             .child(
                 Button::new(SharedString::from(format!("review-file-btn-{path}")))
-                    .label(path.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .debug_selector(|| "review-filename".into())
+                                    .flex_shrink_0()
+                                    .max_w(relative(if directory.is_empty() { 1.0 } else { 0.6 }))
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(filename),
+                            )
+                            .when(!directory.is_empty(), |row| {
+                                row.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(directory),
+                                )
+                            }),
+                    )
                     .icon(IconName::File)
                     .accessibility_label(format!(
                         "Review {path}, status {status}, {} additions, {} deletions",
@@ -1822,7 +1851,14 @@ impl RightPanelView {
                         this.open_file_diff(path.clone(), cx);
                     })),
             )
-            .child(div().text_xs().text_color(theme.muted_foreground).child(status))
+            .child(
+                div()
+                    .debug_selector(|| "review-file-status".into())
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(status),
+            )
             .children((file.additions > 0 || file.deletions > 0).then(|| {
                 let mut stat = String::new();
                 if file.additions > 0 {
@@ -1835,6 +1871,7 @@ impl RightPanelView {
                     stat.push_str(&format!("−{}", file.deletions));
                 }
                 div()
+                    .debug_selector(|| "review-file-stats".into())
                     .flex_none()
                     .text_xs()
                     .text_color(theme.muted_foreground)
@@ -4839,6 +4876,94 @@ mod dialog_keyboard_tests {
                 assert!(panel.switch_target_branch.is_none());
                 assert!(!panel.git_busy, "dismissing a dialog must not run Git");
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod review_layout_tests {
+    use super::RightPanelView;
+    use gpui::{
+        div, px, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled,
+        TestAppContext, Window,
+    };
+    use threadlane_git::GitFile;
+    use threadlane_ui_state::AppState;
+
+    struct RowHost {
+        panel: Entity<RightPanelView>,
+        width: f32,
+    }
+
+    impl Render for RowHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(self.width)).child(
+                self.panel
+                    .update(cx, |panel, cx| panel.render_review_file_row(0, window, cx)),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn long_review_paths_keep_filename_and_stats_visible(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| AppState::default());
+        let (host, cx) = cx.add_window_view(move |window, cx| {
+            let panel = cx.new(|cx| RightPanelView::new(model, window, cx));
+            panel.update(cx, |panel, _| {
+                let mut file = GitFile::default();
+                file.path = format!("crates/{}/tests.rs", "long-directory-name/".repeat(12));
+                file.additions = 1234;
+                file.deletions = 567;
+                panel.review_files = vec![file];
+            });
+            RowHost {
+                panel,
+                width: 320.0,
+            }
+        });
+        for path in [
+            format!("crates/{}tests.rs", "long-directory-name/".repeat(12)),
+            format!("src/{}.rs", "long-filename".repeat(12)),
+            format!("{}.rs", "root-filename".repeat(12)),
+            "Cargo.toml".to_owned(),
+        ] {
+            for width in [320.0, 480.0, 640.0] {
+                host.update(cx, |host, cx| {
+                    host.width = width;
+                    host.panel.update(cx, |panel, cx| {
+                        panel.review_files[0].path = path.clone();
+                        cx.notify();
+                    });
+                    cx.notify();
+                });
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                let filename = cx
+                    .debug_bounds("review-filename")
+                    .expect("filename rendered");
+                let status = cx
+                    .debug_bounds("review-file-status")
+                    .expect("status rendered");
+                let stats = cx
+                    .debug_bounds("review-file-stats")
+                    .expect("stats rendered");
+                assert!(
+                    filename.size.width >= px(40.0),
+                    "filename collapsed at {width}: {filename:?}"
+                );
+                assert!(
+                    filename.right() <= status.left(),
+                    "filename overlaps status at {width}"
+                );
+                assert!(
+                    status.right() <= stats.left(),
+                    "status overlaps stats at {width}"
+                );
+                assert!(
+                    stats.right() <= px(width),
+                    "stats overflow at {width}: {stats:?}"
+                );
+            }
         }
     }
 }

@@ -1,4 +1,299 @@
 #[gpui::test]
+fn composer_model_controls_fit_narrow_and_wide_panels(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.selected_model = "some-future/model-with-a-long-display-name".into();
+        state.is_new_task = false;
+        state
+    });
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    for width in [320.0, 800.0] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        for selector in ["composer-model-picker", "composer-reasoning-effort-picker"] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .expect("composer control is visible");
+            assert!(bounds.size.width > gpui::px(0.0));
+            assert!(
+                bounds.left() >= gpui::px(0.0),
+                "{selector} overflows left at {width}px"
+            );
+            assert!(
+                bounds.right() <= gpui::px(width),
+                "{selector} overflows right at {width}px: {bounds:?}"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn reasoning_menu_reports_open_and_escape_dismissal(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.selected_model = "some-future/model-with-a-long-display-name".into();
+        state.is_new_task = false;
+        state
+    });
+    let (chat, cx) = cx.add_window_view(move |window, cx| {
+        super::ChatListView::new(model, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let trigger = cx.debug_bounds("composer-reasoning-effort-picker").unwrap();
+    cx.simulate_click(trigger.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    chat.read_with(cx, |chat, _| {
+        assert!(chat.reasoning_menu_open.get(), "click must open menu");
+    });
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    chat.read_with(cx, |chat, _| {
+        assert!(!chat.reasoning_menu_open.get(), "Escape must close menu");
+    });
+}
+
+#[gpui::test]
+fn composer_shift_enter_adds_a_line_without_sending(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| threadlane_ui_state::AppState::default());
+    let retained_model = model.clone();
+    let (chat, cx) =
+        cx.add_window_view(move |window, cx| super::ChatListView::new(model, window, cx));
+    chat.update_in(cx, |chat, window, cx| {
+        chat.input_state.update(cx, |input, cx| {
+            input.set_value("First line", window, cx);
+        });
+        chat.focus_composer(window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.simulate_keystrokes("end shift-enter");
+    cx.run_until_parked();
+    chat.read_with(cx, |chat, cx| {
+        assert_eq!(chat.input_state.read(cx).value().as_ref(), "First line\n");
+    });
+    retained_model.read_with(cx, |state, _| {
+        assert!(state.messages.is_empty(), "newline must not submit the draft");
+        assert!(!state.is_generating);
+    });
+}
+
+#[gpui::test]
+fn stashing_requires_a_task_and_preserves_existing_stashes_and_images(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| threadlane_ui_state::AppState::default());
+    let retained_model = model.clone();
+    let (chat, cx) =
+        cx.add_window_view(move |window, cx| super::ChatListView::new(model, window, cx));
+    for (has_task, has_stash, has_image, generating) in [
+        (false, false, false, false),
+        (true, true, false, false),
+        (true, false, true, false),
+        (true, false, false, true),
+        (true, false, false, false),
+    ] {
+        retained_model.update(cx, |state, cx| {
+            state.active_session_id = has_task.then(|| "stash-task".into());
+            state.is_generating = generating;
+            state.clear_stashed_prompt("stash-task");
+            if has_stash {
+                state.stash_prompt("stash-task", "Previous stash".into());
+            }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        chat.update_in(cx, |chat, window, cx| {
+            chat.input_state.update(cx, |input, cx| {
+                input.set_value("Current draft", window, cx);
+            });
+            chat.pasted_images.clear();
+            if has_image {
+                chat.pasted_images.push(super::ImageAttachment {
+                    display_name: "draft.png".into(),
+                    data_url: "data:image/png;base64,test".into(),
+                });
+            }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let stash = cx.debug_bounds("stash-prompt-btn").unwrap();
+        cx.simulate_click(stash.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let allowed = has_task && !has_stash && !has_image && !generating;
+        chat.read_with(cx, |chat, cx| {
+            assert_eq!(
+                chat.input_state.read(cx).value().as_ref(),
+                if allowed { "" } else { "Current draft" }
+            );
+            assert_eq!(chat.pasted_images.len(), usize::from(has_image));
+        });
+        retained_model.read_with(cx, |state, _| {
+            let expected = if has_stash {
+                Some("Previous stash")
+            } else if allowed {
+                Some("Current draft")
+            } else {
+                None
+            };
+            assert_eq!(
+                state.get_stashed_prompt("stash-task").map(String::as_str),
+                expected
+            );
+        });
+    }
+}
+
+#[gpui::test]
+fn restoring_a_stash_preserves_unsent_text_and_images(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Focusable as _};
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.active_session_id = Some("draft-session".into());
+        state.is_new_task = false;
+        state.stash_prompt("draft-session", "Saved request".into());
+        state
+    });
+    let retained_model = model.clone();
+    let holder = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let holder_clone = holder.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        holder_clone.borrow_mut().replace(chat.clone());
+        struct DialogHost(gpui::Entity<super::ChatListView>);
+        impl gpui::Render for DialogHost {
+            fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                use gpui::{ParentElement as _, Styled as _};
+                gpui::div().size_full().child(self.0.clone())
+                    .children(gpui_component::Root::render_dialog_layer(window, cx))
+            }
+        }
+        let host = cx.new(|_| DialogHost(chat));
+        gpui_component::Root::new(host, window, cx)
+    });
+    let chat = holder.borrow().as_ref().unwrap().clone();
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let discard = cx.debug_bounds("discard-stashed-draft").unwrap();
+    cx.simulate_click(discard.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("dialog-0").is_some());
+    retained_model.read_with(cx, |state, _| {
+        assert_eq!(
+            state.get_stashed_prompt("draft-session").map(String::as_str),
+            Some("Saved request")
+        );
+    });
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("dialog-0").is_none());
+    for (draft, image) in [("Newer request", false), ("", true), ("", false)] {
+        chat.update_in(cx, |chat, window, cx| {
+            chat.input_state.update(cx, |input, cx| {
+                input.set_value(draft, window, cx);
+            });
+            chat.pasted_images.clear();
+            if image {
+                chat.pasted_images.push(super::ImageAttachment {
+                    display_name: "new.png".into(),
+                    data_url: "data:image/png;base64,test".into(),
+                });
+            }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let restore = cx.debug_bounds("restore-stashed-draft").unwrap();
+        cx.simulate_click(restore.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let blocked = !draft.is_empty() || image;
+        chat.read_with(cx, |chat, cx| {
+            assert_eq!(
+                chat.input_state.read(cx).value().as_ref(),
+                if blocked { draft } else { "Saved request" }
+            );
+            assert_eq!(chat.pasted_images.len(), usize::from(image));
+        });
+        retained_model.read_with(cx, |state, _| {
+            assert_eq!(state.get_stashed_prompt("draft-session").is_some(), blocked);
+        });
+        cx.update(|window, cx| {
+            let focus = chat.read(cx).input_state.read(cx).focus_handle(cx);
+            assert_eq!(window.focused(cx), Some(focus));
+        });
+    }
+    chat.update_in(cx, |chat, window, cx| {
+        chat.input_state.update(cx, |input, cx| {
+            input.set_value("Keep this draft", window, cx);
+        });
+        chat.pasted_images.push(super::ImageAttachment {
+            display_name: "keep.png".into(),
+            data_url: "data:image/png;base64,keep".into(),
+        });
+        cx.notify();
+    });
+    for replaced in [false, true] {
+        retained_model.update(cx, |state, cx| {
+            state.stash_prompt("draft-session", "Discard this stash".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let discard = cx.debug_bounds("discard-stashed-draft").unwrap();
+        cx.simulate_click(discard.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("dialog-0").is_some());
+        if replaced {
+            retained_model.update(cx, |state, cx| {
+                state.stash_prompt("draft-session", "New saved draft".into());
+                cx.notify();
+            });
+        }
+        cx.update(|window, cx| {
+            window.dispatch_action(
+                Box::new(gpui_component::dialog::Confirm { secondary: false }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("dialog-0").is_none());
+        retained_model.read_with(cx, |state, _| {
+            assert_eq!(
+                state.get_stashed_prompt("draft-session").map(String::as_str),
+                replaced.then_some("New saved draft")
+            );
+        });
+        chat.read_with(cx, |chat, cx| {
+            assert_eq!(chat.input_state.read(cx).value().as_ref(), "Keep this draft");
+            assert_eq!(chat.pasted_images.len(), 1);
+            assert_eq!(chat.pasted_images[0].data_url, "data:image/png;base64,keep");
+        });
+    }
+}
+
+#[gpui::test]
 fn unsupported_acp_steer_keeps_the_composer_text_and_images(cx: &mut gpui::TestAppContext) {
     use gpui::AppContext as _;
 
@@ -215,6 +510,116 @@ fn chat_errors_are_bounded_deduplicated_and_keep_recovery_details(cx: &mut gpui:
     assert_eq!(
         retained_model.read_with(cx, |model, _| model.workspace_page),
         threadlane_ui_state::WorkspacePage::Settings
+    );
+}
+
+#[test]
+fn last_retryable_prompt_prefers_the_latest_user_message() {
+    let user = |id: &str, content: &str| ChatMessageInfo {
+        id: id.into(),
+        role: MessageRole::User,
+        content: content.into(),
+        tool_activities: Vec::new(),
+        streaming: false,
+        reasoning_content: None,
+        reasoning_expanded: false,
+    };
+    let assistant = |id: &str| ChatMessageInfo {
+        id: id.into(),
+        role: MessageRole::Assistant,
+        content: "done".into(),
+        tool_activities: Vec::new(),
+        streaming: false,
+        reasoning_content: None,
+        reasoning_expanded: false,
+    };
+    assert_eq!(super::last_retryable_prompt(&[]), None);
+    assert_eq!(super::last_retryable_prompt(&[assistant("a")]), None);
+    assert_eq!(
+        super::last_retryable_prompt(&[user("u", "   ")]),
+        None,
+        "whitespace-only prompts cannot be resent"
+    );
+    assert_eq!(
+        super::last_retryable_prompt(&[user("u1", "first"), assistant("a"), user("u2", "second")]),
+        Some("second".to_string()),
+        "retry resends the latest user prompt, not an earlier one"
+    );
+}
+
+#[gpui::test]
+fn error_retry_appears_only_with_a_user_prompt_and_no_active_run(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::AppContext as _;
+
+    struct ErrorHarness {
+        model: gpui::Entity<threadlane_ui_state::AppState>,
+        error: String,
+    }
+
+    impl gpui::Render for ErrorHarness {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            super::render_chat_error("retry-test", &self.error, &self.model, cx)
+        }
+    }
+
+    let message = |role: MessageRole, content: &str| ChatMessageInfo {
+        id: format!("{role:?}-retry"),
+        role,
+        content: content.into(),
+        tool_activities: Vec::new(),
+        streaming: false,
+        reasoning_content: None,
+        reasoning_expanded: false,
+    };
+    let show_error = |cx: &mut gpui::TestAppContext,
+                        model: gpui::Entity<threadlane_ui_state::AppState>| {
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let view = cx.new(|_| ErrorHarness {
+                model,
+                error: "boom".into(),
+            });
+            gpui_component::Root::new(view, window, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.debug_bounds("chat-error-retry").is_some()
+    };
+
+    cx.update(gpui_component::init);
+    let without_prompt = cx.new(|_| threadlane_ui_state::AppState::default());
+    assert!(
+        !show_error(cx, without_prompt),
+        "no user prompt means nothing to resend"
+    );
+
+    let with_prompt = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.messages = vec![
+            message(MessageRole::User, "try again"),
+            message(MessageRole::Error, "boom"),
+        ]
+        .into();
+        state
+    });
+    assert!(
+        show_error(cx, with_prompt),
+        "a failed turn with a prior user prompt offers Retry"
+    );
+
+    let generating = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.messages = vec![message(MessageRole::User, "try again")].into();
+        state.is_generating = true;
+        state
+    });
+    assert!(
+        !show_error(cx, generating),
+        "retry stays hidden while a generation is running"
     );
 }
 
@@ -1044,8 +1449,20 @@ fn reading_history_survives_new_activity_and_jump_resumes_following(cx: &mut gpu
         state
     });
     let retained_model = model.clone();
-    let (chat, cx) =
-        cx.add_window_view(move |window, cx| super::ChatListView::new(model, window, cx));
+    let holder: std::rc::Rc<
+        std::cell::RefCell<Option<gpui::Entity<super::ChatListView>>>,
+    > = Default::default();
+    let holder_clone = holder.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        holder_clone.borrow_mut().replace(chat.clone());
+        gpui_component::Root::new(chat, window, cx)
+    });
+    let chat = holder
+        .borrow()
+        .as_ref()
+        .expect("chat view mounted")
+        .clone();
     cx.run_until_parked();
     chat.update(cx, |chat, cx| {
         chat.initial_scroll_frames = 0;
@@ -1220,7 +1637,20 @@ fn completed_activity_disclosure_renders_interactive_tool_rows(cx: &mut gpui::Te
         state.messages = messages.into();
         state
     });
-    let (chat, cx) = cx.add_window_view(move |window, cx| super::ChatListView::new(model, window, cx));
+    let holder: std::rc::Rc<
+        std::cell::RefCell<Option<gpui::Entity<super::ChatListView>>>,
+    > = Default::default();
+    let holder_clone = holder.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        holder_clone.borrow_mut().replace(chat.clone());
+        gpui_component::Root::new(chat, window, cx)
+    });
+    let chat = holder
+        .borrow()
+        .as_ref()
+        .expect("chat view mounted")
+        .clone();
     cx.run_until_parked();
     chat.update(cx, |chat, cx| {
         chat.initial_scroll_frames = 0;
@@ -1273,8 +1703,21 @@ fn reasoning_disclosure_supports_keyboard_and_pauses_following(cx: &mut gpui::Te
             gpui::div().id("workspace").tab_group().size_full().child(self.0.clone())
         }
     }
-    let (harness, cx) = cx.add_window_view(move |window, cx| Harness(cx.new(|cx| super::ChatListView::new(model, window, cx))));
-    let chat = harness.read_with(cx, |harness, _| harness.0.clone());
+    let holder: std::rc::Rc<
+        std::cell::RefCell<Option<gpui::Entity<super::ChatListView>>>,
+    > = Default::default();
+    let holder_clone = holder.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        holder_clone.borrow_mut().replace(chat.clone());
+        let host = cx.new(|_| Harness(chat));
+        gpui_component::Root::new(host, window, cx)
+    });
+    let chat = holder
+        .borrow()
+        .as_ref()
+        .expect("chat view mounted")
+        .clone();
     cx.run_until_parked();
     chat.update(cx, |chat, cx| {
         chat.initial_scroll_frames = 0;
@@ -1344,4 +1787,292 @@ fn environment_tracks_checkout_and_yields_space_to_chat(cx: &mut gpui::TestAppCo
     chat.update(cx, |chat, cx| chat.set_environment_width(gpui::px(900.), gpui::px(16.), cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("chat-environment").is_none());
+}
+
+#[gpui::test]
+fn user_message_edit_loads_composer_for_resend(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    use gpui::Focusable as _;
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state.messages = vec![ChatMessageInfo {
+            id: "user-1".into(),
+            role: MessageRole::User,
+            content: "User request".into(),
+            tool_activities: Vec::new(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        }]
+        .into();
+        state
+    });
+    let holder: std::rc::Rc<
+        std::cell::RefCell<Option<gpui::Entity<super::ChatListView>>>,
+    > = Default::default();
+    let holder_clone = holder.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        holder_clone.borrow_mut().replace(chat.clone());
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let chat = holder
+        .borrow()
+        .as_ref()
+        .expect("chat view mounted")
+        .clone();
+    let edit = cx
+        .debug_bounds("message-edit")
+        .expect("settled user message exposes an edit action");
+    cx.simulate_click(edit.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let composer_focus = chat.read_with(cx, |chat, cx| {
+        chat.input_state
+            .read(cx)
+            .focus_handle(cx)
+    });
+    cx.update(|window, cx| {
+        assert_eq!(
+            window.focused(cx),
+            Some(composer_focus),
+            "edit hands focus to the composer"
+        );
+    });
+    chat.update(cx, |chat, cx| {
+        assert_eq!(
+            chat.input_state.read(cx).value().as_ref(),
+            "User request",
+            "edit loads the message text into the composer"
+        );
+        assert_eq!(chat.current_tab, super::CentralTab::Chat);
+    });
+
+    // Editing history must never silently replace an unsent draft, including
+    // image-only drafts whose text field is empty.
+    for (draft, with_image) in [("Unsent follow-up", false), ("", true)] {
+        cx.update(|window, cx| {
+            chat.update(cx, |chat, cx| {
+                chat.input_state.update(cx, |input, cx| {
+                    input.set_value(draft, window, cx);
+                });
+                chat.pasted_images = vec![super::ImageAttachment {
+                    display_name: "draft.png".into(),
+                    data_url: "data:image/png;base64,test".into(),
+                }];
+                if !with_image {
+                    chat.pasted_images.clear();
+                }
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let edit = cx
+            .debug_bounds("message-edit")
+            .expect("edit action remains available");
+        cx.simulate_click(edit.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        chat.read_with(cx, |chat, cx| {
+            assert_eq!(chat.input_state.read(cx).value().as_ref(), draft);
+            assert_eq!(chat.pasted_images.len(), usize::from(with_image));
+            if with_image {
+                assert_eq!(chat.pasted_images[0].display_name, "draft.png");
+            }
+        });
+    }
+}
+
+#[gpui::test]
+fn user_message_edit_hidden_while_generating(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state.messages = vec![ChatMessageInfo {
+            id: "user-1".into(),
+            role: MessageRole::User,
+            content: "User request".into(),
+            tool_activities: Vec::new(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        }]
+        .into();
+        state.is_generating = true;
+        state
+    });
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("message-edit").is_none(),
+        "edit stays hidden while a generation is running"
+    );
+    assert!(
+        cx.debug_bounds("message-copy").is_some(),
+        "copy remains available while generating"
+    );
+}
+
+#[gpui::test]
+fn user_message_exposes_copy_action(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state.messages = vec![ChatMessageInfo {
+            id: "user-1".into(),
+            role: MessageRole::User,
+            content: "User request".into(),
+            tool_activities: Vec::new(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        }]
+        .into();
+        state
+    });
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let copy = cx
+        .debug_bounds("message-copy")
+        .expect("user message exposes a copy action");
+    cx.simulate_click(copy.center(), gpui::Modifiers::default());
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("User request".to_string())
+    );
+}
+
+#[gpui::test]
+fn completed_assistant_message_exposes_copy_action(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state.messages = vec![ChatMessageInfo {
+            id: "assistant-1".into(),
+            role: MessageRole::Assistant,
+            content: "Completed response".into(),
+            tool_activities: Vec::new(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        }]
+        .into();
+        state
+    });
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let copy = cx
+        .debug_bounds("message-copy")
+        .expect("completed response exposes a copy action");
+    cx.simulate_click(copy.center(), gpui::Modifiers::default());
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("Completed response".to_string())
+    );
+}
+
+#[gpui::test]
+fn message_copy_shows_copied_feedback(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state.messages = vec![ChatMessageInfo {
+            id: "assistant-1".into(),
+            role: MessageRole::Assistant,
+            content: "Completed response".into(),
+            tool_activities: Vec::new(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        }]
+        .into();
+        state
+    });
+    let holder: std::rc::Rc<
+        std::cell::RefCell<Option<gpui::Entity<super::ChatListView>>>,
+    > = Default::default();
+    let holder_clone = holder.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        holder_clone.borrow_mut().replace(chat.clone());
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let chat = holder
+        .borrow()
+        .as_ref()
+        .expect("chat view mounted")
+        .clone();
+    chat.read_with(cx, |chat, _| {
+        assert!(chat.copied_message.is_none());
+    });
+    let copy = cx
+        .debug_bounds("message-copy")
+        .expect("copy action present");
+    cx.simulate_click(copy.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    chat.read_with(cx, |chat, _| {
+        let (key, _) = chat
+            .copied_message
+            .as_ref()
+            .expect("copy records per-message feedback");
+        assert_eq!(key, "message-copy-assistant-1");
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("message-copy").is_some());
+}
+
+#[gpui::test]
+fn streaming_assistant_message_hides_copy_action(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state.messages = vec![ChatMessageInfo {
+            id: "assistant-streaming".into(),
+            role: MessageRole::Assistant,
+            content: "Partial response".into(),
+            tool_activities: Vec::new(),
+            streaming: true,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        }]
+        .into();
+        state
+    });
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("message-copy").is_none(),
+        "streaming response defers its actions until generation completes"
+    );
 }

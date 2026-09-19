@@ -85,10 +85,22 @@ fn visible_session_status<'a>(
     })
 }
 
+fn last_retryable_prompt(messages: &[ChatMessageInfo]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == MessageRole::User && !message.content.trim().is_empty()
+        })
+        .map(|message| message.content.clone())
+}
+
 fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) -> Div {
     let theme = cx.theme().colors;
     let (summary, needs_provider_settings) = chat_error_summary(error);
     let details = error.to_owned();
+    let retry_text = last_retryable_prompt(&model.read(cx).messages);
+    let can_retry = retry_text.is_some() && !model.read(cx).is_generating;
     div().w_full().my_2().px_4().child(
         div()
             .w_full()
@@ -117,6 +129,22 @@ fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) 
                     .flex()
                     .items_center()
                     .gap_2()
+                    .children(can_retry.then(|| {
+                        let text = retry_text.clone().expect("retry gated on a user prompt");
+                        let model = model.clone();
+                        Button::new(SharedString::from(format!("chat-error-retry-{id}")))
+                            .label("Retry")
+                            .small()
+                            .tooltip("Resend the last message")
+                            .accessibility_label("Resend the last message")
+                            .debug_selector(|| "chat-error-retry".into())
+                            .on_click(move |_, _, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(state, AppAction::SendPrompt(text.clone()));
+                                    cx.notify();
+                                });
+                            })
+                    }))
                     .children(needs_provider_settings.then(|| {
                         let model = model.clone();
                         Button::new(SharedString::from(format!("chat-error-settings-{id}")))
@@ -203,6 +231,8 @@ pub fn init(cx: &mut App) {
 
 pub struct ChatListView {
     model: Entity<AppState>,
+    #[cfg(test)]
+    reasoning_menu_open: std::rc::Rc<std::cell::Cell<bool>>,
     pub input_state: Entity<TextareaState>,
     pub header_left_padding: Pixels,
     environment_available: bool,
@@ -255,6 +285,7 @@ pub struct ChatListView {
     subagents_popover_open: bool,
     selected_subagent_run_id: Option<String>,
     copied_code_block: Option<(String, std::time::Instant)>,
+    copied_message: Option<(String, std::time::Instant)>,
     expanded_tool_aggregates: HashSet<String>,
     segment_cache: HashMap<String, (String, Vec<MarkdownSegment>)>,
     _subscriptions: Vec<Subscription>,
@@ -262,6 +293,9 @@ pub struct ChatListView {
 /// Maximum chat-stream events per pump tick: bounds one redraw's work so a
 /// hot turn cannot starve the UI; leftovers stay queued for the next tick.
 const CHAT_STREAM_BATCH_LIMIT: usize = 128;
+/// How long copy confirmations stay visible on code blocks and message
+/// footers; shared so both affordances clear together.
+const COPIED_FEEDBACK_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 async fn next_chat_stream_batch(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>,
@@ -519,6 +553,8 @@ impl ChatListView {
         };
         Self {
             model,
+            #[cfg(test)]
+            reasoning_menu_open: Default::default(),
             input_state,
             header_left_padding: px(14.0),
             environment_available: false,
@@ -559,6 +595,7 @@ impl ChatListView {
             subagents_popover_open: false,
             selected_subagent_run_id: None,
             copied_code_block: None,
+            copied_message: None,
             expanded_tool_aggregates: HashSet::new(),
             segment_cache: HashMap::new(),
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
@@ -2844,7 +2881,7 @@ impl ChatListView {
                             .when(!streaming, |actions| {
                                 let block_key = format!("copy-code-{msg_id}-{block_index}");
                                 let is_copied = self.copied_code_block.as_ref().is_some_and(|(id, time)| {
-                                    id == &block_key && time.elapsed() < std::time::Duration::from_secs(2)
+                                    id == &block_key && time.elapsed() < COPIED_FEEDBACK_WINDOW
                                 });
                                 let copy_code_key = block_key.clone();
                                 actions.child(
@@ -3212,6 +3249,56 @@ impl ChatListView {
         )
     }
 
+    fn render_message_copy_button(
+        &self,
+        msg: &ChatMessageInfo,
+        align_end: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = cx.theme().colors;
+        let copy_key = format!("message-copy-{}", msg.id);
+        let is_copied = self.copied_message.as_ref().is_some_and(|(id, time)| {
+            id == &copy_key && time.elapsed() < COPIED_FEEDBACK_WINDOW
+        });
+        let content = msg.content.clone();
+        let copy_key_click = copy_key.clone();
+        let row = div().flex().items_center().gap_1();
+        let row = if align_end { row.justify_end() } else { row };
+        row.child(
+            Button::new(SharedString::from(copy_key))
+                .icon(if is_copied {
+                    IconName::Check
+                } else {
+                    IconName::Copy
+                })
+                .label(if is_copied { "Copied" } else { "Copy" })
+                .xsmall()
+                .ghost()
+                .tooltip(if is_copied {
+                    "Copied!"
+                } else {
+                    "Copy message to clipboard"
+                })
+                .accessibility_label(if is_copied {
+                    "Message copied"
+                } else {
+                    "Copy message"
+                })
+                .debug_selector(|| "message-copy".into())
+                .when(is_copied, |btn| btn.text_color(theme.success))
+                .on_click(cx.listener(move |this, _event, window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                    this.copied_message =
+                        Some((copy_key_click.clone(), std::time::Instant::now()));
+                    window.push_notification(
+                        Notification::info("Copied to clipboard"),
+                        cx,
+                    );
+                    cx.notify();
+                })),
+        )
+    }
+
     fn render_message(&mut self, msg: &ChatMessageInfo, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         match msg.role {
@@ -3280,6 +3367,47 @@ impl ChatListView {
                                 }
                             }),
                     )
+                    .children((!msg.content.is_empty()).then(|| {
+                        let mut footer = self.render_message_copy_button(msg, true, cx);
+                        if !self.model.read(cx).is_generating {
+                            let content = msg.content.clone();
+                            footer = footer.child(
+                                Button::new(SharedString::from(format!(
+                                    "message-edit-{}",
+                                    msg.id
+                                )))
+                                .label("Edit")
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Load this message into the composer to edit and resend")
+                                .accessibility_label(
+                                    "Load this message into the composer to edit and resend",
+                                )
+                                .debug_selector(|| "message-edit".into())
+                                .on_click(cx.listener(
+                                    move |this, _event, window, cx| {
+                                        if !this.input_state.read(cx).value().is_empty()
+                                            || !this.pasted_images.is_empty()
+                                        {
+                                            window.push_notification(
+                                                Notification::info(
+                                                    "Send or clear your draft before editing a message",
+                                                ),
+                                                cx,
+                                            );
+                                            this.focus_composer(window, cx);
+                                            return;
+                                        }
+                                        this.input_state.update(cx, |input, cx| {
+                                            input.set_value(content.clone(), window, cx);
+                                        });
+                                        this.focus_composer(window, cx);
+                                    },
+                                )),
+                            );
+                        }
+                        footer
+                    }))
             }
             MessageRole::Assistant => {
                 let reasoning_element = self.render_reasoning_block(msg, cx);
@@ -3351,6 +3479,9 @@ impl ChatListView {
                                 None
                             })
                             .children(tools_element)
+                            .children((!msg.streaming && !msg.content.is_empty()).then(|| {
+                                self.render_message_copy_button(msg, false, cx)
+                            }))
                             .context_menu({
                                 let content = msg.content.clone();
                                 move |menu, window, _cx| {
@@ -5272,6 +5403,7 @@ impl ChatListView {
         });
 
         let model_picker = Button::new("composer-model-picker")
+            .debug_selector(|| "composer-model-picker".into())
             .small()
             .label(model_label.clone())
             .accessibility_label(format!("Model: {model_label}"))
@@ -5444,6 +5576,7 @@ impl ChatListView {
         let show_effort_picker =
             threadlane_ui_catalog::supports_reasoning(&selected_model, project_root.as_deref());
         let effort_picker = Button::new("composer-reasoning-effort-picker")
+            .debug_selector(|| "composer-reasoning-effort-picker".into())
             .icon(Icon::default().path("icons/effort.svg"))
             .label(reasoning_effort.label())
             .accessibility_label(format!("Reasoning effort: {}", reasoning_effort.label()))
@@ -5473,6 +5606,11 @@ impl ChatListView {
                         )
                     })
             });
+        #[cfg(test)]
+        let effort_picker = effort_picker.on_open_change({
+            let open = self.reasoning_menu_open.clone();
+            move |is_open, _, _| open.set(*is_open)
+        });
 
         let input_value = self.input_state.read(cx).value().to_string();
         let mut slash_completion_active = false;
@@ -5861,7 +5999,20 @@ impl ChatListView {
                                 .label("Restore draft")
                                 .small()
                                 .primary()
-                                .on_click(move |_event, window, cx| {
+                                .debug_selector(|| "restore-stashed-draft".into())
+                                .on_click(cx.listener(move |this, _event, window, cx| {
+                                    if !restore_input.read(cx).value().is_empty()
+                                        || !this.pasted_images.is_empty()
+                                    {
+                                        window.push_notification(
+                                            Notification::info(
+                                                "Send or clear your draft before restoring the saved draft",
+                                            ),
+                                            cx,
+                                        );
+                                        this.focus_composer(window, cx);
+                                        return;
+                                    }
                                     if let Some(session_id) = &restore_session_id {
                                         if let Some(text) = restore_model.update(cx, |state, cx| {
                                             let popped = state.pop_stashed_prompt(session_id);
@@ -5872,8 +6023,9 @@ impl ChatListView {
                                                 input.set_value(text, window, cx);
                                             });
                                         }
+                                        this.focus_composer(window, cx);
                                     }
-                                }),
+                                })),
                         )
                         .child(
                             Button::new("dismiss-stashed-draft")
@@ -5881,14 +6033,44 @@ impl ChatListView {
                                 .accessibility_label("Discard stashed draft")
                                 .ghost()
                                 .xsmall()
-                                .tooltip("Discard stash")
-                                .on_click(move |_event, _window, cx| {
-                                    if let Some(session_id) = &dismiss_session_id {
-                                        dismiss_model.update(cx, |state, cx| {
-                                            state.clear_stashed_prompt(session_id);
-                                            cx.notify();
-                                        });
-                                    }
+                                .tooltip("Discard saved draft…")
+                                .debug_selector(|| "discard-stashed-draft".into())
+                                .on_click(move |_event, window, cx| {
+                                    let Some(session_id) = dismiss_session_id.clone() else {
+                                        return;
+                                    };
+                                    let Some(draft) = dismiss_model.read(cx)
+                                        .get_stashed_prompt(&session_id).cloned() else {
+                                        return;
+                                    };
+                                    let model = dismiss_model.clone();
+                                    window.open_alert_dialog(cx, move |alert, _, _| {
+                                        let model = model.clone();
+                                        let session_id = session_id.clone();
+                                        let draft = draft.clone();
+                                        alert
+                                            .title("Discard saved draft?")
+                                            .description("This removes the saved draft. Your current composer text and attachments will not change.")
+                                            .child(
+                                                div().max_h(rems(8.0)).overflow_y_scrollbar()
+                                                    .text_sm().child(draft.clone()),
+                                            )
+                                            .button_props(
+                                                gpui_component::dialog::DialogButtonProps::default()
+                                                    .ok_text("Discard")
+                                                    .ok_variant(gpui_component::button::ButtonVariant::Danger)
+                                                    .show_cancel(true),
+                                            )
+                                            .on_ok(move |_, _, cx| {
+                                                model.update(cx, |state, cx| {
+                                                    if state.get_stashed_prompt(&session_id) == Some(&draft) {
+                                                        state.clear_stashed_prompt(&session_id);
+                                                        cx.notify();
+                                                    }
+                                                });
+                                                true
+                                            })
+                                    });
                                 }),
                         ),
                 )
@@ -5898,16 +6080,35 @@ impl ChatListView {
             let do_stash_input = self.input_state.clone();
             let do_stash_model = self.model.clone();
             let do_stash_session_id = active_session_id.clone();
+            let stash_unavailable_reason = if is_generating {
+                Some("Wait for the current turn to finish before stashing a draft")
+            } else if active_session_id.is_none() {
+                Some("Start a task before stashing a draft")
+            } else if active_session_id.as_ref().is_some_and(|id| {
+                self.model.read(cx).get_stashed_prompt(id).is_some()
+            }) {
+                Some("Restore or discard the saved draft before stashing another")
+            } else if !self.pasted_images.is_empty() {
+                Some("Draft stashes support text only; remove attached images first")
+            } else if !has_composer_text {
+                Some("Type a message to stash")
+            } else {
+                None
+            };
             Button::new("stash-prompt-btn")
+                .debug_selector(|| "stash-prompt-btn".into())
                 .icon(IconName::Folder)
                 .accessibility_label("Stash draft")
-                .tooltip("Stash draft")
+                .tooltip(stash_unavailable_reason.unwrap_or("Stash draft"))
                 .ghost()
                 .small()
-                .disabled(is_generating || !has_prompt)
+                .disabled(stash_unavailable_reason.is_some())
                 .on_click(move |_event, window, cx| {
                     if let Some(session_id) = &do_stash_session_id {
                         let text = do_stash_input.read(cx).value().to_string();
+                        if do_stash_model.read(cx).get_stashed_prompt(session_id).is_some() {
+                            return;
+                        }
                         if !text.trim().is_empty() {
                             do_stash_model.update(cx, |state, cx| {
                                 state.stash_prompt(session_id, text);
@@ -6020,6 +6221,7 @@ impl ChatListView {
                                     .items_center()
                                     .gap_1()
                                     .min_w_0()
+                                    .flex_wrap()
                                     .child(model_picker)
                                     .children(show_effort_picker.then_some(effort_picker)),
                             )

@@ -37,10 +37,13 @@ pub struct BrowserView {
     address_input: Entity<InputState>,
     tabs: Vec<BrowserTab>,
     active_tab: usize,
+    tab_scroll: ScrollHandle,
+    revealed_tab: Option<(usize, usize)>,
     next_tab_id: usize,
     annotating: bool,
     annotate_task: Option<Task<()>>,
     visible: bool,
+    _annotation_escape: Subscription,
 }
 
 impl BrowserView {
@@ -69,13 +72,34 @@ impl BrowserView {
             address_input,
             tabs: Vec::new(),
             active_tab: 0,
+            tab_scroll: ScrollHandle::new(),
+            revealed_tab: None,
             next_tab_id: 1,
             annotating: false,
             annotate_task: None,
             visible: false,
+            _annotation_escape: Self::annotation_escape_subscription(cx),
         };
         this.open_tab(DEFAULT_URL, window, cx);
         this
+    }
+
+    fn annotation_escape_subscription(cx: &mut Context<Self>) -> Subscription {
+        let browser = cx.entity().downgrade();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            if event.keystroke.key != "escape"
+                || event.keystroke.modifiers != Modifiers::default()
+            {
+                return;
+            }
+            let _ = browser.update(cx, |browser, cx| {
+                if browser.annotating && browser.focus_handle.contains_focused(window, cx) {
+                    browser.stop_annotate(cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            });
+        })
     }
 
     fn navigate_to_input(&mut self, raw: &str, cx: &mut Context<Self>) {
@@ -576,9 +600,17 @@ impl Render for BrowserView {
         self.sync_address_bar(window, cx);
         let webview = self.active_webview();
         let active_id = self.active_tab_id();
+        let selection = active_id.map(|id| (id, self.active_tab));
+        if self.revealed_tab != selection {
+            self.tab_scroll.scroll_to_item(self.active_tab);
+            self.revealed_tab = selection;
+        }
         let tabs = self.tabs();
         let annotating = self.annotating;
         div()
+            .id("browser-panel")
+            .track_focus(&self.focus_handle)
+            .tab_group()
             .size_full()
             .flex()
             .flex_col()
@@ -635,6 +667,7 @@ impl Render for BrowserView {
                     .child(
                         div()
                             .flex_1()
+                            .debug_selector(|| "browser-address-field".into())
                             .child(Input::new(&self.address_input).aria_label("Browser address")),
                     ),
             )
@@ -644,61 +677,90 @@ impl Render for BrowserView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .children(tabs.into_iter().map(|(id, url)| {
-                        let selected = Some(id) == active_id;
-                        let title = tab_title(&url);
+                    .min_w_0()
+                    .child(
                         div()
+                            .id("browser-tab-strip")
+                            .debug_selector(|| "browser-tab-strip".into())
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .items_center()
-                            .rounded_md()
-                            .bg(if selected {
-                                cx.theme().primary.opacity(0.12)
-                            } else {
-                                gpui::transparent_black()
-                            })
-                            .child(
-                                Button::new(SharedString::from(format!("browser-tab-{id}")))
-                                    .label(title.clone())
-                                    .accessibility_label(format!("Show browser tab {title}"))
-                                    .tooltip(url.clone())
-                                    .ghost()
-                                    .xsmall()
-                                    .selected(selected)
-                                    .on_click(cx.listener(move |this, _event, window, cx| {
-                                        this.switch_tab(id, window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("browser-tab-close-{id}")))
-                                    .icon(IconName::Close)
-                                    .accessibility_label(format!("Close tab {title}"))
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(move |this, _event, window, cx| {
-                                        this.close_tab(id, window, cx);
-                                    })),
-                            )
-                    }))
-                    .child(
-                        Button::new("browser-new-tab")
-                            .icon(IconName::Plus)
-                            .accessibility_label("New browser tab")
-                            .tooltip("New tab")
-                            .ghost()
-                            .xsmall()
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.open_tab(DEFAULT_URL, window, cx);
+                            .gap_1()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.tab_scroll)
+                            .children(tabs.into_iter().map(|(id, url)| {
+                                let selected = Some(id) == active_id;
+                                let title = tab_title(&url);
+                                div()
+                                    .flex()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .rounded_md()
+                                    .bg(if selected {
+                                        cx.theme().primary.opacity(0.12)
+                                    } else {
+                                        gpui::transparent_black()
+                                    })
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "browser-tab-{id}"
+                                        )))
+                                        .label(title.clone())
+                                        .accessibility_label(format!("Show browser tab {title}"))
+                                        .tooltip(url.clone())
+                                        .ghost()
+                                        .xsmall()
+                                        .selected(selected)
+                                        .on_click(
+                                            cx.listener(move |this, _event, window, cx| {
+                                                this.switch_tab(id, window, cx);
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "browser-tab-close-{id}"
+                                        )))
+                                        .icon(IconName::Close)
+                                        .accessibility_label(format!("Close tab {title}"))
+                                        .ghost()
+                                        .xsmall()
+                                        .on_click(
+                                            cx.listener(move |this, _event, window, cx| {
+                                                this.close_tab(id, window, cx);
+                                            }),
+                                        ),
+                                    )
                             })),
                     )
-                    .when(annotating, |row| {
-                        row.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().warning)
-                                .child("Click a page element — Esc cancels"),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .debug_selector(|| "browser-new-tab-control".into())
+                            .flex_shrink_0()
+                            .child(
+                                Button::new("browser-new-tab")
+                                    .icon(IconName::Plus)
+                                    .accessibility_label("New browser tab")
+                                    .tooltip("New tab")
+                                    .flex_shrink_0()
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.open_tab(DEFAULT_URL, window, cx);
+                                    })),
+                            ),
+                    ),
             )
+            .when(annotating, |panel| {
+                panel.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(cx.theme().warning)
+                        .child("Click a page element — Esc cancels"),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -716,11 +778,187 @@ impl Render for BrowserView {
 mod browser_tabs_tests {
     // Narrow import: `use super::*` pulls GPUI macros into test scope and
     // blows the recursion limit (same hazard as threadlane-ui-mirror).
-    use super::tab_title;
+    use super::{tab_title, BrowserTab, BrowserView};
+    use gpui::{
+        div, px, AppContext, Context, Entity, Focusable, InteractiveElement, IntoElement,
+        ParentElement, Render, Styled, TestAppContext, Window,
+    };
+    use gpui_component::input::InputState;
+    use threadlane_ui_state::AppState;
+
+    gpui::actions!(browser_tests, [FallbackEscape]);
+    struct BrowserHost {
+        browser: Entity<BrowserView>,
+        width: f32,
+        fallback_escapes: usize,
+    }
+
+    impl Render for BrowserHost {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .on_action(cx.listener(|this, _: &FallbackEscape, _, _| {
+                    this.fallback_escapes += 1;
+                }))
+                .w(px(self.width))
+                .h(px(480.0))
+                .child(self.browser.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn overflowing_tabs_preserve_new_tab_control(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| cx.bind_keys([gpui::KeyBinding::new("escape", FallbackEscape, None)]));
+        let model = cx.new(|_| AppState::default());
+        let (host, cx) = cx.add_window_view(move |window, cx| {
+            let browser = cx.new(|cx| BrowserView {
+                focus_handle: cx.focus_handle(),
+                model,
+                address_input: cx.new(|cx| {
+                    InputState::new(window, cx).default_value(format!(
+                        "https://example.com/{}?query=long-address",
+                        "deeply-nested-path/".repeat(40)
+                    ))
+                }),
+                tabs: Vec::new(),
+                active_tab: 0,
+                tab_scroll: gpui::ScrollHandle::new(),
+                revealed_tab: None,
+                next_tab_id: 12,
+                annotating: false,
+                annotate_task: None,
+                visible: false,
+                _annotation_escape: BrowserView::annotation_escape_subscription(cx),
+            });
+            browser.update(cx, |browser, _| {
+                // Exercise the real toolbar without constructing native webviews.
+                browser.tabs = (0..12)
+                    .map(|id| BrowserTab {
+                        id,
+                        url: format!("https://long-subdomain-{id}.example.com"),
+                        webview: None,
+                    })
+                    .collect();
+            });
+            BrowserHost {
+                browser,
+                width: 320.0,
+                fallback_escapes: 0,
+            }
+        });
+        for annotating in [false, true] {
+            for width in [320.0, 480.0, 640.0] {
+                host.update(cx, |host, cx| {
+                    host.width = width;
+                    host.browser.update(cx, |browser, cx| {
+                        browser.annotating = annotating;
+                        cx.notify();
+                    });
+                    cx.notify();
+                });
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                let strip = cx
+                    .debug_bounds("browser-tab-strip")
+                    .expect("tab strip rendered");
+                let add = cx
+                    .debug_bounds("browser-new-tab-control")
+                    .expect("new tab rendered");
+                assert!(
+                    strip.size.width >= px(80.0),
+                    "tab strip collapsed at {width}, annotating={annotating}: {strip:?}"
+                );
+                assert!(strip.right() <= add.left(), "tabs overlap New tab");
+                assert!(add.size.width >= px(16.0), "New tab collapsed");
+                assert!(add.right() <= px(width), "New tab overflows panel");
+                let address = cx
+                    .debug_bounds("browser-address-field")
+                    .expect("address rendered");
+                assert!(
+                    address.size.width >= px(120.0),
+                    "address field collapsed at {width}"
+                );
+                assert!(
+                    address.right() <= px(width - 8.0),
+                    "address field overflows at {width}"
+                );
+                let browser = host.read_with(cx, |host, _| host.browser.clone());
+                for index in [11, 0] {
+                    browser.update(cx, |browser, cx| {
+                        browser.active_tab = index;
+                        cx.notify();
+                    });
+                    cx.update(|window, cx| window.draw(cx).clear(cx));
+                    browser.read_with(cx, |browser, _| {
+                        let viewport = browser.tab_scroll.bounds();
+                        let tab = browser.tab_scroll.bounds_for_item(index).unwrap();
+                        let offset = browser.tab_scroll.offset().x;
+                        assert!(
+                            tab.left() + offset >= viewport.left(),
+                            "selected tab hidden on left"
+                        );
+                        assert!(
+                            tab.right() + offset <= viewport.right(),
+                            "selected tab hidden on right"
+                        );
+                    });
+                }
+                // An unrelated render must not snap manual scrolling back to selection.
+                browser.update(cx, |browser, cx| {
+                    browser
+                        .tab_scroll
+                        .set_offset(gpui::point(px(-100.0), px(0.0)));
+                    cx.notify();
+                });
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                browser.read_with(cx, |browser, _| {
+                    assert_eq!(browser.tab_scroll.offset().x, px(-100.0));
+                });
+            }
+        }
+        let browser = host.read_with(cx, |host, _| host.browser.clone());
+        cx.update(|window, cx| {
+            let focus = browser.read(cx).focus_handle.clone();
+            focus.focus(window, cx);
+            assert!(browser.read(cx).focus_handle.contains_focused(window, cx));
+            // Back, Reload, Annotate, then the address input.
+            for _ in 0..4 {
+                window.focus_next(cx);
+            }
+            assert!(browser
+                .read(cx)
+                .address_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window));
+            assert!(browser.read(cx).focus_handle.contains_focused(window, cx));
+        });
+        browser.update(cx, |browser, cx| {
+            browser.annotating = true;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("shift-escape");
+        browser.read_with(cx, |browser, _| assert!(browser.annotating));
+        cx.simulate_keystrokes("escape");
+        browser.read_with(cx, |browser, _| assert!(!browser.annotating));
+        host.read_with(cx, |host, _| assert_eq!(host.fallback_escapes, 0));
+        // With no annotation to dismiss, the surrounding UI keeps its Escape action.
+        cx.simulate_keystrokes("escape");
+        host.read_with(cx, |host, _| assert_eq!(host.fallback_escapes, 1));
+        browser.update(cx, |browser, cx| {
+            browser.annotating = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.blur(cx));
+        cx.simulate_keystrokes("escape");
+        browser.read_with(cx, |browser, _| assert!(browser.annotating));
+    }
 
     #[test]
     fn tab_titles_show_hosts_compactly() {
-        assert_eq!(tab_title("https://example.com/some/long/path"), "example.com");
+        assert_eq!(
+            tab_title("https://example.com/some/long/path"),
+            "example.com"
+        );
         assert_eq!(tab_title("https://gpui-kit.com"), "gpui-kit.com");
         assert_eq!(
             tab_title("https://very-long-subdomain-name.example.com/x"),
