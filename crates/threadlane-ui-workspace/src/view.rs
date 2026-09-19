@@ -159,8 +159,15 @@ fn session_pr_target_is_active(
     targets.contains(target)
 }
 
-fn session_pr_refresh_delay(succeeded: bool) -> std::time::Duration {
-    std::time::Duration::from_secs(if succeeded { 31 } else { 5 * 60 })
+fn session_pr_refresh_delay(succeeded: bool, active: bool, open: bool) -> std::time::Duration {
+    // Full review data is needed by auto-address, but historical sessions must
+    // not poll it at the same cadence as the branch the user is working on.
+    std::time::Duration::from_secs(match (succeeded, active, open) {
+        (false, _, _) => 10 * 60,
+        (true, true, true) => 2 * 60,
+        (true, false, true) => 10 * 60,
+        (true, _, false) => 30 * 60,
+    })
 }
 
 pub struct WorkspaceView {
@@ -952,7 +959,14 @@ impl WorkspaceView {
                 result,
             } => {
                 let target = (work_dir.clone(), branch.clone());
-                let refresh_delay = session_pr_refresh_delay(result.is_ok());
+                let state = self.model.read(cx);
+                let active = state.projects.iter().flat_map(|project| &project.sessions)
+                    .any(|session| state.active_session_id.as_ref() == Some(&session.id)
+                        && session.work_dir == work_dir
+                        && session.git_branch.as_ref() == Some(&branch));
+                let open = result.as_ref().ok().and_then(|pr| pr.as_ref())
+                    .is_some_and(|pr| pr.state.eq_ignore_ascii_case("open"));
+                let refresh_delay = session_pr_refresh_delay(result.is_ok(), active, open);
                 if let Ok(pr) = result {
                     self.model.update(cx, |state, cx| {
                         state
@@ -2516,8 +2530,11 @@ mod tests {
 
         assert!(session_pr_target_is_active(&targets, &target));
         assert!(!session_pr_target_is_active(&HashSet::new(), &target));
-        assert_eq!(session_pr_refresh_delay(true).as_secs(), 31);
-        assert_eq!(session_pr_refresh_delay(false).as_secs(), 300);
+        assert_eq!(session_pr_refresh_delay(true, true, true).as_secs(), 120);
+        assert_eq!(session_pr_refresh_delay(true, false, true).as_secs(), 600);
+        assert_eq!(session_pr_refresh_delay(true, true, false).as_secs(), 1800);
+        assert_eq!(session_pr_refresh_delay(true, false, false).as_secs(), 1800);
+        assert_eq!(session_pr_refresh_delay(false, true, true).as_secs(), 600);
     }
 
     #[test]

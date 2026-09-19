@@ -11,8 +11,8 @@
 //! overlap its rect. The tab hides the view when inactive to bound this.
 
 use base64::Engine as _;
-use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme, Icon, IconName, Selectable, Sizable};
@@ -47,11 +47,7 @@ pub struct BrowserView {
 }
 
 impl BrowserView {
-    pub fn new(
-        model: Entity<AppState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let address_input = cx.new(|cx| InputState::new(window, cx).default_value(DEFAULT_URL));
         let address_events = address_input.clone();
         cx.subscribe(
@@ -87,8 +83,7 @@ impl BrowserView {
     fn annotation_escape_subscription(cx: &mut Context<Self>) -> Subscription {
         let browser = cx.entity().downgrade();
         cx.intercept_keystrokes(move |event, window, cx| {
-            if event.keystroke.key != "escape"
-                || event.keystroke.modifiers != Modifiers::default()
+            if event.keystroke.key != "escape" || event.keystroke.modifiers != Modifiers::default()
             {
                 return;
             }
@@ -136,8 +131,7 @@ impl BrowserView {
         let builder = wry::WebViewBuilder::new();
         #[cfg(debug_assertions)]
         let builder = builder.with_devtools(true);
-        let builder =
-            builder.with_initialization_script(super::scripts::console_interceptor_js());
+        let builder = builder.with_initialization_script(super::scripts::console_interceptor_js());
         let wry_webview = builder
             .build_as_child(&window_handle)
             .expect("wry child webview");
@@ -248,9 +242,7 @@ impl BrowserView {
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
-        if !focused
-            && self.address_input.read(cx).value().to_string() != url
-        {
+        if !focused && self.address_input.read(cx).value().to_string() != url {
             self.address_input.update(cx, |input, cx| {
                 input.set_value(url, window, cx);
             });
@@ -494,11 +486,7 @@ impl BrowserView {
 
     /// Formats a recorded pick and hands it to the composer with a viewport
     /// snapshot, like an attached screenshot.
-    fn finish_annotation(
-        &mut self,
-        pick: Option<serde_json::Value>,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_annotation(&mut self, pick: Option<serde_json::Value>, cx: &mut Context<Self>) {
         self.annotating = false;
         self.annotate_task.take();
         if let Ok(receiver) = self.evaluate_script(&annotate_uninstall_js(), cx) {
@@ -511,15 +499,30 @@ impl BrowserView {
             cx.notify();
             return;
         };
-        let tag = pick.get("tag").and_then(|value| value.as_str()).unwrap_or("element");
-        let text = pick.get("text").and_then(|value| value.as_str()).unwrap_or("");
+        let tag = pick
+            .get("tag")
+            .and_then(|value| value.as_str())
+            .unwrap_or("element");
+        let text = pick
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         let selector = pick
             .get("selector")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        let href = pick.get("href").and_then(|value| value.as_str()).unwrap_or("");
-        let page_title = pick.get("title").and_then(|value| value.as_str()).unwrap_or("");
-        let page_url = pick.get("url").and_then(|value| value.as_str()).unwrap_or("");
+        let href = pick
+            .get("href")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let page_title = pick
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let page_url = pick
+            .get("url")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         let rect = pick.get("rect");
         let geometry = rect
             .map(|rect| {
@@ -563,10 +566,9 @@ impl BrowserView {
                 }
             }
             let _ = model.update(cx, |state, cx| {
-                state.requested_composer_inserts.push(RequestedComposerInsert {
-                    text: note,
-                    images,
-                });
+                state
+                    .requested_composer_inserts
+                    .push(RequestedComposerInsert { text: note, images });
                 cx.notify();
             });
         })
@@ -623,7 +625,7 @@ impl Render for BrowserView {
                     .items_center()
                     .gap_2()
                     .px_1()
-                    .py(px(2.0))
+                    .py_0p5()
                     .rounded_md()
                     .when(annotating, |bar| {
                         bar.bg(cx.theme().warning.opacity(0.08))
@@ -675,8 +677,26 @@ impl Render for BrowserView {
                     .child(
                         div()
                             .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .debug_selector(|| "browser-address-field".into())
-                            .child(Input::new(&self.address_input).aria_label("Browser address")),
+                            .when(
+                                self.current_url(cx)
+                                    .as_deref()
+                                    .is_some_and(|u| u.starts_with("https://")),
+                                |row| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(cx.theme().success)
+                                            .child(Icon::default().path("icons/lock.svg").xsmall()),
+                                    )
+                                },
+                            )
+                            .child(div().flex_1().min_w_0().child(
+                                Input::new(&self.address_input).aria_label("Browser address"),
+                            )),
                     ),
             )
             .child(
@@ -730,7 +750,8 @@ impl Render for BrowserView {
                                     )
                                     .child({
                                         let is_active_tab = selected;
-                                        let group_name = SharedString::from(format!("browser-tab-group-{id}"));
+                                        let group_name =
+                                            SharedString::from(format!("browser-tab-group-{id}"));
                                         div()
                                             .when(!is_active_tab, |el| {
                                                 el.invisible()
@@ -744,11 +765,11 @@ impl Render for BrowserView {
                                                 .accessibility_label(format!("Close tab {title}"))
                                                 .ghost()
                                                 .xsmall()
-                                                .on_click(
-                                                    cx.listener(move |this, _event, window, cx| {
+                                                .on_click(cx.listener(
+                                                    move |this, _event, window, cx| {
                                                         this.close_tab(id, window, cx);
-                                                    }),
-                                                ),
+                                                    },
+                                                )),
                                             )
                                     })
                             })),
@@ -802,37 +823,32 @@ impl Render for BrowserView {
             })
             .when(self.tabs.is_empty(), |panel| {
                 panel.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(IconName::Globe),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child("No tabs open"),
-                                )
-                                .child(
-                                    Button::new("open-first-tab")
-                                        .label("New Tab")
-                                        .small()
-                                        .on_click(cx.listener(|this, _event, window, cx| {
-                                            this.open_tab(DEFAULT_URL, window, cx);
-                                        })),
-                                ),
-                        ),
+                    div().flex_1().flex().items_center().justify_center().child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(IconName::Globe),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("No tabs open"),
+                            )
+                            .child(
+                                Button::new("open-first-tab")
+                                    .label("New Tab")
+                                    .small()
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.open_tab(DEFAULT_URL, window, cx);
+                                    })),
+                            ),
+                    ),
                 )
             })
             .when(!self.tabs.is_empty(), |panel| {

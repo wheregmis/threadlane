@@ -1115,6 +1115,38 @@ mod github_tests {
     use super::*;
 
     #[test]
+    fn issue_draft_pr_tool_survives_default_schema_filter_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        crate::harness::CodingSessionHarness::append_fact_to_path(
+            &session_file,
+            "main",
+            "github_issue",
+            "{}",
+            None,
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let agent = crate::runtime::CodingAgent::new(crate::options::CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "gpt-4o".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: Some(session_file.clone()),
+                system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
+                browser: threadlane_protocol::browser::BrowserBridge::unavailable(),
+            });
+            assert!(agent
+                .agent
+                .configured_tool_definitions()
+                .iter()
+                .any(|definition| definition.name == CREATE_DRAFT_PR_TOOL_NAME));
+        }
+    }
+
+    #[test]
     fn draft_pr_tool_discloses_publish_behavior_and_requires_pr_fields() {
         let executor = GitHubToolExecutor {
             work_dir: PathBuf::from("."),

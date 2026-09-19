@@ -1,3 +1,7 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -411,6 +415,7 @@ pub struct GitHubView {
     issue_has_more: bool,
     pr_has_more: bool,
     active_list_request: Option<GitHubRequest>,
+    list_cancelled: Arc<AtomicBool>,
     active_detail_request: Option<GitHubRequest>,
     issue_list_state: ListState,
     pr_list_state: ListState,
@@ -599,6 +604,7 @@ impl GitHubView {
             issue_has_more: false,
             pr_has_more: false,
             active_list_request: None,
+            list_cancelled: Arc::new(AtomicBool::new(false)),
             active_detail_request: None,
             issue_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 5.5),
             pr_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 4.875),
@@ -699,6 +705,7 @@ impl GitHubView {
         self.fetch_list(cx);
     }
     fn reset_list_state(&mut self, cx: &mut Context<Self>) {
+        self.list_cancelled.store(true, Ordering::Relaxed);
         self.repository = None;
         self.issues.clear();
         self.pull_requests.clear();
@@ -740,6 +747,7 @@ impl GitHubView {
 
 
     fn schedule_query(&mut self, _query: String, cx: &mut Context<Self>) {
+        self.list_cancelled.store(true, Ordering::Relaxed);
         self.debounce_task.take();
         self.issue_limit = PAGE_SIZE;
         self.pr_limit = PAGE_SIZE;
@@ -749,7 +757,7 @@ impl GitHubView {
         let revision = self.query_revision;
         self.debounce_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(250))
+                .timer(Duration::from_millis(750))
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.query_revision == revision {
@@ -795,6 +803,9 @@ impl GitHubView {
     }
 
     fn fetch_list(&mut self, cx: &mut Context<Self>) {
+        self.list_cancelled.store(true, Ordering::Relaxed);
+        self.list_cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = self.list_cancelled.clone();
         let targets = self.scope_targets(cx);
         self.last_targets = targets.iter().map(|(_, dir)| dir.clone()).collect();
         if targets.is_empty() {
@@ -834,6 +845,9 @@ impl GitHubView {
                                 let mut errors = Vec::new();
                                 let mut has_more = false;
                                 for (project_name, work_dir) in &targets {
+                                    if cancelled.load(Ordering::Relaxed) {
+                                        break;
+                                    }
                                     match threadlane_git::list_github_issues(
                                         work_dir,
                                         &state,
@@ -865,6 +879,9 @@ impl GitHubView {
                                 let mut errors = Vec::new();
                                 let mut has_more = false;
                                 for (project_name, work_dir) in &targets {
+                                    if cancelled.load(Ordering::Relaxed) {
+                                        break;
+                                    }
                                     match threadlane_git::list_github_pull_requests(
                                         work_dir,
                                         &state,
@@ -1085,20 +1102,30 @@ impl GitHubView {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.list_loading {
+            return;
+        }
         self.debounce_task.take();
         self.query_revision = self.query_revision.saturating_add(1);
         for (_, work_dir) in self.scope_targets(cx) {
-            threadlane_git::invalidate_github_cache(&work_dir);
+            threadlane_git::invalidate_github_list_cache(&work_dir);
+        }
+        if let Some(selected) = self.selected_key() {
+            threadlane_git::invalidate_github_detail_cache(&selected.project, selected.number);
         }
         self.fetch_list(cx);
     }
 
     fn load_more(&mut self, cx: &mut Context<Self>) {
+        if self.list_loading {
+            return;
+        }
         match self.tab {
             GitHubTab::Issues => self.issue_limit += PAGE_SIZE,
             GitHubTab::PullRequests => self.pr_limit += PAGE_SIZE,
         }
-        self.refresh(cx);
+        self.query_revision = self.query_revision.saturating_add(1);
+        self.fetch_list(cx);
     }
 
     fn selected_ix(&self) -> Option<usize> {
@@ -5234,12 +5261,20 @@ mod tests {
                 query_revision: view.query_revision,
                 item: None,
             });
+            view.list_cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let previous_batch = view.list_cancelled.clone();
             view.query_revision += 1;
             view.schedule_query("older fix".into(), cx);
+            assert!(previous_batch.load(std::sync::atomic::Ordering::Relaxed));
             assert!(view.active_list_request.is_none());
             assert!(view.list_loading);
             assert_eq!(view.issue_limit, super::PAGE_SIZE);
             assert_eq!(view.pr_limit, super::PAGE_SIZE);
+            let revision = view.query_revision;
+            view.load_more(cx);
+            view.refresh(cx);
+            assert_eq!(view.pr_limit, super::PAGE_SIZE);
+            assert_eq!(view.query_revision, revision);
             view.debounce_task.take();
         });
     }
@@ -5479,9 +5514,9 @@ mod tests {
         );
         assert!(confirmation
             .copy
-            .contains("push its issue branch to origin"));
-        assert!(confirmation.copy.contains("draft pull request on GitHub"));
-        assert_eq!(confirmation.start_label, "Start, push & create draft PR");
+            .contains("pushes to origin"));
+        assert!(confirmation.copy.contains("draft PR on GitHub"));
+        assert_eq!(confirmation.start_label, "Start task");
         assert_eq!(
             confirmation.branch_disclosure,
             "A unique six-character suffix is assigned when the task starts."
@@ -5502,7 +5537,7 @@ mod tests {
         assert!(confirmation.show_open_task);
         assert_eq!(
             confirmation.start_label,
-            "Start another, push & create draft PR"
+            "Start another task"
         );
     }
 

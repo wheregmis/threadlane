@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::error::GitError;
-use crate::github::{fresh_cache_value, inspect_pr, invalidate_pr_cache, repository_key};
+use crate::github::{fresh_cache_value, inspect_pr, repository_key};
 use crate::types::{
     GitBranchInfo, GitCommitInfo, GitFile, GitStashInfo, GitStatus, GitWorktreeInfo,
     GIT_FIELD_SEPARATOR,
@@ -193,9 +193,6 @@ fn apply_numstats(work_dir: &Path, status: &mut GitStatus) {
 
 pub fn sync_remote(work_dir: &Path) -> Result<(), GitError> {
     command(work_dir, &["fetch", "--prune", "--quiet"])?;
-    if let Ok(Some(branch)) = current_branch(work_dir) {
-        invalidate_pr_cache(work_dir, &branch);
-    }
     Ok(())
 }
 

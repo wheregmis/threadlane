@@ -424,7 +424,8 @@ use super::{
     markdown_cache_exceeded, next_chat_stream_batch, normalize_terminal_command,
     reconcile_trajectory_entries, reconcile_trajectory_entries_by_epoch, subagent_popover_counts,
     summarize_trajectory, ChatLinkTarget, ContextMeterContext, ContextMeterMetrics,
-    MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow,
+    MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryInspectorTab, TrajectoryMode,
+    TrajectoryRenderCache, TrajectoryRow, TrajectorySummary,
     TranscriptRow, INPUT_KEY_CONTEXT, MARKDOWN_CACHE_ENTRY_LIMIT, SLASH_COMMAND_BINDING_CONTEXT,
     SLASH_COMMAND_KEY_CONTEXT,
 };
@@ -2075,4 +2076,546 @@ fn streaming_assistant_message_hides_copy_action(cx: &mut gpui::TestAppContext) 
         cx.debug_bounds("message-copy").is_none(),
         "streaming response defers its actions until generation completes"
     );
+}
+
+#[test]
+fn run_elapsed_formats_seconds_minutes_and_hours() {
+    assert_eq!(super::format_run_elapsed(7), "7s");
+    assert_eq!(super::format_run_elapsed(59), "59s");
+    assert_eq!(super::format_run_elapsed(65), "1m 05s");
+    assert_eq!(super::format_run_elapsed(600), "10m 00s");
+    assert_eq!(super::format_run_elapsed(3725), "1h 02m");
+}
+
+#[test]
+fn sendable_prompt_accepts_text_or_images() {
+    assert!(!super::has_sendable_prompt("", 0));
+    assert!(!super::has_sendable_prompt("   ", 0));
+    assert!(super::has_sendable_prompt("hello", 0));
+    assert!(super::has_sendable_prompt("", 1));
+    assert!(super::has_sendable_prompt("   ", 2));
+}
+
+#[test]
+fn plan_step_truncates_long_labels_with_ellipsis() {
+    assert_eq!(super::truncate_plan_step("Short step", 42), "Short step");
+    assert_eq!(
+        super::truncate_plan_step(&"x".repeat(42), 42),
+        "x".repeat(42)
+    );
+    let long = "Implement the multi-turn durable queue handoff with tests";
+    let truncated = super::truncate_plan_step(long, 20);
+    assert!(truncated.ends_with('…'));
+    assert!(truncated.chars().count() <= 20);
+    assert!(long.starts_with(truncated.trim_end_matches('…')));
+}
+
+#[test]
+fn preview_truncation_matches_stash_banner_bounds() {
+    let short = "Fix the typo";
+    assert_eq!(super::truncate_preview_text(short, 60), short);
+    assert_eq!(
+        super::truncate_preview_text(&"y".repeat(60), 60),
+        "y".repeat(60)
+    );
+    let long = "z".repeat(61);
+    let truncated = super::truncate_preview_text(&long, 60);
+    assert!(truncated.ends_with('…'));
+    assert_eq!(truncated.chars().count(), 60);
+    assert_eq!(super::truncate_preview_text("  padded  ", 60), "padded");
+}
+
+#[test]
+fn completed_activity_labels_use_singular_for_one() {
+    assert_eq!(super::completed_activities_text(1), "1 completed activity");
+    assert_eq!(super::completed_activities_text(2), "2 completed activities");
+    assert_eq!(
+        super::expand_activities_a11y(1),
+        "Expand 1 completed tool activity"
+    );
+    assert_eq!(
+        super::expand_activities_a11y(3),
+        "Expand 3 completed tool activities"
+    );
+}
+
+#[test]
+fn plan_tracker_labels_avoid_repeating_plan_when_complete() {
+    let (display, a11y, tooltip) = super::plan_tracker_texts(1, 3, Some("Run tests"));
+    assert_eq!(display, "Run tests");
+    assert_eq!(a11y, "Task plan, 1 of 3 complete, current step: Run tests");
+    assert_eq!(tooltip, "Show task plan · Run tests");
+    let (display, a11y, tooltip) = super::plan_tracker_texts(3, 3, None);
+    assert_eq!(display, "Complete");
+    assert_eq!(a11y, "Task plan, 3 of 3 complete");
+    assert_eq!(tooltip, "Show task plan · all steps complete");
+}
+
+#[test]
+fn reasoning_token_badge_uses_singular_for_one_token() {
+    assert_eq!(super::reasoning_token_badge(true, 100), "thinking…");
+    assert_eq!(super::reasoning_token_badge(false, 1), "~1 token");
+    assert_eq!(super::reasoning_token_badge(false, 0), "~0 tokens");
+    assert_eq!(super::reasoning_token_badge(false, 100), "~25 tokens");
+}
+
+#[test]
+fn tool_activity_glyph_marks_unknown_categories_neutral() {
+    assert_eq!(super::tool_activity_glyph("Error"), "!");
+    assert_eq!(super::tool_activity_glyph("Working"), "◌");
+    assert_eq!(super::tool_activity_glyph("Thinking"), "◌");
+    assert_eq!(super::tool_activity_glyph("Completed"), "✓");
+    assert_eq!(super::tool_activity_glyph("Edited"), "✓");
+    assert_eq!(super::tool_activity_glyph("tool"), "•");
+    assert_eq!(super::tool_activity_glyph(""), "•");
+}
+
+#[test]
+fn progress_header_prefix_names_errors_explicitly() {
+    assert_eq!(super::progress_header_prefix(false), "Latest activity:");
+    assert_eq!(super::progress_header_prefix(true), "Needs attention:");
+}
+
+#[test]
+fn skills_chip_label_uses_singular_for_one_skill() {
+    assert_eq!(super::skills_chip_label(0), "Skills");
+    assert_eq!(super::skills_chip_label(1), "1 Skill");
+    assert_eq!(super::skills_chip_label(4), "4 Skills");
+}
+
+#[test]
+fn stats_nouns_use_singular_for_one() {
+    assert_eq!(super::plural_noun(0, "turn", "turns"), "turns");
+    assert_eq!(super::plural_noun(1, "turn", "turns"), "turn");
+    assert_eq!(super::plural_noun(2, "tool call", "tool calls"), "tool calls");
+    assert_eq!(super::plural_noun(1, "anomaly", "anomalies"), "anomaly");
+}
+
+#[test]
+fn project_menus_mark_the_current_project() {
+    use std::path::{Path, PathBuf};
+
+    let active = PathBuf::from("/work/mypi");
+    assert!(super::is_current_project(Some(&active), Path::new("/work/mypi")));
+    assert!(!super::is_current_project(
+        Some(&active),
+        Path::new("/work/other")
+    ));
+    assert!(!super::is_current_project(None, Path::new("/work/mypi")));
+}
+
+#[gpui::test]
+fn header_issue_link_appears_only_with_a_linked_issue(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let session_file = std::path::Path::new("/test-project/.threadlane/sessions/session-1.jsonl");
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        threadlane_ui_state::activate_test_session(&mut state, "session-1", session_file);
+        state
+    });
+    let retained_model = model.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("chat-header-issue-link").is_none(),
+        "no issue link without a linked issue"
+    );
+    retained_model.update(cx, |state, cx| {
+        for project in &mut state.projects {
+            for session in &mut project.sessions {
+                session.github_issue = Some(threadlane_git::GitHubIssueRef {
+                    host: "github.com".into(),
+                    owner: "octo".into(),
+                    repo: "demo".into(),
+                    number: 42,
+                    url: "https://github.com/octo/demo/issues/42".into(),
+                });
+            }
+        }
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("chat-header-issue-link").is_some(),
+        "issue link appears once the session links an issue"
+    );
+}
+
+#[gpui::test]
+fn new_task_hero_offers_project_picker(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = true;
+        state
+    });
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("new-task-project-picker").is_some(),
+        "new-task hero names its project picker"
+    );
+}
+
+#[gpui::test]
+fn question_card_toggles_option_selection(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let session_file = std::path::Path::new("/test-project/.threadlane/sessions/session-1.jsonl");
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        threadlane_ui_state::activate_test_session(&mut state, "session-1", session_file);
+        state.pending_questions.insert(
+            "session-1".into(),
+            threadlane_protocol::QuestionRequest {
+                id: "q-req-1".into(),
+                questions: vec![threadlane_protocol::QuestionItem {
+                    id: "q1".into(),
+                    header: "Scope".into(),
+                    question: "Which scope should apply?".into(),
+                    options: vec!["Yes".into(), "No".into()],
+                    allow_custom: false,
+                }],
+            },
+        );
+        state
+    });
+    // No Root layer: option toggles only notify, and submit/dismiss need a
+    // live session runtime to resolve, so the card's UI-owned toggle state is
+    // what's pinned here.
+    let (chat, cx) =
+        cx.add_window_view(move |window, cx| super::ChatListView::new(model, window, cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    for selector in [
+        "question-card",
+        "question-option-q1-0",
+        "question-option-q1-1",
+        "question-submit",
+        "question-dismiss",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "{selector} is visible while a question is pending"
+        );
+    }
+    let selection_key = "q-req-1\0q1".to_string();
+    assert!(
+        chat.read_with(cx, |chat, _| {
+            chat.question_selections
+                .get(&selection_key)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .is_empty()
+    );
+    let option = cx.debug_bounds("question-option-q1-0").unwrap();
+    cx.simulate_click(option.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        chat.read_with(cx, |chat, _| {
+            chat.question_selections
+                .get(&selection_key)
+                .cloned()
+                .unwrap_or_default()
+        }),
+        vec!["Yes".to_string()]
+    );
+    // Toggling again removes the answer.
+    let option = cx.debug_bounds("question-option-q1-0").unwrap();
+    cx.simulate_click(option.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        chat.read_with(cx, |chat, _| {
+            chat.question_selections
+                .get(&selection_key)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .is_empty()
+    );
+}
+
+#[gpui::test]
+fn pending_preview_offers_queue_steer_and_edit_while_generating(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state.is_generating = true;
+        threadlane_ui_state::activate_test_session(
+            &mut state,
+            "session-1",
+            std::path::Path::new("/test-project/.threadlane/sessions/session-1.jsonl"),
+        );
+        threadlane_ui_state::controller::dispatch(
+            &mut state,
+            threadlane_ui_state::actions::AppAction::StageBusyMessage {
+                text: "Follow up after this turn".into(),
+                images: Vec::new(),
+            },
+        );
+        state
+    });
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    for selector in [
+        "pending-preview-row",
+        "pending-queue",
+        "pending-steer",
+        "pending-dismiss",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "{selector} is visible while a message is staged for the next turn"
+        );
+    }
+}
+
+#[gpui::test]
+fn workspace_changes_review_entry_tracks_uncommitted_files(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let session_file = std::path::Path::new("/test-project/.threadlane/sessions/session-1.jsonl");
+    let work_dir = session_file.parent().unwrap().to_path_buf();
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        threadlane_ui_state::activate_test_session(&mut state, "session-1", session_file);
+        state.git_statuses.insert(
+            work_dir.clone(),
+            threadlane_git::GitStatus {
+                files: vec![
+                    threadlane_git::GitFile::default(),
+                    threadlane_git::GitFile::default(),
+                ],
+                ..Default::default()
+            },
+        );
+        state
+    });
+    let retained_model = model.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("workspace-changes-review").is_some(),
+        "Review entry appears with uncommitted files"
+    );
+    retained_model.update(cx, |state, cx| {
+        if let Some(status) = state.git_statuses.get_mut(&work_dir) {
+            status.files.clear();
+        }
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("workspace-changes-review").is_none(),
+        "Review entry hides with a clean tree"
+    );
+}
+
+#[gpui::test]
+fn provider_setup_banner_hides_when_models_exist(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state
+    });
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    // The static registry seeds always provide models in-process, so the
+    // setup banner must stay hidden; its visible state needs an empty
+    // catalog, which has no test seam yet.
+    assert!(
+        cx.debug_bounds("provider-setup-banner").is_none(),
+        "setup banner hides when models are available"
+    );
+    assert!(
+        cx.debug_bounds("composer-model-picker").is_some(),
+        "model picker stays visible instead"
+    );
+}
+
+#[gpui::test]
+fn trajectory_inspector_tabs_switch_content(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state
+    });
+    let (chat, cx) =
+        cx.add_window_view(move |window, cx| super::ChatListView::new(model, window, cx));
+    chat.update(cx, |chat, cx| {
+        chat.trajectory_cache = Some(TrajectoryRenderCache {
+            key: TrajectoryCacheKey {
+                revision: 0,
+                epoch: 0,
+                mode: TrajectoryMode::Execution,
+                query: String::new(),
+                category: None,
+                lane: None,
+            },
+            all_entries: vec![trajectory_entry("Tool", Some(1), Some(1))],
+            categories: Arc::new(vec!["Tool".to_string()]),
+            lanes: Arc::new(Vec::new()),
+            lane_latest: Arc::new(BTreeMap::new()),
+            filtered_indices: vec![0],
+            previews: vec!["Tool".into()],
+            rows: vec![TrajectoryRow::Entry(0)],
+            summary: TrajectorySummary::default(),
+        });
+        chat.selected_trajectory_index = Some(0);
+        chat.current_tab = super::CentralTab::Trajectory;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    for selector in [
+        "trajectory-inspector-Overview",
+        "trajectory-inspector-Preview",
+        "trajectory-inspector-Raw",
+        "trajectory-inspector-Source",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "{selector} inspector tab is reachable"
+        );
+    }
+    chat.read_with(cx, |chat, _| {
+        assert_eq!(
+            chat.trajectory_inspector_tab,
+            TrajectoryInspectorTab::Overview
+        );
+    });
+    let raw = cx.debug_bounds("trajectory-inspector-Raw").unwrap();
+    cx.simulate_click(raw.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    chat.read_with(cx, |chat, _| {
+        assert_eq!(chat.trajectory_inspector_tab, TrajectoryInspectorTab::Raw);
+    });
+}
+
+#[gpui::test]
+fn environment_section_renders_without_git_data(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state.active_work_dir = Some(std::path::PathBuf::from("/test-project"));
+        state
+    });
+    let (chat, cx) =
+        cx.add_window_view(move |window, cx| super::ChatListView::new(model, window, cx));
+    chat.update(cx, |chat, cx| {
+        chat.environment_available = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    for selector in [
+        "chat-environment",
+        "environment-changes",
+        "environment-files",
+        "environment-terminal",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "{selector} renders with no session or git status"
+        );
+    }
+}
+
+#[gpui::test]
+fn trajectory_toolbar_filters_are_reachable(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state
+    });
+    let (chat, cx) =
+        cx.add_window_view(move |window, cx| super::ChatListView::new(model, window, cx));
+    chat.update(cx, |chat, cx| {
+        chat.trajectory_cache = Some(TrajectoryRenderCache {
+            key: TrajectoryCacheKey {
+                revision: 0,
+                epoch: 0,
+                mode: TrajectoryMode::Execution,
+                query: String::new(),
+                category: None,
+                lane: None,
+            },
+            all_entries: vec![trajectory_entry("Tool", Some(1), Some(1))],
+            categories: Arc::new(vec!["Tool".to_string()]),
+            lanes: Arc::new(vec!["main".to_string(), "worker".to_string()]),
+            lane_latest: Arc::new(BTreeMap::from([
+                ("main".to_string(), "Read file".to_string()),
+                ("worker".to_string(), "Write file".to_string()),
+            ])),
+            filtered_indices: vec![0],
+            previews: vec!["Tool".into()],
+            rows: vec![TrajectoryRow::Entry(0)],
+            summary: TrajectorySummary::default(),
+        });
+        chat.current_tab = super::CentralTab::Trajectory;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    for selector in [
+        "trajectory-mode-filter",
+        "trajectory-category-filter",
+        "trajectory-lane-filter",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "{selector} is reachable in the trajectory toolbar"
+        );
+    }
 }

@@ -1,10 +1,11 @@
-use std::collections::HashMap;
-use std::hash::Hash;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+mod cache;
+use cache::ResponseCache;
 
 use crate::error::GitError;
 use crate::git::{command, current_branch, push};
@@ -15,31 +16,21 @@ use crate::types::{
     PullRequestReviewVerdict,
 };
 
-const PR_INSPECTION_TTL: Duration = Duration::from_secs(30);
-const GITHUB_RESPONSE_TTL: Duration = Duration::from_secs(30);
+// Background readers share results; explicit refresh and mutations invalidate them.
+const PR_INSPECTION_TTL: Duration = Duration::from_secs(120);
+const GITHUB_RESPONSE_TTL: Duration = Duration::from_secs(300);
 
 type PrCacheKey = (PathBuf, String);
 type GithubListCacheKey = (PathBuf, String);
 type GithubIssueCacheKey = (PathBuf, u64);
 
-static PR_CACHE: OnceLock<Mutex<HashMap<PrCacheKey, (Instant, Option<GitHubPrInfo>)>>> =
+static PR_CACHE: OnceLock<ResponseCache<PrCacheKey, Option<GitHubPrInfo>>> = OnceLock::new();
+static ISSUE_LIST_CACHE: OnceLock<ResponseCache<GithubListCacheKey, Vec<GitHubIssueSummary>>> =
     OnceLock::new();
-static ISSUE_LIST_CACHE: OnceLock<
-    Mutex<HashMap<GithubListCacheKey, (Instant, Vec<GitHubIssueSummary>)>>,
-> = OnceLock::new();
-static PR_LIST_CACHE: OnceLock<
-    Mutex<HashMap<GithubListCacheKey, (Instant, Vec<GitHubPullRequestSummary>)>>,
-> = OnceLock::new();
-static ISSUE_DETAIL_CACHE: OnceLock<
-    Mutex<HashMap<GithubIssueCacheKey, (Instant, GitHubIssueDetail)>>,
-> = OnceLock::new();
-
-pub(crate) fn prune_expired<K, T>(cache: &mut HashMap<K, (Instant, T)>, now: Instant, ttl: Duration)
-where
-    K: Eq + Hash,
-{
-    cache.retain(|_, (created, _)| now.duration_since(*created) <= ttl);
-}
+static PR_LIST_CACHE: OnceLock<ResponseCache<GithubListCacheKey, Vec<GitHubPullRequestSummary>>> =
+    OnceLock::new();
+static ISSUE_DETAIL_CACHE: OnceLock<ResponseCache<GithubIssueCacheKey, GitHubIssueDetail>> =
+    OnceLock::new();
 
 pub(crate) fn fresh_cache_value<T: Clone>(
     entry: &(Instant, T),
@@ -61,38 +52,39 @@ pub(crate) fn pr_cache_key(work_dir: &Path, branch: &str) -> PrCacheKey {
 
 pub(crate) fn invalidate_pr_cache(work_dir: &Path, branch: &str) {
     if let Some(cache) = PR_CACHE.get() {
-        if let Ok(mut cache) = cache.lock() {
-            cache.remove(&pr_cache_key(work_dir, branch));
-        }
+        let key = pr_cache_key(work_dir, branch);
+        cache.invalidate(|candidate| candidate == &key);
     }
+}
+
+/// Refresh the visible lists without expiring every session's PR inspection.
+pub fn invalidate_github_list_cache(work_dir: &Path) {
+    let repository = repository_key(work_dir);
+    if let Some(cache) = ISSUE_LIST_CACHE.get() {
+        cache.invalidate(|(path, _)| path == &repository);
+    }
+    if let Some(cache) = PR_LIST_CACHE.get() {
+        cache.invalidate(|(path, _)| path == &repository);
+    }
+}
+
+pub fn invalidate_github_detail_cache(work_dir: &Path, number: u64) {
+    let repository = repository_key(work_dir);
+    if let Some(cache) = ISSUE_DETAIL_CACHE.get() {
+        cache.invalidate(|key| key == &(repository.clone(), number));
+    }
+    invalidate_pr_cache(work_dir, &number.to_string());
 }
 
 pub fn invalidate_github_cache(work_dir: &Path) {
     let repository = repository_key(work_dir);
+    invalidate_github_list_cache(work_dir);
     if let Some(cache) = PR_CACHE.get() {
-        if let Ok(mut cache) = cache.lock() {
-            cache.retain(|(path, _), _| path != &repository);
-        }
-    }
-    if let Some(cache) = ISSUE_LIST_CACHE.get() {
-        if let Ok(mut cache) = cache.lock() {
-            cache.retain(|(path, _), _| path != &repository);
-        }
-    }
-    if let Some(cache) = PR_LIST_CACHE.get() {
-        if let Ok(mut cache) = cache.lock() {
-            cache.retain(|(path, _), _| path != &repository);
-        }
+        cache.invalidate(|(path, _)| path == &repository);
     }
     if let Some(cache) = ISSUE_DETAIL_CACHE.get() {
-        if let Ok(mut cache) = cache.lock() {
-            cache.retain(|(path, _), _| path != &repository);
-        }
+        cache.invalidate(|(path, _)| path == &repository);
     }
-}
-
-fn gh_command(work_dir: &Path, args: &[&str]) -> Command {
-    gh_command_with_captured_token(work_dir, args).0
 }
 
 fn gh_command_with_captured_token(
@@ -164,8 +156,7 @@ fn gh_failure(
     stored_token: Option<&str>,
 ) -> GitError {
     if let Some(guidance) = rate_limit_message(stderr) {
-        note_rate_limit();
-        return GitError::new(work_dir, guidance);
+        return GitError::new(work_dir, redact_gh_failure(&guidance, stored_token));
     }
     let stderr = gh_failure_message(stderr, stored_token);
     GitError::new(
@@ -476,38 +467,24 @@ pub(crate) fn parse_github_issue_json(json_str: &str) -> Result<GitHubIssueDetai
     })
 }
 
-fn inspect_pr_uncached(
-    work_dir: &Path,
-    branch: &str,
-) -> Result<Option<GitHubPrInfo>, GitError> {
-    let (mut command, stored_token) = gh_command_with_captured_token(
-        work_dir,
-        &[
-            "pr",
-            "view",
-            branch,
-            "--json",
-            "number,title,url,state,isDraft,body,comments,reviews,commits,files,statusCheckRollup,headRefName,headRefOid,baseRefName,updatedAt,author,reviewDecision",
-        ],
-    );
-    let output = command
-        .output()
-        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        if stderr.to_ascii_lowercase().contains("no pull request") {
-            return Ok(None);
+fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrInfo>, GitError> {
+    let args = [
+        "pr", "view", branch, "--json",
+        "number,title,url,state,isDraft,body,comments,reviews,commits,files,statusCheckRollup,headRefName,headRefOid,baseRefName,updatedAt,author,reviewDecision",
+    ].map(str::to_owned);
+    let stdout = match execute_gh(work_dir, &args) {
+        Ok(stdout) => stdout,
+        Err(error)
+            if error
+                .message
+                .to_ascii_lowercase()
+                .contains("no pull request") =>
+        {
+            return Ok(None)
         }
-        return Err(gh_failure(
-            work_dir,
-            output.status,
-            &stderr,
-            stored_token.as_deref(),
-        ));
-    }
+        Err(error) => return Err(error),
+    };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut info = parse_gh_pr_json(&stdout).map_err(|error| {
         GitError::new(
             work_dir,
@@ -525,24 +502,19 @@ fn inspect_pr_uncached(
             repository.owner, repository.repo
         );
         let api_args = github_api_args(&repository.host, &[&api_path, "--paginate", "--slurp"]);
-        let api_args = api_args.iter().map(String::as_str).collect::<Vec<_>>();
-        match gh_command(work_dir, &api_args).output() {
-            Err(error) => tracing::warn!(
-                "review comments for PR #{number} unavailable (could not start gh): {error}"
-            ),
-            Ok(review_output) if !review_output.status.success() => tracing::warn!(
-                "review comments for PR #{number} unavailable: {}",
-                String::from_utf8_lossy(&review_output.stderr).trim()
-            ),
-            Ok(review_output) => {
-                let pages = String::from_utf8_lossy(&review_output.stdout);
+        match execute_gh(work_dir, &api_args) {
+            Err(error) => tracing::warn!("review comments for PR #{number} unavailable: {error}"),
+            Ok(pages) => {
                 if let Err(error) = enrich_pr_review_comments(&mut info, &pages) {
                     tracing::warn!("review comments for PR #{number} failed to parse: {error}");
                 }
             }
         }
     } else {
-        tracing::warn!("cannot fetch review comments: unparseable PR url '{}'", info.url);
+        tracing::warn!(
+            "cannot fetch review comments: unparseable PR url '{}'",
+            info.url
+        );
     }
 
     if info.number == 0 {
@@ -565,24 +537,11 @@ pub fn inspect_pr_for_branch(
     work_dir: &Path,
     branch: &str,
 ) -> Result<Option<GitHubPrInfo>, GitError> {
-    let key = pr_cache_key(work_dir, branch);
-    let now = Instant::now();
-    let cache = PR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut cache) = cache.lock() {
-        prune_expired(&mut cache, now, PR_INSPECTION_TTL);
-    }
-    if let Some(info) = cache.lock().ok().and_then(|cache| {
-        cache
-            .get(&key)
-            .and_then(|entry| fresh_cache_value(entry, now, PR_INSPECTION_TTL))
-    }) {
-        return Ok(info);
-    }
-    let info = inspect_pr_uncached(work_dir, branch)?;
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(key, (now, info.clone()));
-    }
-    Ok(info)
+    PR_CACHE.get_or_init(ResponseCache::new).get_or_fetch(
+        pr_cache_key(work_dir, branch),
+        PR_INSPECTION_TTL,
+        || inspect_pr_uncached(work_dir, branch),
+    )
 }
 
 pub(crate) fn github_issue_list_args(
@@ -762,54 +721,195 @@ pub(crate) fn review_comment_payloads(
 }
 
 fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
-    if let Some(limited) = rate_limit_hold() {
-        return Err(GitError::new(work_dir, limited));
-    }
-    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &refs);
-    let output = command
-        .output()
-        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    // One transparent retry on rate limiting: a transient 429/secondary
-    // limit should not fail the whole list when a short wait recovers.
-    if rate_limit_message(&stderr).is_some() {
-        note_rate_limit();
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        return execute_gh_once(work_dir, args);
-    }
-    Err(gh_failure(
-        work_dir,
-        output.status,
-        &stderr,
-        stored_token.as_deref(),
-    ))
+    execute_gh_command(work_dir, args, None)
 }
 
-/// Single `gh` invocation without rate-limit retry (the retry tail of
-/// [`execute_gh`]).
-fn execute_gh_once(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
+// ponytail: one process-wide gate is conservative across accounts/hosts; split
+// by authenticated host if independent GitHub Enterprise traffic needs concurrency.
+#[derive(Default)]
+struct GhRequestState {
+    busy: bool,
+    limited_until: Option<Instant>,
+    consecutive_limits: u32,
+}
+
+#[derive(Default)]
+struct GhRequestGate {
+    state: Mutex<GhRequestState>,
+    changed: Condvar,
+}
+
+struct GhRequestPermit<'a>(&'a GhRequestGate);
+
+impl GhRequestGate {
+    fn acquire(&self, work_dir: &Path) -> Result<GhRequestPermit<'_>, GitError> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self
+            .changed
+            .wait_while(state, |state| state.busy)
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(remaining) = state
+            .limited_until
+            .and_then(|until| until.checked_duration_since(Instant::now()))
+        {
+            return Err(GitError::new(
+                work_dir,
+                format!(
+                    "GitHub API rate limit reached; retry in {} seconds",
+                    remaining.as_secs() + 1
+                ),
+            ));
+        }
+        state.busy = true;
+        Ok(GhRequestPermit(self))
+    }
+}
+
+impl GhRequestPermit<'_> {
+    fn record(&self, success: bool, stderr: &str) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if rate_limit_message(stderr).is_some() {
+            state.consecutive_limits = state.consecutive_limits.saturating_add(1);
+            let delay = rate_limit_delay(state.consecutive_limits);
+            state.limited_until = Some(Instant::now() + delay);
+        } else if success {
+            state.consecutive_limits = 0;
+            state.limited_until = None;
+        }
+    }
+}
+
+impl Drop for GhRequestPermit<'_> {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap_or_else(|e| e.into_inner()).busy = false;
+        self.0.changed.notify_all();
+    }
+}
+
+fn rate_limit_delay(consecutive_limits: u32) -> Duration {
+    Duration::from_secs((60u64 << consecutive_limits.saturating_sub(1).min(6)).min(3600))
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::{rate_limit_delay, run_gh_command, GhRequestGate};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[cfg(unix)]
+    fn rate_limit_blocks_subsequent_reads_and_writes_without_retrying() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("calls");
+        let gate = GhRequestGate::default();
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "echo call >> \"$1\"; echo 'HTTP 429' >&2; exit 1",
+                "test",
+            ])
+            .arg(&marker);
+        assert!(run_gh_command(dir.path(), &mut command, None, None, &gate).is_err());
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "call\n");
+        for payload in [None, Some(serde_json::json!({"body": "test"}))] {
+            assert!(
+                run_gh_command(dir.path(), &mut command, None, payload.as_ref(), &gate)
+                    .unwrap_err()
+                    .message
+                    .contains("retry in")
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "call\n");
+        gate.state.lock().unwrap().limited_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(run_gh_command(dir.path(), &mut command, None, None, &gate).is_err());
+        assert_eq!(gate.state.lock().unwrap().consecutive_limits, 2);
+        assert_eq!(rate_limit_delay(1).as_secs(), 60);
+        assert_eq!(rate_limit_delay(2).as_secs(), 120);
+        assert_eq!(rate_limit_delay(u32::MAX).as_secs(), 3600);
+    }
+
+    #[test]
+    fn github_gate_serializes_requests_and_releases_on_drop() {
+        let gate = GhRequestGate::default();
+        let concurrent = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..12 {
+                scope.spawn(|| {
+                    let _permit = gate.acquire(std::path::Path::new("repo")).unwrap();
+                    assert_eq!(
+                        concurrent.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                        0
+                    );
+                    std::thread::yield_now();
+                    assert_eq!(
+                        concurrent.fetch_sub(1, std::sync::atomic::Ordering::SeqCst),
+                        1
+                    );
+                });
+            }
+        });
+    }
+}
+
+fn execute_gh_command(
+    work_dir: &Path,
+    args: &[String],
+    payload: Option<&serde_json::Value>,
+) -> Result<String, GitError> {
+    static GATE: OnceLock<GhRequestGate> = OnceLock::new();
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &refs);
-    let output = command
-        .output()
-        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if rate_limit_message(&stderr).is_some() {
-        note_rate_limit();
-    }
-    Err(gh_failure(
+    run_gh_command(
         work_dir,
-        output.status,
-        &stderr,
+        &mut command,
         stored_token.as_deref(),
-    ))
+        payload,
+        GATE.get_or_init(GhRequestGate::default),
+    )
+}
+
+fn run_gh_command(
+    work_dir: &Path,
+    command: &mut Command,
+    stored_token: Option<&str>,
+    payload: Option<&serde_json::Value>,
+    gate: &GhRequestGate,
+) -> Result<String, GitError> {
+    let permit = gate.acquire(work_dir)?;
+    let output = if let Some(payload) = payload {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
+        let write_result = child
+            .stdin
+            .take()
+            .ok_or_else(|| GitError::new(work_dir, "could not open gh input"))?
+            .write_all(payload.to_string().as_bytes());
+        if let Err(error) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(GitError::new(
+                work_dir,
+                format!("could not write gh input: {error}"),
+            ));
+        }
+        child.wait_with_output()
+    } else {
+        command.output()
+    }
+    .map_err(|error| GitError::new(work_dir, format!("could not run gh: {error}")))?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    permit.record(output.status.success(), &stderr);
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        Err(gh_failure(work_dir, output.status, &stderr, stored_token))
+    }
 }
 
 /// Matches `gh` rate-limit failures (primary 429, secondary limits, 403
@@ -820,7 +920,10 @@ pub(crate) fn rate_limit_message(stderr: &str) -> Option<String> {
     let limited = folded.contains("api rate limit exceeded")
         || folded.contains("secondary rate limit")
         || folded.contains("exceeded a rate limit")
-        || folded.contains("rate limit exceeded");
+        || folded.contains("rate limit exceeded")
+        || folded.contains("http 429")
+        || folded.contains("(429)")
+        || folded.contains("abuse detection");
     if !limited {
         return None;
     }
@@ -831,31 +934,8 @@ pub(crate) fn rate_limit_message(stderr: &str) -> Option<String> {
         .map(str::trim)
         .unwrap_or("GitHub API rate limit reached");
     Some(format!(
-        "{reset}. Wait a minute, then retry — repeated calls only extend the limit."
+        "{reset}. Requests are paused; wait before retrying."
     ))
-}
-
-fn rate_limit_hold() -> Option<String> {
-    let held = rate_limit_until()
-        .lock()
-        .ok()
-        .and_then(|guard| *guard)
-        .is_some_and(|deadline| std::time::Instant::now() < deadline);
-    held.then(|| {
-        "GitHub API rate limit reached recently; holding for a minute instead of hammering. Retry shortly.".to_string()
-    })
-}
-
-fn note_rate_limit() {
-    if let Ok(mut guard) = rate_limit_until().lock() {
-        *guard = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
-    }
-}
-
-fn rate_limit_until() -> &'static std::sync::Mutex<Option<std::time::Instant>> {
-    use std::sync::OnceLock;
-    static UNTIL: OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = OnceLock::new();
-    UNTIL.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 fn execute_gh_json(
@@ -863,35 +943,7 @@ fn execute_gh_json(
     args: &[String],
     payload: &serde_json::Value,
 ) -> Result<String, GitError> {
-    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &refs);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| GitError::new(work_dir, "could not open gh input".to_owned()))?
-        .write_all(payload.to_string().as_bytes())
-        .map_err(|error| GitError::new(work_dir, format!("could not write gh input: {error}")))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|error| GitError::new(work_dir, format!("could not wait for gh: {error}")))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(gh_failure(
-            work_dir,
-            output.status,
-            &stderr,
-            stored_token.as_deref(),
-        ))
-    }
+    execute_gh_command(work_dir, args, Some(payload))
 }
 
 pub fn list_github_issues(
@@ -903,64 +955,43 @@ pub fn list_github_issues(
     let args = github_issue_list_args(state, query, limit)
         .map_err(|message| GitError::new(work_dir, message))?;
     let key = (repository_key(work_dir), args.join("\0"));
-    let now = Instant::now();
-    let cache = ISSUE_LIST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut cache) = cache.lock() {
-        prune_expired(&mut cache, now, GITHUB_RESPONSE_TTL);
-    }
-    if let Some(rows) = cache.lock().ok().and_then(|cache| {
-        cache
-            .get(&key)
-            .and_then(|entry| fresh_cache_value(entry, now, GITHUB_RESPONSE_TTL))
-    }) {
-        return Ok(rows);
-    }
-    let output = execute_gh(work_dir, &args)?;
-    let values: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|error| {
-        GitError::new(
-            work_dir,
-            format!("could not parse GitHub issue list: {error}"),
-        )
-    })?;
-    let rows = values
-        .into_iter()
-        .filter_map(|value| match parse_github_issue_json(&value.to_string()) {
-            Ok(detail) => Some(detail.summary),
-            Err(error) => {
-                tracing::warn!("skipping unparseable issue entry: {error}");
-                None
-            }
+    ISSUE_LIST_CACHE
+        .get_or_init(ResponseCache::new)
+        .get_or_fetch(key, GITHUB_RESPONSE_TTL, || {
+            let output = execute_gh(work_dir, &args)?;
+            let values: Vec<serde_json::Value> =
+                serde_json::from_str(&output).map_err(|error| {
+                    GitError::new(
+                        work_dir,
+                        format!("could not parse GitHub issue list: {error}"),
+                    )
+                })?;
+            let rows = values
+                .into_iter()
+                .filter_map(|value| match parse_github_issue_json(&value.to_string()) {
+                    Ok(detail) => Some(detail.summary),
+                    Err(error) => {
+                        tracing::warn!("skipping unparseable issue entry: {error}");
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            Ok(rows)
         })
-        .collect::<Vec<_>>();
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(key, (now, rows.clone()));
-    }
-    Ok(rows)
 }
 pub fn inspect_github_issue(work_dir: &Path, number: u64) -> Result<GitHubIssueDetail, GitError> {
     let key = (repository_key(work_dir), number);
-    let now = Instant::now();
-    let cache = ISSUE_DETAIL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut cache) = cache.lock() {
-        prune_expired(&mut cache, now, GITHUB_RESPONSE_TTL);
-    }
-    if let Some(detail) = cache.lock().ok().and_then(|cache| {
-        cache
-            .get(&key)
-            .and_then(|entry| fresh_cache_value(entry, now, GITHUB_RESPONSE_TTL))
-    }) {
-        return Ok(detail);
-    }
-    let args =
-        github_issue_view_args(number).map_err(|message| GitError::new(work_dir, message))?;
-    let output = execute_gh(work_dir, &args)?;
-    let detail = parse_github_issue_json(&output).map_err(|message| {
-        GitError::new(work_dir, format!("could not parse GitHub issue: {message}"))
-    })?;
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(key, (now, detail.clone()));
-    }
-    Ok(detail)
+    ISSUE_DETAIL_CACHE
+        .get_or_init(ResponseCache::new)
+        .get_or_fetch(key, GITHUB_RESPONSE_TTL, || {
+            let args = github_issue_view_args(number)
+                .map_err(|message| GitError::new(work_dir, message))?;
+            let output = execute_gh(work_dir, &args)?;
+            let detail = parse_github_issue_json(&output).map_err(|message| {
+                GitError::new(work_dir, format!("could not parse GitHub issue: {message}"))
+            })?;
+            Ok(detail)
+        })
 }
 pub fn list_github_pull_requests(
     work_dir: &Path,
@@ -971,30 +1002,20 @@ pub fn list_github_pull_requests(
     let args = github_pr_list_args(state, query, limit)
         .map_err(|message| GitError::new(work_dir, message))?;
     let key = (repository_key(work_dir), args.join("\0"));
-    let now = Instant::now();
-    let cache = PR_LIST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut cache) = cache.lock() {
-        prune_expired(&mut cache, now, GITHUB_RESPONSE_TTL);
-    }
-    if let Some(rows) = cache.lock().ok().and_then(|cache| {
-        cache
-            .get(&key)
-            .and_then(|entry| fresh_cache_value(entry, now, GITHUB_RESPONSE_TTL))
-    }) {
-        return Ok(rows);
-    }
-    let output = execute_gh(work_dir, &args)?;
-    let values: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|error| {
-        GitError::new(
-            work_dir,
-            format!("could not parse GitHub pull request list: {error}"),
-        )
-    })?;
-    let rows = summarize_pr_list(values);
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(key, (now, rows.clone()));
-    }
-    Ok(rows)
+    PR_LIST_CACHE
+        .get_or_init(ResponseCache::new)
+        .get_or_fetch(key, GITHUB_RESPONSE_TTL, || {
+            let output = execute_gh(work_dir, &args)?;
+            let values: Vec<serde_json::Value> =
+                serde_json::from_str(&output).map_err(|error| {
+                    GitError::new(
+                        work_dir,
+                        format!("could not parse GitHub pull request list: {error}"),
+                    )
+                })?;
+            let rows = summarize_pr_list(values);
+            Ok(rows)
+        })
 }
 
 /// Maps raw `gh pr list` entries onto summaries, skipping malformed ones.
@@ -1073,23 +1094,9 @@ pub fn create_pull_request(work_dir: &Path) -> Result<String, GitError> {
     push(work_dir)?;
     invalidate_pr_cache(work_dir, &branch);
 
-    let (mut command, stored_token) =
-        gh_command_with_captured_token(work_dir, &["pr", "create", "--fill"]);
-    let output = command
-        .output()
-        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(gh_failure(
-            work_dir,
-            output.status,
-            &stderr,
-            stored_token.as_deref(),
-        ));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let result = execute_gh(work_dir, &["pr".into(), "create".into(), "--fill".into()]);
+    invalidate_github_cache(work_dir);
+    result
 }
 
 /// Creates a draft pull request for an already-published branch without pushing it.
@@ -1099,7 +1106,7 @@ pub fn create_draft_pull_request(
     title: &str,
     body: &str,
 ) -> Result<String, GitError> {
-    let branch = current_branch(work_dir)?.ok_or_else(|| {
+    current_branch(work_dir)?.ok_or_else(|| {
         GitError::new(
             work_dir,
             "cannot create a pull request from a detached HEAD; check out a named branch first"
@@ -1120,8 +1127,9 @@ pub fn create_draft_pull_request(
     }
     let args = create_draft_pr_args(base, title, body)
         .map_err(|message| GitError::new(work_dir, message))?;
-    invalidate_pr_cache(work_dir, &branch);
-    execute_gh(work_dir, &args)
+    let result = execute_gh(work_dir, &args);
+    invalidate_github_cache(work_dir);
+    result
 }
 
 pub fn comment_on_github_issue(

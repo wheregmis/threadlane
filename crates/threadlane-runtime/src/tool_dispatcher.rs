@@ -438,6 +438,8 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "write_file",
     "run_command",
     "subagent",
+    // Registered only for issue tasks; their publish step must be model-visible.
+    "create_draft_pull_request",
     // Embedded browser panel (`threadlane-browser`). The tools
     // report a helpful error when no panel is attached, so they are safe to
     // advertise unconditionally.

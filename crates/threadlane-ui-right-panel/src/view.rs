@@ -2721,11 +2721,15 @@ impl RightPanelView {
                         .child("No changes"),
                 )
                 .child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("The working tree is clean."),
+                    Button::new("refresh-clean-review")
+                        .label("Refresh review")
+                        .ghost()
+                        .small()
+                        .tooltip("Refresh the working tree review")
+                        .disabled(self.git_busy)
+                        .on_click(cx.listener(|this, _event, _window, _cx| {
+                            this.refresh_active_surface();
+                        })),
                 )
                 .into_any_element()
         } else {

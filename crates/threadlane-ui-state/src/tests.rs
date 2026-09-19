@@ -1256,9 +1256,7 @@ fn new_session_persists_draft_reasoning_effort() {
 #[test]
 fn issue_work_session_persists_link_and_uses_isolated_worktree() {
     let repo = tempfile::tempdir().unwrap();
-    run_git(repo.path(), &["init", "-b", "main"]);
-    run_git(repo.path(), &["config", "user.email", "test@example.com"]);
-    run_git(repo.path(), &["config", "user.name", "Test"]);
+    init_test_repo(&repo);
     std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
     run_git(repo.path(), &["add", "."]);
     run_git(repo.path(), &["commit", "-m", "initial"]);
@@ -1267,13 +1265,34 @@ fn issue_work_session_persists_link_and_uses_isolated_worktree() {
     let issue = issue_ref(42);
     let mut state = issue_work_state(&work_dir);
     let session_id = state
-        .start_issue_work(work_dir.clone(), issue.clone(), "Fix flaky auth!".into())
+        .start_issue_work_with_prompt(
+            work_dir.clone(),
+            issue.clone(),
+            "Fix flaky auth!".into(),
+            "opencode-go/test-model".into(),
+            ReasoningEffort::High,
+            |state, prompt| {
+                assert_eq!(state.selected_model, "opencode-go/test-model");
+                assert_eq!(state.reasoning_effort, ReasoningEffort::High);
+                assert!(prompt.contains("create_draft_pull_request"));
+                assert!(prompt.contains("verify the resulting PR URL"));
+                Ok(())
+            },
+        )
         .unwrap();
 
     let session_file = work_dir
         .join(".threadlane/sessions")
         .join(format!("{session_id}.jsonl"));
     let facts = JsonlStore::open_read_only(&session_file).unwrap().facts();
+    assert_eq!(
+        facts.get("model").map(String::as_str),
+        Some("opencode-go/test-model")
+    );
+    assert_eq!(
+        facts.get("reasoning_effort").map(String::as_str),
+        Some("High")
+    );
     assert_eq!(facts.get("is_worktree").map(String::as_str), Some("true"));
     assert_eq!(
         facts.get("worktree_path").map(String::as_str),
@@ -1318,7 +1337,14 @@ fn issue_work_failure_never_selects_or_runs_in_canonical_checkout() {
     let mut state = issue_work_state(&work_dir);
 
     let error = state
-        .start_issue_work(work_dir.clone(), issue_ref(9), "Unborn".into())
+        .start_issue_work_with_prompt(
+            work_dir.clone(),
+            issue_ref(9),
+            "Unborn".into(),
+            "test-model".into(),
+            ReasoningEffort::High,
+            |_, _| panic!("must not run"),
+        )
         .unwrap_err();
 
     assert!(!error.is_empty());
@@ -1356,6 +1382,8 @@ fn issue_work_prompt_failure_rolls_back_artifacts_and_selection() {
     let workspace_page = state.workspace_page;
     let session_status = state.session_status.clone();
     let pending_hydrations = state.pending_hydrations.clone();
+    let prior_model = state.selected_model.clone();
+    let prior_effort = state.reasoning_effort;
     let persisted_before = threadlane_project::load_project_registry()
         .into_iter()
         .find(|project| project.path == work_dir)
@@ -1366,8 +1394,10 @@ fn issue_work_prompt_failure_rolls_back_artifacts_and_selection() {
             work_dir.clone(),
             issue_ref(77),
             "Prompt failure".into(),
+            "test-model".into(),
+            ReasoningEffort::High,
             |_, prompt| {
-                assert!(prompt.contains("call create_draft_pull_request"));
+                assert!(prompt.contains("create_draft_pull_request"));
                 assert!(prompt.contains("publish the issue branch to origin"));
                 assert!(prompt.contains("credential-aware tool"));
                 assert!(!prompt.contains("Do not push or publish anything"));
@@ -1377,6 +1407,8 @@ fn issue_work_prompt_failure_rolls_back_artifacts_and_selection() {
         .unwrap_err();
 
     assert_eq!(error, "prompt acceptance failed");
+    assert_eq!(state.selected_model, prior_model);
+    assert_eq!(state.reasoning_effort, prior_effort);
     assert_eq!(state.active_work_dir, active_work_dir);
     assert_eq!(state.active_session_id, active_session_id);
     assert_eq!(state.is_new_task, is_new_task);

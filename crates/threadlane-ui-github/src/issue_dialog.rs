@@ -3,9 +3,11 @@ use std::path::PathBuf;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState, Textarea, TextareaState};
-use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::{ActiveTheme, Disableable, WindowExt};
 use threadlane_git::GitHubIssueRef;
+use threadlane_protocol::ReasoningEffort;
+use threadlane_provider::model_registry::effective_effort;
 
 use threadlane_ui_state::AppState;
 
@@ -31,7 +33,7 @@ pub fn issue_start_confirmation(
     has_linked_task: bool,
 ) -> IssueStartConfirmation {
     IssueStartConfirmation {
-        copy: "Threadlane will create an isolated worktree, then the agent will push its issue branch to origin and open a draft pull request on GitHub after completing the task.".into(),
+        copy: "The agent works in an isolated worktree, verifies and commits its changes, then pushes to origin and creates a draft PR on GitHub.".into(),
         model: model.into(),
         reasoning_effort: reasoning_effort.into(),
         branch_preview: AppState::issue_branch_name(issue.number, title, "xxxxxx"),
@@ -41,9 +43,9 @@ pub fn issue_start_confirmation(
             .then_some("This project is not a Git repository.".into()),
         show_open_task: has_linked_task,
         start_label: if has_linked_task {
-            "Start another, push & create draft PR"
+            "Start another task"
         } else {
-            "Start, push & create draft PR"
+            "Start task"
         },
     }
 }
@@ -78,16 +80,20 @@ pub struct IssueStartDialog {
     pub title: String,
     pub confirmation: IssueStartConfirmation,
     pub error: Option<String>,
+    effort: ReasoningEffort,
+    models: Vec<threadlane_ui_catalog::ModelOption>,
 }
 
 impl IssueStartDialog {
     pub fn start(&mut self, cx: &mut Context<Self>) -> bool {
         let result = issue_start_activation(self.confirmation.start_enabled, || {
             self.model.update(cx, |state, cx| {
-                let result = state.start_issue_work(
+                let result = state.start_issue_work_with_options(
                     self.work_dir.clone(),
                     self.issue.clone(),
                     self.title.clone(),
+                    self.confirmation.model.clone(),
+                    self.effort,
                 );
                 if let Err(error) = &result {
                     state.session_status = Some(error.clone());
@@ -110,40 +116,127 @@ pub fn activate_issue_start_dialog(dialog: &Entity<IssueStartDialog>, cx: &mut A
 impl Render for IssueStartDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
+        let selected = self.confirmation.model.clone();
+        let model_label = threadlane_ui_catalog::selection_label(&selected, &self.models);
+        let models = self.models.clone();
+        let owner = cx.entity().downgrade();
+        let model_picker = Button::new("issue-task-model")
+            .debug_selector(|| "issue-task-model".into())
+            .label(model_label.clone())
+            .accessibility_label(format!("Model: {model_label}"))
+            .dropdown_caret(true)
+            .w_full()
+            .disabled(models.is_empty())
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, _cx| {
+                let mut previous_provider = None;
+                models.iter().fold(
+                    menu.max_h(window.rem_size() * 20.0).scrollable(true),
+                    |menu, option| {
+                        let menu = if previous_provider == Some(option.provider) {
+                            menu
+                        } else {
+                            previous_provider = Some(option.provider);
+                            menu.item(PopupMenuItem::label(option.provider.label()))
+                        };
+                        let owner = owner.clone();
+                        let id = option.id.clone();
+                        menu.item(
+                            PopupMenuItem::new(option.label.clone())
+                                .checked(id == selected)
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner.update(cx, |this, cx| {
+                                        this.effort = effective_effort(
+                                            &id,
+                                            this.effort,
+                                            Some(&this.work_dir),
+                                        );
+                                        this.confirmation.model = id.clone();
+                                        this.error = None;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    },
+                )
+            });
+        let show_effort = threadlane_ui_catalog::supports_reasoning(
+            &self.confirmation.model,
+            Some(&self.work_dir),
+        );
+        let efforts = threadlane_ui_catalog::efforts_for_model(
+            &self.confirmation.model,
+            Some(&self.work_dir),
+        );
+        let effort = self.effort;
+        let owner = cx.entity().downgrade();
+        let effort_picker = Button::new("issue-task-effort")
+            .debug_selector(|| "issue-task-effort".into())
+            .label(effort.label())
+            .accessibility_label(format!("Reasoning effort: {}", effort.label()))
+            .dropdown_caret(true)
+            .w_full()
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                efforts.iter().fold(menu, |menu, option| {
+                    let option = *option;
+                    let owner = owner.clone();
+                    menu.item(
+                        PopupMenuItem::new(option.label())
+                            .checked(option == effort)
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |this, cx| {
+                                    this.effort = option;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                })
+            });
         let confirmation = &self.confirmation;
         div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_4()
             .text_sm()
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(confirmation.copy.clone()),
-            )
-            .child(format!("Issue: #{} {}", self.issue.number, self.title))
-            .child(format!("Model: {}", confirmation.model))
-            .child(format!(
-                "Reasoning effort: {}",
-                confirmation.reasoning_effort
-            ))
-            .child(format!("Branch preview: {}", confirmation.branch_preview))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(confirmation.branch_disclosure.clone()),
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_color(theme.muted_foreground).child(format!(
+                        "{}/{} · #{}",
+                        self.issue.owner, self.issue.repo, self.issue.number
+                    )))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(self.title.clone()),
+                    ),
             )
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .p_2()
-                    .bg(theme.secondary)
-                    .rounded_md()
-                    .child("Isolated worktree")
-                    .child(Tag::new().small().child("Locked")),
+                    .flex_col()
+                    .gap_2()
+                    .child("Model")
+                    .child(model_picker),
+            )
+            .children(show_effort.then(|| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("Reasoning effort")
+                    .child(effort_picker)
+            }))
+            .children(self.models.is_empty().then(|| {
+                div()
+                    .text_color(theme.warning)
+                    .child("Connect a provider in Settings to choose a model.")
+            }))
+            .child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child(confirmation.copy.clone()),
             )
             .children(confirmation.start_disabled_reason.as_ref().map(|reason| {
                 div()
@@ -151,25 +244,11 @@ impl Render for IssueStartDialog {
                     .text_color(theme.warning)
                     .child(reason.clone())
             }))
-            .children(self.error.as_ref().map(|error| {
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .text_color(theme.danger)
-                    .child(error.clone())
-                    .child(
-                        Button::new("retry-issue-task")
-                            .label("Retry")
-                            .small()
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                if this.start(cx) {
-                                    window.close_dialog(cx);
-                                }
-                            })),
-                    )
-            }))
+            .children(
+                self.error
+                    .as_ref()
+                    .map(|error| div().text_color(theme.danger).child(error.clone())),
+            )
     }
 }
 
@@ -184,16 +263,18 @@ pub fn open_issue_start_dialog(
 ) {
     let (selected_model, reasoning_effort) = {
         let state = model.read(cx);
-        (state.selected_model.clone(), state.reasoning_effort.label())
+        (state.selected_model.clone(), state.reasoning_effort)
     };
     let confirmation = issue_start_confirmation(
         &issue,
         &title,
         &selected_model,
-        reasoning_effort,
+        reasoning_effort.label(),
         threadlane_git::is_git_repo(&work_dir),
         has_linked_task,
     );
+    let models = threadlane_ui_catalog::available_models_for_project(Some(&work_dir));
+    let effort = effective_effort(&selected_model, reasoning_effort, Some(&work_dir));
     let start_enabled = confirmation.start_enabled;
     let start_label = confirmation.start_label;
     let disabled_reason = confirmation.start_disabled_reason.clone();
@@ -203,13 +284,16 @@ pub fn open_issue_start_dialog(
         issue,
         title,
         confirmation,
+        effort,
+        models,
         error: None,
     });
-    window.open_dialog(cx, move |dialog, _window, _cx| {
+    window.open_dialog(cx, move |dialog, _window, cx| {
+        let start_enabled = start_enabled && !dialog_state.read(cx).confirmation.model.is_empty();
         let confirm_state = dialog_state.clone();
         let on_ok_state = dialog_state.clone();
         dialog
-            .title("Start task and publish draft PR?")
+            .title("Start task from issue")
             .child(dialog_state.clone())
             .footer(
                 div()
@@ -364,4 +448,80 @@ pub fn open_issue_create_dialog(
                 on_ok_state.update(cx, |dialog, cx| dialog.create(window, cx))
             })
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{issue_start_confirmation, IssueStartDialog};
+    use gpui::{AppContext, Modifiers, TestAppContext};
+    use threadlane_protocol::ReasoningEffort;
+    use threadlane_ui_catalog::{ModelOption, ModelProvider};
+    use threadlane_ui_state::AppState;
+
+    #[gpui::test]
+    fn issue_start_pickers_keep_changes_local_and_hide_external_agent_effort(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| AppState::default());
+        let original = model.read_with(cx, |state, _| {
+            (state.selected_model.clone(), state.reasoning_effort)
+        });
+        let issue = threadlane_git::GitHubIssueRef {
+            owner: "example".into(),
+            repo: "app".into(),
+            number: 42,
+            ..Default::default()
+        };
+        let state = cx.new(|_| IssueStartDialog {
+            model: model.clone(),
+            work_dir: std::env::temp_dir(),
+            confirmation: issue_start_confirmation(
+                &issue,
+                "Fix an issue",
+                "test-model",
+                "High",
+                true,
+                false,
+            ),
+            issue,
+            title: "Fix an issue".into(),
+            error: None,
+            effort: ReasoningEffort::High,
+            models: vec![ModelOption {
+                id: "acp/test-agent".into(),
+                label: "Test agent".into(),
+                provider: ModelProvider::Acp,
+            }],
+        });
+        let view = state.clone();
+        let (_, cx) =
+            cx.add_window_view(move |window, cx| gpui_component::Root::new(view, window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let effort = cx.debug_bounds("issue-task-effort").unwrap();
+        cx.simulate_click(effort.center(), Modifiers::default());
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        state.read_with(cx, |state, _| {
+            assert_ne!(state.effort, ReasoningEffort::High)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let picker = cx.debug_bounds("issue-task-model").unwrap();
+        cx.simulate_click(picker.center(), Modifiers::default());
+        // The first row is the provider heading.
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.confirmation.model, "acp/test-agent")
+        });
+        assert!(cx.debug_bounds("issue-task-effort").is_none());
+        model.read_with(cx, |state, _| {
+            assert_eq!(
+                (state.selected_model.clone(), state.reasoning_effort),
+                original
+            )
+        });
+    }
 }

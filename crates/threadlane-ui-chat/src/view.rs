@@ -95,6 +95,127 @@ fn last_retryable_prompt(messages: &[ChatMessageInfo]) -> Option<String> {
         .map(|message| message.content.clone())
 }
 
+fn format_run_elapsed(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    let remaining = seconds % 60;
+    if minutes < 60 {
+        return format!("{minutes}m {remaining:02}s");
+    }
+    let hours = minutes / 60;
+    let minutes = minutes % 60;
+    format!("{hours}h {minutes:02}m")
+}
+
+fn has_sendable_prompt(text: &str, image_count: usize) -> bool {
+    !text.trim().is_empty() || image_count > 0
+}
+
+fn truncate_preview_text(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let clamped = max_chars.max(2) - 1;
+    let truncated: String = text.chars().take(clamped).collect();
+    format!("{}…", truncated.trim_end())
+}
+
+fn truncate_plan_step(step: &str, max_chars: usize) -> String {
+    truncate_preview_text(step, max_chars)
+}
+
+fn completed_activities_text(hidden_count: usize) -> String {
+    format!(
+        "{hidden_count} completed {}",
+        if hidden_count == 1 {
+            "activity"
+        } else {
+            "activities"
+        }
+    )
+}
+
+fn expand_activities_a11y(hidden_count: usize) -> String {
+    format!(
+        "Expand {hidden_count} completed tool {}",
+        if hidden_count == 1 {
+            "activity"
+        } else {
+            "activities"
+        }
+    )
+}
+
+fn plan_tracker_texts(
+    completed: usize,
+    total: usize,
+    current_step: Option<&str>,
+) -> (String, String, String) {
+    match current_step {
+        Some(step) => (
+            step.to_string(),
+            format!("Task plan, {completed} of {total} complete, current step: {step}"),
+            format!("Show task plan · {step}"),
+        ),
+        None => (
+            "Complete".to_string(),
+            format!("Task plan, {completed} of {total} complete"),
+            "Show task plan · all steps complete".to_string(),
+        ),
+    }
+}
+
+fn reasoning_token_badge(is_streaming: bool, reasoning_len: usize) -> String {
+    if is_streaming {
+        return "thinking…".to_string();
+    }
+    let approx_tokens = (reasoning_len + 3) / 4;
+    if approx_tokens == 1 {
+        "~1 token".to_string()
+    } else {
+        format!("~{approx_tokens} tokens")
+    }
+}
+
+fn tool_activity_glyph(category: &str) -> &'static str {
+    match category {
+        "Error" => "!",
+        "Working" | "Thinking" => "◌",
+        "Completed" | "Edited" | "Created" | "Ran" | "Loaded" | "Explored" => "✓",
+        _ => "•",
+    }
+}
+
+fn progress_header_prefix(is_error: bool) -> &'static str {
+    if is_error {
+        "Needs attention:"
+    } else {
+        "Latest activity:"
+    }
+}
+
+fn skills_chip_label(active_count: usize) -> String {
+    if active_count == 0 {
+        "Skills".to_string()
+    } else {
+        format!(
+            "{active_count} {}",
+            if active_count == 1 { "Skill" } else { "Skills" }
+        )
+    }
+}
+
+fn plural_noun(count: u64, singular: &'static str, plural: &'static str) -> &'static str {
+    if count == 1 { singular } else { plural }
+}
+
+fn is_current_project(active: Option<&PathBuf>, candidate: &Path) -> bool {
+    active.is_some_and(|dir| dir.as_path() == candidate)
+}
+
 fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) -> Div {
     let theme = cx.theme().colors;
     let (summary, needs_provider_settings) = chat_error_summary(error);
@@ -800,8 +921,13 @@ impl ChatListView {
                     .children(linked_issue.clone().map(|issue| {
                         let model = self.model.clone();
                         Button::new("chat-open-task-context")
+                            .debug_selector(|| "chat-header-issue-link".into())
                             .label(format!("#{}", issue.number))
                             .icon(IconName::Github)
+                            .accessibility_label(format!(
+                                "Open task context: {}/{} #{}",
+                                issue.owner, issue.repo, issue.number
+                            ))
                             .tooltip(format!(
                                 "{} / {} · Open task context",
                                 issue.owner, issue.repo
@@ -1036,6 +1162,7 @@ impl ChatListView {
             )
             .child(
                 Button::new("environment-changes")
+                    .debug_selector(|| "environment-changes".into())
                     .ghost()
                     .small()
                     .w_full()
@@ -1056,6 +1183,7 @@ impl ChatListView {
                     .border_color(theme.border)
                     .child(
                         Button::new("environment-files")
+                            .debug_selector(|| "environment-files".into())
                             .ghost()
                             .small()
                             .w_full()
@@ -1102,6 +1230,7 @@ impl ChatListView {
         }
         Some(
             div()
+                .debug_selector(|| "workspace-changes-row".into())
                 .w_full()
                 .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                 .mx_auto()
@@ -1119,6 +1248,7 @@ impl ChatListView {
                 .child(div().flex_1())
                 .child(
                     Button::new("review-workspace-changes")
+                        .debug_selector(|| "workspace-changes-review".into())
                         .label("Review")
                         .ghost()
                         .small()
@@ -1152,7 +1282,7 @@ impl ChatListView {
             .filter(|item| item.status == PlanItemStatus::Completed)
             .count();
         let total = plan.items.len();
-        let current_step = plan
+        let current_step_opt = plan
             .items
             .iter()
             .position(|item| item.status == PlanItemStatus::InProgress)
@@ -1161,8 +1291,9 @@ impl ChatListView {
                     .iter()
                     .position(|item| item.status == PlanItemStatus::Pending)
             })
-            .map(|index| plan.items[index].step.as_str())
-            .unwrap_or("Plan complete");
+            .map(|index| plan.items[index].step.as_str());
+        let (display_step, tracker_a11y, tracker_tooltip) =
+            plan_tracker_texts(completed, total, current_step_opt);
         let content_plan = plan.clone();
 
         Some(
@@ -1190,11 +1321,12 @@ impl ChatListView {
                             .debug_selector(|| "session-plan-tracker".into())
                             .ghost()
                             .small()
-                            .label(format!("Plan · {completed}/{total} · {current_step}"))
-                            .accessibility_label(format!(
-                                "Task plan, {completed} of {total} complete, current step: {current_step}"
+                            .label(format!(
+                                "Plan · {completed}/{total} · {}",
+                                truncate_plan_step(&display_step, 42)
                             ))
-                            .tooltip(format!("Show task plan · {current_step}"))
+                            .accessibility_label(tracker_a11y.clone())
+                            .tooltip(tracker_tooltip.clone())
                             .max_w(rems(26.0))
                             .min_w_0()
                             .flex_shrink_1()
@@ -1253,13 +1385,14 @@ impl ChatListView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let (marker, marker_color) = match activity.category.as_str() {
-            "Error" => ("!", theme.danger),
-            "Working" | "Thinking" => ("◌", theme.primary),
+        let marker = tool_activity_glyph(activity.category.as_str());
+        let marker_color = match activity.category.as_str() {
+            "Error" => theme.danger,
+            "Working" | "Thinking" => theme.primary,
             "Completed" | "Edited" | "Created" | "Ran" | "Loaded" | "Explored" => {
-                ("✓", theme.success)
+                theme.success
             }
-            _ => ("✓", theme.muted_foreground),
+            _ => theme.muted_foreground,
         };
         let model = self.model.clone();
         let transcript = self.transcript_list_state.clone();
@@ -1267,6 +1400,12 @@ impl ChatListView {
         let has_detail = !activity.detail.trim().is_empty();
         let row_id = SharedString::from(activity.id.clone());
         let display_summary = activity.display_summary.clone();
+        let is_error = activity.category == "Error";
+        let summary_color = if is_error {
+            theme.danger
+        } else {
+            theme.muted_foreground
+        };
 
         div()
             .w_full()
@@ -1315,7 +1454,7 @@ impl ChatListView {
                             .flex_1()
                             .truncate()
                             .text_sm()
-                            .text_color(theme.muted_foreground)
+                            .text_color(summary_color)
                             .child(display_summary.clone()),
                     )
                     .children(has_detail.then(|| {
@@ -1381,17 +1520,25 @@ impl ChatListView {
                     .flex()
                     .flex_col()
                     .children((hidden_count > 0).then(|| {
+                        let disclosure_text = if is_expanded {
+                            "Collapse activities".to_string()
+                        } else {
+                            completed_activities_text(hidden_count)
+                        };
+                        let disclosure_a11y = if is_expanded {
+                            "Collapse completed tool activity".to_string()
+                        } else {
+                            expand_activities_a11y(hidden_count)
+                        };
                         Button::new(SharedString::from(format!("activity-group-{group_id}")))
                             .debug_selector(|| "activity-group-disclosure".into())
                             .xsmall()
                             .ghost()
                             .justify_start()
                             .text_color(theme.muted_foreground)
-                            .label(if is_expanded {
-                                "Collapse activities".to_string()
-                            } else {
-                                format!("{hidden_count} completed activities")
-                            })
+                            .label(disclosure_text.clone())
+                            .accessibility_label(disclosure_a11y.clone())
+                            .tooltip(disclosure_a11y)
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 if !this.expanded_activity_groups.remove(&button_group_id) {
                                     this.expanded_activity_groups
@@ -2072,11 +2219,29 @@ impl ChatListView {
                         .into_iter()
                         .map(|(label, tab)| {
                             let view = inspector_view.clone();
+                            let tip = match tab {
+                                TrajectoryInspectorTab::Overview => {
+                                    "Overview of the selected entry"
+                                }
+                                TrajectoryInspectorTab::Preview => {
+                                    "Preview of the selected entry"
+                                }
+                                TrajectoryInspectorTab::Raw => {
+                                    "Raw JSON of the selected entry"
+                                }
+                                TrajectoryInspectorTab::Source => {
+                                    "Source of the selected entry"
+                                }
+                            };
                             Button::new(SharedString::from(format!("trajectory-inspector-{label}")))
+                                .debug_selector(move || {
+                                    format!("trajectory-inspector-{label}")
+                                })
                                 .ghost()
                                 .small()
                                 .selected(inspector_tab == tab)
                                 .label(label)
+                                .tooltip(tip)
                                 .on_click(move |_, _, cx| {
                                     view.update(cx, |this, cx| {
                                         this.trajectory_inspector_tab = tab;
@@ -2294,9 +2459,12 @@ impl ChatListView {
             .bg(theme.secondary)
             .child(
                 Button::new("trajectory-mode-filter")
+                    .debug_selector(|| "trajectory-mode-filter".into())
                     .ghost()
                     .small()
                     .label(mode_label)
+                    .accessibility_label(format!("Trajectory mode filter: {mode_label}"))
+                    .tooltip("Filter trajectory by mode")
                     .dropdown_caret(true)
                     .dropdown_menu(move |menu, _, _| {
                         let mut menu = menu;
@@ -2324,9 +2492,12 @@ impl ChatListView {
             )
             .child(
                 Button::new("trajectory-category-filter")
+                    .debug_selector(|| "trajectory-category-filter".into())
                     .ghost()
                     .small()
-                    .label(category_label)
+                    .label(category_label.clone())
+                    .accessibility_label(format!("Trajectory category filter: {category_label}"))
+                    .tooltip("Filter trajectory by category")
                     .dropdown_caret(true)
                     .dropdown_menu(move |menu, _, _| {
                         let all_view = category_view.clone();
@@ -2355,9 +2526,12 @@ impl ChatListView {
             )
             .children((lanes.len() > 1).then(|| {
                 Button::new("trajectory-lane-filter")
+                    .debug_selector(|| "trajectory-lane-filter".into())
                     .ghost()
                     .small()
-                    .label(lane_label)
+                    .label(lane_label.clone())
+                    .accessibility_label(format!("Trajectory lane filter: {lane_label}"))
+                    .tooltip("Filter trajectory by lane")
                     .dropdown_caret(true)
                     .dropdown_menu(move |menu, _, _| {
                         let all_view = lane_view.clone();
@@ -2435,7 +2609,7 @@ impl ChatListView {
                             .text_color(theme.foreground)
                             .child(format!("{max_turn}")),
                     )
-                    .child("turns"),
+                    .child(plural_noun(max_turn as u64, "turn", "turns")),
             )
             .child(
                 div()
@@ -2448,7 +2622,11 @@ impl ChatListView {
                             .text_color(theme.foreground)
                             .child(format!("{tool_count}")),
                     )
-                    .child("tool calls"),
+                    .child(plural_noun(
+                        tool_count as u64,
+                        "tool call",
+                        "tool calls",
+                    )),
             )
             .child(
                 div().flex().items_center().gap_1().child(
@@ -2468,7 +2646,10 @@ impl ChatListView {
                     } else {
                         theme.success
                     }))
-                    .child(format!("{anomaly_count} anomalies")),
+                    .child(format!(
+                        "{anomaly_count} {}",
+                        plural_noun(anomaly_count as u64, "anomaly", "anomalies")
+                    )),
             );
 
         div()
@@ -2930,13 +3111,9 @@ impl ChatListView {
         let model = self.model.clone();
         let msg_id = msg.id.clone();
 
-        let approx_tokens = (reasoning.len() + 3) / 4;
+        let approx_badge = reasoning_token_badge(is_streaming, reasoning.len());
         let token_badge = Tag::new()
-            .child(if is_streaming {
-                "thinking…".to_string()
-            } else {
-                format!("~{approx_tokens} tokens")
-            })
+            .child(approx_badge)
             .small()
             .with_variant(TagVariant::Secondary);
 
@@ -2944,6 +3121,7 @@ impl ChatListView {
         let header = Button::new(SharedString::from(format!("reasoning-toggle-{}", msg.id)))
             .debug_selector(|| "reasoning-disclosure".into())
             .accessibility_label(if is_expanded { "Collapse thought process" } else { "Expand thought process" })
+            .tooltip(if is_expanded { "Collapse thought process" } else { "Expand thought process" })
             .ghost()
             .small()
             .w_full()
@@ -3529,11 +3707,23 @@ impl ChatListView {
             .find(|(_, work_dir)| active_work_dir.as_ref() == Some(work_dir))
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "Choose a project".to_string());
+        let selected_project_path = projects
+            .iter()
+            .find(|(_, work_dir)| active_work_dir.as_ref() == Some(work_dir))
+            .map(|(_, work_dir)| work_dir.display().to_string());
         let model = self.model.clone();
+        let hero_active_dir = active_work_dir.clone();
 
         let project_picker = Button::new("new-task-project-picker")
+            .debug_selector(|| "new-task-project-picker".into())
             .icon(IconName::Folder)
-            .label(selected_project)
+            .label(selected_project.clone())
+            .accessibility_label(format!("Project for the new task: {selected_project}"))
+            .tooltip(
+                selected_project_path
+                    .map(|path| format!("Project for the new task: {path}"))
+                    .unwrap_or_else(|| "Choose a project for the new task".to_string()),
+            )
             .dropdown_caret(true)
             .ghost()
             .small()
@@ -3541,7 +3731,8 @@ impl ChatListView {
                 let mut menu = menu;
                 for (name, work_dir) in projects.clone() {
                     let model = model.clone();
-                    menu = menu.item(PopupMenuItem::new(name).on_click(
+                    let is_current = is_current_project(hero_active_dir.as_ref(), &work_dir);
+                    menu = menu.item(PopupMenuItem::new(name).checked(is_current).on_click(
                         move |_event, _window, cx| {
                             model.update(cx, |state, cx| {
                                 controller::dispatch(
@@ -4118,7 +4309,8 @@ impl ChatListView {
                 let options = item
                     .options
                     .iter()
-                    .map(|option| {
+                    .enumerate()
+                    .map(|(idx, option)| {
                         let option_label = option.clone();
                         let is_selected = selected.iter().any(|item| item == option);
                         let request_id = request.id.clone();
@@ -4128,6 +4320,10 @@ impl ChatListView {
                             "question-{request_id}-{}-{}",
                             item.id, option_label
                         )))
+                        .debug_selector({
+                            let question_id = question_id.clone();
+                            move || format!("question-option-{question_id}-{idx}").into()
+                        })
                         .label(option_label.clone())
                         .small()
                         .ghost()
@@ -4206,6 +4402,7 @@ impl ChatListView {
 
         Some(
             div()
+                .debug_selector(|| "question-card".into())
                 .w_full()
                 .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                 .mx_auto()
@@ -4259,6 +4456,7 @@ impl ChatListView {
                                 .gap_2()
                                 .child(
                                     Button::new("question-dismiss")
+                                        .debug_selector(|| "question-dismiss".into())
                                         .label("Dismiss")
                                         .ghost()
                                         .small()
@@ -4269,6 +4467,7 @@ impl ChatListView {
                                 )
                                 .child(
                                     Button::new("question-submit")
+                                        .debug_selector(|| "question-submit".into())
                                         .label("Send answers")
                                         .small()
                                         .primary()
@@ -4888,8 +5087,10 @@ impl ChatListView {
             "This agent does not support live steering. Use Queue for the next turn."
         };
         let has_composer_text = !self.input_state.read(cx).value().trim().is_empty();
-        let has_prompt =
-            !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
+        let has_prompt = has_sendable_prompt(
+            &self.input_state.read(cx).value(),
+            self.pasted_images.len(),
+        );
         let (model_options, selected_option, project_root) = {
             let state = self.model.read(cx);
             let options = state.available_models().to_vec();
@@ -5003,6 +5204,7 @@ impl ChatListView {
         let provider_setup_model = self.model.clone();
         let provider_setup_banner = needs_provider.then(|| {
             div()
+                .debug_selector(|| "provider-setup-banner".into())
                 .w_full()
                 .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                 .mx_auto()
@@ -5036,6 +5238,7 @@ impl ChatListView {
                 )
                 .child(
                     Button::new("composer-open-provider-settings")
+                        .debug_selector(|| "provider-setup-open-settings".into())
                         .icon(IconName::Settings)
                         .label("Open settings")
                         .small()
@@ -5116,6 +5319,7 @@ impl ChatListView {
         .unwrap_or_else(|| "Select project".to_string());
 
         let project_chip_model = self.model.clone();
+        let project_chip_active = active_work_dir.clone();
         let project_chip_tooltip = active_work_dir
             .as_ref()
             .map(|dir| dir.display().to_string())
@@ -5135,7 +5339,9 @@ impl ChatListView {
                 let mut menu = menu;
                 for (name, work_dir) in projects_list.clone() {
                     let model = project_chip_model.clone();
-                    menu = menu.item(PopupMenuItem::new(name).on_click(
+                    let is_current =
+                        is_current_project(project_chip_active.as_ref(), &work_dir);
+                    menu = menu.item(PopupMenuItem::new(name).checked(is_current).on_click(
                         move |_event, _window, cx| {
                             model.update(cx, |state, cx| {
                                 controller::dispatch(
@@ -5252,11 +5458,7 @@ impl ChatListView {
             
             Button::new("composer-skills-chip")
                 .icon(IconName::BookOpen)
-                .label(if active_skills_count > 0 {
-                    format!("{active_skills_count} Skills")
-                } else {
-                    "Skills".to_string()
-                })
+                .label(skills_chip_label(active_skills_count))
                 .accessibility_label("Manage workspace skills")
                 .tooltip("Manage workspace skills")
                 .xsmall()
@@ -5297,6 +5499,7 @@ impl ChatListView {
 
         let pending_preview = pending_message.map(|text| {
             div()
+                .debug_selector(|| "pending-preview-row".into())
                 .w_full()
                 .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                 .mx_auto()
@@ -5327,6 +5530,7 @@ impl ChatListView {
                 )
                 .child(
                     Button::new("queue-pending-message")
+                        .debug_selector(|| "pending-queue".into())
                         .icon(IconName::Plus)
                         .accessibility_label("Queue pending message")
                         .xsmall()
@@ -5341,6 +5545,7 @@ impl ChatListView {
                 )
                 .child(
                     Button::new("steer-pending-message")
+                        .debug_selector(|| "pending-steer".into())
                         .icon(IconName::ArrowRight)
                         .accessibility_label("Steer with pending message")
                         .xsmall()
@@ -5356,6 +5561,7 @@ impl ChatListView {
                 )
                 .child(
                     Button::new("dismiss-pending-message")
+                        .debug_selector(|| "pending-dismiss".into())
                         .icon(IconName::Undo2)
                         .accessibility_label("Edit pending message")
                         .xsmall()
@@ -5921,11 +6127,7 @@ impl ChatListView {
             let restore_session_id = stash_session_id.clone();
             let dismiss_model = stash_model.clone();
             let dismiss_session_id = stash_session_id.clone();
-            let preview_text = if draft.chars().count() > 60 {
-                format!("{}…", draft.chars().take(60).collect::<String>())
-            } else {
-                draft.clone()
-            };
+            let preview_text = truncate_preview_text(&draft, 60);
             div()
                 .w_full()
                 .mb_2()
@@ -6224,11 +6426,12 @@ impl ChatListView {
                                             .label("Queue")
                                             .small()
                                             .secondary()
-                                            .disabled(!has_composer_text)
+                                            .disabled(!has_prompt)
+                                            .accessibility_label("Queue message for next turn")
                                             .tooltip("Queue for next turn (Enter)")
                                             .on_click(cx.listener(move |this, _event, window, cx| {
                                                 let text = queue_prompt_input.read(cx).value().to_string();
-                                                if !text.trim().is_empty() {
+                                                if has_sendable_prompt(&text, this.pasted_images.len()) {
                                                     queue_prompt_model.update(cx, |state, cx| {
                                                         let images = std::mem::take(&mut this.pasted_images);
                                                         controller::dispatch(state, AppAction::StageBusyMessage { text, images });
@@ -6248,11 +6451,12 @@ impl ChatListView {
                                             .label("Steer")
                                             .small()
                                             .primary()
-                                            .disabled(!has_composer_text || !supports_live_steering)
+                                            .disabled(!has_prompt || !supports_live_steering)
+                                            .accessibility_label("Steer current turn with message")
                                             .tooltip(steer_tooltip)
                                             .on_click(cx.listener(move |this, _event, window, cx| {
                                                 let text = steer_prompt_input.read(cx).value().to_string();
-                                                if !text.trim().is_empty() {
+                                                if has_sendable_prompt(&text, this.pasted_images.len()) {
                                                     steer_prompt_model.update(cx, |state, cx| {
                                                         let images = std::mem::take(&mut this.pasted_images);
                                                         controller::dispatch(state, AppAction::StageBusyMessage { text, images });
@@ -6369,6 +6573,12 @@ impl ChatListView {
             (summary, category, tool_detail, active_subagents)
         };
         let theme = cx.theme().colors;
+        let is_latest_error = category == "Error";
+        let summary_color = if is_latest_error {
+            theme.danger
+        } else {
+            theme.muted_foreground
+        };
         let disclosure_label = format!(
             "{} activity details: {summary}",
             if self.progress_summary_expanded {
@@ -6378,7 +6588,7 @@ impl ChatListView {
             }
         );
         let elapsed = self.model.read(cx).active_run_elapsed_seconds()
-            .map(|seconds| format!("{seconds}s"));
+            .map(format_run_elapsed);
         let disclosure_label = match &elapsed {
             Some(elapsed) => format!("{disclosure_label}; elapsed {elapsed}"),
             None => disclosure_label,
@@ -6424,14 +6634,18 @@ impl ChatListView {
                             .flex_none()
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child("Latest activity:"),
+                            .text_color(if is_latest_error {
+                                theme.danger
+                            } else {
+                                theme.foreground
+                            })
+                            .child(progress_header_prefix(is_latest_error)),
                     )
                     .child(
                         div()
                             .truncate()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(summary_color)
                             .child(summary),
                     ),
             )
@@ -6490,6 +6704,7 @@ impl ChatListView {
             }
 
             if !active_subagent_tasks.is_empty() {
+                let overflow_count = active_subagent_tasks.len().saturating_sub(3);
                 let subagents_view = div().flex().flex_col().gap_1().children(
                     active_subagent_tasks
                         .into_iter()
@@ -6518,7 +6733,12 @@ impl ChatListView {
                                         .child(task),
                                 )
                         }),
-                );
+                ).children((overflow_count > 0).then(|| {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("+{overflow_count} more"))
+                }));
                 expanded_content = expanded_content.child(subagents_view);
             }
 
@@ -6680,7 +6900,7 @@ impl Render for ChatListView {
             .children((self.current_tab == CentralTab::Chat && !is_generating)
                 .then(|| self.model.read(cx).active_run_elapsed_seconds()).flatten()
                 .map(|seconds| {
-                    let label = format!("Last run · {seconds}s");
+                    let label = format!("Last run · {}", format_run_elapsed(seconds));
                     div().id("last-run-duration").role(Role::Status)
                         .aria_label(label.clone()).px_4().py_1().text_xs()
                         .text_color(theme.muted_foreground).child(label)

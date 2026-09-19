@@ -135,20 +135,6 @@ fn cache_entry_expires_after_ttl() {
 }
 
 #[test]
-fn expired_cache_entries_are_pruned() {
-    let started = std::time::Instant::now();
-    let mut cache = HashMap::from([
-        ("fresh", (started, 1)),
-        ("stale", (started - std::time::Duration::from_secs(31), 2)),
-    ]);
-
-    prune_expired(&mut cache, started, std::time::Duration::from_secs(30));
-
-    assert_eq!(cache.len(), 1);
-    assert_eq!(cache.get("fresh"), Some(&(started, 1)));
-}
-
-#[test]
 fn pr_cache_separates_branches_in_the_same_repository() {
     let repository = Path::new("/tmp/project");
 
