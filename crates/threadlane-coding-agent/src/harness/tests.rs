@@ -884,7 +884,10 @@ fn cancellation_closes_an_unfinished_provider_attempt_before_abort_observation()
         _ => None,
     });
     let abort_observed_seq = store.records().iter().find_map(|record| match record {
-        HarnessRecord::AbortObserved { seq, .. } => Some(*seq),
+        HarnessRecord::AbortObserved { seq, wall_time_ms, .. } => {
+            assert!(wall_time_ms.is_some(), "abort time must survive journal reload");
+            Some(*seq)
+        }
         _ => None,
     });
     assert!(matches!(

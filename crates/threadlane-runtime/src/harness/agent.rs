@@ -467,10 +467,14 @@ impl<S: SessionStore> AgentHarness<S> {
     }
 
     pub fn drive_to_completion_atomically(&mut self) -> Result<(), ProcedureError> {
-        self.effects
+        let actions = self
+            .effects
             .run_to_completion_atomically(&mut self.store)
-            .map(|_| ())
-            .map_err(ProcedureError::Effects)
+            .map_err(ProcedureError::Effects)?;
+        for action in &actions {
+            super::effects::publish_committed(&self.events, action);
+        }
+        Ok(())
     }
 
     pub fn resume_navigation(
@@ -782,6 +786,11 @@ impl<S: SessionStore> SessionStore for AgentHarness<S> {
     fn append_entry(&mut self, entry: super::Entry) -> Result<(), super::ReduceError> {
         let lane = entry.lane.clone();
         self.store.append_entry(entry.clone())?;
+        let entry = self
+            .store
+            .entry(&entry.id)
+            .expect("committed entry exists")
+            .clone();
         self.events.publish_identified(
             super::EventPayload::EntryCommitted(entry),
             Some(lane),
@@ -796,6 +805,11 @@ impl<S: SessionStore> SessionStore for AgentHarness<S> {
         let run_id = record.run_id().map(str::to_owned);
         let turn = record.turn();
         self.store.append_record(record.clone())?;
+        let record = self
+            .store
+            .record(record.id())
+            .expect("committed record exists")
+            .clone();
         self.events.publish_identified_with_turn(
             super::EventPayload::RecordCommitted(record),
             Some(lane),

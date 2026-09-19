@@ -1179,6 +1179,7 @@ mod tests {
                 seq: store.next_sequence(),
                 lane: "main".into(),
                 timestamp: 50,
+                wall_time_ms: None,
                 source_leaf_id: None,
                 intent: crate::harness::OperationIntent::Run,
             })
@@ -1301,6 +1302,7 @@ mod tests {
                 seq: store.next_sequence(),
                 lane: "main".into(),
                 timestamp: 100,
+                wall_time_ms: None,
                 source_leaf_id: None,
                 intent: crate::harness::OperationIntent::Run,
             })
@@ -1408,6 +1410,7 @@ mod tests {
                 seq: store.next_sequence(),
                 lane: "main".into(),
                 timestamp: 50,
+                wall_time_ms: None,
                 source_leaf_id: None,
                 intent: crate::harness::OperationIntent::Run,
             })
@@ -1683,6 +1686,7 @@ mod tests {
                 seq: store.next_sequence(),
                 lane: "main".into(),
                 timestamp: 50,
+                wall_time_ms: None,
                 source_leaf_id: None,
                 intent: crate::harness::OperationIntent::Run,
             })
@@ -1842,6 +1846,7 @@ mod tests {
                 seq: store.next_sequence(),
                 lane: "main".into(),
                 timestamp: 50,
+                wall_time_ms: None,
                 source_leaf_id: None,
                 intent: crate::harness::OperationIntent::Run,
             })
@@ -1883,6 +1888,7 @@ mod tests {
                 seq: store.next_sequence(),
                 lane: "main".into(),
                 timestamp: 50,
+                wall_time_ms: None,
                 source_leaf_id: None,
                 intent: crate::harness::OperationIntent::Run,
             })
@@ -1925,6 +1931,7 @@ mod tests {
                 seq: store.next_sequence(),
                 lane: "main".into(),
                 timestamp: 50,
+                wall_time_ms: None,
                 source_leaf_id: None,
                 intent: crate::harness::OperationIntent::Run,
             })

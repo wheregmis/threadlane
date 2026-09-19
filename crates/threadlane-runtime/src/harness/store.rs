@@ -152,6 +152,9 @@ pub trait SessionStore {
     fn entry(&self, id: &str) -> Option<&Entry> {
         self.entries().iter().find(|entry| entry.id == id)
     }
+    fn record(&self, id: &str) -> Option<&Record> {
+        self.records().iter().rev().find(|record| record.id() == id)
+    }
     fn lanes(&self) -> Vec<String> {
         let mut lanes = BTreeSet::from([String::from("main")]);
         lanes.extend(self.entries().iter().map(|entry| entry.lane.clone()));

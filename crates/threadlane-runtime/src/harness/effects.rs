@@ -38,6 +38,26 @@ impl EffectAction {
             Self::AppendRecord { record, .. } => store.append_record(record.clone()),
         }
     }
+
+    // The writer may allocate a new sequence or stamp the commit time.
+    // Always return and publish the durable value after a successful append.
+    fn committed<S: SessionStore>(mut self, store: &S) -> Self {
+        match &mut self {
+            Self::AppendEntry { entry } => {
+                *entry = store
+                    .entry(&entry.id)
+                    .expect("committed entry exists")
+                    .clone();
+            }
+            Self::AppendRecord { record, .. } => {
+                *record = store
+                    .record(record.id())
+                    .expect("committed record exists")
+                    .clone();
+            }
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,7 +262,7 @@ impl GatedEffects {
             .pending
             .remove(index)
             .expect("action index was present");
-        Ok(action)
+        Ok(action.committed(store))
     }
 
     #[cfg(test)]
@@ -296,6 +316,10 @@ impl GatedEffects {
             return Err(EffectsError::Faulted(error));
         }
         self.pending.clear();
+        let actions = actions
+            .into_iter()
+            .map(|action| action.committed(store))
+            .collect::<Vec<_>>();
         for action in &actions {
             self.max_committed_seq = self.max_committed_seq.max(action.seq());
         }
@@ -392,7 +416,7 @@ impl GatedEffects {
     }
 }
 
-fn publish_committed(hub: &HarnessEventHub, action: &EffectAction) {
+pub(crate) fn publish_committed(hub: &HarnessEventHub, action: &EffectAction) {
     let payload = match action {
         EffectAction::AppendEntry { entry } => EventPayload::EntryCommitted(entry.clone()),
         EffectAction::AppendRecord { record, .. } => EventPayload::RecordCommitted(record.clone()),

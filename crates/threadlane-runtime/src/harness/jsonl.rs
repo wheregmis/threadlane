@@ -12,6 +12,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::SystemTime;
 
+fn stamp_lifecycle_time(record: &mut Record) {
+    if let Record::OperationStarted { wall_time_ms, .. }
+        | Record::OperationFinished { wall_time_ms, .. }
+        | Record::AbortObserved { wall_time_ms, .. } = record
+    {
+        if wall_time_ms.is_none() {
+            *wall_time_ms = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -760,6 +774,7 @@ impl SessionStore for JsonlStore {
                 }
                 super::EffectAction::AppendRecord { record, .. } => {
                     let mut record = record.clone().with_seq(next_seq);
+                    stamp_lifecycle_time(&mut record);
                     if let (Record::LaneMoved { target_leaf_id, .. }, Some(leaf)) =
                         (&mut record, &final_main_leaf)
                     {
@@ -855,6 +870,7 @@ impl SessionStore for JsonlStore {
             return Err(ReduceError::DuplicateId(record_id.into()));
         }
         record = record.with_seq(self.next_seq());
+        stamp_lifecycle_time(&mut record);
         self.reduction.record_guard(&record)?;
         append_json_line(&self.path, &record, record.sync_policy())?;
         (self.session_file_len, self.session_mtime) = file_fingerprint(&self.path)
@@ -1301,6 +1317,55 @@ mod tests {
         )
     }
 
+    #[test]
+    fn operation_wall_time_survives_single_and_atomic_commits_and_legacy_loads() {
+        use crate::harness::{EffectAction, OperationIntent, OperationOutcome};
+        let start = Record::OperationStarted {
+            id: "timed-run".into(), seq: 1, lane: "main".into(), timestamp: 7,
+            wall_time_ms: None, source_leaf_id: None, intent: OperationIntent::Run,
+        };
+        let finish = Record::OperationFinished {
+            id: "timed-finish".into(), seq: 2, lane: "main".into(), timestamp: 8,
+            wall_time_ms: None, run_id: "timed-run".into(),
+            outcome: OperationOutcome::Completed, error: None,
+        };
+        let now = || std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        for atomic in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("timing.jsonl");
+            let mut store = JsonlStore::open(&path).unwrap();
+            let before = now();
+            if atomic {
+                store.append_actions_atomically(&[
+                    EffectAction::AppendRecord { id: "start-action".into(), record: start.clone() },
+                    EffectAction::AppendRecord { id: "finish-action".into(), record: finish.clone() },
+                ]).unwrap();
+            } else {
+                store.append_record(start.clone()).unwrap();
+                store.append_record(finish.clone()).unwrap();
+            }
+            let after = now();
+            let stored = store.records().to_vec();
+            drop(store);
+            let restored = JsonlStore::open_read_only(&path).unwrap();
+            assert_eq!(restored.records(), stored);
+            for (record, logical) in restored.records().iter().zip([7, 8]) {
+                let (Record::OperationStarted { timestamp, wall_time_ms, .. }
+                    | Record::OperationFinished { timestamp, wall_time_ms, .. }) = record else {
+                    panic!("expected operation record");
+                };
+                assert_eq!(*timestamp, logical);
+                assert!((before..=after).contains(&wall_time_ms.unwrap()));
+            }
+        }
+        for legacy in [start, finish] {
+            let json = serde_json::to_string(&legacy).unwrap();
+            assert!(!json.contains("wall_time_ms"));
+            assert_eq!(serde_json::from_str::<Record>(&json).unwrap(), legacy);
+        }
+    }
+
     fn transcript_entry(index: usize, message: AgentMessage) -> crate::harness::Entry {
         crate::harness::Entry::new(
             format!("entry-{index}"),
@@ -1657,6 +1722,7 @@ mod tests {
             seq: 2,
             lane: "main".into(),
             timestamp: 1,
+            wall_time_ms: None,
             source_leaf_id: None,
             intent: crate::harness::OperationIntent::Run,
         };
@@ -1875,6 +1941,7 @@ mod tests {
                 seq: store.next_sequence(),
                 lane: "main".into(),
                 timestamp: 1,
+                wall_time_ms: None,
                 source_leaf_id: Some("msg-1".into()),
                 intent: crate::harness::OperationIntent::Run,
             })
@@ -2027,6 +2094,7 @@ mod tests {
                 seq: store.next_sequence(),
                 lane: "main".into(),
                 timestamp: 1,
+                wall_time_ms: None,
                 run_id: "run-1".into(),
                 outcome: crate::harness::OperationOutcome::Completed,
                 error: None,

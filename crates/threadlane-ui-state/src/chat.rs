@@ -242,7 +242,7 @@ pub(crate) fn cancel_prompt(
     stream_tx: Sender<ChatStreamEvent>,
 ) -> Result<(), String> {
     runtime.cancel()?;
-    runtime.finish_generation(Some("Generation cancelled".into()));
+    runtime.finish_generation(None);
     let _ = stream_tx.send(ChatStreamEvent::Agent {
         session_id: session_id.clone(),
         event: AgentEvent::AgentError {

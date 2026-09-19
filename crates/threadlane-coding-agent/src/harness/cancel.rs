@@ -101,6 +101,7 @@ impl CodingSessionHarness {
                 seq,
                 lane: "main".into(),
                 timestamp: timestamp(),
+                wall_time_ms: None,
                 run_id: run_id.into(),
                 attempt,
                 observation: AbortObservation::SignalSent,

@@ -462,6 +462,18 @@ impl ChatListView {
 
         let stream_model = model.clone();
         cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update(cx, |view, cx| {
+                    if view.model.read(cx).is_generating {
+                        cx.notify();
+                    }
+                }).is_err() {
+                    break;
+                }
+            }
+        }).detach();
+        cx.spawn(async move |this, cx| {
             // Dev hook: `THREADLANE_MIRROR_DEBUG=1` opens the mirror at
             // launch, so the popup can be observed without a model turn or
             // an approval prompt. It shows the last screenshot sidecar until
@@ -6176,6 +6188,12 @@ impl ChatListView {
                 "Expand"
             }
         );
+        let elapsed = self.model.read(cx).active_run_elapsed_seconds()
+            .map(|seconds| format!("{seconds}s"));
+        let disclosure_label = match &elapsed {
+            Some(elapsed) => format!("{disclosure_label}; elapsed {elapsed}"),
+            None => disclosure_label,
+        };
         let subagent_count = active_subagent_tasks.len();
         let subagent_label = (subagent_count > 0).then(|| {
             format!(
@@ -6235,6 +6253,8 @@ impl ChatListView {
                     .text_color(theme.muted_foreground)
                     .child(subagent_label.unwrap_or(category)),
             )
+            .children(elapsed.map(|elapsed| div().flex_none().text_xs()
+                .text_color(theme.muted_foreground).child(elapsed)))
             .child(
                 div().flex_none().text_color(theme.muted_foreground).child(
                     Icon::new(if self.progress_summary_expanded {
@@ -6472,6 +6492,14 @@ impl Render for ChatListView {
                 (self.current_tab == CentralTab::Chat && is_generating)
                     .then(|| self.render_progress_summary(cx)),
             )
+            .children((self.current_tab == CentralTab::Chat && !is_generating)
+                .then(|| self.model.read(cx).active_run_elapsed_seconds()).flatten()
+                .map(|seconds| {
+                    let label = format!("Last run · {seconds}s");
+                    div().id("last-run-duration").role(Role::Status)
+                        .aria_label(label.clone()).px_4().py_1().text_xs()
+                        .text_color(theme.muted_foreground).child(label)
+                }))
             .child(match self.current_tab {
                 CentralTab::Editor => self.editor.clone().into_any_element(),
                 CentralTab::Trajectory => self.render_trajectory(cx),

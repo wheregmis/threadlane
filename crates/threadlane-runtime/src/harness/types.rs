@@ -525,6 +525,9 @@ pub enum Record {
         seq: u64,
         lane: String,
         timestamp: u64,
+        /// Unix milliseconds at durable commit; absent in legacy journals.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wall_time_ms: Option<u64>,
         source_leaf_id: Option<String>,
         intent: OperationIntent,
     },
@@ -596,6 +599,9 @@ pub enum Record {
         seq: u64,
         lane: String,
         timestamp: u64,
+        /// Unix milliseconds at durable commit; independent of the logical clock.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wall_time_ms: Option<u64>,
         run_id: String,
         outcome: OperationOutcome,
         error: Option<String>,
@@ -838,6 +844,8 @@ pub enum Record {
         seq: u64,
         lane: String,
         timestamp: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wall_time_ms: Option<u64>,
         run_id: String,
         attempt: Option<u32>,
         observation: AbortObservation,
@@ -891,6 +899,7 @@ impl Record {
                 id,
                 lane,
                 timestamp,
+                wall_time_ms,
                 source_leaf_id,
                 intent,
                 ..
@@ -899,6 +908,7 @@ impl Record {
                 seq,
                 lane,
                 timestamp,
+                wall_time_ms,
                 source_leaf_id,
                 intent,
             },
@@ -919,6 +929,7 @@ impl Record {
                 id,
                 lane,
                 timestamp,
+                wall_time_ms,
                 run_id,
                 outcome,
                 error,
@@ -928,6 +939,7 @@ impl Record {
                 seq,
                 lane,
                 timestamp,
+                wall_time_ms,
                 run_id,
                 outcome,
                 error,

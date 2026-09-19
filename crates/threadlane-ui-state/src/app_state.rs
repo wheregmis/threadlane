@@ -53,6 +53,7 @@ pub struct AppState {
         HashMap<SessionProjectionKey, threadlane_runtime::harness::SessionDiagnostics>,
     session_metrics: HashMap<SessionProjectionKey, SessionMetricsInfo>,
     context_windows: HashMap<SessionProjectionKey, ContextWindowInfo>,
+    run_timings: HashMap<SessionProjectionKey, RunTiming>,
     /// Settings each ACP session's agent exposes, keyed by session id.
     ///
     /// Keyed by session rather than by model id because two sessions on the
@@ -291,6 +292,7 @@ impl AppState {
             diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
             context_windows: HashMap::new(),
+            run_timings: HashMap::new(),
             acp_config_options: HashMap::new(),
             pending_acp_config: HashMap::new(),
             stashed_prompts: HashMap::new(),
@@ -1745,6 +1747,7 @@ impl AppState {
     ) -> Result<(), String> {
         let result = compute_full_session_projection(session_file)?;
         let key = Self::projection_key(session_id, session_file);
+        self.apply_run_timing(&key, result.run_timing);
         self.diagnostics_by_session
             .insert(key.clone(), result.diagnostics);
         self.diagnostics_revision = self.diagnostics_revision.wrapping_add(1);
@@ -2862,6 +2865,7 @@ impl AppState {
         }
         let key = Self::projection_key(session_id, session_file);
         self.active_plan = result.plan;
+        self.apply_run_timing(&key, result.run_timing);
         // Hydration snapshots lag live execution: the file is parsed in the
         // background while tool/subagent events keep arriving, and deferred
         // replay on session switch already consumed its queue into these maps.
@@ -3538,6 +3542,28 @@ impl AppState {
             .and_then(|key| self.context_windows.get(&key))
     }
 
+    pub fn active_run_elapsed_seconds(&self) -> Option<u64> {
+        let key = self.active_session_projection_key()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).ok()?;
+        self.run_timings.get(&key)?.elapsed_seconds(
+            u64::try_from(now.as_millis()).ok()?, self.is_generating,
+        )
+    }
+
+    fn apply_run_timing(&mut self, key: &SessionProjectionKey, timing: Option<RunTiming>) {
+        let Some(mut timing) = timing else { return };
+        if let Some(current) = self.run_timings.get(key) {
+            if timing.source_seq < current.source_seq {
+                return;
+            }
+            // A late snapshot of the previous run must not revive its timer
+            // after the user has submitted another prompt.
+            timing.suppressed = current.suppressed && timing.start_seq <= current.start_seq;
+        }
+        self.run_timings.insert(key.clone(), timing);
+    }
+
     pub fn drain_chat_stream(&mut self, events: Vec<ChatStreamEvent>) -> bool {
         let active_session_id = self.active_session_id.clone();
         let deferred = active_session_id
@@ -3552,6 +3578,16 @@ impl AppState {
                 ChatStreamEvent::Agent { session_id, event }
                     if self.active_session_id.as_deref() == Some(&session_id) =>
                 {
+                    if matches!(&event, AgentEvent::AgentStart) {
+                        if let Some(key) = self.active_session_projection_key() {
+                            self.pending_hydrations.push(SessionHydrationRequest {
+                                session_id: key.session_id,
+                                session_file: key.session_file,
+                                reload_messages: false,
+                                runtime_options: None,
+                            });
+                        }
+                    }
                     if matches!(&event, AgentEvent::TurnStart { .. }) {
                         if let Some(message) = self
                             .messages_mut()
@@ -4180,6 +4216,11 @@ impl AppState {
 
         self.is_generating = true;
         self.session_status = Some("Working…".into());
+        if let Some(timing) = self.active_session_projection_key()
+            .and_then(|key| self.run_timings.get_mut(&key))
+        {
+            timing.suppressed = true;
+        }
 
         // Refresh project sessions without blocking the UI thread.
         self.request_session_refresh(&work_dir);

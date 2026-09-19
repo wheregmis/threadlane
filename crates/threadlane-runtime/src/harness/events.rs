@@ -606,6 +606,44 @@ mod tests {
     use super::*;
     use crate::harness::MemoryStore;
 
+    #[test]
+    fn lifecycle_events_match_durable_commits() {
+        use crate::harness::{AgentHarness, JsonlStore, OperationOutcome};
+
+        for atomic in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("events.jsonl");
+            let store = JsonlStore::open(&path).unwrap();
+            let hub = HarnessEventHub::new(16);
+            let mut subscription = hub.subscribe(&store).unwrap();
+            let mut harness = AgentHarness::with_events(store, hub.clone());
+            harness.start_operation("run", None, OperationIntent::Run).unwrap();
+            assert!(hub.poll(&mut subscription).unwrap().is_empty());
+            if atomic {
+                harness.drive_to_completion_atomically().unwrap();
+            } else {
+                harness.drive_to_completion().unwrap();
+            }
+            harness.finish_operation("run", OperationOutcome::Completed, None).unwrap();
+            if atomic {
+                harness.drive_to_completion_atomically().unwrap();
+            } else {
+                harness.drive_to_completion().unwrap();
+            }
+            let events = hub.poll(&mut subscription).unwrap();
+            assert_eq!(events.len(), 2);
+            let restored = JsonlStore::open_read_only(&path).unwrap();
+            for (event, saved) in events.iter().zip(restored.records()) {
+                assert_eq!(event.payload, EventPayload::RecordCommitted(saved.clone()));
+                let (Record::OperationStarted { wall_time_ms, .. }
+                    | Record::OperationFinished { wall_time_ms, .. }) = saved else {
+                    panic!("expected operation record");
+                };
+                assert!(wall_time_ms.is_some());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn subscription_waits_for_publication_without_polling() {
         let hub = HarnessEventHub::new(8);

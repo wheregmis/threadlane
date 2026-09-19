@@ -200,6 +200,7 @@ mod tests {
                 seq: 4,
                 lane: "main".into(),
                 timestamp: 4,
+                wall_time_ms: None,
                 source_leaf_id: Some("entry".into()),
                 intent: OperationIntent::Run,
             })

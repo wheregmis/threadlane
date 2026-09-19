@@ -89,6 +89,7 @@ pub fn compute_full_session_projection(
         AppState::project_trajectory_from_store(&store);
     let subagents = project_subagents_from_store(&store);
     Ok(SessionProjectionResult {
+        run_timing: project_run_timing(&store),
         plan: store.plan(),
         trajectory,
         subagents,
@@ -96,6 +97,39 @@ pub fn compute_full_session_projection(
         metrics,
         token_usage,
         context_window,
+    })
+}
+
+pub(crate) fn project_run_timing(store: &impl SessionStore) -> Option<crate::types::RunTiming> {
+    use threadlane_runtime::harness::{AbortObservation, OperationIntent, Record};
+    let (id, start_seq, started_at_ms) = store.records().iter().rev().find_map(|record| {
+        match record {
+            Record::OperationStarted { id, seq, lane, intent: OperationIntent::Run, wall_time_ms, .. }
+                if lane == "main" => Some((id, *seq, *wall_time_ms)),
+            _ => None,
+        }
+    })?;
+    let finish = store.records().iter().rev().find_map(|record| match record {
+        Record::OperationFinished { run_id, lane, seq, wall_time_ms, .. }
+            if lane == "main" && run_id == id => Some((*seq, *wall_time_ms)),
+        _ => None,
+    });
+    // Abort acknowledgement precedes reconciliation, which may happen only
+    // when the session is reopened. Do not count that intervening idle time.
+    let abort = store.records().iter().find_map(|record| match record {
+        Record::AbortObserved { run_id, lane, seq, wall_time_ms,
+            observation: AbortObservation::SignalSent, acknowledged: true, .. }
+            if lane == "main" && run_id == id => Some((*seq, *wall_time_ms)),
+        _ => None,
+    });
+    let terminal = abort.into_iter().chain(finish).min_by_key(|(seq, _)| *seq);
+    Some(crate::types::RunTiming {
+        start_seq,
+        source_seq: finish.into_iter().chain(abort).map(|(seq, _)| seq).max().unwrap_or(start_seq),
+        started_at_ms,
+        finished_at_ms: terminal.and_then(|(_, time)| time),
+        finished: terminal.is_some(),
+        suppressed: false,
     })
 }
 

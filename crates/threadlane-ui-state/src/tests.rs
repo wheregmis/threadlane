@@ -12,6 +12,69 @@ use threadlane_runtime::harness::{
 };
 
 #[test]
+fn run_timing_uses_durable_identity_and_survives_selection_and_stale_hydration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("timing.jsonl");
+    let mut store = JsonlStore::open(&path).unwrap();
+    store.append_record(Record::OperationStarted {
+        id: "run".into(), seq: 1, lane: "main".into(), timestamp: 1,
+        wall_time_ms: Some(10_000), source_leaf_id: None, intent: OperationIntent::Run,
+    }).unwrap();
+    let running = compute_full_session_projection(&path).unwrap().run_timing.unwrap();
+    assert_eq!(running.elapsed_seconds(17_999, true), Some(7));
+    assert_eq!(running.elapsed_seconds(9_000, true), None);
+    assert_eq!(running.elapsed_seconds(17_000, false), None);
+    store.append_record(Record::AbortObserved {
+        id: "abort".into(), seq: 2, lane: "main".into(), timestamp: 2,
+        wall_time_ms: Some(22_000), run_id: "run".into(), attempt: None,
+        observation: threadlane_runtime::harness::AbortObservation::SignalSent,
+        initiator: threadlane_runtime::harness::AbortInitiator::User,
+        target: threadlane_runtime::harness::AbortTarget::ActiveRun,
+        acknowledged: true, detail: None,
+    }).unwrap();
+    let stopped = compute_full_session_projection(&path).unwrap().run_timing.unwrap();
+    assert_eq!(stopped.elapsed_seconds(99_000, false), Some(12));
+    store.append_record(Record::OperationFinished {
+        id: "finished".into(), seq: 3, lane: "main".into(), timestamp: 3,
+        wall_time_ms: Some(99_000), run_id: "run".into(),
+        outcome: OperationOutcome::Aborted, error: None,
+    }).unwrap();
+    store.append_record(Record::OperationStarted {
+        id: "compaction".into(), seq: 4, lane: "main".into(), timestamp: 4,
+        wall_time_ms: Some(100_000), source_leaf_id: None, intent: OperationIntent::Compaction,
+    }).unwrap();
+    let finished = compute_full_session_projection(&path).unwrap().run_timing.unwrap();
+    assert_eq!(finished.elapsed_seconds(99_000, false), Some(12));
+    assert_eq!(finished.elapsed_seconds(99_000, true), None);
+    let mut legacy = finished.clone();
+    legacy.started_at_ms = None;
+    assert_eq!(legacy.elapsed_seconds(99_000, false), None);
+    legacy = finished.clone();
+    legacy.finished_at_ms = None;
+    assert_eq!(legacy.elapsed_seconds(99_000, false), None);
+
+    let mut state = AppState::load_from_registry(Vec::new());
+    state.active_work_dir = Some(dir.path().to_path_buf());
+    state.active_session_id = Some("one".into());
+    let key = state.active_session_projection_key().unwrap();
+    state.apply_run_timing(&key, Some(finished.clone()));
+    state.apply_run_timing(&key, Some(running));
+    assert_eq!(state.active_run_elapsed_seconds(), Some(12));
+    state.active_session_id = Some("two".into());
+    assert_eq!(state.active_run_elapsed_seconds(), None);
+    state.active_session_id = Some("one".into());
+    assert_eq!(state.active_run_elapsed_seconds(), Some(12));
+    state.run_timings.get_mut(&key).unwrap().suppressed = true;
+    state.apply_run_timing(&key, Some(finished.clone()));
+    assert_eq!(state.active_run_elapsed_seconds(), None);
+    let mut next = finished;
+    next.start_seq = 4;
+    next.source_seq = 5;
+    state.apply_run_timing(&key, Some(next));
+    assert_eq!(state.active_run_elapsed_seconds(), Some(12));
+}
+
+#[test]
 fn filesystem_root_is_not_an_attachable_project() {
     assert!(!super::is_attachable_project_root(Path::new("/")));
     assert!(super::is_attachable_project_root(Path::new("/project")));
@@ -720,7 +783,7 @@ fn worktree_queue_and_stop_use_the_existing_session_runtime() {
         is_expanded: true,
     });
     state.active_work_dir = Some(project);
-    state.active_session_id = Some(session.id);
+    state.active_session_id = Some(session.id.clone());
     let runtime = state.ensure_session_runtime(worktree, session_file);
     runtime.begin_generation().unwrap();
     state.is_generating = true;
@@ -734,10 +797,15 @@ fn worktree_queue_and_stop_use_the_existing_session_runtime() {
     state.cancel_generation().unwrap();
     assert!(!state.is_generating);
     assert!(!runtime.is_generating());
+    assert_eq!(runtime.status(), SessionRuntimeStatus::Ready);
+    assert_eq!(state.session_attention(&session), SessionAttention::Idle);
     assert_eq!(
         state.session_status.as_deref(),
         Some("Generation cancelled")
     );
+    let events = take_stream_events(&mut state, 16);
+    state.drain_chat_stream(events);
+    assert_eq!(state.session_attention(&session), SessionAttention::Idle);
 }
 
 #[test]
@@ -2237,6 +2305,7 @@ fn app_state_startup_defers_messages_and_full_projection() {
             seq: 99,
             lane: "main".into(),
             timestamp: 99,
+            wall_time_ms: None,
             source_leaf_id: None,
             intent: OperationIntent::Run,
         })
@@ -2418,6 +2487,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
             seq: 1,
             lane: "main".into(),
             timestamp: 1,
+            wall_time_ms: None,
             source_leaf_id: None,
             intent: OperationIntent::Run,
         })
@@ -2545,6 +2615,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
             seq: 9,
             lane: "main".into(),
             timestamp: 9,
+            wall_time_ms: None,
             run_id: "run-1".into(),
             outcome: OperationOutcome::Completed,
             error: None,
@@ -2556,6 +2627,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
             seq: 10,
             lane: "main".into(),
             timestamp: 10,
+            wall_time_ms: None,
             source_leaf_id: Some("tool-result-1".into()),
             intent: OperationIntent::Run,
         })
@@ -2650,6 +2722,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
             seq: 16,
             lane: "main".into(),
             timestamp: 16,
+            wall_time_ms: None,
             run_id: "run-2".into(),
             outcome: OperationOutcome::Completed,
             error: None,
@@ -3374,6 +3447,7 @@ fn startup_hydration_from_project_registry_populates_all_views() {
             seq: 10,
             lane: "main".into(),
             timestamp: 10,
+            wall_time_ms: None,
             source_leaf_id: None,
             intent: OperationIntent::Run,
         })
@@ -3511,6 +3585,7 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
             seq: 1,
             lane: "main".into(),
             timestamp: 1,
+            wall_time_ms: None,
             source_leaf_id: None,
             intent: OperationIntent::Run,
         })
@@ -3521,6 +3596,7 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
             seq: 2,
             lane: "main".into(),
             timestamp: 2,
+            wall_time_ms: None,
             run_id: "run-branch-a".into(),
             outcome: OperationOutcome::Completed,
             error: None,
@@ -3532,6 +3608,7 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
             seq: 3,
             lane: "main".into(),
             timestamp: 3,
+            wall_time_ms: None,
             source_leaf_id: None,
             intent: OperationIntent::Run,
         })
@@ -3542,6 +3619,7 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
             seq: 4,
             lane: "main".into(),
             timestamp: 4,
+            wall_time_ms: None,
             run_id: "run-branch-b".into(),
             outcome: OperationOutcome::Completed,
             error: None,

@@ -349,6 +349,7 @@ pub struct SessionHydrationRequest {
 
 /// The complete durable UI projection built from one JSONL store parse.
 pub struct SessionProjectionResult {
+    pub run_timing: Option<RunTiming>,
     pub plan: SessionPlan,
     pub trajectory: Vec<TrajectoryEntry>,
     pub subagents: Vec<SubagentActivityInfo>,
@@ -356,6 +357,27 @@ pub struct SessionProjectionResult {
     pub metrics: SessionMetricsInfo,
     pub token_usage: TokenUsage,
     pub context_window: Option<ContextWindowInfo>,
+}
+
+/// Timing of the latest foreground run, projected from the session journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunTiming {
+    pub(crate) start_seq: u64,
+    pub(crate) source_seq: u64,
+    pub(crate) started_at_ms: Option<u64>,
+    pub(crate) finished_at_ms: Option<u64>,
+    pub(crate) finished: bool,
+    pub(crate) suppressed: bool,
+}
+
+impl RunTiming {
+    pub(crate) fn elapsed_seconds(&self, now_ms: u64, generating: bool) -> Option<u64> {
+        if self.suppressed || generating == self.finished {
+            return None;
+        }
+        let end = if self.finished { self.finished_at_ms? } else { now_ms };
+        end.checked_sub(self.started_at_ms?).map(|ms| ms / 1000)
+    }
 }
 
 #[derive(Default)]
