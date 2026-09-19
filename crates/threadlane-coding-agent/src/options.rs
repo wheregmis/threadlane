@@ -1,7 +1,7 @@
-use threadlane_protocol::browser::BrowserBridge;
-use threadlane_prompt::SystemPromptConfig;
 use serde::Serialize;
 use std::path::PathBuf;
+use threadlane_prompt::SystemPromptConfig;
+use threadlane_protocol::browser::BrowserBridge;
 use threadlane_skills::SkillRegistry;
 use threadlane_wasi::WasiExtensionManager;
 

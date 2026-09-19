@@ -20,7 +20,10 @@ impl CodingSessionHarness {
     /// because two consecutive provider messages can legitimately have the
     /// same serialized value.
     #[cfg(test)]
-    pub(super) fn append_synced_message(&mut self, message: AgentMessage) -> Result<String, String> {
+    pub(super) fn append_synced_message(
+        &mut self,
+        message: AgentMessage,
+    ) -> Result<String, String> {
         self.append_message_inner(message, false, false)
     }
 
@@ -368,5 +371,4 @@ impl CodingSessionHarness {
             .drive_to_completion()
             .map_err(|error| error.to_string())
     }
-
 }

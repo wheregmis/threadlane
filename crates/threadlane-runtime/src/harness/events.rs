@@ -3,6 +3,7 @@ use super::types::{Entry, OperationIntent, Record, ReduceError, ReducedState};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
@@ -318,9 +319,70 @@ pub struct HarnessEvent {
     operation_intent: Option<OperationIntent>,
 }
 
+impl HarnessEvent {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn payload(&self) -> &EventPayload {
+        &self.payload
+    }
+
+    pub fn lane(&self) -> Option<&str> {
+        self.lane.as_deref()
+    }
+
+    pub fn run_id(&self) -> Option<&str> {
+        self.run_id.as_deref()
+    }
+
+    pub fn turn(&self) -> Option<u32> {
+        self.turn
+    }
+
+    pub fn recovery_id(&self) -> Option<&str> {
+        self.recovery_id.as_deref()
+    }
+
+    pub fn operation_intent(&self) -> Option<&OperationIntent> {
+        self.operation_intent.as_ref()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventError {
     Gap { requested: u64, oldest: u64 },
+    Unavailable(String),
+}
+
+impl fmt::Display for EventError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gap { requested, oldest } => write!(
+                formatter,
+                "durable event cursor gap: requested {requested}, oldest available {oldest}"
+            ),
+            Self::Unavailable(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for EventError {}
+
+impl EventError {
+    pub fn gap(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Gap { requested, oldest } => Some((*requested, *oldest)),
+            Self::Unavailable(_) => None,
+        }
+    }
+    pub fn is_gap(&self) -> bool {
+        matches!(self, Self::Gap { .. })
+    }
+
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable(_))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -504,14 +566,14 @@ impl HarnessEventHub {
             .clone()
     }
 
-    pub(crate) fn subscribe<S: SessionStore>(
+    pub fn subscribe<S: SessionStore>(
         &self,
         store: &S,
     ) -> Result<Subscription, ReduceError> {
         self.subscribe_for_lane(store, None)
     }
 
-    pub(crate) fn subscribe_for_lane<S: SessionStore>(
+    pub fn subscribe_for_lane<S: SessionStore>(
         &self,
         store: &S,
         lane: Option<&str>,
@@ -549,7 +611,10 @@ impl HarnessEventHub {
         })
     }
 
-    fn poll(&self, subscription: &mut Subscription) -> Result<Vec<HarnessEvent>, EventError> {
+    pub fn poll(
+        &self,
+        subscription: &mut Subscription,
+    ) -> Result<Vec<HarnessEvent>, EventError> {
         let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let Some(oldest) = state.events.front().map(|event| event.id) else {
             return Ok(Vec::new());
@@ -606,6 +671,20 @@ mod tests {
     use super::*;
     use crate::harness::MemoryStore;
 
+    #[test]
+    fn event_gap_has_actionable_display_text() {
+        let error = EventError::Gap {
+            requested: 3,
+            oldest: 9,
+        };
+        assert_eq!(
+            error.to_string(),
+            "durable event cursor gap: requested 3, oldest available 9"
+        );
+        assert!(error.is_gap());
+        assert_eq!(error.gap(), Some((3, 9)));
+        assert!(!error.is_unavailable());
+    }
     #[test]
     fn lifecycle_events_match_durable_commits() {
         use crate::harness::{AgentHarness, JsonlStore, OperationOutcome};

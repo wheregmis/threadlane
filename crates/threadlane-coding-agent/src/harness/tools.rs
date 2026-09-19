@@ -386,5 +386,4 @@ impl CodingSessionHarness {
         }
         Ok(())
     }
-
 }

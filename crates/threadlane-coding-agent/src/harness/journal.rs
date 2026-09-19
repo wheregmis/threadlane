@@ -2,7 +2,10 @@ use super::*;
 
 impl CodingSessionHarness {
     #[cfg(test)]
-    pub(crate) fn transcript(&self, lane: &str) -> threadlane_runtime::harness::TranscriptProjection {
+    pub(crate) fn transcript(
+        &self,
+        lane: &str,
+    ) -> threadlane_runtime::harness::TranscriptProjection {
         self.store.store().transcript(lane)
     }
 

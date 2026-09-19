@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
-use threadlane_protocol::{AgentEvent, ImageAttachment, SessionPlan, TokenUsage};
 use threadlane_acp::AcpConfigOption;
+use threadlane_protocol::{AgentEvent, ImageAttachment, SessionPlan, TokenUsage};
 
 use crate::AppState;
 use threadlane_coding_agent::controller::{SessionRuntime, SessionRuntimeStatus};
@@ -277,6 +277,11 @@ pub enum ChatStreamEvent {
         session_id: String,
         session_file: PathBuf,
     },
+    Scheduled {
+        session_id: String,
+        session_file: PathBuf,
+        result: Option<Result<String, String>>,
+    },
     TitleGenerated {
         session_id: String,
         session_file: PathBuf,
@@ -375,7 +380,11 @@ impl RunTiming {
         if self.suppressed || generating == self.finished {
             return None;
         }
-        let end = if self.finished { self.finished_at_ms? } else { now_ms };
+        let end = if self.finished {
+            self.finished_at_ms?
+        } else {
+            now_ms
+        };
         end.checked_sub(self.started_at_ms?).map(|ms| ms / 1000)
     }
 }

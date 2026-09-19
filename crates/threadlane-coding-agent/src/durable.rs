@@ -1,29 +1,29 @@
-use super::cancellation::{recover_v2_subagent_records, AgentRunTask};
+use super::cancellation::{AgentRunTask, recover_v2_subagent_records};
 use super::capabilities::dispatch_hook_requests;
 use super::harness::{
     CodingSessionHarness, InterruptedSubagentRecoveryState, SubagentLaneIdentity,
 };
 use super::runtime::CodingAgent;
 use super::subagents::{
-    run_subagent_task, subagent_workspace, SubagentLaneStatus, SubagentRunContext,
-    NEXT_SUBAGENT_UI_RUN_ID,
+    NEXT_SUBAGENT_UI_RUN_ID, SubagentLaneStatus, SubagentRunContext, run_subagent_task,
+    subagent_workspace,
 };
-use threadlane_compaction::CompactionParams;
-use threadlane_context::{context_budget_for_project, BudgetConfig};
-use threadlane_skills::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
 use log::warn;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use threadlane_compaction::CompactionParams;
+use threadlane_context::{BudgetConfig, context_budget_for_project};
+use threadlane_protocol::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
 use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
     Reducer, SessionStore,
 };
-use threadlane_protocol::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
+use threadlane_skills::agents::AgentDefinition;
 use tokio::sync::broadcast;
 
 pub(crate) const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
@@ -311,7 +311,8 @@ impl CodingAgent {
                                     active_effort,
                                     &state.target_model,
                                     state.target_reasoning,
-                                ) {
+                                )
+                            {
                                 let _ = event_tx.send(threadlane_protocol::AgentEvent::PrewalkCompleted {
                                     model: state.target_model.clone(),
                                     message: format!(
@@ -351,9 +352,8 @@ impl CodingAgent {
                             .system_prompt
                             .contains(threadlane_orchestrator::PREWALK_CHECKLIST_HEADER)
                         {
-                            turn.system_prompt.push_str(
-                                &threadlane_orchestrator::build_checklist_directive(),
-                            );
+                            turn.system_prompt
+                                .push_str(&threadlane_orchestrator::build_checklist_directive());
                         }
                     }
                     // The handoff crosses providers mid-turn: re-resolve the
@@ -434,20 +434,32 @@ impl CodingAgent {
                     };
                     let parent_leaf =
                         self.prompt_parent_leaf(AgentMessage::user(prompt, Vec::new()), true);
-                    *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
+                    *self
+                        .dispatch_parent_leaf
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = parent_leaf;
                     let result = match (self.agent_runner)(vec![task], false, None).await {
                         Ok(result) => result,
                         Err(err) => {
-                            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                            *self
+                                .dispatch_parent_leaf
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner()) = None;
                             return Err(format!("Subagent Error: {err}"));
                         }
                     };
                     let output = result["output"].as_str().unwrap_or_default().to_string();
                     if let Err(error) = self.commit_completed_subagent_lanes() {
-                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                        *self
+                            .dispatch_parent_leaf
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = None;
                         return Err(format!("Subagent Sync Error: {error}"));
                     }
-                    *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                    *self
+                        .dispatch_parent_leaf
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = None;
 
                     if let Some(harness) = self.harness.as_mut() {
                         let _ = harness.append_message_to_lane(
@@ -860,12 +872,11 @@ impl CodingAgent {
             .to_owned();
         let retained_tail = compaction_retained_tail(&compacted);
         let config = self.agent.config().clone();
-        let pre_tokens =
-            threadlane_compaction::estimate_request_tokens(
-                &before,
-                None,
-                &CompactionParams::from(&config),
-            );
+        let pre_tokens = threadlane_compaction::estimate_request_tokens(
+            &before,
+            None,
+            &CompactionParams::from(&config),
+        );
         let compacted_messages = before
             .len()
             .saturating_sub(compacted.len().saturating_sub(1));
@@ -899,12 +910,11 @@ impl CodingAgent {
         compacted_messages: usize,
     ) -> Result<(), String> {
         let config = self.agent.config().clone();
-        let retained_tail_tokens =
-            threadlane_compaction::estimate_request_tokens(
-                retained_tail,
-                None,
-                &CompactionParams::from(&config),
-            );
+        let retained_tail_tokens = threadlane_compaction::estimate_request_tokens(
+            retained_tail,
+            None,
+            &CompactionParams::from(&config),
+        );
         let model = self.agent.model().to_string();
         if let Some(journal) = self.harness.as_mut() {
             journal.ensure_fresh()?;

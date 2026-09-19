@@ -1,34 +1,34 @@
 use super::broker::{
-    HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS,
+    HostCapabilityHandler, MAX_BROKER_CONTINUATION_ROUNDS, ManagedProcessRegistry,
 };
 use super::cancellation::AgentRunTask;
 use super::context_snapshots::{ContextSnapshotToolExecutor, MAX_SUBAGENT_CONTEXT_REFS};
 use super::mailbox::{HubToolExecutor, ReviveHook};
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
-use threadlane_skills::agents::{discover_agents, AgentScope};
-use threadlane_protocol::browser::BrowserBridge;
-use threadlane_browser::BrowserToolExecutor;
-use threadlane_wasi::broker::{
-    BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
-};
-use threadlane_mcp::McpManager;
 use crate::mcp::McpToolExecutor;
-use threadlane_permission::{PermissionHandle, PermissionManager};
-use threadlane_plan::{SessionPlanStore, UpdatePlanToolExecutor};
-use threadlane_question::{AskQuestionToolExecutor, QuestionHandle};
 use async_trait::async_trait;
 use log::warn;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
+use threadlane_browser::BrowserToolExecutor;
+use threadlane_mcp::McpManager;
+use threadlane_permission::{PermissionHandle, PermissionManager};
+use threadlane_plan::{SessionPlanStore, UpdatePlanToolExecutor};
+use threadlane_protocol::browser::BrowserBridge;
+use threadlane_protocol::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
+use threadlane_question::{AskQuestionToolExecutor, QuestionHandle};
 use threadlane_runtime::Capability;
 use threadlane_runtime::ToolPolicy;
-use threadlane_protocol::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
+use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
+use threadlane_skills::agents::{AgentScope, discover_agents};
 use threadlane_skills::{LoadSkillToolExecutor as SkillLoader, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
+use threadlane_wasi::broker::{
+    BROKER_API_VERSION, BrokerError, CapabilityDispatcher, HostBrokerRequest,
+};
 use tokio::sync::broadcast;
 
 const SUBAGENT_TOOL_NAME: &str = "subagent";
@@ -517,11 +517,13 @@ mod subagent_definition_tests {
     fn subagent_tool_supports_background_wait_flag() {
         let definition = subagent_tool_definition();
         assert!(definition.parameters["properties"]["wait"].is_object());
-        assert!(definition
-            .description
-            .as_deref()
-            .unwrap_or_default()
-            .contains("hub"));
+        assert!(
+            definition
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("hub")
+        );
     }
 
     #[test]
@@ -1138,11 +1140,13 @@ mod github_tests {
                 coding_config: None,
                 browser: threadlane_protocol::browser::BrowserBridge::unavailable(),
             });
-            assert!(agent
-                .agent
-                .configured_tool_definitions()
-                .iter()
-                .any(|definition| definition.name == CREATE_DRAFT_PR_TOOL_NAME));
+            assert!(
+                agent
+                    .agent
+                    .configured_tool_definitions()
+                    .iter()
+                    .any(|definition| definition.name == CREATE_DRAFT_PR_TOOL_NAME)
+            );
         }
     }
 
@@ -1155,10 +1159,12 @@ mod github_tests {
         let definition = &definitions[0];
 
         assert_eq!(definition.name, CREATE_DRAFT_PR_TOOL_NAME);
-        assert!(definition
-            .description
-            .as_deref()
-            .is_some_and(|description| description.contains("Publish the current branch")));
+        assert!(
+            definition
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("Publish the current branch"))
+        );
         assert_eq!(
             definition.parameters["required"],
             serde_json::json!(["base", "title", "body"])

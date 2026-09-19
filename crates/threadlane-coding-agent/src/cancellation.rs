@@ -1,13 +1,13 @@
-use super::harness::{harness_cancellation_state, CodingSessionHarness};
+use super::harness::{CodingSessionHarness, harness_cancellation_state};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use threadlane_protocol::{AgentEvent, AgentMessage};
 use threadlane_runtime::harness::{
     JsonlStore, OperationOutcome, ProvisionedEntry, Record as HarnessRecord, Reducer,
 };
-use threadlane_protocol::{AgentEvent, AgentMessage};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,9 +268,11 @@ mod tests {
         assert!(outcome.unwrap_err().is_cancelled());
 
         let replacement = tokio::spawn(std::future::pending::<()>());
-        assert!(cancellation
-            .track_active_run(replacement.abort_handle())
-            .is_ok());
+        assert!(
+            cancellation
+                .track_active_run(replacement.abort_handle())
+                .is_ok()
+        );
         replacement.abort();
     }
 }

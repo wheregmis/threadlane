@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use threadlane_protocol::{AgentMessage, AgentToolDefinition, ToolExecutor};
 use threadlane_runtime::harness::{
     ContextSnapshot, ContextSnapshotLoadOutcome, JsonlStore, Record, Reducer, TraceString,
 };
-use threadlane_protocol::{AgentMessage, AgentToolDefinition, ToolExecutor};
 
 use super::durable::sha256_hex;
 use super::harness::CodingSessionHarness;
@@ -288,7 +288,7 @@ impl ToolExecutor for ContextSnapshotToolExecutor {
                     Some(_) => {
                         return Some(Err(
                             "Invalid manage_context arguments: path must be a string".into(),
-                        ))
+                        ));
                     }
                 };
                 let before_context_id =
@@ -448,12 +448,13 @@ pub(crate) fn resolve_context_snapshot(
 #[cfg(test)]
 mod tests {
     use super::{
-        compacted_context_snapshot_index_for_sources, is_local_path, ContextSnapshotLoadOutcome,
-        ContextSnapshotToolExecutor, JsonlStore, Record, Reducer, MAX_CONTEXT_LIST_RESULTS,
+        ContextSnapshotLoadOutcome, ContextSnapshotToolExecutor, JsonlStore,
+        MAX_CONTEXT_LIST_RESULTS, Record, Reducer, compacted_context_snapshot_index_for_sources,
+        is_local_path,
     };
     use crate::harness::CodingSessionHarness;
-    use threadlane_runtime::harness::SessionStore;
     use threadlane_protocol::{AgentMessage, ToolExecutor};
+    use threadlane_runtime::harness::SessionStore;
 
     async fn snapshot_session() -> (tempfile::TempDir, std::path::PathBuf, String) {
         let dir = tempfile::tempdir().unwrap();
@@ -657,10 +658,16 @@ mod tests {
 
         assert!(index.len() <= MAX_CONTEXT_LIST_RESULTS);
         assert!(!index.is_empty());
-        assert!(index.iter().any(|item| item["context_id"]
-            == format!("ctx-v2-tool-result-{run_id}-read-0")));
-        assert!(!index.iter().any(|item| item["context_id"]
-            == format!("ctx-v2-tool-result-{run_id}-read-1")));
+        assert!(
+            index
+                .iter()
+                .any(|item| item["context_id"] == format!("ctx-v2-tool-result-{run_id}-read-0"))
+        );
+        assert!(
+            !index
+                .iter()
+                .any(|item| item["context_id"] == format!("ctx-v2-tool-result-{run_id}-read-1"))
+        );
     }
 
     #[test]
@@ -718,12 +725,14 @@ mod tests {
         .unwrap();
 
         let store = JsonlStore::open(&session_file).unwrap();
-        assert!(Reducer::reduce(&store)
-            .unwrap()
-            .lane("main")
-            .unwrap()
-            .context_snapshots
-            .is_empty());
+        assert!(
+            Reducer::reduce(&store)
+                .unwrap()
+                .lane("main")
+                .unwrap()
+                .context_snapshots
+                .is_empty()
+        );
         let executor = ContextSnapshotToolExecutor::new(session_file, dir.path().into());
         assert_eq!(
             executor
@@ -826,12 +835,14 @@ mod tests {
                 .unwrap_err(),
             "Context snapshot missing: missing"
         );
-        assert!(executor
-            .execute_tool("manage_context", "not-json")
-            .await
-            .unwrap()
-            .unwrap_err()
-            .starts_with("Invalid manage_context arguments:"));
+        assert!(
+            executor
+                .execute_tool("manage_context", "not-json")
+                .await
+                .unwrap()
+                .unwrap_err()
+                .starts_with("Invalid manage_context arguments:")
+        );
     }
 
     #[tokio::test]
@@ -848,17 +859,19 @@ mod tests {
             .unwrap_err();
         assert!(missing.starts_with("Context snapshot missing:"));
         assert!(!missing.contains("snapshot body"));
-        assert!(JsonlStore::open(&session_file)
-            .unwrap()
-            .records()
-            .iter()
-            .any(|record| matches!(
-                record,
-                Record::ContextSnapshotLoaded {
-                    outcome: ContextSnapshotLoadOutcome::Missing,
-                    ..
-                }
-            )));
+        assert!(
+            JsonlStore::open(&session_file)
+                .unwrap()
+                .records()
+                .iter()
+                .any(|record| matches!(
+                    record,
+                    Record::ContextSnapshotLoaded {
+                        outcome: ContextSnapshotLoadOutcome::Missing,
+                        ..
+                    }
+                ))
+        );
 
         std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
         let session = std::fs::read_to_string(&session_file).unwrap();
@@ -886,17 +899,19 @@ mod tests {
             .unwrap_err();
         assert!(corrupt.starts_with("Context snapshot corrupt:"));
         assert!(!corrupt.contains("snapshot body"));
-        assert!(JsonlStore::open(&session_file)
-            .unwrap()
-            .records()
-            .iter()
-            .any(|record| matches!(
-                record,
-                Record::ContextSnapshotLoaded {
-                    outcome: ContextSnapshotLoadOutcome::Corrupt,
-                    ..
-                }
-            )));
+        assert!(
+            JsonlStore::open(&session_file)
+                .unwrap()
+                .records()
+                .iter()
+                .any(|record| matches!(
+                    record,
+                    Record::ContextSnapshotLoaded {
+                        outcome: ContextSnapshotLoadOutcome::Corrupt,
+                        ..
+                    }
+                ))
+        );
     }
 
     #[tokio::test]
@@ -1001,7 +1016,10 @@ mod tests {
         let session = std::fs::read_to_string(&session_file).unwrap();
         std::fs::write(
             &session_file,
-            session.replace(&missing_entry_target, r#""source_entry_id":"missing-entry""#),
+            session.replace(
+                &missing_entry_target,
+                r#""source_entry_id":"missing-entry""#,
+            ),
         )
         .unwrap();
 

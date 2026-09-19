@@ -482,7 +482,8 @@ mod tests {
     }
 
     #[test]
-    fn broadcast_skips_sender_and_queues_unknown() {        let hub = SubagentHub::new();
+    fn broadcast_skips_sender_and_queues_unknown() {
+        let hub = SubagentHub::new();
         hub.register(
             "lane-a".into(),
             "run-a".into(),

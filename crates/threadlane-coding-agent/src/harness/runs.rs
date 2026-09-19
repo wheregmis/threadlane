@@ -161,11 +161,7 @@ impl CodingSessionHarness {
     }
 
     /// Start a foreground operation with an optional prompt.
-    pub fn start(
-        &mut self,
-        run_id: &str,
-        prompt: Option<AgentMessage>,
-    ) -> Result<(), String> {
+    pub fn start(&mut self, run_id: &str, prompt: Option<AgentMessage>) -> Result<(), String> {
         self.ensure_fresh()?;
         self.store
             .start_operation(run_id, None, OperationIntent::Run)
