@@ -1850,31 +1850,17 @@ impl RightPanelView {
                         this.open_file_diff(path.clone(), cx);
                     })),
             )
-            .child(
-                div()
-                    .debug_selector(|| "review-file-status".into())
-                    .flex_none()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(status),
-            )
+            .child({
+                let status_color = match file.status_char() {
+                    'A' | '?' => theme.success, 'D' => theme.danger, 'R' => theme.link, _ => theme.warning,
+                };
+                div().debug_selector(|| "review-file-status".into()).flex_none().text_xs()
+                    .font_weight(FontWeight::SEMIBOLD).text_color(status_color).child(status)
+            })
             .children((file.additions > 0 || file.deletions > 0).then(|| {
-                let mut stat = String::new();
-                if file.additions > 0 {
-                    stat.push_str(&format!("+{}", file.additions));
-                }
-                if file.deletions > 0 {
-                    if !stat.is_empty() {
-                        stat.push(' ');
-                    }
-                    stat.push_str(&format!("−{}", file.deletions));
-                }
-                div()
-                    .debug_selector(|| "review-file-stats".into())
-                    .flex_none()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(stat)
+                div().debug_selector(|| "review-file-stats".into()).flex_none().flex().items_center().gap_1().text_xs()
+                    .children((file.additions > 0).then(|| div().text_color(theme.success).child(format!("+{}", file.additions))))
+                    .children((file.deletions > 0).then(|| div().text_color(theme.danger).child(format!("−{}", file.deletions))))
             }))
             .context_menu({
                 let path = context_path.clone();
@@ -2060,6 +2046,8 @@ impl RightPanelView {
             .filter(|f| self.selected_files.contains(&f.path))
             .map(|f| f.deletions)
             .sum();
+        let total_additions: u32 = self.review_files.iter().map(|f| f.additions).sum();
+        let total_deletions: u32 = self.review_files.iter().map(|f| f.deletions).sum();
 
         let branch = self
             .git_status
@@ -2486,6 +2474,11 @@ impl RightPanelView {
         let staged_count = self.review_files.iter().filter(|f| f.staged).count();
         let unstaged_count = self.review_files.iter().filter(|f| f.unstaged).count();
         let has_staged = staged_count > 0;
+        let changes_summary = (total_files > 0).then(|| div().flex_none().flex().items_center().justify_between().px_3().py_1().border_b_1().border_color(theme.border).bg(theme.muted.opacity(0.08)).text_xs()
+            .child(div().flex().items_center().gap_2().child(div().text_color(theme.success).child(format!("+{total_additions}"))).child(div().text_color(theme.danger).child(format!("−{total_deletions}"))))
+            .child(div().flex().items_center().gap_2()
+                .child(div().text_color(if staged_count > 0 { theme.success } else { theme.muted_foreground }).child(format!("{staged_count} staged")))
+                .child(div().text_color(if unstaged_count > 0 { theme.warning } else { theme.muted_foreground }).child(format!("{unstaged_count} unstaged")))));
 
         let selection_bar = (total_files > 0).then(|| {
             let panel_sb = panel_entity.clone();
@@ -2634,6 +2627,7 @@ impl RightPanelView {
                 .justify_center()
                 .p_4()
                 .text_center()
+                .child(div().mb_2().size_8().flex().items_center().justify_center().rounded_full().bg(theme.success.opacity(0.12)).text_color(theme.success).child(Icon::new(IconName::Check)))
                 .child(
                     div()
                         .text_sm()
@@ -3175,6 +3169,7 @@ impl RightPanelView {
                 .children(stash_banner)
                 .children(pr_card)
                 .children(selection_bar)
+                .children(changes_summary)
                 .child(file_list_content)
                 .child(commit_footer)
                 .into_any_element()
