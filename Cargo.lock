@@ -8614,6 +8614,7 @@ dependencies = [
  "threadlane-git",
  "threadlane-permission",
  "threadlane-protocol",
+ "threadlane-skills",
  "threadlane-ui-catalog",
  "threadlane-ui-editor",
  "threadlane-ui-mirror",

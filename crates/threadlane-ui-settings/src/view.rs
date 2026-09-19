@@ -104,6 +104,7 @@ pub struct SettingsView {
     extension_rows: Vec<ExtensionRecord>,
     skill_rows: Vec<SkillMetadata>,
     acp_rows: Vec<AcpAgentRecord>,
+    acp_probe: threadlane_ui_state::settings::AcpProbeState,
     capability_status: Option<String>,
     auth_tx: tokio::sync::mpsc::UnboundedSender<ProviderAuthEvent>,
     settings_tx: tokio::sync::mpsc::UnboundedSender<SettingsEvent>,
@@ -306,7 +307,11 @@ impl SettingsView {
                 let _ = this.update(cx, |this, cx| {
                     for event in events {
                         match event {
-                            SettingsEvent::AcpRefreshed(records) => this.acp_rows = records,
+                            SettingsEvent::AcpRefreshed { request_id, records } => {
+                                if this.acp_probe.is_current(request_id) {
+                                    this.acp_rows = records;
+                                }
+                            }
                         }
                     }
                     cx.notify();
@@ -327,6 +332,7 @@ impl SettingsView {
             extension_rows: Vec::new(),
             skill_rows: Vec::new(),
             acp_rows: Vec::new(),
+            acp_probe: Default::default(),
             capability_status: None,
             auth_tx,
             settings_tx,
@@ -354,16 +360,25 @@ impl SettingsView {
     }
 
     fn refresh_acp(&mut self, cx: &mut Context<Self>) {
+        self.load_acp(false, cx);
+    }
+
+    fn load_acp(&mut self, force: bool, cx: &mut Context<Self>) {
         let project = self.active_project(cx);
         if let Err(error) = threadlane_acp_engine::upgrade_acp_presets(project.as_deref()) {
             self.capability_status = Some(error);
         }
-        self.acp_rows = threadlane_acp_engine::configured_acp_agents(project.clone());
+        let rows = threadlane_acp_engine::configured_acp_agents(project.clone());
+        let configs = rows.iter().map(|row| row.config.clone()).collect();
+        let Some(request_id) = self.acp_probe.begin(project.clone(), configs, force) else {
+            return;
+        };
+        self.acp_rows = rows;
         self.model.update(cx, |state, cx| {
             state.reconcile_selected_model();
             cx.notify();
         });
-        if let Err(error) = threadlane_ui_state::settings::probe_acp_agents(project, self.settings_tx.clone()) {
+        if let Err(error) = threadlane_ui_state::settings::probe_acp_agents(project, request_id, self.settings_tx.clone()) {
             self.capability_status = Some(error);
         }
         // Keep the shared model cache warm while the status probe runs: the
@@ -2928,7 +2943,7 @@ impl SettingsView {
                                     .label("Refresh")
                                     .outline()
                                     .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.refresh_acp(cx);
+                                        this.load_acp(true, cx);
                                         cx.notify();
                                     })),
                             )

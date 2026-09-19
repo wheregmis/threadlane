@@ -229,7 +229,10 @@ impl RightPanelView {
                                         break;
                                     }
                                 }
-                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                // The bridge pump runs on GPUI, outside Tokio's reactor.
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(150))
+                                    .await;
                             }
                             outcome
                         }

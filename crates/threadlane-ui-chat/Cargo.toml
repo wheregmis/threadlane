@@ -17,6 +17,7 @@ threadlane-computer.workspace = true
 threadlane-git.workspace = true
 threadlane-permission.workspace = true
 threadlane-protocol.workspace = true
+threadlane-skills = { version = "0.1.0", path = "../threadlane-skills" }
 threadlane-ui-catalog.workspace = true
 threadlane-ui-editor.workspace = true
 threadlane-ui-mirror.workspace = true

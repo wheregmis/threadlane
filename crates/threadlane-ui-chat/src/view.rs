@@ -697,25 +697,8 @@ impl ChatListView {
                             .child("Needs you"),
                     ),
             ),
-            SessionAttention::Working => Some(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py(rems(0.09375))
-                    .rounded_full()
-                    .bg(theme.muted)
-                    .text_color(theme.foreground)
-                    .child(Spinner::new().xsmall())
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Working"),
-                    ),
-            ),
+            // Live progress is shown in the transcript; reserve header badges for attention.
+            SessionAttention::Working => None,
             SessionAttention::Ready => Some(
                 div()
                     .flex()
@@ -5152,6 +5135,33 @@ impl ChatListView {
                 .and_then(|dir| state.git_statuses.get(&dir))
                 .and_then(|status| status.branch.clone())
         };
+        let skills_chip = {
+            let active_skills_count = active_work_dir.as_ref().map(|dir| {
+                threadlane_skills::settings::discover_skills(Some(dir))
+                    .into_iter()
+                    .filter(|s| s.enabled)
+                    .count()
+            }).unwrap_or(0);
+            
+            Button::new("composer-skills-chip")
+                .icon(IconName::BookOpen)
+                .label(if active_skills_count > 0 {
+                    format!("{active_skills_count} Skills")
+                } else {
+                    "Skills".to_string()
+                })
+                .accessibility_label("Manage workspace skills")
+                .tooltip("Manage workspace skills")
+                .xsmall()
+                .outline()
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.model.update(cx, |state, cx| {
+                        controller::dispatch(state, AppAction::OpenSettings);
+                        cx.notify();
+                    });
+                }))
+        };
+
         let composer_context_bar = div()
             .w_full()
             .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
@@ -5162,6 +5172,7 @@ impl ChatListView {
             .gap_2()
             .child(project_chip)
             .child(work_mode_chip)
+            .child(skills_chip)
             .children(branch.map(|branch| {
                 div()
                     .id("composer-branch")
