@@ -1407,33 +1407,9 @@ impl ChatListView {
             .into_any_element()
     }
 
-    fn render_working_indicator(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().colors;
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .my_1()
-            .px_4()
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .py_1()
-                    .child(Spinner::new().xsmall())
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.muted_foreground)
-                            .child("Working…"),
-                    ),
-            )
-            .into_any_element()
+    fn render_working_indicator(&self, _cx: &mut Context<Self>) -> AnyElement {
+        // Running state is shown by the progress summary below the transcript.
+        Empty.into_any_element()
     }
 
     fn render_trajectory_row(
@@ -6701,10 +6677,6 @@ impl Render for ChatListView {
             .child(self.render_header(cx))
             .child(div().flex().flex_1().min_h_0().min_w_0().justify_center()
                 .child(div().flex().flex_col().w_full().max_w(rems(CHAT_CONTENT_MAX_WIDTH)).min_h_0().min_w_0()
-            .children(
-                (self.current_tab == CentralTab::Chat && is_generating)
-                    .then(|| self.render_progress_summary(cx)),
-            )
             .children((self.current_tab == CentralTab::Chat && !is_generating)
                 .then(|| self.model.read(cx).active_run_elapsed_seconds()).flatten()
                 .map(|seconds| {
@@ -6773,6 +6745,10 @@ impl Render for ChatListView {
                     }
                 }
             })
+            .children(
+                (self.current_tab == CentralTab::Chat && is_generating)
+                    .then(|| self.render_progress_summary(cx)),
+            )
             .children(
                 (self.current_tab == CentralTab::Chat)
                     .then(|| self.render_plan_tracker(&active_plan, cx))

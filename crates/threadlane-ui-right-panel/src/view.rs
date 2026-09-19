@@ -1385,7 +1385,6 @@ impl RightPanelView {
                             })),
                     ),
             )
-            .child(self.render_workspace_context(cx))
     }
 
     fn render_chooser(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4556,6 +4555,9 @@ impl Render for RightPanelView {
             .flex_col()
             .bg(theme.background)
             .child(self.render_header(cx))
+            .when(self.active_surface == Some(Surface::Review), |panel| {
+                panel.child(self.render_workspace_context(cx))
+            })
             .child(body)
     }
 }

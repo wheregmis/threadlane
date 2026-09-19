@@ -544,8 +544,12 @@ impl AppState {
         );
         if let Some((runtime, _)) = self.active_session_runtime() {
             if runtime.is_generating() {
-                self.session_status =
-                    Some("Stop the current turn before changing reasoning effort".into());
+                if self.reasoning_effort != effort {
+                    self.reasoning_effort = effort;
+                    self.session_status = Some(
+                        "Reasoning effort changed; it will apply to the next turn".into(),
+                    );
+                }
                 return;
             }
             let result = if let Some(error) = runtime.harness_error() {
@@ -1312,7 +1316,7 @@ impl AppState {
             }
         } else {
             let model = runtime.model().to_owned();
-            let reasoning_effort = runtime.reasoning_effort();
+            let reasoning_effort = self.reasoning_effort;
             let (api_key, _) = threadlane_coding_agent::credentials::provider_credentials(&model);
             if api_key.is_empty() && !threadlane_acp_engine::is_acp_model(&model) {
                 return None;
