@@ -642,6 +642,27 @@ pub(crate) fn create_draft_pr_args(
     ])
 }
 
+pub(crate) fn github_issue_create_args(title: &str, body: &str) -> Result<Vec<String>, String> {
+    Ok(vec![
+        "issue".to_owned(),
+        "create".to_owned(),
+        "--title".to_owned(),
+        validated_text(title, "issue title")?,
+        "--body".to_owned(),
+        body.to_owned(),
+    ])
+}
+
+pub(crate) fn parse_gh_issue_create_output(output: &str) -> Result<u64, String> {
+    let output = output.trim();
+    let number = output
+        .rsplit_once("/issues/")
+        .and_then(|(_, number)| number.parse::<u64>().ok())
+        .filter(|number| *number > 0)
+        .ok_or_else(|| "gh returned an invalid created issue URL".to_owned())?;
+    Ok(number)
+}
+
 pub(crate) fn github_pr_comment_args(number: u64, body: &str) -> Result<Vec<String>, String> {
     validate_github_number(number, "pull request")?;
     Ok(vec![
@@ -1159,26 +1180,12 @@ pub fn create_github_issue(
     title: &str,
     body: &str,
 ) -> Result<u64, GitError> {
-    let title = validated_text(title, "issue title").map_err(|message| GitError::new(work_dir, message))?;
+    let args = github_issue_create_args(title, body)
+        .map_err(|message| GitError::new(work_dir, message))?;
     invalidate_github_cache(work_dir);
-    let output = execute_gh(
-        work_dir,
-        &[
-            "issue".into(),
-            "create".into(),
-            "--title".into(),
-            title,
-            "--body".into(),
-            body.to_string(),
-            "--json".into(),
-            "number,url".into(),
-        ],
-    )?;
-    serde_json::from_str::<serde_json::Value>(&output)
-        .ok()
-        .and_then(|value| value["number"].as_u64())
-        .filter(|number| *number > 0)
-        .ok_or_else(|| GitError::new(work_dir, "could not parse created issue number"))
+    let output = execute_gh(work_dir, &args)?;
+    parse_gh_issue_create_output(&output)
+        .map_err(|message| GitError::new(work_dir, message))
 }
 
 /// Closes (`close=true`) or reopens an issue.
