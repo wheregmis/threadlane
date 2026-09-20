@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -11,35 +11,34 @@ use sha2::{Digest, Sha256};
 use super::context_snapshots::{
     compacted_context_snapshot_index_for_sources, is_local_path, read_file_request,
 };
-use threadlane_permission::PermissionTraceEvent;
 use threadlane_compaction::{
-    build_checkpoint_omitting_tool_outputs, compact_for_budget, estimate_request_tokens,
-    CompactionParams, PreparedCompaction,
+    CompactionParams, PreparedCompaction, build_checkpoint_omitting_tool_outputs,
+    compact_for_budget, estimate_request_tokens,
+};
+use threadlane_context::{BudgetConfig, ContextBudget, context_budget};
+use threadlane_permission::PermissionTraceEvent;
+use threadlane_protocol::{
+    AgentMessage, AgentToolResult, ImageAttachment, ReasoningEffort, TokenUsage,
 };
 pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
     AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
     CompactionReason, ContextSnapshotLoadOutcome, DeferredResolution, Entry as HarnessEntry,
-    ErrorCategory, HarnessEventHub, HookRegistry, JsonlStore,
-    OperationOutcome, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
-    QueueKind, Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot,
-    SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
-    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
-    TraceString,
-};
-use threadlane_context::{context_budget, BudgetConfig, ContextBudget};
-use threadlane_protocol::{
-    AgentMessage, AgentToolResult, ImageAttachment, ReasoningEffort, TokenUsage,
+    ErrorCategory, HarnessEventHub, HookRegistry, JsonlStore, OperationOutcome, PromptSnapshot,
+    ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind, Reducer, RetryPolicy,
+    SessionIdGenerator, SessionStore, Snapshot, SubagentLifecyclePhase, Subscription,
+    ToolExecutionOutcome, ToolExecutionPhase,
+    ToolReplaySafety as HarnessToolReplaySafety,
+    ToolResult as HarnessToolResult, ToolSpec, TraceString,
 };
 use threadlane_runtime::{
     AgentConfig, ProviderBoundaryRequest, ProviderBoundaryResult, ProviderTraceEvent,
     ToolExecutionTraceEvent,
 };
 
-use threadlane_runtime::harness::OperationIntent;
 #[cfg(test)]
 use threadlane_runtime::harness::HookContext;
-
+use threadlane_runtime::harness::OperationIntent;
 
 mod assistant;
 mod boundary;
@@ -229,6 +228,31 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
+    /// Create a replayable subscription over durable harness events.
+    pub fn subscribe_durable_events(
+        &self,
+    ) -> Result<Subscription, threadlane_runtime::harness::EventError> {
+        self.events.subscribe(&self.store).map_err(|error| {
+            threadlane_runtime::harness::EventError::Unavailable(error.to_string())
+        })
+    }
+
+    /// Wait for the next batch of durable events after the subscription cursor.
+    pub async fn wait_durable_events(
+        &self,
+        subscription: &mut Subscription,
+    ) -> Result<Vec<threadlane_runtime::harness::HarnessEvent>, threadlane_runtime::harness::EventError> {
+        self.events.wait(subscription).await
+    }
+
+    /// Poll currently available durable events without waiting.
+    pub fn poll_durable_events(
+        &self,
+        subscription: &mut Subscription,
+    ) -> Result<Vec<threadlane_runtime::harness::HarnessEvent>, threadlane_runtime::harness::EventError> {
+        self.events.poll(subscription)
+    }
+
     /// Append a durable fact through the canonical session harness adapter.
     pub fn append_fact_to_path(
         path: &Path,
@@ -246,16 +270,7 @@ impl CodingSessionHarness {
         })
     }
 
-
-
-
-
-
-
-
     // ── Cancellation ──────────────────────────────────────────────────
-
-
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

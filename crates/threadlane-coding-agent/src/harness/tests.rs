@@ -93,12 +93,14 @@ fn provider_boundary_retains_and_budgets_current_system_after_reload() {
         assert_eq!(prepared.provisional_estimated_tokens, Some(actual));
         drop(harness);
         harness = CodingSessionHarness::open(&path).unwrap();
-        assert!(!harness
-            .model_context("main")
-            .unwrap()
-            .messages()
-            .iter()
-            .any(|message| { matches!(message, AgentMessage::System { .. }) }));
+        assert!(
+            !harness
+                .model_context("main")
+                .unwrap()
+                .messages()
+                .iter()
+                .any(|message| { matches!(message, AgentMessage::System { .. }) })
+        );
         let updated_system = AgentMessage::System {
             content: "updated instructions after restart".into(),
         };
@@ -280,11 +282,13 @@ fn compaction_persistence_failure_appends_no_checkpoint_prefix() {
     fs::set_permissions(&path, original).unwrap();
     assert!(result.is_err());
     assert_eq!(fs::read(&path).unwrap(), canonical);
-    assert!(!harness
-        .store
-        .records()
-        .iter()
-        .any(|record| matches!(record, HarnessRecord::ProviderRequestStarted { .. })));
+    assert!(
+        !harness
+            .store
+            .records()
+            .iter()
+            .any(|record| matches!(record, HarnessRecord::ProviderRequestStarted { .. }))
+    );
 }
 
 #[test]
@@ -547,13 +551,15 @@ fn cancellation_before_compaction_has_no_partial_operation_or_provider_start() {
             _ => None,
         })
         .expect("abort record");
-    assert!(harness
-        .prepare_provider_boundary(
-            "run-compact",
-            boundary_request(false),
-            &AgentConfig::default(),
-        )
-        .is_err());
+    assert!(
+        harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .is_err()
+    );
     assert!(!harness.store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ContextCompacted { seq, .. } if *seq > abort_seq)
                 || matches!(record, HarnessRecord::ProviderRequestStarted { seq, .. } if *seq > abort_seq)
@@ -884,8 +890,13 @@ fn cancellation_closes_an_unfinished_provider_attempt_before_abort_observation()
         _ => None,
     });
     let abort_observed_seq = store.records().iter().find_map(|record| match record {
-        HarnessRecord::AbortObserved { seq, wall_time_ms, .. } => {
-            assert!(wall_time_ms.is_some(), "abort time must survive journal reload");
+        HarnessRecord::AbortObserved {
+            seq, wall_time_ms, ..
+        } => {
+            assert!(
+                wall_time_ms.is_some(),
+                "abort time must survive journal reload"
+            );
             Some(*seq)
         }
         _ => None,
@@ -1324,13 +1335,15 @@ fn sync_messages_persists_provider_visible_queued_user_messages() {
         .assert_model_visible(&[initial, queued.clone()])
         .unwrap();
 
-    assert!(harness
-        .store
-        .model_context("main")
-        .unwrap()
-        .entries
-        .iter()
-        .any(|entry| entry.message == queued));
+    assert!(
+        harness
+            .store
+            .model_context("main")
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.message == queued)
+    );
 }
 
 #[test]
@@ -1372,11 +1385,13 @@ fn sync_messages_persists_reasoning_before_model_visibility_check() {
         .assert_model_visible(&[prompt, thinking.clone()])
         .unwrap();
 
-    assert!(harness
-        .store
-        .entries()
-        .iter()
-        .any(|entry| entry.message == thinking));
+    assert!(
+        harness
+            .store
+            .entries()
+            .iter()
+            .any(|entry| entry.message == thinking)
+    );
 }
 
 #[tokio::test]
@@ -1443,14 +1458,16 @@ async fn context_snapshot_capture_indexes_only_successful_local_read_results_onc
         harness.context_snapshots("main")[0].file_sha256.as_str(),
         threadlane_tools::read_file_snapshot_digest(&read_output).unwrap()
     );
-    assert!(super::super::context_snapshots::resolve_context_snapshot(
-        &path,
-        dir.path(),
-        &format!("ctx-{entry_id}"),
-    )
-    .err()
-    .unwrap()
-    .starts_with("Context snapshot stale:"));
+    assert!(
+        super::super::context_snapshots::resolve_context_snapshot(
+            &path,
+            dir.path(),
+            &format!("ctx-{entry_id}"),
+        )
+        .err()
+        .unwrap()
+        .starts_with("Context snapshot stale:")
+    );
     std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
     assert_eq!(
         harness
@@ -1752,11 +1769,11 @@ async fn compacted_context_snapshot_stays_durable_and_is_indexed_in_checkpoint()
             .len(),
         1
     );
-    let provider_checkpoint = threadlane_provider::convert_to_llm(&[checkpoint_message])[0]
-        ["content"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let provider_checkpoint =
+        threadlane_provider::convert_to_llm(&[checkpoint_message])[0]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
     assert_eq!(provider_checkpoint.matches(&context_id).count(), 1);
     assert_eq!(
         provider_checkpoint
@@ -2170,6 +2187,72 @@ fn sequential_single_call_turns_start_tools_on_lane() {
     assert_eq!(tools.len(), 2);
     assert_ne!(tools[0].assistant_entry_id, tools[1].assistant_entry_id);
     assert_eq!((tools[0].tool_index, tools[1].tool_index), (0, 0));
+}
+
+#[tokio::test]
+async fn tool_intent_and_completion_survive_harness_reload() {
+    let (_dir, path) = temp_session();
+    let mut harness = CodingSessionHarness::open(&path).unwrap();
+    harness
+        .begin_run("run-reload", AgentMessage::user("prompt", vec![]))
+        .unwrap();
+    harness
+        .append_message(AgentMessage::Assistant {
+            content: None,
+            tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                id: "call-reload".into(),
+                r#type: "function".into(),
+                function: threadlane_provider::openai::ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: "{\"path\":\"README.md\"}".into(),
+                },
+                thought_signature: None,
+            }]),
+            stop_reason: None,
+            deferred_handle: None,
+        })
+        .unwrap();
+    harness
+        .append_tool_intent(
+            "run-reload",
+            "call-reload",
+            "read_file",
+            serde_json::json!({"path": "README.md"}),
+        )
+        .await
+        .unwrap();
+    harness
+        .record_tool_result(
+            "run-reload",
+            &AgentToolResult::external("call-reload", "read_file", "body", false),
+        )
+        .unwrap();
+
+    let reopened = CodingSessionHarness::open(&path).unwrap();
+    let state = Reducer::reduce(&reopened.store).unwrap();
+    let tool = &state.lane("main").unwrap().tools[0];
+    assert_eq!(tool.tool_call_id, "call-reload");
+    assert_eq!(tool.tool_name, "read_file");
+    assert!(tool.completed);
+}
+
+#[tokio::test]
+async fn durable_event_subscription_replays_harness_commits() {
+    let (_dir, path) = temp_session();
+    let mut harness = CodingSessionHarness::open(&path).unwrap();
+    let reopened = CodingSessionHarness::open(&path).unwrap();
+    let mut replay = reopened.subscribe_durable_events().unwrap();
+
+    harness
+        .begin_run("run-events", AgentMessage::user("prompt", vec![]))
+        .unwrap();
+
+    let events = reopened
+        .wait_durable_events(&mut replay)
+        .await
+        .unwrap();
+    assert!(!events.is_empty());
+    assert!(!replay.snapshot.state.lanes.is_empty());
 }
 
 #[test]

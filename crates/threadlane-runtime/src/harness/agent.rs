@@ -63,6 +63,29 @@ impl<S: SessionStore> AgentHarness<S> {
         &self.store
     }
 
+    /// Create a replayable subscription backed by the durable session store.
+    pub fn subscribe_events(&self) -> Result<super::Subscription, super::EventError> {
+        self.events.subscribe(&self.store).map_err(|error| {
+            super::EventError::Unavailable(error.to_string())
+        })
+    }
+
+    /// Wait for the next durable event batch after the subscription cursor.
+    pub async fn wait_events(
+        &self,
+        subscription: &mut super::Subscription,
+    ) -> Result<Vec<super::HarnessEvent>, super::EventError> {
+        self.events.wait(subscription).await
+    }
+
+    /// Poll currently available durable events without waiting.
+    pub fn poll_events(
+        &self,
+        subscription: &mut super::Subscription,
+    ) -> Result<Vec<super::HarnessEvent>, super::EventError> {
+        self.events.poll(subscription)
+    }
+
     pub fn store_mut(&mut self) -> &mut S {
         &mut self.store
     }

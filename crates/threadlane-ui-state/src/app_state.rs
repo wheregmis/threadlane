@@ -1,23 +1,25 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_runtime::harness::{JsonlStore, SessionStore};
+use threadlane_acp::AcpConfigOption;
 use threadlane_protocol::{
     AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
     SubagentProgressUpdate, TokenUsage,
 };
-use threadlane_acp::AcpConfigOption;
+use threadlane_runtime::harness::{EventPayload, HarnessEvent, JsonlStore, SessionStore};
 
-use crate::agent_events::{adapt_agent_event, ChatAgentUpdate};
-use threadlane_coding_agent::controller::SessionRuntime;
+use crate::agent_events::{ChatAgentUpdate, adapt_agent_event};
+use threadlane_coding_agent::controller::{
+    SchedulerSupervisorEvent, SchedulerSupervisorHandle, SessionRuntime,
+};
 use threadlane_project::load_project_registry;
 
 use crate::discovery::*;
 use crate::projection::*;
-use threadlane_runtime::harness::{tool_activity_display_summary, tool_activity_summary};
 pub use crate::types::*;
+use threadlane_runtime::harness::{tool_activity_display_summary, tool_activity_summary};
 
 pub struct AppState {
     pub projects: Vec<ProjectInfo>,
@@ -75,8 +77,7 @@ pub struct AppState {
     pub git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
     pub auto_address_pr_reviews_enabled: bool,
     /// Persistent PR review tracking per project, loaded on demand and cached.
-    pub(crate) pr_review_tracking:
-        HashMap<PathBuf, threadlane_git::PrReviewTrackingStore>,
+    pub(crate) pr_review_tracking: HashMap<PathBuf, threadlane_git::PrReviewTrackingStore>,
 
     pub selected_model: String,
     model_roles: threadlane_runtime::ModelRoles,
@@ -98,6 +99,9 @@ pub struct AppState {
     pub session_refresh_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<(PathBuf, Vec<SessionInfo>)>>,
     pub session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
+    scheduler_handles: HashMap<PathBuf, SchedulerSupervisorHandle>,
+    scheduler_results:
+        HashMap<PathBuf, tokio::sync::mpsc::UnboundedReceiver<SchedulerSupervisorEvent>>,
     deferred_stream_events: HashMap<String, Vec<ChatStreamEvent>>,
     /// Bridge to the embedded browser panel. The channel is created with the
     /// app; the first constructed right panel claims the receiver and pumps
@@ -315,6 +319,8 @@ impl AppState {
             session_refresh_tx,
             session_refresh_rx: Some(session_refresh_rx),
             session_runtimes,
+            scheduler_handles: HashMap::new(),
+            scheduler_results: HashMap::new(),
             deferred_stream_events: HashMap::new(),
             browser_bridge: threadlane_protocol::browser::BrowserBridge::channel(),
             mirror_open: false,
@@ -324,8 +330,7 @@ impl AppState {
             pending_hydrations: Vec::new(),
             git_statuses: HashMap::new(),
             git_prs: HashMap::new(),
-            auto_address_pr_reviews_enabled:
-                threadlane_git::load_auto_address_pr_reviews_enabled(),
+            auto_address_pr_reviews_enabled: threadlane_git::load_auto_address_pr_reviews_enabled(),
             pr_review_tracking: HashMap::new(),
         };
         if let (Some(session_id), Some(session_file)) = (
@@ -378,10 +383,7 @@ impl AppState {
         );
     }
 
-    pub fn set_auto_address_pr_reviews_enabled(
-        &mut self,
-        enabled: bool,
-    ) -> Result<(), String> {
+    pub fn set_auto_address_pr_reviews_enabled(&mut self, enabled: bool) -> Result<(), String> {
         threadlane_git::save_auto_address_pr_reviews_enabled(enabled)?;
         self.auto_address_pr_reviews_enabled = enabled;
         Ok(())
@@ -422,8 +424,21 @@ impl AppState {
     }
 
     fn invalidate_idle_runtimes(&mut self) {
-        self.session_runtimes
-            .retain(|_, runtime| runtime.is_generating());
+        let idle = self
+            .session_runtimes
+            .iter()
+            .filter(|(_, runtime)| !runtime.is_generating())
+            .map(|(session_file, _)| session_file.clone())
+            .collect::<Vec<_>>();
+        for session_file in idle {
+            self.drop_session_runtime(&session_file);
+        }
+    }
+
+    fn drop_session_runtime(&mut self, session_file: &Path) {
+        self.scheduler_handles.remove(session_file);
+        self.scheduler_results.remove(session_file);
+        self.session_runtimes.remove(session_file);
     }
 
     pub fn invalidate_capability_runtimes(&mut self) {
@@ -460,8 +475,9 @@ impl AppState {
         } else {
             if let Err(error) = threadlane_auth::opencode_auth::clear_opencode_api_key() {
                 tracing::warn!("failed to remove Opencode API key: {error}");
-                self.auth_status_msg =
-                    Some(format!("Opencode API key removal may be incomplete: {error}"));
+                self.auth_status_msg = Some(format!(
+                    "Opencode API key removal may be incomplete: {error}"
+                ));
             } else {
                 self.auth_status_msg = Some("Opencode API key removed.".into());
             }
@@ -514,7 +530,7 @@ impl AppState {
                 self.session_status = Some(format!("Could not switch models: {error}"));
                 return;
             }
-            self.session_runtimes.remove(&runtime.session_file);
+            self.drop_session_runtime(&runtime.session_file);
         } else if self.selected_model == model {
             return;
         }
@@ -546,9 +562,8 @@ impl AppState {
             if runtime.is_generating() {
                 if self.reasoning_effort != effort {
                     self.reasoning_effort = effort;
-                    self.session_status = Some(
-                        "Reasoning effort changed; it will apply to the next turn".into(),
-                    );
+                    self.session_status =
+                        Some("Reasoning effort changed; it will apply to the next turn".into());
                 }
                 return;
             }
@@ -564,7 +579,7 @@ impl AppState {
                 self.session_status = Some(format!("Could not switch reasoning effort: {error}"));
                 return;
             }
-            self.session_runtimes.remove(&runtime.session_file);
+            self.drop_session_runtime(&runtime.session_file);
         } else if self.reasoning_effort == effort {
             return;
         }
@@ -599,11 +614,7 @@ impl AppState {
         let _ = self.session_refresh_tx.send(work_dir.to_path_buf());
     }
 
-    pub fn apply_session_refresh(
-        &mut self,
-        work_dir: PathBuf,
-        sessions: Vec<SessionInfo>,
-    ) -> bool {
+    pub fn apply_session_refresh(&mut self, work_dir: PathBuf, sessions: Vec<SessionInfo>) -> bool {
         let Some(project) = self
             .projects
             .iter_mut()
@@ -734,12 +745,7 @@ impl AppState {
         });
     }
 
-    pub fn request_open_diff(
-        &mut self,
-        project: PathBuf,
-        relative_path: String,
-        content: String,
-    ) {
+    pub fn request_open_diff(&mut self, project: PathBuf, relative_path: String, content: String) {
         self.requested_editor_target = Some(RequestedEditorTarget::Diff {
             project,
             path: relative_path,
@@ -861,9 +867,7 @@ impl AppState {
                     .map_err(|error| error.to_string())?
                     .files
                     .iter()
-                    .any(|file| {
-                        !(file.is_untracked() && file.path.starts_with(".threadlane/"))
-                    });
+                    .any(|file| !(file.is_untracked() && file.path.starts_with(".threadlane/")));
                 if dirty {
                     return Err("Commit or discard worktree changes before archiving".into());
                 }
@@ -907,8 +911,8 @@ impl AppState {
                 Self::remove_file_if_present(&stub)?;
                 if delete_worktree {
                     if let Err(error) = threadlane_git::prune_worktrees(&work_dir) {
-                    tracing::warn!("worktree prune failed: {error}");
-                }
+                        tracing::warn!("worktree prune failed: {error}");
+                    }
                 }
             }
         } else {
@@ -952,9 +956,7 @@ impl AppState {
                     .map_err(|error| error.to_string())?
                     .files
                     .iter()
-                    .any(|file| {
-                        !(file.is_untracked() && file.path.starts_with(".threadlane/"))
-                    });
+                    .any(|file| !(file.is_untracked() && file.path.starts_with(".threadlane/")));
                 if dirty {
                     return Err(
                         "Commit or discard worktree changes before deleting this session".into(),
@@ -979,8 +981,6 @@ impl AppState {
         self.finish_session_removal(&work_dir, &session_id);
         Ok(())
     }
-
-
 
     pub fn ensure_session_runtime(
         &mut self,
@@ -1010,6 +1010,21 @@ impl AppState {
             .expect("failed to spawn session runtime constructor")
             .join()
             .expect("session runtime construction panicked");
+        self.register_session_runtime(session_file, runtime)
+    }
+
+    pub fn register_session_runtime(
+        &mut self,
+        session_file: PathBuf,
+        runtime: Arc<SessionRuntime>,
+    ) -> Arc<SessionRuntime> {
+        if let Some(existing) = self.session_runtimes.get(&session_file) {
+            return existing.clone();
+        }
+        if let Ok((handle, results)) = runtime.start_scheduler_supervisor_with_results() {
+            self.scheduler_handles.insert(session_file.clone(), handle);
+            self.scheduler_results.insert(session_file.clone(), results);
+        }
         self.session_runtimes.insert(session_file, runtime.clone());
         runtime
     }
@@ -1022,10 +1037,14 @@ impl AppState {
         let Some(session_id) = self.active_session_id.clone() else {
             return false;
         };
-        let Some(request) = self.pending_permissions.get(&session_id) else { return false; };
+        let Some(request) = self.pending_permissions.get(&session_id) else {
+            return false;
+        };
         if request.id != request_id
             || (decision == threadlane_permission::PermissionDecision::AllowAlways
-                && !request.scopes.contains(&threadlane_protocol::PermissionScope::Always))
+                && !request
+                    .scopes
+                    .contains(&threadlane_protocol::PermissionScope::Always))
             || (decision == threadlane_permission::PermissionDecision::AllowSession
                 && !request
                     .scopes
@@ -1191,7 +1210,7 @@ impl AppState {
 
     fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
         let session_file = self.session_file(work_dir, session_id);
-        self.session_runtimes.remove(&session_file);
+        self.drop_session_runtime(&session_file);
         self.pending_permissions.remove(session_id);
         self.pending_questions.remove(session_id);
         self.deferred_stream_events.remove(session_id);
@@ -1301,8 +1320,7 @@ impl AppState {
             threadlane_git::FeedbackSyncResult::NewFeedback(items) => items,
         };
 
-        let prompt =
-            threadlane_git::build_auto_address_prompt(pr.number, &branch, &new_items);
+        let prompt = threadlane_git::build_auto_address_prompt(pr.number, &branch, &new_items);
         let runtime = self.ensure_session_runtime(runtime_work_dir.clone(), session_file);
         if runtime.is_generating() {
             // An active turn will pick the queued follow-up up via
@@ -1369,11 +1387,7 @@ impl AppState {
             return Err("No actionable review feedback found on this PR.".into());
         }
 
-        let prompt = threadlane_git::build_auto_address_prompt(
-            pr.number,
-            &branch,
-            &feedback_items,
-        );
+        let prompt = threadlane_git::build_auto_address_prompt(pr.number, &branch, &feedback_items);
 
         let session = self
             .projects
@@ -1450,10 +1464,34 @@ impl AppState {
             .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
         let branch_is_actionable = session.git_branch.is_some()
             && (linked_pr_is_active || (linked_pr.is_none() && actionable_git_work));
-        let ready_work = branch_is_actionable || (linked_pr.is_none() && actionable_git_work);
+        let deferred_work = self
+            .deferred_stream_events
+            .get(&session.id)
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, ChatStreamEvent::Scheduled { .. }))
+            });
+        let ready_work =
+            deferred_work || branch_is_actionable || (linked_pr.is_none() && actionable_git_work);
+        let deferred_failure = self
+            .deferred_stream_events
+            .get(&session.id)
+            .is_some_and(|events| {
+                events.iter().any(|event| {
+                    matches!(
+                        event,
+                        ChatStreamEvent::Scheduled {
+                            result: Some(Err(_)),
+                            ..
+                        }
+                    )
+                })
+            });
         derive_session_attention(
             self.pending_permissions.contains_key(&session.id)
-                || self.pending_questions.contains_key(&session.id),
+                || self.pending_questions.contains_key(&session.id)
+                || deferred_failure,
             &session.health,
             runtime_status.as_ref(),
             runtime.is_some_and(|runtime| runtime.is_generating())
@@ -1558,13 +1596,15 @@ impl AppState {
                     ("worktree_path", worktree_dir.to_string_lossy().to_string()),
                     ("git_branch", branch.clone()),
                 ] {
-                    if let Err(error) = threadlane_coding_agent::harness::CodingSessionHarness::append_fact_to_path(
-                        &session_file,
-                        "main",
-                        key,
-                        &value,
-                        None,
-                    ) {
+                    if let Err(error) =
+                        threadlane_coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+                            &session_file,
+                            "main",
+                            key,
+                            &value,
+                            None,
+                        )
+                    {
                         if let Err(cleanup_error) =
                             threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
                         {
@@ -1766,7 +1806,7 @@ impl AppState {
         );
         if let Err(error) = accept_prompt(self, prompt) {
             cleanup(&work_dir, &worktree_dir, &session_file);
-            self.session_runtimes.remove(&session_file);
+            self.drop_session_runtime(&session_file);
             if let Some(project) = self
                 .projects
                 .iter_mut()
@@ -2793,9 +2833,9 @@ impl AppState {
 
     /// Applies a completed background projection if its session remains active.
     pub fn session_status_for_file(&self, session_file: &Path) -> Option<String> {
-        self.session_runtimes
-            .get(session_file)
-            .and_then(|runtime| threadlane_coding_agent::controller::runtime_status_text(runtime.status()))
+        self.session_runtimes.get(session_file).and_then(|runtime| {
+            threadlane_coding_agent::controller::runtime_status_text(runtime.status())
+        })
     }
 
     pub fn apply_session_messages(
@@ -3444,11 +3484,9 @@ impl AppState {
         };
         // A refusal here is not worth interrupting the user: this is a
         // background question, and the picker simply stays as it was.
-        if let Err(error) = crate::chat::load_acp_config_options(
-            runtime,
-            session_id,
-            self.stream_tx.clone(),
-        ) {
+        if let Err(error) =
+            crate::chat::load_acp_config_options(runtime, session_id, self.stream_tx.clone())
+        {
             tracing::debug!("Could not load ACP agent settings: {error}");
         }
     }
@@ -3588,10 +3626,11 @@ impl AppState {
     pub fn active_run_elapsed_seconds(&self) -> Option<u64> {
         let key = self.active_session_projection_key()?;
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).ok()?;
-        self.run_timings.get(&key)?.elapsed_seconds(
-            u64::try_from(now.as_millis()).ok()?, self.is_generating,
-        )
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        self.run_timings
+            .get(&key)?
+            .elapsed_seconds(u64::try_from(now.as_millis()).ok()?, self.is_generating)
     }
 
     fn apply_run_timing(&mut self, key: &SessionProjectionKey, timing: Option<RunTiming>) {
@@ -3607,7 +3646,88 @@ impl AppState {
         self.run_timings.insert(key.clone(), timing);
     }
 
-    pub fn drain_chat_stream(&mut self, events: Vec<ChatStreamEvent>) -> bool {
+
+    /// Applies a durable runtime event to the session projection.
+    ///
+    /// Record-backed events remain authoritative for the session projection and
+    /// are intentionally left for the existing journal hydration path.
+    pub fn apply_durable_event(&mut self, session_id: &str, event: HarnessEvent) -> bool {
+        match event.payload() {
+            EventPayload::Agent(agent_event) => self.drain_chat_stream(vec![
+                ChatStreamEvent::Agent {
+                    session_id: session_id.to_owned(),
+                    event: agent_event.clone(),
+                },
+            ]),
+            EventPayload::Fault(error) => self.drain_chat_stream(vec![
+                ChatStreamEvent::Agent {
+                    session_id: session_id.to_owned(),
+                    event: AgentEvent::AgentError {
+                        error: error.clone(),
+                    },
+                },
+            ]),
+            _ => false,
+        }
+    }
+
+    /// Creates a durable event cursor for a session runtime.
+    pub fn subscribe_durable_events(
+        &self,
+        runtime: &SessionRuntime,
+    ) -> Result<threadlane_runtime::harness::Subscription, threadlane_runtime::harness::EventError> {
+        runtime.subscribe_durable_events()
+    }
+    /// Polls a runtime subscription and applies any durable agent events.
+    ///
+    /// The caller owns the cursor so subscriptions can be kept alongside the
+    /// runtime that created them and recovered independently after a gap.
+    pub fn poll_durable_events(
+        &mut self,
+        session_id: &str,
+        runtime: &SessionRuntime,
+        subscription: &mut threadlane_runtime::harness::Subscription,
+    ) -> Result<bool, threadlane_runtime::harness::EventError> {
+        let events = runtime.poll_durable_events(subscription)?;
+        let mut changed = false;
+        for event in events {
+            changed |= self.apply_durable_event(session_id, event);
+        }
+        Ok(changed)
+    }
+    pub fn drain_chat_stream(&mut self, mut events: Vec<ChatStreamEvent>) -> bool {
+        let scheduler_files: Vec<PathBuf> = self.scheduler_results.keys().cloned().collect();
+        for session_file in scheduler_files {
+            if let Some(receiver) = self.scheduler_results.get_mut(&session_file) {
+                while let Ok(update) = receiver.try_recv() {
+                    let session_id = self
+                        .projects
+                        .iter()
+                        .flat_map(|project| project.sessions.iter())
+                        .find(|session| session.session_file == session_file)
+                        .map(|session| session.id.clone())
+                        .or_else(|| {
+                            session_file
+                                .file_stem()
+                                .and_then(|stem| stem.to_str())
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_else(|| session_file.to_string_lossy().into_owned());
+                    events.push(match update {
+                        SchedulerSupervisorEvent::Agent(event) => {
+                            ChatStreamEvent::Agent { session_id, event }
+                        }
+                        SchedulerSupervisorEvent::Completed(result) => {
+                            ChatStreamEvent::Scheduled {
+                                session_id,
+                                session_file: session_file.clone(),
+                                result,
+                            }
+                        }
+                    });
+                }
+            }
+        }
         let active_session_id = self.active_session_id.clone();
         let deferred = active_session_id
             .as_ref()
@@ -3857,6 +3977,50 @@ impl AppState {
                         ChatAgentUpdate::Ignore => {}
                     }
                 }
+                ChatStreamEvent::Scheduled {
+                    session_id,
+                    session_file,
+                    result,
+                } => {
+                    let active_file = self
+                        .active_session_projection_key()
+                        .map(|key| key.session_file);
+                    if active_file.as_ref() != Some(&session_file) {
+                        changed = true;
+                        self.deferred_stream_events
+                            .entry(session_id.clone())
+                            .or_default()
+                            .push(ChatStreamEvent::Scheduled {
+                                session_id,
+                                session_file,
+                                result,
+                            });
+                        continue;
+                    }
+                    changed = true;
+                    self.is_generating = false;
+                    let (role, content) = match result {
+                        Some(Ok(content)) => (MessageRole::Assistant, content),
+                        Some(Err(error)) => (MessageRole::Error, error),
+                        None => (MessageRole::System, "Scheduled work completed".into()),
+                    };
+                    let message_id = format!("scheduled-{}", self.messages.len());
+                    let status = if role == MessageRole::Error {
+                        content.clone()
+                    } else {
+                        "Scheduled work completed".into()
+                    };
+                    self.messages_mut().push(ChatMessageInfo {
+                        id: message_id,
+                        role,
+                        content,
+                        tool_activities: Vec::new(),
+                        streaming: false,
+                        reasoning_content: None,
+                        reasoning_expanded: false,
+                    });
+                    self.session_status = Some(status);
+                }
                 ChatStreamEvent::Finished {
                     session_id,
                     session_file,
@@ -3908,7 +4072,7 @@ impl AppState {
                                     && runtime.selected_model != self.selected_model
                             });
                     if runtime_is_stale {
-                        self.session_runtimes.remove(&session_file);
+                        self.drop_session_runtime(&session_file);
                     }
                     if let Some(work_dir) = session_file
                         .parent()
@@ -4171,7 +4335,8 @@ impl AppState {
 
         // Resolve credentials using the same provider routing as the runtime and title task.
         let model = self.selected_model.clone();
-        let (api_key, account_id) = threadlane_coding_agent::credentials::provider_credentials(&model);
+        let (api_key, account_id) =
+            threadlane_coding_agent::credentials::provider_credentials(&model);
 
         // An external ACP agent authenticates itself — Claude Code uses its own
         // CLI login — so it has no Threadlane provider credential to check, and
@@ -4259,7 +4424,8 @@ impl AppState {
 
         self.is_generating = true;
         self.session_status = Some("Working…".into());
-        if let Some(timing) = self.active_session_projection_key()
+        if let Some(timing) = self
+            .active_session_projection_key()
             .and_then(|key| self.run_timings.get_mut(&key))
         {
             timing.suppressed = true;

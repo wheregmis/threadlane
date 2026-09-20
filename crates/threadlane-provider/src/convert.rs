@@ -6,7 +6,6 @@
 //! to them; `threadlane-runtime` re-exports them for backward compatibility.
 
 use serde_json::Value;
-#[cfg(test)]
 use std::collections::HashSet;
 use threadlane_protocol::AgentMessage;
 
@@ -87,17 +86,21 @@ pub(crate) fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
     }
 }
 
-/// Removes an assistant tool-call turn that was interrupted before every call
-/// received a tool result. Provider APIs reject replaying such incomplete turns.
+/// Removes incomplete tool-call turns and orphaned results before provider
+/// conversion. Provider APIs reject replaying either shape.
 ///
 /// Moved from `threadlane-runtime::loop_engine` (body verbatim): it sits with
 /// `normalized_tool_call_id`, which it uses to match calls to results, and
 /// only touches the shared `AgentMessage` contract — never engine state.
-/// `threadlane-runtime` re-exports it for compatibility.
-#[cfg(test)]
 pub(crate) fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
+    let mut repaired = false;
     let mut index = 0;
     while index < messages.len() {
+        if matches!(messages[index], AgentMessage::Tool { .. }) {
+            messages.remove(index);
+            repaired = true;
+            continue;
+        }
         let AgentMessage::Assistant {
             tool_calls: Some(tool_calls),
             ..
@@ -126,21 +129,29 @@ pub(crate) fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> 
             next += 1;
         }
 
-        if expected_ids.is_subset(&completed_ids) {
+        if expected_ids == completed_ids && next - index - 1 == tool_calls.len() {
             index = next;
             continue;
         }
 
-        let truncate_at = index.checked_sub(1).filter(|previous| {
-            matches!(
-                &messages[*previous],
-                AgentMessage::Custom { custom_type, .. } if custom_type == "thinking"
-            )
-        });
-        messages.truncate(truncate_at.unwrap_or(index));
-        return true;
+        let replacement = match &messages[index] {
+            AgentMessage::Assistant {
+                content: Some(content),
+                stop_reason,
+                deferred_handle,
+                ..
+            } if !content.trim().is_empty() => Some(AgentMessage::Assistant {
+                content: Some(content.clone()),
+                tool_calls: None,
+                stop_reason: stop_reason.clone(),
+                deferred_handle: deferred_handle.clone(),
+            }),
+            _ => None,
+        };
+        messages.splice(index..next, replacement);
+        repaired = true;
     }
-    false
+    repaired
 }
 
 /// Converts agent messages into the standard Chat Completions message array.
@@ -373,7 +384,7 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
 
 fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
     let mut tool_index = 0;
-    messages
+    let mut messages = messages
         .iter()
         .map(|message| match message {
             AgentMessage::Assistant {
@@ -424,7 +435,9 @@ fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                 other.clone()
             }
         })
-        .collect()
+        .collect();
+    repair_interrupted_tool_turn(&mut messages);
+    messages
 }
 
 #[cfg(test)]
@@ -476,7 +489,7 @@ mod repair_tests {
     }
 
     #[test]
-    fn interrupted_turn_truncates_and_drops_thinking_prefix() {
+    fn interrupted_turn_is_removed_without_dropping_later_messages() {
         let thinking = AgentMessage::Custom {
             custom_type: "thinking".to_string(),
             payload: serde_json::json!({}),
@@ -486,10 +499,38 @@ mod repair_tests {
             thinking,
             assistant_with_calls(&["a", "b"]),
             tool_result("a"),
+            AgentMessage::user("later", Vec::new()),
         ];
         assert!(repair_interrupted_tool_turn(&mut messages));
-        // Truncates before the thinking prefix; the incomplete turn is gone.
-        assert_eq!(messages.len(), 1);
+        assert_eq!(messages.len(), 3);
         assert!(messages[0].is_user());
+        assert!(matches!(messages[1], AgentMessage::Custom { .. }));
+        assert!(messages[2].is_user());
+    }
+
+    #[test]
+    fn codex_conversion_drops_replayed_call_without_a_second_result() {
+        let messages = vec![
+            assistant_with_calls(&["call-1"]),
+            tool_result("call-1"),
+            assistant_with_calls(&["call-1"]),
+            AgentMessage::user("continue", Vec::new()),
+        ];
+
+        let (_, items) = convert_to_codex_llm(&messages);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item["type"] == "function_call")
+                .count(),
+            1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item["type"] == "function_call_output")
+                .count(),
+            1
+        );
     }
 }

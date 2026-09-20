@@ -13,12 +13,13 @@ use std::sync::{Arc, Mutex};
 
 use crate::cancellation::CodingAgentCancellation;
 use crate::options::CodingAgentOptions;
-use crate::runtime::CodingAgent;
+use crate::runtime::{CodingAgent, ScheduledWorkExecution};
 use crate::scheduler::CodingAgentWorkHandle;
 use threadlane_acp::AcpConfigOption;
 use threadlane_permission::{PermissionDecision, PermissionHandle};
 use threadlane_protocol::{AgentEvent, ImageAttachment, ReasoningEffort};
 use threadlane_question::QuestionHandle;
+use threadlane_runtime::harness::{EventError, HarnessEvent, Subscription};
 use threadlane_runtime::ModelRoles;
 
 /// Dynamic status of the session controller.
@@ -33,6 +34,45 @@ pub enum SessionStatus {
 /// Historical alias: the GPUI session runtime *is* the session controller.
 pub type SessionRuntime = SessionController;
 /// Historical alias for the controller status.
+
+/// Owned lifecycle for an opt-in session scheduler supervisor.
+pub struct SchedulerSupervisorHandle {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+pub enum SchedulerSupervisorEvent {
+    Agent(AgentEvent),
+    Completed(Option<Result<String, String>>),
+}
+
+impl SchedulerSupervisorHandle {
+    /// Signal supervisor shutdown and wait until its task exits.
+    pub async fn shutdown(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+struct SchedulerSupervisorLease(Arc<AtomicBool>);
+
+impl Drop for SchedulerSupervisorLease {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for SchedulerSupervisorHandle {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+}
 pub type SessionRuntimeStatus = SessionStatus;
 
 pub fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
@@ -89,10 +129,29 @@ pub struct SessionController {
     pub system_prompt: String,
     pub harness_error: Option<String>,
     is_generating: AtomicBool,
+    scheduler_supervisor_active: Arc<AtomicBool>,
     status: Mutex<SessionStatus>,
 }
-
 impl SessionController {
+
+    /// Subscribe to replayable durable harness events for this session.
+    pub fn subscribe_durable_events(&self) -> Result<Subscription, EventError> {
+        let agent = self.agent.try_lock().map_err(|_| {
+            EventError::Unavailable("session agent is currently busy".to_owned())
+        })?;
+        agent.subscribe_durable_events()
+    }
+
+    /// Poll durable harness events without waiting for the agent execution lock.
+    pub fn poll_durable_events(
+        &self,
+        subscription: &mut Subscription,
+    ) -> Result<Vec<HarnessEvent>, EventError> {
+        let agent = self.agent.try_lock().map_err(|_| {
+            EventError::Unavailable("session agent is currently busy".to_owned())
+        })?;
+        agent.poll_durable_events(subscription)
+    }
     /// Construct a new interactive session controller.
     pub fn new(options: CodingAgentOptions) -> Arc<Self> {
         let session_file = options
@@ -132,6 +191,7 @@ impl SessionController {
             system_prompt,
             harness_error,
             is_generating: AtomicBool::new(false),
+            scheduler_supervisor_active: Arc::new(AtomicBool::new(false)),
             status: Mutex::new(status),
         })
     }
@@ -192,6 +252,121 @@ impl SessionController {
 
     pub fn work_handle(&self) -> CodingAgentWorkHandle {
         self.work_handle.clone()
+    }
+
+    /// Launch the single scheduler driver for this session.
+    ///
+    /// The caller must not concurrently drive interactive work through the
+    /// same `CodingAgent` while this task owns its mutex. The returned task
+    /// ends after `stop` is signaled, making supervisor lifecycle explicit to
+    /// the surface adapter rather than spawning hidden background work.
+    pub(crate) fn spawn_scheduler_supervisor(
+        self: &Arc<Self>,
+        stop: tokio::sync::oneshot::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
+        let (result_tx, _result_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.spawn_scheduler_supervisor_with_results(stop, result_tx)
+    }
+
+    /// Launch the scheduler driver and stream completed scheduled results.
+    pub(crate) fn spawn_scheduler_supervisor_with_results(
+        self: &Arc<Self>,
+        mut stop: tokio::sync::oneshot::Receiver<()>,
+        result_tx: tokio::sync::mpsc::UnboundedSender<SchedulerSupervisorEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        let agent = self.agent.clone();
+        let work_handle = self.work_handle.clone();
+        let active = self.scheduler_supervisor_active.clone();
+        threadlane_provider::exec::get_runtime().spawn(async move {
+            let _lease = SchedulerSupervisorLease(active);
+            loop {
+                tokio::select! {
+                    _ = &mut stop => break,
+                    _ = work_handle.wait_for_work() => {}
+                }
+                let outcome = {
+                    let mut agent = agent.lock().await;
+                    let mut events = agent.subscribe();
+                    let execution = agent.execute_scheduled_work();
+                    tokio::pin!(execution);
+                    loop {
+                        tokio::select! {
+                            result = &mut execution => {
+                                while let Ok(event) = events.try_recv() {
+                                    let _ = result_tx.send(SchedulerSupervisorEvent::Agent(event));
+                                }
+                                break result;
+                            }
+                            event = events.recv() => match event {
+                                Ok(event) => {
+                                    let _ = result_tx.send(SchedulerSupervisorEvent::Agent(event));
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    break ScheduledWorkExecution::Idle;
+                                }
+                            }
+                        }
+                    }
+                };
+                if let ScheduledWorkExecution::Completed(result) = outcome {
+                    let _ = result_tx.send(SchedulerSupervisorEvent::Completed(result));
+                }
+            }
+        })
+    }
+
+    /// Create an explicitly owned supervisor lifecycle handle.
+    pub fn start_scheduler_supervisor(
+        self: &Arc<Self>,
+    ) -> Result<SchedulerSupervisorHandle, &'static str> {
+        if self
+            .scheduler_supervisor_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err("scheduler supervisor already running");
+        }
+        let (stop, receiver) = tokio::sync::oneshot::channel();
+        let task = self.spawn_scheduler_supervisor(receiver);
+        Ok(SchedulerSupervisorHandle {
+            stop: Some(stop),
+            task: Some(task),
+        })
+    }
+
+    /// Start a supervisor and return its completion stream to the adapter.
+    pub fn start_scheduler_supervisor_with_results(
+        self: &Arc<Self>,
+    ) -> Result<
+        (
+            SchedulerSupervisorHandle,
+            tokio::sync::mpsc::UnboundedReceiver<SchedulerSupervisorEvent>,
+        ),
+        &'static str,
+    > {
+        if self
+            .scheduler_supervisor_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err("scheduler supervisor already running");
+        }
+        let (stop, receiver) = tokio::sync::oneshot::channel();
+        let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = self.spawn_scheduler_supervisor_with_results(receiver, result_tx);
+        Ok((
+            SchedulerSupervisorHandle {
+                stop: Some(stop),
+                task: Some(task),
+            },
+            result_rx,
+        ))
+    }
+
+    /// Report whether this session currently has an owned scheduler driver.
+    pub fn scheduler_supervisor_running(&self) -> bool {
+        self.scheduler_supervisor_active.load(Ordering::SeqCst)
     }
 
     pub fn permission_handle(&self) -> PermissionHandle {

@@ -218,6 +218,29 @@ impl AgentRuntime {
         self.event_tx.subscribe()
     }
 
+    /// Subscribe to replayable events committed to the durable session journal.
+    pub fn subscribe_durable_events(
+        &self,
+    ) -> Result<crate::harness::Subscription, crate::harness::EventError> {
+        self.harness.subscribe_events()
+    }
+
+    /// Wait for the next replayable durable event batch.
+    pub async fn wait_durable_events(
+        &self,
+        subscription: &mut crate::harness::Subscription,
+    ) -> Result<Vec<crate::harness::HarnessEvent>, crate::harness::EventError> {
+        self.harness.wait_events(subscription).await
+    }
+
+    /// Poll replayable durable events without waiting.
+    pub fn poll_durable_events(
+        &self,
+        subscription: &mut crate::harness::Subscription,
+    ) -> Result<Vec<crate::harness::HarnessEvent>, crate::harness::EventError> {
+        self.harness.poll_events(subscription)
+    }
+
     pub fn model(&self) -> String {
         self.turn
             .try_lock()
@@ -774,6 +797,42 @@ mod tests {
             message,
             AgentMessage::User { content } if content == "child task"
         )));
+    }
+
+    #[tokio::test]
+    async fn runtime_exposes_durable_event_subscription() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            Some(&path),
+            AgentConfig::default(),
+            Arc::new(UnusedProvider),
+        )
+        .unwrap();
+
+        let mut subscription = runtime.subscribe_durable_events().unwrap();
+        runtime
+            .harness
+            .start_operation("runtime-events", None, crate::harness::OperationIntent::Run)
+            .unwrap();
+        runtime.harness.drive_to_completion().unwrap();
+        runtime
+            .harness
+            .finish_operation(
+                "runtime-events",
+                crate::harness::OperationOutcome::Completed,
+                None,
+            )
+            .unwrap();
+        let events = runtime.poll_durable_events(&mut subscription).unwrap();
+        let event = events.first().expect("committed durable event");
+        assert!(event.id() > 0);
+        assert!(matches!(event.payload(), crate::harness::EventPayload::RecordCommitted(_)));
+        assert_eq!(event.lane(), Some("main"));
+        assert_eq!(event.run_id(), Some("runtime-events"));
     }
 
     struct RecordingProvider {

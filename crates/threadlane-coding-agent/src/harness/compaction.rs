@@ -25,12 +25,7 @@ impl CodingSessionHarness {
         let params = CompactionParams::from(config);
         let pairs: Vec<(&AgentMessage, bool)> = dropped
             .iter()
-            .map(|entry| {
-                (
-                    &entry.message,
-                    omitted_source_entry_ids.contains(&entry.id),
-                )
-            })
+            .map(|entry| (&entry.message, omitted_source_entry_ids.contains(&entry.id)))
             .collect();
         Ok(build_checkpoint_omitting_tool_outputs(&pairs, &params))
     }
@@ -197,8 +192,7 @@ impl CodingSessionHarness {
         self.ensure_fresh()?;
         let budget = context_budget(model, &BudgetConfig::from(config));
         let messages = self.model_context("main")?.messages();
-        let post_tokens =
-            estimate_request_tokens(&messages, None, &CompactionParams::from(config));
+        let post_tokens = estimate_request_tokens(&messages, None, &CompactionParams::from(config));
         let generation = self.compaction_generation().saturating_add(1);
         let record = HarnessRecord::ContextCompacted {
             id: format!("context-compacted-{run_id}-{generation}"),

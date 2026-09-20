@@ -3,8 +3,8 @@ use super::capabilities::{
     build_broker_dispatcher, create_after_tool_hook_handler, extension_before_tool_hook_handler,
 };
 use super::context_snapshots::{
-    resolve_context_snapshot, snapshot_location, MAX_SUBAGENT_CONTEXT_CHARS,
-    MAX_SUBAGENT_CONTEXT_REFS,
+    MAX_SUBAGENT_CONTEXT_CHARS, MAX_SUBAGENT_CONTEXT_REFS, resolve_context_snapshot,
+    snapshot_location,
 };
 use super::harness::{AcceptedRun, CodingSessionHarness, SubagentLaneIdentity, SubagentStartError};
 use super::scheduler::AgentWorkScheduler;
@@ -12,26 +12,26 @@ use super::scheduler::AgentWorkScheduler;
 use super::scheduler::{
     AgentWork, AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
 };
-use threadlane_skills::agents::{discover_agents, AgentDefinition, AgentScope};
-#[cfg(test)]
-use threadlane_protocol::browser::BrowserBridge;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use threadlane_runtime::harness::HookKind;
-use threadlane_runtime::ToolPolicy;
+#[cfg(test)]
+use threadlane_protocol::browser::BrowserBridge;
 use threadlane_protocol::{AgentEvent, AgentMessage, SubagentProgressUpdate};
+use threadlane_runtime::ToolPolicy;
+use threadlane_runtime::harness::HookKind;
 use threadlane_runtime::{AgentRuntime, TurnState};
+use threadlane_skills::agents::{AgentDefinition, AgentScope, discover_agents};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
 pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
@@ -1184,7 +1184,11 @@ pub(crate) async fn run_subagent_task(
             }
         });
         let observed_model = model.clone();
-        let _ = scheduler.run_executor(&mut agent, None).await;
+        let execution_owner = scheduler.acquire_execution_owner().await;
+        let _ = scheduler
+            .run_executor_with_owner(&mut agent, None, &execution_owner)
+            .await
+            .completed();
         let mut messages = if is_recovery {
             resume_messages.clone()
         } else {
@@ -1298,7 +1302,12 @@ pub(crate) async fn run_subagent_task(
         agent.steer(AgentMessage::user(prompt_text.to_string(), Vec::new()));
         agent.run_steer().await;
     }
-    while agent_work.run_executor(&mut agent, None).await {}
+    let execution_owner = agent_work.acquire_execution_owner().await;
+    while agent_work
+        .run_executor_with_owner(&mut agent, None, &execution_owner)
+        .await
+        .completed()
+    {}
 
     // Inbox follow-up loop (parent `hub send` / late sibling messages).
     // Bounded to 3 extra turns so a chatty peer cannot loop the child.
@@ -1328,7 +1337,11 @@ pub(crate) async fn run_subagent_task(
             Vec::new(),
         ));
         agent.run_steer().await;
-        while agent_work.run_executor(&mut agent, None).await {}
+        while agent_work
+            .run_executor_with_owner(&mut agent, None, &execution_owner)
+            .await
+            .completed()
+        {}
     }
 
     let mut checkpoint_cursor = checkpoint_task
@@ -1586,33 +1599,37 @@ mod result_tests {
         });
         let mut child = task("worker");
         child.context_refs = vec!["ctx-missing".into()];
-        assert!(run_subagents_with_context(
-            vec![child],
-            false,
-            None,
-            test_context(
-                dir.path().into(),
-                session_file.clone(),
-                Some(observer.clone())
-            ),
-        )
-        .await
-        .unwrap_err()
-        .contains("missing"));
+        assert!(
+            run_subagents_with_context(
+                vec![child],
+                false,
+                None,
+                test_context(
+                    dir.path().into(),
+                    session_file.clone(),
+                    Some(observer.clone())
+                ),
+            )
+            .await
+            .unwrap_err()
+            .contains("missing")
+        );
         assert!(!observed.load(Ordering::SeqCst));
 
         std::fs::write(dir.path().join("first.rs"), "stale").unwrap();
         let mut child = task("worker");
         child.context_refs = vec![context_ids[0].clone()];
-        assert!(run_subagents_with_context(
-            vec![child],
-            false,
-            None,
-            test_context(dir.path().into(), session_file, Some(observer)),
-        )
-        .await
-        .unwrap_err()
-        .contains("stale"));
+        assert!(
+            run_subagents_with_context(
+                vec![child],
+                false,
+                None,
+                test_context(dir.path().into(), session_file, Some(observer)),
+            )
+            .await
+            .unwrap_err()
+            .contains("stale")
+        );
         assert!(!observed.load(Ordering::SeqCst));
     }
 

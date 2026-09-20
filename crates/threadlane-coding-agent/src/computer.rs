@@ -42,18 +42,17 @@ mod tests {
         // strips every non-core schema from the provider payload.
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
-        let agent =
-            crate::runtime::CodingAgent::new(crate::options::CodingAgentOptions {
-                api_key: "test-key".into(),
-                account_id: None,
-                model: "gpt-4o".into(),
-                work_dir: dir.path().to_path_buf(),
-                session_file: Some(session_file),
-                system_prompt: Default::default(),
-                agent_config: None,
-                coding_config: None,
-                browser: threadlane_protocol::browser::BrowserBridge::unavailable(),
-            });
+        let agent = crate::runtime::CodingAgent::new(crate::options::CodingAgentOptions {
+            api_key: "test-key".into(),
+            account_id: None,
+            model: "gpt-4o".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(session_file),
+            system_prompt: Default::default(),
+            agent_config: None,
+            coding_config: None,
+            browser: threadlane_protocol::browser::BrowserBridge::unavailable(),
+        });
         let names: Vec<String> = agent
             .agent
             .configured_tool_definitions()

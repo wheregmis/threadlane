@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use threadlane_acp::{AcpAgentConfig, AcpScope, AcpSettings};
-use threadlane_acp_engine::{generate_title, AcpEngine};
+use threadlane_acp_engine::{AcpEngine, generate_title};
 use threadlane_permission::{PermissionDecision, PermissionHandle};
 use threadlane_protocol::{AgentEvent, ImageAttachment, ReasoningEffort};
 use tokio::sync::broadcast;
@@ -550,12 +550,12 @@ fn configure_project_stub(work_dir: &Path, mode: &str) {
 
 #[tokio::test]
 async fn an_acp_turn_is_journaled_so_the_transcript_survives_a_reload() {
-    use threadlane_runtime::harness::{
-        read_transcript_page, JsonlStore, SessionStore, TranscriptItem,
-    };
     use threadlane_coding_agent::{CodingAgent, CodingAgentOptions};
     use threadlane_protocol::browser::BrowserBridge;
     use threadlane_protocol::{AgentMessage, PlanItemStatus};
+    use threadlane_runtime::harness::{
+        JsonlStore, SessionStore, TranscriptItem, read_transcript_page,
+    };
 
     let temp = tempfile::tempdir().unwrap();
     let work = work_dir(&temp);
@@ -680,11 +680,13 @@ async fn queued_acp_prompts_reuse_the_conversation_and_survive_reload() {
         .unwrap_err();
     assert!(steer.contains("use Queue"));
     assert!(controller.resolve_permission(&request.id, PermissionDecision::AllowOnce));
-    assert!(tokio::time::timeout(Duration::from_secs(10), turn)
-        .await
-        .unwrap()
-        .unwrap()
-        .is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), turn)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
 
     let session_file = controller.session_file.clone();
     drop(controller);
@@ -800,9 +802,11 @@ async fn assert_acp_permission_cancellation(stop_again: bool) {
     .expect("Stop must answer both permission requests so the same conversation can resume");
     assert!(result.is_none(), "resume failed: {result:?}");
     assert!(!controller.resolve_permission(&request.id, PermissionDecision::AllowOnce));
-    assert!(collect(&mut events)
-        .iter()
-        .all(|event| !matches!(event, AgentEvent::PermissionRequested { .. })));
+    assert!(
+        collect(&mut events)
+            .iter()
+            .all(|event| !matches!(event, AgentEvent::PermissionRequested { .. }))
+    );
 
     let session_file = controller.session_file.clone();
     drop(controller);
@@ -842,10 +846,12 @@ async fn assert_acp_permission_cancellation(stop_again: bool) {
         })
         .collect::<Vec<_>>();
     assert_eq!(resolved.len(), 2);
-    assert!(resolved
-        .iter()
-        .all(|(run_id, decision)| *run_id == Some(first_run)
-            && **decision == PermissionTraceDecision::Cancelled));
+    assert!(
+        resolved
+            .iter()
+            .all(|(run_id, decision)| *run_id == Some(first_run)
+                && **decision == PermissionTraceDecision::Cancelled)
+    );
     assert!(Reducer::reduce(&store).unwrap().lanes[0].queued.is_empty());
 }
 
@@ -938,30 +944,116 @@ async fn assert_stopping_acp_preserves_queued_input(reopen: bool) {
     assert!(Reducer::reduce(&store).unwrap().lanes[0].queued.is_empty());
 }
 
-fn queued_controller(work: &Path) -> std::sync::Arc<threadlane_coding_agent::controller::SessionController> {
-    use threadlane_coding_agent::controller::SessionController;
+fn queued_controller(
+    work: &Path,
+) -> std::sync::Arc<threadlane_coding_agent::controller::SessionController> {
     use threadlane_coding_agent::CodingAgentOptions;
+    use threadlane_coding_agent::controller::SessionController;
     use threadlane_protocol::browser::BrowserBridge;
     let session_file = work.join(".threadlane/sessions/session_queue.jsonl");
     std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
-    SessionController::new(
-        CodingAgentOptions {
-            api_key: String::new(),
-            account_id: None,
-            model: "acp/stub".into(),
-            work_dir: work.to_path_buf(),
-            session_file: Some(session_file),
-            system_prompt: Default::default(),
-            agent_config: None,
-            coding_config: None,
-            browser: BrowserBridge::unavailable(),
-        },
-    )
+    SessionController::new(CodingAgentOptions {
+        api_key: String::new(),
+        account_id: None,
+        model: "acp/stub".into(),
+        work_dir: work.to_path_buf(),
+        session_file: Some(session_file),
+        system_prompt: Default::default(),
+        agent_config: None,
+        coding_config: None,
+        browser: BrowserBridge::unavailable(),
+    })
+}
+
+#[tokio::test]
+async fn controller_scheduler_supervisor_has_single_owned_lifecycle() {
+    let temp = tempfile::tempdir().unwrap();
+    let controller = queued_controller(temp.path());
+
+    let (handle, mut results) = controller
+        .start_scheduler_supervisor_with_results()
+        .expect("first supervisor starts");
+    assert!(controller.scheduler_supervisor_running());
+    assert!(
+        controller
+            .start_scheduler_supervisor_with_results()
+            .is_err()
+    );
+
+    let _agent_guard = tokio::time::timeout(Duration::from_millis(100), controller.agent.lock())
+        .await
+        .expect("idle supervisor must not hold the agent mutex");
+
+    handle.shutdown().await;
+    assert!(!controller.scheduler_supervisor_running());
+    assert!(results.try_recv().is_err());
+
+    let (dropped_handle, _dropped_results) = controller
+        .start_scheduler_supervisor_with_results()
+        .expect("supervisor restarts after shutdown");
+    drop(dropped_handle);
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while controller.scheduler_supervisor_running() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropped supervisor must release its lease when its task exits");
+    let final_handle = controller
+        .start_scheduler_supervisor_with_results()
+        .expect("supervisor can restart after a dropped handle exits")
+        .0;
+
+    final_handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn controller_scheduler_supervisor_forwards_permission_events() {
+    use threadlane_coding_agent::controller::SchedulerSupervisorEvent;
+
+    let temp = tempfile::tempdir().unwrap();
+    let work = work_dir(&temp);
+    configure_project_stub(&work, "permission");
+    let controller = queued_controller(&work);
+    let (handle, mut updates) = controller
+        .start_scheduler_supervisor_with_results()
+        .expect("supervisor starts");
+    controller
+        .work_handle
+        .try_queue_follow_up_with_images("run with permission", Vec::new())
+        .unwrap();
+
+    let request = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(SchedulerSupervisorEvent::Agent(
+                AgentEvent::PermissionRequested { request },
+            )) = updates.recv().await
+            {
+                break request;
+            }
+        }
+    })
+    .await
+    .expect("supervisor must forward the permission request");
+    assert!(controller.resolve_permission(&request.id, PermissionDecision::AllowOnce));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                updates.recv().await,
+                Some(SchedulerSupervisorEvent::Completed(_))
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("supervised work completes after permission resolution");
+    handle.shutdown().await;
 }
 
 fn queued_transcript(path: &Path) -> Vec<String> {
-    use threadlane_runtime::harness::{read_transcript_page, TranscriptItem};
     use threadlane_protocol::AgentMessage;
+    use threadlane_runtime::harness::{TranscriptItem, read_transcript_page};
     read_transcript_page(path, None, 100)
         .unwrap()
         .items
@@ -1056,7 +1148,7 @@ async fn an_agent_without_an_effort_setting_still_runs() {
 
 #[tokio::test]
 async fn the_picker_lists_the_agents_settings_without_running_a_turn() {
-    use threadlane_acp::{config_option_for, ACP_CONFIG_CATEGORY_MODEL};
+    use threadlane_acp::{ACP_CONFIG_CATEGORY_MODEL, config_option_for};
 
     let (_temp, mut engine) = setup("config");
     let (tx, _rx) = broadcast::channel(64);
@@ -1081,7 +1173,7 @@ async fn the_picker_lists_the_agents_settings_without_running_a_turn() {
 
 #[tokio::test]
 async fn the_effort_setting_is_hidden_from_the_picker() {
-    use threadlane_acp::{config_option_for, ACP_CONFIG_CATEGORY_EFFORT};
+    use threadlane_acp::{ACP_CONFIG_CATEGORY_EFFORT, config_option_for};
 
     let (_temp, mut engine) = setup("config");
     let (tx, _rx) = broadcast::channel(64);
@@ -1106,7 +1198,7 @@ async fn the_effort_setting_is_hidden_from_the_picker() {
 
 #[tokio::test]
 async fn picking_a_setting_applies_it_on_the_agent() {
-    use threadlane_acp::{config_option_for, ACP_CONFIG_CATEGORY_MODEL};
+    use threadlane_acp::{ACP_CONFIG_CATEGORY_MODEL, config_option_for};
 
     let (_temp, mut engine) = setup("config");
     let (tx, mut rx) = broadcast::channel(64);
@@ -1185,7 +1277,7 @@ async fn a_value_the_agent_does_not_offer_is_refused_rather_than_sent() {
 
 #[tokio::test]
 async fn a_control_label_is_the_option_name_not_its_description() {
-    use threadlane_acp::{config_option_for, ACP_CONFIG_CATEGORY_MODE};
+    use threadlane_acp::{ACP_CONFIG_CATEGORY_MODE, config_option_for};
 
     let (_temp, mut engine) = setup("config");
     let (tx, _rx) = broadcast::channel(64);

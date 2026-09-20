@@ -14,13 +14,14 @@ use super::harness::CodingSessionHarness;
 use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use threadlane_runtime::harness::QueueKind;
+use std::sync::atomic::{AtomicBool, Ordering};
 use threadlane_protocol::{AgentMessage, ImageAttachment};
-use threadlane_runtime::AgentRuntime;
 #[cfg(test)]
 use threadlane_protocol::{AgentToolDefinition, ToolExecutor};
+use threadlane_runtime::AgentRuntime;
+use threadlane_runtime::harness::QueueKind;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentWork {
@@ -36,6 +37,18 @@ pub enum AgentWork {
         content: String,
         images: Vec<ImageAttachment>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentWorkExecution {
+    Idle,
+    Completed { work_items: usize },
+}
+
+impl AgentWorkExecution {
+    pub(crate) fn completed(self) -> bool {
+        matches!(self, Self::Completed { work_items } if work_items > 0)
+    }
 }
 
 #[cfg(test)]
@@ -67,14 +80,36 @@ pub(crate) fn enqueue_harness_follow_up(
 pub struct AgentWorkScheduler {
     pending: Arc<std::sync::Mutex<VecDeque<AgentWork>>>,
     acp_model: Arc<AtomicBool>,
+    wake: Arc<Notify>,
+    /// Exactly one executor may drive a session scheduler at a time. Queue
+    /// wakes are shared across surface adapters, but the CodingAgent runtime
+    /// and its durable reconciliation must have one execution owner.
+    execution_owner: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
     test_observer: SubagentObserverState,
 }
 
 impl AgentWorkScheduler {
+    pub(crate) async fn acquire_execution_owner(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.execution_owner.clone().lock_owned().await
+    }
     pub(crate) fn schedule(&self, work: AgentWork) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.push_back(work);
+            self.wake.notify_one();
+        }
+    }
+
+    /// Wait until this scheduler has queued work. The notification is shared
+    /// by all scheduler clones and is only a wake; the queue remains the
+    /// durable source of truth for execution.
+    #[allow(dead_code)]
+    pub(crate) async fn wait_for_work(&self) {
+        loop {
+            if self.next().is_some() {
+                return;
+            }
+            self.wake.notified().await;
         }
     }
 
@@ -106,21 +141,26 @@ impl AgentWorkScheduler {
         }
     }
 
-    pub(crate) async fn run_executor(
+    /// Run one scheduler batch while the caller retains the session lease.
+    /// The main runtime uses this across its whole drain loop, so another
+    /// surface cannot take ownership between adjacent batches.
+    pub(crate) async fn run_executor_with_owner(
         &self,
         agent: &mut AgentRuntime,
         session_file: Option<&Path>,
-    ) -> bool {
+        _execution_owner: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> AgentWorkExecution {
         let pending = self.drain();
         if pending.is_empty() {
-            return false;
+            return AgentWorkExecution::Idle;
         }
+        let work_items = pending.len();
         #[cfg(test)]
         if let Ok(Some(observer)) = self.test_observer.lock().map(|observer| observer.clone()) {
             if let Ok(mut observed) = observer.lock() {
                 observed.extend(pending);
             }
-            return true;
+            return AgentWorkExecution::Completed { work_items };
         }
         for work in pending {
             match work {
@@ -144,7 +184,7 @@ impl AgentWorkScheduler {
                 }
             }
         }
-        true
+        AgentWorkExecution::Completed { work_items }
     }
 }
 
@@ -185,6 +225,9 @@ pub struct CodingAgentWorkHandle {
 }
 
 impl CodingAgentWorkHandle {
+    pub(crate) async fn wait_for_work(&self) {
+        self.scheduler.wait_for_work().await;
+    }
     pub(crate) fn new(scheduler: AgentWorkScheduler, session_file: Option<PathBuf>) -> Self {
         Self {
             scheduler,
@@ -237,5 +280,54 @@ impl CodingAgentWorkHandle {
         }
         Ok(())
     }
+}
 
+#[cfg(test)]
+mod execution_owner_tests {
+    use super::{AgentWork, AgentWorkExecution, AgentWorkScheduler};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn execution_owner_serializes_session_drivers() {
+        let scheduler = AgentWorkScheduler::default();
+        let first = scheduler.acquire_execution_owner().await;
+        let scheduler_clone = scheduler.clone();
+        let mut waiting =
+            tokio::spawn(async move { scheduler_clone.acquire_execution_owner().await });
+
+        let result = tokio::time::timeout(Duration::from_millis(20), &mut waiting).await;
+        assert!(result.is_err());
+        waiting.abort();
+        drop(first);
+
+        let second = tokio::time::timeout(Duration::from_secs(1), async {
+            scheduler.acquire_execution_owner().await
+        })
+        .await
+        .expect("second executor should acquire the released session lease");
+        drop(second);
+    }
+
+    #[test]
+    fn execution_result_distinguishes_idle_from_completed_work() {
+        assert!(!AgentWorkExecution::Idle.completed());
+        assert!(AgentWorkExecution::Completed { work_items: 1 }.completed());
+    }
+
+    #[tokio::test]
+    async fn scheduling_wakes_cloned_scheduler_waiters() {
+        let scheduler = AgentWorkScheduler::default();
+        let waiter = scheduler.clone();
+        let waiting = tokio::spawn(async move { waiter.wait_for_work().await });
+
+        scheduler.schedule(AgentWork::QueueMessage {
+            content: "wake".into(),
+            images: Vec::new(),
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("scheduled work should wake the supervisor")
+            .expect("waiter task should finish");
+    }
 }

@@ -4,11 +4,7 @@ impl CodingSessionHarness {
     // ── Usage ─────────────────────────────────────────────────────────
 
     /// Record provider token usage for a run.
-    pub fn record_provider_usage(
-        &mut self,
-        run_id: &str,
-        usage: TokenUsage,
-    ) -> Result<(), String> {
+    pub fn record_provider_usage(&mut self, run_id: &str, usage: TokenUsage) -> Result<(), String> {
         self.ensure_fresh()?;
         self.store
             .record_provider_usage(run_id, usage)
@@ -116,5 +112,4 @@ impl CodingSessionHarness {
             .drive_to_completion()
             .map_err(|error| error.to_string())
     }
-
 }

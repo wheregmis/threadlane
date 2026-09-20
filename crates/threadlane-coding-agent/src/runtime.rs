@@ -6,32 +6,30 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
-    ContextCapability, GitHubCapability, McpCapability, PlanCapability, QuestionCapability,
-    SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
+    BrowserCapability, ContextCapability, GitHubCapability, McpCapability, PlanCapability,
+    QuestionCapability, SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy,
 };
 use super::harness::{CodingSessionHarness, InterruptedSubagentRecoveryState};
-use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
+use crate::commands::{CommandAction, execute_slash_command, parse_slash_command};
 use crate::computer::ComputerCapability;
-use threadlane_prompt::ProjectContext;
-use threadlane_wasi::broker::CapabilityDispatcher;
-use threadlane_runtime::plan::session_plan_store;
-use threadlane_question::QuestionManager;
-use threadlane_prompt::{build_system_prompt, SystemPromptBuildOptions};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use threadlane_mcp::McpManager;
 use threadlane_project::default_global_threadlane_dir;
+use threadlane_prompt::ProjectContext;
+use threadlane_prompt::{SystemPromptBuildOptions, build_system_prompt};
 use threadlane_protocol::ProviderPort;
+use threadlane_protocol::{AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
 use threadlane_provider::openai::fetch_available_models;
-use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore};
-use threadlane_runtime::ToolPolicy;
-use threadlane_protocol::{
-    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage,
-};
+use threadlane_question::QuestionManager;
 use threadlane_runtime::AgentRuntime;
+use threadlane_runtime::ToolPolicy;
+use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore};
+use threadlane_runtime::plan::session_plan_store;
 use threadlane_skills::{SkillManager, SkillRegistry};
+use threadlane_wasi::broker::CapabilityDispatcher;
 use threadlane_wasi::{WasiExtensionManager, WasiLegacyEffect};
 use tokio::sync::broadcast;
 
@@ -57,8 +55,7 @@ pub struct CodingAgent {
     pub(crate) harness: Option<CodingSessionHarness>,
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) prewalk:
-        Arc<std::sync::Mutex<Option<threadlane_orchestrator::PrewalkState>>>,
+    pub(crate) prewalk: Arc<std::sync::Mutex<Option<threadlane_orchestrator::PrewalkState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
     /// parent `hub` tool (oh-my-pi hub/IRC parity).
     pub(crate) hub: super::mailbox::SubagentHub,
@@ -73,6 +70,11 @@ pub struct CodingAgent {
     pub(crate) subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
     pub(crate) subagent_branch_observer: Option<SubagentBoundaryObserver>,
+}
+
+pub(crate) enum ScheduledWorkExecution {
+    Idle,
+    Completed(Option<Result<String, String>>),
 }
 
 impl CodingAgent {
@@ -107,14 +109,27 @@ impl CodingAgent {
         if let Some(agent_id) = threadlane_acp_engine::acp_agent_id(&model) {
             return self.run_queued_acp_work(agent_id).await;
         }
-        while self
-            .agent_work
-            .run_executor(&mut self.agent, self.session_file.as_deref())
+        let scheduler = self.agent_work.clone();
+        let execution_owner = scheduler.acquire_execution_owner().await;
+        while scheduler
+            .run_executor_with_owner(
+                &mut self.agent,
+                self.session_file.as_deref(),
+                &execution_owner,
+            )
             .await
+            .completed()
         {
             self.sync_harness_and_dispatch_assistant_hooks().await;
         }
         None
+    }
+
+    pub(crate) async fn execute_scheduled_work(&mut self) -> ScheduledWorkExecution {
+        if self.agent_work.next().is_none() {
+            return ScheduledWorkExecution::Idle;
+        }
+        ScheduledWorkExecution::Completed(self.run_scheduled_agent_work().await)
     }
 
     pub(crate) fn work_handle(&self) -> CodingAgentWorkHandle {
@@ -125,6 +140,60 @@ impl CodingAgent {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.agent.subscribe()
+    }
+
+    /// Subscribe to replayable durable harness events for this session.
+    pub fn subscribe_durable_events(
+        &self,
+    ) -> Result<
+        threadlane_runtime::harness::Subscription,
+        threadlane_runtime::harness::EventError,
+    > {
+        self.harness
+            .as_ref()
+            .ok_or_else(|| {
+                threadlane_runtime::harness::EventError::Unavailable(
+                    "durable harness is unavailable".to_owned(),
+                )
+            })?
+            .subscribe_durable_events()
+    }
+
+    /// Wait for replayable durable harness events after a subscription cursor.
+    pub async fn wait_durable_events(
+        &self,
+        subscription: &mut threadlane_runtime::harness::Subscription,
+    ) -> Result<
+        Vec<threadlane_runtime::harness::HarnessEvent>,
+        threadlane_runtime::harness::EventError,
+    > {
+        self.harness
+            .as_ref()
+            .ok_or_else(|| {
+                threadlane_runtime::harness::EventError::Unavailable(
+                    "durable harness is unavailable".to_owned(),
+                )
+            })?
+            .wait_durable_events(subscription)
+            .await
+    }
+
+    /// Poll currently available replayable durable harness events.
+    pub fn poll_durable_events(
+        &self,
+        subscription: &mut threadlane_runtime::harness::Subscription,
+    ) -> Result<
+        Vec<threadlane_runtime::harness::HarnessEvent>,
+        threadlane_runtime::harness::EventError,
+    > {
+        self.harness
+            .as_ref()
+            .ok_or_else(|| {
+                threadlane_runtime::harness::EventError::Unavailable(
+                    "durable harness is unavailable".to_owned(),
+                )
+            })?
+            .poll_durable_events(subscription)
     }
 
     pub(crate) fn harness_error(&self) -> Option<&str> {
@@ -412,7 +481,8 @@ impl CodingAgent {
                 effective_reasoning_effort = effort;
             }
             if let Some(plan_json) = h.store.facts().get("session_plan") {
-                if let Ok(plan) = serde_json::from_str::<threadlane_protocol::SessionPlan>(plan_json)
+                if let Ok(plan) =
+                    serde_json::from_str::<threadlane_protocol::SessionPlan>(plan_json)
                 {
                     initial_plan = plan;
                 }
@@ -1153,7 +1223,10 @@ impl CodingAgent {
                 *run_id = None;
             }
         }
-        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        *self
+            .dispatch_parent_leaf
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         let trimmed = input.trim();
 
         if self.prompt_templates.is_none() {
@@ -1198,7 +1271,10 @@ impl CodingAgent {
                             AgentMessage::user(input, images.clone()),
                             harness_run_id.is_some(),
                         );
-                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
+                        *self
+                            .dispatch_parent_leaf
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = parent_leaf;
                         if let Some(accepted) = harness_run_id.as_ref() {
                             if let Err(error) = self.execute_accepted_run(accepted).await {
                                 self.harness_journal_error = Some(error);
@@ -1210,7 +1286,10 @@ impl CodingAgent {
                         self.sync_harness_and_dispatch_assistant_hooks().await;
                         self.run_scheduled_agent_work().await;
                         if let Err(error) = self.commit_completed_subagent_lanes() {
-                            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                            *self
+                                .dispatch_parent_leaf
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner()) = None;
                             let _ = self
                                 .finish_harness_run(
                                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1220,7 +1299,10 @@ impl CodingAgent {
                                 .await;
                             return Some(Err(error));
                         }
-                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                        *self
+                            .dispatch_parent_leaf
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = None;
                         if let Err(error) = self
                             .finish_harness_run(
                                 harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1282,11 +1364,17 @@ impl CodingAgent {
                     AgentMessage::user(input, images.clone()),
                     harness_run_id.is_some(),
                 );
-                *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
+                *self
+                    .dispatch_parent_leaf
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = parent_leaf;
                 let result = match (self.agent_runner)(vec![task], false, None).await {
                     Ok(result) => result,
                     Err(err) => {
-                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                        *self
+                            .dispatch_parent_leaf
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = None;
                         let _ = self
                             .finish_harness_run(
                                 harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1299,7 +1387,10 @@ impl CodingAgent {
                 };
                 let output = result["output"].as_str().unwrap_or_default().to_string();
                 if let Err(error) = self.commit_completed_subagent_lanes() {
-                    *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                    *self
+                        .dispatch_parent_leaf
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = None;
                     let _ = self
                         .finish_harness_run(
                             harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1309,7 +1400,10 @@ impl CodingAgent {
                         .await;
                     return Some(Err(error));
                 }
-                *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                *self
+                    .dispatch_parent_leaf
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = None;
                 let assistant = AgentMessage::Assistant {
                     content: Some(output.clone()),
                     tool_calls: None,
@@ -1366,7 +1460,10 @@ impl CodingAgent {
                     AgentMessage::user(input, images.clone()),
                     harness_run_id.is_some(),
                 );
-                *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
+                *self
+                    .dispatch_parent_leaf
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = parent_leaf;
                 return match res {
                     Ok(result) => {
                         let message = if result.message.is_empty() {
@@ -1459,7 +1556,10 @@ impl CodingAgent {
                             }
                         }
                         if let Err(error) = self.commit_completed_subagent_lanes() {
-                            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                            *self
+                                .dispatch_parent_leaf
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner()) = None;
                             let _ = self
                                 .finish_harness_run(
                                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1469,7 +1569,10 @@ impl CodingAgent {
                                 .await;
                             return Some(Err(error));
                         }
-                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                        *self
+                            .dispatch_parent_leaf
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = None;
                         if let Some(agent_run_output) = agent_run_output {
                             let result = agent_run_output;
                             let outcome = if result.is_ok() {
@@ -1584,7 +1687,10 @@ impl CodingAgent {
                             self.agent.configured_tool_definitions().iter().any(|tool| {
                                 tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL
                             });
-                        *self.prewalk.lock().unwrap_or_else(|error| error.into_inner()) =
+                        *self
+                            .prewalk
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) =
                             Some(threadlane_orchestrator::PrewalkState::new(
                                 fast_model.clone(),
                                 fast_reasoning,
@@ -1613,7 +1719,13 @@ impl CodingAgent {
         // --- One-shot Prewalk orchestrator (oh-my-pi parity): no classifier.
         // Only `Always` mode arms automatically; explicit `/prewalk` above
         // bypasses this. `Auto` is deprecated and inert.
-        if architect_directive.is_none() && self.prewalk.lock().unwrap_or_else(|error| error.into_inner()).is_none() {
+        if architect_directive.is_none()
+            && self
+                .prewalk
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none()
+        {
             let (active_model, active_effort) = {
                 let turn = self.agent.turn.lock().await;
                 (turn.model.clone(), Some(turn.reasoning_effort))
@@ -1661,7 +1773,10 @@ impl CodingAgent {
                         message: format!("Prewalk: target `{target_fast}` already matches the active model and reasoning; nothing to switch."),
                     });
                 } else {
-                    *self.prewalk.lock().unwrap_or_else(|error| error.into_inner()) =
+                    *self
+                        .prewalk
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) =
                         Some(threadlane_orchestrator::PrewalkState::new(
                             target_fast.clone(),
                             target_effort,
@@ -1717,7 +1832,10 @@ impl CodingAgent {
             }
         };
         let parent_leaf = self.prompt_parent_leaf(msg.clone(), harness_run_id.is_some());
-        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
+        *self
+            .dispatch_parent_leaf
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = parent_leaf;
         if let (Some(run_id), Some(harness)) = (
             harness_run_id.as_ref().map(|run| run.run_id.as_str()),
             self.harness.as_mut(),
@@ -1740,7 +1858,10 @@ impl CodingAgent {
             self.sync_harness_and_dispatch_assistant_hooks().await;
         }
         if let Some(error) = self.harness_journal_error.clone() {
-            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+            *self
+                .dispatch_parent_leaf
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
             let _ = self
                 .finish_harness_run(
                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1752,7 +1873,10 @@ impl CodingAgent {
         }
         self.run_scheduled_agent_work().await;
         if let Some(error) = self.harness_journal_error.clone() {
-            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+            *self
+                .dispatch_parent_leaf
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
             let _ = self
                 .finish_harness_run(
                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1763,7 +1887,10 @@ impl CodingAgent {
             return Some(Err(format!("Harness Error: {error}")));
         }
         if let Err(error) = self.commit_completed_subagent_lanes() {
-            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+            *self
+                .dispatch_parent_leaf
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
             let _ = self
                 .finish_harness_run(
                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1776,7 +1903,10 @@ impl CodingAgent {
             });
             return Some(Err(error));
         }
-        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        *self
+            .dispatch_parent_leaf
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         // Bounded continuation safety net (oh-my-pi `prewalk-continue.md`
         // parity): if prewalk is still armed after the turn and the last
         // assistant message made no tool calls, the plan nudge's prose reply
@@ -1816,7 +1946,13 @@ impl CodingAgent {
                 // Only remind when the turn truly ended text-only with no
                 // handoff. If tools ran (todo opened, edits attempted), the
                 // normal gate/handoff path already applies.
-                if text_only && self.prewalk.lock().unwrap_or_else(|error| error.into_inner()).is_some() {
+                if text_only
+                    && self
+                        .prewalk
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .is_some()
+                {
                     let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
                         model: self.agent.model(),
                         message: format!(
@@ -1908,31 +2044,30 @@ impl CodingAgent {
 #[cfg(test)]
 mod compaction_sync_tests {
     use super::{
-        durable_prompt_snapshot, requires_harness_compaction_reset, CodingAgent,
-        CodingAgentOptions, CompletedSubagentLane, SubagentLaneStatus,
-        MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
+        CodingAgent, CodingAgentOptions, CompletedSubagentLane, MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
+        SubagentLaneStatus, durable_prompt_snapshot, requires_harness_compaction_reset,
     };
-    use threadlane_protocol::browser::BrowserBridge;
-    use threadlane_prompt::SystemPromptConfig;
     use async_trait::async_trait;
     use std::{
         collections::HashSet,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
         },
     };
+    use threadlane_prompt::SystemPromptConfig;
+    use threadlane_protocol::browser::BrowserBridge;
+    use threadlane_protocol::{AgentMessage, AgentToolResult};
     use threadlane_protocol::{
         DeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall,
         RuntimeToolCallFunction, RuntimeUsage,
     };
-    use threadlane_protocol::{AgentMessage, AgentToolResult};
     use threadlane_runtime::{
-        harness::{
-            read_transcript_page, CompactionReason, JsonlStore, OperationOutcome, SessionStore,
-            TranscriptItem,
-        },
         Record,
+        harness::{
+            CompactionReason, JsonlStore, OperationOutcome, SessionStore, TranscriptItem,
+            read_transcript_page,
+        },
     };
 
     fn summary() -> AgentMessage {
@@ -2076,6 +2211,31 @@ mod compaction_sync_tests {
         });
 
         assert!(!requires_harness_compaction_reset(&durable, &state));
+    }
+
+    #[tokio::test]
+    async fn coding_agent_exposes_durable_event_subscription() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut agent = CodingAgent::new(CodingAgentOptions {
+            api_key: "test-key".into(),
+            account_id: None,
+            model: "test-model".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(path),
+            system_prompt: SystemPromptConfig::default(),
+            agent_config: None,
+            coding_config: None,
+            browser: BrowserBridge::unavailable(),
+        });
+        let mut subscription = agent.subscribe_durable_events().unwrap();
+        let harness = agent.harness.as_mut().unwrap();
+        harness
+            .begin_run("runtime-events", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+        let events = agent.wait_durable_events(&mut subscription).await.unwrap();
+        assert!(!events.is_empty());
+        assert!(agent.poll_durable_events(&mut subscription).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2238,10 +2398,12 @@ mod compaction_sync_tests {
             &entry.message,
             AgentMessage::Custom { custom_type, .. } if custom_type == "subagent_lane"
         )));
-        assert!(store
-            .entries()
-            .iter()
-            .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
+        assert!(
+            store
+                .entries()
+                .iter()
+                .all(|entry| entry.parent_id.as_deref() != Some("node_69"))
+        );
     }
 
     struct LongToolLoopProvider {
@@ -2352,12 +2514,14 @@ mod compaction_sync_tests {
             })
             .collect();
         assert_eq!(prompts, expected);
-        assert!(threadlane_runtime::harness::Reducer::reduce(&store)
-            .unwrap()
-            .lane("main")
-            .unwrap()
-            .queued
-            .is_empty());
+        assert!(
+            threadlane_runtime::harness::Reducer::reduce(&store)
+                .unwrap()
+                .lane("main")
+                .unwrap()
+                .queued
+                .is_empty()
+        );
     }
 
     impl LongToolLoopProvider {
@@ -2603,14 +2767,18 @@ mod compaction_sync_tests {
         // The reopened branch selects the latest durable checkpoint and a descendant leaf.
         let model_context = store.model_context("main").unwrap();
         let checkpoint = model_context.checkpoint.expect("durable checkpoint");
-        assert!(model_context
-            .leaf_id
-            .as_deref()
-            .is_some_and(|leaf| leaf != checkpoint.entry_id));
-        assert!(model_context
-            .entries
-            .iter()
-            .any(|entry| entry.id == checkpoint.entry_id));
+        assert!(
+            model_context
+                .leaf_id
+                .as_deref()
+                .is_some_and(|leaf| leaf != checkpoint.entry_id)
+        );
+        assert!(
+            model_context
+                .entries
+                .iter()
+                .any(|entry| entry.id == checkpoint.entry_id)
+        );
 
         let page = read_transcript_page(&path, None, 1_000).unwrap();
         assert!(!page.has_older);

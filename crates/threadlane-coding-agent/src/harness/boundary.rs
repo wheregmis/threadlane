@@ -135,12 +135,11 @@ impl CodingSessionHarness {
                 .collect::<Vec<_>>()
         };
         let mut current = with_system(self.model_context("main")?.messages());
-        let pre_tokens =
-            estimate_request_tokens(
-                &current,
-                request.tool_schema_json.as_deref(),
-                &CompactionParams::from(config),
-            );
+        let pre_tokens = estimate_request_tokens(
+            &current,
+            request.tool_schema_json.as_deref(),
+            &CompactionParams::from(config),
+        );
         if pre_tokens < budget.trigger_tokens && !request.overflow_recovery {
             return Ok(boundary_result(
                 current,
@@ -179,8 +178,7 @@ impl CodingSessionHarness {
                 prepared,
             )?;
             current = with_system(self.model_context("main")?.messages());
-            let post_tokens =
-                estimate_request_tokens(
+            let post_tokens = estimate_request_tokens(
                 &current,
                 request.tool_schema_json.as_deref(),
                 &CompactionParams::from(config),

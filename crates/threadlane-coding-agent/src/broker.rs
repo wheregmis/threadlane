@@ -1,23 +1,23 @@
-use threadlane_wasi::broker::{BrokerError, BrokerRequest, CapabilityHandler};
-use threadlane_permission::{PermissionDecision, PermissionManager};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use threadlane_permission::{PermissionDecision, PermissionManager};
 use threadlane_protocol::AgentEvent;
 use threadlane_runtime::ToolPolicy;
 use threadlane_wasi::WasiExtensionManager;
+use threadlane_wasi::broker::{BrokerError, BrokerRequest, CapabilityHandler};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use super::cancellation::AgentRunTask;
 use super::capabilities::parse_context_refs;
-use super::scheduler::{enqueue_harness_follow_up, AgentWork, AgentWorkScheduler};
-use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS, MAX_SUBAGENT_TASK_CHARS};
+use super::scheduler::{AgentWork, AgentWorkScheduler, enqueue_harness_follow_up};
+use super::subagents::{AgentRunner, MAX_SUBAGENT_TASK_CHARS, MAX_SUBAGENT_TASKS};
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
@@ -1145,7 +1145,10 @@ mod framing_tests {
                 assert_eq!(message, "hello");
                 assert_eq!(consumed, frame(b"hello").len());
             }
-            other => panic!("expected Ready, got {}", matches!(other, ContentFrame::NeedMore)),
+            other => panic!(
+                "expected Ready, got {}",
+                matches!(other, ContentFrame::NeedMore)
+            ),
         }
         assert!(matches!(
             extract_content_length_frame(b"Content-Length: 5\r\n\r\nhel"),
@@ -1157,8 +1160,7 @@ mod framing_tests {
         ));
         // Oversize only reports once the whole frame arrived (no desync).
         let huge_len = MAX_CONTENT_LENGTH_BYTES + 1;
-        let mut partial =
-            format!("Content-Length: {huge_len}\r\n\r\n").into_bytes();
+        let mut partial = format!("Content-Length: {huge_len}\r\n\r\n").into_bytes();
         partial.extend_from_slice(b"part");
         assert!(matches!(
             extract_content_length_frame(&partial),
