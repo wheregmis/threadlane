@@ -31,7 +31,7 @@ pub use super::types::{
     can_create_pull_request, can_publish_branch, detect_language, discard_options,
     message_generated_matches_active_project, normalize_generated_commit_message,
     selection_bar_discard_options, DiscardOption, FileNode, GitAction, PanelEvent, ReviewTab,
-    Surface,
+    ReviewViewMode, Surface,
 };
 
 pub struct RightPanelView {
@@ -51,6 +51,13 @@ pub struct RightPanelView {
     review_files_list_state: ListState,
     selected_files: HashSet<String>,
     review_selection_initialized: bool,
+    review_filter_input: Entity<InputState>,
+    review_view_mode: ReviewViewMode,
+    commit_amend: bool,
+    stash_dialog_open: bool,
+    stash_message_input: Entity<InputState>,
+    stash_include_untracked: bool,
+    collapsed_tree_folders: HashSet<String>,
     review_diff_revision: u64,
     git_status: Option<GitStatus>,
     draft_pr_context_revision: u64,
@@ -109,6 +116,10 @@ impl RightPanelView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter branches to merge…"));
         let history_filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter commits…"));
+        let review_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter changes…"));
+        let stash_message_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Stash message (optional)"));
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         cx.spawn(async move |this, cx| {
@@ -287,6 +298,13 @@ impl RightPanelView {
                 .with_uniform_item_height(window.rem_size() * 2.0),
             selected_files: HashSet::new(),
             review_selection_initialized: false,
+            review_filter_input,
+            review_view_mode: ReviewViewMode::List,
+            commit_amend: false,
+            stash_dialog_open: false,
+            stash_message_input,
+            stash_include_untracked: true,
+            collapsed_tree_folders: HashSet::new(),
             review_diff_revision: 0,
             git_status: None,
             draft_pr_context_revision: 0,
@@ -804,6 +822,11 @@ impl RightPanelView {
                     self.stash_files = Some((index, files));
                 }
             }
+            PanelEvent::LastCommitMessageLoaded { project, message } => {
+                if self.project.as_ref() == Some(&project) {
+                    self.generated_commit_message = Some(message);
+                }
+            }
             _ => {}
         }
     }
@@ -951,8 +974,9 @@ impl RightPanelView {
             .trim()
             .to_string();
         let selected_paths: Vec<String> = self.selected_files.iter().cloned().collect();
+        let total_count = self.review_files.len();
 
-        if matches!(action, GitAction::Commit | GitAction::CommitAndPush) {
+        if matches!(action, GitAction::Commit | GitAction::CommitAndPush | GitAction::CommitAmend) {
             if selected_paths.is_empty() {
                 self.git_feedback = Some("Select at least one file to commit.".into());
                 let notif = Notification::warning("Select at least one file to commit");
@@ -981,6 +1005,13 @@ impl RightPanelView {
         let feedback = match &action {
             GitAction::Commit => "Committing…".to_string(),
             GitAction::CommitAndPush => "Committing and pushing…".to_string(),
+            GitAction::CommitAmend => "Amending commit…".to_string(),
+            GitAction::StageFile(p) => format!("Staging {p}…"),
+            GitAction::UnstageFile(p) => format!("Unstaging {p}…"),
+            GitAction::StageFiles(paths) => format!("Staging {} files…", paths.len()),
+            GitAction::UnstageFiles(paths) => format!("Unstaging {} files…", paths.len()),
+            GitAction::StashPush { .. } => "Stashing changes…".to_string(),
+            GitAction::LoadLastCommitMessage => "Loading commit message…".to_string(),
             GitAction::Push => "Pushing…".to_string(),
             GitAction::Pull => "Pulling from origin…".to_string(),
             GitAction::Fetch => "Fetching origin…".to_string(),
@@ -1112,6 +1143,53 @@ impl RightPanelView {
                     GitAction::IgnoreExtension(ext) => {
                         threadlane_git::ignore_extension(&work_dir, ext)
                             .map_err(|e| e.to_string())?;
+                    }
+                    GitAction::CommitAmend => {
+                        let status =
+                            threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
+                        let selected_set: HashSet<&str> =
+                            selected_paths.iter().map(String::as_str).collect();
+                        if !selected_paths.is_empty() && selected_paths.len() < total_count {
+                            for file in &status.files {
+                                if selected_set.contains(file.path.as_str()) {
+                                    threadlane_git::stage_file(&work_dir, &file.path)
+                                        .map_err(|e| e.to_string())?;
+                                } else {
+                                    let _ = threadlane_git::unstage_file(&work_dir, &file.path);
+                                }
+                            }
+                        }
+                        threadlane_git::commit_amend(&work_dir, &message)
+                            .map_err(|e| e.to_string())?;
+                        action_message = Some("Commit amended successfully".to_string());
+                    }
+                    GitAction::StageFile(path) => {
+                        threadlane_git::stage_file(&work_dir, path).map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Staged {path}"));
+                    }
+                    GitAction::UnstageFile(path) => {
+                        threadlane_git::unstage_file(&work_dir, path).map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Unstaged {path}"));
+                    }
+                    GitAction::StageFiles(paths) => {
+                        threadlane_git::stage_files(&work_dir, paths).map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Staged {} files", paths.len()));
+                    }
+                    GitAction::UnstageFiles(paths) => {
+                        threadlane_git::unstage_files(&work_dir, paths).map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Unstaged {} files", paths.len()));
+                    }
+                    GitAction::StashPush { message, include_untracked } => {
+                        threadlane_git::stash_push(&work_dir, message.as_deref(), *include_untracked)
+                            .map_err(|e| e.to_string())?;
+                        action_message = Some("Stashed changes successfully".to_string());
+                    }
+                    GitAction::LoadLastCommitMessage => {
+                        let msg = threadlane_git::last_commit_message(&work_dir).map_err(|e| e.to_string())?;
+                        let _ = tx.send(PanelEvent::LastCommitMessageLoaded {
+                            project: work_dir.clone(),
+                            message: msg,
+                        });
                     }
                 }
                 Ok(action_message)
@@ -1730,15 +1808,45 @@ impl RightPanelView {
         }
     }
 
-    fn render_review_file_row(
-        &mut self,
-        index: usize,
-        _window: &mut Window,
+    fn filtered_review_files(&self, cx: &Context<Self>) -> Vec<GitFile> {
+        let query = self.review_filter_input.read(cx).value().trim().to_lowercase();
+        if query.is_empty() {
+            self.review_files.clone()
+        } else {
+            self.review_files
+                .iter()
+                .filter(|f| f.path.to_lowercase().contains(&query))
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn apply_commit_prefix(&mut self, prefix: &str, cx: &mut Context<Self>) {
+        const PREFIXES: &[&str] = &["feat", "fix", "docs", "refactor", "test", "chore"];
+        let cur = self.commit_message_input.read(cx).value().to_string();
+        let trimmed = cur.trim_start();
+        let has_prefix = PREFIXES.iter().any(|p| trimmed.starts_with(&format!("{p}:")) || trimmed.starts_with(&format!("{p}(")));
+        let new_val = if has_prefix {
+            if let Some((_, rest)) = trimmed.split_once(':') {
+                format!("{prefix}:{rest}")
+            } else {
+                format!("{prefix}: {trimmed}")
+            }
+        } else if trimmed.is_empty() {
+            format!("{prefix}: ")
+        } else {
+            format!("{prefix}: {trimmed}")
+        };
+        self.generated_commit_message = Some(new_val);
+        cx.notify();
+    }
+
+    fn render_file_item(
+        &self,
+        file: &GitFile,
+        is_tree_node: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(file) = self.review_files.get(index).cloned() else {
-            return div().into_any_element();
-        };
         let theme = cx.theme().colors;
         let panel_entity = cx.entity().clone();
 
@@ -1753,15 +1861,70 @@ impl RightPanelView {
             .as_ref()
             .map(|root| root.join(&path).display().to_string());
         let status = file.status_char().to_string();
+        let is_staged = file.staged;
         let context_path = path.clone();
-        // Highlight the file whose diff is currently open (Synara's file
-        // list keeps selection visible across refresh).
         let is_open = self
             .document_title
             .as_deref()
             .is_some_and(|title| title == format!("Review · {path}").as_str());
+
+        let (status_color, status_bg) = match file.status_char() {
+            'A' | '?' => (theme.success, theme.success.opacity(0.15)),
+            'D' => (theme.danger, theme.danger.opacity(0.15)),
+            'R' => (theme.link, theme.link.opacity(0.15)),
+            _ => (theme.warning, theme.warning.opacity(0.15)),
+        };
+
+        let row_id = SharedString::from(format!("review-file-{path}"));
+        let stage_path = path.clone();
+        let stage_btn = if is_staged {
+            Button::new(SharedString::from(format!("unstage-btn-{path}")))
+                .icon(IconName::Minus)
+                .ghost()
+                .xsmall()
+                .tooltip("Unstage file")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_git_action(GitAction::UnstageFile(stage_path.clone()), window, cx);
+                }))
+        } else {
+            Button::new(SharedString::from(format!("stage-btn-{path}")))
+                .icon(IconName::Plus)
+                .ghost()
+                .xsmall()
+                .tooltip("Stage file")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_git_action(GitAction::StageFile(stage_path.clone()), window, cx);
+                }))
+        };
+
+        let discard_panel = panel_entity.clone();
+        let discard_path_btn = path.clone();
+        let discard_btn = Button::new(SharedString::from(format!("discard-btn-{path}")))
+            .icon(IconName::Close)
+            .ghost()
+            .xsmall()
+            .tooltip("Discard changes")
+            .on_click(cx.listener(move |_this, _, window, cx| {
+                Self::handle_discard_option(
+                    discard_panel.clone(),
+                    DiscardOption::Single(discard_path_btn.clone()),
+                    window,
+                    cx,
+                );
+            }));
+
+        let diff_path_btn = path.clone();
+        let diff_btn = Button::new(SharedString::from(format!("open-diff-btn-{path}")))
+            .icon(IconName::ExternalLink)
+            .ghost()
+            .xsmall()
+            .tooltip("Open diff")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_file_diff(diff_path_btn.clone(), cx);
+            }));
+
         div()
-            .id(SharedString::from(format!("review-file-{path}")))
+            .id(row_id)
             .h_8()
             .mx_2()
             .px_2()
@@ -1809,12 +1972,12 @@ impl RightPanelView {
                                 div()
                                     .debug_selector(|| "review-filename".into())
                                     .flex_shrink_0()
-                                    .max_w(relative(if directory.is_empty() { 1.0 } else { 0.6 }))
+                                    .max_w(relative(if directory.is_empty() || is_tree_node { 1.0 } else { 0.6 }))
                                     .min_w_0()
                                     .truncate()
                                     .child(filename),
                             )
-                            .when(!directory.is_empty(), |row| {
+                            .when(!directory.is_empty() && !is_tree_node, |row| {
                                 row.child(
                                     div()
                                         .min_w_0()
@@ -1846,25 +2009,26 @@ impl RightPanelView {
                     .overflow_hidden()
                     .justify_start()
                     .selected(is_open)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_file_diff(path.clone(), cx);
+                    .on_click(cx.listener({
+                        let path = path.clone();
+                        move |this, _, _, cx| {
+                            this.open_file_diff(path.clone(), cx);
+                        }
                     })),
             )
-            .child({
-                let status_color = match file.status_char() {
-                    'A' | '?' => theme.success,
-                    'D' => theme.danger,
-                    'R' => theme.link,
-                    _ => theme.warning,
-                };
+            .child(
                 div()
                     .debug_selector(|| "review-file-status".into())
                     .flex_none()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(status_bg)
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(status_color)
-                    .child(status)
-            })
+                    .child(status),
+            )
             .children((file.additions > 0 || file.deletions > 0).then(|| {
                 div()
                     .debug_selector(|| "review-file-stats".into())
@@ -1873,21 +2037,20 @@ impl RightPanelView {
                     .items_center()
                     .gap_1()
                     .text_xs()
-                    .children(
-                        (file.additions > 0).then(|| {
-                            div()
-                                .text_color(theme.success)
-                                .child(format!("+{}", file.additions))
-                        }),
-                    )
-                    .children(
-                        (file.deletions > 0).then(|| {
-                            div()
-                                .text_color(theme.danger)
-                                .child(format!("\u{2212}{}", file.deletions))
-                        }),
-                    )
+                    .children((file.additions > 0).then(|| {
+                        div()
+                            .text_color(theme.success)
+                            .child(format!("+{}", file.additions))
+                    }))
+                    .children((file.deletions > 0).then(|| {
+                        div()
+                            .text_color(theme.danger)
+                            .child(format!("\u{2212}{}", file.deletions))
+                    }))
             }))
+            .child(stage_btn)
+            .child(diff_btn)
+            .child(discard_btn)
             .context_menu({
                 let path = context_path.clone();
                 let absolute_path = absolute_path.clone();
@@ -1908,8 +2071,29 @@ impl RightPanelView {
                     let model_ref = model.clone();
                     let panel_ignore = panel.clone();
                     let panel_ignore_ext = panel.clone();
+                    let panel_stage = panel.clone();
 
                     let mut menu = menu;
+                    if is_staged {
+                        let unstage_p = path.clone();
+                        menu = menu.item(PopupMenuItem::new("Unstage File").on_click(
+                            move |_event, window, cx| {
+                                panel_stage.update(cx, |this, cx| {
+                                    this.run_git_action(GitAction::UnstageFile(unstage_p.clone()), window, cx);
+                                });
+                            },
+                        ));
+                    } else {
+                        let stage_p = path.clone();
+                        menu = menu.item(PopupMenuItem::new("Stage File").on_click(
+                            move |_event, window, cx| {
+                                panel_stage.update(cx, |this, cx| {
+                                    this.run_git_action(GitAction::StageFile(stage_p.clone()), window, cx);
+                                });
+                            },
+                        ));
+                    }
+
                     let (selected_paths, total_files) = {
                         let panel_ref = panel.read(_cx);
                         let selected_paths: Vec<String> =
@@ -1931,30 +2115,35 @@ impl RightPanelView {
                             },
                         ));
                     }
-                    menu = menu.item(
-                        PopupMenuItem::new("Ignore File (Add to .gitignore)").on_click(
+
+                    menu = menu.separator().item(
+                        PopupMenuItem::new("Ignore File (.gitignore)").on_click(
                             move |_event, window, cx| {
-                                let p = ignore_path.clone();
                                 panel_ignore.update(cx, |this, cx| {
-                                    this.run_git_action(GitAction::IgnoreFile(p), window, cx);
+                                    this.run_git_action(
+                                        GitAction::IgnoreFile(ignore_path.clone()),
+                                        window,
+                                        cx,
+                                    );
                                 });
                             },
                         ),
                     );
 
-                    if let Some(ext_str) = ext.clone() {
-                        let ext_action = ext_str.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(format!(
-                                "Ignore All .{ext_str} Files (Add to .gitignore)"
-                            ))
-                            .on_click(move |_event, window, cx| {
-                                let e = ext_action.clone();
+                    if let Some(ref ext) = ext {
+                        let ext_label = format!("Ignore all *.{ext} files");
+                        let ext_to_ignore = ext.clone();
+                        menu = menu.item(PopupMenuItem::new(ext_label).on_click(
+                            move |_event, window, cx| {
                                 panel_ignore_ext.update(cx, |this, cx| {
-                                    this.run_git_action(GitAction::IgnoreExtension(e), window, cx);
+                                    this.run_git_action(
+                                        GitAction::IgnoreExtension(ext_to_ignore.clone()),
+                                        window,
+                                        cx,
+                                    );
                                 });
-                            }),
-                        );
+                            },
+                        ));
                     }
 
                     menu = menu.separator().item(
@@ -1995,29 +2184,17 @@ impl RightPanelView {
                                 window
                                     .push_notification(Notification::info("Copied file path"), cx);
                             },
-                        ))
-                        .item(PopupMenuItem::new("Copy Relative File Path").on_click(
-                            move |_event, window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    rel_path_2.clone(),
-                                ));
-                                window.push_notification(
-                                    Notification::info("Copied relative file path"),
-                                    cx,
-                                );
-                            },
                         ));
 
-                    if let Some(absolute_path) = absolute_path.clone() {
-                        let abs_text = absolute_path.clone();
-                        let reveal_text = absolute_path.clone();
-                        let reveal_label = if cfg!(target_os = "macos") {
-                            "Reveal in Finder"
-                        } else if cfg!(target_os = "windows") {
-                            "Reveal in File Explorer"
-                        } else {
-                            "Reveal in File Manager"
-                        };
+                    if let Some(ref abs_path) = absolute_path {
+                        let abs_text = abs_path.clone();
+                        let reveal_text = abs_path.clone();
+                        #[cfg(target_os = "macos")]
+                        let reveal_label = "Reveal in Finder";
+                        #[cfg(target_os = "windows")]
+                        let reveal_label = "Reveal in File Explorer";
+                        #[cfg(all(unix, not(target_os = "macos")))]
+                        let reveal_label = "Reveal in File Manager";
 
                         menu = menu
                             .item(PopupMenuItem::new("Copy Absolute File Path").on_click(
@@ -2044,6 +2221,19 @@ impl RightPanelView {
                 }
             })
             .into_any_element()
+    }
+
+    fn render_review_file_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let files = self.filtered_review_files(cx);
+        let Some(file) = files.get(index).cloned() else {
+            return div().into_any_element();
+        };
+        self.render_file_item(&file, false, cx)
     }
 
     fn render_review(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -3985,10 +4175,14 @@ impl RightPanelView {
         self.merge_selected_branch = None;
         self.switch_dialog_open = false;
         self.switch_target_branch = None;
+        self.stash_dialog_open = false;
     }
 
     pub fn sync_git_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let open = self.new_branch_dialog_open || self.merge_dialog_open || self.switch_dialog_open;
+        let open = self.new_branch_dialog_open
+            || self.merge_dialog_open
+            || self.switch_dialog_open
+            || self.stash_dialog_open;
         if open == self.git_dialog_presented {
             return;
         }
@@ -3998,7 +4192,7 @@ impl RightPanelView {
             return;
         }
         let panel = cx.entity().downgrade();
-        let width = if self.new_branch_dialog_open {
+        let width = if self.new_branch_dialog_open || self.stash_dialog_open {
             26.25
         } else {
             28.75
@@ -4007,6 +4201,8 @@ impl RightPanelView {
             "Create a branch".to_string()
         } else if self.merge_dialog_open {
             "Merge branches".to_string()
+        } else if self.stash_dialog_open {
+            "Stash changes".to_string()
         } else {
             format!(
                 "Switch to {}",
@@ -4041,9 +4237,110 @@ impl RightPanelView {
             Some(self.render_merge_dialog(cx).into_any_element())
         } else if self.switch_dialog_open {
             Some(self.render_switch_branch_dialog(cx).into_any_element())
+        } else if self.stash_dialog_open {
+            Some(self.render_stash_dialog(cx).into_any_element())
         } else {
             None
         }
+    }
+
+    fn render_stash_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let include_untracked = self.stash_include_untracked;
+
+        div()
+            .id("stash-dialog")
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child("Stash message (optional)"),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1p5()
+                            .rounded_md()
+                            .bg(theme.input)
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(Input::new(&self.stash_message_input)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Checkbox::new("stash-include-untracked-chk")
+                            .checked(include_untracked)
+                            .on_click(cx.listener(|this, checked, _window, cx| {
+                                this.stash_include_untracked = *checked;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.foreground)
+                            .child("Include untracked files"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .pt_2()
+                    .child(
+                        Button::new("cancel-stash-btn")
+                            .label("Cancel")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.close_all_git_dialogs();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("confirm-stash-btn")
+                            .label("Stash changes")
+                            .primary()
+                            .small()
+                            .disabled(self.git_busy)
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                let message = this
+                                    .stash_message_input
+                                    .read(cx)
+                                    .value()
+                                    .trim()
+                                    .to_string();
+                                let msg_opt = (!message.is_empty()).then_some(message);
+                                let include_untracked = this.stash_include_untracked;
+                                this.run_git_action(
+                                    GitAction::StashPush {
+                                        message: msg_opt,
+                                        include_untracked,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                this.close_all_git_dialogs();
+                            })),
+                    ),
+            )
     }
 
     fn render_new_branch_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 pub(crate) const GIT_FIELD_SEPARATOR: char = '\u{1f}';
+pub(crate) const GIT_RECORD_SEPARATOR: char = '\u{1e}';
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitHubPrInfo {

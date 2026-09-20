@@ -88,6 +88,12 @@ pub enum ReviewTab {
     Changes,
     History,
 }
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum ReviewViewMode {
+    #[default]
+    List,
+    Tree,
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -125,6 +131,16 @@ impl Surface {
 pub enum GitAction {
     Commit,
     CommitAndPush,
+    CommitAmend,
+    StageFile(String),
+    UnstageFile(String),
+    StageFiles(Vec<String>),
+    UnstageFiles(Vec<String>),
+    StashPush {
+        message: Option<String>,
+        include_untracked: bool,
+    },
+    LoadLastCommitMessage,
     Push,
     Pull,
     Fetch,
@@ -276,5 +292,9 @@ pub enum PanelEvent {
         project: PathBuf,
         index: usize,
         files: Vec<GitFile>,
+    },
+    LastCommitMessageLoaded {
+        project: PathBuf,
+        message: String,
     },
 }

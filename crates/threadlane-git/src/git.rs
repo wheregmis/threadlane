@@ -8,7 +8,7 @@ use crate::error::GitError;
 use crate::github::{fresh_cache_value, inspect_pr, repository_key};
 use crate::types::{
     GitBranchInfo, GitCommitInfo, GitFile, GitStashInfo, GitStatus, GitWorktreeInfo,
-    GIT_FIELD_SEPARATOR,
+    GIT_FIELD_SEPARATOR, GIT_RECORD_SEPARATOR,
 };
 
 #[cfg(test)]
@@ -540,6 +540,24 @@ pub fn diff_stash_file(
         ],
     )
 }
+pub fn stash_push(
+    work_dir: &Path,
+    message: Option<&str>,
+    include_untracked: bool,
+) -> Result<(), GitError> {
+    let mut args = vec!["stash", "push"];
+    if include_untracked {
+        args.push("-u");
+    }
+    let msg_str;
+    if let Some(msg) = message.map(str::trim).filter(|s| !s.is_empty()) {
+        msg_str = msg.to_string();
+        args.push("-m");
+        args.push(&msg_str);
+    }
+    command(work_dir, &args)?;
+    Ok(())
+}
 
 pub fn pop_stash(work_dir: &Path, stash_index: Option<usize>) -> Result<(), GitError> {
     if let Some(idx) = stash_index {
@@ -568,7 +586,7 @@ pub fn list_commits(work_dir: &Path, max_count: usize) -> Result<Vec<GitCommitIn
         &[
             "log",
             &count_arg,
-            "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cr%x1f%ct%x1f%s",
+            "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cr%x1f%ct%x1f%s%x1f%b%x1e",
         ],
     ) {
         Ok(out) => out,
@@ -576,8 +594,12 @@ pub fn list_commits(work_dir: &Path, max_count: usize) -> Result<Vec<GitCommitIn
     };
 
     let mut commits = Vec::new();
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split(GIT_FIELD_SEPARATOR).collect();
+    for record in output.split(GIT_RECORD_SEPARATOR) {
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = record.split(GIT_FIELD_SEPARATOR).collect();
         if parts.len() >= 7 {
             let sha = parts[0].trim().to_string();
             let short_sha = parts[1].trim().to_string();
@@ -586,12 +608,17 @@ pub fn list_commits(work_dir: &Path, max_count: usize) -> Result<Vec<GitCommitIn
             let relative_time = parts[4].trim().to_string();
             let timestamp = parts[5].trim().parse::<i64>().unwrap_or(0);
             let summary = parts[6].trim().to_string();
+            let body = if parts.len() > 7 {
+                parts[7].trim().to_string()
+            } else {
+                String::new()
+            };
 
             commits.push(GitCommitInfo {
                 sha,
                 short_sha,
                 summary,
-                body: String::new(),
+                body,
                 author_name,
                 author_email,
                 relative_time,
@@ -984,6 +1011,22 @@ pub fn commit_staged(work_dir: &Path, message: &str) -> Result<(), GitError> {
     command(work_dir, &["commit", "-m", message])?;
     Ok(())
 }
+pub fn commit_amend(work_dir: &Path, message: &str) -> Result<(), GitError> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(GitError::new(
+            work_dir,
+            "commit message cannot be empty".to_owned(),
+        ));
+    }
+    command(work_dir, &["commit", "--amend", "-m", message])?;
+    Ok(())
+}
+
+pub fn last_commit_message(work_dir: &Path) -> Result<String, GitError> {
+    let msg = command(work_dir, &["log", "-1", "--format=%B"])?;
+    Ok(msg.trim_end().to_string())
+}
 
 pub fn push(work_dir: &Path) -> Result<(), GitError> {
     let has_upstream = command(
@@ -1058,6 +1101,29 @@ pub fn stage_all(work_dir: &Path) -> Result<(), GitError> {
 
 pub fn unstage_all(work_dir: &Path) -> Result<(), GitError> {
     command(work_dir, &["restore", "--staged", "."])?;
+    Ok(())
+}
+pub fn stage_files<S: AsRef<str>>(work_dir: &Path, paths: &[S]) -> Result<(), GitError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["add", "--"];
+    for p in paths {
+        args.push(p.as_ref());
+    }
+    command(work_dir, &args)?;
+    Ok(())
+}
+
+pub fn unstage_files<S: AsRef<str>>(work_dir: &Path, paths: &[S]) -> Result<(), GitError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["restore", "--staged", "--"];
+    for p in paths {
+        args.push(p.as_ref());
+    }
+    command(work_dir, &args)?;
     Ok(())
 }
 
