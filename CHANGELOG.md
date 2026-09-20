@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.19](https://github.com/wheregmis/threadlane/compare/v0.1.18...v0.1.19) (2026-09-20)
+
+
+### Features
+
+* **controller:** add scheduler supervisor and durable event APIs ([83099ec](https://github.com/wheregmis/threadlane/commit/83099ec8c24ce62416760843fa3fc85e77609882))
+* **controller:** add scheduler supervisor and durable event APIs ([5130823](https://github.com/wheregmis/threadlane/commit/5130823b45d1ebe6fb28aaf96d02ff5e7cb20a7c))
+
+
+### Bug Fixes
+
+* **git:** parse issue creation URL instead of requesting JSON ([6fbbcc3](https://github.com/wheregmis/threadlane/commit/6fbbcc3082f65d46a6f9642fb1180679f643d51e))
+* **git:** parse issue creation URL instead of requesting JSON ([a1568aa](https://github.com/wheregmis/threadlane/commit/a1568aad385daf39b9d2a962ea4aa9256748bc87))
+
 ## [0.1.18](https://github.com/wheregmis/threadlane/compare/v0.1.17...v0.1.18) (2026-09-19)
 
 
