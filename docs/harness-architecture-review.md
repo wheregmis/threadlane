@@ -35,7 +35,7 @@ Evidence, with repository-relative paths and line numbers at review time:
 - `crates/threadlane-runtime/src/harness/effects.rs:8`: `EffectAction` contains `AppendEntry` and `AppendRecord`. It is a journal-effect mechanism, not a provider/tool execution command queue. The name alone should not be read as proof of durable execution.
 - `crates/threadlane-coding-agent/src/durable.rs:140`: `install_run_trace_recorders` opens a per-run harness adapter and installs provider tracing, provider-boundary preparation, message recording, tool-intent recording, and tool-completion callbacks onto the live agent.
 - `crates/threadlane-runtime/src/turn_driver.rs:249`: the imperative loop passes current messages through the boundary preparer and writes prepared messages back into mutable turn state. At `:824`, that loop dispatches the next tool batch.
-- `crates/threadlane-coding-agent/src/durable.rs:937`: `sync_turn_from_model_context` copies the canonical context projection into the live agent. At `:994`, `sync_harness_and_dispatch_assistant_hooks` compares live and durable histories, including compaction reconciliation.
+- `crates/threadlane-coding-agent/src/durable.rs:947`: `sync_turn_from_model_context` copies the canonical context projection into the live agent. At `:1004`, `sync_harness_and_dispatch_assistant_hooks` compares live and durable histories, including compaction reconciliation.
 
 Having cached or projected state is not inherently wrong. The concern is that the live continuation, durable lane lifecycle, and recovery decisions are implemented in different control paths. Correctness therefore depends on all those paths obeying the same ordering contracts.
 

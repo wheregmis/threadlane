@@ -11,7 +11,9 @@ use threadlane_protocol::{
 use threadlane_runtime::harness::{EventPayload, HarnessEvent, JsonlStore, SessionStore};
 
 use crate::agent_events::{ChatAgentUpdate, adapt_agent_event};
-use threadlane_coding_agent::controller::{SchedulerSupervisorHandle, SessionRuntime};
+use threadlane_coding_agent::controller::{
+    SchedulerSupervisorEvent, SchedulerSupervisorHandle, SessionRuntime,
+};
 use threadlane_project::load_project_registry;
 
 use crate::discovery::*;
@@ -99,7 +101,7 @@ pub struct AppState {
     pub session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
     scheduler_handles: HashMap<PathBuf, SchedulerSupervisorHandle>,
     scheduler_results:
-        HashMap<PathBuf, tokio::sync::mpsc::UnboundedReceiver<Option<Result<String, String>>>>,
+        HashMap<PathBuf, tokio::sync::mpsc::UnboundedReceiver<SchedulerSupervisorEvent>>,
     deferred_stream_events: HashMap<String, Vec<ChatStreamEvent>>,
     /// Bridge to the embedded browser panel. The channel is created with the
     /// app; the first constructed right panel claims the receiver and pumps
@@ -422,8 +424,21 @@ impl AppState {
     }
 
     fn invalidate_idle_runtimes(&mut self) {
-        self.session_runtimes
-            .retain(|_, runtime| runtime.is_generating());
+        let idle = self
+            .session_runtimes
+            .iter()
+            .filter(|(_, runtime)| !runtime.is_generating())
+            .map(|(session_file, _)| session_file.clone())
+            .collect::<Vec<_>>();
+        for session_file in idle {
+            self.drop_session_runtime(&session_file);
+        }
+    }
+
+    fn drop_session_runtime(&mut self, session_file: &Path) {
+        self.scheduler_handles.remove(session_file);
+        self.scheduler_results.remove(session_file);
+        self.session_runtimes.remove(session_file);
     }
 
     pub fn invalidate_capability_runtimes(&mut self) {
@@ -515,7 +530,7 @@ impl AppState {
                 self.session_status = Some(format!("Could not switch models: {error}"));
                 return;
             }
-            self.session_runtimes.remove(&runtime.session_file);
+            self.drop_session_runtime(&runtime.session_file);
         } else if self.selected_model == model {
             return;
         }
@@ -564,7 +579,7 @@ impl AppState {
                 self.session_status = Some(format!("Could not switch reasoning effort: {error}"));
                 return;
             }
-            self.session_runtimes.remove(&runtime.session_file);
+            self.drop_session_runtime(&runtime.session_file);
         } else if self.reasoning_effort == effort {
             return;
         }
@@ -995,6 +1010,17 @@ impl AppState {
             .expect("failed to spawn session runtime constructor")
             .join()
             .expect("session runtime construction panicked");
+        self.register_session_runtime(session_file, runtime)
+    }
+
+    pub fn register_session_runtime(
+        &mut self,
+        session_file: PathBuf,
+        runtime: Arc<SessionRuntime>,
+    ) -> Arc<SessionRuntime> {
+        if let Some(existing) = self.session_runtimes.get(&session_file) {
+            return existing.clone();
+        }
         if let Ok((handle, results)) = runtime.start_scheduler_supervisor_with_results() {
             self.scheduler_handles.insert(session_file.clone(), handle);
             self.scheduler_results.insert(session_file.clone(), results);
@@ -1184,9 +1210,7 @@ impl AppState {
 
     fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
         let session_file = self.session_file(work_dir, session_id);
-        self.scheduler_handles.remove(&session_file);
-        self.scheduler_results.remove(&session_file);
-        self.session_runtimes.remove(&session_file);
+        self.drop_session_runtime(&session_file);
         self.pending_permissions.remove(session_id);
         self.pending_questions.remove(session_id);
         self.deferred_stream_events.remove(session_id);
@@ -1782,7 +1806,7 @@ impl AppState {
         );
         if let Err(error) = accept_prompt(self, prompt) {
             cleanup(&work_dir, &worktree_dir, &session_file);
-            self.session_runtimes.remove(&session_file);
+            self.drop_session_runtime(&session_file);
             if let Some(project) = self
                 .projects
                 .iter_mut()
@@ -3675,7 +3699,7 @@ impl AppState {
         let scheduler_files: Vec<PathBuf> = self.scheduler_results.keys().cloned().collect();
         for session_file in scheduler_files {
             if let Some(receiver) = self.scheduler_results.get_mut(&session_file) {
-                while let Ok(result) = receiver.try_recv() {
+                while let Ok(update) = receiver.try_recv() {
                     let session_id = self
                         .projects
                         .iter()
@@ -3689,10 +3713,17 @@ impl AppState {
                                 .map(str::to_owned)
                         })
                         .unwrap_or_else(|| session_file.to_string_lossy().into_owned());
-                    events.push(ChatStreamEvent::Scheduled {
-                        session_id,
-                        session_file: session_file.clone(),
-                        result,
+                    events.push(match update {
+                        SchedulerSupervisorEvent::Agent(event) => {
+                            ChatStreamEvent::Agent { session_id, event }
+                        }
+                        SchedulerSupervisorEvent::Completed(result) => {
+                            ChatStreamEvent::Scheduled {
+                                session_id,
+                                session_file: session_file.clone(),
+                                result,
+                            }
+                        }
                     });
                 }
             }
@@ -4041,7 +4072,7 @@ impl AppState {
                                     && runtime.selected_model != self.selected_model
                             });
                     if runtime_is_stale {
-                        self.session_runtimes.remove(&session_file);
+                        self.drop_session_runtime(&session_file);
                     }
                     if let Some(work_dir) = session_file
                         .parent()

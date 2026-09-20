@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::cancellation::CodingAgentCancellation;
 use crate::options::CodingAgentOptions;
-use crate::runtime::CodingAgent;
+use crate::runtime::{CodingAgent, ScheduledWorkExecution};
 use crate::scheduler::CodingAgentWorkHandle;
 use threadlane_acp::AcpConfigOption;
 use threadlane_permission::{PermissionDecision, PermissionHandle};
@@ -39,6 +39,12 @@ pub type SessionRuntime = SessionController;
 pub struct SchedulerSupervisorHandle {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+pub enum SchedulerSupervisorEvent {
+    Agent(AgentEvent),
+    Completed(Option<Result<String, String>>),
 }
 
 impl SchedulerSupervisorHandle {
@@ -254,7 +260,7 @@ impl SessionController {
     /// same `CodingAgent` while this task owns its mutex. The returned task
     /// ends after `stop` is signaled, making supervisor lifecycle explicit to
     /// the surface adapter rather than spawning hidden background work.
-    pub fn spawn_scheduler_supervisor(
+    pub(crate) fn spawn_scheduler_supervisor(
         self: &Arc<Self>,
         stop: tokio::sync::oneshot::Receiver<()>,
     ) -> tokio::task::JoinHandle<()> {
@@ -263,10 +269,10 @@ impl SessionController {
     }
 
     /// Launch the scheduler driver and stream completed scheduled results.
-    pub fn spawn_scheduler_supervisor_with_results(
+    pub(crate) fn spawn_scheduler_supervisor_with_results(
         self: &Arc<Self>,
         mut stop: tokio::sync::oneshot::Receiver<()>,
-        result_tx: tokio::sync::mpsc::UnboundedSender<Option<Result<String, String>>>,
+        result_tx: tokio::sync::mpsc::UnboundedSender<SchedulerSupervisorEvent>,
     ) -> tokio::task::JoinHandle<()> {
         let agent = self.agent.clone();
         let work_handle = self.work_handle.clone();
@@ -278,11 +284,34 @@ impl SessionController {
                     _ = &mut stop => break,
                     _ = work_handle.wait_for_work() => {}
                 }
-                let result = {
+                let outcome = {
                     let mut agent = agent.lock().await;
-                    agent.execute_scheduled_work().await
+                    let mut events = agent.subscribe();
+                    let execution = agent.execute_scheduled_work();
+                    tokio::pin!(execution);
+                    loop {
+                        tokio::select! {
+                            result = &mut execution => {
+                                while let Ok(event) = events.try_recv() {
+                                    let _ = result_tx.send(SchedulerSupervisorEvent::Agent(event));
+                                }
+                                break result;
+                            }
+                            event = events.recv() => match event {
+                                Ok(event) => {
+                                    let _ = result_tx.send(SchedulerSupervisorEvent::Agent(event));
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    break ScheduledWorkExecution::Idle;
+                                }
+                            }
+                        }
+                    }
                 };
-                let _ = result_tx.send(result);
+                if let ScheduledWorkExecution::Completed(result) = outcome {
+                    let _ = result_tx.send(SchedulerSupervisorEvent::Completed(result));
+                }
             }
         })
     }
@@ -312,7 +341,7 @@ impl SessionController {
     ) -> Result<
         (
             SchedulerSupervisorHandle,
-            tokio::sync::mpsc::UnboundedReceiver<Option<Result<String, String>>>,
+            tokio::sync::mpsc::UnboundedReceiver<SchedulerSupervisorEvent>,
         ),
         &'static str,
     > {

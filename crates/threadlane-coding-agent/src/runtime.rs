@@ -72,6 +72,11 @@ pub struct CodingAgent {
     pub(crate) subagent_branch_observer: Option<SubagentBoundaryObserver>,
 }
 
+pub(crate) enum ScheduledWorkExecution {
+    Idle,
+    Completed(Option<Result<String, String>>),
+}
+
 impl CodingAgent {
     pub(crate) fn permission_handle(&self) -> threadlane_permission::PermissionHandle {
         self.permission_handle.clone()
@@ -120,47 +125,11 @@ impl CodingAgent {
         None
     }
 
-    /// Wait for scheduler activity, then execute it under the normal session
-    /// ownership boundary. Surface adapters can use this as the entry point
-    /// for a dedicated supervisor task without polling the queue.
-    #[allow(dead_code)]
-    pub(crate) async fn wait_for_scheduled_work(&mut self) -> Option<Result<String, String>> {
-        let scheduler = self.agent_work.clone();
-        scheduler.wait_for_work().await;
-        self.run_scheduled_agent_work().await
-    }
-
-    pub(crate) async fn execute_scheduled_work(&mut self) -> Option<Result<String, String>> {
-        self.run_scheduled_agent_work().await
-    }
-
-    /// Own scheduled work until the caller signals supervisor shutdown.
-    /// Interactive turns may continue using the existing direct path while
-    /// surfaces migrate to this single-driver entry point.
-    #[allow(dead_code)]
-    pub(crate) async fn run_scheduled_work_supervisor(
-        &mut self,
-        stop: tokio::sync::oneshot::Receiver<()>,
-    ) {
-        self.run_scheduled_work_supervisor_with(stop, |_| {}).await;
-    }
-
-    /// Run the scheduler supervisor and report each completed scheduled turn
-    /// to the owning surface adapter.
-    pub(crate) async fn run_scheduled_work_supervisor_with<F>(
-        &mut self,
-        mut stop: tokio::sync::oneshot::Receiver<()>,
-        mut on_result: F,
-    ) where
-        F: FnMut(Option<Result<String, String>>),
-    {
-        loop {
-            let result = tokio::select! {
-                _ = &mut stop => break,
-                result = self.wait_for_scheduled_work() => result,
-            };
-            on_result(result);
+    pub(crate) async fn execute_scheduled_work(&mut self) -> ScheduledWorkExecution {
+        if self.agent_work.next().is_none() {
+            return ScheduledWorkExecution::Idle;
         }
+        ScheduledWorkExecution::Completed(self.run_scheduled_agent_work().await)
     }
 
     pub(crate) fn work_handle(&self) -> CodingAgentWorkHandle {

@@ -1007,6 +1007,50 @@ async fn controller_scheduler_supervisor_has_single_owned_lifecycle() {
     final_handle.shutdown().await;
 }
 
+#[tokio::test]
+async fn controller_scheduler_supervisor_forwards_permission_events() {
+    use threadlane_coding_agent::controller::SchedulerSupervisorEvent;
+
+    let temp = tempfile::tempdir().unwrap();
+    let work = work_dir(&temp);
+    configure_project_stub(&work, "permission");
+    let controller = queued_controller(&work);
+    let (handle, mut updates) = controller
+        .start_scheduler_supervisor_with_results()
+        .expect("supervisor starts");
+    controller
+        .work_handle
+        .try_queue_follow_up_with_images("run with permission", Vec::new())
+        .unwrap();
+
+    let request = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(SchedulerSupervisorEvent::Agent(
+                AgentEvent::PermissionRequested { request },
+            )) = updates.recv().await
+            {
+                break request;
+            }
+        }
+    })
+    .await
+    .expect("supervisor must forward the permission request");
+    assert!(controller.resolve_permission(&request.id, PermissionDecision::AllowOnce));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                updates.recv().await,
+                Some(SchedulerSupervisorEvent::Completed(_))
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("supervised work completes after permission resolution");
+    handle.shutdown().await;
+}
+
 fn queued_transcript(path: &Path) -> Vec<String> {
     use threadlane_protocol::AgentMessage;
     use threadlane_runtime::harness::{TranscriptItem, read_transcript_page};

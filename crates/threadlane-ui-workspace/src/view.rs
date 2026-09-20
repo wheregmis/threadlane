@@ -276,10 +276,10 @@ impl WorkspaceView {
                 }
                 match runtime {
                     Some(Ok(runtime)) => {
-                        let runtime = state
-                            .session_runtimes
-                            .entry(request.session_file.clone())
-                            .or_insert(runtime);
+                        let runtime = state.register_session_runtime(
+                            request.session_file.clone(),
+                            runtime,
+                        );
                         state.is_generating = runtime.is_generating();
                         state.selected_model = runtime.selected_model.clone();
                         state.reasoning_effort = runtime.reasoning_effort();

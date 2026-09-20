@@ -608,7 +608,9 @@ fn scheduled_completion_updates_only_matching_active_session() {
         .scheduler_results
         .insert(background_file.clone(), scheduled_rx);
     scheduled_tx
-        .send(Some(Ok("background complete".into())))
+        .send(SchedulerSupervisorEvent::Completed(Some(Ok(
+            "background complete".into(),
+        ))))
         .unwrap();
     assert!(state.drain_chat_stream(Vec::new()));
     assert_eq!(
