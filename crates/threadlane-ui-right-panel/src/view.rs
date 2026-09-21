@@ -31,7 +31,7 @@ pub use super::types::{
     can_create_pull_request, can_publish_branch, detect_language, discard_options,
     message_generated_matches_active_project, normalize_generated_commit_message,
     selection_bar_discard_options, DiscardOption, FileNode, GitAction, PanelEvent, ReviewTab,
-    Surface,
+    ReviewViewMode, Surface,
 };
 
 pub struct RightPanelView {
@@ -51,6 +51,13 @@ pub struct RightPanelView {
     review_files_list_state: ListState,
     selected_files: HashSet<String>,
     review_selection_initialized: bool,
+    review_filter_input: Entity<InputState>,
+    review_view_mode: ReviewViewMode,
+    commit_amend: bool,
+    stash_dialog_open: bool,
+    stash_message_input: Entity<InputState>,
+    stash_include_untracked: bool,
+    collapsed_tree_folders: HashSet<String>,
     review_diff_revision: u64,
     git_status: Option<GitStatus>,
     draft_pr_context_revision: u64,
@@ -109,6 +116,10 @@ impl RightPanelView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter branches to merge…"));
         let history_filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter commits…"));
+        let review_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter changes…"));
+        let stash_message_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Stash message (optional)"));
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         cx.spawn(async move |this, cx| {
@@ -287,6 +298,13 @@ impl RightPanelView {
                 .with_uniform_item_height(window.rem_size() * 2.0),
             selected_files: HashSet::new(),
             review_selection_initialized: false,
+            review_filter_input,
+            review_view_mode: ReviewViewMode::List,
+            commit_amend: false,
+            stash_dialog_open: false,
+            stash_message_input,
+            stash_include_untracked: true,
+            collapsed_tree_folders: HashSet::new(),
             review_diff_revision: 0,
             git_status: None,
             draft_pr_context_revision: 0,
@@ -804,6 +822,22 @@ impl RightPanelView {
                     self.stash_files = Some((index, files));
                 }
             }
+            PanelEvent::LastCommitMessageLoaded { project, result } => {
+                self.git_busy = false;
+                if self.project.as_ref() == Some(&project) {
+                    match result {
+                        Ok(message) => {
+                            self.generated_commit_message = Some(message);
+                            self.git_feedback = None;
+                        }
+                        Err(error) => {
+                            self.git_feedback = Some(error.clone());
+                            self.pending_git_notifications
+                                .push(Notification::error(error));
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -964,23 +998,38 @@ impl RightPanelView {
                 cx.notify();
                 return;
             }
-            if message.is_empty() {
-                self.git_feedback = Some("Enter a commit message first.".into());
-                let notif = Notification::warning("Enter a commit message first");
-                if let Some(ref mut window) = window {
-                    window.push_notification(notif, cx);
-                } else {
-                    self.pending_git_notifications.push(notif);
-                }
-                cx.notify();
-                return;
+        }
+        if matches!(
+            action,
+            GitAction::Commit
+                | GitAction::CommitAndPush
+                | GitAction::CommitAmend
+                | GitAction::CommitAmendAndPush
+        ) && message.is_empty()
+        {
+            self.git_feedback = Some("Enter a commit message first.".into());
+            let notif = Notification::warning("Enter a commit message first");
+            if let Some(ref mut window) = window {
+                window.push_notification(notif, cx);
+            } else {
+                self.pending_git_notifications.push(notif);
             }
+            cx.notify();
+            return;
         }
 
         self.git_busy = true;
         let feedback = match &action {
             GitAction::Commit => "Committing…".to_string(),
             GitAction::CommitAndPush => "Committing and pushing…".to_string(),
+            GitAction::CommitAmend => "Amending commit…".to_string(),
+            GitAction::CommitAmendAndPush => "Amending commit and pushing…".to_string(),
+            GitAction::StageFile(p) => format!("Staging {p}…"),
+            GitAction::UnstageFile(p) => format!("Unstaging {p}…"),
+            GitAction::StageFiles(paths) => format!("Staging {} files…", paths.len()),
+            GitAction::UnstageFiles(paths) => format!("Unstaging {} files…", paths.len()),
+            GitAction::StashPush { .. } => "Stashing changes…".to_string(),
+            GitAction::LoadLastCommitMessage => "Loading commit message…".to_string(),
             GitAction::Push => "Pushing…".to_string(),
             GitAction::Pull => "Pulling from origin…".to_string(),
             GitAction::Fetch => "Fetching origin…".to_string(),
@@ -1015,6 +1064,15 @@ impl RightPanelView {
         }
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
+            if matches!(&action, GitAction::LoadLastCommitMessage) {
+                let result = threadlane_git::last_commit_message(&work_dir)
+                    .map_err(|error| error.to_string());
+                let _ = tx.send(PanelEvent::LastCommitMessageLoaded {
+                    project: work_dir,
+                    result,
+                });
+                return;
+            }
             let action_result = (|| {
                 let mut action_message = None;
                 match &action {
@@ -1113,6 +1171,57 @@ impl RightPanelView {
                         threadlane_git::ignore_extension(&work_dir, ext)
                             .map_err(|e| e.to_string())?;
                     }
+                    GitAction::CommitAmend | GitAction::CommitAmendAndPush => {
+                        let status =
+                            threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
+                        let selected_set: HashSet<&str> =
+                            selected_paths.iter().map(String::as_str).collect();
+                        if !selected_paths.is_empty() {
+                            for file in &status.files {
+                                if selected_set.contains(file.path.as_str()) {
+                                    threadlane_git::stage_file(&work_dir, &file.path)
+                                        .map_err(|e| e.to_string())?;
+                                } else {
+                                    let _ = threadlane_git::unstage_file(&work_dir, &file.path);
+                                }
+                            }
+                        }
+                        threadlane_git::commit_amend(&work_dir, &message)
+                            .map_err(|e| e.to_string())?;
+                        if matches!(&action, GitAction::CommitAmendAndPush) {
+                            threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
+                        }
+                        action_message = Some(
+                            if matches!(&action, GitAction::CommitAmendAndPush) {
+                                "Commit amended and pushed successfully"
+                            } else {
+                                "Commit amended successfully"
+                            }
+                            .to_string(),
+                        );
+                    }
+                    GitAction::StageFile(path) => {
+                        threadlane_git::stage_file(&work_dir, path).map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Staged {path}"));
+                    }
+                    GitAction::UnstageFile(path) => {
+                        threadlane_git::unstage_file(&work_dir, path).map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Unstaged {path}"));
+                    }
+                    GitAction::StageFiles(paths) => {
+                        threadlane_git::stage_files(&work_dir, paths).map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Staged {} files", paths.len()));
+                    }
+                    GitAction::UnstageFiles(paths) => {
+                        threadlane_git::unstage_files(&work_dir, paths).map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Unstaged {} files", paths.len()));
+                    }
+                    GitAction::StashPush { message, include_untracked } => {
+                        threadlane_git::stash_push(&work_dir, message.as_deref(), *include_untracked)
+                            .map_err(|e| e.to_string())?;
+                        action_message = Some("Stashed changes successfully".to_string());
+                    }
+                    GitAction::LoadLastCommitMessage => unreachable!(),
                 }
                 Ok(action_message)
             })();
@@ -1730,15 +1839,55 @@ impl RightPanelView {
         }
     }
 
-    fn render_review_file_row(
-        &mut self,
-        index: usize,
-        _window: &mut Window,
+    fn filtered_review_files(&self, cx: &Context<Self>) -> Vec<GitFile> {
+        let query = self.review_filter_input.read(cx).value().trim().to_lowercase();
+        if query.is_empty() {
+            self.review_files.clone()
+        } else {
+            self.review_files
+                .iter()
+                .filter(|f| f.path.to_lowercase().contains(&query))
+                .cloned()
+                .collect()
+        }
+    }
+
+    pub(crate) fn diff_addition_percent(additions: u32, deletions: u32) -> f32 {
+        match (additions, deletions) {
+            (0, _) => 0.0,
+            (_, 0) => 100.0,
+            _ => {
+                (additions as f32 / (additions + deletions) as f32 * 100.0).clamp(5.0, 95.0)
+            }
+        }
+    }
+
+    fn apply_commit_prefix(&mut self, prefix: &str, cx: &mut Context<Self>) {
+        const PREFIXES: &[&str] = &["feat", "fix", "docs", "refactor", "test", "chore"];
+        let cur = self.commit_message_input.read(cx).value().to_string();
+        let trimmed = cur.trim_start();
+        let has_prefix = PREFIXES.iter().any(|p| trimmed.starts_with(&format!("{p}:")) || trimmed.starts_with(&format!("{p}(")));
+        let new_val = if has_prefix {
+            if let Some((_, rest)) = trimmed.split_once(':') {
+                format!("{prefix}:{rest}")
+            } else {
+                format!("{prefix}: {trimmed}")
+            }
+        } else if trimmed.is_empty() {
+            format!("{prefix}: ")
+        } else {
+            format!("{prefix}: {trimmed}")
+        };
+        self.generated_commit_message = Some(new_val);
+        cx.notify();
+    }
+
+    fn render_file_item(
+        &self,
+        file: &GitFile,
+        is_tree_node: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(file) = self.review_files.get(index).cloned() else {
-            return div().into_any_element();
-        };
         let theme = cx.theme().colors;
         let panel_entity = cx.entity().clone();
 
@@ -1753,15 +1902,74 @@ impl RightPanelView {
             .as_ref()
             .map(|root| root.join(&path).display().to_string());
         let status = file.status_char().to_string();
+        let is_staged = file.staged;
         let context_path = path.clone();
-        // Highlight the file whose diff is currently open (Synara's file
-        // list keeps selection visible across refresh).
         let is_open = self
             .document_title
             .as_deref()
             .is_some_and(|title| title == format!("Review · {path}").as_str());
+
+        let (status_color, status_bg) = match file.status_char() {
+            'A' | '?' => (theme.success, theme.success.opacity(0.15)),
+            'D' => (theme.danger, theme.danger.opacity(0.15)),
+            'R' => (theme.link, theme.link.opacity(0.15)),
+            _ => (theme.warning, theme.warning.opacity(0.15)),
+        };
+
+        let row_id = SharedString::from(format!("review-file-{path}"));
+        let stage_path = path.clone();
+        let stage_btn = if is_staged {
+            Button::new(SharedString::from(format!("unstage-btn-{path}")))
+                .icon(IconName::Minus)
+                .accessibility_label("Unstage file")
+                .ghost()
+                .xsmall()
+                .tooltip("Unstage file")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_git_action(GitAction::UnstageFile(stage_path.clone()), window, cx);
+                }))
+        } else {
+            Button::new(SharedString::from(format!("stage-btn-{path}")))
+                .icon(IconName::Plus)
+                .accessibility_label("Stage file")
+                .ghost()
+                .xsmall()
+                .tooltip("Stage file")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_git_action(GitAction::StageFile(stage_path.clone()), window, cx);
+                }))
+        };
+
+        let discard_panel = panel_entity.clone();
+        let discard_path_btn = path.clone();
+        let discard_btn = Button::new(SharedString::from(format!("discard-btn-{path}")))
+            .icon(IconName::Close)
+            .accessibility_label("Discard changes")
+            .ghost()
+            .xsmall()
+            .tooltip("Discard changes")
+            .on_click(cx.listener(move |_this, _, window, cx| {
+                Self::handle_discard_option(
+                    discard_panel.clone(),
+                    DiscardOption::Single(discard_path_btn.clone()),
+                    window,
+                    cx,
+                );
+            }));
+
+        let diff_path_btn = path.clone();
+        let diff_btn = Button::new(SharedString::from(format!("open-diff-btn-{path}")))
+            .icon(IconName::ExternalLink)
+            .accessibility_label("Open diff")
+            .ghost()
+            .xsmall()
+            .tooltip("Open diff")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_file_diff(diff_path_btn.clone(), cx);
+            }));
+
         div()
-            .id(SharedString::from(format!("review-file-{path}")))
+            .id(row_id)
             .h_8()
             .mx_2()
             .px_2()
@@ -1808,16 +2016,15 @@ impl RightPanelView {
                             .child(
                                 div()
                                     .debug_selector(|| "review-filename".into())
-                                    .flex_shrink_0()
-                                    .max_w(relative(if directory.is_empty() { 1.0 } else { 0.6 }))
-                                    .min_w_0()
+                                    .min_w(px(40.0))
                                     .truncate()
                                     .child(filename),
                             )
-                            .when(!directory.is_empty(), |row| {
+                            .when(!directory.is_empty() && !is_tree_node, |row| {
                                 row.child(
                                     div()
                                         .min_w_0()
+                                        .flex_1()
                                         .truncate()
                                         .text_xs()
                                         .text_color(theme.muted_foreground)
@@ -1846,25 +2053,26 @@ impl RightPanelView {
                     .overflow_hidden()
                     .justify_start()
                     .selected(is_open)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_file_diff(path.clone(), cx);
+                    .on_click(cx.listener({
+                        let path = path.clone();
+                        move |this, _, _, cx| {
+                            this.open_file_diff(path.clone(), cx);
+                        }
                     })),
             )
-            .child({
-                let status_color = match file.status_char() {
-                    'A' | '?' => theme.success,
-                    'D' => theme.danger,
-                    'R' => theme.link,
-                    _ => theme.warning,
-                };
+            .child(
                 div()
                     .debug_selector(|| "review-file-status".into())
                     .flex_none()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(status_bg)
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(status_color)
-                    .child(status)
-            })
+                    .child(status),
+            )
             .children((file.additions > 0 || file.deletions > 0).then(|| {
                 div()
                     .debug_selector(|| "review-file-stats".into())
@@ -1873,21 +2081,20 @@ impl RightPanelView {
                     .items_center()
                     .gap_1()
                     .text_xs()
-                    .children(
-                        (file.additions > 0).then(|| {
-                            div()
-                                .text_color(theme.success)
-                                .child(format!("+{}", file.additions))
-                        }),
-                    )
-                    .children(
-                        (file.deletions > 0).then(|| {
-                            div()
-                                .text_color(theme.danger)
-                                .child(format!("\u{2212}{}", file.deletions))
-                        }),
-                    )
+                    .children((file.additions > 0).then(|| {
+                        div()
+                            .text_color(theme.success)
+                            .child(format!("+{}", file.additions))
+                    }))
+                    .children((file.deletions > 0).then(|| {
+                        div()
+                            .text_color(theme.danger)
+                            .child(format!("\u{2212}{}", file.deletions))
+                    }))
             }))
+            .child(stage_btn)
+            .child(diff_btn)
+            .child(discard_btn)
             .context_menu({
                 let path = context_path.clone();
                 let absolute_path = absolute_path.clone();
@@ -1903,13 +2110,33 @@ impl RightPanelView {
                     let discard_path = path.clone();
                     let ignore_path = path.clone();
                     let rel_path_1 = path.clone();
-                    let rel_path_2 = path.clone();
                     let project_ref = project.clone();
                     let model_ref = model.clone();
                     let panel_ignore = panel.clone();
                     let panel_ignore_ext = panel.clone();
+                    let panel_stage = panel.clone();
 
                     let mut menu = menu;
+                    if is_staged {
+                        let unstage_p = path.clone();
+                        menu = menu.item(PopupMenuItem::new("Unstage File").on_click(
+                            move |_event, window, cx| {
+                                panel_stage.update(cx, |this, cx| {
+                                    this.run_git_action(GitAction::UnstageFile(unstage_p.clone()), window, cx);
+                                });
+                            },
+                        ));
+                    } else {
+                        let stage_p = path.clone();
+                        menu = menu.item(PopupMenuItem::new("Stage File").on_click(
+                            move |_event, window, cx| {
+                                panel_stage.update(cx, |this, cx| {
+                                    this.run_git_action(GitAction::StageFile(stage_p.clone()), window, cx);
+                                });
+                            },
+                        ));
+                    }
+
                     let (selected_paths, total_files) = {
                         let panel_ref = panel.read(_cx);
                         let selected_paths: Vec<String> =
@@ -1931,30 +2158,35 @@ impl RightPanelView {
                             },
                         ));
                     }
-                    menu = menu.item(
-                        PopupMenuItem::new("Ignore File (Add to .gitignore)").on_click(
+
+                    menu = menu.separator().item(
+                        PopupMenuItem::new("Ignore File (.gitignore)").on_click(
                             move |_event, window, cx| {
-                                let p = ignore_path.clone();
                                 panel_ignore.update(cx, |this, cx| {
-                                    this.run_git_action(GitAction::IgnoreFile(p), window, cx);
+                                    this.run_git_action(
+                                        GitAction::IgnoreFile(ignore_path.clone()),
+                                        window,
+                                        cx,
+                                    );
                                 });
                             },
                         ),
                     );
 
-                    if let Some(ext_str) = ext.clone() {
-                        let ext_action = ext_str.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(format!(
-                                "Ignore All .{ext_str} Files (Add to .gitignore)"
-                            ))
-                            .on_click(move |_event, window, cx| {
-                                let e = ext_action.clone();
+                    if let Some(ref ext) = ext {
+                        let ext_label = format!("Ignore all *.{ext} files");
+                        let ext_to_ignore = ext.clone();
+                        menu = menu.item(PopupMenuItem::new(ext_label).on_click(
+                            move |_event, window, cx| {
                                 panel_ignore_ext.update(cx, |this, cx| {
-                                    this.run_git_action(GitAction::IgnoreExtension(e), window, cx);
+                                    this.run_git_action(
+                                        GitAction::IgnoreExtension(ext_to_ignore.clone()),
+                                        window,
+                                        cx,
+                                    );
                                 });
-                            }),
-                        );
+                            },
+                        ));
                     }
 
                     menu = menu.separator().item(
@@ -1995,29 +2227,17 @@ impl RightPanelView {
                                 window
                                     .push_notification(Notification::info("Copied file path"), cx);
                             },
-                        ))
-                        .item(PopupMenuItem::new("Copy Relative File Path").on_click(
-                            move |_event, window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    rel_path_2.clone(),
-                                ));
-                                window.push_notification(
-                                    Notification::info("Copied relative file path"),
-                                    cx,
-                                );
-                            },
                         ));
 
-                    if let Some(absolute_path) = absolute_path.clone() {
-                        let abs_text = absolute_path.clone();
-                        let reveal_text = absolute_path.clone();
-                        let reveal_label = if cfg!(target_os = "macos") {
-                            "Reveal in Finder"
-                        } else if cfg!(target_os = "windows") {
-                            "Reveal in File Explorer"
-                        } else {
-                            "Reveal in File Manager"
-                        };
+                    if let Some(ref abs_path) = absolute_path {
+                        let abs_text = abs_path.clone();
+                        let reveal_text = abs_path.clone();
+                        #[cfg(target_os = "macos")]
+                        let reveal_label = "Reveal in Finder";
+                        #[cfg(target_os = "windows")]
+                        let reveal_label = "Reveal in File Explorer";
+                        #[cfg(all(unix, not(target_os = "macos")))]
+                        let reveal_label = "Reveal in File Manager";
 
                         menu = menu
                             .item(PopupMenuItem::new("Copy Absolute File Path").on_click(
@@ -2046,10 +2266,24 @@ impl RightPanelView {
             .into_any_element()
     }
 
+    fn render_review_file_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let files = self.filtered_review_files(cx);
+        let Some(file) = files.get(index).cloned() else {
+            return div().into_any_element();
+        };
+        self.render_file_item(&file, false, cx)
+    }
+
     fn render_review(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.review_files_list_state.item_count() != self.review_files.len() {
+        let filtered_count = self.filtered_review_files(cx).len();
+        if self.review_files_list_state.item_count() != filtered_count {
             self.review_files_list_state
-                .reset_with_uniform_height(self.review_files.len(), window.rem_size() * 2.0);
+                .reset_with_uniform_height(filtered_count, window.rem_size() * 2.0);
         }
         let panel_entity = cx.entity().clone();
         let theme = cx.theme().colors;
@@ -2072,8 +2306,6 @@ impl RightPanelView {
             .filter(|f| self.selected_files.contains(&f.path))
             .map(|f| f.deletions)
             .sum();
-        let total_additions: u32 = self.review_files.iter().map(|f| f.additions).sum();
-        let total_deletions: u32 = self.review_files.iter().map(|f| f.deletions).sum();
 
         let branch = self
             .git_status
@@ -2081,7 +2313,6 @@ impl RightPanelView {
             .and_then(|s| s.branch.as_deref())
             .unwrap_or("No branch");
 
-        let can_commit = !self.git_busy && !self.git_message_pending && selected_count > 0;
         let can_push = !self.git_busy
             && !self.git_message_pending
             && self
@@ -2153,6 +2384,23 @@ impl RightPanelView {
             .items_center()
             .gap_1()
             .child(sync_button.disabled(self.git_busy))
+            .when(total_files > 0, |row| {
+                row.child(
+                    Button::new("git-stash-changes")
+                        .label("Stash…")
+                        .outline()
+                        .small()
+                        .tooltip("Stash changes…")
+                        .disabled(self.git_busy)
+                        .on_click(cx.listener(|this, _event, window, cx| {
+                            this.close_all_git_dialogs();
+                            this.stash_dialog_open = true;
+                            this.stash_message_input
+                                .update(cx, |input, cx| input.focus(window, cx));
+                            cx.notify();
+                        })),
+                )
+            })
             .when(can_create_pr, |row| {
                 row.child(
                     Button::new("git-create-pull-request")
@@ -2500,157 +2748,163 @@ impl RightPanelView {
         let staged_count = self.review_files.iter().filter(|f| f.staged).count();
         let unstaged_count = self.review_files.iter().filter(|f| f.unstaged).count();
         let has_staged = staged_count > 0;
-        let changes_summary = (total_files > 0).then(|| {
+
+        let total_additions_all: u32 = self.review_files.iter().map(|f| f.additions).sum();
+        let total_deletions_all: u32 = self.review_files.iter().map(|f| f.deletions).sum();
+        let total_delta = total_additions_all + total_deletions_all;
+        let diff_ratio_bar = (total_delta > 0).then(|| {
+            let add_pct = Self::diff_addition_percent(total_additions_all, total_deletions_all);
+            let del_pct = 100.0 - add_pct;
             div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_between()
                 .px_3()
                 .py_1()
-                .border_b_1()
-                .border_color(theme.border)
-                .bg(theme.muted.opacity(0.08))
-                .text_xs()
                 .child(
                     div()
+                        .w_full()
+                        .h(rems(0.25))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .bg(theme.muted)
                         .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(theme.success)
-                                .child(format!("+{total_additions}")),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.danger)
-                                .child(format!("\u{2212}{total_deletions}")),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(if staged_count > 0 {
-                                    theme.success
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(format!("{staged_count} staged")),
-                        )
-                        .child(
-                            div()
-                                .text_color(if unstaged_count > 0 {
-                                    theme.warning
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(format!("{unstaged_count} unstaged")),
-                        ),
+                        .child(div().h_full().w(relative(add_pct / 100.0)).bg(theme.success))
+                        .child(div().h_full().w(relative(del_pct / 100.0)).bg(theme.danger)),
                 )
         });
 
-        let selection_bar = (total_files > 0).then(|| {
+        let review_toolbar = (total_files > 0).then(|| {
             let panel_sb = panel_entity.clone();
             div()
                 .flex()
-                .items_center()
-                .justify_between()
-                .px_3()
-                .py_1p5()
+                .flex_col()
                 .border_b_1()
                 .border_color(theme.border)
-                .bg(theme.muted.opacity(0.15))
-                .context_menu({
-                    let panel = panel_sb;
-                    move |menu, _window, cx| {
-                        let (selected_paths, total_files, unstaged_count, has_staged) = {
-                            let panel_ref = panel.read(cx);
-                            let selected_paths: Vec<String> =
-                                panel_ref.selected_files.iter().cloned().collect();
-                            let total = panel_ref.review_files.len();
-                            let unstaged =
-                                panel_ref.review_files.iter().filter(|f| f.unstaged).count();
-                            let staged = panel_ref.review_files.iter().any(|f| f.staged);
-                            (selected_paths, total, unstaged, staged)
-                        };
-                        let mut menu = menu;
-                        for opt in selection_bar_discard_options(&selected_paths, total_files) {
-                            let panel_action = panel.clone();
-                            let label = opt.label();
-                            let opt_action = opt.clone();
-                            menu = menu.item(PopupMenuItem::new(label).on_click(
-                                move |_event, window, cx| {
-                                    Self::handle_discard_option(
-                                        panel_action.clone(),
-                                        opt_action.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            ));
-                        }
-                        if total_files > 0 {
-                            let panel_stage = panel.clone();
-                            menu = menu.separator().item(
-                                PopupMenuItem::new("Stage All")
-                                    .disabled(unstaged_count == 0)
-                                    .on_click(move |_event, window, cx| {
-                                        panel_stage.update(cx, |this, cx| {
-                                            this.run_git_action(GitAction::StageAll, window, cx);
-                                        });
-                                    }),
-                            );
-                            if has_staged {
-                                let panel_unstage = panel.clone();
-                                menu = menu.item(PopupMenuItem::new("Unstage All").on_click(
-                                    move |_event, window, cx| {
-                                        panel_unstage.update(cx, |this, cx| {
-                                            this.run_git_action(GitAction::UnstageAll, window, cx);
-                                        });
-                                    },
-                                ));
-                            }
-                        }
-                        menu
-                    }
-                })
+                .bg(theme.muted.opacity(0.12))
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
+                        .px_3()
+                        .py_1p5()
                         .child(
-                            Checkbox::new("select-all-files")
-                                .accessibility_label("Select all files for Git actions")
-                                .checked(all_selected)
-                                .small()
-                                .on_click(cx.listener(move |this, checked, _window, cx| {
-                                    if *checked {
-                                        this.selected_files = this
-                                            .review_files
-                                            .iter()
-                                            .map(|f| f.path.clone())
-                                            .collect();
-                                    } else {
-                                        this.selected_files.clear();
-                                    }
-                                    cx.notify();
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(theme.input)
+                                .border_1()
+                                .border_color(theme.border)
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(
+                                    div()
+                                        .size(rems(0.875))
+                                        .text_color(theme.muted_foreground)
+                                        .child(IconName::Search),
+                                )
+                                .child(
+                                    div().flex_1().min_w_0().child(
+                                        Input::new(&self.review_filter_input)
+                                            .aria_label("Filter changes")
+                                            .appearance(false)
+                                            .bordered(false),
+                                    ),
+                                )
+                                .children((!self.review_filter_input.read(cx).value().is_empty()).then(|| {
+                                    Button::new("clear-review-filter-btn")
+                                        .icon(IconName::Close)
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip("Clear filter")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.review_filter_input.update(cx, |input, cx| input.set_value("", window, cx));
+                                            cx.notify();
+                                        }))
                                 })),
                         )
                         .child(
                             div()
-                                .text_xs()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.foreground)
-                                .child(if all_selected {
-                                    format!("{total_files} changed files")
-                                } else {
-                                    format!("{selected_count} of {total_files} selected")
+                                .flex()
+                                .items_center()
+                                .gap_0p5()
+                                .rounded_md()
+                                .bg(theme.muted.opacity(0.4))
+                                .p_0p5()
+                                .child(
+                                    Button::new("review-view-list")
+                                        .icon(IconName::Menu)
+                                        .ghost()
+                                        .xsmall()
+                                        .selected(self.review_view_mode == ReviewViewMode::List)
+                                        .tooltip("Flat list view")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.review_view_mode = ReviewViewMode::List;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("review-view-tree")
+                                        .icon(IconName::FolderOpen)
+                                        .ghost()
+                                        .xsmall()
+                                        .selected(self.review_view_mode == ReviewViewMode::Tree)
+                                        .tooltip("Tree view")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.review_view_mode = ReviewViewMode::Tree;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .child(
+                                    Button::new("selection-bar-discard-btn")
+                                        .icon(IconName::Undo2)
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip("Discard changes (right-click for more options)")
+                                        .disabled(self.git_busy)
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            let paths: Vec<String> = this.selected_files.iter().cloned().collect();
+                                            let total = this.review_files.len();
+                                            Self::handle_discard_option(
+                                                cx.entity().clone(),
+                                                if paths.is_empty() { DiscardOption::All(total) } else { DiscardOption::Selected(paths) },
+                                                window,
+                                                cx,
+                                            );
+                                        })),
+                                )
+                                .context_menu({
+                                    let panel = panel_sb.clone();
+                                    move |menu, _window, cx| {
+                                        let (selected_paths, total_files) = {
+                                            let panel_ref = panel.read(cx);
+                                            let selected_paths: Vec<String> =
+                                                panel_ref.selected_files.iter().cloned().collect();
+                                            (selected_paths, panel_ref.review_files.len())
+                                        };
+                                        let mut menu = menu;
+                                        for opt in selection_bar_discard_options(&selected_paths, total_files) {
+                                            let panel_action = panel.clone();
+                                            let label = opt.label();
+                                            let opt_action = opt.clone();
+                                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                                move |_event, window, cx| {
+                                                    Self::handle_discard_option(
+                                                        panel_action.clone(),
+                                                        opt_action.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            ));
+                                        }
+                                        menu
+                                    }
                                 }),
                         ),
                 )
@@ -2658,40 +2912,83 @@ impl RightPanelView {
                     div()
                         .flex()
                         .items_center()
-                        .gap_1p5()
+                        .justify_between()
+                        .px_3()
+                        .py_1()
+                        .bg(theme.muted.opacity(0.18))
+                        .text_xs()
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("+{selected_additions} −{selected_deletions}")),
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    Checkbox::new("select-all-files")
+                                        .checked(all_selected)
+                                        .small()
+                                        .disabled(self.git_busy)
+                                        .on_click(cx.listener(move |this, checked, _window, cx| {
+                                            if *checked {
+                                                this.selected_files = this.review_files.iter().map(|f| f.path.clone()).collect();
+                                            } else {
+                                                this.selected_files.clear();
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.foreground)
+                                        .child(format!("{selected_count}/{total_files} files")),
+                                )
+                                .when(selected_additions > 0 || selected_deletions > 0, |stats| {
+                                    stats
+                                        .child(
+                                            div()
+                                                .text_color(theme.success)
+                                                .child(format!("+{selected_additions}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(theme.danger)
+                                                .child(format!("\u{2212}{selected_deletions}")),
+                                        )
+                                }),
                         )
                         .child(
-                            Button::new("git-stage-all-btn")
-                                .label("Stage all")
-                                .ghost()
-                                .xsmall()
-                                .disabled(self.git_busy || unstaged_count == 0)
-                                .tooltip("Stage all changes (git add -A)")
-                                .on_click(cx.listener(|this, _event, window, cx| {
-                                    this.run_git_action(GitAction::StageAll, window, cx);
-                                })),
-                        )
-                        .when(has_staged, |row| {
-                            row.child(
-                                Button::new("git-unstage-all-btn")
-                                    .label("Unstage all")
-                                    .ghost()
-                                    .xsmall()
-                                    .disabled(self.git_busy)
-                                    .tooltip("Unstage all changes (git restore --staged .)")
-                                    .on_click(cx.listener(|this, _event, window, cx| {
-                                        this.run_git_action(GitAction::UnstageAll, window, cx);
-                                    })),
-                            )
-                        }),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Button::new("git-stage-all-btn")
+                                        .label("Stage all")
+                                        .ghost()
+                                        .xsmall()
+                                        .disabled(self.git_busy || unstaged_count == 0)
+                                        .tooltip("Stage all changes (git add -A)")
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            this.run_git_action(GitAction::StageAll, window, cx);
+                                        })),
+                                )
+                                .when(has_staged, |row| {
+                                    row.child(
+                                        Button::new("git-unstage-all-btn")
+                                            .label("Unstage all")
+                                            .ghost()
+                                            .xsmall()
+                                            .disabled(self.git_busy)
+                                            .tooltip("Unstage all changes (git restore --staged .)")
+                                            .on_click(cx.listener(|this, _event, window, cx| {
+                                                this.run_git_action(GitAction::UnstageAll, window, cx);
+                                            })),
+                                    )
+                                }),
+                        ),
                 )
+                .children(diff_ratio_bar)
         });
-
         let file_list_content = if self.review_files.is_empty() {
             div()
                 .flex_1()
@@ -2732,40 +3029,97 @@ impl RightPanelView {
                         })),
                 )
                 .into_any_element()
+        } else if self.review_view_mode == ReviewViewMode::Tree {
+            let filtered = self.filtered_review_files(cx);
+            let mut dir_map: std::collections::BTreeMap<String, Vec<GitFile>> = std::collections::BTreeMap::new();
+            for f in filtered {
+                let (dir, _) = f.path.rsplit_once('/').unwrap_or(("", &f.path));
+                dir_map.entry(dir.to_string()).or_default().push(f);
+            }
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .py_1()
+                .children(dir_map.into_iter().map(|(dir, dir_files)| {
+                    let is_collapsed = self.collapsed_tree_folders.contains(&dir);
+                    let dir_key = dir.clone();
+                    let folder_label = if dir.is_empty() { "(root)".to_string() } else { dir.clone() };
+                    let count = dir_files.len();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            Button::new(SharedString::from(format!("folder-btn-{dir}")))
+                                .ghost()
+                                .xsmall()
+                                .w_full()
+                                .justify_start()
+                                .px_2()
+                                .py_1()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.collapsed_tree_folders.contains(&dir_key) {
+                                        this.collapsed_tree_folders.remove(&dir_key);
+                                    } else {
+                                        this.collapsed_tree_folders.insert(dir_key.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(
+                                            Icon::new(if is_collapsed {
+                                                IconName::ChevronRight
+                                            } else {
+                                                IconName::ChevronDown
+                                            })
+                                            .size_3()
+                                            .text_color(theme.muted_foreground),
+                                        )
+                                        .child(
+                                            Icon::new(if is_collapsed {
+                                                IconName::Folder
+                                            } else {
+                                                IconName::FolderOpen
+                                            })
+                                            .size_3p5()
+                                            .text_color(theme.muted_foreground),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme.foreground)
+                                                .child(folder_label),
+                                        )
+                                        .child(
+                                            Tag::new()
+                                                .child(count.to_string())
+                                                .with_variant(TagVariant::Secondary)
+                                                .small(),
+                                        ),
+                                ),
+                        )
+                        .children((!is_collapsed).then(|| {
+                            div()
+                                .pl_3()
+                                .border_l_1()
+                                .border_color(theme.border.opacity(0.4))
+                                .ml_3()
+                                .flex()
+                                .flex_col()
+                                .children(dir_files.into_iter().map(|f| self.render_file_item(&f, true, cx)))
+                        }))
+                }))
+                .into_any_element()
         } else {
-            let panel_fl = panel_entity.clone();
             div()
                 .relative()
                 .flex_1()
                 .min_h_0()
-                .context_menu({
-                    let panel = panel_fl;
-                    move |menu, _window, cx| {
-                        let (selected_paths, total_files) = {
-                            let panel_ref = panel.read(cx);
-                            let selected_paths: Vec<String> =
-                                panel_ref.selected_files.iter().cloned().collect();
-                            (selected_paths, panel_ref.review_files.len())
-                        };
-                        let mut menu = menu;
-                        for opt in selection_bar_discard_options(&selected_paths, total_files) {
-                            let panel_action = panel.clone();
-                            let label = opt.label();
-                            let opt_action = opt.clone();
-                            menu = menu.item(PopupMenuItem::new(label).on_click(
-                                move |_event, window, cx| {
-                                    Self::handle_discard_option(
-                                        panel_action.clone(),
-                                        opt_action.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            ));
-                        }
-                        menu
-                    }
-                })
                 .child(
                     list(
                         self.review_files_list_state.clone(),
@@ -2780,12 +3134,17 @@ impl RightPanelView {
                 ))
                 .into_any_element()
         };
-        let commit_label = if selected_count > 0 && selected_count < total_files {
+
+        let commit_label = if self.commit_amend {
+            "Amend commit".to_string()
+        } else if selected_count > 0 && selected_count < total_files {
             format!("Commit {selected_count}")
         } else {
             "Commit".to_string()
         };
-        let commit_push_label = if selected_count > 0 && selected_count < total_files {
+        let commit_push_label = if self.commit_amend {
+            "Amend & push".to_string()
+        } else if selected_count > 0 && selected_count < total_files {
             format!("Commit {selected_count} & push")
         } else {
             "Commit & push".to_string()
@@ -2802,11 +3161,39 @@ impl RightPanelView {
             theme.muted_foreground
         };
 
+        let is_empty = commit_val.trim().is_empty();
+        let can_commit = if self.commit_amend {
+            !is_empty && !self.git_busy
+        } else {
+            !is_empty && selected_count > 0 && !self.git_busy
+        };
+
+        let conventional_chips = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .flex_wrap()
+            .children(["feat", "fix", "docs", "refactor", "test", "chore"].into_iter().map(|prefix| {
+                let p = prefix.to_string();
+                Button::new(SharedString::from(format!("chip-{prefix}")))
+                    .label(prefix)
+                    .ghost()
+                    .xsmall()
+                    .tooltip(format!("Prefix message with '{prefix}:'"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.apply_commit_prefix(&p, cx);
+                    }))
+            }));
+
         let commit_footer = div()
             .flex_none()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_2p5()
+            .p_3()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.muted.opacity(0.3))
             .child(
                 div()
                     .flex()
@@ -2827,59 +3214,130 @@ impl RightPanelView {
                             .when(subject_len > 0, |header| {
                                 header.child(
                                     div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(counter_color.opacity(0.12))
                                         .text_xs()
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(counter_color)
                                         .child(if subject_len > 72 {
                                             format!("{subject_len}/72 (too long)")
-                                        } else {
+                                        } else if subject_len > 50 {
                                             format!("{subject_len}/50")
+                                        } else {
+                                            format!("{subject_len}")
                                         }),
                                 )
-                            }),
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        Checkbox::new("commit-amend-chk")
+                                            .checked(self.commit_amend)
+                                            .small()
+                                            .on_click(cx.listener(|this, checked, window, cx| {
+                                                this.commit_amend = *checked;
+                                                if this.commit_amend {
+                                                    let cur = this.commit_message_input.read(cx).value();
+                                                    if cur.trim().is_empty() {
+                                                        this.run_git_action(GitAction::LoadLastCommitMessage, window, cx);
+                                                    }
+                                                }
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child("Amend"),
+                                    ),
+                            ),
                     )
                     .child(
-                        Button::new("git-generate-message")
-                            .when(self.git_message_pending, |button| {
-                                button.child(Spinner::new().xsmall()).label("Generating…")
-                            })
-                            .when(!self.git_message_pending, |button| button.label("Generate"))
-                            .ghost()
-                            .xsmall()
-                            .tooltip(if selected_count == 0 {
-                                "Select files below to generate a message"
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .children((!commit_val.is_empty()).then(|| {
+                                Button::new("clear-commit-input")
+                                    .icon(IconName::Close)
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("Clear message")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.commit_message_input.update(cx, |input, cx| input.set_value("", window, cx));
+                                        cx.notify();
+                                    }))
+                            }))
+                            .child(if self.git_message_pending {
+                                Button::new("git-generate-commit-msg")
+                                    .child(Spinner::new().xsmall())
+                                    .ghost()
+                                    .xsmall()
+                                    .disabled(true)
+                                    .tooltip("Generating commit message with AI…")
                             } else {
-                                "Generate a commit message from the selected changes"
-                            })
-                            .disabled(
-                                self.git_busy || self.git_message_pending || selected_count == 0,
-                            )
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.generate_commit_message(cx);
-                            })),
+                                Button::new("git-generate-commit-msg")
+                                    .icon(IconName::Bot)
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("Generate commit message with AI")
+                                    .disabled(self.git_busy || total_files == 0)
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.generate_commit_message(cx);
+                                    }))
+                            }),
                     ),
             )
-            .child(Input::new(&self.commit_message_input).aria_label("Commit summary").disabled(self.git_busy))
+            .child(conventional_chips)
+            .child(
+                div()
+                    .px_2p5()
+                    .py_2()
+                    .rounded_md()
+                    .bg(theme.input)
+                    .border_1()
+                    .border_color(theme.border)
+                    .focus(|d| d.border_color(theme.primary))
+                    .child(
+                        Input::new(&self.commit_message_input)
+                            .aria_label("Commit summary")
+                            .disabled(self.git_busy),
+                    ),
+            )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(
-                        Button::new("git-commit-push")
+                        Button::new("git-commit-and-push")
                             .icon(Icon::default().path("icons/git/commit.svg"))
                             .label(commit_push_label)
                             .primary()
                             .small()
                             .flex_1()
                             .tooltip(if can_commit {
-                                "Commit the selected changes and push"
+                                if self.commit_amend {
+                                    "Amend the commit and push"
+                                } else {
+                                    "Commit the selected changes and push"
+                                }
                             } else {
                                 "Select files and write a message to commit"
                             })
                             .disabled(!can_commit)
                             .on_click(cx.listener(|this, _event, window, cx| {
-                                this.run_git_action(GitAction::CommitAndPush, window, cx);
+                                if this.commit_amend {
+                                    this.run_git_action(GitAction::CommitAmendAndPush, window, cx);
+                                } else {
+                                    this.run_git_action(GitAction::CommitAndPush, window, cx);
+                                }
                             })),
                     )
                     .child(
@@ -2888,13 +3346,21 @@ impl RightPanelView {
                             .outline()
                             .small()
                             .tooltip(if can_commit {
-                                "Commit the selected changes without pushing"
+                                if self.commit_amend {
+                                    "Amend the commit locally"
+                                } else {
+                                    "Commit the selected changes locally"
+                                }
                             } else {
                                 "Select files and write a message to commit"
                             })
                             .disabled(!can_commit)
                             .on_click(cx.listener(|this, _event, window, cx| {
-                                this.run_git_action(GitAction::Commit, window, cx);
+                                if this.commit_amend {
+                                    this.run_git_action(GitAction::CommitAmend, window, cx);
+                                } else {
+                                    this.run_git_action(GitAction::Commit, window, cx);
+                                }
                             })),
                     )
                     .when(can_push, |row| {
@@ -2911,7 +3377,6 @@ impl RightPanelView {
                         )
                     }),
             );
-
         let stash_banner = self
             .git_status
             .as_ref()
@@ -3257,8 +3722,7 @@ impl RightPanelView {
                 .flex_col()
                 .children(stash_banner)
                 .children(pr_card)
-                .children(selection_bar)
-                .children(changes_summary)
+                .children(review_toolbar)
                 .child(file_list_content)
                 .child(commit_footer)
                 .into_any_element()
@@ -3985,10 +4449,14 @@ impl RightPanelView {
         self.merge_selected_branch = None;
         self.switch_dialog_open = false;
         self.switch_target_branch = None;
+        self.stash_dialog_open = false;
     }
 
     pub fn sync_git_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let open = self.new_branch_dialog_open || self.merge_dialog_open || self.switch_dialog_open;
+        let open = self.new_branch_dialog_open
+            || self.merge_dialog_open
+            || self.switch_dialog_open
+            || self.stash_dialog_open;
         if open == self.git_dialog_presented {
             return;
         }
@@ -3998,7 +4466,7 @@ impl RightPanelView {
             return;
         }
         let panel = cx.entity().downgrade();
-        let width = if self.new_branch_dialog_open {
+        let width = if self.new_branch_dialog_open || self.stash_dialog_open {
             26.25
         } else {
             28.75
@@ -4007,6 +4475,8 @@ impl RightPanelView {
             "Create a branch".to_string()
         } else if self.merge_dialog_open {
             "Merge branches".to_string()
+        } else if self.stash_dialog_open {
+            "Stash changes".to_string()
         } else {
             format!(
                 "Switch to {}",
@@ -4041,9 +4511,110 @@ impl RightPanelView {
             Some(self.render_merge_dialog(cx).into_any_element())
         } else if self.switch_dialog_open {
             Some(self.render_switch_branch_dialog(cx).into_any_element())
+        } else if self.stash_dialog_open {
+            Some(self.render_stash_dialog(cx).into_any_element())
         } else {
             None
         }
+    }
+
+    fn render_stash_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let include_untracked = self.stash_include_untracked;
+
+        div()
+            .id("stash-dialog")
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child("Stash message (optional)"),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1p5()
+                            .rounded_md()
+                            .bg(theme.input)
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(Input::new(&self.stash_message_input)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Checkbox::new("stash-include-untracked-chk")
+                            .checked(include_untracked)
+                            .on_click(cx.listener(|this, checked, _window, cx| {
+                                this.stash_include_untracked = *checked;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.foreground)
+                            .child("Include untracked files"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .pt_2()
+                    .child(
+                        Button::new("cancel-stash-btn")
+                            .label("Cancel")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.close_all_git_dialogs();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("confirm-stash-btn")
+                            .label("Stash changes")
+                            .primary()
+                            .small()
+                            .disabled(self.git_busy)
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                let message = this
+                                    .stash_message_input
+                                    .read(cx)
+                                    .value()
+                                    .trim()
+                                    .to_string();
+                                let msg_opt = (!message.is_empty()).then_some(message);
+                                let include_untracked = this.stash_include_untracked;
+                                this.run_git_action(
+                                    GitAction::StashPush {
+                                        message: msg_opt,
+                                        include_untracked,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                this.close_all_git_dialogs();
+                            })),
+                    ),
+            )
     }
 
     fn render_new_branch_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {

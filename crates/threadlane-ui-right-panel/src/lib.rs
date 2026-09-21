@@ -10,5 +10,5 @@ mod tests;
 mod types;
 mod view;
 
-pub use types::{DiscardOption, GitAction, ReviewTab, Surface};
+pub use types::{DiscardOption, GitAction, ReviewTab, ReviewViewMode, Surface};
 pub use view::RightPanelView;
