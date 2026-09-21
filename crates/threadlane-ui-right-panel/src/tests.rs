@@ -12,7 +12,7 @@ use super::types::{
     message_generated_matches_active_project, selection_bar_discard_options, DiscardOption,
     GitAction,
 };
-use super::view::{retain_review_selection, scan_project_tree};
+use super::view::{retain_review_selection, scan_project_tree, RightPanelView};
 
 fn paths(values: &[&str]) -> HashSet<String> {
     values.iter().map(|value| (*value).to_string()).collect()
@@ -482,4 +482,12 @@ fn discard_option_confirmation_and_action() {
     assert_eq!(prompt_all.0, "Discard all changes?");
     assert!(prompt_all.1.contains("4 files"));
     assert_eq!(all.git_action(), GitAction::DiscardAll);
+}
+
+#[test]
+fn diff_ratio_preserves_single_sided_changes() {
+    assert_eq!(RightPanelView::diff_addition_percent(10, 0), 100.0);
+    assert_eq!(RightPanelView::diff_addition_percent(0, 10), 0.0);
+    assert_eq!(RightPanelView::diff_addition_percent(1, 99), 5.0);
+    assert_eq!(RightPanelView::diff_addition_percent(99, 1), 95.0);
 }

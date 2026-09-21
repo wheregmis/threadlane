@@ -822,9 +822,20 @@ impl RightPanelView {
                     self.stash_files = Some((index, files));
                 }
             }
-            PanelEvent::LastCommitMessageLoaded { project, message } => {
+            PanelEvent::LastCommitMessageLoaded { project, result } => {
+                self.git_busy = false;
                 if self.project.as_ref() == Some(&project) {
-                    self.generated_commit_message = Some(message);
+                    match result {
+                        Ok(message) => {
+                            self.generated_commit_message = Some(message);
+                            self.git_feedback = None;
+                        }
+                        Err(error) => {
+                            self.git_feedback = Some(error.clone());
+                            self.pending_git_notifications
+                                .push(Notification::error(error));
+                        }
+                    }
                 }
             }
             _ => {}
@@ -974,9 +985,8 @@ impl RightPanelView {
             .trim()
             .to_string();
         let selected_paths: Vec<String> = self.selected_files.iter().cloned().collect();
-        let total_count = self.review_files.len();
 
-        if matches!(action, GitAction::Commit | GitAction::CommitAndPush | GitAction::CommitAmend) {
+        if matches!(action, GitAction::Commit | GitAction::CommitAndPush) {
             if selected_paths.is_empty() {
                 self.git_feedback = Some("Select at least one file to commit.".into());
                 let notif = Notification::warning("Select at least one file to commit");
@@ -988,17 +998,24 @@ impl RightPanelView {
                 cx.notify();
                 return;
             }
-            if message.is_empty() {
-                self.git_feedback = Some("Enter a commit message first.".into());
-                let notif = Notification::warning("Enter a commit message first");
-                if let Some(ref mut window) = window {
-                    window.push_notification(notif, cx);
-                } else {
-                    self.pending_git_notifications.push(notif);
-                }
-                cx.notify();
-                return;
+        }
+        if matches!(
+            action,
+            GitAction::Commit
+                | GitAction::CommitAndPush
+                | GitAction::CommitAmend
+                | GitAction::CommitAmendAndPush
+        ) && message.is_empty()
+        {
+            self.git_feedback = Some("Enter a commit message first.".into());
+            let notif = Notification::warning("Enter a commit message first");
+            if let Some(ref mut window) = window {
+                window.push_notification(notif, cx);
+            } else {
+                self.pending_git_notifications.push(notif);
             }
+            cx.notify();
+            return;
         }
 
         self.git_busy = true;
@@ -1006,6 +1023,7 @@ impl RightPanelView {
             GitAction::Commit => "Committing…".to_string(),
             GitAction::CommitAndPush => "Committing and pushing…".to_string(),
             GitAction::CommitAmend => "Amending commit…".to_string(),
+            GitAction::CommitAmendAndPush => "Amending commit and pushing…".to_string(),
             GitAction::StageFile(p) => format!("Staging {p}…"),
             GitAction::UnstageFile(p) => format!("Unstaging {p}…"),
             GitAction::StageFiles(paths) => format!("Staging {} files…", paths.len()),
@@ -1046,6 +1064,15 @@ impl RightPanelView {
         }
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
+            if matches!(&action, GitAction::LoadLastCommitMessage) {
+                let result = threadlane_git::last_commit_message(&work_dir)
+                    .map_err(|error| error.to_string());
+                let _ = tx.send(PanelEvent::LastCommitMessageLoaded {
+                    project: work_dir,
+                    result,
+                });
+                return;
+            }
             let action_result = (|| {
                 let mut action_message = None;
                 match &action {
@@ -1144,12 +1171,12 @@ impl RightPanelView {
                         threadlane_git::ignore_extension(&work_dir, ext)
                             .map_err(|e| e.to_string())?;
                     }
-                    GitAction::CommitAmend => {
+                    GitAction::CommitAmend | GitAction::CommitAmendAndPush => {
                         let status =
                             threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
                         let selected_set: HashSet<&str> =
                             selected_paths.iter().map(String::as_str).collect();
-                        if !selected_paths.is_empty() && selected_paths.len() < total_count {
+                        if !selected_paths.is_empty() {
                             for file in &status.files {
                                 if selected_set.contains(file.path.as_str()) {
                                     threadlane_git::stage_file(&work_dir, &file.path)
@@ -1161,7 +1188,17 @@ impl RightPanelView {
                         }
                         threadlane_git::commit_amend(&work_dir, &message)
                             .map_err(|e| e.to_string())?;
-                        action_message = Some("Commit amended successfully".to_string());
+                        if matches!(&action, GitAction::CommitAmendAndPush) {
+                            threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
+                        }
+                        action_message = Some(
+                            if matches!(&action, GitAction::CommitAmendAndPush) {
+                                "Commit amended and pushed successfully"
+                            } else {
+                                "Commit amended successfully"
+                            }
+                            .to_string(),
+                        );
                     }
                     GitAction::StageFile(path) => {
                         threadlane_git::stage_file(&work_dir, path).map_err(|e| e.to_string())?;
@@ -1184,13 +1221,7 @@ impl RightPanelView {
                             .map_err(|e| e.to_string())?;
                         action_message = Some("Stashed changes successfully".to_string());
                     }
-                    GitAction::LoadLastCommitMessage => {
-                        let msg = threadlane_git::last_commit_message(&work_dir).map_err(|e| e.to_string())?;
-                        let _ = tx.send(PanelEvent::LastCommitMessageLoaded {
-                            project: work_dir.clone(),
-                            message: msg,
-                        });
-                    }
+                    GitAction::LoadLastCommitMessage => unreachable!(),
                 }
                 Ok(action_message)
             })();
@@ -1821,6 +1852,16 @@ impl RightPanelView {
         }
     }
 
+    pub(crate) fn diff_addition_percent(additions: u32, deletions: u32) -> f32 {
+        match (additions, deletions) {
+            (0, _) => 0.0,
+            (_, 0) => 100.0,
+            _ => {
+                (additions as f32 / (additions + deletions) as f32 * 100.0).clamp(5.0, 95.0)
+            }
+        }
+    }
+
     fn apply_commit_prefix(&mut self, prefix: &str, cx: &mut Context<Self>) {
         const PREFIXES: &[&str] = &["feat", "fix", "docs", "refactor", "test", "chore"];
         let cur = self.commit_message_input.read(cx).value().to_string();
@@ -1880,6 +1921,7 @@ impl RightPanelView {
         let stage_btn = if is_staged {
             Button::new(SharedString::from(format!("unstage-btn-{path}")))
                 .icon(IconName::Minus)
+                .accessibility_label("Unstage file")
                 .ghost()
                 .xsmall()
                 .tooltip("Unstage file")
@@ -1889,6 +1931,7 @@ impl RightPanelView {
         } else {
             Button::new(SharedString::from(format!("stage-btn-{path}")))
                 .icon(IconName::Plus)
+                .accessibility_label("Stage file")
                 .ghost()
                 .xsmall()
                 .tooltip("Stage file")
@@ -1901,6 +1944,7 @@ impl RightPanelView {
         let discard_path_btn = path.clone();
         let discard_btn = Button::new(SharedString::from(format!("discard-btn-{path}")))
             .icon(IconName::Close)
+            .accessibility_label("Discard changes")
             .ghost()
             .xsmall()
             .tooltip("Discard changes")
@@ -1916,6 +1960,7 @@ impl RightPanelView {
         let diff_path_btn = path.clone();
         let diff_btn = Button::new(SharedString::from(format!("open-diff-btn-{path}")))
             .icon(IconName::ExternalLink)
+            .accessibility_label("Open diff")
             .ghost()
             .xsmall()
             .tooltip("Open diff")
@@ -2235,9 +2280,10 @@ impl RightPanelView {
     }
 
     fn render_review(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.review_files_list_state.item_count() != self.review_files.len() {
+        let filtered_count = self.filtered_review_files(cx).len();
+        if self.review_files_list_state.item_count() != filtered_count {
             self.review_files_list_state
-                .reset_with_uniform_height(self.review_files.len(), window.rem_size() * 2.0);
+                .reset_with_uniform_height(filtered_count, window.rem_size() * 2.0);
         }
         let panel_entity = cx.entity().clone();
         let theme = cx.theme().colors;
@@ -2338,6 +2384,23 @@ impl RightPanelView {
             .items_center()
             .gap_1()
             .child(sync_button.disabled(self.git_busy))
+            .when(total_files > 0, |row| {
+                row.child(
+                    Button::new("git-stash-changes")
+                        .label("Stash…")
+                        .outline()
+                        .small()
+                        .tooltip("Stash changes…")
+                        .disabled(self.git_busy)
+                        .on_click(cx.listener(|this, _event, window, cx| {
+                            this.close_all_git_dialogs();
+                            this.stash_dialog_open = true;
+                            this.stash_message_input
+                                .update(cx, |input, cx| input.focus(window, cx));
+                            cx.notify();
+                        })),
+                )
+            })
             .when(can_create_pr, |row| {
                 row.child(
                     Button::new("git-create-pull-request")
@@ -2690,7 +2753,7 @@ impl RightPanelView {
         let total_deletions_all: u32 = self.review_files.iter().map(|f| f.deletions).sum();
         let total_delta = total_additions_all + total_deletions_all;
         let diff_ratio_bar = (total_delta > 0).then(|| {
-            let add_pct = (total_additions_all as f32 / total_delta as f32 * 100.0).clamp(5.0, 95.0);
+            let add_pct = Self::diff_addition_percent(total_additions_all, total_deletions_all);
             let del_pct = 100.0 - add_pct;
             div()
                 .px_3()
@@ -3271,7 +3334,7 @@ impl RightPanelView {
                             .disabled(!can_commit)
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 if this.commit_amend {
-                                    this.run_git_action(GitAction::CommitAmend, window, cx);
+                                    this.run_git_action(GitAction::CommitAmendAndPush, window, cx);
                                 } else {
                                     this.run_git_action(GitAction::CommitAndPush, window, cx);
                                 }

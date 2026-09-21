@@ -132,6 +132,7 @@ pub enum GitAction {
     Commit,
     CommitAndPush,
     CommitAmend,
+    CommitAmendAndPush,
     StageFile(String),
     UnstageFile(String),
     StageFiles(Vec<String>),
@@ -295,6 +296,6 @@ pub enum PanelEvent {
     },
     LastCommitMessageLoaded {
         project: PathBuf,
-        message: String,
+        result: Result<String, String>,
     },
 }
