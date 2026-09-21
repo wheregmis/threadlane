@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.20](https://github.com/wheregmis/threadlane/compare/v0.1.19...v0.1.20) (2026-09-21)
+
+
+### Features
+
+* **git:** add staging, commit amend, and stash push support ([8e4f635](https://github.com/wheregmis/threadlane/commit/8e4f6355d0d9da5bba1c2bbf53b492aca0a6868a))
+* **git:** add staging, commit amend, and stash push support ([7187cd5](https://github.com/wheregmis/threadlane/commit/7187cd5ad48116b7f33a37f9fcce0aafd09f159d))
+* **right-panel:** redesign review toolbar and add diff ratio bar ([dcd0174](https://github.com/wheregmis/threadlane/commit/dcd0174a7ce29b58f165765402e580c1e3e39736))
+
+
+### Bug Fixes
+
+* **review:** address PR feedback ([a441bef](https://github.com/wheregmis/threadlane/commit/a441befc7799a8e90e764ed53431481729e359a2))
+
 ## [0.1.19](https://github.com/wheregmis/threadlane/compare/v0.1.18...v0.1.19) (2026-09-20)
 
 
