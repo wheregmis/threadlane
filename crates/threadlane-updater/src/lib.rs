@@ -9,7 +9,11 @@ const UPDATE_ENDPOINT: &str = match option_env!("THREADLANE_UPDATER_ENDPOINT") {
     Some(endpoint) => endpoint,
     None => "https://github.com/wheregmis/threadlane/releases/latest/download/latest.json",
 };
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub fn current_version() -> &'static str {
+    CURRENT_VERSION
+}
 const UPDATER_PUBLIC_KEY: &str = match option_env!("THREADLANE_UPDATER_PUBLIC_KEY") {
     Some(key) => key,
     None => "",
@@ -182,6 +186,11 @@ mod tests {
         assert!(CURRENT_VERSION
             .parse::<cargo_packager_updater::semver::Version>()
             .is_ok());
+    }
+
+    #[test]
+    fn current_version_matches_constant() {
+        assert_eq!(current_version(), CURRENT_VERSION);
     }
 
     #[test]
