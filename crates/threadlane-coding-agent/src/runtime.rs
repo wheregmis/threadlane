@@ -56,6 +56,10 @@ pub struct CodingAgent {
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) prewalk: Arc<std::sync::Mutex<Option<threadlane_orchestrator::PrewalkState>>>,
+    /// Persistent Fusion router (Devin-Fusion parity): frontier main + cheap
+    /// sidekick lanes with compaction-boundary model switches. `None` when
+    /// the session runs without Fusion armed.
+    pub(crate) fusion: Arc<std::sync::Mutex<Option<threadlane_orchestrator::FusionState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
     /// parent `hub` tool (oh-my-pi hub/IRC parity).
     pub(crate) hub: super::mailbox::SubagentHub,
@@ -392,6 +396,106 @@ impl CodingAgent {
         crate::credentials::refresh_provider_for_model(&agent.provider_client_arc(), model);
     }
 
+    /// Resolve the sidekick model for Fusion from live session wiring:
+    /// explicit subagent model, then the fast (`/prewalk`) model, then the
+    /// active model (which the caller reports as a noop).
+    fn resolve_fusion_sidekick(&self, active_model: &str) -> (String, Option<ReasoningEffort>) {
+        let fast = self.agent.model_roles().resolve_fast(active_model);
+        let fast_opt = if fast == active_model { None } else { Some(fast) };
+        let sidekick = threadlane_orchestrator::resolve_sidekick_model(
+            active_model,
+            fast_opt,
+            self.agent.config().subagent_model.as_deref(),
+        );
+        let effort = self
+            .agent
+            .config()
+            .subagent_reasoning_effort
+            .or(self.agent.config().fast_reasoning_effort);
+        (sidekick, effort)
+    }
+
+    /// Arm Fusion for one run. Returns the user-visible notice, or `None`
+    /// when the sidekick resolves to the active model (noop).
+    pub(crate) async fn arm_fusion(&self, explicit: bool, prompt: &str) -> Option<String> {
+        let active_model = self.agent.turn.lock().await.model.clone();
+        let (sidekick, effort) = self.resolve_fusion_sidekick(&active_model);
+        if threadlane_orchestrator::fusion_would_be_noop(&active_model, &sidekick) {
+            return None;
+        }
+        *self
+            .fusion
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(threadlane_orchestrator::FusionState::new(
+                active_model.clone(),
+                sidekick.clone(),
+                effort,
+                explicit,
+            ));
+        let route = threadlane_orchestrator::evaluate_fusion_prompt(prompt, &sidekick);
+        let route_note = match route {
+            threadlane_orchestrator::FusionDecision::DelegateToSidekick { reason } => {
+                format!(" Initial route: delegate ({reason}).")
+            }
+            threadlane_orchestrator::FusionDecision::KeepOnMain { reason } => {
+                format!(" Initial route: main keeps it ({reason}).")
+            }
+        };
+        Some(format!(
+            "Fusion armed: frontier main `{active_model}` + sidekick `{sidekick}` with parallel cached contexts; switches ride compaction.{route_note}"
+        ))
+    }
+
+    /// Snapshot the armed Fusion main directive, if any.
+    fn fusion_directive_snapshot(&self) -> Option<String> {
+        self.fusion
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|state| threadlane_orchestrator::build_fusion_main_directive(&state.sidekick_model))
+            })
+    }
+
+    /// Compaction-boundary routing: evaluate the Fusion router and switch the
+    /// main-lane model when the policy says so. Runs where a cache miss
+    /// happens anyway, so the switch is effectively free. Emits a
+    /// `FusionUpdate` event on switch and rotates provider credentials.
+    pub(crate) async fn apply_fusion_compaction_routing(&mut self) {
+        let target = {
+            let guard = self
+                .fusion
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(state) = guard.as_ref() else {
+                return;
+            };
+            let active = self
+                .agent
+                .turn
+                .try_lock()
+                .map(|turn| turn.model.clone())
+                .unwrap_or_default();
+            threadlane_orchestrator::select_model_at_compaction(&active, state)
+        };
+        let Some(target) = target else {
+            return;
+        };
+        {
+            let mut turn = self.agent.turn.lock().await;
+            turn.model = target.clone();
+        }
+        self.refresh_provider_credentials();
+        let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
+            model: target.clone(),
+            message: format!(
+                "Fusion routing at compaction: main lane switched to `{target}` (cache-miss boundary)."
+            ),
+        });
+    }
+
     fn set_name(&mut self, name: String) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
             journal.refresh().map_err(|error| error.to_string())?;
@@ -584,6 +688,9 @@ impl CodingAgent {
         let dispatch_parent_leaf = Arc::new(std::sync::Mutex::new(None));
         let completed_subagent_lanes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let hub = super::mailbox::SubagentHub::new();
+        let fusion: Arc<std::sync::Mutex<Option<threadlane_orchestrator::FusionState>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let runner_fusion = fusion.clone();
         // Cloned separately for the `hub revive` spawner below; the
         // `agent_runner` closure moves its own copies.
         let revive_api_key = runner_api_key.clone();
@@ -616,6 +723,7 @@ impl CodingAgent {
             let session_file = runner_session_file.clone();
             let semaphore = runner_semaphore.clone();
             let hub = runner_hub.clone();
+            let fusion = runner_fusion.clone();
             let parent_leaf_id = runner_parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
             let completed_lanes = runner_completed_lanes.clone();
             let parent_session_id = parent_session_id.clone();
@@ -624,9 +732,20 @@ impl CodingAgent {
                     let state = state.lock().await;
                     (state.model.clone(), state.reasoning_effort())
                 };
-                let child_model = runner_config
-                    .subagent_model
-                    .clone()
+                // Fusion forces every delegated child onto the sidekick model
+                // so the cheap lane keeps its own persistent cached context;
+                // otherwise fall back to the configured subagent model.
+                let (fusion_sidekick, fusion_effort) = fusion
+                    .lock()
+                    .ok()
+                    .and_then(|guard| {
+                        guard.as_ref().map(|state| {
+                            (state.sidekick_model.clone(), state.sidekick_effort)
+                        })
+                    })
+                    .map(|(m, e)| (Some(m), e))
+                    .unwrap_or((None, None));
+                let child_model = fusion_sidekick.or(runner_config.subagent_model.clone())
                     .unwrap_or_else(|| model.clone());
                 // Resolve live: the parent may have switched providers since
                 // construction (slash `/model`, prewalk handoff). Falls back
@@ -639,9 +758,14 @@ impl CodingAgent {
                         (key, account)
                     }
                 };
-                let child_reasoning_effort = runner_config
-                    .subagent_reasoning_effort
+                let child_reasoning_effort = fusion_effort
+                    .or(runner_config.subagent_reasoning_effort)
                     .unwrap_or(parent_reasoning_effort);
+                if let Ok(mut guard) = fusion.lock() {
+                    if let Some(state) = guard.as_mut() {
+                        state.record_delegation();
+                    }
+                }
                 #[cfg(test)]
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
@@ -910,6 +1034,7 @@ impl CodingAgent {
             harness_journal_error,
             harness_run_id,
             prewalk: Arc::new(std::sync::Mutex::new(None)),
+            fusion,
             hub,
             cancellation,
             interrupted_subagent_recovery,
@@ -1243,6 +1368,7 @@ impl CodingAgent {
         let expanded_input = threadlane_skills::prompts::expand_prompt_template(trimmed, templates);
         let mut effective_input = expanded_input.trim().to_string();
         let mut architect_directive: Option<String> = None;
+        let mut fusion_directive: Option<String> = None;
 
         if let Some(command_input) = effective_input.strip_prefix('/') {
             let mut parts = command_input.split_whitespace();
@@ -1656,7 +1782,20 @@ impl CodingAgent {
                             .map(|_| format!("Session name set to: {name}")),
                     );
                 }
-                if let CommandAction::Prewalk(objective) = &cmd_action {
+                if let CommandAction::Fusion(objective) = &cmd_action {
+                    let task_prompt = objective.trim();
+                    if task_prompt.is_empty() {
+                        return Some(Ok("Usage: /fusion <task objective> - route with frontier main + sidekick lanes, switching at compaction.".into()));
+                    }
+                    if let Some(message) = self.arm_fusion(true, task_prompt).await {
+                        let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
+                            model: self.agent.model(),
+                            message,
+                        });
+                    }
+                    effective_input = task_prompt.to_string();
+                    fusion_directive = self.fusion_directive_snapshot();
+                } else if let CommandAction::Prewalk(objective) = &cmd_action {
                     let task_prompt = objective.trim();
                     if task_prompt.is_empty() {
                         return Some(Ok("Usage: /prewalk <task objective> - plan with frontier model, land first edit behind an update_plan todo gate, then auto-handoff to fast model.".into()));
@@ -1800,6 +1939,44 @@ impl CodingAgent {
             if !turn
                 .system_prompt
                 .contains(threadlane_orchestrator::ARCHITECT_PROTOCOL_HEADER)
+            {
+                turn.system_prompt.push_str(&directive);
+            }
+        }
+
+        // --- Persistent Fusion router (Devin-Fusion parity). Stored
+        // `OrchestratorMode::Fusion` arms every prompt; explicit `/fusion`
+        // above arms one task when the stored mode is `Off`. Fusion and the
+        // one-shot prewalk handoff never arm together: Fusion owns the whole
+        // run, so an armed Fusion skips prewalk and vice versa.
+        if fusion_directive.is_none()
+            && self
+                .fusion
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none()
+            && self
+                .prewalk
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none()
+            && self.agent.config().orchestrator_mode.is_fusion()
+            && !effective_input.trim().is_empty()
+        {
+            if let Some(message) = self.arm_fusion(false, &effective_input.clone()).await {
+                let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
+                    model: self.agent.model(),
+                    message,
+                });
+            }
+            fusion_directive = self.fusion_directive_snapshot();
+        }
+
+        if let Some(directive) = fusion_directive {
+            let mut turn = self.agent.turn.lock().await;
+            if !turn
+                .system_prompt
+                .contains(threadlane_orchestrator::FUSION_MAIN_HEADER)
             {
                 turn.system_prompt.push_str(&directive);
             }

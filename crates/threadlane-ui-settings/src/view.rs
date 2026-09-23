@@ -854,6 +854,7 @@ impl SettingsView {
                 let project = project_for_orchestrator.clone();
                 [
                     threadlane_protocol::OrchestratorMode::Always,
+                    threadlane_protocol::OrchestratorMode::Fusion,
                     threadlane_protocol::OrchestratorMode::Off,
                 ]
                 .into_iter()
@@ -927,8 +928,8 @@ impl SettingsView {
                 )
             }))
             .child(row(
-                "Auto-Prewalk Orchestrator",
-                "Off by default. Always arms /prewalk planning + todo-gated auto-handoff; otherwise use explicit /prewalk.",
+                "Auto-Prewalk / Fusion Orchestrator",
+                "Off by default. Always arms /prewalk planning + todo-gated auto-handoff; Fusion routes frontier main + sidekick lanes with compaction switches; otherwise use explicit /prewalk or /fusion.",
                 orchestrator_picker.into_any_element(),
             ))
             .into_any_element()

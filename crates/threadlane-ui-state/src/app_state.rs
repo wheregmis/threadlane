@@ -3291,6 +3291,18 @@ impl AppState {
                 reminder.clone(),
                 None,
             )),
+            AgentEvent::PrewalkCompleted { model, message } => Some((
+                "Router",
+                format!("Prewalk → {model}"),
+                message.clone(),
+                None,
+            )),
+            AgentEvent::FusionUpdate { model, message } => Some((
+                "Router",
+                format!("Fusion → {model}"),
+                message.clone(),
+                None,
+            )),
             _ => None,
         };
         if let Some((category, summary, detail, lane)) = entry {

@@ -899,6 +899,10 @@ impl CodingAgent {
         let sync = self.sync_turn_from_model_context().await;
         persisted?;
         sync?;
+        // Fusion dynamic routing rides the compaction cache miss: evaluate the
+        // router now that history is compacted, switching the main-lane model
+        // for free when the policy says so.
+        self.apply_fusion_compaction_routing().await;
         Ok(true)
     }
 
@@ -1126,6 +1130,21 @@ impl CodingAgent {
                         .extend_from_slice(&lanes[index..]);
                     self.interrupted_subagent_recovery = InterruptedSubagentRecoveryState::Pending;
                     return Err(error);
+                }
+            }
+        }
+        // Fusion bookkeeping: sidekick lane outcomes feed the router's error
+        // streak. Failures escalate back to the main agent; successes reset
+        // the streak so clean mechanical stretches can downgrade at the next
+        // compaction boundary.
+        if let Ok(mut guard) = self.fusion.lock() {
+            if let Some(state) = guard.as_mut() {
+                for lane in &lanes {
+                    let failed = matches!(lane.status, SubagentLaneStatus::Failed);
+                    state.record_sidekick_result(failed);
+                    if failed {
+                        state.record_escalation();
+                    }
                 }
             }
         }

@@ -1,4 +1,4 @@
-//! One-shot Prewalk handoff (oh-my-pi parity).
+//! One-shot Prewalk handoff (oh-my-pi parity) + Fusion routing.
 //!
 //! The prewalk state machine and its prompt directives sit next to the
 //! `OrchestratorMode` turn-driving config they interpret (both contract
@@ -12,6 +12,13 @@
 //! lands behind an opened todo gate, the session switches one-shot to the
 //! fast/cheap target model, which verifies consistency, scope, and tests
 //! before finishing.
+//!
+//! Fusion (`OrchestratorMode::Fusion`, explicit `/fusion`) is the persistent
+//! Devin-Fusion-parity mode: the frontier main agent delegates mechanical
+//! implementation and verification to a cheaper sidekick lane (own cached
+//! context via the existing subagent child lanes) while owning the plan,
+//! ambiguity, and final review. Model switches on the main lane happen at
+//! compaction boundaries; see the `fusion` module.
 //!
 //! Differences from the previous Threadlane implementation, all deliberate:
 //! - No LLM intent classifier (`Auto` mode removed). Classification added
@@ -27,6 +34,14 @@
 //!   text-only reply to the plan nudge cannot silently end the run.
 //! - One-shot with noop detection: identical target model + effort disarms
 //!   with a notice instead of a pointless switch.
+
+pub mod fusion;
+pub use fusion::{
+    FUSION_MAIN_FOOTER, FUSION_MAIN_HEADER, FUSION_SIDEKICK_HEADER, FusionComplexity, FusionDecision,
+    FusionState, build_fusion_main_directive, build_fusion_sidekick_directive,
+    classify_fusion_task, evaluate_fusion_prompt, fusion_would_be_noop, is_frontier_only_tool,
+    is_sidekick_eligible_tool, resolve_sidekick_model, select_model_at_compaction,
+};
 
 use threadlane_protocol::{OrchestratorMode, ReasoningEffort};
 

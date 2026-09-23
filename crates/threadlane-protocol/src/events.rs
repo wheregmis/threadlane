@@ -118,6 +118,10 @@ pub enum AgentEvent {
         model: String,
         message: String,
     },
+    FusionUpdate {
+        model: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +337,10 @@ mod tests {
             AgentEvent::PrewalkCompleted {
                 model: "fast".to_string(),
                 message: "ok".to_string(),
+            },
+            AgentEvent::FusionUpdate {
+                model: "sidekick".to_string(),
+                message: "delegated".to_string(),
             },
         ];
         for event in &events {
