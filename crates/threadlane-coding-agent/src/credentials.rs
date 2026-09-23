@@ -4,7 +4,7 @@
 //! credential lives outside it: OpenAI-branch requests sign with an API key
 //! or ChatGPT login token, while Antigravity/OpenCode branches resolve OAuth
 //! internally per request. Any in-place model change (slash `/model`,
-//! prewalk handoffs) must re-resolve through this function and rotate the
+//! Fusion compaction switches) must re-resolve through this function and
 //! shared provider cell, or the new provider receives the previous
 //! provider's credential (e.g. a Google `ya29` token sent to
 //! `api.openai.com`, surfacing as 401 `invalid_api_key` mid-task).

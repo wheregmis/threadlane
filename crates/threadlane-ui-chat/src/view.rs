@@ -5049,6 +5049,7 @@ impl ChatListView {
         let (
             selected_model,
             reasoning_effort,
+            orchestrator_mode,
             is_generating,
             pending_message,
             active_session_id,
@@ -5058,6 +5059,7 @@ impl ChatListView {
             (
                 state.selected_model.clone(),
                 state.reasoning_effort,
+                state.orchestrator_mode,
                 state.is_generating,
                 state.active_pending_composer_message().map(str::to_owned),
                 state.active_session_id.clone(),
@@ -5794,6 +5796,51 @@ impl ChatListView {
             move |is_open, _, _| open.set(*is_open)
         });
 
+        // Session mode dropdown, mirroring the model picker: Normal runs
+        // every prompt directly on the selected model, Fusion routes through
+        // frontier-main + sidekick lanes.
+        let mode_model = self.model.clone();
+        let mode_picker = Button::new("composer-mode-picker")
+            .debug_selector(|| "composer-mode-picker".into())
+            .small()
+            .label(orchestrator_mode.label())
+            .accessibility_label(format!("Mode: {}", orchestrator_mode.label()))
+            .tooltip("Session mode: Normal or Fusion")
+            .dropdown_caret(true)
+            .ghost()
+            .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, _window, _cx| {
+                let menu = menu.check_side(gpui_component::Side::Right);
+                [
+                    threadlane_protocol::OrchestratorMode::Normal,
+                    threadlane_protocol::OrchestratorMode::Fusion,
+                ]
+                .into_iter()
+                .fold(menu, |menu, mode| {
+                    let model = mode_model.clone();
+                    let label = match mode {
+                        threadlane_protocol::OrchestratorMode::Normal => {
+                            "Normal · Direct execution"
+                        }
+                        threadlane_protocol::OrchestratorMode::Fusion => {
+                            "Fusion · Main + sidekick"
+                        }
+                    };
+                    menu.item(
+                        PopupMenuItem::new(label)
+                            .checked(mode == orchestrator_mode)
+                            .on_click(move |_event, _window, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::SelectOrchestratorMode(mode),
+                                    );
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                })
+            });
+
         let input_value = self.input_state.read(cx).value().to_string();
         let mut slash_completion_active = false;
         let command_menu = if let Some(query) = active_slash_command_query(&input_value) {
@@ -6401,6 +6448,7 @@ impl ChatListView {
                                     .min_w_0()
                                     .flex_wrap()
                                     .child(model_picker)
+                                    .child(mode_picker)
                                     .children(show_effort_picker.then_some(effort_picker)),
                             )
                             .child(div().flex_1().min_w_2())

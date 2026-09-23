@@ -1,12 +1,11 @@
 //! Fusion mode: persistent frontier-main + cheap-sidekick routing.
 //!
-//! Devin-Fusion parity (see `OrchestratorMode::Fusion`): instead of the
-//! one-shot prewalk handoff, the frontier main agent plans, disambiguates,
-//! and reviews while a cheaper sidekick agent owns mechanical implementation
-//! and verification in parallel child lanes. Both keep their own persistent
-//! cached contexts (main lane vs. subagent child lanes); model switches on
-//! the main lane happen at compaction boundaries so they ride the
-//! unavoidable cache miss.
+//! Devin-Fusion parity (see `OrchestratorMode::Fusion`): the frontier main
+//! agent plans, disambiguates, and reviews while a cheaper sidekick agent
+//! owns mechanical implementation and verification in parallel child lanes.
+//! Both keep their own persistent cached contexts (main lane vs. subagent
+//! child lanes); model switches on the main lane happen at compaction
+//! boundaries so they ride the unavoidable cache miss.
 
 use threadlane_protocol::ReasoningEffort;
 
@@ -66,6 +65,8 @@ pub fn classify_fusion_task(prompt: &str) -> FusionComplexity {
         "rename",
         "removal",
         "remove",
+        "rip out",
+        "cleanly",
         "deprecat",
         "modernize",
         "migrate",
@@ -78,6 +79,8 @@ pub fn classify_fusion_task(prompt: &str) -> FusionComplexity {
         "make ",
         "repeating",
         "across many files",
+        "across the server",
+        "integration",
         "reuse what's upstream",
         "reuse upstream",
     ]);
@@ -120,8 +123,8 @@ pub fn is_frontier_only_tool(tool_name: &str) -> bool {
 }
 
 /// Resolve which model the sidekick lanes run. Preference order mirrors the
-/// existing session wiring: explicit subagent model, then the fast
-/// (`/prewalk`) model, then the active model (which makes Fusion a noop that
+/// existing session wiring: explicit subagent model, then the sidekick
+/// (fast) model, then the active model (which makes Fusion a noop that
 /// callers detect and report instead of a pointless switch).
 pub fn resolve_sidekick_model(
     active_model: &str,

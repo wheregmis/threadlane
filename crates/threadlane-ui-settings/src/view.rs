@@ -853,9 +853,8 @@ impl SettingsView {
                 let entity = orchestrator_entity.clone();
                 let project = project_for_orchestrator.clone();
                 [
-                    threadlane_protocol::OrchestratorMode::Always,
+                    threadlane_protocol::OrchestratorMode::Normal,
                     threadlane_protocol::OrchestratorMode::Fusion,
-                    threadlane_protocol::OrchestratorMode::Off,
                 ]
                 .into_iter()
                 .fold(menu, |menu, mode| {
@@ -866,6 +865,7 @@ impl SettingsView {
                         settings.orchestrator_mode = mode;
                         if threadlane_project::subagent_settings::save(&project, &settings).is_ok() {
                             entity.update(cx, |state, cx| {
+                                state.orchestrator_mode = mode;
                                 state.invalidate_capability_runtimes();
                                 cx.notify();
                             });
@@ -916,20 +916,20 @@ impl SettingsView {
                 )
             }))
             .child(row(
-                "Fast model (/prewalk)",
-                "Model used for high-speed execution after /prewalk lands the first working edit.",
+                "Sidekick model (Fusion)",
+                "Cheap model owning Fusion sidekick lanes and mechanical implementation.",
                 fast_model_picker.into_any_element(),
             ))
             .children(show_fast_reasoning.then(|| {
                 row(
-                    "Fast model reasoning effort",
-                    "Reasoning effort for fast model execution after /prewalk.",
+                    "Sidekick reasoning effort",
+                    "Reasoning effort for the Fusion sidekick model.",
                     fast_reasoning_picker.into_any_element(),
                 )
             }))
             .child(row(
-                "Auto-Prewalk / Fusion Orchestrator",
-                "Off by default. Always arms /prewalk planning + todo-gated auto-handoff; Fusion routes frontier main + sidekick lanes with compaction switches; otherwise use explicit /prewalk or /fusion.",
+                "Session mode",
+                "Normal runs every prompt on the selected model; Fusion routes frontier main + sidekick lanes with compaction switches. Also switchable from the composer Mode dropdown.",
                 orchestrator_picker.into_any_element(),
             ))
             .into_any_element()
@@ -3149,8 +3149,8 @@ impl Render for SettingsView {
                 self.render_providers(cx),
             ),
             SettingsPage::Subagents => (
-                "Subagents & Fast Models",
-                "Choose project defaults for delegated child models and /prewalk fast execution.",
+                "Subagents & Session Mode",
+                "Choose project defaults for delegated child models, the Fusion sidekick, and the session mode.",
                 self.render_subagents(cx),
             ),
             SettingsPage::Skills => (

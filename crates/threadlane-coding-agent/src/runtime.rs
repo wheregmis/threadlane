@@ -55,10 +55,9 @@ pub struct CodingAgent {
     pub(crate) harness: Option<CodingSessionHarness>,
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) prewalk: Arc<std::sync::Mutex<Option<threadlane_orchestrator::PrewalkState>>>,
-    /// Persistent Fusion router (Devin-Fusion parity): frontier main + cheap
-    /// sidekick lanes with compaction-boundary model switches. `None` when
-    /// the session runs without Fusion armed.
+    /// Persistent Fusion router: frontier main + cheap sidekick lanes with
+    /// compaction-boundary model switches. `None` when the session runs in
+    /// Normal mode without Fusion armed.
     pub(crate) fusion: Arc<std::sync::Mutex<Option<threadlane_orchestrator::FusionState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
     /// parent `hub` tool (oh-my-pi hub/IRC parity).
@@ -351,27 +350,15 @@ impl CodingAgent {
         self.agent_work
             .set_acp_model(threadlane_acp_engine::is_acp_model(model));
         self.refresh_provider_credentials();
-        // A model switch can flip the core tool schema, which decides whether
-        // `update_plan` exists. Re-resolve the armed prewalk's todo gate from
-        // the live toolset so the directive and gate stop lying.
-        let requires_todo = self
-            .agent
-            .configured_tool_definitions()
-            .iter()
-            .any(|tool| tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL);
-        if let Ok(mut guard) = self.prewalk.lock() {
-            if let Some(state) = guard.as_mut() {
-                state.refresh_requires_todo(requires_todo);
-            }
-        }
         Ok(())
     }
 
     /// Re-resolve the signing credential for the current turn model and
     /// rotate the shared provider cell. In-place model changes (slash
-    /// `/model`, prewalk handoffs) otherwise keep the previous provider's
-    /// credential — e.g. a Google `ya29` token sent to `api.openai.com`
-    /// (401 `invalid_api_key`) after switching off an Antigravity model.
+    /// `/model`, Fusion compaction switches) otherwise keep the previous
+    /// provider's credential — e.g. a Google `ya29` token sent to
+    /// `api.openai.com` (401 `invalid_api_key`) after switching off an
+    /// Antigravity model.
     /// Skips silently when nothing usable resolves, preserving legacy
     /// behavior for credential-less contexts.
     pub(crate) fn refresh_provider_credentials(&mut self) {
@@ -397,7 +384,7 @@ impl CodingAgent {
     }
 
     /// Resolve the sidekick model for Fusion from live session wiring:
-    /// explicit subagent model, then the fast (`/prewalk`) model, then the
+    /// explicit subagent model, then the sidekick (fast) model, then the
     /// active model (which the caller reports as a noop).
     fn resolve_fusion_sidekick(&self, active_model: &str) -> (String, Option<ReasoningEffort>) {
         let fast = self.agent.model_roles().resolve_fast(active_model);
@@ -748,7 +735,7 @@ impl CodingAgent {
                 let child_model = fusion_sidekick.or(runner_config.subagent_model.clone())
                     .unwrap_or_else(|| model.clone());
                 // Resolve live: the parent may have switched providers since
-                // construction (slash `/model`, prewalk handoff). Falls back
+                // construction (slash `/model`, Fusion routing). Falls back
                 // to the construction key when nothing is stored.
                 let (api_key, account_id) = {
                     let (key, account) = crate::credentials::provider_credentials(&child_model);
@@ -929,8 +916,9 @@ impl CodingAgent {
                 work_dir: options.work_dir.clone(),
             }));
         }
-        // No PrewalkCapability: oh-my-pi parity handoff is automatic at the
-        // first qualifying edit/write, not an explicit model-invoked tool.
+        // No orchestrator handoff tool: Fusion delegation flows through the
+        // existing `subagent` tool with the sidekick model forced by the
+        // runner, not an explicit model-invoked handoff.
 
         registry.register(Box::new(WasiCapability {
             extensions: wasi_extensions.clone(),
@@ -1033,7 +1021,6 @@ impl CodingAgent {
             harness,
             harness_journal_error,
             harness_run_id,
-            prewalk: Arc::new(std::sync::Mutex::new(None)),
             fusion,
             hub,
             cancellation,
@@ -1367,7 +1354,6 @@ impl CodingAgent {
         let templates = self.prompt_templates.as_ref().unwrap();
         let expanded_input = threadlane_skills::prompts::expand_prompt_template(trimmed, templates);
         let mut effective_input = expanded_input.trim().to_string();
-        let mut architect_directive: Option<String> = None;
         let mut fusion_directive: Option<String> = None;
 
         if let Some(command_input) = effective_input.strip_prefix('/') {
@@ -1795,59 +1781,6 @@ impl CodingAgent {
                     }
                     effective_input = task_prompt.to_string();
                     fusion_directive = self.fusion_directive_snapshot();
-                } else if let CommandAction::Prewalk(objective) = &cmd_action {
-                    let task_prompt = objective.trim();
-                    if task_prompt.is_empty() {
-                        return Some(Ok("Usage: /prewalk <task objective> - plan with frontier model, land first edit behind an update_plan todo gate, then auto-handoff to fast model.".into()));
-                    }
-                    let (active_model, active_effort) = {
-                        let turn = self.agent.turn.lock().await;
-                        (turn.model.clone(), Some(turn.reasoning_effort))
-                    };
-                    let fast_model = self
-                        .agent
-                        .model_roles()
-                        .resolve_fast(&active_model)
-                        .to_string();
-                    let fast_reasoning = self.agent.config().fast_reasoning_effort;
-                    if threadlane_orchestrator::prewalk_would_be_noop(
-                        &active_model,
-                        active_effort,
-                        &fast_model,
-                        fast_reasoning,
-                    ) {
-                        let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
-                            model: active_model.clone(),
-                            message: format!("Prewalk: target `{fast_model}` already matches the active model and reasoning; nothing to switch."),
-                        });
-                        effective_input = task_prompt.to_string();
-                    } else {
-                        let requires_todo =
-                            self.agent.configured_tool_definitions().iter().any(|tool| {
-                                tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL
-                            });
-                        *self
-                            .prewalk
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner()) =
-                            Some(threadlane_orchestrator::PrewalkState::new(
-                                fast_model.clone(),
-                                fast_reasoning,
-                                requires_todo,
-                            ));
-
-                        let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
-                            model: active_model.clone(),
-                            message: format!("Prewalk armed with `{active_model}`. Will auto-switch to `{fast_model}` after the first edit/write behind an opened update_plan gate."),
-                        });
-
-                        effective_input = task_prompt.to_string();
-                        architect_directive =
-                            Some(threadlane_orchestrator::build_architect_directive(
-                                &fast_model,
-                                requires_todo,
-                            ));
-                    }
                 } else {
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
                     return Some(Ok(output));
@@ -1855,108 +1788,12 @@ impl CodingAgent {
             }
         }
 
-        // --- One-shot Prewalk orchestrator (oh-my-pi parity): no classifier.
-        // Only `Always` mode arms automatically; explicit `/prewalk` above
-        // bypasses this. `Auto` is deprecated and inert.
-        if architect_directive.is_none()
-            && self
-                .prewalk
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .is_none()
-        {
-            let (active_model, active_effort) = {
-                let turn = self.agent.turn.lock().await;
-                (turn.model.clone(), Some(turn.reasoning_effort))
-            };
-            let fast_model = self
-                .agent
-                .model_roles()
-                .resolve_fast(&active_model)
-                .to_string();
-            let fast_reasoning = self.agent.config().fast_reasoning_effort;
-            let orchestrator_mode = self.agent.config().orchestrator_mode;
-            // Mirror the gate the armed state will use: without the todo tool
-            // in the schema the gate is open from the start, so the directive
-            // must not demand an unfulfillable `update_plan` call.
-            let requires_todo = self
-                .agent
-                .configured_tool_definitions()
-                .iter()
-                .any(|tool| tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL);
-
-            let decision = threadlane_orchestrator::Orchestrator::evaluate(
-                &effective_input,
-                orchestrator_mode,
-                &active_model,
-                active_effort,
-                &fast_model,
-                fast_reasoning,
-                requires_todo,
-            );
-
-            if let threadlane_orchestrator::OrchestratorDecision::EngagePrewalk {
-                fast_model: target_fast,
-                fast_reasoning: target_effort,
-                architect_system_directive,
-            } = decision
-            {
-                if threadlane_orchestrator::prewalk_would_be_noop(
-                    &active_model,
-                    active_effort,
-                    &target_fast,
-                    target_effort,
-                ) {
-                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
-                        model: active_model.clone(),
-                        message: format!("Prewalk: target `{target_fast}` already matches the active model and reasoning; nothing to switch."),
-                    });
-                } else {
-                    *self
-                        .prewalk
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner()) =
-                        Some(threadlane_orchestrator::PrewalkState::new(
-                            target_fast.clone(),
-                            target_effort,
-                            requires_todo,
-                        ));
-
-                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
-                        model: active_model.clone(),
-                        message: format!(
-                            "Auto-Prewalk armed: frontier architect (`{active_model}`) planning behind an update_plan gate before auto-handoff to `{target_fast}`."
-                        ),
-                    });
-
-                    architect_directive = Some(architect_system_directive);
-                }
-            }
-        }
-
-        if let Some(directive) = architect_directive {
-            let mut turn = self.agent.turn.lock().await;
-            if !turn
-                .system_prompt
-                .contains(threadlane_orchestrator::ARCHITECT_PROTOCOL_HEADER)
-            {
-                turn.system_prompt.push_str(&directive);
-            }
-        }
-
-        // --- Persistent Fusion router (Devin-Fusion parity). Stored
-        // `OrchestratorMode::Fusion` arms every prompt; explicit `/fusion`
-        // above arms one task when the stored mode is `Off`. Fusion and the
-        // one-shot prewalk handoff never arm together: Fusion owns the whole
-        // run, so an armed Fusion skips prewalk and vice versa.
+        // --- Fusion router. Stored `OrchestratorMode::Fusion` arms every
+        // prompt; explicit `/fusion` above arms one task when the stored
+        // mode is `Normal`.
         if fusion_directive.is_none()
             && self
                 .fusion
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .is_none()
-            && self
-                .prewalk
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .is_none()
@@ -2084,62 +1921,6 @@ impl CodingAgent {
             .dispatch_parent_leaf
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
-        // Bounded continuation safety net (oh-my-pi `prewalk-continue.md`
-        // parity): if prewalk is still armed after the turn and the last
-        // assistant message made no tool calls, the plan nudge's prose reply
-        // would otherwise end the run before any code exists. Emit a one-time
-        // reminder and keep the prewalk armed for the next turn instead of
-        // looping. Fires at most once per armed prewalk via `continue_pending`.
-        {
-            let mut fire_reminder = false;
-            if let Ok(mut guard) = self.prewalk.lock() {
-                if let Some(state) = guard.as_mut() {
-                    if state.continue_pending {
-                        state.continue_pending = false;
-                        fire_reminder = true;
-                    }
-                }
-            }
-            if fire_reminder {
-                let text_only = {
-                    let turn = self.agent.turn.lock().await;
-                    turn.messages
-                        .iter()
-                        .rev()
-                        .find_map(|message| match message {
-                            AgentMessage::Assistant {
-                                content,
-                                tool_calls,
-                                ..
-                            } => Some(
-                                tool_calls.as_ref().is_none_or(|calls| calls.is_empty())
-                                    && content.as_ref().is_some_and(|text| !text.trim().is_empty()),
-                            ),
-                            AgentMessage::Tool { .. } => Some(false),
-                            _ => None,
-                        })
-                        .unwrap_or(false)
-                };
-                // Only remind when the turn truly ended text-only with no
-                // handoff. If tools ran (todo opened, edits attempted), the
-                // normal gate/handoff path already applies.
-                if text_only
-                    && self
-                        .prewalk
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .is_some()
-                {
-                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
-                        model: self.agent.model(),
-                        message: format!(
-                            "Prewalk: plan received but no todo/edits yet. {}",
-                            threadlane_orchestrator::PREWALK_CONTINUE_PROMPT
-                        ),
-                    });
-                }
-            }
-        }
         let mut tool_termination = HashMap::new();
         let (usage, failure) = loop {
             match harness_events.try_recv() {

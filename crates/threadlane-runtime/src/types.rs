@@ -46,7 +46,8 @@ impl ModelRoles {
     }
 }
 
-/// Orchestration mode governing explicit /prewalk engagement.
+/// Orchestration mode: `Normal` direct execution or `Fusion` main +
+/// sidekick routing.
 /// Canonical in `threadlane_protocol::OrchestratorMode`; re-exported via the
 /// `threadlane_protocol::{... OrchestratorMode}` import above so existing
 /// `threadlane_protocol::OrchestratorMode` paths keep working.

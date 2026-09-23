@@ -114,10 +114,6 @@ pub enum AgentEvent {
         matched_text: String,
         reminder: String,
     },
-    PrewalkCompleted {
-        model: String,
-        message: String,
-    },
     FusionUpdate {
         model: String,
         message: String,
@@ -333,10 +329,6 @@ mod tests {
                 rule_name: "n".to_string(),
                 matched_text: "m".to_string(),
                 reminder: "rem".to_string(),
-            },
-            AgentEvent::PrewalkCompleted {
-                model: "fast".to_string(),
-                message: "ok".to_string(),
             },
             AgentEvent::FusionUpdate {
                 model: "sidekick".to_string(),

@@ -893,7 +893,7 @@ impl OpenAIClient {
     /// Rotate the credential used for subsequent OpenAI-branch requests.
     /// Called when the session model changes providers mid-task (slash
     /// `/model`, picker rebuilds skip this by constructing fresh clients,
-    /// prewalk handoffs). A changed account identity OR a changed key drops
+    /// Fusion routing). A changed account identity OR a changed key drops
     /// the cached Codex websocket, whose handshake embeds the previous
     /// Bearer token.
     pub(crate) fn refresh_credentials(&self, api_key: String, account_id: Option<String>) {

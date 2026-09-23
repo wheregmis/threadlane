@@ -83,6 +83,7 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
         }
         AppAction::SelectModel(model) => state.set_selected_model(model),
         AppAction::SelectReasoningEffort(effort) => state.set_reasoning_effort(effort),
+        AppAction::SelectOrchestratorMode(mode) => state.set_orchestrator_mode(mode),
         AppAction::SetAcpConfigOption { config_id, value } => {
             state.set_acp_config_option(config_id, value)
         }
