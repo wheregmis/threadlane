@@ -1445,7 +1445,7 @@ impl WorkspaceView {
             .id("command-palette-backdrop")
             .absolute()
             .inset_0()
-            .bg(theme.background.opacity(0.5))
+            .bg(threadlane_ui_theme::overlay_scrim())
             .flex()
             .items_start()
             .justify_center()
@@ -2325,7 +2325,7 @@ impl Render for WorkspaceView {
             .child(view_with_status_bar)
             .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("command-palette-btn")
-                        .accessibility_label("Command palette")
+                    .accessibility_label("Command palette (Cmd+K)")
                     .icon(IconName::SquareTerminal)
                     .tooltip("Command palette (Cmd+K)")
                     .ghost()

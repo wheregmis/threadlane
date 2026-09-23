@@ -611,6 +611,7 @@ impl Render for BrowserView {
         let annotating = self.annotating;
         div()
             .id("browser-panel")
+            .role(Role::Application)
             .track_focus(&self.focus_handle)
             .tab_group()
             .size_full()

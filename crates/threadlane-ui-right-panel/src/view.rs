@@ -2344,6 +2344,7 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowUp)
                 .label("Publish branch")
+                .accessibility_label("Publish this branch to origin")
                 .small()
                 .tooltip("Publish this branch to origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -2353,6 +2354,7 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowDown)
                 .label(format!("Pull ({behind})"))
+                .accessibility_label("Pull latest changes from origin")
                 .small()
                 .tooltip("Pull latest changes from origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -2362,6 +2364,7 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowUp)
                 .label(format!("Push ({ahead})"))
+                .accessibility_label("Push local commits to origin")
                 .small()
                 .tooltip("Push local commits to origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -2371,6 +2374,7 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(Icon::default().path("icons/download.svg"))
                 .label("Fetch")
+                .accessibility_label(&last_fetched_str)
                 .ghost()
                 .small()
                 .tooltip(last_fetched_str)
@@ -2406,6 +2410,7 @@ impl RightPanelView {
                     Button::new("git-create-pull-request")
                         .icon(IconName::Github)
                         .label("Create draft PR…")
+                        .accessibility_label("Review and create a draft pull request on GitHub")
                         .outline()
                         .small()
                         .tooltip("Review and create a draft pull request on GitHub")
@@ -2658,6 +2663,7 @@ impl RightPanelView {
                             let fix_failed_summary = failed_summary.clone();
                             Button::new("fix-ci-btn")
                                 .label("Fix CI")
+                                .accessibility_label("Ask AI to fix failing CI checks")
                                 .outline()
                                 .xsmall()
                                 .tooltip("Ask AI to fix failing CI checks")
@@ -2718,6 +2724,7 @@ impl RightPanelView {
                             .child(
                                 Button::new("address-comments-btn")
                                     .label("Address")
+                                    .accessibility_label("Ask AI to address PR comments")
                                     .ghost()
                                     .xsmall()
                                     .tooltip("Ask AI to address PR comments")
@@ -2816,6 +2823,7 @@ impl RightPanelView {
                                 .children((!self.review_filter_input.read(cx).value().is_empty()).then(|| {
                                     Button::new("clear-review-filter-btn")
                                         .icon(IconName::Close)
+                                        .accessibility_label("Clear filter")
                                         .ghost()
                                         .xsmall()
                                         .tooltip("Clear filter")
@@ -2836,6 +2844,7 @@ impl RightPanelView {
                                 .child(
                                     Button::new("review-view-list")
                                         .icon(IconName::Menu)
+                                        .accessibility_label("Flat list view")
                                         .ghost()
                                         .xsmall()
                                         .selected(self.review_view_mode == ReviewViewMode::List)
@@ -2848,6 +2857,7 @@ impl RightPanelView {
                                 .child(
                                     Button::new("review-view-tree")
                                         .icon(IconName::FolderOpen)
+                                        .accessibility_label("Tree view")
                                         .ghost()
                                         .xsmall()
                                         .selected(self.review_view_mode == ReviewViewMode::Tree)
@@ -2863,6 +2873,7 @@ impl RightPanelView {
                                 .child(
                                     Button::new("selection-bar-discard-btn")
                                         .icon(IconName::Undo2)
+                                        .accessibility_label("Discard changes")
                                         .ghost()
                                         .xsmall()
                                         .tooltip("Discard changes (right-click for more options)")
@@ -2964,6 +2975,7 @@ impl RightPanelView {
                                 .child(
                                     Button::new("git-stage-all-btn")
                                         .label("Stage all")
+                                        .accessibility_label("Stage all changes (git add -A)")
                                         .ghost()
                                         .xsmall()
                                         .disabled(self.git_busy || unstaged_count == 0)
@@ -2976,6 +2988,7 @@ impl RightPanelView {
                                     row.child(
                                         Button::new("git-unstage-all-btn")
                                             .label("Unstage all")
+                                            .accessibility_label("Unstage all changes (git restore --staged .)")
                                             .ghost()
                                             .xsmall()
                                             .disabled(self.git_busy)
@@ -3266,6 +3279,7 @@ impl RightPanelView {
                             .children((!commit_val.is_empty()).then(|| {
                                 Button::new("clear-commit-input")
                                     .icon(IconName::Close)
+                                    .accessibility_label("Clear message")
                                     .ghost()
                                     .xsmall()
                                     .tooltip("Clear message")
@@ -3277,6 +3291,7 @@ impl RightPanelView {
                             .child(if self.git_message_pending {
                                 Button::new("git-generate-commit-msg")
                                     .child(Spinner::new().xsmall())
+                                    .accessibility_label("Generating commit message with AI…")
                                     .ghost()
                                     .xsmall()
                                     .disabled(true)
@@ -3284,6 +3299,7 @@ impl RightPanelView {
                             } else {
                                 Button::new("git-generate-commit-msg")
                                     .icon(IconName::Bot)
+                                    .accessibility_label("Generate commit message with AI")
                                     .ghost()
                                     .xsmall()
                                     .tooltip("Generate commit message with AI")
@@ -4548,7 +4564,7 @@ impl RightPanelView {
                             .bg(theme.input)
                             .border_1()
                             .border_color(theme.border)
-                            .child(Input::new(&self.stash_message_input)),
+                            .child(Input::new(&self.stash_message_input).aria_label("Stash message")),
                     ),
             )
             .child(
