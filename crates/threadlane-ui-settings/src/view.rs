@@ -18,7 +18,7 @@ use threadlane_ui_state::AppState;
 use threadlane_acp::{AcpAgentRecord, AcpScope};
 use threadlane_skills::SkillMetadata;
 use threadlane_wasi::packages::{ExtensionRecord, ExtensionScope};
-use threadlane_updater::UpdateStatus;
+use threadlane_updater::{current_version, UpdateStatus};
 
 /// Fixed palette for the Appearance page's miniature theme previews. These
 /// depict the dark/light themes as static illustrations (audited exception to
@@ -1012,7 +1012,7 @@ impl SettingsView {
                             )
                             .child(
                                 Tag::new()
-                                    .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                    .child(format!("v{}", current_version()))
                                     .with_variant(TagVariant::Primary)
                                     .small(),
                             ),
