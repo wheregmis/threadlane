@@ -2430,8 +2430,8 @@ impl RightPanelView {
             .py_2()
             .gap_2()
             .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.muted.opacity(0.3))
+            .border_color(theme.border.opacity(0.8))
+            .bg(theme.muted.opacity(0.18))
             .child(
                 Button::new("git-branch-selector-btn")
                     .accessibility_label(format!("Manage branches, current branch {branch}"))
@@ -2519,13 +2519,11 @@ impl RightPanelView {
                 .flex()
                 .flex_col()
                 .gap_1p5()
-                .p_2p5()
-                .mx_2()
-                .my_1p5()
-                .rounded_lg()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.muted.opacity(0.2))
+                .px_3()
+                .py_2p5()
+                .border_b_1()
+                .border_color(theme.border.opacity(0.7))
+                .bg(theme.muted.opacity(0.16))
                 .child(
                     Button::new("pr-card-toggle")
                         .accessibility_label(if pr_expanded {
@@ -2786,7 +2784,7 @@ impl RightPanelView {
                 .flex_col()
                 .border_b_1()
                 .border_color(theme.border)
-                .bg(theme.muted.opacity(0.12))
+                .bg(theme.title_bar)
                 .child(
                     div()
                         .flex()
@@ -2927,7 +2925,7 @@ impl RightPanelView {
                         .justify_between()
                         .px_3()
                         .py_1()
-                        .bg(theme.muted.opacity(0.18))
+                        .bg(theme.muted.opacity(0.12))
                         .text_xs()
                         .child(
                             div()
@@ -3207,7 +3205,7 @@ impl RightPanelView {
             .p_3()
             .border_t_1()
             .border_color(theme.border)
-            .bg(theme.muted.opacity(0.3))
+            .bg(theme.title_bar)
             .child(
                 div()
                     .flex()
@@ -3320,7 +3318,7 @@ impl RightPanelView {
                     .bg(theme.input)
                     .border_1()
                     .border_color(theme.border)
-                    .focus(|d| d.border_color(theme.primary))
+                    .focus(|d| d.border_color(theme.ring))
                     .child(
                         Input::new(&self.commit_message_input)
                             .aria_label("Commit summary")

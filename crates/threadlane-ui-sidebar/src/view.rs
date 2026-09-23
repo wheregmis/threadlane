@@ -1031,7 +1031,7 @@ impl SidebarView {
         };
 
         let border_color = if is_active {
-            theme.list_active_border
+            theme.primary.opacity(0.38)
         } else {
             gpui::transparent_black()
         };
@@ -1289,7 +1289,7 @@ impl SidebarView {
                         .bottom_1()
                         .w(rems(0.15625))
                         .rounded_r_full()
-                        .bg(theme.primary),
+                        .bg(theme.primary.opacity(0.82)),
                 )
             })
             .child(
