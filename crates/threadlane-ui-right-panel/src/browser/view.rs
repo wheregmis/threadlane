@@ -729,7 +729,7 @@ impl Render for BrowserView {
                                     .items_center()
                                     .rounded_md()
                                     .bg(if selected {
-                                        cx.theme().primary.opacity(0.12)
+                                        cx.theme().list_active
                                     } else {
                                         gpui::transparent_black()
                                     })

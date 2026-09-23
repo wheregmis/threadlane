@@ -3304,7 +3304,7 @@ impl ChatListView {
         let status_icon = if has_running {
             Spinner::new()
                 .xsmall()
-                .color(theme.primary)
+                .color(theme.info)
                 .into_any_element()
         } else if has_error {
             Icon::new(IconName::CircleX)
@@ -3327,7 +3327,7 @@ impl ChatListView {
             .w_full()
             .px_2()
             .rounded_md()
-            .bg(theme.muted.opacity(0.25))
+            .bg(theme.list_hover)
             .flex()
             .items_center()
             .justify_between()
@@ -3391,7 +3391,7 @@ impl ChatListView {
                 .pl_2()
                 .mt_1()
                 .border_l_2()
-                .border_color(theme.border.opacity(0.4))
+                .border_color(theme.list_active_border.opacity(0.65))
                 .children(tool_rows)
         });
 
@@ -3783,8 +3783,11 @@ impl ChatListView {
                 div()
                     .id("new-task-mark")
                     .aria_label("Threadlane")
+                    .p_3()
+                    .rounded_full()
+                    .bg(theme.accent)
                     .text_2xl()
-                    .text_color(theme.primary)
+                    .text_color(theme.accent_foreground)
                     .child(IconName::Asterisk),
             )
             .child(
@@ -6366,11 +6369,12 @@ impl ChatListView {
                     .flex_col()
                     .justify_between()
                     .p_3()
-                    .rounded_xl()
+                    .rounded_2xl()
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.title_bar)
-                    .hover(|style| style.border_color(theme.border.opacity(0.85)))
+                    .border_color(theme.input)
+                    .bg(theme.popover)
+                    .shadow_xl()
+                    .hover(|style| style.border_color(theme.muted_foreground.opacity(0.5)))
                     .on_action(cx.listener(Self::paste_composer_clipboard))
                     .when(slash_completion_active, |composer| {
                         composer
@@ -6404,6 +6408,10 @@ impl ChatListView {
                             .items_center()
                             .gap_2()
                             .flex_wrap()
+                            .mt_2()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(theme.border.opacity(0.55))
                             .child(
                                 div()
                                     .flex()
@@ -6923,7 +6931,7 @@ impl Render for ChatListView {
                     if is_new_task {
                         self.render_new_task(cx)
                     } else if messages.is_empty()
-                        && self.model.read(cx).session_status.as_deref() == Some("Loading session…")
+                        && self.model.read(cx).active_session_is_loading()
                     {
                         div().flex_1().flex().items_center().justify_center().gap_2()
                             .text_sm().text_color(theme.muted_foreground)

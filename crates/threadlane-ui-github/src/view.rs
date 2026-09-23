@@ -1860,7 +1860,7 @@ impl GitHubView {
         div()
             .flex_none()
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.title_bar_border)
             .bg(theme.title_bar)
             // Same top clearance as the sidebar/right-panel/settings
             // headers so toolbar text sits on the shared line under the

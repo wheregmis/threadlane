@@ -1002,9 +1002,9 @@ impl SidebarView {
                     .px_1p5()
                     .py(rems(0.03125))
                     .rounded_full()
-                    .bg(theme.muted)
+                    .bg(theme.info.opacity(0.12))
                     .text_color(theme.foreground)
-                    .child(Spinner::new().xsmall().color(theme.foreground))
+                    .child(Spinner::new().xsmall().color(theme.info))
                     .child(
                         div()
                             .text_xs()
@@ -1031,7 +1031,7 @@ impl SidebarView {
         };
 
         let border_color = if is_active {
-            theme.border.opacity(0.4)
+            theme.list_active_border
         } else {
             gpui::transparent_black()
         };

@@ -1208,6 +1208,13 @@ impl AppState {
             .is_some_and(|active| active == Self::projection_key(session_id, session_file))
     }
 
+    pub fn active_session_is_loading(&self) -> bool {
+        self.pending_hydrations.iter().any(|pending| {
+            pending.reload_messages
+                && self.active_session_matches(&pending.session_id, &pending.session_file)
+        })
+    }
+
     fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
         let session_file = self.session_file(work_dir, session_id);
         self.drop_session_runtime(&session_file);

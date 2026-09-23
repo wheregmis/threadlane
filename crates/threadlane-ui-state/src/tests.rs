@@ -4105,3 +4105,27 @@ fn remove_session_refuses_dirty_worktree_but_allows_clean() {
         "{\"id\":\"y\"}\n"
     );
 }
+
+#[test]
+fn active_session_loading_requires_matching_message_hydration() {
+    let mut state = AppState::load_from_registry(Vec::new());
+    let work_dir = PathBuf::from("/tmp/threadlane-loading-state");
+    let session_file = work_dir.join(".threadlane/sessions/session-1.jsonl");
+    state.active_work_dir = Some(work_dir);
+    state.active_session_id = Some("session-1".into());
+    state.is_new_task = false;
+
+    assert!(!state.active_session_is_loading());
+    state.pending_hydrations.push(SessionHydrationRequest {
+        session_id: "session-1".into(),
+        session_file: session_file.clone(),
+        reload_messages: true,
+    });
+    assert!(state.active_session_is_loading());
+
+    state.pending_hydrations[0].reload_messages = false;
+    assert!(!state.active_session_is_loading());
+    state.pending_hydrations[0].reload_messages = true;
+    state.pending_hydrations[0].session_id = "session-2".into();
+    assert!(!state.active_session_is_loading());
+}

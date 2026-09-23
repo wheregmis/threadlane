@@ -1458,7 +1458,8 @@ impl RightPanelView {
             .pb_2()
             .px_3()
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.title_bar_border)
+            .bg(theme.title_bar)
             .child(
                 div()
                     .flex()
@@ -1978,18 +1979,18 @@ impl RightPanelView {
             .items_center()
             .gap_2()
             .bg(if is_selected {
-                theme.accent.opacity(0.12)
+                theme.list_active
             } else {
                 gpui::transparent_black()
             })
             .hover(|row| {
                 row.bg(if is_selected {
-                    theme.accent.opacity(0.16)
+                    theme.list_active_border.opacity(0.35)
                 } else {
-                    theme.muted
+                    theme.list_hover
                 })
             })
-            .focus(|row| row.border_color(theme.primary))
+            .focus(|row| row.border_color(theme.ring))
             .child(
                 Checkbox::new(SharedString::from(format!("chk-{path}")))
                     .accessibility_label(format!("Select {path} for Git actions"))
@@ -3700,7 +3701,7 @@ impl RightPanelView {
         let review_sub_tabs = div()
             .flex_none()
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.title_bar_border)
             .bg(theme.title_bar)
             .px_3()
             .child(
