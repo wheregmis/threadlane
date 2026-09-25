@@ -270,6 +270,7 @@ fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) 
                         let model = model.clone();
                         Button::new(SharedString::from(format!("chat-error-settings-{id}")))
                             .label("Settings…")
+                            .accessibility_label("Open provider settings")
                             .small()
                             .tooltip("Open provider settings")
                             .debug_selector(|| "chat-error-settings".into())
@@ -283,6 +284,7 @@ fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) 
                     .child(
                         Button::new(SharedString::from(format!("chat-error-copy-{id}")))
                             .label("Copy details")
+                            .accessibility_label("Copy full error to clipboard")
                             .ghost()
                             .small()
                             .tooltip("Copy full error to clipboard")
@@ -2995,6 +2997,7 @@ impl ChatListView {
                                 )))
                                 .icon(IconName::SquareTerminal)
                                 .label("Run in Terminal")
+                                .accessibility_label("Run in active project terminal")
                                 .xsmall()
                                 .secondary()
                                 .tooltip("Run in active project terminal")
@@ -3031,6 +3034,7 @@ impl ChatListView {
                                 )))
                                 .icon(IconName::File)
                                 .label("Open in Editor")
+                                .accessibility_label("Open file in central editor")
                                 .xsmall()
                                 .ghost()
                                 .tooltip("Open file in central editor")
@@ -3310,7 +3314,7 @@ impl ChatListView {
         let status_icon = if has_running {
             Spinner::new()
                 .xsmall()
-                .color(theme.primary)
+                .color(theme.info)
                 .into_any_element()
         } else if has_error {
             Icon::new(IconName::CircleX)
@@ -3333,7 +3337,7 @@ impl ChatListView {
             .w_full()
             .px_2()
             .rounded_md()
-            .bg(theme.muted.opacity(0.25))
+            .bg(theme.list_hover)
             .flex()
             .items_center()
             .justify_between()
@@ -3397,7 +3401,7 @@ impl ChatListView {
                 .pl_2()
                 .mt_1()
                 .border_l_2()
-                .border_color(theme.border.opacity(0.4))
+                .border_color(theme.list_active_border.opacity(0.65))
                 .children(tool_rows)
         });
 
@@ -3789,8 +3793,11 @@ impl ChatListView {
                 div()
                     .id("new-task-mark")
                     .aria_label("Threadlane")
+                    .p_3()
+                    .rounded_full()
+                    .bg(theme.accent)
                     .text_2xl()
-                    .text_color(theme.primary)
+                    .text_color(theme.accent_foreground)
                     .child(IconName::Asterisk),
             )
             .child(
@@ -4237,6 +4244,7 @@ impl ChatListView {
                             Button::new("permission-details-btn")
                                 .icon(IconName::Maximize)
                                 .label("Details")
+                                .accessibility_label("View full command & arguments")
                                 .ghost()
                                 .xsmall()
                                 .tooltip("View full command & arguments")
@@ -4468,6 +4476,7 @@ impl ChatListView {
                                     Button::new("question-dismiss")
                                         .debug_selector(|| "question-dismiss".into())
                                         .label("Dismiss")
+                                        .accessibility_label("Dismiss without answering")
                                         .ghost()
                                         .small()
                                         .tooltip("Dismiss without answering")
@@ -4479,6 +4488,11 @@ impl ChatListView {
                                     Button::new("question-submit")
                                         .debug_selector(|| "question-submit".into())
                                         .label("Send answers")
+                                        .accessibility_label(if has_answer {
+                                            "Send the selected answers"
+                                        } else {
+                                            "Select an option or type a custom answer first"
+                                        })
                                         .small()
                                         .primary()
                                         .disabled(!has_answer)
@@ -6413,16 +6427,17 @@ impl ChatListView {
                     .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                     .mx_auto()
                     .relative()
-                    .min_h_24()
+                    .min_h(rems(5.25))
                     .flex()
                     .flex_col()
                     .justify_between()
-                    .p_3()
+                    .p_2p5()
                     .rounded_xl()
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.title_bar)
-                    .hover(|style| style.border_color(theme.border.opacity(0.85)))
+                    .border_color(theme.input)
+                    .bg(theme.popover)
+                    .shadow_md()
+                    .hover(|style| style.border_color(theme.muted_foreground.opacity(0.5)))
                     .on_action(cx.listener(Self::paste_composer_clipboard))
                     .when(slash_completion_active, |composer| {
                         composer
@@ -6442,7 +6457,7 @@ impl ChatListView {
                         div()
                             .w_full()
                             .flex_1()
-                            .min_h_8()
+                            .min_h_6()
                             .child(
                                 Textarea::new(&self.input_state)
                                     .appearance(false)
@@ -6456,6 +6471,10 @@ impl ChatListView {
                             .items_center()
                             .gap_2()
                             .flex_wrap()
+                            .mt_1()
+                            .pt_1()
+                            .border_t_1()
+                            .border_color(theme.border.opacity(0.55))
                             .child(
                                 div()
                                     .flex()
@@ -6976,7 +6995,7 @@ impl Render for ChatListView {
                     if is_new_task {
                         self.render_new_task(cx)
                     } else if messages.is_empty()
-                        && self.model.read(cx).session_status.as_deref() == Some("Loading session…")
+                        && self.model.read(cx).active_session_is_loading()
                     {
                         div().flex_1().flex().items_center().justify_center().gap_2()
                             .text_sm().text_color(theme.muted_foreground)

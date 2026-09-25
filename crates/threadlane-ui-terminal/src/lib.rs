@@ -974,15 +974,22 @@ impl Render for TerminalView {
 
         let status_banner = self.status.as_ref().map(|status_text| {
             let restart_handle = terminal_actions.clone();
+            let is_error = status_text.starts_with("Terminal read failed")
+                || status_text.starts_with("Unable to start terminal");
+            let status_color = if is_error {
+                theme.danger
+            } else {
+                theme.warning
+            };
             div()
                 .flex()
                 .items_center()
                 .justify_between()
                 .px_3()
                 .py_2()
-                .bg(theme.secondary)
+                .bg(status_color.opacity(0.1))
                 .border_1()
-                .border_color(theme.border)
+                .border_color(status_color.opacity(0.3))
                 .rounded_md()
                 .mt_2()
                 .child(
@@ -990,7 +997,15 @@ impl Render for TerminalView {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(Icon::new(IconName::Info).xsmall().text_color(theme.warning))
+                        .child(
+                            Icon::new(if is_error {
+                                IconName::CircleX
+                            } else {
+                                IconName::Info
+                            })
+                            .xsmall()
+                            .text_color(status_color),
+                        )
                         .child(
                             div()
                                 .text_xs()
@@ -1053,8 +1068,8 @@ impl Render for TerminalView {
             .bg(theme.background)
             .rounded_md()
             .border_1()
-            .border_color(theme.border)
-            .focus(|style| style.border_color(theme.primary))
+            .border_color(gpui::transparent_black())
+            .focus(|style| style.border_color(theme.ring))
             .track_focus(&self.focus_handle)
             .role(Role::Terminal)
             .on_key_down(cx.listener(Self::key_down))
