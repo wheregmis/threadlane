@@ -60,7 +60,7 @@ jobs:
 #            exit 1
 #          fi
 #
-#      - uses: dtolnay/rust-toolchain@1.95.0
+#      - uses: dtolnay/rust-toolchain@1.120.0
 #      - uses: Swatinem/rust-cache@v2
 #        with:
 #          key: gpui-release-${{ matrix.arch }}
@@ -108,7 +108,7 @@ jobs:
             exit 1
           fi
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: gpui-release-aarch64
