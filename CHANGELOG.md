@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.1.21](https://github.com/wheregmis/threadlane/compare/v0.1.20...v0.1.21) (2026-09-25)
+
+
+### Features
+
+* Harden Fusion routing and durability ([3c0e8e7](https://github.com/wheregmis/threadlane/commit/3c0e8e7e0fb283f9c396821c1fb84810c6fbe6b0))
+* **provider:** add GPT-6 Sol and Luna models ([ba51eba](https://github.com/wheregmis/threadlane/commit/ba51eba5a414f7dbb05ba3b6c7aa8bdb2caa4541))
+
+
+### Bug Fixes
+
+* **antigravity:** retry alternate endpoint on forbidden responses ([44b432b](https://github.com/wheregmis/threadlane/commit/44b432bde79a1dd6958c38ca3ade5333378f1a37))
+* **browser:** point default URL to the threadlane repository ([af1448e](https://github.com/wheregmis/threadlane/commit/af1448edc9273c1273eb15a5c16a495cdc0efc0f))
+* **fusion:** restrict delegation and preserve child lane history ([8e17f6f](https://github.com/wheregmis/threadlane/commit/8e17f6fb760b5eb02d512fcfa88c0bb853ed2827))
+* **settings:** display application version in Settings details ([0be16fb](https://github.com/wheregmis/threadlane/commit/0be16fbe2a08fc015d55de4f1854105d48b55fe0))
+* **settings:** display application version in Settings details ([e44b990](https://github.com/wheregmis/threadlane/commit/e44b990411f574bdcd2998239c6ad3a1d7ce64ba))
+* **ui:** rely on root for automatic overlay rendering ([53a5ac6](https://github.com/wheregmis/threadlane/commit/53a5ac6a59d682fd3948fcd3c09d6835cba61784))
+
+
+### Build System
+
+* **deps:** bump dtolnay/rust-toolchain from 1.95.0 to 1.120.0 ([46d0251](https://github.com/wheregmis/threadlane/commit/46d02516b0570d5ac34b0da226f1a0ca9536d9de))
+* **deps:** bump dtolnay/rust-toolchain from 1.95.0 to 1.120.0 ([cd8f47a](https://github.com/wheregmis/threadlane/commit/cd8f47ad9e303a6fbb82b949faf0087a21f1ac81))
+* **deps:** bump gpui-component from `d604a2a` to `ce92671` ([24de007](https://github.com/wheregmis/threadlane/commit/24de00720c181e14461ce8f909fb1df8049aa7a7))
+* **deps:** bump gpui-component from `d604a2a` to `ce92671` ([14fab57](https://github.com/wheregmis/threadlane/commit/14fab57aef45ebb0074d1ff8fee849b9bfe4890f))
+* **deps:** bump gpui-kit from `d604a2a` to `ce92671` ([b435c5d](https://github.com/wheregmis/threadlane/commit/b435c5dabb798f7b7f14aa00ea7cde7b9ebb9e00))
+* **deps:** bump gpui-kit from `d604a2a` to `ce92671` ([6ee72e2](https://github.com/wheregmis/threadlane/commit/6ee72e27c44b976cfbe5e0d2154c32023b618d40))
+* **deps:** bump gpui-kit-assets from `d604a2a` to `ce92671` ([310d948](https://github.com/wheregmis/threadlane/commit/310d9482477937be617ba6fe2b5404e0c2f2b8c0))
+* **deps:** bump gpui-kit-assets from `d604a2a` to `ce92671` ([6e838e5](https://github.com/wheregmis/threadlane/commit/6e838e56c6df90ad4bf025d5146dc15ca0656618))
+* **deps:** bump gpui-wry from `ce92671` to `f8cd486` ([ed4c8fb](https://github.com/wheregmis/threadlane/commit/ed4c8fb0706c18049201610f455fc1747bfed002))
+* **deps:** bump gpui-wry from `ce92671` to `f8cd486` ([890ae1f](https://github.com/wheregmis/threadlane/commit/890ae1f95a3a912e14d09ac6f90b9f63758ef8a7))
+* **deps:** bump hotpath from 0.25.1 to 0.26.0 ([670d119](https://github.com/wheregmis/threadlane/commit/670d119c089cd8199d896ebd2ada6bd70529ab10))
+* **deps:** bump hotpath from 0.25.1 to 0.26.0 ([8c1b8ca](https://github.com/wheregmis/threadlane/commit/8c1b8ca93235232873f56cad46a6d9ed784283ec))
+
+
+### CI
+
+* use rust 1.95.0 toolchain instead of 1.120.0 ([0134166](https://github.com/wheregmis/threadlane/commit/0134166ae18b494333df12d7f2dc5ed426fdb675))
+
 ## [0.1.20](https://github.com/wheregmis/threadlane/compare/v0.1.19...v0.1.20) (2026-09-21)
 
 
