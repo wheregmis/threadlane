@@ -82,7 +82,7 @@ Example ACP configuration:
 }
 ```
 
-To add an API key from the terminal, start Threadlane and open **Settings → Providers**.
+To add an API key, open **Settings → Providers** in Threadlane.
 
 ## Common commands
 
