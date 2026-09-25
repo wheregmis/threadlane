@@ -845,13 +845,11 @@ impl SettingsView {
         let selected_orchestrator_mode = preferences.orchestrator_mode;
         let orchestrator_label = selected_orchestrator_mode.label();
         let orchestrator_entity = self.model.clone();
-        let project_for_orchestrator = project.clone();
         let orchestrator_picker = Button::new("orchestrator-picker")
             .label(orchestrator_label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let entity = orchestrator_entity.clone();
-                let project = project_for_orchestrator.clone();
                 [
                     threadlane_protocol::OrchestratorMode::Normal,
                     threadlane_protocol::OrchestratorMode::Fusion,
@@ -859,17 +857,15 @@ impl SettingsView {
                 .into_iter()
                 .fold(menu, |menu, mode| {
                     let entity = entity.clone();
-                    let project = project.clone();
+                    // Route through the canonical setter so a mode change
+                    // gets the no-op guard, the in-flight-turn deferral
+                    // message, and the targeted runtime rebuild — the same
+                    // path as the composer Mode dropdown.
                     menu.item(PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
-                        let mut settings = threadlane_project::subagent_settings::load(&project);
-                        settings.orchestrator_mode = mode;
-                        if threadlane_project::subagent_settings::save(&project, &settings).is_ok() {
-                            entity.update(cx, |state, cx| {
-                                state.orchestrator_mode = mode;
-                                state.invalidate_capability_runtimes();
-                                cx.notify();
-                            });
-                        }
+                        entity.update(cx, |state, cx| {
+                            controller::dispatch(state, AppAction::SelectOrchestratorMode(mode));
+                            cx.notify();
+                        });
                     }))
                 })
             });

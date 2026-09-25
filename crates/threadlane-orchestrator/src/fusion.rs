@@ -130,6 +130,21 @@ impl FusionDecision {
     pub fn delegates(&self) -> bool {
         matches!(self, Self::DelegateToSidekick { .. })
     }
+
+    /// Model-visible triage note appended to the Fusion main directive for
+    /// this prompt. This is what makes the keyword router behavioral rather
+    /// than advisory: the main agent reads the initial route in its own
+    /// context and dispatches the turn accordingly.
+    pub fn directive_suffix(&self) -> String {
+        match self {
+            Self::DelegateToSidekick { reason } => format!(
+                "\nInitial triage for this task: DELEGATE ({reason}). Open with the plan, hand implementation and verification to the sidekick, then review."
+            ),
+            Self::KeepOnMain { reason } => format!(
+                "\nInitial triage for this task: KEEP ON MAIN ({reason}). Do the implementation yourself; use the sidekick only for isolated mechanical subtasks."
+            ),
+        }
+    }
 }
 
 /// Initial routing for an incoming prompt under Fusion.
@@ -155,6 +170,11 @@ pub fn evaluate_fusion_prompt(prompt: &str, sidekick_model: &str) -> FusionDecis
         },
     }
 }
+
+/// Consecutive sidekick failures that force escalation to main. The streak
+/// must survive lane commits until the compaction router consumes it with
+/// `record_escalation`; clearing it earlier makes the upgrade branch dead.
+pub const FUSION_ESCALATION_THRESHOLD: u32 = 2;
 
 /// Persistent per-session Fusion router state.
 #[derive(Debug)]
@@ -196,7 +216,11 @@ impl FusionState {
         self.delegated = self.delegated.saturating_add(1);
     }
 
-    /// Record an escalation back to the main agent (clears the error streak).
+    /// Record a completed escalation back to the main agent (clears the
+    /// error streak and counts the episode). Called only when the
+    /// compaction router actually switches the main lane back to the
+    /// frontier model — never per failed lane, or the streak could never
+    /// reach the threshold.
     pub fn record_escalation(&mut self) {
         self.escalated = self.escalated.saturating_add(1);
         self.consecutive_sidekick_errors = 0;
@@ -215,7 +239,7 @@ impl FusionState {
 
     /// Whether the sidekick error streak forces escalation to main.
     pub fn escalation_needed(&self) -> bool {
-        self.consecutive_sidekick_errors >= 2
+        self.consecutive_sidekick_errors >= FUSION_ESCALATION_THRESHOLD
     }
 }
 
@@ -303,6 +327,21 @@ mod tests {
             "flash",
         );
         assert!(decision.delegates());
+    }
+
+    #[test]
+    fn triage_suffix_is_behavioral_not_advisory() {
+        let delegate =
+            evaluate_fusion_prompt("Remove the deprecated auth module and run the full suite", "flash");
+        let suffix = delegate.directive_suffix();
+        assert!(suffix.contains("DELEGATE"));
+        assert!(suffix.contains("flash"));
+        let keep = evaluate_fusion_prompt(
+            "Add a team selector to the search bar (cross-team search), gated on a flag",
+            "flash",
+        );
+        let suffix = keep.directive_suffix();
+        assert!(suffix.contains("KEEP ON MAIN"));
     }
 
     #[test]

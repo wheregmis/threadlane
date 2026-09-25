@@ -17,7 +17,7 @@ use crate::runtime::{CodingAgent, ScheduledWorkExecution};
 use crate::scheduler::CodingAgentWorkHandle;
 use threadlane_acp::AcpConfigOption;
 use threadlane_permission::{PermissionDecision, PermissionHandle};
-use threadlane_protocol::{AgentEvent, ImageAttachment, ReasoningEffort};
+use threadlane_protocol::{AgentEvent, ImageAttachment, OrchestratorMode, ReasoningEffort};
 use threadlane_question::QuestionHandle;
 use threadlane_runtime::harness::{EventError, HarnessEvent, Subscription};
 use threadlane_runtime::ModelRoles;
@@ -126,6 +126,10 @@ pub struct SessionController {
     pub session_file: PathBuf,
     pub selected_model: String,
     pub(crate) reasoning_effort: ReasoningEffort,
+    /// Orchestration mode snapshot taken when the runtime was built. Compared
+    /// against the UI selection at turn end so a mode changed mid-turn drops
+    /// the stale runtime instead of silently serving more turns.
+    pub orchestrator_mode: OrchestratorMode,
     pub system_prompt: String,
     pub harness_error: Option<String>,
     is_generating: AtomicBool,
@@ -177,6 +181,7 @@ impl SessionController {
 
         let selected_model = agent.model().to_string();
         let reasoning_effort = agent.agent.reasoning_effort();
+        let orchestrator_mode = agent.agent.config().orchestrator_mode;
 
         Arc::new(Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
@@ -188,6 +193,7 @@ impl SessionController {
             session_file,
             selected_model,
             reasoning_effort,
+            orchestrator_mode,
             system_prompt,
             harness_error,
             is_generating: AtomicBool::new(false),

@@ -4138,7 +4138,8 @@ impl AppState {
                             .get(&session_file)
                             .is_some_and(|runtime| {
                                 !runtime.is_generating()
-                                    && runtime.selected_model != self.selected_model
+                                    && (runtime.selected_model != self.selected_model
+                                        || runtime.orchestrator_mode != self.orchestrator_mode)
                             });
                     if runtime_is_stale {
                         self.drop_session_runtime(&session_file);

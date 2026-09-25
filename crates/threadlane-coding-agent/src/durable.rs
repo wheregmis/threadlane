@@ -890,6 +890,11 @@ impl CodingAgent {
                     self.harness_journal_error = Some(error);
                     return;
                 }
+                // Fusion dynamic routing rides every compaction boundary,
+                // manual or automatic: sessions that never run `/compact`
+                // still switch the main-lane model where a cache miss
+                // happens anyway.
+                self.apply_fusion_compaction_routing().await;
                 if let Some(last_assistant) = state_messages
                     .iter()
                     .rev()
@@ -977,19 +982,23 @@ impl CodingAgent {
             }
         }
         // Fusion bookkeeping: sidekick lane outcomes feed the router's error
-        // streak. Failures escalate back to the main agent; successes reset
-        // the streak so clean mechanical stretches can downgrade at the next
-        // compaction boundary. Escalations surface as `FusionUpdate` events
-        // so the trajectory shows when and why the main agent took over.
-        let mut escalated_lanes: Vec<(String, String, String)> = Vec::new();
+        // streak, which must survive until the compaction router consumes it:
+        // clearing it here would make `escalation_needed()` unreachable and
+        // the upgrade-to-main branch dead. Successes reset the streak so
+        // clean mechanical stretches can downgrade at the next compaction
+        // boundary. A newly crossed threshold surfaces one `FusionUpdate`
+        // event so the trajectory shows when and why the main agent took
+        // over; the streak itself is cleared only when the compaction router
+        // actually switches the main lane back (`record_escalation` there).
+        let mut failed_lanes: Vec<(String, String, String)> = Vec::new();
         if let Ok(mut guard) = self.fusion.lock() {
             if let Some(state) = guard.as_mut() {
+                let pre_streak = state.consecutive_sidekick_errors;
                 for lane in &lanes {
                     let failed = matches!(lane.status, SubagentLaneStatus::Failed);
                     state.record_sidekick_result(failed);
                     if failed {
-                        state.record_escalation();
-                        escalated_lanes.push((
+                        failed_lanes.push((
                             lane.lane_name.clone(),
                             lane.model.clone(),
                             lane.error
@@ -998,8 +1007,11 @@ impl CodingAgent {
                         ));
                     }
                 }
-                if !escalated_lanes.is_empty() {
-                    let lanes_note = escalated_lanes
+                if !failed_lanes.is_empty()
+                    && pre_streak < threadlane_orchestrator::FUSION_ESCALATION_THRESHOLD
+                    && state.escalation_needed()
+                {
+                    let lanes_note = failed_lanes
                         .iter()
                         .map(|(lane, model, error)| {
                             format!("`{lane}` ({model}): {error}")

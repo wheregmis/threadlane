@@ -433,29 +433,61 @@ impl CodingAgent {
         ))
     }
 
-    /// Snapshot the armed Fusion main directive, if any.
-    fn fusion_directive_snapshot(&self) -> Option<String> {
-        self.fusion
+    /// Snapshot the armed Fusion main directive for this prompt, including
+    /// the classifier's initial triage. The triage suffix is what makes the
+    /// keyword router behavioral: the main agent reads the initial route in
+    /// its own context and dispatches the turn accordingly, instead of every
+    /// prompt entering the same unguided path.
+    fn fusion_directive_for_prompt(&self, prompt: &str) -> Option<String> {
+        let sidekick = self
+            .fusion
             .lock()
             .ok()
-            .and_then(|guard| {
-                guard
-                    .as_ref()
-                    .map(|state| threadlane_orchestrator::build_fusion_main_directive(&state.sidekick_model))
-            })
+            .and_then(|guard| guard.as_ref().map(|state| state.sidekick_model.clone()))?;
+        let mut directive = threadlane_orchestrator::build_fusion_main_directive(&sidekick);
+        let triage = threadlane_orchestrator::evaluate_fusion_prompt(prompt, &sidekick)
+            .directive_suffix();
+        if let Some(pos) = directive.find(threadlane_orchestrator::FUSION_MAIN_FOOTER) {
+            directive.insert_str(pos, &format!("{triage}\n"));
+        } else {
+            directive.push_str(&triage);
+        }
+        Some(directive)
+    }
+
+    /// Drop a previously injected Fusion directive block (header through
+    /// footer, triage suffix included) so an explicit re-arm installs fresh
+    /// per-task triage instead of keeping the arming task's.
+    async fn strip_fusion_directive(&mut self) {
+        let mut turn = self.agent.turn.lock().await;
+        let Some(start) = turn
+            .system_prompt
+            .find(threadlane_orchestrator::FUSION_MAIN_HEADER)
+        else {
+            return;
+        };
+        let end = turn
+            .system_prompt
+            .find(threadlane_orchestrator::FUSION_MAIN_FOOTER)
+            .map(|pos| pos + threadlane_orchestrator::FUSION_MAIN_FOOTER.len())
+            .unwrap_or(turn.system_prompt.len());
+        turn.system_prompt.replace_range(start..end, "");
+        turn.system_prompt = turn.system_prompt.trim_end().to_string();
     }
 
     /// Compaction-boundary routing: evaluate the Fusion router and switch the
     /// main-lane model when the policy says so. Runs where a cache miss
     /// happens anyway, so the switch is effectively free. Emits a
-    /// `FusionUpdate` event on switch and rotates provider credentials.
+    /// `FusionUpdate` event on switch and rotates provider credentials. An
+    /// upgrade back to the frontier model consumes the error streak via
+    /// `record_escalation`; without that the streak could never accumulate.
     pub(crate) async fn apply_fusion_compaction_routing(&mut self) {
-        let target = {
-            let guard = self
+        let (target, is_escalation) = {
+            let mut guard = self
                 .fusion
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let Some(state) = guard.as_ref() else {
+            let Some(state) = guard.as_mut() else {
                 return;
             };
             let active = self
@@ -464,7 +496,16 @@ impl CodingAgent {
                 .try_lock()
                 .map(|turn| turn.model.clone())
                 .unwrap_or_default();
-            threadlane_orchestrator::select_model_at_compaction(&active, state)
+            match threadlane_orchestrator::select_model_at_compaction(&active, state) {
+                Some(target) => {
+                    let is_escalation = target == state.main_model;
+                    if is_escalation {
+                        state.record_escalation();
+                    }
+                    (Some(target), is_escalation)
+                }
+                None => return,
+            }
         };
         let Some(target) = target else {
             return;
@@ -474,11 +515,18 @@ impl CodingAgent {
             turn.model = target.clone();
         }
         self.refresh_provider_credentials();
+        let message = if is_escalation {
+            format!(
+                "Fusion escalated: main lane switched back to frontier `{target}` after repeated sidekick failures (cache-miss boundary)."
+            )
+        } else {
+            format!(
+                "Fusion routing at compaction: main lane switched to cheap `{target}` for continued mechanical work (cache-miss boundary)."
+            )
+        };
         let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
             model: target.clone(),
-            message: format!(
-                "Fusion routing at compaction: main lane switched to `{target}` (cache-miss boundary)."
-            ),
+            message,
         });
     }
 
@@ -1801,7 +1849,11 @@ impl CodingAgent {
                         });
                     }
                     effective_input = task_prompt.to_string();
-                    fusion_directive = self.fusion_directive_snapshot();
+                    // Explicit re-arm replaces the router state, so refresh
+                    // the injected directive too instead of keeping the
+                    // previous task's triage.
+                    self.strip_fusion_directive().await;
+                    fusion_directive = self.fusion_directive_for_prompt(&effective_input);
                 } else {
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
                     return Some(Ok(output));
@@ -1827,7 +1879,7 @@ impl CodingAgent {
                     message,
                 });
             }
-            fusion_directive = self.fusion_directive_snapshot();
+            fusion_directive = self.fusion_directive_for_prompt(&effective_input);
         }
 
         if let Some(directive) = fusion_directive {
