@@ -6,12 +6,12 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    BrowserCapability, ContextCapability, GitHubCapability, McpCapability, PlanCapability,
-    QuestionCapability, SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
+    ContextCapability, GitHubCapability, McpCapability, PlanCapability, QuestionCapability,
+    SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
 };
 use super::harness::{CodingSessionHarness, InterruptedSubagentRecoveryState};
-use crate::commands::{CommandAction, execute_slash_command, parse_slash_command};
+use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::computer::ComputerCapability;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,15 +19,15 @@ use std::sync::Arc;
 use threadlane_mcp::McpManager;
 use threadlane_project::default_global_threadlane_dir;
 use threadlane_prompt::ProjectContext;
-use threadlane_prompt::{SystemPromptBuildOptions, build_system_prompt};
+use threadlane_prompt::{build_system_prompt, SystemPromptBuildOptions};
 use threadlane_protocol::ProviderPort;
 use threadlane_protocol::{AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
 use threadlane_provider::openai::fetch_available_models;
 use threadlane_question::QuestionManager;
-use threadlane_runtime::AgentRuntime;
-use threadlane_runtime::ToolPolicy;
 use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore};
 use threadlane_runtime::plan::session_plan_store;
+use threadlane_runtime::AgentRuntime;
+use threadlane_runtime::ToolPolicy;
 use threadlane_skills::{SkillManager, SkillRegistry};
 use threadlane_wasi::broker::CapabilityDispatcher;
 use threadlane_wasi::{WasiExtensionManager, WasiLegacyEffect};
@@ -148,10 +148,8 @@ impl CodingAgent {
     /// Subscribe to replayable durable harness events for this session.
     pub fn subscribe_durable_events(
         &self,
-    ) -> Result<
-        threadlane_runtime::harness::Subscription,
-        threadlane_runtime::harness::EventError,
-    > {
+    ) -> Result<threadlane_runtime::harness::Subscription, threadlane_runtime::harness::EventError>
+    {
         self.harness
             .as_ref()
             .ok_or_else(|| {
@@ -383,33 +381,23 @@ impl CodingAgent {
         crate::credentials::refresh_provider_for_model(&agent.provider_client_arc(), model);
     }
 
-    /// Resolve the sidekick model for Fusion from live session wiring:
-    /// explicit subagent model, then the sidekick (fast) model, then the
-    /// active model (which the caller reports as a noop).
+    /// Resolve the Fusion model from the project's single configured choice.
     fn resolve_fusion_sidekick(&self, active_model: &str) -> (String, Option<ReasoningEffort>) {
         let fast = self.agent.model_roles().resolve_fast(active_model);
-        let fast_opt = if fast == active_model { None } else { Some(fast) };
-        let sidekick = threadlane_orchestrator::resolve_sidekick_model(
-            active_model,
-            fast_opt,
-            self.agent.config().subagent_model.as_deref(),
-        );
-        let effort = self
-            .agent
-            .config()
-            .subagent_reasoning_effort
-            .or(self.agent.config().fast_reasoning_effort);
+        let fast_opt = if fast == active_model {
+            None
+        } else {
+            Some(fast)
+        };
+        let sidekick = threadlane_orchestrator::resolve_sidekick_model(active_model, fast_opt);
+        let effort = self.agent.config().fast_reasoning_effort;
         (sidekick, effort)
     }
 
-    /// Arm Fusion for one run. Returns the user-visible notice, or `None`
-    /// when the sidekick resolves to the active model (noop).
+    /// Arm Fusion for one run, including when the child uses the main model.
     pub(crate) async fn arm_fusion(&self, prompt: &str) -> Option<String> {
         let active_model = self.agent.turn.lock().await.model.clone();
         let (sidekick, effort) = self.resolve_fusion_sidekick(&active_model);
-        if threadlane_orchestrator::fusion_would_be_noop(&active_model, &sidekick) {
-            return None;
-        }
         *self
             .fusion
             .lock()
@@ -445,8 +433,8 @@ impl CodingAgent {
             .ok()
             .and_then(|guard| guard.as_ref().map(|state| state.sidekick_model.clone()))?;
         let mut directive = threadlane_orchestrator::build_fusion_main_directive(&sidekick);
-        let triage = threadlane_orchestrator::evaluate_fusion_prompt(prompt, &sidekick)
-            .directive_suffix();
+        let triage =
+            threadlane_orchestrator::evaluate_fusion_prompt(prompt, &sidekick).directive_suffix();
         if let Some(pos) = directive.find(threadlane_orchestrator::FUSION_MAIN_FOOTER) {
             directive.insert_str(pos, &format!("{triage}\n"));
         } else {
@@ -711,7 +699,6 @@ impl CodingAgent {
         let runner_api_key = agent.api_key.clone();
         let runner_account_id = agent.account_id.clone();
         let runner_state = agent.turn.clone();
-        let runner_config = agent_config.clone();
         let runner_work_dir = options.work_dir.clone();
         let runner_extensions = wasi_extensions.clone();
         let runner_event_tx = agent.event_tx.clone();
@@ -730,7 +717,7 @@ impl CodingAgent {
         let revive_api_key = runner_api_key.clone();
         let revive_account_id = runner_account_id.clone();
         let revive_state = runner_state.clone();
-        let revive_config = runner_config.clone();
+        let revive_config = agent_config.clone();
         let revive_work_dir = runner_work_dir.clone();
         let revive_extensions = runner_extensions.clone();
         let revive_event_tx = runner_event_tx.clone();
@@ -750,7 +737,6 @@ impl CodingAgent {
             let api_key = runner_api_key.clone();
             let account_id = runner_account_id.clone();
             let state = runner_state.clone();
-            let runner_config = runner_config.clone();
             let work_dir = runner_work_dir.clone();
             let extensions = runner_extensions.clone();
             let event_tx = runner_event_tx.clone();
@@ -766,22 +752,19 @@ impl CodingAgent {
                     let state = state.lock().await;
                     (state.model.clone(), state.reasoning_effort())
                 };
-                // Fusion forces every delegated child onto the sidekick model
-                // so the cheap lane keeps its own persistent cached context;
-                // otherwise fall back to the configured subagent model.
+                // Fusion uses the single configured child model.
                 let (fusion_sidekick, fusion_effort) = fusion
                     .lock()
                     .ok()
                     .and_then(|guard| {
-                        guard.as_ref().map(|state| {
-                            (state.sidekick_model.clone(), state.sidekick_effort)
-                        })
+                        guard
+                            .as_ref()
+                            .map(|state| (state.sidekick_model.clone(), state.sidekick_effort))
                     })
                     .map(|(m, e)| (Some(m), e))
                     .unwrap_or((None, None));
                 let fusion_armed = fusion_sidekick.is_some();
-                let child_model = fusion_sidekick.or(runner_config.subagent_model.clone())
-                    .unwrap_or_else(|| model.clone());
+                let child_model = fusion_sidekick.unwrap_or_else(|| model.clone());
                 // Resolve live: the parent may have switched providers since
                 // construction (slash `/model`, Fusion routing). Falls back
                 // to the construction key when nothing is stored.
@@ -793,9 +776,7 @@ impl CodingAgent {
                         (key, account)
                     }
                 };
-                let child_reasoning_effort = fusion_effort
-                    .or(runner_config.subagent_reasoning_effort)
-                    .unwrap_or(parent_reasoning_effort);
+                let child_reasoning_effort = fusion_effort.unwrap_or(parent_reasoning_effort);
                 if let Ok(mut guard) = fusion.lock() {
                     if let Some(state) = guard.as_mut() {
                         state.record_delegation();
@@ -807,8 +788,7 @@ impl CodingAgent {
                 // the directive the main agent was given actually reaches the
                 // lane doing the work.
                 let tasks = if fusion_armed {
-                    let directive =
-                        threadlane_orchestrator::build_fusion_sidekick_directive();
+                    let directive = threadlane_orchestrator::build_fusion_sidekick_directive();
                     tasks
                         .into_iter()
                         .map(|mut task| {
@@ -884,7 +864,7 @@ impl CodingAgent {
                         state.reasoning_effort()
                     };
                     let child_reasoning_effort = runner_config
-                        .subagent_reasoning_effort
+                        .fast_reasoning_effort
                         .unwrap_or(parent_reasoning_effort);
                     let parent_leaf_id = parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
                     // The revived run keeps the lane's original model so history
@@ -942,7 +922,10 @@ impl CodingAgent {
                 options.work_dir.clone(),
                 agent.event_tx.clone(),
                 agent_work.clone(),
-                Some(agent_runner.clone()),
+                agent_config
+                    .orchestrator_mode
+                    .is_fusion()
+                    .then(|| agent_runner.clone()),
                 options.session_file.clone(),
             );
         let mcp_manager = Arc::new(McpManager::new(
@@ -953,12 +936,14 @@ impl CodingAgent {
         registry.register(Box::new(SkillCapability {
             skills: skills.clone(),
         }));
-        registry.register(Box::new(SubagentCapability {
-            agent_runner: agent_runner.clone(),
-            hub: hub.clone(),
-            session_file: session_file.clone(),
-            revive_hook: Some(revive_hook),
-        }));
+        if agent_config.orchestrator_mode.is_fusion() {
+            registry.register(Box::new(SubagentCapability {
+                agent_runner: agent_runner.clone(),
+                hub: hub.clone(),
+                session_file: session_file.clone(),
+                revive_hook: Some(revive_hook),
+            }));
+        }
         registry.register(Box::new(PlanCapability {
             plan_store: plan_store.clone(),
             event_tx: agent.event_tx.clone(),
@@ -1838,6 +1823,11 @@ impl CodingAgent {
                     );
                 }
                 if let CommandAction::Fusion(objective) = &cmd_action {
+                    if !self.agent.config().orchestrator_mode.is_fusion() {
+                        return Some(Err(
+                            "Switch the session to Fusion mode to delegate work.".into()
+                        ));
+                    }
                     let task_prompt = objective.trim();
                     if task_prompt.is_empty() {
                         return Some(Ok("Usage: /fusion <task objective> - route with frontier main + sidekick lanes, switching at compaction.".into()));
@@ -1862,8 +1852,7 @@ impl CodingAgent {
         }
 
         // --- Fusion router. Stored `OrchestratorMode::Fusion` arms every
-        // prompt; explicit `/fusion` above arms one task when the stored
-        // mode is `Normal`.
+        // prompt; `/fusion` can explicitly re-arm a task in that mode.
         if fusion_directive.is_none()
             && self
                 .fusion
@@ -2075,15 +2064,16 @@ impl CodingAgent {
 #[cfg(test)]
 mod compaction_sync_tests {
     use super::{
-        CodingAgent, CodingAgentOptions, CompletedSubagentLane, MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
-        SubagentLaneStatus, durable_prompt_snapshot, requires_harness_compaction_reset,
+        durable_prompt_snapshot, requires_harness_compaction_reset, CodingAgent,
+        CodingAgentOptions, CompletedSubagentLane, SubagentLaneStatus,
+        MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
     };
     use async_trait::async_trait;
     use std::{
         collections::HashSet,
         sync::{
-            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
         },
     };
     use threadlane_prompt::SystemPromptConfig;
@@ -2094,11 +2084,11 @@ mod compaction_sync_tests {
         RuntimeToolCallFunction, RuntimeUsage,
     };
     use threadlane_runtime::{
-        Record,
         harness::{
-            CompactionReason, JsonlStore, OperationOutcome, SessionStore, TranscriptItem,
-            read_transcript_page,
+            read_transcript_page, CompactionReason, JsonlStore, OperationOutcome, SessionStore,
+            TranscriptItem,
         },
+        Record,
     };
 
     fn summary() -> AgentMessage {
@@ -2266,7 +2256,40 @@ mod compaction_sync_tests {
             .unwrap();
         let events = agent.wait_durable_events(&mut subscription).await.unwrap();
         assert!(!events.is_empty());
-        assert!(agent.poll_durable_events(&mut subscription).unwrap().is_empty());
+        assert!(agent
+            .poll_durable_events(&mut subscription)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_mode_has_no_subagent_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        for (mode, expected) in [
+            (threadlane_protocol::OrchestratorMode::Normal, false),
+            (threadlane_protocol::OrchestratorMode::Fusion, true),
+        ] {
+            let mut config = threadlane_runtime::AgentConfig::default();
+            config.orchestrator_mode = mode;
+            let agent = CodingAgent::new(CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "test-model".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: None,
+                system_prompt: SystemPromptConfig::default(),
+                agent_config: Some(config),
+                coding_config: None,
+                browser: BrowserBridge::unavailable(),
+            });
+            let names: Vec<_> = agent
+                .agent
+                .configured_tool_definitions()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
+            assert_eq!(names.iter().any(|name| name == "subagent"), expected);
+        }
     }
 
     #[tokio::test]
@@ -2429,12 +2452,10 @@ mod compaction_sync_tests {
             &entry.message,
             AgentMessage::Custom { custom_type, .. } if custom_type == "subagent_lane"
         )));
-        assert!(
-            store
-                .entries()
-                .iter()
-                .all(|entry| entry.parent_id.as_deref() != Some("node_69"))
-        );
+        assert!(store
+            .entries()
+            .iter()
+            .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
     }
 
     struct LongToolLoopProvider {
@@ -2545,14 +2566,12 @@ mod compaction_sync_tests {
             })
             .collect();
         assert_eq!(prompts, expected);
-        assert!(
-            threadlane_runtime::harness::Reducer::reduce(&store)
-                .unwrap()
-                .lane("main")
-                .unwrap()
-                .queued
-                .is_empty()
-        );
+        assert!(threadlane_runtime::harness::Reducer::reduce(&store)
+            .unwrap()
+            .lane("main")
+            .unwrap()
+            .queued
+            .is_empty());
     }
 
     impl LongToolLoopProvider {
@@ -2798,18 +2817,14 @@ mod compaction_sync_tests {
         // The reopened branch selects the latest durable checkpoint and a descendant leaf.
         let model_context = store.model_context("main").unwrap();
         let checkpoint = model_context.checkpoint.expect("durable checkpoint");
-        assert!(
-            model_context
-                .leaf_id
-                .as_deref()
-                .is_some_and(|leaf| leaf != checkpoint.entry_id)
-        );
-        assert!(
-            model_context
-                .entries
-                .iter()
-                .any(|entry| entry.id == checkpoint.entry_id)
-        );
+        assert!(model_context
+            .leaf_id
+            .as_deref()
+            .is_some_and(|leaf| leaf != checkpoint.entry_id));
+        assert!(model_context
+            .entries
+            .iter()
+            .any(|entry| entry.id == checkpoint.entry_id));
 
         let page = read_transcript_page(&path, None, 1_000).unwrap();
         assert!(!page.has_older);

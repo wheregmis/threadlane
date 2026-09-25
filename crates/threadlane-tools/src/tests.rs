@@ -1,9 +1,9 @@
 use super::*;
 use serde_json::json;
-use threadlane_hashline as hashline;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
+use threadlane_hashline as hashline;
 
 #[test]
 fn canonical_workspace_root_reuses_successful_resolution() {
@@ -352,6 +352,48 @@ fn test_read_file_rejects_reversed_line_range_without_panicking() {
         res,
         "Invalid line range: end_line (2) must not be before start_line (3)."
     );
+}
+
+#[test]
+fn read_file_pages_at_line_boundary_without_losing_the_middle() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("sample.txt");
+    fs::write(
+        &file,
+        (1..=500)
+            .map(|n| format!("line {n}: {}\n", "x".repeat(40)))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let first = execute_tool_in_workspace("read_file", r#"{"path":"sample.txt"}"#, dir.path());
+    assert!(!first.contains("Output truncated"));
+    let next = first
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("[Continue reading at start_line: ")
+                .and_then(|n| n.strip_suffix(']'))
+                .and_then(|n| n.parse::<usize>().ok())
+        })
+        .unwrap();
+    assert!(first.contains(&format!("line {}:", next - 1)));
+    let second = execute_tool_in_workspace(
+        "read_file",
+        &format!(r#"{{"path":"sample.txt","start_line":{next}}}"#),
+        dir.path(),
+    );
+    assert!(second.contains(&format!("line {next}:")));
+}
+
+#[test]
+fn successful_command_keeps_the_middle_of_moderate_output() {
+    let dir = tempdir().unwrap();
+    let output = execute_tool_in_workspace(
+        "run_command",
+        r#"{"command":"printf '%06000d' 0"}"#,
+        dir.path(),
+    );
+    assert!(!output.contains("Output truncated"));
+    assert!(output.len() > 6_000);
 }
 
 #[test]

@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 
 use crate::definitions::tool_definitions;
 use crate::memory::{consolidate_memory_impl, read_memory_impl, save_memory_impl};
-use threadlane_hashline as hashline;
 use crate::repo_map::get_repo_map_impl;
 use crate::search;
 use crate::transaction::{commit_text_transaction, run_post_edit_diagnostics};
@@ -16,6 +15,7 @@ use crate::workspace::{
     canonical_workspace_root, find_fuzzy_workspace_path, validate_cwd_in_workspace,
     validate_path_in_workspace,
 };
+use threadlane_hashline as hashline;
 
 pub(crate) const READ_FILE_SNAPSHOT_PREFIX: &str = "[Threadlane read_file SHA-256: ";
 pub(crate) const READ_FILE_SNAPSHOT_PATH_PREFIX: &str = "[Threadlane read_file path: ";
@@ -180,15 +180,19 @@ pub fn try_execute_tool_in_workspace_with(
                 ));
             }
             let selected = &lines[start_idx..end_idx];
-            let formatted_lines: Vec<String> = selected
-                .iter()
-                .enumerate()
-                .map(|(idx, line)| {
-                    let line_no = start_idx + idx + 1;
-                    hashline::format_line_hashline(line_no, line)
-                })
-                .collect();
-            let body = formatted_lines.join("\n");
+            let mut body = String::new();
+            for (idx, line) in selected.iter().enumerate() {
+                let line_no = start_idx + idx + 1;
+                let formatted = hashline::format_line_hashline(line_no, line);
+                if !body.is_empty() && body.len() + formatted.len() > 12_000 {
+                    body.push_str(&format!("\n[Continue reading at start_line: {line_no}]"));
+                    break;
+                }
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(&formatted);
+            }
             let canonical_root = canonical_workspace_root(workspace_root)?;
             let snapshot_path = validated_path
                 .strip_prefix(&canonical_root)
@@ -208,7 +212,7 @@ pub fn try_execute_tool_in_workspace_with(
                 Some(notice) => format!("{notice}{snapshot}{body}"),
                 None => format!("{snapshot}{body}"),
             };
-            Ok(truncate_tool_output(&output))
+            Ok(output)
         }
         "write_file" => {
             let raw_path = args
@@ -431,14 +435,21 @@ pub fn try_execute_tool_in_workspace_with(
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    let rendered = truncate_tool_output(&format!(
+                    let rendered = format!(
                         "Exit Status: {}\n--- STDOUT ---\n{}\n--- STDERR ---\n{}",
                         output.status, stdout, stderr
-                    ));
+                    );
                     if output.status.success() {
-                        Ok(rendered)
+                        if rendered.chars().count() > 12_000 {
+                            Ok(format!(
+                                "{}\n[Output exceeds 12,000 characters; run a narrower command to read the rest.]",
+                                rendered.chars().take(12_000).collect::<String>()
+                            ))
+                        } else {
+                            Ok(rendered)
+                        }
                     } else {
-                        Err(rendered)
+                        Err(truncate_tool_output(&rendered))
                     }
                 }
                 Err(e) => Err(format!("Error executing command '{cmd_str}': {e}")),

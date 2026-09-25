@@ -209,7 +209,15 @@ impl CodingSessionHarness {
                         run_id: record_run,
                         result_entry_id,
                         ..
-                    } if record_run == run_id => Some(result_entry_id.clone()),
+                    } if record_run == run_id
+                        && !self
+                            .store
+                            .entries()
+                            .iter()
+                            .any(|entry| entry.id == *result_entry_id) =>
+                    {
+                        Some(result_entry_id.clone())
+                    }
                     _ => None,
                 })
                 .next()

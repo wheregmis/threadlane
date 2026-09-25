@@ -127,11 +127,11 @@ Run focused checks while developing, then use the full workspace suite before su
 cargo check -p threadlane-gpui
 
 # Focused tests
-cargo test -p threadlane-runtime
-cargo test -p threadlane-updater
+cargo nextest run -p threadlane-runtime
+cargo nextest run -p threadlane-updater
 
 # Full workspace test suite
-cargo test --workspace
+cargo nextest run --workspace
 ```
 
 ## Packaging and releases

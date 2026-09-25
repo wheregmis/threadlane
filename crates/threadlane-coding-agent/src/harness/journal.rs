@@ -23,6 +23,19 @@ impl CodingSessionHarness {
         run_id: &str,
         event: ProviderTraceEvent,
     ) -> Result<(), String> {
+        self.record_provider_trace_on_lane("main", run_id, event)
+    }
+
+    pub(crate) fn record_provider_trace_on_lane(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        event: ProviderTraceEvent,
+    ) -> Result<(), String> {
+        // Child responses are persisted by the child checkpoint stream.
+        if lane != "main" && matches!(&event, ProviderTraceEvent::AssistantReady { .. }) {
+            return Ok(());
+        }
         let journal = self;
         let event = match event {
             ProviderTraceEvent::AssistantReady {
@@ -43,11 +56,11 @@ impl CodingSessionHarness {
                         .entries()
                         .iter()
                         .rev()
-                        .find(|entry| entry.message == thinking)
+                        .find(|entry| entry.lane == lane && entry.message == thinking)
                         .map(|entry| entry.id.clone());
                     Some(match existing {
                         Some(id) => id,
-                        None => journal.append_message(thinking)?,
+                        None => journal.append_message_to_lane(lane, run_id, thinking)?,
                     })
                 } else {
                     None
@@ -57,17 +70,17 @@ impl CodingSessionHarness {
                     .entries()
                     .iter()
                     .rev()
-                    .find(|entry| entry.message == message)
+                    .find(|entry| entry.lane == lane && entry.message == message)
                     .map(|entry| entry.id.clone());
                 let entry_id = match existing {
                     Some(id) => id,
-                    None => journal.append_message(message)?,
+                    None => journal.append_message_to_lane(lane, run_id, message)?,
                 };
                 let seq = harness_next_seq(journal.store.store());
                 let record = HarnessRecord::ProviderResponseAttached {
                     id: format!("provider-response-{run_id}-{request_id}"),
                     seq,
-                    lane: "main".into(),
+                    lane: lane.into(),
                     timestamp: timestamp(),
                     run_id: run_id.into(),
                     attempt,
@@ -98,7 +111,7 @@ impl CodingSessionHarness {
             } => HarnessRecord::ProviderRequestStarted {
                 id: format!("provider-start-{run_id}-{request_id}"),
                 seq,
-                lane: "main".into(),
+                lane: lane.into(),
                 timestamp: timestamp(),
                 run_id: run_id.into(),
                 attempt,
@@ -118,7 +131,7 @@ impl CodingSessionHarness {
             } => HarnessRecord::ContextManifestCaptured {
                 id: format!("context-manifest-{run_id}-{request_id}"),
                 seq,
-                lane: "main".into(),
+                lane: lane.into(),
                 timestamp: timestamp(),
                 run_id: run_id.into(),
                 attempt,
@@ -145,7 +158,7 @@ impl CodingSessionHarness {
                 HarnessRecord::StreamCheckpoint {
                     id: format!("stream-checkpoint-{run_id}-{request_id}-{checkpoint_index}"),
                     seq,
-                    lane: "main".into(),
+                    lane: lane.into(),
                     timestamp: timestamp(),
                     run_id: run_id.into(),
                     attempt: Some(attempt),
@@ -172,7 +185,7 @@ impl CodingSessionHarness {
             } => HarnessRecord::ProviderRequestFinished {
                 id: format!("provider-finish-{run_id}-{request_id}"),
                 seq,
-                lane: "main".into(),
+                lane: lane.into(),
                 timestamp: timestamp(),
                 run_id: run_id.into(),
                 attempt,

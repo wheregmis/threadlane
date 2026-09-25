@@ -12,10 +12,6 @@ use threadlane_protocol::{OrchestratorMode, ReasoningEffort};
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_reasoning_effort: Option<ReasoningEffort>,
@@ -36,11 +32,8 @@ pub fn load(project_root: &Path) -> SubagentSettings {
 
 pub fn save(project_root: &Path, settings: &SubagentSettings) -> Result<(), String> {
     if settings
-        .reasoning_effort
+        .fast_reasoning_effort
         .is_some_and(|effort| ReasoningEffort::from_label(effort.label()).is_none())
-        || settings
-            .fast_reasoning_effort
-            .is_some_and(|effort| ReasoningEffort::from_label(effort.label()).is_none())
     {
         return Err("Unsupported subagent reasoning effort.".into());
     }
@@ -61,8 +54,6 @@ mod tests {
     fn settings_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = SubagentSettings {
-            model: Some("antigravity/gemini-3.1-pro".into()),
-            reasoning_effort: Some(ReasoningEffort::High),
             fast_model: Some("antigravity/gemini-3-flash".into()),
             fast_reasoning_effort: Some(ReasoningEffort::Low),
             orchestrator_mode: OrchestratorMode::Fusion,
@@ -77,5 +68,16 @@ mod tests {
             .filter(|name| name.to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(residue.is_empty(), "unexpected files: {residue:?}");
+    }
+
+    #[test]
+    fn legacy_subagent_model_cannot_override_fusion_model() {
+        let settings: SubagentSettings = serde_json::from_str(
+            r#"{"model":"gpt-5.6-terra","reasoning_effort":"off","fast_model":"gpt-5.6-luna","orchestrator_mode":"fusion"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.fast_model.as_deref(), Some("gpt-5.6-luna"));
+        let saved = serde_json::to_string(&settings).unwrap();
+        assert!(!saved.contains("gpt-5.6-terra"));
     }
 }

@@ -4,9 +4,9 @@
 //! stream rules live here rather than as scattered `const` items.
 
 use crate::types::ModelRoles;
-use threadlane_protocol::{OrchestratorMode, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use threadlane_protocol::{OrchestratorMode, ReasoningEffort};
 
 /// Configuration for the agent execution loop, compaction, and stream rules.
 ///
@@ -61,16 +61,6 @@ pub struct AgentConfig {
     /// Assigned models for specialized roles (Task, Plan, Advisor).
     #[serde(default)]
     pub model_roles: ModelRoles,
-
-    /// Project-selected model for delegated subagents. `None` inherits the
-    /// active parent session model.
-    #[serde(default)]
-    pub subagent_model: Option<String>,
-
-    /// Project-selected reasoning effort for delegated subagents. `None`
-    /// inherits the active parent turn's reasoning effort.
-    #[serde(default)]
-    pub subagent_reasoning_effort: Option<ReasoningEffort>,
 
     /// Project-selected reasoning effort for sidekick (Fusion) execution. `None`
     /// inherits the active parent turn's reasoning effort.
@@ -138,8 +128,6 @@ impl Default for AgentConfig {
             context_retained_tail_percent: 25,
             default_system_prompt: "You are threadlane AI coding agent. Lead with answers and actions. Omit conversational filler, preambles, and recaps. Keep edits minimal, focused on root causes, and strictly avoid unrequested refactoring or speculative abstractions.".into(),
             model_roles: ModelRoles::default(),
-            subagent_model: None,
-            subagent_reasoning_effort: None,
             fast_reasoning_effort: None,
             orchestrator_mode: OrchestratorMode::default(),
             core_tool_schema_mode: true,

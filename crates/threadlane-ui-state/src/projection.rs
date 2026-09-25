@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
-use threadlane_runtime::harness::{
-    tool_activity_display_summary, JsonlStore, SessionStore,
-};
 use threadlane_protocol::AgentMessage;
+use threadlane_runtime::harness::{tool_activity_display_summary, JsonlStore, SessionStore};
 
 use crate::types::{
     ChatMessageInfo, MessageRole, SessionProjectionResult, SubagentActivityInfo,
@@ -15,9 +13,7 @@ pub(crate) fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo>
     compute_session_messages(session_file).unwrap_or_default()
 }
 
-pub fn compute_session_messages(
-    session_file: &Path,
-) -> Result<Vec<ChatMessageInfo>, String> {
+pub fn compute_session_messages(session_file: &Path) -> Result<Vec<ChatMessageInfo>, String> {
     use threadlane_runtime::harness::{read_transcript_page, TranscriptItem};
 
     // The durable pager is the single transcript source, but exhaust it here:
@@ -102,30 +98,59 @@ pub fn compute_full_session_projection(
 
 pub(crate) fn project_run_timing(store: &impl SessionStore) -> Option<crate::types::RunTiming> {
     use threadlane_runtime::harness::{AbortObservation, OperationIntent, Record};
-    let (id, start_seq, started_at_ms) = store.records().iter().rev().find_map(|record| {
-        match record {
-            Record::OperationStarted { id, seq, lane, intent: OperationIntent::Run, wall_time_ms, .. }
-                if lane == "main" => Some((id, *seq, *wall_time_ms)),
+    let (id, start_seq, started_at_ms) =
+        store
+            .records()
+            .iter()
+            .rev()
+            .find_map(|record| match record {
+                Record::OperationStarted {
+                    id,
+                    seq,
+                    lane,
+                    intent: OperationIntent::Run,
+                    wall_time_ms,
+                    ..
+                } if lane == "main" => Some((id, *seq, *wall_time_ms)),
+                _ => None,
+            })?;
+    let finish = store
+        .records()
+        .iter()
+        .rev()
+        .find_map(|record| match record {
+            Record::OperationFinished {
+                run_id,
+                lane,
+                seq,
+                wall_time_ms,
+                ..
+            } if lane == "main" && run_id == id => Some((*seq, *wall_time_ms)),
             _ => None,
-        }
-    })?;
-    let finish = store.records().iter().rev().find_map(|record| match record {
-        Record::OperationFinished { run_id, lane, seq, wall_time_ms, .. }
-            if lane == "main" && run_id == id => Some((*seq, *wall_time_ms)),
-        _ => None,
-    });
+        });
     // Abort acknowledgement precedes reconciliation, which may happen only
     // when the session is reopened. Do not count that intervening idle time.
     let abort = store.records().iter().find_map(|record| match record {
-        Record::AbortObserved { run_id, lane, seq, wall_time_ms,
-            observation: AbortObservation::SignalSent, acknowledged: true, .. }
-            if lane == "main" && run_id == id => Some((*seq, *wall_time_ms)),
+        Record::AbortObserved {
+            run_id,
+            lane,
+            seq,
+            wall_time_ms,
+            observation: AbortObservation::SignalSent,
+            acknowledged: true,
+            ..
+        } if lane == "main" && run_id == id => Some((*seq, *wall_time_ms)),
         _ => None,
     });
     let terminal = abort.into_iter().chain(finish).min_by_key(|(seq, _)| *seq);
     Some(crate::types::RunTiming {
         start_seq,
-        source_seq: finish.into_iter().chain(abort).map(|(seq, _)| seq).max().unwrap_or(start_seq),
+        source_seq: finish
+            .into_iter()
+            .chain(abort)
+            .map(|(seq, _)| seq)
+            .max()
+            .unwrap_or(start_seq),
         started_at_ms,
         finished_at_ms: terminal.and_then(|(_, time)| time),
         finished: terminal.is_some(),
@@ -308,11 +333,7 @@ pub fn coding_agent_options(
     let mut agent_config = threadlane_runtime::AgentConfig::default();
     agent_config.model_roles = model_roles;
     let subagent_settings = threadlane_project::subagent_settings::load(&work_dir);
-    agent_config.subagent_model = subagent_settings.model;
-    agent_config.subagent_reasoning_effort = subagent_settings.reasoning_effort;
-    if agent_config.model_roles.fast.is_none() {
-        agent_config.model_roles.fast = subagent_settings.fast_model;
-    }
+    agent_config.model_roles.fast = subagent_settings.fast_model;
     agent_config.fast_reasoning_effort = subagent_settings.fast_reasoning_effort;
     agent_config.orchestrator_mode = subagent_settings.orchestrator_mode;
 

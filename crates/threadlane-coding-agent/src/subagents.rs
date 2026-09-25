@@ -3,8 +3,8 @@ use super::capabilities::{
     build_broker_dispatcher, create_after_tool_hook_handler, extension_before_tool_hook_handler,
 };
 use super::context_snapshots::{
-    MAX_SUBAGENT_CONTEXT_CHARS, MAX_SUBAGENT_CONTEXT_REFS, resolve_context_snapshot,
-    snapshot_location,
+    resolve_context_snapshot, snapshot_location, MAX_SUBAGENT_CONTEXT_CHARS,
+    MAX_SUBAGENT_CONTEXT_REFS,
 };
 use super::harness::{AcceptedRun, CodingSessionHarness, SubagentLaneIdentity, SubagentStartError};
 use super::scheduler::AgentWorkScheduler;
@@ -18,20 +18,20 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 #[cfg(test)]
 use threadlane_protocol::browser::BrowserBridge;
 use threadlane_protocol::{AgentEvent, AgentMessage, SubagentProgressUpdate};
-use threadlane_runtime::ToolPolicy;
 use threadlane_runtime::harness::HookKind;
+use threadlane_runtime::ToolPolicy;
 use threadlane_runtime::{AgentRuntime, TurnState};
-use threadlane_skills::agents::{AgentDefinition, AgentScope, discover_agents};
+use threadlane_skills::agents::{discover_agents, AgentDefinition, AgentScope};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
 pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
@@ -318,7 +318,10 @@ async fn consume_subagent_turn_checkpoints(
             )
             .await?;
         }
-        if matches!(&event, AgentEvent::AgentEnd { .. }) {
+        if let AgentEvent::AgentEnd { usage } = event {
+            if let Some(path) = session_file.as_deref() {
+                CodingSessionHarness::open(path)?.record_provider_usage(&run_id, usage)?;
+            }
             break;
         }
     }
@@ -1027,6 +1030,22 @@ pub(crate) async fn run_subagent_task(
         )),
     )
     .unwrap();
+    if let Some(path) = context.session_file.as_deref() {
+        let journal = Arc::new(tokio::sync::Mutex::new(CodingSessionHarness::open(path)?));
+        let run_id = journal_run_id.clone();
+        let lane = lane_name.clone();
+        agent.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let journal = journal.clone();
+            let run_id = run_id.clone();
+            let lane = lane.clone();
+            Box::pin(async move {
+                journal
+                    .lock()
+                    .await
+                    .record_provider_trace_on_lane(&lane, &run_id, event)
+            })
+        })));
+    }
     agent
         .set_reasoning_effort(context.child_reasoning_effort)
         .await;
@@ -1599,37 +1618,33 @@ mod result_tests {
         });
         let mut child = task("worker");
         child.context_refs = vec!["ctx-missing".into()];
-        assert!(
-            run_subagents_with_context(
-                vec![child],
-                false,
-                None,
-                test_context(
-                    dir.path().into(),
-                    session_file.clone(),
-                    Some(observer.clone())
-                ),
-            )
-            .await
-            .unwrap_err()
-            .contains("missing")
-        );
+        assert!(run_subagents_with_context(
+            vec![child],
+            false,
+            None,
+            test_context(
+                dir.path().into(),
+                session_file.clone(),
+                Some(observer.clone())
+            ),
+        )
+        .await
+        .unwrap_err()
+        .contains("missing"));
         assert!(!observed.load(Ordering::SeqCst));
 
         std::fs::write(dir.path().join("first.rs"), "stale").unwrap();
         let mut child = task("worker");
         child.context_refs = vec![context_ids[0].clone()];
-        assert!(
-            run_subagents_with_context(
-                vec![child],
-                false,
-                None,
-                test_context(dir.path().into(), session_file, Some(observer)),
-            )
-            .await
-            .unwrap_err()
-            .contains("stale")
-        );
+        assert!(run_subagents_with_context(
+            vec![child],
+            false,
+            None,
+            test_context(dir.path().into(), session_file, Some(observer)),
+        )
+        .await
+        .unwrap_err()
+        .contains("stale"));
         assert!(!observed.load(Ordering::SeqCst));
     }
 

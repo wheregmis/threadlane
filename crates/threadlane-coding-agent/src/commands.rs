@@ -37,16 +37,13 @@ fn builtin_commands() -> Vec<SlashCommandInfo> {
         ("model", "Switch model, or show the current one"),
         (
             "fusion",
-            "Route with frontier main + sidekick lanes, switching at compaction (/fusion <objective>)",
+            "Re-arm Fusion routing for an objective (Fusion mode only)",
         ),
         ("compact", "Compact the conversation context"),
         ("session", "Show session info"),
         ("name", "Name this session"),
         ("skill", "Load a discovered skill by ID"),
-        (
-            "subagent",
-            "Delegate tasks to subagents in parallel or sequentially",
-        ),
+        ("subagent", "Delegate tasks to subagents (Fusion mode only)"),
         ("quit", "Quit threadlane agent"),
     ]
     .into_iter()

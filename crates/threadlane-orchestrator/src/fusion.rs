@@ -92,18 +92,8 @@ pub fn classify_fusion_task(prompt: &str) -> FusionComplexity {
     }
 }
 
-/// Resolve which model the sidekick lanes run. Preference order mirrors the
-/// existing session wiring: explicit subagent model, then the sidekick
-/// (fast) model, then the active model (which makes Fusion a noop that
-/// callers detect and report instead of a pointless switch).
-pub fn resolve_sidekick_model(
-    active_model: &str,
-    fast_model: Option<&str>,
-    subagent_model: Option<&str>,
-) -> String {
-    if let Some(model) = subagent_model.filter(|m| !m.trim().is_empty()) {
-        return model.to_string();
-    }
+/// Resolve the Fusion child model from its single configured choice.
+pub fn resolve_sidekick_model(active_model: &str, fast_model: Option<&str>) -> String {
     if let Some(model) = fast_model.filter(|m| !m.trim().is_empty()) {
         return model.to_string();
     }
@@ -230,8 +220,7 @@ impl FusionState {
     /// escalation threshold; success resets the streak.
     pub fn record_sidekick_result(&mut self, is_error: bool) {
         if is_error {
-            self.consecutive_sidekick_errors =
-                self.consecutive_sidekick_errors.saturating_add(1);
+            self.consecutive_sidekick_errors = self.consecutive_sidekick_errors.saturating_add(1);
         } else {
             self.consecutive_sidekick_errors = 0;
         }
@@ -251,10 +240,7 @@ impl FusionState {
 /// - Long clean mechanical stretches downgrade the main lane to the sidekick
 ///   model to save cost while implementation continues.
 /// - Otherwise no switch: churn without signal just burns cache.
-pub fn select_model_at_compaction(
-    active_model: &str,
-    state: &FusionState,
-) -> Option<String> {
+pub fn select_model_at_compaction(active_model: &str, state: &FusionState) -> Option<String> {
     if state.escalation_needed() && active_model != state.main_model {
         return Some(state.main_model.clone());
     }
@@ -278,6 +264,7 @@ pub fn build_fusion_main_directive(sidekick_model: &str) -> String {
          Sidekick model: {sidekick_model}\n\
          You are the frontier main agent. Take MINIMAL direct actions and only read what is absolutely necessary.\n\
          By default DELEGATE and MONITOR: hand mechanical implementation and slow verification (edits, test suites, bulk refactors, deprecation removals) to the sidekick `{sidekick_model}` via `subagent`, then review the diff.\n\
+         Make tiny corrections found during review yourself; do not launch a fresh child for a one-line fix.\n\
          Own the significant decisions yourself: the plan (`update_plan`), interpretation of ambiguity (`ask_question` — never let the sidekick guess intent), and the final review before delivery.\n\
          Keep your own context lean so both lanes stay cache-friendly; let the sidekick gather its own context in its lane.\n\
          If sidekick work errors twice in a row or the subtle intent is at risk, escalate back to yourself and finish directly.\n\
@@ -302,8 +289,10 @@ mod tests {
 
     #[test]
     fn mechanical_prompts_delegate() {
-        let decision =
-            evaluate_fusion_prompt("Modernize search.js to ES6 and verify with the full make suite", "flash");
+        let decision = evaluate_fusion_prompt(
+            "Modernize search.js to ES6 and verify with the full make suite",
+            "flash",
+        );
         assert!(decision.delegates());
         assert_eq!(
             classify_fusion_task("Rip out the OpenTracing integration across the server, cleanly"),
@@ -331,8 +320,10 @@ mod tests {
 
     #[test]
     fn triage_suffix_is_behavioral_not_advisory() {
-        let delegate =
-            evaluate_fusion_prompt("Remove the deprecated auth module and run the full suite", "flash");
+        let delegate = evaluate_fusion_prompt(
+            "Remove the deprecated auth module and run the full suite",
+            "flash",
+        );
         let suffix = delegate.directive_suffix();
         assert!(suffix.contains("DELEGATE"));
         assert!(suffix.contains("flash"));
@@ -353,13 +344,9 @@ mod tests {
     }
 
     #[test]
-    fn sidekick_resolution_prefers_subagent_then_fast() {
-        assert_eq!(
-            resolve_sidekick_model("main", Some("fast"), Some("child")),
-            "child"
-        );
-        assert_eq!(resolve_sidekick_model("main", Some("fast"), None), "fast");
-        assert_eq!(resolve_sidekick_model("main", None, None), "main");
+    fn sidekick_resolution_uses_fusion_model() {
+        assert_eq!(resolve_sidekick_model("main", Some("luna")), "luna");
+        assert_eq!(resolve_sidekick_model("main", None), "main");
         assert!(fusion_would_be_noop("m", "m"));
         assert!(!fusion_would_be_noop("main", "sidekick"));
     }

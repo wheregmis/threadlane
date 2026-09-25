@@ -10,15 +10,15 @@ use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 
-use threadlane_ui_state::{actions::AppAction, controller};
+use threadlane_acp::{AcpAgentRecord, AcpScope};
+use threadlane_skills::SkillMetadata;
 use threadlane_ui_state::next_event_batch;
 use threadlane_ui_state::provider_auth::{self, ProviderAuthEvent};
 use threadlane_ui_state::settings::SettingsEvent;
 use threadlane_ui_state::AppState;
-use threadlane_acp::{AcpAgentRecord, AcpScope};
-use threadlane_skills::SkillMetadata;
-use threadlane_wasi::packages::{ExtensionRecord, ExtensionScope};
+use threadlane_ui_state::{actions::AppAction, controller};
 use threadlane_updater::{current_version, UpdateStatus};
+use threadlane_wasi::packages::{ExtensionRecord, ExtensionScope};
 
 /// Fixed palette for the Appearance page's miniature theme previews. These
 /// depict the dark/light themes as static illustrations (audited exception to
@@ -147,11 +147,7 @@ impl AuthStatusMessage {
 }
 
 impl SettingsView {
-    pub fn new(
-        model: Entity<AppState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (openai_key, opencode_key) = {
             let state = model.read(cx);
             (state.openai_key.clone(), state.opencode_key.clone())
@@ -217,11 +213,7 @@ impl SettingsView {
                                     cx,
                                 )
                                 .await;
-                                crate::refresh_openai_models_and_update(
-                                    dynamic_model,
-                                    cx,
-                                )
-                                .await;
+                                crate::refresh_openai_models_and_update(dynamic_model, cx).await;
                             })
                             .detach();
                         }
@@ -254,8 +246,7 @@ impl SettingsView {
                     // The key just changed, so re-pull the live OpenAI list.
                     let openai_refresh = openai_model.clone();
                     cx.spawn(async move |_this, cx| {
-                        crate::refresh_openai_models_and_update(openai_refresh, cx)
-                            .await;
+                        crate::refresh_openai_models_and_update(openai_refresh, cx).await;
                     })
                     .detach();
                 }
@@ -275,11 +266,7 @@ impl SettingsView {
                     // The key just changed, so re-pull the live Zen model list.
                     let discovery_model = opencode_model.clone();
                     cx.spawn(async move |_this, cx| {
-                        crate::refresh_discovered_models_and_update(
-                            discovery_model,
-                            cx,
-                        )
-                        .await;
+                        crate::refresh_discovered_models_and_update(discovery_model, cx).await;
                     })
                     .detach();
                 }
@@ -307,7 +294,10 @@ impl SettingsView {
                 let _ = this.update(cx, |this, cx| {
                     for event in events {
                         match event {
-                            SettingsEvent::AcpRefreshed { request_id, records } => {
+                            SettingsEvent::AcpRefreshed {
+                                request_id,
+                                records,
+                            } => {
                                 if this.acp_probe.is_current(request_id) {
                                     this.acp_rows = records;
                                 }
@@ -347,7 +337,8 @@ impl SettingsView {
     }
 
     fn refresh_extensions(&mut self, cx: &mut Context<Self>) {
-        self.extension_rows = threadlane_wasi::settings::discover_extensions(self.active_project(cx));
+        self.extension_rows =
+            threadlane_wasi::settings::discover_extensions(self.active_project(cx));
     }
 
     fn refresh_skills(&mut self, cx: &mut Context<Self>) {
@@ -378,7 +369,11 @@ impl SettingsView {
             state.reconcile_selected_model();
             cx.notify();
         });
-        if let Err(error) = threadlane_ui_state::settings::probe_acp_agents(project, request_id, self.settings_tx.clone()) {
+        if let Err(error) = threadlane_ui_state::settings::probe_acp_agents(
+            project,
+            request_id,
+            self.settings_tx.clone(),
+        ) {
             self.capability_status = Some(error);
         }
         // Keep the shared model cache warm while the status probe runs: the
@@ -387,8 +382,7 @@ impl SettingsView {
         let cache_model = self.model.clone();
         let cache_project = self.active_project(cx);
         cx.spawn(async move |_view, cx| {
-            crate::refresh_acp_models_and_update(cache_model, cx, cache_project)
-                .await;
+            crate::refresh_acp_models_and_update(cache_model, cx, cache_project).await;
         })
         .detach();
     }
@@ -434,10 +428,15 @@ impl SettingsView {
             .border_r_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
-            .child(div().h(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
             .child(
                 div()
-                    .pl(rems(1.25)).pr_3()
+                    .h(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE)
+                    .flex_none(),
+            )
+            .child(
+                div()
+                    .pl(rems(1.25))
+                    .pr_3()
                     .pb_2()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -504,7 +503,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-subagents")
-                            .child(nav_content(Icon::new(IconName::Bot), "Subagents"))
+                            .child(nav_content(Icon::new(IconName::Bot), "Agent & Fusion"))
                             .ghost()
                             .selected(self.page == SettingsPage::Subagents)
                             .w_full()
@@ -583,144 +582,14 @@ impl SettingsView {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
         let Some(project) = state.active_work_dir.clone() else {
-            return Self::empty_state("Attach a project to configure subagents.", theme);
+            return Self::empty_state(
+                "Attach a project to configure Agent and Fusion modes.",
+                theme,
+            );
         };
         let preferences = threadlane_project::subagent_settings::load(&project);
         let available = threadlane_ui_catalog::available_models_for_project(Some(&project));
-        let selected_model = preferences.model.clone();
-        let reasoning_model = selected_model
-            .as_deref()
-            .or(preferences.fast_model.as_deref())
-            .unwrap_or(&state.selected_model);
-        let selected_reasoning = preferences.reasoning_effort.map(|effort| {
-            threadlane_provider::model_registry::effective_effort(
-                reasoning_model,
-                effort,
-                Some(&project),
-            )
-        });
-        let model_label = selected_model
-            .as_deref()
-            .map(|id| threadlane_ui_catalog::selection_label(id, &available))
-            .unwrap_or_else(|| "Same as parent".into());
-        let reasoning_label = selected_reasoning
-            .map(|effort| effort.label())
-            .unwrap_or("Same as parent");
-        let available_for_subagent = available.clone();
         let available_for_fast = available.clone();
-        let model_entity = self.model.clone();
-        let project_for_models = project.clone();
-        let reasoning_for_model = reasoning_model.to_string();
-        // Reasoning controls hide for models without thinking (ACP agents,
-        // off-only registry entries) instead of offering dead options. An
-        // unset model inherits the parent, so the control stays visible.
-        let show_reasoning =
-            threadlane_ui_catalog::supports_reasoning(&reasoning_for_model, Some(&project));
-        let model_picker = Button::new("subagent-model-picker")
-            .label(model_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let menu = menu.check_side(gpui_component::Side::Right);
-                let model_entity_for_parent = model_entity.clone();
-                let project_for_parent = project_for_models.clone();
-                let parent_label = if selected_model.is_none() {
-                    "Same as parent · Current"
-                } else {
-                    "Same as parent"
-                };
-                available_for_subagent.iter().cloned().fold(
-                    menu.scrollable(true).item(
-                        PopupMenuItem::new(parent_label)
-                            .checked(selected_model.is_none())
-                            .on_click(move |_, _, cx| {
-                                let mut settings =
-                                    threadlane_project::subagent_settings::load(&project_for_parent);
-                                settings.model = None;
-                                if threadlane_project::subagent_settings::save(
-                                    &project_for_parent,
-                                    &settings,
-                                )
-                                .is_ok()
-                                {
-                                    model_entity_for_parent.update(cx, |state, cx| {
-                                        state.invalidate_capability_runtimes();
-                                        cx.notify();
-                                    });
-                                }
-                            }),
-                    ),
-                    |menu, option| {
-                        let model_entity = model_entity.clone();
-                        let project = project_for_models.clone();
-                        let is_current = selected_model.as_deref() == Some(option.id.as_str());
-                        let label = if is_current {
-                            format!("{} · Current", option.label)
-                        } else {
-                            option.label
-                        };
-                        menu.item(
-                            PopupMenuItem::new(label)
-                                .icon(Icon::default().path(option.provider.icon_path()))
-                                .checked(is_current)
-                                .on_click(move |_, _, cx| {
-                                    let mut settings =
-                                        threadlane_project::subagent_settings::load(&project);
-                                    settings.model = Some(option.id.clone());
-                                    if threadlane_project::subagent_settings::save(&project, &settings)
-                                        .is_ok()
-                                    {
-                                        model_entity.update(cx, |state, cx| {
-                                            state.invalidate_capability_runtimes();
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        )
-                    },
-                )
-            });
-        let reasoning_entity = self.model.clone();
-        let project_for_reasoning = project.clone();
-        let reasoning_for_model_cloned = reasoning_for_model.clone();
-        let reasoning_picker = Button::new("subagent-reasoning-picker")
-            .label(reasoning_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let entity = reasoning_entity.clone();
-                let project = project_for_reasoning.clone();
-                let mut options: Vec<Option<threadlane_protocol::ReasoningEffort>> = vec![None];
-                options.extend(
-                    threadlane_ui_catalog::efforts_for_model(
-                        &reasoning_for_model_cloned,
-                        Some(&project),
-                    )
-                    .into_iter()
-                    .map(Some),
-                );
-                options.into_iter().fold(menu, |menu, effort| {
-                    let entity = entity.clone();
-                    let project = project.clone();
-                    menu.item(
-                        PopupMenuItem::new(
-                            effort
-                                .map(|value| value.label())
-                                .unwrap_or("Same as parent"),
-                        )
-                        .checked(selected_reasoning == effort)
-                        .on_click(move |_, _, cx| {
-                            let mut settings = threadlane_project::subagent_settings::load(&project);
-                            settings.reasoning_effort = effort;
-                            if threadlane_project::subagent_settings::save(&project, &settings).is_ok()
-                            {
-                                entity.update(cx, |state, cx| {
-                                    state.invalidate_capability_runtimes();
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                    )
-                })
-            });
         let selected_fast_model = preferences.fast_model.clone();
         let fast_model_label = selected_fast_model
             .as_deref()
@@ -745,8 +614,9 @@ impl SettingsView {
                         PopupMenuItem::new(parent_label)
                             .checked(selected_fast_model.is_none())
                             .on_click(move |_, _, cx| {
-                                let mut settings =
-                                    threadlane_project::subagent_settings::load(&project_for_parent);
+                                let mut settings = threadlane_project::subagent_settings::load(
+                                    &project_for_parent,
+                                );
                                 settings.fast_model = None;
                                 if threadlane_project::subagent_settings::save(
                                     &project_for_parent,
@@ -778,8 +648,10 @@ impl SettingsView {
                                     let mut settings =
                                         threadlane_project::subagent_settings::load(&project);
                                     settings.fast_model = Some(option.id.clone());
-                                    if threadlane_project::subagent_settings::save(&project, &settings)
-                                        .is_ok()
+                                    if threadlane_project::subagent_settings::save(
+                                        &project, &settings,
+                                    )
+                                    .is_ok()
                                     {
                                         model_entity.update(cx, |state, cx| {
                                             state.invalidate_capability_runtimes();
@@ -829,9 +701,11 @@ impl SettingsView {
                         )
                         .checked(selected_fast_reasoning == effort)
                         .on_click(move |_, _, cx| {
-                            let mut settings = threadlane_project::subagent_settings::load(&project);
+                            let mut settings =
+                                threadlane_project::subagent_settings::load(&project);
                             settings.fast_reasoning_effort = effort;
-                            if threadlane_project::subagent_settings::save(&project, &settings).is_ok()
+                            if threadlane_project::subagent_settings::save(&project, &settings)
+                                .is_ok()
                             {
                                 entity.update(cx, |state, cx| {
                                     state.invalidate_capability_runtimes();
@@ -900,32 +774,20 @@ impl SettingsView {
             .flex_col()
             .gap_4()
             .child(row(
-                "Subagent model",
-                "Default model for every delegated child.",
-                model_picker.into_any_element(),
-            ))
-            .children(show_reasoning.then(|| {
-                row(
-                    "Subagent reasoning effort",
-                    "Default reasoning effort for every delegated child.",
-                    reasoning_picker.into_any_element(),
-                )
-            }))
-            .child(row(
-                "Sidekick model (Fusion)",
-                "Cheap model owning Fusion sidekick lanes and mechanical implementation.",
+                "Fusion model",
+                "Model used for delegated work in Fusion mode.",
                 fast_model_picker.into_any_element(),
             ))
             .children(show_fast_reasoning.then(|| {
                 row(
-                    "Sidekick reasoning effort",
-                    "Reasoning effort for the Fusion sidekick model.",
+                    "Fusion reasoning effort",
+                    "Reasoning effort for delegated work in Fusion mode.",
                     fast_reasoning_picker.into_any_element(),
                 )
             }))
             .child(row(
                 "Session mode",
-                "Normal runs every prompt on the selected model; Fusion routes frontier main + sidekick lanes with compaction switches. Also switchable from the composer Mode dropdown.",
+                "Agent runs on the selected model; Fusion delegates work to the configured Fusion model. Also switchable from the composer Mode dropdown.",
                 orchestrator_picker.into_any_element(),
             ))
             .into_any_element()
@@ -2248,7 +2110,11 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&input).mask_toggle().aria_label(label)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&input).mask_toggle().aria_label(label)),
+                    )
                     .child({
                         let input = input.clone();
                         let auth_tx = auth_tx.clone();
@@ -2458,8 +2324,10 @@ impl SettingsView {
                                             };
                                             let project = this.active_project(cx);
                                             this.capability_status = Some(
-                                                threadlane_wasi::settings::install_extension(project, &path, scope)
-                                                    .unwrap_or_else(|error| error),
+                                                threadlane_wasi::settings::install_extension(
+                                                    project, &path, scope,
+                                                )
+                                                .unwrap_or_else(|error| error),
                                             );
                                             this.refresh_extensions(cx);
                                             this.model.update(cx, |state, cx| {
@@ -2651,7 +2519,11 @@ impl SettingsView {
                                     return;
                                 };
                                 this.capability_status =
-                                    threadlane_skills::settings::disable_all_skills(&project, skill_ids.clone()).err();
+                                    threadlane_skills::settings::disable_all_skills(
+                                        &project,
+                                        skill_ids.clone(),
+                                    )
+                                    .err();
                                 this.refresh_skills(cx);
                                 this.model.update(cx, |state, cx| {
                                     state.invalidate_capability_runtimes();
@@ -2768,8 +2640,10 @@ impl SettingsView {
                                         return;
                                     };
                                     this.capability_status =
-                                        threadlane_skills::settings::set_skill_enabled(&project, &skill_id, checked)
-                                            .err();
+                                        threadlane_skills::settings::set_skill_enabled(
+                                            &project, &skill_id, checked,
+                                        )
+                                        .err();
                                     this.refresh_skills(cx);
                                     this.model.update(cx, |state, cx| {
                                         state.invalidate_capability_runtimes();
@@ -2960,13 +2834,14 @@ impl SettingsView {
                                                 AcpScope::Project
                                             };
                                             let project = this.active_project(cx);
-                                            this.capability_status = threadlane_acp_engine::add_acp_agent(
-                                                project.as_deref(),
-                                                scope,
-                                                &name,
-                                                &command,
-                                            )
-                                            .err();
+                                            this.capability_status =
+                                                threadlane_acp_engine::add_acp_agent(
+                                                    project.as_deref(),
+                                                    scope,
+                                                    &name,
+                                                    &command,
+                                                )
+                                                .err();
                                             this.refresh_acp(cx);
                                             cx.notify();
                                         });
@@ -3077,13 +2952,14 @@ impl SettingsView {
                                 let checked = *checked;
                                 let _ = toggle_view.update(cx, |this, cx| {
                                     let project = this.active_project(cx);
-                                    this.capability_status = threadlane_acp_engine::set_acp_enabled(
-                                        project.as_deref(),
-                                        scope,
-                                        &toggle_id,
-                                        checked,
-                                    )
-                                    .err();
+                                    this.capability_status =
+                                        threadlane_acp_engine::set_acp_enabled(
+                                            project.as_deref(),
+                                            scope,
+                                            &toggle_id,
+                                            checked,
+                                        )
+                                        .err();
                                     this.refresh_acp(cx);
                                     cx.notify();
                                 });
@@ -3100,12 +2976,13 @@ impl SettingsView {
                             .on_click(move |_event, _window, cx| {
                                 let _ = remove_view.update(cx, |this, cx| {
                                     let project = this.active_project(cx);
-                                    this.capability_status = threadlane_acp_engine::remove_acp_agent(
-                                        project.as_deref(),
-                                        scope,
-                                        &remove_id,
-                                    )
-                                    .err();
+                                    this.capability_status =
+                                        threadlane_acp_engine::remove_acp_agent(
+                                            project.as_deref(),
+                                            scope,
+                                            &remove_id,
+                                        )
+                                        .err();
                                     this.refresh_acp(cx);
                                     cx.notify();
                                 });
@@ -3145,8 +3022,8 @@ impl Render for SettingsView {
                 self.render_providers(cx),
             ),
             SettingsPage::Subagents => (
-                "Subagents & Session Mode",
-                "Choose project defaults for delegated child models, the Fusion sidekick, and the session mode.",
+                "Agent & Fusion",
+                "Choose the Fusion model, reasoning effort, and the session mode.",
                 self.render_subagents(cx),
             ),
             SettingsPage::Skills => (
@@ -3185,8 +3062,11 @@ impl Render for SettingsView {
                         div()
                             .w_full()
                             .max_w(rems(48.0))
-                            
-                            .child(div().h(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
+                            .child(
+                                div()
+                                    .h(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE)
+                                    .flex_none(),
+                            )
                             .child(
                                 div()
                                     .text_xl()

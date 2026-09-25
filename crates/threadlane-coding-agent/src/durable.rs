@@ -1,12 +1,12 @@
-use super::cancellation::{AgentRunTask, recover_v2_subagent_records};
+use super::cancellation::{recover_v2_subagent_records, AgentRunTask};
 use super::capabilities::dispatch_hook_requests;
 use super::harness::{
     CodingSessionHarness, InterruptedSubagentRecoveryState, SubagentLaneIdentity,
 };
 use super::runtime::CodingAgent;
 use super::subagents::{
-    NEXT_SUBAGENT_UI_RUN_ID, SubagentLaneStatus, SubagentRunContext, run_subagent_task,
-    subagent_workspace,
+    run_subagent_task, subagent_workspace, SubagentLaneStatus, SubagentRunContext,
+    NEXT_SUBAGENT_UI_RUN_ID,
 };
 use crate::commands::{execute_slash_command, parse_slash_command};
 use log::warn;
@@ -14,10 +14,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use threadlane_compaction::CompactionParams;
-use threadlane_context::{BudgetConfig, context_budget_for_project};
+use threadlane_context::{context_budget_for_project, BudgetConfig};
 use threadlane_protocol::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
 use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
@@ -263,6 +263,9 @@ impl CodingAgent {
                 let cmd_name = parts.next().unwrap_or("");
                 let cmd_args = parts.collect::<Vec<&str>>().join(" ");
                 if cmd_name == "subagent" {
+                    if !self.agent_config.orchestrator_mode.is_fusion() {
+                        return Err("Subagents are available in Fusion mode only.".into());
+                    }
                     let task_prompt = cmd_args.trim();
                     if task_prompt.is_empty() {
                         return Err("Usage: /subagent <task description>".into());
@@ -1013,9 +1016,7 @@ impl CodingAgent {
                 {
                     let lanes_note = failed_lanes
                         .iter()
-                        .map(|(lane, model, error)| {
-                            format!("`{lane}` ({model}): {error}")
-                        })
+                        .map(|(lane, model, error)| format!("`{lane}` ({model}): {error}"))
                         .collect::<Vec<_>>()
                         .join("; ");
                     let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
@@ -1301,7 +1302,7 @@ impl CodingAgent {
                 .map(|root| subagent_workspace(&root, &lane.run_id).0)
                 .filter(|worktree| worktree.is_dir())
                 .unwrap_or_else(|| self.work_dir.clone());
-            let child_model = self.agent_config.subagent_model.clone().unwrap_or(model);
+            let child_model = self.agent_config.model_roles.fast.clone().unwrap_or(model);
             // Resolve live: the parent may have switched providers since the
             // session (or the interrupted child) started. Falls back to the
             // session key when nothing is stored.
@@ -1331,7 +1332,7 @@ impl CodingAgent {
                     child_model,
                     child_reasoning_effort: self
                         .agent_config
-                        .subagent_reasoning_effort
+                        .fast_reasoning_effort
                         .unwrap_or_else(|| self.agent.reasoning_effort()),
                     parent_session_id: self.session_id.clone(),
                     work_dir: recovery_work_dir,

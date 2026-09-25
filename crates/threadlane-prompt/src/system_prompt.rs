@@ -166,7 +166,7 @@ pub fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
                 "SUBAGENT DELEGATION RULES: Use `subagent` judiciously and only when necessary.",
             );
             add_tool_guideline(
-                "Do NOT spawn subagents for simple requests, single-file edits, or direct questions—handle them directly.",
+                "Handle direct questions and tiny corrections yourself. Delegate substantive implementation and verification when Fusion routing calls for it.",
             );
             add_tool_guideline(
                 "Phase-Ordered Execution: Subagents MUST follow a sequential lifecycle (Research -> Implementation -> Review). NEVER spawn a `reviewer` or `tester` subagent concurrently with or before code changes exist.",
