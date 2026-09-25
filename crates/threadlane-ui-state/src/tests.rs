@@ -3926,6 +3926,46 @@ fn hydration_merge_subagents_by_identity() {
     );
 }
 
+#[test]
+fn fusion_trajectory_rows_name_router_events_and_lane_models() {
+    let mut state = AppState::load_from_registry(Vec::new());
+    state.active_work_dir = Some(std::env::temp_dir().join("threadlane-fusion-trajectory"));
+    state.active_session_id = Some("fusion-session".into());
+    state.record_trajectory(
+        "fusion-session",
+        &AgentEvent::SubagentStarted {
+            run_id: 3,
+            task_index: 0,
+            journal_run_id: "child-run".into(),
+            lane: "child-lane".into(),
+            agent: "worker".into(),
+            task: "implement".into(),
+            model: "flash-sidekick".into(),
+            isolation: None,
+        },
+    );
+    state.record_trajectory(
+        "fusion-session",
+        &AgentEvent::FusionUpdate {
+            model: "frontier-main".into(),
+            message: "Fusion escalated to main".into(),
+        },
+    );
+    let rows = &state.trajectory_by_session[&cached_key(&state, "fusion-session")];
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].category, "Subagent");
+    assert!(
+        rows[0].detail.contains("flash-sidekick"),
+        "started rows must name the lane model so sidekick lanes read distinctly"
+    );
+    assert!(
+        rows[0].detail.contains("child-run"),
+        "started rows must keep the run id for correlation"
+    );
+    assert_eq!(rows[1].category, "Router");
+    assert!(rows[1].summary.contains("frontier-main"));
+}
+
 fn computer_permission_request(id: &str) -> threadlane_protocol::PermissionRequest {
     threadlane_protocol::PermissionRequest {
         id: id.into(),
@@ -4104,4 +4144,40 @@ fn remove_session_refuses_dirty_worktree_but_allows_clean() {
         std::fs::read_to_string(&archived).unwrap(),
         "{\"id\":\"y\"}\n"
     );
+}
+
+#[test]
+fn active_session_loading_requires_matching_message_hydration() {
+    let mut state = AppState::load_from_registry(Vec::new());
+    let work_dir = PathBuf::from("/tmp/threadlane-loading-state");
+    let session_file = work_dir.join(".threadlane/sessions/session-1.jsonl");
+    state.active_work_dir = Some(work_dir);
+    state.active_session_id = Some("session-1".into());
+    state.is_new_task = false;
+
+    assert!(!state.active_session_is_loading());
+    state.pending_hydrations.push(SessionHydrationRequest {
+        session_id: "session-1".into(),
+        session_file: session_file.clone(),
+        reload_messages: true,
+        runtime_options: None,
+    });
+    assert!(state.active_session_is_loading());
+
+    state.pending_hydrations[0].reload_messages = false;
+    assert!(!state.active_session_is_loading());
+    state.pending_hydrations[0].reload_messages = true;
+    state.pending_hydrations[0].session_id = "session-2".into();
+    assert!(!state.active_session_is_loading());
+    state.pending_hydrations[0].session_id = "session-1".into();
+    state.pending_hydrations.push(state.pending_hydrations[0].clone());
+
+    state.take_pending_hydrations();
+    assert!(state.pending_hydrations.is_empty());
+    assert!(state.active_session_is_loading());
+
+    state.finish_session_hydration("session-1", &session_file);
+    assert!(state.active_session_is_loading());
+    state.finish_session_hydration("session-1", &session_file);
+    assert!(!state.active_session_is_loading());
 }

@@ -36,8 +36,8 @@ fn builtin_commands() -> Vec<SlashCommandInfo> {
     [
         ("model", "Switch model, or show the current one"),
         (
-            "prewalk",
-            "Plan with frontier model, land first edit, auto-handoff to fast model (/prewalk <objective>)",
+            "fusion",
+            "Route with frontier main + sidekick lanes, switching at compaction (/fusion <objective>)",
         ),
         ("compact", "Compact the conversation context"),
         ("session", "Show session info"),
@@ -85,7 +85,7 @@ pub fn available_slash_commands(project_root: Option<&Path>) -> Vec<SlashCommand
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
     SwitchModel(String),
-    Prewalk(String),
+    Fusion(String),
     Compact,
     ShowSession,
     SetName(String),
@@ -108,7 +108,7 @@ pub(crate) fn parse_slash_command(input: &str) -> Option<CommandAction> {
 
     match cmd {
         "model" => Some(CommandAction::SwitchModel(arg)),
-        "prewalk" => Some(CommandAction::Prewalk(arg)),
+        "fusion" => Some(CommandAction::Fusion(arg)),
         "compact" => Some(CommandAction::Compact),
         "session" => Some(CommandAction::ShowSession),
         "name" => Some(CommandAction::SetName(arg)),
@@ -141,11 +141,11 @@ pub(crate) async fn execute_slash_command(
                 format!("Switched model to: {}", new_model)
             }
         }
-        CommandAction::Prewalk(objective) => {
+        CommandAction::Fusion(objective) => {
             if objective.trim().is_empty() {
-                "Usage: /prewalk <task objective> to plan, land the first edit behind an update_plan todo gate, and auto-handoff to the fast model.".to_string()
+                "Usage: /fusion <task objective> to route with frontier main + sidekick lanes, switching at compaction.".to_string()
             } else {
-                format!("Prewalk initiated for: {}", objective.trim())
+                format!("Fusion initiated for: {}", objective.trim())
             }
         }
         CommandAction::Compact => {

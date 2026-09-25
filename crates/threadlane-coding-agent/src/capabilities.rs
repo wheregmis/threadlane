@@ -36,9 +36,9 @@ const MANAGE_SUBAGENT_BRANCH_TOOL_NAME: &str = "manage_subagent_branch";
 const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
 // HUB_TOOL_NAME / MESSAGE_PEER_TOOL_NAME live in `super::mailbox` (single
 // channel shared by parent `hub` and child `message_peer`).
-// NOTE: oh-my-pi parity removed the explicit `complete_prewalk` handoff tool.
-// The handoff is automatic at the first qualifying edit/write behind an
-// opened `update_plan` todo gate (see `threadlane_orchestrator`).
+// NOTE: there is no orchestrator handoff tool. Fusion delegation flows
+// through the `subagent` tool with the sidekick model forced by the session
+// runner (see `threadlane_orchestrator::fusion`).
 
 // ── Capability implementations ─────────────────────────────────────────
 // Each wraps a subsystem and implements [`threadlane_runtime::Capability`]

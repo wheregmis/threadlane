@@ -1860,7 +1860,7 @@ impl GitHubView {
         div()
             .flex_none()
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.title_bar_border)
             .bg(theme.title_bar)
             // Same top clearance as the sidebar/right-panel/settings
             // headers so toolbar text sits on the shared line under the
@@ -2078,6 +2078,11 @@ impl GitHubView {
                         let create_model = self.model.clone();
                         Button::new("github-new-issue")
                             .label("New issue")
+                            .accessibility_label(if single {
+                                "Create an issue in this project"
+                            } else {
+                                "Scope to one project to create an issue"
+                            })
                             .ghost()
                             .small()
                             .disabled(!single)
@@ -2506,6 +2511,7 @@ impl GitHubView {
                 Button::new("github-list-warning-copy")
                     .debug_selector(|| "github-list-warning-copy".into())
                     .label("Copy")
+                    .accessibility_label("Copy the complete GitHub error")
                     .tooltip("Copy the complete GitHub error")
                     .ghost()
                     .xsmall()
@@ -2557,6 +2563,7 @@ impl GitHubView {
                         Button::new(format!("github-{id}-error-copy"))
                             .debug_selector(move || format!("github-{id}-error-copy"))
                             .label("Copy details")
+                            .accessibility_label("Copy the complete GitHub error")
                             .tooltip("Copy the complete GitHub error")
                             .ghost()
                             .small()
@@ -3866,6 +3873,11 @@ impl GitHubView {
                             .child(
                                 Button::new("github-issue-close-reopen")
                                     .label(if is_closed { "Reopen" } else { "Close" })
+                                    .accessibility_label(if is_closed {
+                                        "Reopen this issue"
+                                    } else {
+                                        "Close this issue"
+                                    })
                                     .ghost()
                                     .small()
                                     .disabled(pending)
@@ -3881,6 +3893,7 @@ impl GitHubView {
                             .child(
                                 Button::new("github-issue-suggest-labels")
                                     .label("Suggest labels")
+                                    .accessibility_label("Ask the model to pick repository labels (no session)")
                                     .ghost()
                                     .small()
                                     .disabled(pending)
@@ -3892,6 +3905,7 @@ impl GitHubView {
                             .child(
                                 Button::new("github-issue-delete")
                                     .label("Delete")
+                                    .accessibility_label("Permanently delete this issue")
                                     .ghost()
                                     .small()
                                     .disabled(pending)

@@ -232,6 +232,7 @@ impl WorkspaceView {
                     .spawn(async move { compute_session_messages(&history_file) })
                     .await;
                 let _ = model.update(cx, |state, cx| {
+                    state.finish_session_hydration(&request.session_id, &request.session_file);
                     if !state.active_session_matches(&request.session_id, &request.session_file) {
                         return;
                     }
@@ -385,9 +386,8 @@ impl WorkspaceView {
                     while model_wake_rx.try_recv().is_ok() {}
                     let hydration_requests = this
                         .update(cx, |this, cx| {
-                            this.model.update(cx, |state, _cx| {
-                                std::mem::take(&mut state.pending_hydrations)
-                            })
+                            this.model
+                                .update(cx, |state, _cx| state.take_pending_hydrations())
                         })
                         .unwrap_or_default();
                     for request in hydration_requests {
@@ -458,7 +458,7 @@ impl WorkspaceView {
                 sidebar_resizable_state,
                 right_panel_resizable_state,
                 bottom_panel_resizable_state,
-                preferred_panel_sizes: [15.0, 26.0, 14.0],
+                preferred_panel_sizes: [13.5, 22.0, 14.0],
                 panel_layout: None,
                 git_event_tx,
                 updater_tx,
@@ -467,9 +467,9 @@ impl WorkspaceView {
             }
         });
         view.update(cx, |view, cx| {
-            let hydration_requests = view.model.update(cx, |state, _cx| {
-                std::mem::take(&mut state.pending_hydrations)
-            });
+            let hydration_requests = view
+                .model
+                .update(cx, |state, _cx| state.take_pending_hydrations());
             if !hydration_requests.is_empty() {
                 let model = view.model.clone();
                 cx.spawn(async move |_view, cx| {
@@ -1445,7 +1445,7 @@ impl WorkspaceView {
             .id("command-palette-backdrop")
             .absolute()
             .inset_0()
-            .bg(theme.background.opacity(0.5))
+            .bg(threadlane_ui_theme::overlay_scrim())
             .flex()
             .items_start()
             .justify_center()
@@ -1899,7 +1899,7 @@ impl Render for WorkspaceView {
         let rem = window.rem_size();
         let viewport = window.viewport_size();
         let sidebar_width = self.sidebar_resizable_state.read(cx).sizes().first()
-            .copied().unwrap_or(rem * 15.0).clamp(rem * 13.0, rem * 20.0);
+            .copied().unwrap_or(rem * 13.5).clamp(rem * 12.0, rem * 18.0);
         let required_content = if self.right_panel_visible { rem * 48.0 } else { rem * 28.0 };
         let show_sidebar = !self.sidebar_collapsed && viewport.width >= sidebar_width + required_content;
         let review_focus = self.right_panel_visible && viewport.width < rem * 48.0;
@@ -1963,11 +1963,11 @@ impl Render for WorkspaceView {
                             this.preferred_panel_sizes[1] = *size / window.rem_size();
                         }
                     }))
-                    .child(resizable_panel().size_range(rem * 28.0..Pixels::MAX).child(self.chat_list.clone()))
+                    .child(resizable_panel().size_range(rem * 24.0..Pixels::MAX).child(self.chat_list.clone()))
                     .child(
                         resizable_panel()
-                            .size(rem * 26.0)
-                            .size_range(rem * 20.0..viewport.width * 0.5)
+                            .size(rem * 22.0)
+                            .size_range(rem * 18.0..viewport.width * 0.42)
                             .child(self.right_panel.clone()),
                     )
                     .into_any_element()
@@ -2217,9 +2217,9 @@ impl Render for WorkspaceView {
                             .px_2()
                             .gap_2()
                             .overflow_x_scrollbar()
-                            .bg(theme.tab_bar)
+                            .bg(theme.title_bar)
                             .border_b_1()
-                            .border_color(theme.border)
+                            .border_color(theme.title_bar_border)
                             .child(project_badge)
                             .child(div().w(px(1.0)).h_4().bg(theme.border))
                             .children(tab_buttons)
@@ -2265,8 +2265,8 @@ impl Render for WorkspaceView {
                 }))
                 .child(
                     resizable_panel()
-                        .size(rem * 15.0)
-                        .size_range(rem * 13.0..rem * 20.0)
+                        .size(rem * 13.5)
+                        .size_range(rem * 12.0..rem * 18.0)
                         .child(self.sidebar.clone()),
                 )
                 .child(resizable_panel().child(central_content))
@@ -2325,7 +2325,7 @@ impl Render for WorkspaceView {
             .child(view_with_status_bar)
             .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("command-palette-btn")
-                        .accessibility_label("Command palette")
+                    .accessibility_label("Command palette (Cmd+K)")
                     .icon(IconName::SquareTerminal)
                     .tooltip("Command palette (Cmd+K)")
                     .ghost()

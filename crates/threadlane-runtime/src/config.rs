@@ -72,12 +72,13 @@ pub struct AgentConfig {
     #[serde(default)]
     pub subagent_reasoning_effort: Option<ReasoningEffort>,
 
-    /// Project-selected reasoning effort for fast model execution (/prewalk). `None`
+    /// Project-selected reasoning effort for sidekick (Fusion) execution. `None`
     /// inherits the active parent turn's reasoning effort.
     #[serde(default)]
     pub fast_reasoning_effort: Option<ReasoningEffort>,
 
-    /// Orchestrator mode governing automatic /prewalk engagement.
+    /// Orchestrator mode: `Normal` direct execution or `Fusion` main +
+    /// sidekick routing.
     #[serde(default)]
     pub orchestrator_mode: OrchestratorMode,
 

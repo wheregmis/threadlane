@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Sender};
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_acp::AcpConfigOption;
 use threadlane_protocol::{
-    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
+    AgentEvent, AgentMessage, ImageAttachment, OrchestratorMode, ReasoningEffort, SessionPlan,
     SubagentProgressUpdate, TokenUsage,
 };
 use threadlane_runtime::harness::{EventPayload, HarnessEvent, JsonlStore, SessionStore};
@@ -73,6 +73,7 @@ pub struct AppState {
     pub pending_permissions: HashMap<String, threadlane_protocol::PermissionRequest>,
     pub pending_questions: HashMap<String, threadlane_protocol::QuestionRequest>,
     pub pending_hydrations: Vec<SessionHydrationRequest>,
+    in_flight_hydrations: HashMap<SessionProjectionKey, usize>,
     pub git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
     pub git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
     pub auto_address_pr_reviews_enabled: bool,
@@ -82,6 +83,10 @@ pub struct AppState {
     pub selected_model: String,
     model_roles: threadlane_runtime::ModelRoles,
     pub reasoning_effort: ReasoningEffort,
+    /// Session orchestration mode shown in the composer Mode dropdown.
+    /// Persisted per project in `.threadlane/subagents.json`; the live
+    /// session runtime reads it when it is (re)built.
+    pub orchestrator_mode: OrchestratorMode,
     pub workspace_page: WorkspacePage,
     pub openai_key: String,
     pub opencode_key: String,
@@ -270,6 +275,12 @@ impl AppState {
         let available_models =
             threadlane_ui_catalog::available_models_for_project(active_work_dir.as_deref());
 
+        let orchestrator_mode = active_work_dir
+            .as_deref()
+            .map(threadlane_project::subagent_settings::load)
+            .map(|settings| settings.orchestrator_mode)
+            .unwrap_or_default();
+
         let mut state = Self {
             projects: project_infos,
             active_work_dir,
@@ -303,6 +314,7 @@ impl AppState {
             selected_model,
             model_roles,
             reasoning_effort: ReasoningEffort::default(),
+            orchestrator_mode,
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
@@ -328,6 +340,7 @@ impl AppState {
             pending_permissions: HashMap::new(),
             pending_questions: HashMap::new(),
             pending_hydrations: Vec::new(),
+            in_flight_hydrations: HashMap::new(),
             git_statuses: HashMap::new(),
             git_prs: HashMap::new(),
             auto_address_pr_reviews_enabled: threadlane_git::load_auto_address_pr_reviews_enabled(),
@@ -587,6 +600,51 @@ impl AppState {
         self.active_session_runtime();
     }
 
+    /// Switch the session orchestration mode shown in the composer Mode
+    /// dropdown. Persists per project in `.threadlane/subagents.json` and
+    /// rebuilds the live session runtime so the next turn routes through the
+    /// new mode; mirrors `set_selected_model`.
+    pub fn set_orchestrator_mode(&mut self, mode: OrchestratorMode) {
+        let Some(work_dir) = self.active_work_dir.clone() else {
+            return;
+        };
+        if self.orchestrator_mode == mode {
+            return;
+        }
+        let mut settings = threadlane_project::subagent_settings::load(&work_dir);
+        settings.orchestrator_mode = mode;
+        if let Err(error) = threadlane_project::subagent_settings::save(&work_dir, &settings) {
+            self.session_status = Some(format!("Could not switch mode: {error}"));
+            return;
+        }
+        self.orchestrator_mode = mode;
+        // Rebuild only a live runtime; a missing one is constructed on
+        // demand from the saved settings by hydration or the next prompt.
+        let Some(session_id) = self.active_session_id.clone() else {
+            return;
+        };
+        let session_file = self.session_file(&work_dir, &session_id);
+        let Some(runtime) = self.session_runtimes.get(&session_file).cloned() else {
+            return;
+        };
+        if runtime.is_generating() {
+            self.session_status = Some("Mode changed; it will apply to the next turn".into());
+            return;
+        }
+        self.drop_session_runtime(&session_file);
+        self.active_session_runtime();
+    }
+
+    /// Re-read the orchestration mode from the active project's stored
+    /// settings. Called after session or project switches so the composer
+    /// dropdown never shows a stale project's mode.
+    fn refresh_orchestrator_mode(&mut self) {
+        if let Some(work_dir) = self.active_work_dir.as_deref() {
+            self.orchestrator_mode =
+                threadlane_project::subagent_settings::load(work_dir).orchestrator_mode;
+        }
+    }
+
     pub(crate) fn open_settings(&mut self) {
         self.workspace_page = WorkspacePage::Settings;
         self.auth_status_msg = None;
@@ -674,6 +732,7 @@ impl AppState {
                 .first()
                 .map(|project| project.work_dir.clone());
         }
+        self.refresh_orchestrator_mode();
     }
 
     pub fn set_work_mode(&mut self, mode: WorkMode) {
@@ -710,6 +769,7 @@ impl AppState {
             self.session_status = None;
             self.persist_project_selection(&work_dir, None);
             self.refresh_available_models();
+            self.refresh_orchestrator_mode();
             self.request_session_refresh(&work_dir);
         }
     }
@@ -795,6 +855,7 @@ impl AppState {
         self.active_work_dir = Some(work_dir.clone());
         self.active_session_id = Some(session_id.clone());
         self.is_new_task = false;
+        self.refresh_orchestrator_mode();
         let project_work_dir = self
             .projects
             .iter()
@@ -1208,6 +1269,36 @@ impl AppState {
             .is_some_and(|active| active == Self::projection_key(session_id, session_file))
     }
 
+    pub fn active_session_is_loading(&self) -> bool {
+        self.pending_hydrations.iter().any(|pending| {
+            pending.reload_messages
+                && self.active_session_matches(&pending.session_id, &pending.session_file)
+        }) || self
+            .active_session_projection_key()
+            .is_some_and(|key| self.in_flight_hydrations.contains_key(&key))
+    }
+
+    pub fn take_pending_hydrations(&mut self) -> Vec<SessionHydrationRequest> {
+        let requests = std::mem::take(&mut self.pending_hydrations);
+        for request in requests.iter().filter(|request| request.reload_messages) {
+            *self
+                .in_flight_hydrations
+                .entry(Self::projection_key(&request.session_id, &request.session_file))
+                .or_default() += 1;
+        }
+        requests
+    }
+
+    pub fn finish_session_hydration(&mut self, session_id: &str, session_file: &Path) {
+        let key = Self::projection_key(session_id, session_file);
+        if let Some(count) = self.in_flight_hydrations.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                self.in_flight_hydrations.remove(&key);
+            }
+        }
+    }
+
     fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
         let session_file = self.session_file(work_dir, session_id);
         self.drop_session_runtime(&session_file);
@@ -1567,6 +1658,7 @@ impl AppState {
             self.is_generating = false;
             self.session_status = None;
             self.refresh_available_models();
+            self.refresh_orchestrator_mode();
         }
         Ok(())
     }
@@ -3246,11 +3338,14 @@ impl AppState {
             AgentEvent::SubagentStarted {
                 journal_run_id,
                 task_index,
+                model,
                 ..
             } => Some((
                 "Subagent",
                 format!("Subagent {task_index} started"),
-                journal_run_id.clone(),
+                // The model names the lane's driver at a glance: frontier
+                // main-model lanes vs. cheap Fusion sidekick lanes.
+                format!("{model} · {journal_run_id}"),
                 Some(journal_run_id.clone()),
             )),
             AgentEvent::SubagentFinished {
@@ -3289,6 +3384,12 @@ impl AppState {
                 "Rule",
                 format!("{rule_name} triggered"),
                 reminder.clone(),
+                None,
+            )),
+            AgentEvent::FusionUpdate { model, message } => Some((
+                "Router",
+                format!("Fusion → {model}"),
+                message.clone(),
                 None,
             )),
             _ => None,
@@ -4069,7 +4170,8 @@ impl AppState {
                             .get(&session_file)
                             .is_some_and(|runtime| {
                                 !runtime.is_generating()
-                                    && runtime.selected_model != self.selected_model
+                                    && (runtime.selected_model != self.selected_model
+                                        || runtime.orchestrator_mode != self.orchestrator_mode)
                             });
                     if runtime_is_stale {
                         self.drop_session_runtime(&session_file);

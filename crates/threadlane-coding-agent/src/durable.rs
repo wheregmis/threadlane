@@ -32,30 +32,6 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-#[cfg(test)]
-mod prewalk_tests {
-    use threadlane_orchestrator::{
-        is_prewalk_implementation_action, is_prewalk_todo_gate_opener, prewalk_would_be_noop,
-    };
-
-    #[test]
-    fn handoff_is_automatic_todo_gated_not_tool_triggered() {
-        // Implementation actions alone do not complete prewalk; the todo
-        // gate must open first and the handoff is automatic.
-        assert!(is_prewalk_implementation_action("write_file", false));
-        assert!(is_prewalk_implementation_action(
-            "edit_file_hashline",
-            false
-        ));
-        assert!(!is_prewalk_implementation_action("read_file", false));
-        assert!(!is_prewalk_implementation_action("run_command", false));
-        assert!(!is_prewalk_implementation_action("update_plan", false));
-        assert!(is_prewalk_todo_gate_opener("update_plan", false));
-        assert!(!is_prewalk_todo_gate_opener("update_plan", true));
-        assert!(!prewalk_would_be_noop("a", None, "b", None));
-    }
-}
-
 pub(crate) fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
     let sha256 = threadlane_runtime::harness::TraceString::new(sha256_hex(content.as_bytes()))
         .expect("sha256 digest is bounded");
@@ -138,21 +114,6 @@ pub(crate) fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMe
 
 impl CodingAgent {
     fn install_run_trace_recorders(&mut self, path: PathBuf, run_id: String) -> Result<(), String> {
-        // Refresh the armed prewalk's todo gate from the live toolset at every
-        // run boundary: the snapshot taken at arming goes stale when the
-        // schema changes underneath it (e.g. a `/model` switch), and a stale
-        // `requires_todo=true` would deadlock the handoff waiting for an
-        // `update_plan` tool that no longer exists.
-        let live_requires_todo = self
-            .agent
-            .configured_tool_definitions()
-            .iter()
-            .any(|tool| tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL);
-        if let Ok(mut guard) = self.prewalk.lock() {
-            if let Some(state) = guard.as_mut() {
-                state.refresh_requires_todo(live_requires_todo);
-            }
-        }
         let trace_harness = Arc::new(tokio::sync::Mutex::new(CodingSessionHarness::open(&path)?));
         let provider_harness = trace_harness.clone();
         let provider_run_id = run_id.clone();
@@ -252,129 +213,11 @@ impl CodingAgent {
         }));
         let completion_harness = trace_harness.clone();
         let completion_run_id = run_id.clone();
-        let prewalk_arc = self.prewalk.clone();
-        let event_tx = self.agent.event_tx.clone();
-        let turn_arc = self.agent.turn.clone();
-        // Shared provider cell: rotating the credential here (rather than
-        // replacing the client) keeps the in-flight turn loop, background
-        // workers, and title requests on the new key immediately.
-        let handoff_provider = self.agent.provider_client_arc();
         self.agent.tool_dispatcher.tool_completion_recorder = Some(Arc::new(move |result| {
             let harness = completion_harness.clone();
-            let provider = handoff_provider.clone();
             let run_id = completion_run_id.clone();
             let result = result.clone();
-            let prewalk = prewalk_arc.clone();
-            let event_tx = event_tx.clone();
-            let turn_arc = turn_arc.clone();
-            Box::pin(async move {
-                // oh-my-pi parity: todo-gated automatic handoff. A successful
-                // `update_plan` (even view) opens the gate; the first
-                // workspace-mutating edit/write behind an open gate switches
-                // one-shot to the fast model. No explicit handoff tool.
-                let handoff = {
-                    let mut guard = prewalk.lock().unwrap_or_else(|error| error.into_inner());
-                    match guard.as_mut() {
-                        None => None,
-                        Some(state)
-                            if threadlane_orchestrator::is_prewalk_todo_gate_opener(
-                                &result.name,
-                                result.is_error,
-                            ) =>
-                        {
-                            state.todo_seen = true;
-                            // Any successful todo call (including view) counts,
-                            // but never triggers the handoff by itself.
-                            None
-                        }
-                        Some(state)
-                            if state.todo_gate_open()
-                                && threadlane_orchestrator::is_prewalk_implementation_action(
-                                    &result.name,
-                                    result.is_error,
-                                ) =>
-                        {
-                            let state = guard.take().expect("prewalk checked above");
-                            // Noop guard at handoff time: the active model may
-                            // have changed since arming (e.g. /model switch).
-                            let (active_model, active_effort) = {
-                                // Best-effort synchronous read; if locked, skip
-                                // noop check and proceed with the handoff.
-                                match turn_arc.try_lock() {
-                                    Ok(turn) => (turn.model.clone(), Some(turn.reasoning_effort)),
-                                    Err(_) => (String::new(), None),
-                                }
-                            };
-                            if !active_model.is_empty()
-                                && threadlane_orchestrator::prewalk_would_be_noop(
-                                    &active_model,
-                                    active_effort,
-                                    &state.target_model,
-                                    state.target_reasoning,
-                                )
-                            {
-                                let _ = event_tx.send(threadlane_protocol::AgentEvent::PrewalkCompleted {
-                                    model: state.target_model.clone(),
-                                    message: format!(
-                                        "Prewalk: target `{}` already matches the active model and reasoning; nothing to switch.",
-                                        state.target_model
-                                    ),
-                                });
-                                None
-                            } else {
-                                Some(state)
-                            }
-                        }
-                        Some(_) => None,
-                    }
-                };
-                if let Some(state) = handoff {
-                    let handoff_ms = state.started_at.elapsed().as_millis();
-                    let target_model = state.target_model;
-                    let target_effort = state.target_reasoning;
-                    let action_name = result.name.clone();
-                    {
-                        let mut turn = turn_arc.lock().await;
-                        turn.model = target_model.clone();
-                        if let Some(effort) = target_effort {
-                            turn.reasoning_effort = effort;
-                        }
-                        // Scrub the hidden plan nudge, then inject the
-                        // post-handoff verification checklist.
-                        if let Some(pos) = turn
-                            .system_prompt
-                            .find(threadlane_orchestrator::ARCHITECT_PROTOCOL_HEADER)
-                        {
-                            turn.system_prompt.truncate(pos);
-                            turn.system_prompt = turn.system_prompt.trim_end().to_string();
-                        }
-                        if !turn
-                            .system_prompt
-                            .contains(threadlane_orchestrator::PREWALK_CHECKLIST_HEADER)
-                        {
-                            turn.system_prompt
-                                .push_str(&threadlane_orchestrator::build_checklist_directive());
-                        }
-                    }
-                    // The handoff crosses providers mid-turn: re-resolve the
-                    // signing credential for the fast model now, or its first
-                    // request fails with the frontier provider's key (401).
-                    crate::credentials::refresh_provider_for_model(&provider, &target_model);
-                    let effort_info = target_effort
-                        .map(|e| format!(" with reasoning effort `{}`", e.label()))
-                        .unwrap_or_default();
-                    let _ = event_tx.send(threadlane_protocol::AgentEvent::PrewalkCompleted {
-                        model: target_model.clone(),
-                        message: format!(
-                            "Prewalk complete: first `{action_name}` landed behind an opened todo gate. Switched model to `{target_model}`{effort_info}."
-                        ),
-                    });
-                    log::info!(
-                        "orchestrator handoff_ms={handoff_ms} handoff_model={target_model} action={action_name} success=true"
-                    );
-                }
-                harness.lock().await.record_tool_result(&run_id, &result)
-            })
+            Box::pin(async move { harness.lock().await.record_tool_result(&run_id, &result) })
         }));
         let permission_harness = trace_harness;
         self.permission_handle
@@ -899,6 +742,10 @@ impl CodingAgent {
         let sync = self.sync_turn_from_model_context().await;
         persisted?;
         sync?;
+        // Fusion dynamic routing rides the compaction cache miss: evaluate the
+        // router now that history is compacted, switching the main-lane model
+        // for free when the policy says so.
+        self.apply_fusion_compaction_routing().await;
         Ok(true)
     }
 
@@ -1043,6 +890,11 @@ impl CodingAgent {
                     self.harness_journal_error = Some(error);
                     return;
                 }
+                // Fusion dynamic routing rides every compaction boundary,
+                // manual or automatic: sessions that never run `/compact`
+                // still switch the main-lane model where a cache miss
+                // happens anyway.
+                self.apply_fusion_compaction_routing().await;
                 if let Some(last_assistant) = state_messages
                     .iter()
                     .rev()
@@ -1126,6 +978,52 @@ impl CodingAgent {
                         .extend_from_slice(&lanes[index..]);
                     self.interrupted_subagent_recovery = InterruptedSubagentRecoveryState::Pending;
                     return Err(error);
+                }
+            }
+        }
+        // Fusion bookkeeping: sidekick lane outcomes feed the router's error
+        // streak, which must survive until the compaction router consumes it:
+        // clearing it here would make `escalation_needed()` unreachable and
+        // the upgrade-to-main branch dead. Successes reset the streak so
+        // clean mechanical stretches can downgrade at the next compaction
+        // boundary. A newly crossed threshold surfaces one `FusionUpdate`
+        // event so the trajectory shows when and why the main agent took
+        // over; the streak itself is cleared only when the compaction router
+        // actually switches the main lane back (`record_escalation` there).
+        let mut failed_lanes: Vec<(String, String, String)> = Vec::new();
+        if let Ok(mut guard) = self.fusion.lock() {
+            if let Some(state) = guard.as_mut() {
+                let pre_streak = state.consecutive_sidekick_errors;
+                for lane in &lanes {
+                    let failed = matches!(lane.status, SubagentLaneStatus::Failed);
+                    state.record_sidekick_result(failed);
+                    if failed {
+                        failed_lanes.push((
+                            lane.lane_name.clone(),
+                            lane.model.clone(),
+                            lane.error
+                                .clone()
+                                .unwrap_or_else(|| "lane failed".to_string()),
+                        ));
+                    }
+                }
+                if !failed_lanes.is_empty()
+                    && pre_streak < threadlane_orchestrator::FUSION_ESCALATION_THRESHOLD
+                    && state.escalation_needed()
+                {
+                    let lanes_note = failed_lanes
+                        .iter()
+                        .map(|(lane, model, error)| {
+                            format!("`{lane}` ({model}): {error}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
+                        model: state.main_model.clone(),
+                        message: format!(
+                            "Fusion escalated to main: sidekick lane(s) failed — {lanes_note}. Main owns the remainder."
+                        ),
+                    });
                 }
             }
         }

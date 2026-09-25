@@ -8824,6 +8824,7 @@ dependencies = [
  "threadlane-ui-sidebar",
  "threadlane-ui-state",
  "threadlane-ui-terminal",
+ "threadlane-ui-theme",
  "threadlane-updater",
  "tokio",
 ]

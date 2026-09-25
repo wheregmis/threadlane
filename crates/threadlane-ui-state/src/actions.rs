@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use threadlane_git::GitHubIssueRef;
-use threadlane_protocol::{ImageAttachment, ReasoningEffort};
+use threadlane_protocol::{ImageAttachment, OrchestratorMode, ReasoningEffort};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppAction {
@@ -46,6 +46,7 @@ pub enum AppAction {
     CancelGeneration,
     SelectModel(String),
     SelectReasoningEffort(ReasoningEffort),
+    SelectOrchestratorMode(OrchestratorMode),
     /// Applies one setting an external ACP agent exposes.
     ///
     /// Carries the agent's own option id rather than a Threadlane concept:
