@@ -33,7 +33,7 @@ Threadlane brings project workspaces, persistent conversation sessions, coding-a
 
 ### Prerequisites
 
-- Rust 1.95.0 or later. The repository pins this version in [`rust-toolchain.toml`](rust-toolchain.toml).
+- Rust 1.95.0 or later. The repository pins this version in [`rust-toolchain.toml`](rust-toolchain.toml); CI and release packaging use the same pin.
 - The WASI target: `rustup target add wasm32-wasip1`.
 - A native C toolchain, such as Xcode Command Line Tools on macOS or `build-essential` on Ubuntu.
 

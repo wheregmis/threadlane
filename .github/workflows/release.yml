@@ -51,6 +51,8 @@ jobs:
 #        with:
 #          ref: ${{ env.RELEASE_TAG }}
 #
+#      - uses: dtolnay/rust-toolchain@1.95.0
+#
 #      - name: Verify release tag
 #        shell: bash
 #        run: |
@@ -60,7 +62,6 @@ jobs:
 #            exit 1
 #          fi
 #
-#      - uses: dtolnay/rust-toolchain@1.120.0
 #      - uses: Swatinem/rust-cache@v2
 #        with:
 #          key: gpui-release-${{ matrix.arch }}
@@ -99,6 +100,8 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
+      - uses: dtolnay/rust-toolchain@1.95.0
+
       - name: Verify release tag
         shell: bash
         run: |
@@ -108,7 +111,6 @@ jobs:
             exit 1
           fi
 
-      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: gpui-release-aarch64
