@@ -5171,15 +5171,41 @@ impl RightPanelView {
                     .child(description.to_string()),
             )
             .child(
-                Button::new("right-panel-use-local")
-                    .label("Use project folder")
-                    .small()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.model.update(cx, |state, cx| {
-                            state.set_work_mode(threadlane_ui_state::WorkMode::Local);
-                            cx.notify();
-                        });
-                    })),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("right-panel-recreate-worktree")
+                            .label("Recreate worktree")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.model.update(cx, |state, cx| {
+                                    threadlane_ui_state::controller::dispatch(
+                                        state,
+                                        threadlane_ui_state::actions::AppAction::RecreateActiveWorktree,
+                                    );
+                                    cx.notify();
+                                });
+                            })),
+                    )
+                    .child(
+                        Button::new("right-panel-use-local")
+                            .label("Use project folder")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.model.update(cx, |state, cx| {
+                                    if let Some(work_dir) = state.active_work_dir.clone() {
+                                        threadlane_ui_state::controller::dispatch(
+                                            state,
+                                            threadlane_ui_state::actions::AppAction::SelectDraftProject(work_dir),
+                                        );
+                                    }
+                                    cx.notify();
+                                });
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -5202,7 +5228,9 @@ impl Render for RightPanelView {
         }
         self.sync_pending_document(window, cx);
         let theme = cx.theme().colors;
-        let body = if self.worktree_unavailable {
+        let unavailable_non_browser =
+            self.worktree_unavailable && self.active_surface != Some(Surface::Browser);
+        let body = if unavailable_non_browser {
             self.render_empty(
                 "Worktree unavailable",
                 "This worktree is not checked out",

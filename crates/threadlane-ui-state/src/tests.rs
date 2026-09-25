@@ -188,15 +188,64 @@ fn active_git_work_dir_uses_the_active_session_checkout_when_available() {
     state.active_session_id = Some("session".into());
 
     assert_eq!(state.active_git_work_dir(), Some(worktree.clone()));
+    assert!(!state.active_worktree_unavailable());
 
     state.projects[0].sessions[0].worktree_available = false;
 
     assert_eq!(state.active_git_work_dir(), None);
+    assert!(state.active_worktree_unavailable());
 
     state.projects[0].sessions.clear();
     state.active_session_id = Some("missing-session".into());
 
     assert_eq!(state.active_git_work_dir(), None);
+    assert!(state.active_worktree_unavailable());
+}
+
+
+#[test]
+fn recreate_active_worktree_restores_the_recorded_session_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = init_test_repo(&dir);
+    std::fs::write(project.join("base.txt"), "base\n").unwrap();
+    run_git(&project, &["add", "."]);
+    run_git(&project, &["commit", "-qm", "initial"]);
+    run_git(&project, &["branch", "worktree/session"]);
+
+    let session_id = "session";
+    let worktree = project.join(".threadlane/worktrees/session");
+    let session_file = project.join(".threadlane/sessions/session.jsonl");
+    std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+    let mut store = JsonlStore::open(&session_file).unwrap();
+    store.append_fact("main", "is_worktree", "true", None).unwrap();
+    store
+        .append_fact("main", "worktree_path", &worktree.to_string_lossy(), None)
+        .unwrap();
+    store
+        .append_fact("main", "git_branch", "worktree/session", None)
+        .unwrap();
+    drop(store);
+
+    let mut state = AppState::load_from_registry(Vec::new());
+    state.projects.push(ProjectInfo {
+        name: "project".into(),
+        work_dir: project.clone(),
+        sessions: discover_sessions_in_project(&project),
+        is_expanded: true,
+    });
+    state.active_work_dir = Some(project.clone());
+    state.active_session_id = Some(session_id.into());
+
+    assert!(state.active_worktree_unavailable());
+    state.recreate_active_worktree().unwrap();
+
+    assert_eq!(state.active_git_work_dir(), Some(worktree.clone()));
+    assert!(worktree.is_dir());
+    assert_eq!(
+        threadlane_git::current_branch(&worktree).unwrap().as_deref(),
+        Some("worktree/session")
+    );
+    assert!(!state.active_worktree_unavailable());
 }
 
 #[test]

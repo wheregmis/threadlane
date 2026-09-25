@@ -335,23 +335,33 @@ impl WorkspaceView {
                     model.update(cx, |state, _cx| state.requested_terminal_command.take())
                 {
                     this.bottom_panel_visible = true;
-                    let term = if let Some(work_dir) = model.read(cx).active_work_dir.clone() {
-                        this.get_or_create_active_terminal(&work_dir, cx)
+                    let state = model.read(cx);
+                    let work_dir = state.active_git_work_dir();
+                    let unavailable = state.active_worktree_unavailable();
+                    let term = work_dir
+                        .map(|work_dir| this.get_or_create_active_terminal(&work_dir, cx))
+                        .or_else(|| (!unavailable).then(|| this.fallback_terminal(cx)));
+                    if let Some(term) = term {
+                        term.update(cx, |term, _cx| {
+                            let trimmed = cmd.trim_end();
+                            term.send_input(&format!("{trimmed}\n"));
+                        });
                     } else {
-                        this.fallback_terminal(cx)
-                    };
-                    term.update(cx, |term, _cx| {
-                        let trimmed = cmd.trim_end();
-                        term.send_input(&format!("{trimmed}\n"));
-                    });
+                        model.update(cx, |state, _cx| {
+                            state.session_status = Some("The active worktree is unavailable".into());
+                        });
+                    }
                 }
                 if let Some(work_dir) =
                     model.update(cx, |state, _cx| state.requested_terminal_work_dir.take())
                 {
                     this.bottom_panel_visible = true;
-                    if let Some(project) = model.read(cx).active_work_dir.clone() {
+                    let state = model.read(cx);
+                    let project = state.active_git_work_dir();
+                    let unavailable = state.active_worktree_unavailable();
+                    if let Some(project) = project {
                         this.add_terminal_tab_for_project(project, work_dir, cx);
-                    } else {
+                    } else if !unavailable {
                         this.get_or_create_active_terminal(&work_dir, cx);
                     }
                 }
@@ -1687,15 +1697,18 @@ impl WorkspaceView {
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.bottom_panel_visible = !this.bottom_panel_visible;
                                 if this.bottom_panel_visible {
-                                    let project = this.model.read(cx).active_work_dir.clone();
-                                    let terminal = project
-                                        .as_ref()
-                                        .and_then(|project| this.terminal_groups.get(project))
-                                        .and_then(|group| group.tabs.get(group.active_tab))
-                                        .cloned()
-                                        .unwrap_or_else(|| this.fallback_terminal(cx));
-                                    let focus = terminal.read(cx).focus_handle(cx);
-                                    focus.focus(window, cx);
+                                    let state = this.model.read(cx);
+                                    let project = state.active_git_work_dir();
+                                    let unavailable = state.active_worktree_unavailable();
+                                    if !unavailable {
+                                        let terminal = project
+                                            .as_ref()
+                                            .and_then(|project| this.terminal_groups.get(project))
+                                            .and_then(|group| group.tabs.get(group.active_tab))
+                                            .cloned()
+                                            .unwrap_or_else(|| this.fallback_terminal(cx));
+                                        terminal.read(cx).focus_handle(cx).focus(window, cx);
+                                    }
                                 }
                                 cx.notify();
                             })),
@@ -1749,15 +1762,18 @@ impl WorkspaceView {
     ) {
         self.bottom_panel_visible = !self.bottom_panel_visible;
         if self.bottom_panel_visible {
-            let project = self.model.read(cx).active_work_dir.clone();
-            let terminal = project
-                .as_ref()
-                .and_then(|project| self.terminal_groups.get(project))
-                .and_then(|group| group.tabs.get(group.active_tab))
-                .cloned()
-                .unwrap_or_else(|| self.fallback_terminal(cx));
-            let focus = terminal.read(cx).focus_handle(cx);
-            focus.focus(window, cx);
+            let state = self.model.read(cx);
+            let project = state.active_git_work_dir();
+            let unavailable = state.active_worktree_unavailable();
+            if !unavailable {
+                let terminal = project
+                    .as_ref()
+                    .and_then(|project| self.terminal_groups.get(project))
+                    .and_then(|group| group.tabs.get(group.active_tab))
+                    .cloned()
+                    .unwrap_or_else(|| self.fallback_terminal(cx));
+                terminal.read(cx).focus_handle(cx).focus(window, cx);
+            }
         }
         cx.notify();
     }
@@ -1877,18 +1893,22 @@ impl Render for WorkspaceView {
                 });
             }
         }
-        let terminal_project = self.model.read(cx).active_work_dir.clone();
+        let state = self.model.read(cx);
+        let terminal_project = state.active_git_work_dir();
+        let terminal_unavailable = state.active_worktree_unavailable();
         let (terminal_tabs, active_terminal_tab, active_terminal) =
             if let Some(project) = &terminal_project {
                 let group = self.get_or_create_terminal_group(project, cx);
                 (
                     group.tabs.clone(),
                     group.active_tab,
-                    group.tabs[group.active_tab].clone(),
+                    Some(group.tabs[group.active_tab].clone()),
                 )
+            } else if terminal_unavailable {
+                (Vec::new(), 0, None)
             } else {
                 let fallback = self.fallback_terminal(cx);
-                (vec![fallback.clone()], 0, fallback)
+                (vec![fallback.clone()], 0, Some(fallback))
             };
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Expand sidebar"
@@ -1976,6 +1996,106 @@ impl Render for WorkspaceView {
             };
 
             let main_content = if self.bottom_panel_visible {
+                if terminal_unavailable {
+                    let recreate_model = self.model.clone();
+                    let local_model = self.model.clone();
+                    let close_view = cx.entity().clone();
+                    let terminal_panel = div()
+                        .size_full()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .bg(theme.background)
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .h(rems(2.125))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .px_2()
+                                .bg(theme.title_bar)
+                                .border_b_1()
+                                .border_color(theme.title_bar_border)
+                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Terminal"))
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new("terminal-unavailable-close")
+                                        .icon(IconName::Close)
+                                        .accessibility_label("Hide terminal")
+                                        .tooltip("Hide terminal (Cmd+J)")
+                                        .ghost()
+                                        .small()
+                                        .on_click(move |_event, _window, cx| {
+                                            close_view.update(cx, |this, cx| {
+                                                this.bottom_panel_visible = false;
+                                                cx.notify();
+                                            });
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_3()
+                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Worktree unavailable"))
+                                .child(div().text_xs().text_color(theme.muted_foreground).child("This session's worktree is not checked out"))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("terminal-recreate-worktree")
+                                                .label("Recreate worktree")
+                                                .small()
+                                                .on_click(move |_event, _window, cx| {
+                                                    recreate_model.update(cx, |state, cx| {
+                                                        controller::dispatch(state, AppAction::RecreateActiveWorktree);
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("terminal-use-project-folder")
+                                                .label("Use project folder")
+                                                .small()
+                                                .ghost()
+                                                .on_click(move |_event, _window, cx| {
+                                                    local_model.update(cx, |state, cx| {
+                                                        if let Some(work_dir) = state.active_work_dir.clone() {
+                                                            controller::dispatch(
+                                                                state,
+                                                                AppAction::SelectDraftProject(work_dir),
+                                                            );
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        ),
+                                ),
+                        );
+                    v_resizable("workspace-main-bottom-split")
+                        .with_state(&self.bottom_panel_resizable_state)
+                        .on_resize(cx.listener(|this, state: &Entity<ResizableState>, window, cx| {
+                            if let Some(size) = state.read(cx).sizes().get(1) {
+                                this.preferred_panel_sizes[2] = *size / window.rem_size();
+                            }
+                        }))
+                        .child(resizable_panel().child(upper_content))
+                        .child(
+                            resizable_panel()
+                                .size(rem * 14.0)
+                                .size_range(rem * 8.0..(viewport.height - rem * 24.0).max(rem * 8.0))
+                                .child(terminal_panel),
+                        )
+                        .into_any_element()
+                } else {
                 let tab_buttons = terminal_tabs.iter().enumerate().map(|(tab, _)| {
                     let select_project = terminal_project.clone();
                     let close_project = terminal_project.clone();
@@ -2112,6 +2232,7 @@ impl Render for WorkspaceView {
                         })
                 });
 
+                let active_terminal = active_terminal.expect("available terminal");
                 let active_terminal_clear = active_terminal.clone();
                 let active_terminal_restart = active_terminal.clone();
                 let new_project = terminal_project.clone();
@@ -2243,6 +2364,7 @@ impl Render for WorkspaceView {
                             .child(terminal_panel),
                     )
                     .into_any_element()
+                }
             } else {
                 upper_content
             };

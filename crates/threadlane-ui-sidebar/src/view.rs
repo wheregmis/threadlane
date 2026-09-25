@@ -1090,13 +1090,8 @@ impl SidebarView {
         let context_session_id = session.id.clone();
         let context_model = self.model.clone();
         let terminal_model = self.model.clone();
-        // A removed worktree's runtime dir no longer exists; fall back to
-        // the canonical project root so the shell always has a cwd.
-        let terminal_work_dir = if session.is_worktree && !session.worktree_available {
-            session.work_dir.clone()
-        } else {
-            session.runtime_work_dir.clone()
-        };
+        let terminal_work_dir = session.runtime_work_dir.clone();
+        let terminal_unavailable = session.is_worktree && !session.worktree_available;
         let context_is_worktree = session.is_worktree;
         let context_git_branch = session.git_branch.clone();
         let copy_session_file = session.session_file.display().to_string();
@@ -1492,21 +1487,30 @@ impl SidebarView {
                         });
                     },
                 ))
-                .item(
-                    PopupMenuItem::new("Open Terminal Here").on_click({
-                        let terminal_model = terminal_model.clone();
-                        let terminal_work_dir = terminal_work_dir.clone();
-                        move |_event, _window, cx| {
-                            terminal_model.update(cx, |state, cx| {
-                                controller::dispatch(
-                                    state,
-                                    AppAction::OpenTerminalAt(terminal_work_dir.clone()),
-                                );
-                                cx.notify();
-                            });
-                        }
-                    }),
-                )
+                .item({
+                    let item = PopupMenuItem::new(if terminal_unavailable {
+                        "Open Terminal Here — worktree unavailable"
+                    } else {
+                        "Open Terminal Here"
+                    });
+                    if terminal_unavailable {
+                        item.disabled(true)
+                    } else {
+                        item.on_click({
+                            let terminal_model = terminal_model.clone();
+                            let terminal_work_dir = terminal_work_dir.clone();
+                            move |_event, _window, cx| {
+                                terminal_model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::OpenTerminalAt(terminal_work_dir.clone()),
+                                    );
+                                    cx.notify();
+                                });
+                            }
+                        })
+                    }
+                })
                 .item(
                     PopupMenuItem::new("Copy Session ID").on_click(move |_event, _window, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(copy_session_id.clone()));

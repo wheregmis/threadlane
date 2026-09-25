@@ -174,6 +174,12 @@ impl AppState {
         }
     }
 
+    pub fn active_worktree_unavailable(&self) -> bool {
+        self.active_work_dir.is_some()
+            && self.active_session_id.is_some()
+            && self.active_git_work_dir().is_none()
+    }
+
     pub(crate) fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
         #[cfg(not(test))]
         let mut registry_projects = registry_projects;
@@ -682,6 +688,56 @@ impl AppState {
         };
         project.sessions = sessions;
         true
+    }
+
+    pub(crate) fn recreate_active_worktree(&mut self) -> Result<(), String> {
+        let work_dir = self.active_work_dir.clone().ok_or("No active project")?;
+        let session_id = self.active_session_id.clone().ok_or("No active session")?;
+        let session = self
+            .projects
+            .iter()
+            .find(|project| project.work_dir == work_dir)
+            .and_then(|project| project.sessions.iter().find(|session| session.id == session_id))
+            .cloned()
+            .ok_or("Active session was not found")?;
+        if !session.is_worktree {
+            return Err("The active session does not use a worktree".into());
+        }
+        if session.worktree_available {
+            return Err("The active worktree is already available".into());
+        }
+        let expected_path = Self::canonical_worktree_dir(&work_dir, &session_id);
+        if session.runtime_work_dir != expected_path {
+            return Err("The recorded worktree path is not safe to recreate".into());
+        }
+        let branch = session
+            .git_branch
+            .as_deref()
+            .ok_or("The session has no recorded Git branch")?;
+        let branches = threadlane_git::inspect(&work_dir)
+            .map_err(|error| format!("Could not inspect project branches: {error}"))?
+            .branches;
+        if !branches.iter().any(|candidate| candidate == branch) {
+            return Err(format!("Branch '{branch}' no longer exists in the project"));
+        }
+        threadlane_git::prune_worktrees(&work_dir)
+            .map_err(|error| format!("Could not prune stale worktrees: {error}"))?;
+        threadlane_git::create_worktree(&work_dir, &session.runtime_work_dir, branch)
+            .map_err(|error| format!("Could not recreate worktree: {error}"))?;
+
+        let sessions = discover_sessions_in_project(&work_dir);
+        let recreated = sessions
+            .iter()
+            .any(|candidate| candidate.id == session_id && candidate.worktree_available);
+        if let Some(project) = self.projects.iter_mut().find(|project| project.work_dir == work_dir) {
+            project.sessions = sessions;
+        }
+        if !recreated {
+            return Err("Worktree was recreated, but the session could not be rediscovered".into());
+        }
+        self.select_session(work_dir, session_id);
+        self.session_status = None;
+        Ok(())
     }
 
     fn refresh_active_session(&mut self) {
