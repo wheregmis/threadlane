@@ -697,7 +697,12 @@ impl AppState {
             .projects
             .iter()
             .find(|project| project.work_dir == work_dir)
-            .and_then(|project| project.sessions.iter().find(|session| session.id == session_id))
+            .and_then(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+            })
             .cloned()
             .ok_or("Active session was not found")?;
         if !session.is_worktree {
@@ -729,7 +734,11 @@ impl AppState {
         let recreated = sessions
             .iter()
             .any(|candidate| candidate.id == session_id && candidate.worktree_available);
-        if let Some(project) = self.projects.iter_mut().find(|project| project.work_dir == work_dir) {
+        if let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| project.work_dir == work_dir)
+        {
             project.sessions = sessions;
         }
         if !recreated {
@@ -1339,7 +1348,10 @@ impl AppState {
         for request in requests.iter().filter(|request| request.reload_messages) {
             *self
                 .in_flight_hydrations
-                .entry(Self::projection_key(&request.session_id, &request.session_file))
+                .entry(Self::projection_key(
+                    &request.session_id,
+                    &request.session_file,
+                ))
                 .or_default() += 1;
         }
         requests
@@ -3442,12 +3454,9 @@ impl AppState {
                 reminder.clone(),
                 None,
             )),
-            AgentEvent::FusionUpdate { model, message } => Some((
-                "Router",
-                format!("Fusion → {model}"),
-                message.clone(),
-                None,
-            )),
+            AgentEvent::FusionUpdate { model, message } => {
+                Some(("Router", format!("Fusion → {model}"), message.clone(), None))
+            }
             _ => None,
         };
         if let Some((category, summary, detail, lane)) = entry {
@@ -3803,27 +3812,24 @@ impl AppState {
         self.run_timings.insert(key.clone(), timing);
     }
 
-
     /// Applies a durable runtime event to the session projection.
     ///
     /// Record-backed events remain authoritative for the session projection and
     /// are intentionally left for the existing journal hydration path.
     pub fn apply_durable_event(&mut self, session_id: &str, event: HarnessEvent) -> bool {
         match event.payload() {
-            EventPayload::Agent(agent_event) => self.drain_chat_stream(vec![
-                ChatStreamEvent::Agent {
+            EventPayload::Agent(agent_event) => {
+                self.drain_chat_stream(vec![ChatStreamEvent::Agent {
                     session_id: session_id.to_owned(),
                     event: agent_event.clone(),
+                }])
+            }
+            EventPayload::Fault(error) => self.drain_chat_stream(vec![ChatStreamEvent::Agent {
+                session_id: session_id.to_owned(),
+                event: AgentEvent::AgentError {
+                    error: error.clone(),
                 },
-            ]),
-            EventPayload::Fault(error) => self.drain_chat_stream(vec![
-                ChatStreamEvent::Agent {
-                    session_id: session_id.to_owned(),
-                    event: AgentEvent::AgentError {
-                        error: error.clone(),
-                    },
-                },
-            ]),
+            }]),
             _ => false,
         }
     }
@@ -3832,7 +3838,8 @@ impl AppState {
     pub fn subscribe_durable_events(
         &self,
         runtime: &SessionRuntime,
-    ) -> Result<threadlane_runtime::harness::Subscription, threadlane_runtime::harness::EventError> {
+    ) -> Result<threadlane_runtime::harness::Subscription, threadlane_runtime::harness::EventError>
+    {
         runtime.subscribe_durable_events()
     }
     /// Polls a runtime subscription and applies any durable agent events.
@@ -3874,13 +3881,11 @@ impl AppState {
                         SchedulerSupervisorEvent::Agent(event) => {
                             ChatStreamEvent::Agent { session_id, event }
                         }
-                        SchedulerSupervisorEvent::Completed(result) => {
-                            ChatStreamEvent::Scheduled {
-                                session_id,
-                                session_file: session_file.clone(),
-                                result,
-                            }
-                        }
+                        SchedulerSupervisorEvent::Completed(result) => ChatStreamEvent::Scheduled {
+                            session_id,
+                            session_file: session_file.clone(),
+                            result,
+                        },
                     });
                 }
             }

@@ -2,8 +2,8 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
@@ -16,8 +16,8 @@ use gpui_component::theme::ActiveTheme;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
 
-use threadlane_ui_state::{actions::AppAction, controller};
 use threadlane_ui_state::{AppState, SessionAttention, SessionInfo, TrajectoryEntry};
+use threadlane_ui_state::{actions::AppAction, controller};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionRemovalKind {
@@ -40,9 +40,9 @@ impl SessionRemovalKind {
             Self::Archive => format!(
                 "“{title}” ({project}) will leave the active list. Its transcript stays in the archive."
             ),
-            Self::Remove => format!(
-                "“{title}” ({project}) will be permanently deleted, transcript included."
-            ),
+            Self::Remove => {
+                format!("“{title}” ({project}) will be permanently deleted, transcript included.")
+            }
         };
         match worktree_note {
             Some(note) => format!("{base}\n{note}"),
@@ -618,11 +618,7 @@ fn pr_status_tooltip(pr: &threadlane_git::GitHubPrInfo) -> String {
 }
 
 impl SidebarView {
-    pub fn new(
-        model: Entity<AppState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
 
         let sub1 = cx.observe(&model, |this, model, cx| {
@@ -692,8 +688,7 @@ impl SidebarView {
                             .child("⌘N"),
                     )
                     .on_click(move |_event, window, cx| {
-                        window
-                            .dispatch_action(Box::new(crate::BeginNewTask), cx);
+                        window.dispatch_action(Box::new(crate::BeginNewTask), cx);
                     }),
             )
             .child(
@@ -801,7 +796,8 @@ impl SidebarView {
                                                 cx.notify();
                                             });
                                         },
-                                    ));
+                                    ),
+                                );
                             }
                             menu
                         }),
@@ -925,9 +921,18 @@ impl SidebarView {
                                 let mut menu = menu;
                                 for (filter, label) in [
                                     (None, format!("All statuses · {session_count}")),
-                                    (Some(SessionAttention::NeedsYou), format!("Needs you · {}", attention_counts[0])),
-                                    (Some(SessionAttention::Working), format!("Working · {}", attention_counts[1])),
-                                    (Some(SessionAttention::Ready), format!("Ready · {}", attention_counts[2])),
+                                    (
+                                        Some(SessionAttention::NeedsYou),
+                                        format!("Needs you · {}", attention_counts[0]),
+                                    ),
+                                    (
+                                        Some(SessionAttention::Working),
+                                        format!("Working · {}", attention_counts[1]),
+                                    ),
+                                    (
+                                        Some(SessionAttention::Ready),
+                                        format!("Ready · {}", attention_counts[2]),
+                                    ),
                                 ] {
                                     let sidebar = sidebar.clone();
                                     menu = menu.item(
@@ -1160,29 +1165,24 @@ impl SidebarView {
                 )
             };
 
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_1()
-                .child(
-                    Button::new(SharedString::from(format!(
-                        "session-pr-{}-{}",
-                        session.id, pr.number
-                    )))
-                    .icon(pr_icon)
-                    .label(pr_label)
-                    .accessibility_label(format!(
-                        "Pull request #{}, {}",
-                        pr.number,
-                        pr_status_label(&pr)
-                    ))
-                    .tooltip(tooltip)
-                    .ghost()
-                    .xsmall()
-                    .bg(pr_bg)
-                    .text_color(pr_fg),
-                )
+            div().flex().flex_none().items_center().gap_1().child(
+                Button::new(SharedString::from(format!(
+                    "session-pr-{}-{}",
+                    session.id, pr.number
+                )))
+                .icon(pr_icon)
+                .label(pr_label)
+                .accessibility_label(format!(
+                    "Pull request #{}, {}",
+                    pr.number,
+                    pr_status_label(&pr)
+                ))
+                .tooltip(tooltip)
+                .ghost()
+                .xsmall()
+                .bg(pr_bg)
+                .text_color(pr_fg),
+            )
         });
 
         let mut row2_items = Vec::new();
@@ -1357,26 +1357,22 @@ impl SidebarView {
                                     .justify_end()
                                     .gap_1()
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    // Trailing-slot swap (Synara SidebarRowHoverActions
-                                                    // pattern): timestamp fades out when the hover
-                                                    // actions appear, so the 223px row never shows
-                                                    // both at once. Layout width is preserved for
-                                                    // stability; only visual crowding is removed.
-                                                    .opacity(1.0)
-                                                    .group_hover("session-card", |style| {
-                                                        style.opacity(0.0)
-                                                    })
-                                                    .when(is_active, |this| this.opacity(0.0))
-                                                    .child(time_ago),
-                                            ),
+                                        div().flex().items_center().gap_1().child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                // Trailing-slot swap (Synara SidebarRowHoverActions
+                                                // pattern): timestamp fades out when the hover
+                                                // actions appear, so the 223px row never shows
+                                                // both at once. Layout width is preserved for
+                                                // stability; only visual crowding is removed.
+                                                .opacity(1.0)
+                                                .group_hover("session-card", |style| {
+                                                    style.opacity(0.0)
+                                                })
+                                                .when(is_active, |this| this.opacity(0.0))
+                                                .child(time_ago),
+                                        ),
                                     )
                                     .child(
                                         Button::new(SharedString::from(format!(
@@ -1739,7 +1735,11 @@ impl SidebarView {
                     &session.title.to_lowercase(),
                     &session.id.to_lowercase(),
                     &project_name,
-                    &session.git_branch.as_deref().unwrap_or_default().to_lowercase(),
+                    &session
+                        .git_branch
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase(),
                     &session
                         .work_dir
                         .file_name()
@@ -1781,7 +1781,11 @@ impl SidebarView {
                 .items_center()
                 .gap_2()
                 .px_3()
-                .pt(if index == 0 { window.rem_size() * 0.25 } else { window.rem_size() * 0.75 })
+                .pt(if index == 0 {
+                    window.rem_size() * 0.25
+                } else {
+                    window.rem_size() * 0.75
+                })
                 .pb_1()
                 .child(
                     div()
@@ -1790,7 +1794,12 @@ impl SidebarView {
                         .text_color(theme.muted_foreground.opacity(0.8))
                         .child(group.label()),
                 )
-                .child(div().h(rems(0.0625)).flex_1().bg(theme.border.opacity(0.35)))
+                .child(
+                    div()
+                        .h(rems(0.0625))
+                        .flex_1()
+                        .bg(theme.border.opacity(0.35)),
+                )
                 .into_any_element(),
             Some(HistoryRow::Session(session, attention)) => {
                 let state = self.model.read(cx);
@@ -1878,10 +1887,7 @@ impl SidebarView {
                         .accessibility_label("Start a new task")
                         .tooltip("Start a new task (⌘N)")
                         .on_click(move |_event, window, cx| {
-                            window.dispatch_action(
-                                Box::new(crate::BeginNewTask),
-                                cx,
-                            );
+                            window.dispatch_action(Box::new(crate::BeginNewTask), cx);
                         })
                 }))
                 .into_any_element();
@@ -1914,13 +1920,13 @@ impl SidebarView {
 #[cfg(test)]
 mod tests {
     use super::{
-        flatten_history_sessions, format_time_ago, history_query_matches, pr_status_label,
-        pr_status_tooltip, same_history_row_identity, session_pr_info, sidebar_session_fingerprint,
-        sidebar_session_identity, DateGroup, HistoryRow,
+        DateGroup, HistoryRow, flatten_history_sessions, format_time_ago, history_query_matches,
+        pr_status_label, pr_status_tooltip, same_history_row_identity, session_pr_info,
+        sidebar_session_fingerprint, sidebar_session_identity,
     };
-    use threadlane_ui_state::{SessionAttention, SessionHealth, SessionInfo};
     use std::collections::HashMap;
     use threadlane_git::GitHubPrInfo;
+    use threadlane_ui_state::{SessionAttention, SessionHealth, SessionInfo};
 
     fn session(id: &str) -> SessionInfo {
         SessionInfo {
@@ -1942,9 +1948,9 @@ mod tests {
     fn sidebar_task_title_and_navigation_support_keyboard_activation(
         cx: &mut gpui::TestAppContext,
     ) {
-        use threadlane_ui_state::{AppState, WorkspacePage};
         use gpui::*;
         use std::{cell::Cell, rc::Rc};
+        use threadlane_ui_state::{AppState, WorkspacePage};
 
         struct Harness {
             sidebar: Entity<super::SidebarView>,
@@ -1995,9 +2001,15 @@ mod tests {
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let attention = cx.debug_bounds("session-attention-keyboard-task").unwrap();
-        assert!(attention.right() <= px(223.0), "attention must not clip in a narrow sidebar");
+        assert!(
+            attention.right() <= px(223.0),
+            "attention must not clip in a narrow sidebar"
+        );
         let title = cx.debug_bounds("session-title-keyboard-task").unwrap();
-        assert!(title.size.width > px(0.0), "the title must retain usable width");
+        assert!(
+            title.size.width > px(0.0),
+            "the title must retain usable width"
+        );
         cx.simulate_click(title.center(), Modifiers::default());
         assert_eq!(changes.get(), 1, "title click must select only once");
         model.read_with(cx, |state, _| {
@@ -2103,10 +2115,33 @@ mod tests {
 
     #[test]
     fn history_search_matches_context_beyond_title_and_id() {
-        assert!(history_query_matches("fix login", "abc", "mypi", "main", "mypi", ""));
-        assert!(history_query_matches("fix login", "abc", "mypi", "main", "mypi", "login"));
-        assert!(history_query_matches("fix login", "abc123", "mypi", "main", "mypi", "abc"));
-        assert!(history_query_matches("other", "abc", "mypi", "main", "mypi", "mypi"));
+        assert!(history_query_matches(
+            "fix login",
+            "abc",
+            "mypi",
+            "main",
+            "mypi",
+            ""
+        ));
+        assert!(history_query_matches(
+            "fix login",
+            "abc",
+            "mypi",
+            "main",
+            "mypi",
+            "login"
+        ));
+        assert!(history_query_matches(
+            "fix login",
+            "abc123",
+            "mypi",
+            "main",
+            "mypi",
+            "abc"
+        ));
+        assert!(history_query_matches(
+            "other", "abc", "mypi", "main", "mypi", "mypi"
+        ));
         assert!(history_query_matches(
             "other",
             "abc",

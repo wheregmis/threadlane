@@ -1707,7 +1707,8 @@ impl WorkspaceView {
                                             .and_then(|group| group.tabs.get(group.active_tab))
                                             .cloned()
                                             .unwrap_or_else(|| this.fallback_terminal(cx));
-                                        terminal.read(cx).focus_handle(cx).focus(window, cx);
+                                        let focus = terminal.read(cx).focus_handle(cx);
+                                        focus.focus(window, cx);
                                     }
                                 }
                                 cx.notify();
@@ -1772,7 +1773,8 @@ impl WorkspaceView {
                     .and_then(|group| group.tabs.get(group.active_tab))
                     .cloned()
                     .unwrap_or_else(|| self.fallback_terminal(cx));
-                terminal.read(cx).focus_handle(cx).focus(window, cx);
+                let focus = terminal.read(cx).focus_handle(cx);
+                focus.focus(window, cx);
             }
         }
         cx.notify();

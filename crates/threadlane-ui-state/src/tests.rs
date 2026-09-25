@@ -451,11 +451,13 @@ fn model_picker_preserves_current_selection_while_runtime_is_busy() {
     let _settings = runtime.agent.try_lock().unwrap();
     state.set_selected_model("opencode-go/minimax-m2.7".into());
     assert_eq!(state.selected_model, "gpt-4o");
-    assert!(state
-        .session_status
-        .as_deref()
-        .unwrap()
-        .contains("settings are still loading"));
+    assert!(
+        state
+            .session_status
+            .as_deref()
+            .unwrap()
+            .contains("settings are still loading")
+    );
     assert!(Arc::ptr_eq(
         &state.session_runtimes[&session_file],
         &runtime
@@ -513,11 +515,13 @@ fn model_picker_ignores_acp_replies_from_replaced_or_inactive_runtimes() {
         ChatStreamEvent::AcpConfigOptions {
             session_id: "session".into(),
             source: Arc::downgrade(runtime),
-            options: vec![serde_json::from_value(serde_json::json!({
-                "id": "model", "name": "Model", "category": "model",
-                "currentValue": "model", "options": [{ "value": "model", "name": label }]
-            }))
-            .unwrap()],
+            options: vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "model", "name": "Model", "category": "model",
+                    "currentValue": "model", "options": [{ "value": "model", "name": label }]
+                }))
+                .unwrap(),
+            ],
             error: error.map(str::to_string),
             failed_config: None,
         }
@@ -1051,10 +1055,12 @@ fn removing_worktree_session_removes_checkout_and_metadata_stub() {
 
     assert!(!worktree.exists());
     assert!(!stub.exists());
-    assert!(threadlane_git::list_worktrees(&project)
-        .unwrap()
-        .iter()
-        .all(|entry| entry.branch.as_deref() != Some("worktree/session")));
+    assert!(
+        threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.branch.as_deref() != Some("worktree/session"))
+    );
 }
 
 #[test]
@@ -1097,10 +1103,12 @@ fn removing_worktree_session_retains_checkout_when_requested() {
 
     assert!(worktree.exists());
     assert!(!stub.exists());
-    assert!(threadlane_git::list_worktrees(&project)
-        .unwrap()
-        .iter()
-        .any(|entry| entry.branch.as_deref() == Some("worktree/session")));
+    assert!(
+        threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.branch.as_deref() == Some("worktree/session"))
+    );
 }
 
 #[test]
@@ -1147,10 +1155,12 @@ fn settling_worktree_session_removes_checkout_when_requested() {
     assert!(archive_file.exists());
     assert!(!worktree.exists());
     assert!(!stub.exists());
-    assert!(threadlane_git::list_worktrees(&project)
-        .unwrap()
-        .iter()
-        .all(|entry| entry.branch.as_deref() != Some("worktree/session")));
+    assert!(
+        threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.branch.as_deref() != Some("worktree/session"))
+    );
 }
 
 #[test]
@@ -1197,10 +1207,12 @@ fn settling_worktree_session_retains_checkout_when_requested() {
     assert!(archive_file.exists());
     assert!(worktree.exists());
     assert!(!stub.exists());
-    assert!(threadlane_git::list_worktrees(&project)
-        .unwrap()
-        .iter()
-        .any(|entry| entry.branch.as_deref() == Some("worktree/session")));
+    assert!(
+        threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.branch.as_deref() == Some("worktree/session"))
+    );
 }
 
 #[test]
@@ -1477,9 +1489,11 @@ fn issue_work_session_persists_link_and_uses_isolated_worktree() {
                 .as_ref()
         )
     );
-    assert!(facts
-        .get("git_branch")
-        .is_some_and(|branch| branch.starts_with("issue/42-fix-flaky-auth-")));
+    assert!(
+        facts
+            .get("git_branch")
+            .is_some_and(|branch| branch.starts_with("issue/42-fix-flaky-auth-"))
+    );
     assert_eq!(
         facts.get("github_issue"),
         Some(&serde_json::to_string(&issue).unwrap())
@@ -1735,7 +1749,7 @@ async fn reported_session_shape_keeps_total_processed_separate() {
     assert!(!projected_context.context_limit_is_estimate);
 
     // Inspect the production journal again, independently of the GPUI projection above.
-    use threadlane_runtime::harness::{read_transcript_page, CompactionReason, TranscriptItem};
+    use threadlane_runtime::harness::{CompactionReason, TranscriptItem, read_transcript_page};
 
     let store = JsonlStore::open(&path).unwrap();
     let records = store.records();
@@ -2094,9 +2108,11 @@ async fn transcript_marker_survives_reload_without_summary_content() {
         first.iter().map(|row| &row.id).collect::<Vec<_>>(),
         second.iter().map(|row| &row.id).collect::<Vec<_>>()
     );
-    assert!(!first
-        .iter()
-        .any(|message| message.content.contains("Context checkpoint from")));
+    assert!(
+        !first
+            .iter()
+            .any(|message| message.content.contains("Context checkpoint from"))
+    );
     assert!(first.iter().any(|message| {
         message.role == MessageRole::User && message.content == "continue the cached tool loop"
     }));
@@ -2131,10 +2147,12 @@ fn legacy_session_without_compaction_has_no_fabricated_marker() {
         })
         .unwrap();
     drop(store);
-    assert!(compute_session_messages(&path)
-        .unwrap()
-        .iter()
-        .all(|message| message.role != MessageRole::ContextMarker));
+    assert!(
+        compute_session_messages(&path)
+            .unwrap()
+            .iter()
+            .all(|message| message.role != MessageRole::ContextMarker)
+    );
     assert_eq!(
         compute_full_session_projection(&path)
             .unwrap()
@@ -3006,10 +3024,12 @@ fn durable_subagent_projection_ignores_unrelated_named_lanes() {
         .unwrap();
     drop(store);
 
-    assert!(compute_full_session_projection(&path)
-        .unwrap()
-        .subagents
-        .is_empty());
+    assert!(
+        compute_full_session_projection(&path)
+            .unwrap()
+            .subagents
+            .is_empty()
+    );
 }
 
 #[test]
@@ -3388,9 +3408,11 @@ fn durable_trajectory_hydrates_after_session_switch() {
 
     let trajectory = &state.trajectory_by_session[&cached_key(&state, "old-session")];
     assert!(trajectory.iter().any(|entry| entry.category == "Operation"));
-    assert!(trajectory
-        .iter()
-        .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" }));
+    assert!(
+        trajectory
+            .iter()
+            .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" })
+    );
     assert!(trajectory.iter().any(|entry| entry.category == "Step"));
     assert!(trajectory.iter().any(|entry| {
         entry.category == "Tool"
@@ -3851,12 +3873,16 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
         .trajectory_by_session
         .get(&cached_key(&state, "branch-session"))
         .unwrap();
-    assert!(trajectory
-        .iter()
-        .any(|t| t.run_id.as_deref() == Some("run-branch-a")));
-    assert!(trajectory
-        .iter()
-        .any(|t| t.run_id.as_deref() == Some("run-branch-b")));
+    assert!(
+        trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-a"))
+    );
+    assert!(
+        trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-b"))
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

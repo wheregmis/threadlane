@@ -10,10 +10,10 @@ use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState, 
 use gpui_component::list::ListItem;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
+use gpui_component::radio::{Radio, RadioGroup};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::separator::Separator;
 use gpui_component::spinner::Spinner;
-use gpui_component::radio::{Radio, RadioGroup};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
@@ -21,17 +21,17 @@ use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 
-use threadlane_ui_state::next_event_batch;
 use threadlane_project::watcher::WorkspaceWatcher;
 use threadlane_ui_state::AppState;
+use threadlane_ui_state::next_event_batch;
 
 use super::browser::BrowserView;
-use super::draft_pr::{draft_pr_prefill, DraftPrContextKey, DraftPrDialogView};
+use super::draft_pr::{DraftPrContextKey, DraftPrDialogView, draft_pr_prefill};
 pub use super::types::{
+    DiscardOption, FileNode, GitAction, PanelEvent, ReviewTab, ReviewViewMode, Surface,
     can_create_pull_request, can_publish_branch, detect_language, discard_options,
     message_generated_matches_active_project, normalize_generated_commit_message,
-    selection_bar_discard_options, DiscardOption, FileNode, GitAction, PanelEvent, ReviewTab,
-    ReviewViewMode, Surface,
+    selection_bar_discard_options,
 };
 
 pub struct RightPanelView {
@@ -99,11 +99,7 @@ pub struct RightPanelView {
 }
 
 impl RightPanelView {
-    pub fn new(
-        model: Entity<AppState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let document_state = cx.new(|cx| TextViewState::markdown("", cx));
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let commit_message_input =
@@ -294,8 +290,12 @@ impl RightPanelView {
             selected_commit_files: Vec::new(),
             loading_commit_sha: None,
             review_files: Vec::new(),
-            review_files_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 10.0)
-                .with_uniform_item_height(window.rem_size() * 2.0),
+            review_files_list_state: ListState::new(
+                0,
+                ListAlignment::Top,
+                window.rem_size() * 10.0,
+            )
+            .with_uniform_item_height(window.rem_size() * 2.0),
             selected_files: HashSet::new(),
             review_selection_initialized: false,
             review_filter_input,
@@ -722,17 +722,25 @@ impl RightPanelView {
                 );
                 self.review_files = files;
                 self.review_error = error;
-                if let Some(path) = self.document_title.as_deref().and_then(|title| title.strip_prefix("Review · ")).map(str::to_owned) {
+                if let Some(path) = self
+                    .document_title
+                    .as_deref()
+                    .and_then(|title| title.strip_prefix("Review · "))
+                    .map(str::to_owned)
+                {
                     self.open_file_diff(path, cx);
                 }
                 self.stash_files = None;
                 self.loading_stash_index = None;
             }
-            PanelEvent::MessageGenerated { project, result, diff_truncated }
-                if message_generated_matches_active_project(
-                    &project,
-                    self.model.read(cx).active_git_work_dir().as_deref(),
-                ) =>
+            PanelEvent::MessageGenerated {
+                project,
+                result,
+                diff_truncated,
+            } if message_generated_matches_active_project(
+                &project,
+                self.model.read(cx).active_git_work_dir().as_deref(),
+            ) =>
             {
                 self.git_message_pending = false;
                 match result {
@@ -741,7 +749,8 @@ impl RightPanelView {
                         // Synara DiffTruncationWarning pattern: never present a
                         // truncated diff as complete.
                         self.git_feedback = diff_truncated.then(|| {
-                            "Partial diff — message generated from the first 24,000 characters.".into()
+                            "Partial diff — message generated from the first 24,000 characters."
+                                .into()
                         });
                         self.pending_git_notifications
                             .push(Notification::success("Commit message generated."));
@@ -877,7 +886,8 @@ impl RightPanelView {
             cx.notify();
             return;
         }
-        let (api_key, account_id) = threadlane_coding_agent::credentials::provider_credentials(&model);
+        let (api_key, account_id) =
+            threadlane_coding_agent::credentials::provider_credentials(&model);
         let tx = self.event_tx.clone();
         let Ok(executor) = threadlane_ui_state::chat::executor() else {
             self.git_feedback = Some("Unable to start the model runtime.".into());
@@ -915,8 +925,7 @@ impl RightPanelView {
                     diff
                 };
                 let raw = match threadlane_coding_agent::credentials::provider_client_for(
-                    api_key,
-                    account_id,
+                    api_key, account_id,
                 )
                 .generate_commit_message(&model, &diff)
                 .await
@@ -926,7 +935,10 @@ impl RightPanelView {
                 };
                 let message = normalize_generated_commit_message(&raw);
                 if message.is_empty() {
-                    (Err("The model returned an empty commit message.".to_string()), diff_truncated)
+                    (
+                        Err("The model returned an empty commit message.".to_string()),
+                        diff_truncated,
+                    )
                 } else {
                     (Ok(message), diff_truncated)
                 }
@@ -1213,12 +1225,20 @@ impl RightPanelView {
                         action_message = Some(format!("Staged {} files", paths.len()));
                     }
                     GitAction::UnstageFiles(paths) => {
-                        threadlane_git::unstage_files(&work_dir, paths).map_err(|e| e.to_string())?;
+                        threadlane_git::unstage_files(&work_dir, paths)
+                            .map_err(|e| e.to_string())?;
                         action_message = Some(format!("Unstaged {} files", paths.len()));
                     }
-                    GitAction::StashPush { message, include_untracked } => {
-                        threadlane_git::stash_push(&work_dir, message.as_deref(), *include_untracked)
-                            .map_err(|e| e.to_string())?;
+                    GitAction::StashPush {
+                        message,
+                        include_untracked,
+                    } => {
+                        threadlane_git::stash_push(
+                            &work_dir,
+                            message.as_deref(),
+                            *include_untracked,
+                        )
+                        .map_err(|e| e.to_string())?;
                         action_message = Some("Stashed changes successfully".to_string());
                     }
                     GitAction::LoadLastCommitMessage => unreachable!(),
@@ -1310,7 +1330,7 @@ impl RightPanelView {
         }
         #[cfg(target_os = "macos")]
         {
-            use super::browser::{resolve_address, search_url, AddressTarget};
+            use super::browser::{AddressTarget, resolve_address, search_url};
             use threadlane_protocol::browser::BrowserCommand;
             let Some(browser) = self.browser.clone() else {
                 return Err("The browser panel is not ready.".to_string());
@@ -1425,7 +1445,11 @@ impl RightPanelView {
                         )
                     })
                     .when(!has_changes, |this| {
-                        this.child(div().text_color(theme.muted_foreground).child(git_state.clone()))
+                        this.child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child(git_state.clone()),
+                        )
                     }),
             )
             .child(
@@ -1448,9 +1472,9 @@ impl RightPanelView {
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let surfaces = Surface::all();
-        let selected_surface = self.active_surface.and_then(|active| {
-            surfaces.iter().position(|surface| *surface == active)
-        });
+        let selected_surface = self
+            .active_surface
+            .and_then(|active| surfaces.iter().position(|surface| *surface == active));
         let selected_index = selected_surface.unwrap_or(0);
         div()
             .flex_none()
@@ -1484,7 +1508,7 @@ impl RightPanelView {
                     .child(div().flex_1())
                     .child(
                         Button::new("right-panel-refresh")
-                        .accessibility_label("Refresh surface")
+                            .accessibility_label("Refresh surface")
                             .icon(Icon::default().path("icons/refresh-cw.svg"))
                             .tooltip("Refresh surface")
                             .ghost()
@@ -1841,7 +1865,12 @@ impl RightPanelView {
     }
 
     fn filtered_review_files(&self, cx: &Context<Self>) -> Vec<GitFile> {
-        let query = self.review_filter_input.read(cx).value().trim().to_lowercase();
+        let query = self
+            .review_filter_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_lowercase();
         if query.is_empty() {
             self.review_files.clone()
         } else {
@@ -1857,9 +1886,7 @@ impl RightPanelView {
         match (additions, deletions) {
             (0, _) => 0.0,
             (_, 0) => 100.0,
-            _ => {
-                (additions as f32 / (additions + deletions) as f32 * 100.0).clamp(5.0, 95.0)
-            }
+            _ => (additions as f32 / (additions + deletions) as f32 * 100.0).clamp(5.0, 95.0),
         }
     }
 
@@ -1867,7 +1894,9 @@ impl RightPanelView {
         const PREFIXES: &[&str] = &["feat", "fix", "docs", "refactor", "test", "chore"];
         let cur = self.commit_message_input.read(cx).value().to_string();
         let trimmed = cur.trim_start();
-        let has_prefix = PREFIXES.iter().any(|p| trimmed.starts_with(&format!("{p}:")) || trimmed.starts_with(&format!("{p}(")));
+        let has_prefix = PREFIXES.iter().any(|p| {
+            trimmed.starts_with(&format!("{p}:")) || trimmed.starts_with(&format!("{p}("))
+        });
         let new_val = if has_prefix {
             if let Some((_, rest)) = trimmed.split_once(':') {
                 format!("{prefix}:{rest}")
@@ -2123,7 +2152,11 @@ impl RightPanelView {
                         menu = menu.item(PopupMenuItem::new("Unstage File").on_click(
                             move |_event, window, cx| {
                                 panel_stage.update(cx, |this, cx| {
-                                    this.run_git_action(GitAction::UnstageFile(unstage_p.clone()), window, cx);
+                                    this.run_git_action(
+                                        GitAction::UnstageFile(unstage_p.clone()),
+                                        window,
+                                        cx,
+                                    );
                                 });
                             },
                         ));
@@ -2132,7 +2165,11 @@ impl RightPanelView {
                         menu = menu.item(PopupMenuItem::new("Stage File").on_click(
                             move |_event, window, cx| {
                                 panel_stage.update(cx, |this, cx| {
-                                    this.run_git_action(GitAction::StageFile(stage_p.clone()), window, cx);
+                                    this.run_git_action(
+                                        GitAction::StageFile(stage_p.clone()),
+                                        window,
+                                        cx,
+                                    );
                                 });
                             },
                         ));
@@ -2761,20 +2798,22 @@ impl RightPanelView {
         let diff_ratio_bar = (total_delta > 0).then(|| {
             let add_pct = Self::diff_addition_percent(total_additions_all, total_deletions_all);
             let del_pct = 100.0 - add_pct;
-            div()
-                .px_3()
-                .py_1()
-                .child(
-                    div()
-                        .w_full()
-                        .h(rems(0.25))
-                        .rounded_full()
-                        .overflow_hidden()
-                        .bg(theme.muted)
-                        .flex()
-                        .child(div().h_full().w(relative(add_pct / 100.0)).bg(theme.success))
-                        .child(div().h_full().w(relative(del_pct / 100.0)).bg(theme.danger)),
-                )
+            div().px_3().py_1().child(
+                div()
+                    .w_full()
+                    .h(rems(0.25))
+                    .rounded_full()
+                    .overflow_hidden()
+                    .bg(theme.muted)
+                    .flex()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(add_pct / 100.0))
+                            .bg(theme.success),
+                    )
+                    .child(div().h_full().w(relative(del_pct / 100.0)).bg(theme.danger)),
+            )
         });
 
         let review_toolbar = (total_files > 0).then(|| {
@@ -2819,18 +2858,25 @@ impl RightPanelView {
                                             .bordered(false),
                                     ),
                                 )
-                                .children((!self.review_filter_input.read(cx).value().is_empty()).then(|| {
-                                    Button::new("clear-review-filter-btn")
-                                        .icon(IconName::Close)
-                                        .accessibility_label("Clear filter")
-                                        .ghost()
-                                        .xsmall()
-                                        .tooltip("Clear filter")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.review_filter_input.update(cx, |input, cx| input.set_value("", window, cx));
-                                            cx.notify();
-                                        }))
-                                })),
+                                .children(
+                                    (!self.review_filter_input.read(cx).value().is_empty()).then(
+                                        || {
+                                            Button::new("clear-review-filter-btn")
+                                                .icon(IconName::Close)
+                                                .accessibility_label("Clear filter")
+                                                .ghost()
+                                                .xsmall()
+                                                .tooltip("Clear filter")
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.review_filter_input
+                                                        .update(cx, |input, cx| {
+                                                            input.set_value("", window, cx)
+                                                        });
+                                                    cx.notify();
+                                                }))
+                                        },
+                                    ),
+                                ),
                         )
                         .child(
                             div()
@@ -2878,11 +2924,16 @@ impl RightPanelView {
                                         .tooltip("Discard changes (right-click for more options)")
                                         .disabled(self.git_busy)
                                         .on_click(cx.listener(|this, _event, window, cx| {
-                                            let paths: Vec<String> = this.selected_files.iter().cloned().collect();
+                                            let paths: Vec<String> =
+                                                this.selected_files.iter().cloned().collect();
                                             let total = this.review_files.len();
                                             Self::handle_discard_option(
                                                 cx.entity().clone(),
-                                                if paths.is_empty() { DiscardOption::All(total) } else { DiscardOption::Selected(paths) },
+                                                if paths.is_empty() {
+                                                    DiscardOption::All(total)
+                                                } else {
+                                                    DiscardOption::Selected(paths)
+                                                },
                                                 window,
                                                 cx,
                                             );
@@ -2898,7 +2949,10 @@ impl RightPanelView {
                                             (selected_paths, panel_ref.review_files.len())
                                         };
                                         let mut menu = menu;
-                                        for opt in selection_bar_discard_options(&selected_paths, total_files) {
+                                        for opt in selection_bar_discard_options(
+                                            &selected_paths,
+                                            total_files,
+                                        ) {
                                             let panel_action = panel.clone();
                                             let label = opt.label();
                                             let opt_action = opt.clone();
@@ -2937,14 +2991,20 @@ impl RightPanelView {
                                         .checked(all_selected)
                                         .small()
                                         .disabled(self.git_busy)
-                                        .on_click(cx.listener(move |this, checked, _window, cx| {
-                                            if *checked {
-                                                this.selected_files = this.review_files.iter().map(|f| f.path.clone()).collect();
-                                            } else {
-                                                this.selected_files.clear();
-                                            }
-                                            cx.notify();
-                                        })),
+                                        .on_click(cx.listener(
+                                            move |this, checked, _window, cx| {
+                                                if *checked {
+                                                    this.selected_files = this
+                                                        .review_files
+                                                        .iter()
+                                                        .map(|f| f.path.clone())
+                                                        .collect();
+                                                } else {
+                                                    this.selected_files.clear();
+                                                }
+                                                cx.notify();
+                                            },
+                                        )),
                                 )
                                 .child(
                                     div()
@@ -2987,13 +3047,19 @@ impl RightPanelView {
                                     row.child(
                                         Button::new("git-unstage-all-btn")
                                             .label("Unstage all")
-                                            .accessibility_label("Unstage all changes (git restore --staged .)")
+                                            .accessibility_label(
+                                                "Unstage all changes (git restore --staged .)",
+                                            )
                                             .ghost()
                                             .xsmall()
                                             .disabled(self.git_busy)
                                             .tooltip("Unstage all changes (git restore --staged .)")
                                             .on_click(cx.listener(|this, _event, window, cx| {
-                                                this.run_git_action(GitAction::UnstageAll, window, cx);
+                                                this.run_git_action(
+                                                    GitAction::UnstageAll,
+                                                    window,
+                                                    cx,
+                                                );
                                             })),
                                     )
                                 }),
@@ -3043,7 +3109,8 @@ impl RightPanelView {
                 .into_any_element()
         } else if self.review_view_mode == ReviewViewMode::Tree {
             let filtered = self.filtered_review_files(cx);
-            let mut dir_map: std::collections::BTreeMap<String, Vec<GitFile>> = std::collections::BTreeMap::new();
+            let mut dir_map: std::collections::BTreeMap<String, Vec<GitFile>> =
+                std::collections::BTreeMap::new();
             for f in filtered {
                 let (dir, _) = f.path.rsplit_once('/').unwrap_or(("", &f.path));
                 dir_map.entry(dir.to_string()).or_default().push(f);
@@ -3056,7 +3123,11 @@ impl RightPanelView {
                 .children(dir_map.into_iter().map(|(dir, dir_files)| {
                     let is_collapsed = self.collapsed_tree_folders.contains(&dir);
                     let dir_key = dir.clone();
-                    let folder_label = if dir.is_empty() { "(root)".to_string() } else { dir.clone() };
+                    let folder_label = if dir.is_empty() {
+                        "(root)".to_string()
+                    } else {
+                        dir.clone()
+                    };
                     let count = dir_files.len();
                     div()
                         .flex()
@@ -3123,7 +3194,11 @@ impl RightPanelView {
                                 .ml_3()
                                 .flex()
                                 .flex_col()
-                                .children(dir_files.into_iter().map(|f| self.render_file_item(&f, true, cx)))
+                                .children(
+                                    dir_files
+                                        .into_iter()
+                                        .map(|f| self.render_file_item(&f, true, cx)),
+                                )
                         }))
                 }))
                 .into_any_element()
@@ -3180,22 +3255,21 @@ impl RightPanelView {
             !is_empty && selected_count > 0 && !self.git_busy
         };
 
-        let conventional_chips = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .flex_wrap()
-            .children(["feat", "fix", "docs", "refactor", "test", "chore"].into_iter().map(|prefix| {
-                let p = prefix.to_string();
-                Button::new(SharedString::from(format!("chip-{prefix}")))
-                    .label(prefix)
-                    .ghost()
-                    .xsmall()
-                    .tooltip(format!("Prefix message with '{prefix}:'"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.apply_commit_prefix(&p, cx);
-                    }))
-            }));
+        let conventional_chips = div().flex().items_center().gap_1().flex_wrap().children(
+            ["feat", "fix", "docs", "refactor", "test", "chore"]
+                .into_iter()
+                .map(|prefix| {
+                    let p = prefix.to_string();
+                    Button::new(SharedString::from(format!("chip-{prefix}")))
+                        .label(prefix)
+                        .ghost()
+                        .xsmall()
+                        .tooltip(format!("Prefix message with '{prefix}:'"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.apply_commit_prefix(&p, cx);
+                        }))
+                }),
+        );
 
         let commit_footer = div()
             .flex_none()
@@ -3254,9 +3328,14 @@ impl RightPanelView {
                                             .on_click(cx.listener(|this, checked, window, cx| {
                                                 this.commit_amend = *checked;
                                                 if this.commit_amend {
-                                                    let cur = this.commit_message_input.read(cx).value();
+                                                    let cur =
+                                                        this.commit_message_input.read(cx).value();
                                                     if cur.trim().is_empty() {
-                                                        this.run_git_action(GitAction::LoadLastCommitMessage, window, cx);
+                                                        this.run_git_action(
+                                                            GitAction::LoadLastCommitMessage,
+                                                            window,
+                                                            cx,
+                                                        );
                                                     }
                                                 }
                                                 cx.notify();
@@ -3283,7 +3362,9 @@ impl RightPanelView {
                                     .xsmall()
                                     .tooltip("Clear message")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.commit_message_input.update(cx, |input, cx| input.set_value("", window, cx));
+                                        this.commit_message_input.update(cx, |input, cx| {
+                                            input.set_value("", window, cx)
+                                        });
                                         cx.notify();
                                     }))
                             }))
@@ -3454,7 +3535,10 @@ impl RightPanelView {
                                 "Show stashed changes"
                             })
                             .tooltip(if is_expanded { "Collapse" } else { "Expand" })
-                            .ghost().h_auto().w_full().p_0()
+                            .ghost()
+                            .h_auto()
+                            .w_full()
+                            .p_0()
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.stash_expanded = !this.stash_expanded;
                                 if this.stash_expanded
@@ -3480,39 +3564,46 @@ impl RightPanelView {
                                 }
                                 cx.notify();
                             }))
-                            .child(div().w_full().whitespace_normal()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
                             .child(
                                 div()
+                                    .w_full()
+                                    .whitespace_normal()
                                     .flex()
                                     .items_center()
-                                    .gap_1p5()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(div().size(rems(0.875)).text_color(theme.primary).child(
-                                        if is_expanded {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        },
-                                    ))
+                                    .justify_between()
+                                    .gap_2()
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(theme.foreground)
-                                            .child("Stashed changes"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(format!("({count_label}{time_str})")),
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                div()
+                                                    .size(rems(0.875))
+                                                    .text_color(theme.primary)
+                                                    .child(if is_expanded {
+                                                        IconName::ChevronDown
+                                                    } else {
+                                                        IconName::ChevronRight
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(theme.foreground)
+                                                    .child("Stashed changes"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(format!("({count_label}{time_str})")),
+                                            ),
                                     ),
-                            )),
+                            ),
                     )
                     .child(
                         div()
@@ -3548,7 +3639,10 @@ impl RightPanelView {
 
                                 Button::new(SharedString::from(format!("stash-file-{path}")))
                                     .accessibility_label(format!("Review stashed file {path}"))
-                                    .ghost().h_auto().w_full().p_0()
+                                    .ghost()
+                                    .h_auto()
+                                    .w_full()
+                                    .p_0()
                                     .on_click(cx.listener(move |_this, _event, _window, cx| {
                                         let Some(proj) = project_for_click.clone() else {
                                             return;
@@ -3576,53 +3670,57 @@ impl RightPanelView {
                                         })
                                         .detach();
                                     }))
-                                    .child(div().w_full().whitespace_normal()
-                                    .h(rems(1.625))
-                                    .px_2()
-                                    .rounded_sm()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
                                     .child(
                                         div()
+                                            .w_full()
+                                            .whitespace_normal()
+                                            .h(rems(1.625))
+                                            .px_2()
+                                            .rounded_sm()
                                             .flex()
                                             .items_center()
-                                            .gap_1p5()
-                                            .min_w_0()
-                                            .flex_1()
+                                            .justify_between()
+                                            .gap_2()
                                             .child(
                                                 div()
-                                                    .text_xs()
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .text_color(status_color)
-                                                    .child(status),
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(status_color)
+                                                            .child(status),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .text_xs()
+                                                            .text_color(theme.foreground)
+                                                            .child(path),
+                                                    ),
                                             )
                                             .child(
                                                 div()
-                                                    .truncate()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
                                                     .text_xs()
-                                                    .text_color(theme.foreground)
-                                                    .child(path),
+                                                    .child(
+                                                        div()
+                                                            .text_color(theme.success)
+                                                            .child(format!("+{adds}")),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_color(theme.danger)
+                                                            .child(format!("-{dels}")),
+                                                    ),
                                             ),
                                     )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .text_xs()
-                                            .child(
-                                                div()
-                                                    .text_color(theme.success)
-                                                    .child(format!("+{adds}")),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_color(theme.danger)
-                                                    .child(format!("-{dels}")),
-                                            ),
-                                    ))
                             }))
                             .when(is_loading, |container| {
                                 container.child(
@@ -3708,9 +3806,10 @@ impl RightPanelView {
                     .small()
                     .selected_index(if changes_active { 0 } else { 1 })
                     .children(vec![
-                        Tab::new()
-                            .label(changes_label.clone())
-                            .aria_label(format!("Changes, {} files, {} staged", total_changes, staged_in_tab)),
+                        Tab::new().label(changes_label.clone()).aria_label(format!(
+                            "Changes, {} files, {} staged",
+                            total_changes, staged_in_tab
+                        )),
                         Tab::new()
                             .label(history_label.clone())
                             .aria_label(format!("History, {commit_count} recent commits")),
@@ -3869,8 +3968,13 @@ impl RightPanelView {
                         })
                         .child(
                             Button::new(SharedString::from(format!("commit-header-{sha}")))
-                                .accessibility_label(format!("Inspect commit {short_sha}: {summary}"))
-                                .ghost().h_auto().w_full().p_0()
+                                .accessibility_label(format!(
+                                    "Inspect commit {short_sha}: {summary}"
+                                ))
+                                .ghost()
+                                .h_auto()
+                                .w_full()
+                                .p_0()
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     if this.selected_commit_sha.as_deref() == Some(&click_sha) {
                                         this.selected_commit_sha = None;
@@ -3896,57 +4000,61 @@ impl RightPanelView {
                                     }
                                     cx.notify();
                                 }))
-                                .child(div().w_full().whitespace_normal()
-                                .p_2p5()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
                                 .child(
                                     div()
+                                        .w_full()
+                                        .whitespace_normal()
+                                        .p_2p5()
                                         .flex()
-                                        .items_start()
-                                        .justify_between()
-                                        .gap_2()
+                                        .flex_col()
+                                        .gap_1()
                                         .child(
                                             div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(theme.foreground)
-                                                .child(summary),
+                                                .flex()
+                                                .items_start()
+                                                .justify_between()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(theme.foreground)
+                                                        .child(summary),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .flex_shrink_0()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(theme.muted)
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(short_sha.clone()),
+                                                ),
                                         )
                                         .child(
                                             div()
-                                                .flex_none()
-                                                .flex_shrink_0()
-                                                .px_1p5()
-                                                .py_0p5()
-                                                .rounded_sm()
-                                                .bg(theme.muted)
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child(short_sha.clone()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(
-                                            div()
-                                                .size_3()
                                                 .flex()
                                                 .items_center()
-                                                .justify_center()
-                                                .child(IconName::User),
-                                        )
-                                        .child(format!("{author} • {rel_time}")),
-                                )),
+                                                .gap_1p5()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(
+                                                    div()
+                                                        .size_3()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .child(IconName::User),
+                                                )
+                                                .child(format!("{author} • {rel_time}")),
+                                        ),
+                                ),
                         )
                         .children(is_expanded.then(|| {
                             let commit_files = selected_files.clone();
@@ -3996,99 +4104,114 @@ impl RightPanelView {
                                     let m = model_ref.clone();
 
                                     Button::new(SharedString::from(format!(
-                                            "commit-file-{commit_sha}-{path}"
-                                        )))
-                                        .accessibility_label(format!("Review {path} in commit {commit_sha}"))
-                                        .ghost().h_auto().w_full().p_0()
-                                        .on_click(cx.listener(move |_this, _event, _window, cx| {
-                                            let Some(proj) = diff_proj.clone() else {
-                                                return;
-                                            };
-                                            let p = proj.clone();
-                                            let target = target_path.clone();
-                                            let sha_str = diff_sha.clone();
-                                            let label = format!("{target} @ {disp_sha}");
-                                            let state_model = m.clone();
-                                            cx.spawn(async move |_this, cx| {
-                                                let content = cx
-                                                    .background_executor()
-                                                    .spawn(async move {
-                                                        threadlane_git::diff_commit_file(
-                                                            &p, &sha_str, &target,
+                                        "commit-file-{commit_sha}-{path}"
+                                    )))
+                                    .accessibility_label(format!(
+                                        "Review {path} in commit {commit_sha}"
+                                    ))
+                                    .ghost()
+                                    .h_auto()
+                                    .w_full()
+                                    .p_0()
+                                    .on_click(cx.listener(move |_this, _event, _window, cx| {
+                                        let Some(proj) = diff_proj.clone() else {
+                                            return;
+                                        };
+                                        let p = proj.clone();
+                                        let target = target_path.clone();
+                                        let sha_str = diff_sha.clone();
+                                        let label = format!("{target} @ {disp_sha}");
+                                        let state_model = m.clone();
+                                        cx.spawn(async move |_this, cx| {
+                                            let content = cx
+                                                .background_executor()
+                                                .spawn(async move {
+                                                    threadlane_git::diff_commit_file(
+                                                        &p, &sha_str, &target,
+                                                    )
+                                                    .unwrap_or_else(|e| e.to_string())
+                                                })
+                                                .await;
+                                            let _ = state_model.update(cx, |state, cx| {
+                                                state.request_open_diff(proj, label, content);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .detach();
+                                    }))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .whitespace_normal()
+                                            .h(rems(1.625))
+                                            .px_2()
+                                            .rounded_md()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(
+                                                        div()
+                                                            .size_3()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(IconName::File),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .text_xs()
+                                                            .text_color(theme.foreground)
+                                                            .child(path),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .when(file.additions > 0, |r| {
+                                                        r.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(theme.success)
+                                                                .child(format!(
+                                                                    "+{}",
+                                                                    file.additions
+                                                                )),
                                                         )
-                                                        .unwrap_or_else(|e| e.to_string())
                                                     })
-                                                    .await;
-                                                let _ = state_model.update(cx, |state, cx| {
-                                                    state.request_open_diff(proj, label, content);
-                                                    cx.notify();
-                                                });
-                                            })
-                                            .detach();
-                                        }))
-                                        .child(div().w_full().whitespace_normal()
-                                        .h(rems(1.625))
-                                        .px_2()
-                                        .rounded_md()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1p5()
-                                                .child(
-                                                    div()
-                                                        .size_3()
-                                                        .text_color(theme.muted_foreground)
-                                                        .child(IconName::File),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_xs()
-                                                        .text_color(theme.foreground)
-                                                        .child(path),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1p5()
-                                                .when(file.additions > 0, |r| {
-                                                    r.child(
+                                                    .when(file.deletions > 0, |r| {
+                                                        r.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(theme.danger)
+                                                                .child(format!(
+                                                                    "-{}",
+                                                                    file.deletions
+                                                                )),
+                                                        )
+                                                    })
+                                                    .child(
                                                         div()
+                                                            .size(rems(0.875))
+                                                            .rounded_sm()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
                                                             .text_xs()
-                                                            .text_color(theme.success)
-                                                            .child(format!("+{}", file.additions)),
-                                                    )
-                                                })
-                                                .when(file.deletions > 0, |r| {
-                                                    r.child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(theme.danger)
-                                                            .child(format!("-{}", file.deletions)),
-                                                    )
-                                                })
-                                                .child(
-                                                    div()
-                                                        .size(rems(0.875))
-                                                        .rounded_sm()
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .text_xs()
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .text_color(status_color)
-                                                        .child(status),
-                                                ),
-                                        ))
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(status_color)
+                                                            .child(status),
+                                                    ),
+                                            ),
+                                    )
                                 }))
                         }))
                 }))
@@ -4126,7 +4249,8 @@ impl RightPanelView {
                             )
                             .child(
                                 div().flex_1().child(
-                                    Input::new(&self.history_filter_input).aria_label("Filter commits")
+                                    Input::new(&self.history_filter_input)
+                                        .aria_label("Filter commits")
                                         .appearance(false)
                                         .bordered(false),
                                 ),
@@ -4367,7 +4491,10 @@ impl RightPanelView {
                     } else {
                         format!("Switch to branch {name}")
                     })
-                    .ghost().h_auto().w_full().p_0()
+                    .ghost()
+                    .h_auto()
+                    .w_full()
+                    .p_0()
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         if !is_current {
                             let has_dirty = this
@@ -4389,72 +4516,76 @@ impl RightPanelView {
                             }
                         }
                     }))
-                    .child(div().w_full().whitespace_normal()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_2p5()
-                    .py_2()
-                    .rounded_md()
-                    .bg(if is_current {
-                        theme.muted.opacity(0.7)
-                    } else {
-                        gpui::transparent_black()
-                    })
                     .child(
                         div()
+                            .w_full()
+                            .whitespace_normal()
                             .flex()
                             .items_center()
+                            .justify_between()
                             .gap_2()
-                            .min_w_0()
-                            .flex_1()
+                            .px_2p5()
+                            .py_2()
+                            .rounded_md()
+                            .bg(if is_current {
+                                theme.muted.opacity(0.7)
+                            } else {
+                                gpui::transparent_black()
+                            })
                             .child(
                                 div()
-                                    .size_4()
                                     .flex()
                                     .items_center()
-                                    .justify_center()
-                                    .text_color(if is_current {
-                                        theme.primary
-                                    } else {
-                                        theme.muted_foreground
-                                    })
-                                    .child(if is_current {
-                                        Icon::new(IconName::Check)
-                                    } else {
-                                        Icon::default().path("icons/git/branch.svg")
-                                    }),
+                                    .gap_2()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .size_4()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(if is_current {
+                                                theme.primary
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(if is_current {
+                                                Icon::new(IconName::Check)
+                                            } else {
+                                                Icon::default().path("icons/git/branch.svg")
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_xs()
+                                            .font_weight(if is_current {
+                                                FontWeight::BOLD
+                                            } else {
+                                                FontWeight::MEDIUM
+                                            })
+                                            .text_color(if is_current {
+                                                theme.foreground
+                                            } else {
+                                                theme.foreground.opacity(0.9)
+                                            })
+                                            .child(name),
+                                    )
+                                    .children(is_current.then(|| {
+                                        Tag::new()
+                                            .child("current")
+                                            .with_variant(TagVariant::Info)
+                                            .small()
+                                    })),
                             )
-                            .child(
+                            .children((!rel_time.is_empty()).then(|| {
                                 div()
-                                    .truncate()
                                     .text_xs()
-                                    .font_weight(if is_current {
-                                        FontWeight::BOLD
-                                    } else {
-                                        FontWeight::MEDIUM
-                                    })
-                                    .text_color(if is_current {
-                                        theme.foreground
-                                    } else {
-                                        theme.foreground.opacity(0.9)
-                                    })
-                                    .child(name),
-                            )
-                            .children(is_current.then(|| {
-                                Tag::new()
-                                    .child("current")
-                                    .with_variant(TagVariant::Info)
-                                    .small()
+                                    .text_color(theme.muted_foreground)
+                                    .child(rel_time)
                             })),
                     )
-                    .children((!rel_time.is_empty()).then(|| {
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(rel_time)
-                    })))
             }))
     }
 
@@ -4563,7 +4694,9 @@ impl RightPanelView {
                             .bg(theme.input)
                             .border_1()
                             .border_color(theme.border)
-                            .child(Input::new(&self.stash_message_input).aria_label("Stash message")),
+                            .child(
+                                Input::new(&self.stash_message_input).aria_label("Stash message"),
+                            ),
                     ),
             )
             .child(
@@ -4610,12 +4743,8 @@ impl RightPanelView {
                             .small()
                             .disabled(self.git_busy)
                             .on_click(cx.listener(move |this, _event, window, cx| {
-                                let message = this
-                                    .stash_message_input
-                                    .read(cx)
-                                    .value()
-                                    .trim()
-                                    .to_string();
+                                let message =
+                                    this.stash_message_input.read(cx).value().trim().to_string();
                                 let msg_opt = (!message.is_empty()).then_some(message);
                                 let include_untracked = this.stash_include_untracked;
                                 this.run_git_action(
@@ -5448,7 +5577,8 @@ pub(crate) fn retain_review_selection(
     }
 }
 
-pub fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {    fn visit(
+pub fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
+    fn visit(
         root: &Path,
         relative: &Path,
         depth: usize,
@@ -5508,17 +5638,27 @@ pub fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {    fn vis
 #[cfg(test)]
 mod dialog_keyboard_tests {
     use super::RightPanelView;
-    use gpui::{AppContext, Context, Entity, FocusHandle, Render, Window, IntoElement, div,
-        InteractiveElement, StatefulInteractiveElement, Styled, Role, TestAppContext};
+    use gpui::{
+        AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement, Render, Role,
+        StatefulInteractiveElement, Styled, TestAppContext, Window, div,
+    };
     use gpui_component::{Root, WindowExt};
     use threadlane_ui_state::AppState;
 
-    struct Host { panel: Entity<RightPanelView>, trigger: FocusHandle }
+    struct Host {
+        panel: Entity<RightPanelView>,
+        trigger: FocusHandle,
+    }
     impl Render for Host {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            self.panel.update(cx, |panel, cx| panel.sync_git_dialog(window, cx));
-            div().id("dialog-host").track_focus(&self.trigger).role(Role::Application)
-                .tab_group().size_full()
+            self.panel
+                .update(cx, |panel, cx| panel.sync_git_dialog(window, cx));
+            div()
+                .id("dialog-host")
+                .track_focus(&self.trigger)
+                .role(Role::Application)
+                .tab_group()
+                .size_full()
         }
     }
 
@@ -5537,13 +5677,15 @@ mod dialog_keyboard_tests {
         });
         let (panel, trigger) = captured.borrow_mut().take().unwrap();
         for kind in 0..3 {
-            cx.update(|window, cx| panel.update(cx, |panel, cx| {
-                panel.new_branch_dialog_open = kind == 0;
-                panel.merge_dialog_open = kind == 1;
-                panel.switch_dialog_open = kind == 2;
-                panel.switch_target_branch = Some("test-target".into());
-                panel.sync_git_dialog(window, cx);
-            }));
+            cx.update(|window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.new_branch_dialog_open = kind == 0;
+                    panel.merge_dialog_open = kind == 1;
+                    panel.switch_dialog_open = kind == 2;
+                    panel.switch_target_branch = Some("test-target".into());
+                    panel.sync_git_dialog(window, cx);
+                })
+            });
             cx.run_until_parked();
             cx.update(|window, cx| {
                 window.draw(cx).clear(cx);
@@ -5557,7 +5699,9 @@ mod dialog_keyboard_tests {
                 });
                 let keystroke = gpui::Keystroke::parse("space").unwrap();
                 cx.simulate_event(gpui::KeyDownEvent {
-                    keystroke: keystroke.clone(), is_held: false, prefer_character_input: false,
+                    keystroke: keystroke.clone(),
+                    is_held: false,
+                    prefer_character_input: false,
                 });
                 cx.simulate_event(gpui::KeyUpEvent { keystroke });
                 panel.read_with(cx, |panel, _| {
@@ -5571,7 +5715,11 @@ mod dialog_keyboard_tests {
                 assert!(!window.has_active_dialog(cx));
                 assert!(trigger.is_focused(window));
                 let panel = panel.read(cx);
-                assert!(!panel.new_branch_dialog_open && !panel.merge_dialog_open && !panel.switch_dialog_open);
+                assert!(
+                    !panel.new_branch_dialog_open
+                        && !panel.merge_dialog_open
+                        && !panel.switch_dialog_open
+                );
                 assert!(panel.switch_target_branch.is_none());
                 assert!(!panel.git_busy, "dismissing a dialog must not run Git");
             });
@@ -5583,8 +5731,8 @@ mod dialog_keyboard_tests {
 mod review_layout_tests {
     use super::RightPanelView;
     use gpui::{
-        div, px, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled,
-        TestAppContext, Window,
+        AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext,
+        Window, div, px,
     };
     use threadlane_git::GitFile;
     use threadlane_ui_state::AppState;
