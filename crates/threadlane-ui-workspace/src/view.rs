@@ -335,7 +335,7 @@ impl WorkspaceView {
                     model.update(cx, |state, _cx| state.requested_terminal_command.take())
                 {
                     this.bottom_panel_visible = true;
-                    let term = if let Some(work_dir) = model.read(cx).active_work_dir.clone() {
+                    let term = if let Some(work_dir) = model.read(cx).active_git_work_dir() {
                         this.get_or_create_active_terminal(&work_dir, cx)
                     } else {
                         this.fallback_terminal(cx)
@@ -349,7 +349,7 @@ impl WorkspaceView {
                     model.update(cx, |state, _cx| state.requested_terminal_work_dir.take())
                 {
                     this.bottom_panel_visible = true;
-                    if let Some(project) = model.read(cx).active_work_dir.clone() {
+                    if let Some(project) = model.read(cx).active_git_work_dir() {
                         this.add_terminal_tab_for_project(project, work_dir, cx);
                     } else {
                         this.get_or_create_active_terminal(&work_dir, cx);
@@ -1687,7 +1687,7 @@ impl WorkspaceView {
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.bottom_panel_visible = !this.bottom_panel_visible;
                                 if this.bottom_panel_visible {
-                                    let project = this.model.read(cx).active_work_dir.clone();
+                                    let project = this.model.read(cx).active_git_work_dir();
                                     let terminal = project
                                         .as_ref()
                                         .and_then(|project| this.terminal_groups.get(project))
@@ -1749,7 +1749,7 @@ impl WorkspaceView {
     ) {
         self.bottom_panel_visible = !self.bottom_panel_visible;
         if self.bottom_panel_visible {
-            let project = self.model.read(cx).active_work_dir.clone();
+            let project = self.model.read(cx).active_git_work_dir();
             let terminal = project
                 .as_ref()
                 .and_then(|project| self.terminal_groups.get(project))
@@ -1877,7 +1877,7 @@ impl Render for WorkspaceView {
                 });
             }
         }
-        let terminal_project = self.model.read(cx).active_work_dir.clone();
+        let terminal_project = self.model.read(cx).active_git_work_dir();
         let (terminal_tabs, active_terminal_tab, active_terminal) =
             if let Some(project) = &terminal_project {
                 let group = self.get_or_create_terminal_group(project, cx);
