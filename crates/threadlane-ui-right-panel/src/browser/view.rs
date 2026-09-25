@@ -23,7 +23,7 @@ use super::scripts::{
     annotate_install_js, annotate_poll_js, annotate_uninstall_js, unwrap_callback_payload,
 };
 
-const DEFAULT_URL: &str = "https://gpui-kit.com";
+const DEFAULT_URL: &str = "https://github.com/wheregmis/threadlane";
 
 struct BrowserTab {
     id: usize,
@@ -611,6 +611,7 @@ impl Render for BrowserView {
         let annotating = self.annotating;
         div()
             .id("browser-panel")
+            .role(Role::Application)
             .track_focus(&self.focus_handle)
             .tab_group()
             .size_full()
@@ -728,7 +729,7 @@ impl Render for BrowserView {
                                     .items_center()
                                     .rounded_md()
                                     .bg(if selected {
-                                        cx.theme().primary.opacity(0.12)
+                                        cx.theme().list_active
                                     } else {
                                         gpui::transparent_black()
                                     })

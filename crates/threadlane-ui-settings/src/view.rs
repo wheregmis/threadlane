@@ -25,10 +25,10 @@ use threadlane_updater::{current_version, UpdateStatus};
 /// the token rule: the preview must show its own theme, not the active one),
 /// so they are defined once here instead of repeated at each swatch.
 fn preview_dark_surface() -> Hsla {
-    hsla(0.0, 0.0, 0.07, 1.0)
+    hsla(0.65, 0.10, 0.08, 1.0)
 }
 fn preview_dark_well() -> Hsla {
-    hsla(0.0, 0.0, 0.16, 1.0)
+    hsla(0.65, 0.12, 0.14, 1.0)
 }
 fn preview_light_surface() -> Hsla {
     hsla(0.0, 0.0, 0.98, 1.0)

@@ -73,6 +73,7 @@ pub struct AppState {
     pub pending_permissions: HashMap<String, threadlane_protocol::PermissionRequest>,
     pub pending_questions: HashMap<String, threadlane_protocol::QuestionRequest>,
     pub pending_hydrations: Vec<SessionHydrationRequest>,
+    in_flight_hydrations: HashMap<SessionProjectionKey, usize>,
     pub git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
     pub git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
     pub auto_address_pr_reviews_enabled: bool,
@@ -328,6 +329,7 @@ impl AppState {
             pending_permissions: HashMap::new(),
             pending_questions: HashMap::new(),
             pending_hydrations: Vec::new(),
+            in_flight_hydrations: HashMap::new(),
             git_statuses: HashMap::new(),
             git_prs: HashMap::new(),
             auto_address_pr_reviews_enabled: threadlane_git::load_auto_address_pr_reviews_enabled(),
@@ -1206,6 +1208,36 @@ impl AppState {
     pub fn active_session_matches(&self, session_id: &str, session_file: &Path) -> bool {
         self.active_session_projection_key()
             .is_some_and(|active| active == Self::projection_key(session_id, session_file))
+    }
+
+    pub fn active_session_is_loading(&self) -> bool {
+        self.pending_hydrations.iter().any(|pending| {
+            pending.reload_messages
+                && self.active_session_matches(&pending.session_id, &pending.session_file)
+        }) || self
+            .active_session_projection_key()
+            .is_some_and(|key| self.in_flight_hydrations.contains_key(&key))
+    }
+
+    pub fn take_pending_hydrations(&mut self) -> Vec<SessionHydrationRequest> {
+        let requests = std::mem::take(&mut self.pending_hydrations);
+        for request in requests.iter().filter(|request| request.reload_messages) {
+            *self
+                .in_flight_hydrations
+                .entry(Self::projection_key(&request.session_id, &request.session_file))
+                .or_default() += 1;
+        }
+        requests
+    }
+
+    pub fn finish_session_hydration(&mut self, session_id: &str, session_file: &Path) {
+        let key = Self::projection_key(session_id, session_file);
+        if let Some(count) = self.in_flight_hydrations.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                self.in_flight_hydrations.remove(&key);
+            }
+        }
     }
 
     fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
