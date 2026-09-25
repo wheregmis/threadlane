@@ -1067,13 +1067,7 @@ impl RightPanelView {
             GitAction::IgnoreFile(p) => format!("Adding {p} to .gitignore…"),
             GitAction::IgnoreExtension(ext) => format!("Ignoring *.{ext} files…"),
         };
-        self.git_feedback = Some(feedback.clone());
-        let notif = Notification::info(feedback);
-        if let Some(ref mut window) = window {
-            window.push_notification(notif, cx);
-        } else {
-            self.pending_git_notifications.push(notif);
-        }
+        self.git_feedback = Some(feedback);
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
             if matches!(&action, GitAction::LoadLastCommitMessage) {
