@@ -141,10 +141,38 @@ fn builtin_entry(id: &str, label: &str, provider: &str, context_window: usize) -
     }
 }
 
+fn builtin_reasoning_entry(
+    id: &str,
+    label: &str,
+    provider: &str,
+    default_effort: &str,
+) -> ModelInfo {
+    ModelInfo {
+        id: id.to_string(),
+        label: label.to_string(),
+        provider: Some(provider.to_string()),
+        context_window: None,
+        supported_efforts: Vec::new(),
+        default_effort: Some(default_effort.to_string()),
+    }
+}
+
 /// Compiled fallback seeds. Prefer `resources/models.json` or user files for
 /// new models; this list only guarantees offline startup.
 pub(crate) fn builtin_models() -> Vec<ModelInfo> {
     let mut models = Vec::new();
+    models.push(builtin_reasoning_entry(
+        "gpt-6-sol",
+        "GPT-6 Sol",
+        "openai",
+        "medium",
+    ));
+    models.push(builtin_reasoning_entry(
+        "gpt-6-luna",
+        "GPT-6 Luna",
+        "openai",
+        "high",
+    ));
     for (id, label, context) in [
         ("gpt-5.6-luna", "GPT-5.6 Luna", 1_000_000),
         ("gpt-5.4", "GPT-5.4", 1_000_000),
@@ -394,6 +422,19 @@ mod tests {
             effort
         );
         assert_eq!(effort.as_api_str(), Some("ultra"));
+    }
+
+    #[test]
+    fn gpt6_fallback_entries_preserve_verified_efforts_without_context_guess() {
+        let sol = find_model("gpt-6-sol", None).expect("GPT-6 Sol fallback entry");
+        assert_eq!(sol.label, "GPT-6 Sol");
+        assert_eq!(sol.default_effort.as_deref(), Some("medium"));
+        assert_eq!(sol.context_window, None);
+
+        let luna = find_model("gpt-6-luna", None).expect("GPT-6 Luna fallback entry");
+        assert_eq!(luna.label, "GPT-6 Luna");
+        assert_eq!(luna.default_effort.as_deref(), Some("high"));
+        assert_eq!(luna.context_window, None);
     }
 
     #[test]

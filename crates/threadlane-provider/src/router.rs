@@ -1529,7 +1529,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_request_builds_an_object_for_codex() {
         let request = RuntimeRequest {
-            model: "gpt-5.6-luna".into(),
+            model: "gpt-6-luna".into(),
             messages: serde_json::json!([{"role": "user", "content": "hello"}]),
             tools: serde_json::json!([]),
             prompt_cache_key: Some("cache-key".into()),
@@ -1539,7 +1539,7 @@ mod tests {
             .resolve(PayloadFormat::Codex)
             .await;
         assert!(payload.is_object());
-        assert_eq!(payload["model"], "gpt-5.6-luna");
+        assert_eq!(payload["model"], "gpt-6-luna");
         assert_eq!(
             payload["input"],
             serde_json::json!([{

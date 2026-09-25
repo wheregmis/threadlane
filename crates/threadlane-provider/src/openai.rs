@@ -1969,6 +1969,7 @@ mod tests {
     fn chat_model_filter_accepts_new_models_without_code_changes() {
         use super::is_chat_capable_model;
         assert!(is_chat_capable_model("gpt-5.6-luna"));
+        assert!(is_chat_capable_model("gpt-6-sol"));
         assert!(is_chat_capable_model("gpt-99-new"));
         assert!(is_chat_capable_model("o4-mini"));
         assert!(!is_chat_capable_model("text-embedding-3-small"));
