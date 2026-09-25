@@ -684,6 +684,56 @@ impl AppState {
         true
     }
 
+    pub(crate) fn recreate_active_worktree(&mut self) -> Result<(), String> {
+        let work_dir = self.active_work_dir.clone().ok_or("No active project")?;
+        let session_id = self.active_session_id.clone().ok_or("No active session")?;
+        let session = self
+            .projects
+            .iter()
+            .find(|project| project.work_dir == work_dir)
+            .and_then(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+            })
+            .cloned()
+            .ok_or("Active session was not found")?;
+        if !session.is_worktree {
+            return Err("The active session does not use a worktree".into());
+        }
+        if session.worktree_available {
+            return Err("The active worktree is already available".into());
+        }
+        let branch = session
+            .git_branch
+            .as_deref()
+            .ok_or("The session has no recorded Git branch")?;
+        let branches = threadlane_git::inspect(&work_dir)
+            .map_err(|error| format!("Could not inspect project branches: {error}"))?
+            .branches;
+        if !branches.iter().any(|candidate| candidate == branch) {
+            return Err(format!("Branch '{branch}' no longer exists in the project"));
+        }
+        threadlane_git::create_worktree(&work_dir, &session.runtime_work_dir, branch)
+            .map_err(|error| format!("Could not recreate worktree: {error}"))?;
+        let sessions = discover_sessions_in_project(&work_dir);
+        let still_present = sessions.iter().any(|candidate| candidate.id == session_id);
+        if let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| project.work_dir == work_dir)
+        {
+            project.sessions = sessions;
+        }
+        if still_present {
+            self.select_session(work_dir, session_id);
+            Ok(())
+        } else {
+            Err("Worktree was recreated, but the session could not be rediscovered".into())
+        }
+    }
+
     fn refresh_active_session(&mut self) {
         if let (Some(work_dir), Some(session_id)) = (
             &self.active_work_dir.clone(),
@@ -1283,7 +1333,10 @@ impl AppState {
         for request in requests.iter().filter(|request| request.reload_messages) {
             *self
                 .in_flight_hydrations
-                .entry(Self::projection_key(&request.session_id, &request.session_file))
+                .entry(Self::projection_key(
+                    &request.session_id,
+                    &request.session_file,
+                ))
                 .or_default() += 1;
         }
         requests
@@ -3386,12 +3439,9 @@ impl AppState {
                 reminder.clone(),
                 None,
             )),
-            AgentEvent::FusionUpdate { model, message } => Some((
-                "Router",
-                format!("Fusion → {model}"),
-                message.clone(),
-                None,
-            )),
+            AgentEvent::FusionUpdate { model, message } => {
+                Some(("Router", format!("Fusion → {model}"), message.clone(), None))
+            }
             _ => None,
         };
         if let Some((category, summary, detail, lane)) = entry {
@@ -3747,27 +3797,24 @@ impl AppState {
         self.run_timings.insert(key.clone(), timing);
     }
 
-
     /// Applies a durable runtime event to the session projection.
     ///
     /// Record-backed events remain authoritative for the session projection and
     /// are intentionally left for the existing journal hydration path.
     pub fn apply_durable_event(&mut self, session_id: &str, event: HarnessEvent) -> bool {
         match event.payload() {
-            EventPayload::Agent(agent_event) => self.drain_chat_stream(vec![
-                ChatStreamEvent::Agent {
+            EventPayload::Agent(agent_event) => {
+                self.drain_chat_stream(vec![ChatStreamEvent::Agent {
                     session_id: session_id.to_owned(),
                     event: agent_event.clone(),
+                }])
+            }
+            EventPayload::Fault(error) => self.drain_chat_stream(vec![ChatStreamEvent::Agent {
+                session_id: session_id.to_owned(),
+                event: AgentEvent::AgentError {
+                    error: error.clone(),
                 },
-            ]),
-            EventPayload::Fault(error) => self.drain_chat_stream(vec![
-                ChatStreamEvent::Agent {
-                    session_id: session_id.to_owned(),
-                    event: AgentEvent::AgentError {
-                        error: error.clone(),
-                    },
-                },
-            ]),
+            }]),
             _ => false,
         }
     }
@@ -3776,7 +3823,8 @@ impl AppState {
     pub fn subscribe_durable_events(
         &self,
         runtime: &SessionRuntime,
-    ) -> Result<threadlane_runtime::harness::Subscription, threadlane_runtime::harness::EventError> {
+    ) -> Result<threadlane_runtime::harness::Subscription, threadlane_runtime::harness::EventError>
+    {
         runtime.subscribe_durable_events()
     }
     /// Polls a runtime subscription and applies any durable agent events.
@@ -3818,13 +3866,11 @@ impl AppState {
                         SchedulerSupervisorEvent::Agent(event) => {
                             ChatStreamEvent::Agent { session_id, event }
                         }
-                        SchedulerSupervisorEvent::Completed(result) => {
-                            ChatStreamEvent::Scheduled {
-                                session_id,
-                                session_file: session_file.clone(),
-                                result,
-                            }
-                        }
+                        SchedulerSupervisorEvent::Completed(result) => ChatStreamEvent::Scheduled {
+                            session_id,
+                            session_file: session_file.clone(),
+                            result,
+                        },
                     });
                 }
             }

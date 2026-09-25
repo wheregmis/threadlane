@@ -15,6 +15,11 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
                 state.session_status = Some(error);
             }
         }
+        AppAction::RecreateActiveWorktree => {
+            if let Err(error) = state.recreate_active_worktree() {
+                state.session_status = Some(error);
+            }
+        }
         AppAction::SelectSession {
             work_dir,
             session_id,
