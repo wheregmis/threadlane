@@ -199,7 +199,34 @@ fn active_git_work_dir_uses_the_active_session_checkout_when_available() {
     state.active_session_id = Some("missing-session".into());
 
     assert_eq!(state.active_git_work_dir(), None);
-    assert!(state.active_worktree_unavailable());
+    // No session record exists, so there is no worktree to recreate: the
+    // terminal falls back instead of offering recovery that would fail with
+    // "Active session was not found".
+    assert!(!state.active_worktree_unavailable());
+}
+
+#[test]
+fn stale_session_refresh_results_are_discarded() {
+    let project = PathBuf::from("/projects/local");
+    let mut state = AppState::load_from_registry(Vec::new());
+    state.projects = vec![ProjectInfo {
+        name: "Local".into(),
+        work_dir: project.clone(),
+        sessions: Vec::new(),
+        is_expanded: true,
+    }];
+    state.active_work_dir = Some(project.clone());
+    state.active_session_id = Some("session".into());
+
+    // A result captured before a worktree recreation (older generation) must
+    // not overwrite current sessions.
+    state.session_refresh_generation = 1;
+    assert!(!state.apply_session_refresh(project.clone(), Vec::new(), 0));
+    assert!(state.active_session_id.as_deref() == Some("session"));
+    assert!(state.apply_session_refresh(project.clone(), Vec::new(), 1));
+    // The refreshed list omits the selected session, so the selection clears
+    // instead of pointing at a record that no longer exists.
+    assert!(state.active_session_id.is_none());
 }
 
 
@@ -2401,8 +2428,9 @@ fn startup_seeds_session_rows_without_reducing_every_journal() {
     let mut receiver = state.session_refresh_rx.take().unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let (work_dir, sessions) = loop {
-        if let Ok(refresh) = receiver.try_recv() {
-            break refresh;
+        if let Ok((generation, work_dir, sessions)) = receiver.try_recv() {
+            assert_eq!(generation, 0);
+            break (work_dir, sessions);
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -2410,7 +2438,7 @@ fn startup_seeds_session_rows_without_reducing_every_journal() {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    assert!(state.apply_session_refresh(work_dir, sessions));
+    assert!(state.apply_session_refresh(work_dir, sessions, 0));
     let deferred = state.projects[0]
         .sessions
         .iter()
