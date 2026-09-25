@@ -49,6 +49,43 @@ pub struct RuntimeUsage {
     pub cache_write_tokens: u32,
     pub total_tokens: u32,
 }
+
+/// What Threadlane can observe about provider prompt caching. A missing TTL
+/// or hit report is unknown, never evidence of a miss or free inference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCacheCapabilities {
+    pub accepts_cache_key: bool,
+    pub reports_cached_tokens: bool,
+    pub ttl_seconds: Option<u32>,
+}
+
+impl ProviderCacheCapabilities {
+    pub fn observed_hit(&self, usage: Option<&RuntimeUsage>) -> Option<bool> {
+        (self.reports_cached_tokens && usage.is_some_and(|usage| usage.cache_read_tokens > 0))
+            .then_some(true)
+    }
+}
+
+#[cfg(test)]
+mod cache_capability_tests {
+    use super::*;
+
+    #[test]
+    fn zero_cached_tokens_is_unknown_not_a_measured_miss() {
+        let capabilities = ProviderCacheCapabilities {
+            accepts_cache_key: true,
+            reports_cached_tokens: true,
+            ttl_seconds: None,
+        };
+        assert_eq!(capabilities.observed_hit(Some(&RuntimeUsage::default())), None);
+        let usage = RuntimeUsage {
+            cache_read_tokens: 12,
+            ..Default::default()
+        };
+        assert_eq!(capabilities.observed_hit(Some(&usage)), Some(true));
+        assert_eq!(ProviderCacheCapabilities::default().observed_hit(Some(&usage)), None);
+    }
+}
 #[derive(Debug, Clone)]
 pub enum RuntimeStreamEvent {
     ContentToken(String),
@@ -95,6 +132,9 @@ pub trait ProviderPort: Send + Sync {
     ) -> Result<DeferredResponse, String>;
     async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String>;
     fn provider_kind(&self, model: &str) -> &'static str;
+    fn cache_capabilities(&self, _model: &str) -> ProviderCacheCapabilities {
+        ProviderCacheCapabilities::default()
+    }
     /// Rotate the OpenAI-branch credential for subsequent requests. Used
     /// when the session model changes providers mid-task (slash `/model`,
     /// Fusion routing); the shared cell inside `ProviderClient` makes the

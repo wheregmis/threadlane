@@ -1,6 +1,33 @@
 use super::*;
 
 impl CodingSessionHarness {
+    /// A Fusion audit fact has a unique key, so replay keeps every decision
+    /// alongside the existing per-run usage and provider trace records.
+    pub(crate) fn record_fusion_audit(
+        &mut self,
+        lane: &str,
+        run_id: Option<&str>,
+        event: serde_json::Value,
+    ) -> Result<(), String> {
+        self.ensure_fresh()?;
+        let seq = harness_next_seq(self.store.store());
+        let record = HarnessRecord::FactSet {
+            id: format!("fusion-audit-{seq}"),
+            seq,
+            lane: lane.into(),
+            timestamp: timestamp(),
+            run_id: run_id.map(str::to_owned),
+            key: format!("fusion_audit:{seq}"),
+            value: serde_json::to_string(&event).map_err(|error| error.to_string())?,
+        };
+        self.store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
     // ── Usage ─────────────────────────────────────────────────────────
 
     /// Record provider token usage for a run.

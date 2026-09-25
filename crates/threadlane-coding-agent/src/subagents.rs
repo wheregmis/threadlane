@@ -25,7 +25,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use threadlane_protocol::browser::BrowserBridge;
 use threadlane_protocol::{AgentEvent, AgentMessage, SubagentProgressUpdate};
-use threadlane_runtime::harness::HookKind;
+use threadlane_runtime::harness::{HookKind, SessionStore};
 use threadlane_runtime::ToolPolicy;
 use threadlane_runtime::{AgentRuntime, TurnState};
 use threadlane_skills::agents::{discover_agents, AgentDefinition, AgentScope};
@@ -117,6 +117,7 @@ pub struct CompletedSubagentLane {
     pub(crate) status: SubagentLaneStatus,
     pub(crate) messages: Vec<AgentMessage>,
     pub(crate) error: Option<String>,
+    pub(crate) escalation_reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -159,6 +160,7 @@ pub struct SubagentResult {
     output: String,
     thinking: Vec<AgentMessage>,
     pub(crate) error: Option<String>,
+    pub(crate) escalation_reason: Option<String>,
     pub(crate) messages: Vec<AgentMessage>,
 }
 
@@ -473,6 +475,30 @@ pub(crate) async fn run_subagents_with_context(
                         ),
                     }
                     result.and_then(|started| {
+                        if let Some(state) = journal
+                            .store
+                            .facts()
+                            .get("fusion_state")
+                            .and_then(|json| serde_json::from_str::<threadlane_orchestrator::FusionState>(json).ok())
+                        {
+                            journal
+                                .record_fusion_audit(
+                                    &started.identity.lane_name,
+                                    Some(&started.identity.run_id),
+                                    serde_json::json!({
+                                        "version": 1,
+                                        "kind": "delegation",
+                                        "model": context.child_model,
+                                        "compaction_generation": state.compaction_generation,
+                                        "workspace": context.work_dir,
+                                        "isolated_workspace": isolate_workspace,
+                                    }),
+                                )
+                                .map_err(|error| SubagentStartError {
+                                    identity: Some(started.identity.clone()),
+                                    error,
+                                })?;
+                        }
                         if let Some(message) = context_message {
                             journal
                                 .append_subagent_context(
@@ -681,6 +707,7 @@ pub(crate) async fn run_subagents_with_context(
                     .ok()
                     .and_then(|result| result.error.clone())
                     .or_else(|| result.as_ref().err().cloned()),
+                escalation_reason: result.as_ref().ok().and_then(|result| result.escalation_reason.clone()),
             };
             // Completion belongs to the child lifecycle, not batch success.
             // A sibling failure must not strand this lane or discard its work.
@@ -771,7 +798,51 @@ pub(crate) async fn revive_subagent_lane(
     }
     let (identity, accepted) = {
         let mut journal = CodingSessionHarness::open(&session_file)?;
-        journal.resume_subagent_lane(&req.lane_name, &prompt)?
+        let fusion_state = journal
+            .store
+            .facts()
+            .get("fusion_state")
+            .and_then(|json| serde_json::from_str::<threadlane_orchestrator::FusionState>(json).ok());
+        if let Some(state) = fusion_state.as_ref() {
+            let previous = journal.store.records().iter().rev().find_map(|record| match record {
+                threadlane_runtime::harness::Record::FactSet { lane, key, value, .. }
+                    if lane == &req.lane_name && key.starts_with("fusion_audit:") =>
+                {
+                    serde_json::from_str::<serde_json::Value>(value).ok().filter(|event| {
+                        matches!(event.get("kind").and_then(serde_json::Value::as_str), Some("delegation" | "revive"))
+                    })
+                }
+                _ => None,
+            });
+            let safe = previous.as_ref().is_some_and(|event| {
+                event.get("compaction_generation").and_then(serde_json::Value::as_u64)
+                    == Some(state.compaction_generation)
+                    && event.get("model").and_then(serde_json::Value::as_str) == Some(req.model.as_str())
+                    && event.get("workspace").and_then(serde_json::Value::as_str)
+                        == context.work_dir.to_str()
+                    && event.get("isolated_workspace").and_then(serde_json::Value::as_bool)
+                        == Some(false)
+            });
+            if !safe {
+                return Err("Fusion lane context is stale after compaction, workspace, or model change; start a new child".into());
+            }
+        }
+        let (identity, accepted) = journal.resume_subagent_lane(&req.lane_name, &prompt)?;
+        if let Some(state) = fusion_state {
+            journal.record_fusion_audit(
+                &identity.lane_name,
+                Some(&identity.run_id),
+                serde_json::json!({
+                    "version": 1,
+                    "kind": "revive",
+                    "model": req.model,
+                    "compaction_generation": state.compaction_generation,
+                    "workspace": context.work_dir,
+                    "isolated_workspace": false,
+                }),
+            )?;
+        }
+        (identity, accepted)
     };
     context.hub.register(
         identity.lane_name.clone(),
@@ -887,6 +958,7 @@ pub(crate) async fn revive_subagent_lane(
                 .ok()
                 .and_then(|result| result.error.clone())
                 .or_else(|| result.as_ref().err().cloned()),
+            escalation_reason: result.as_ref().ok().and_then(|result| result.escalation_reason.clone()),
         };
         let _ = accept_completed_subagent_lanes(&completed_lanes, vec![lane]);
     });
@@ -1165,6 +1237,7 @@ pub(crate) async fn run_subagent_task(
                 output: "test subagent result".into(),
                 thinking: Vec::new(),
                 error: None,
+                escalation_reason: None,
                 messages: resume_messages,
             });
         }
@@ -1225,6 +1298,7 @@ pub(crate) async fn run_subagent_task(
             output: format!("test subagent result ({observed_model})"),
             thinking: Vec::new(),
             error: None,
+            escalation_reason: None,
             messages,
         });
     }
@@ -1310,6 +1384,7 @@ pub(crate) async fn run_subagent_task(
                 output: error.clone(),
                 thinking,
                 error: Some(error),
+                escalation_reason: None,
                 messages: state
                     .messages
                     .into_iter()
@@ -1376,9 +1451,16 @@ pub(crate) async fn run_subagent_task(
     .await?;
 
     let mut error = None;
+    let mut escalation_reason = None;
     while let Ok(event) = events.try_recv() {
-        if let AgentEvent::AgentError { error: message } = event {
-            error = Some(message);
+        match event {
+            AgentEvent::AgentError { error: message } => error = Some(message),
+            AgentEvent::QuestionRequested { .. } => escalation_reason = Some("unresolved_question".into()),
+            AgentEvent::PermissionRequested { .. } => escalation_reason = Some("permission_requested".into()),
+            AgentEvent::ToolExecutionEnd { result, .. } if result.is_error => {
+                escalation_reason.get_or_insert_with(|| "tool_failure".into());
+            }
+            _ => {}
         }
     }
     let state = agent.get_state().await;
@@ -1414,6 +1496,7 @@ pub(crate) async fn run_subagent_task(
         output: completion_error.clone().unwrap_or(output),
         thinking,
         error: completion_error,
+        escalation_reason,
         messages: state
             .messages
             .into_iter()
@@ -1689,6 +1772,7 @@ mod result_tests {
             status,
             messages: Vec::new(),
             error: None,
+            escalation_reason: None,
         }
     }
 
@@ -1697,8 +1781,77 @@ mod result_tests {
             output: output.into(),
             thinking: Vec::new(),
             error: None,
+            escalation_reason: None,
             messages: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn fusion_revival_rejects_compacted_lane_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut journal = CodingSessionHarness::open(&path).unwrap();
+        let mut state = threadlane_orchestrator::FusionState::new(
+            "main".into(),
+            "test-model".into(),
+            None,
+        );
+        journal
+            .set_fact("main", "fusion_state", serde_json::to_string(&state).unwrap())
+            .unwrap();
+        let child = journal.start_subagent_lane("worker", "edit", None).unwrap();
+        journal
+            .append_message_to_lane(
+                &child.identity.lane_name,
+                &child.identity.run_id,
+                AgentMessage::Assistant {
+                    content: Some("done".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            )
+            .unwrap();
+        journal
+            .record_fusion_audit(
+                &child.identity.lane_name,
+                Some(&child.identity.run_id),
+                serde_json::json!({
+                    "kind": "delegation",
+                    "model": "test-model",
+                    "workspace": dir.path(),
+                    "isolated_workspace": false,
+                    "compaction_generation": 0,
+                }),
+            )
+            .unwrap();
+        journal
+            .finish_subagent_lane(
+                &child.identity.lane_name,
+                &child.identity.run_id,
+                threadlane_runtime::harness::OperationOutcome::Completed,
+                None,
+            )
+            .unwrap();
+        state.compaction_generation = 1;
+        journal
+            .set_fact("main", "fusion_state", serde_json::to_string(&state).unwrap())
+            .unwrap();
+        drop(journal);
+        let context = test_context(dir.path().to_path_buf(), path, None);
+        let error = revive_subagent_lane(
+            ReviveLaneRequest {
+                lane_name: child.identity.lane_name,
+                agent: "worker".into(),
+                task: "edit".into(),
+                model: "test-model".into(),
+                message: "continue".into(),
+            },
+            context,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("stale"), "{error}");
     }
 
     #[tokio::test]

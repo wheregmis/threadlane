@@ -262,12 +262,14 @@ impl CodingSessionHarness {
         termination: &HashMap<String, bool>,
     ) -> Result<(), String> {
         self.ensure_fresh()?;
-        let start_seq = self
+        let (start_seq, lane) = self
             .store
             .records()
             .iter()
             .find_map(|record| match record {
-                HarnessRecord::OperationStarted { id, seq, .. } if id == run_id => Some(*seq),
+                HarnessRecord::OperationStarted { id, seq, lane, .. } if id == run_id => {
+                    Some((*seq, lane.clone()))
+                }
                 _ => None,
             })
             .ok_or_else(|| format!("missing harness operation {run_id}"))?;
@@ -275,7 +277,8 @@ impl CodingSessionHarness {
             .store
             .entries()
             .iter()
-            .filter(|entry| entry.seq > start_seq)
+            // Child transcripts share this store but are not part of this run's batch.
+            .filter(|entry| entry.lane == lane && entry.seq > start_seq)
             .filter(|entry| {
                 matches!(&entry.message,
                 AgentMessage::Assistant {
@@ -292,7 +295,7 @@ impl CodingSessionHarness {
             .store
             .entries()
             .iter()
-            .filter(|entry| entry.seq > assistant.seq)
+            .filter(|entry| entry.lane == lane && entry.seq > assistant.seq)
             .filter_map(|entry| match &entry.message {
                 AgentMessage::Tool {
                     tool_call_id, name, ..

@@ -3,11 +3,14 @@
 //! Devin-Fusion parity (see `OrchestratorMode::Fusion`): the frontier main
 //! agent plans, disambiguates, and reviews while a cheaper sidekick agent
 //! owns mechanical implementation and verification in parallel child lanes.
-//! Both keep their own persistent cached contexts (main lane vs. subagent
-//! child lanes); model switches on the main lane happen at compaction
-//! boundaries so they ride the unavoidable cache miss.
+//! Main and child lanes have durable histories. Provider-side prompt cache
+//! behavior is separate and must be confirmed by reported usage.
 
+use serde::{Deserialize, Serialize};
 use threadlane_protocol::ReasoningEffort;
+
+pub const FUSION_STATE_VERSION: u32 = 2;
+pub const FUSION_CLASSIFIER_VERSION: u32 = 1;
 
 /// Marker for the hidden Fusion main-agent directive injected into the
 /// system prompt while Fusion is armed.
@@ -30,12 +33,27 @@ pub enum FusionComplexity {
     Judgment,
 }
 
+/// Deterministic baseline classifier result. `abstain` keeps uncertain work
+/// with the main agent; no external classifier is required for offline use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FusionClassification {
+    pub version: u32,
+    pub complexity: FusionComplexity,
+    pub confidence_percent: u8,
+    pub reason_codes: Vec<&'static str>,
+    pub abstain: bool,
+}
+
 /// Classify a prompt into mechanical / mixed / judgment.
 ///
 /// Judgment markers win over mechanical ones: when the deliverable is intent
 /// or taste (hard multi-file features, ambiguous scope, UX wording), delegating
 /// the coding loses the subtle intent even when the work looks mechanical.
 pub fn classify_fusion_task(prompt: &str) -> FusionComplexity {
+    classify_fusion_prompt(prompt).complexity
+}
+
+pub fn classify_fusion_prompt(prompt: &str) -> FusionClassification {
     let lower = prompt.to_lowercase();
     let has_any = |markers: &[&str]| markers.iter().any(|m| lower.contains(m));
     // Judgment signals: ambiguity, taste, cross-cutting intent.
@@ -57,6 +75,10 @@ pub fn classify_fusion_task(prompt: &str) -> FusionComplexity {
         "redux",
         "selector",
         "gated on",
+        "design",
+        "feature",
+        "user experience",
+        "product behavior",
     ]);
     // Mechanical signals: bulk, verification-heavy, or deprecation work.
     let mechanical = has_any(&[
@@ -84,11 +106,18 @@ pub fn classify_fusion_task(prompt: &str) -> FusionComplexity {
         "reuse what's upstream",
         "reuse upstream",
     ]);
-    match (judgment, mechanical) {
-        (true, false) => FusionComplexity::Judgment,
-        (false, true) => FusionComplexity::Mechanical,
-        (true, true) => FusionComplexity::Mixed,
-        (false, false) => FusionComplexity::Mixed,
+    let (complexity, confidence_percent, reason_codes, abstain) = match (judgment, mechanical) {
+        (true, false) => (FusionComplexity::Judgment, 90, vec!["judgment_marker"], false),
+        (false, true) => (FusionComplexity::Mechanical, 80, vec!["mechanical_marker"], false),
+        (true, true) => (FusionComplexity::Mixed, 40, vec!["conflicting_markers"], true),
+        (false, false) => (FusionComplexity::Mixed, 0, vec!["no_markers"], true),
+    };
+    FusionClassification {
+        version: FUSION_CLASSIFIER_VERSION,
+        complexity,
+        confidence_percent,
+        reason_codes,
+        abstain,
     }
 }
 
@@ -144,16 +173,15 @@ pub fn evaluate_fusion_prompt(prompt: &str, sidekick_model: &str) -> FusionDecis
             reason: "empty prompt runs directly".into(),
         };
     }
-    match classify_fusion_task(prompt) {
+    let classification = classify_fusion_prompt(prompt);
+    match classification.complexity {
         FusionComplexity::Mechanical => FusionDecision::DelegateToSidekick {
             reason: format!(
                 "mechanical work hands off cleanly to sidekick `{sidekick_model}`; main monitors and reviews"
             ),
         },
-        FusionComplexity::Mixed => FusionDecision::DelegateToSidekick {
-            reason: format!(
-                "mixed work delegates to sidekick `{sidekick_model}` with supervision; escalate on ambiguity"
-            ),
+        FusionComplexity::Mixed => FusionDecision::KeepOnMain {
+            reason: "classifier abstained on mixed or unclear intent; main keeps ownership".into(),
         },
         FusionComplexity::Judgment => FusionDecision::KeepOnMain {
             reason: "judgment is the deliverable; delegating loses subtle intent".into(),
@@ -167,8 +195,11 @@ pub fn evaluate_fusion_prompt(prompt: &str, sidekick_model: &str) -> FusionDecis
 pub const FUSION_ESCALATION_THRESHOLD: u32 = 2;
 
 /// Persistent per-session Fusion router state.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FusionState {
+    pub version: u32,
+    pub classifier_version: u32,
+    pub compaction_generation: u64,
     /// Frontier model owning the main lane at arm time.
     pub main_model: String,
     /// Cheap model owning sidekick child lanes.
@@ -181,6 +212,9 @@ pub struct FusionState {
     pub escalated: u64,
     /// Consecutive sidekick tool errors (resets on success).
     pub consecutive_sidekick_errors: u32,
+    /// Structured child signal awaiting a safe main-lane boundary.
+    #[serde(default)]
+    pub pending_escalation: Option<String>,
 }
 
 impl FusionState {
@@ -192,12 +226,16 @@ impl FusionState {
         sidekick_effort: Option<ReasoningEffort>,
     ) -> Self {
         Self {
+            version: FUSION_STATE_VERSION,
+            classifier_version: FUSION_CLASSIFIER_VERSION,
+            compaction_generation: 0,
             main_model,
             sidekick_model,
             sidekick_effort,
             delegated: 0,
             escalated: 0,
             consecutive_sidekick_errors: 0,
+            pending_escalation: None,
         }
     }
 
@@ -206,14 +244,12 @@ impl FusionState {
         self.delegated = self.delegated.saturating_add(1);
     }
 
-    /// Record a completed escalation back to the main agent (clears the
-    /// error streak and counts the episode). Called only when the
-    /// compaction router actually switches the main lane back to the
-    /// frontier model — never per failed lane, or the streak could never
-    /// reach the threshold.
+    /// Record a completed escalation after the main agent takes ownership
+    /// at a compaction boundary. Never clear the streak per failed lane.
     pub fn record_escalation(&mut self) {
         self.escalated = self.escalated.saturating_add(1);
         self.consecutive_sidekick_errors = 0;
+        self.pending_escalation = None;
     }
 
     /// Record one sidekick tool result. Errors accumulate toward the
@@ -229,28 +265,35 @@ impl FusionState {
     /// Whether the sidekick error streak forces escalation to main.
     pub fn escalation_needed(&self) -> bool {
         self.consecutive_sidekick_errors >= FUSION_ESCALATION_THRESHOLD
+            || self.pending_escalation.is_some()
+    }
+
+    pub fn request_escalation(&mut self, reason_code: &str) {
+        self.pending_escalation = Some(reason_code.to_owned());
+    }
+
+    /// A persisted router is reusable only with the same configured model
+    /// roles. Invalid or old snapshots fall back to a fresh router.
+    pub fn compatible_with(
+        &self,
+        active_model: &str,
+        configured_sidekick: &str,
+        configured_effort: Option<ReasoningEffort>,
+    ) -> bool {
+        self.version == FUSION_STATE_VERSION
+            && self.classifier_version == FUSION_CLASSIFIER_VERSION
+            && !self.main_model.trim().is_empty()
+            && self.sidekick_model == configured_sidekick
+            && self.sidekick_effort == configured_effort
+            && (active_model == self.main_model || active_model == self.sidekick_model)
     }
 }
 
-/// Model switch opportunity evaluated at compaction boundaries, where a cache
-/// miss happens anyway so the switch is effectively free.
-///
-/// - Repeated sidekick failures upgrade the main lane back to the frontier
-///   model so judgment recovers the run.
-/// - Long clean mechanical stretches downgrade the main lane to the sidekick
-///   model to save cost while implementation continues.
-/// - Otherwise no switch: churn without signal just burns cache.
+/// Keep the main lane on its selected model. Previously downgraded sessions
+/// return to that model at the next compaction boundary.
 pub fn select_model_at_compaction(active_model: &str, state: &FusionState) -> Option<String> {
-    if state.escalation_needed() && active_model != state.main_model {
+    if active_model != state.main_model {
         return Some(state.main_model.clone());
-    }
-    let clean_mechanical = state.delegated > state.escalated.saturating_mul(2).max(2)
-        && state.consecutive_sidekick_errors == 0;
-    if clean_mechanical
-        && active_model == state.main_model
-        && !fusion_would_be_noop(&state.main_model, &state.sidekick_model)
-    {
-        return Some(state.sidekick_model.clone());
     }
     None
 }
@@ -263,10 +306,11 @@ pub fn build_fusion_main_directive(sidekick_model: &str) -> String {
         "\n\n{FUSION_MAIN_HEADER}\n\
          Sidekick model: {sidekick_model}\n\
          You are the frontier main agent. Take MINIMAL direct actions and only read what is absolutely necessary.\n\
-         By default DELEGATE and MONITOR: hand mechanical implementation and slow verification (edits, test suites, bulk refactors, deprecation removals) to the sidekick `{sidekick_model}` via `subagent`, then review the diff.\n\
+         For delegated tasks, first ask the sidekick to explore the code and return only relevant file snippets. Use those findings to make the plan. Then hand mechanical implementation and verification (edits, tests, lint) to the sidekick `{sidekick_model}` via `subagent` with `wait=false` when work can proceed independently; supervise it with `hub read` and `hub wait`.\n\
+         Review the resulting diff yourself. If it needs substantial edits, send precise feedback with `hub revive` on the same lane, then review again.\n\
          Make tiny corrections found during review yourself; do not launch a fresh child for a one-line fix.\n\
          Own the significant decisions yourself: the plan (`update_plan`), interpretation of ambiguity (`ask_question` — never let the sidekick guess intent), and the final review before delivery.\n\
-         Keep your own context lean so both lanes stay cache-friendly; let the sidekick gather its own context in its lane.\n\
+         Keep your own context lean; let the sidekick gather its own context in its lane.\n\
          If sidekick work errors twice in a row or the subtle intent is at risk, escalate back to yourself and finish directly.\n\
          {FUSION_MAIN_FOOTER}"
     )
@@ -310,12 +354,17 @@ mod tests {
     }
 
     #[test]
-    fn mixed_prompts_delegate_with_supervision() {
+    fn mixed_prompts_abstain_to_main() {
         let decision = evaluate_fusion_prompt(
-            "Integrate the WebSocket MCP transport into Quarkus, reusing upstream",
+            "Design a WebSocket feature in Quarkus and reuse upstream code",
             "flash",
         );
-        assert!(decision.delegates());
+        assert!(!decision.delegates());
+        let classification = classify_fusion_prompt(
+            "Design a WebSocket feature in Quarkus and reuse upstream code",
+        );
+        assert!(classification.abstain);
+        assert_eq!(classification.version, FUSION_CLASSIFIER_VERSION);
     }
 
     #[test]
@@ -359,7 +408,7 @@ mod tests {
         assert!(!state.escalation_needed());
         state.record_sidekick_result(true);
         assert!(state.escalation_needed());
-        // Active on sidekick with a failing streak upgrades to main for free.
+        // A legacy session running main on the sidekick returns to main.
         assert_eq!(
             select_model_at_compaction("side", &state),
             Some("main".into())
@@ -369,18 +418,14 @@ mod tests {
     }
 
     #[test]
-    fn clean_mechanical_stretch_downgrades_at_compaction() {
+    fn clean_mechanical_stretch_keeps_main_on_selected_model() {
         let mut state = FusionState::new("main".into(), "side".into(), None);
         for _ in 0..4 {
             state.record_delegation();
             state.record_sidekick_result(false);
         }
-        assert_eq!(
-            select_model_at_compaction("main", &state),
-            Some("side".into())
-        );
-        // No churn when already on the cheap model or when sidekick is a noop.
-        assert_eq!(select_model_at_compaction("side", &state), None);
+        assert_eq!(select_model_at_compaction("main", &state), None);
+        assert_eq!(select_model_at_compaction("side", &state), Some("main".into()));
         let noop = FusionState::new("same".into(), "same".into(), None);
         assert_eq!(select_model_at_compaction("same", &noop), None);
     }
@@ -392,7 +437,45 @@ mod tests {
         assert!(main.contains("flash"));
         assert!(main.contains("MINIMAL"));
         assert!(main.contains("update_plan"));
+        assert!(main.contains("wait=false"));
+        assert!(main.contains("hub revive"));
         let side = build_fusion_sidekick_directive();
         assert!(side.contains(FUSION_SIDEKICK_HEADER));
+    }
+
+    #[test]
+    fn restored_state_rejects_stale_model_roles_and_versions() {
+        let mut state = FusionState::new("main".into(), "side".into(), None);
+        state.record_delegation();
+        state.record_sidekick_result(true);
+        let restored: FusionState = serde_json::from_str(&serde_json::to_string(&state).unwrap())
+            .unwrap();
+        assert!(restored.compatible_with("main", "side", None));
+        assert!(restored.compatible_with("side", "side", None));
+        assert_eq!(restored.delegated, 1);
+        assert_eq!(restored.consecutive_sidekick_errors, 1);
+        assert!(!restored.compatible_with("unknown", "side", None));
+        assert!(!restored.compatible_with("main", "changed", None));
+        state.version += 1;
+        assert!(!state.compatible_with("main", "side", None));
+    }
+
+    #[test]
+    fn feature_wording_prevents_false_mechanical_handoff() {
+        let prompt = "Remove the old search selector and redesign the cross-team feature";
+        let result = classify_fusion_prompt(prompt);
+        assert!(result.abstain);
+        assert_eq!(result.reason_codes, vec!["conflicting_markers"]);
+        assert!(!evaluate_fusion_prompt(prompt, "side").delegates());
+    }
+
+    #[test]
+    fn quality_signal_escalates_at_compaction_without_two_failures() {
+        let mut state = FusionState::new("main".into(), "side".into(), None);
+        state.request_escalation("unresolved_question");
+        assert!(state.escalation_needed());
+        assert_eq!(select_model_at_compaction("side", &state), Some("main".into()));
+        state.record_escalation();
+        assert_eq!(state.pending_escalation, None);
     }
 }

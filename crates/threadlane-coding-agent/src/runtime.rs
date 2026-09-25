@@ -55,8 +55,8 @@ pub struct CodingAgent {
     pub(crate) harness: Option<CodingSessionHarness>,
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    /// Persistent Fusion router: frontier main + cheap sidekick lanes with
-    /// compaction-boundary model switches. `None` when the session runs in
+    /// Persistent Fusion router: selected-model main + sidekick child lanes.
+    /// `None` when the session runs in
     /// Normal mode without Fusion armed.
     pub(crate) fusion: Arc<std::sync::Mutex<Option<threadlane_orchestrator::FusionState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
@@ -227,7 +227,11 @@ impl CodingAgent {
     }
 
     pub fn set_model_roles(&mut self, roles: threadlane_runtime::ModelRoles) {
+        let changed = self.agent.model_roles().fast != roles.fast;
         self.agent.set_model_roles(roles);
+        if changed {
+            *self.fusion.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        }
     }
 
     pub fn model_roles(&self) -> &threadlane_runtime::ModelRoles {
@@ -345,6 +349,11 @@ impl CodingAgent {
             self.sync_turn_from_model_context().await?;
         }
         self.agent.turn.lock().await.model = model.to_string();
+        if self.agent.config().orchestrator_mode.is_fusion() {
+            self.set_fact("fusion_state", "")?;
+            *self.fusion.lock().unwrap_or_else(|error| error.into_inner()) = None;
+            self.strip_fusion_directive().await;
+        }
         self.agent_work
             .set_acp_model(threadlane_acp_engine::is_acp_model(model));
         self.refresh_provider_credentials();
@@ -395,18 +404,36 @@ impl CodingAgent {
     }
 
     /// Arm Fusion for one run, including when the child uses the main model.
-    pub(crate) async fn arm_fusion(&self, prompt: &str) -> Option<String> {
+    pub(crate) async fn arm_fusion(&mut self, prompt: &str) -> Result<String, String> {
         let active_model = self.agent.turn.lock().await.model.clone();
         let (sidekick, effort) = self.resolve_fusion_sidekick(&active_model);
+        let state = threadlane_orchestrator::FusionState::new(
+            active_model.clone(),
+            sidekick.clone(),
+            effort,
+        );
+        self.set_fact(
+            "fusion_state",
+            &serde_json::to_string(&state).map_err(|error| error.to_string())?,
+        )?;
+        if let Some(harness) = self.harness.as_mut() {
+            harness.record_fusion_audit(
+                "main",
+                None,
+                serde_json::json!({
+                    "version": 1,
+                    "kind": "arm",
+                    "main_model": state.main_model,
+                    "sidekick_model": state.sidekick_model,
+                    "classifier_version": state.classifier_version,
+                    "compaction_generation": state.compaction_generation,
+                }),
+            )?;
+        }
         *self
             .fusion
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            Some(threadlane_orchestrator::FusionState::new(
-                active_model.clone(),
-                sidekick.clone(),
-                effort,
-            ));
+            .unwrap_or_else(|error| error.into_inner()) = Some(state);
         let route = threadlane_orchestrator::evaluate_fusion_prompt(prompt, &sidekick);
         let route_note = match route {
             threadlane_orchestrator::FusionDecision::DelegateToSidekick { reason } => {
@@ -416,8 +443,8 @@ impl CodingAgent {
                 format!(" Initial route: main keeps it ({reason}).")
             }
         };
-        Some(format!(
-            "Fusion armed: frontier main `{active_model}` + sidekick `{sidekick}` with parallel cached contexts; switches ride compaction.{route_note}"
+        Ok(format!(
+            "Fusion armed: main `{active_model}` + sidekick `{sidekick}`.{route_note}"
         ))
     }
 
@@ -463,19 +490,18 @@ impl CodingAgent {
         turn.system_prompt = turn.system_prompt.trim_end().to_string();
     }
 
-    /// Compaction-boundary routing: evaluate the Fusion router and switch the
-    /// main-lane model when the policy says so. Runs where a cache miss
-    /// happens anyway, so the switch is effectively free. Emits a
+    /// Compaction-boundary routing: restore legacy downgraded main lanes to
+    /// their selected model and acknowledge pending escalation. Emits a
     /// `FusionUpdate` event on switch and rotates provider credentials. An
     /// upgrade back to the frontier model consumes the error streak via
     /// `record_escalation`; without that the streak could never accumulate.
     pub(crate) async fn apply_fusion_compaction_routing(&mut self) {
-        let (target, is_escalation) = {
-            let mut guard = self
+        let (target, is_escalation, mut snapshot) = {
+            let guard = self
                 .fusion
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let Some(state) = guard.as_mut() else {
+            let Some(state) = guard.as_ref() else {
                 return;
             };
             let active = self
@@ -484,20 +510,63 @@ impl CodingAgent {
                 .try_lock()
                 .map(|turn| turn.model.clone())
                 .unwrap_or_default();
-            match threadlane_orchestrator::select_model_at_compaction(&active, state) {
-                Some(target) => {
-                    let is_escalation = target == state.main_model;
-                    if is_escalation {
-                        state.record_escalation();
-                    }
-                    (Some(target), is_escalation)
-                }
-                None => return,
-            }
+            let target = threadlane_orchestrator::select_model_at_compaction(&active, state);
+            let is_escalation = state.escalation_needed();
+            (target, is_escalation, state.clone())
         };
+        snapshot.compaction_generation = snapshot.compaction_generation.saturating_add(1);
+        if is_escalation {
+            snapshot.record_escalation();
+        }
+        if let Some(target) = target.as_deref() {
+            if let Err(error) = self.set_fact("model", target) {
+                let _ = self.agent.event_tx.send(AgentEvent::AgentError { error });
+                return;
+            }
+        }
+        if let Err(error) = self.set_fact(
+            "fusion_state",
+            &serde_json::to_string(&snapshot).expect("Fusion state is serializable"),
+        ) {
+            let _ = self.agent.event_tx.send(AgentEvent::AgentError { error });
+            return;
+        }
+        *self.fusion.lock().unwrap_or_else(|error| error.into_inner()) = Some(snapshot);
         let Some(target) = target else {
+            if is_escalation {
+                if let Some(harness) = self.harness.as_mut() {
+                    if let Err(error) = harness.record_fusion_audit(
+                        "main",
+                        None,
+                        serde_json::json!({
+                            "version": 1,
+                            "kind": "escalation_acknowledged",
+                            "target_model": self.agent.model(),
+                            "compaction_generation": self.fusion.lock().ok().and_then(|state| state.as_ref().map(|state| state.compaction_generation)),
+                        }),
+                    ) {
+                        let _ = self.agent.event_tx.send(AgentEvent::AgentError { error });
+                    }
+                }
+            }
             return;
         };
+        if let Some(harness) = self.harness.as_mut() {
+            if let Err(error) = harness.record_fusion_audit(
+                "main",
+                None,
+                serde_json::json!({
+                    "version": 1,
+                    "kind": if is_escalation { "escalation_switch" } else { "compaction_switch" },
+                    "target_model": target,
+                    "compaction_generation": self.fusion.lock().ok().and_then(|state| state.as_ref().map(|state| state.compaction_generation)),
+                    "provider_cache_hit": null,
+                    "estimated_cost_usd": null,
+                }),
+            ) {
+                let _ = self.agent.event_tx.send(AgentEvent::AgentError { error });
+            }
+        }
         {
             let mut turn = self.agent.turn.lock().await;
             turn.model = target.clone();
@@ -505,11 +574,11 @@ impl CodingAgent {
         self.refresh_provider_credentials();
         let message = if is_escalation {
             format!(
-                "Fusion escalated: main lane switched back to frontier `{target}` after repeated sidekick failures (cache-miss boundary)."
+                "Fusion escalated: main lane switched back to frontier `{target}` at compaction."
             )
         } else {
             format!(
-                "Fusion routing at compaction: main lane switched to cheap `{target}` for continued mechanical work (cache-miss boundary)."
+                "Fusion routing at compaction: main lane restored to selected model `{target}`."
             )
         };
         let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
@@ -583,7 +652,7 @@ impl CodingAgent {
 
         let mut effective_model = options.model.clone();
         let mut effective_reasoning_effort = ReasoningEffort::default();
-        let (mut harness, harness_journal_error) = match session_file.as_deref() {
+        let (mut harness, mut harness_journal_error) = match session_file.as_deref() {
             Some(path) => match super::harness::CodingSessionHarness::open(path) {
                 Ok(h) => (Some(h), None),
                 Err(error) => (None, Some(error)),
@@ -611,6 +680,96 @@ impl CodingAgent {
                     serde_json::from_str::<threadlane_protocol::SessionPlan>(plan_json)
                 {
                     initial_plan = plan;
+                }
+            }
+        }
+        let configured_fusion_model = agent_config
+            .model_roles
+            .resolve_fast(&effective_model)
+            .to_string();
+        let mut restored_fusion = agent_config.orchestrator_mode.is_fusion().then(|| {
+            harness
+                .as_ref()?
+                .store
+                .facts()
+                .get("fusion_state")
+                .and_then(|json| {
+                    serde_json::from_str::<threadlane_orchestrator::FusionState>(json).ok()
+                })
+                .filter(|state| {
+                    state.compatible_with(
+                        &effective_model,
+                        &configured_fusion_model,
+                        agent_config.fast_reasoning_effort,
+                    )
+                })
+        }).flatten();
+        // A process can stop after a child lifecycle commit but before the
+        // router snapshot is written. Replay only completions newer than the
+        // last state fact so the failure streak and delegation count survive.
+        if let (Some(harness), Some(state)) = (harness.as_mut(), restored_fusion.as_mut()) {
+            let state_seq = harness
+                .store
+                .records()
+                .iter()
+                .rev()
+                .find_map(|record| match record {
+                    threadlane_runtime::harness::Record::FactSet { key, seq, .. }
+                        if key == "fusion_state" => Some(*seq),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let recovered = harness
+                .store
+                .records()
+                .iter()
+                .filter_map(|record| match record {
+                    threadlane_runtime::harness::Record::SubagentLifecycle { seq, phase, .. }
+                        if *seq > state_seq
+                            && matches!(phase, threadlane_runtime::harness::SubagentLifecyclePhase::Completed | threadlane_runtime::harness::SubagentLifecyclePhase::Failed) =>
+                    {
+                        Some(*phase == threadlane_runtime::harness::SubagentLifecyclePhase::Failed)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for failed in &recovered {
+                state.record_delegation();
+                state.record_sidekick_result(*failed);
+            }
+            let signals = harness.store.records().iter().filter_map(|record| match record {
+                threadlane_runtime::harness::Record::FactSet { key, value, seq, .. }
+                    if *seq > state_seq && key.starts_with("fusion_audit:") =>
+                {
+                    serde_json::from_str::<serde_json::Value>(value).ok().and_then(|event| {
+                        (event.get("kind")?.as_str()? == "sidekick_outcome")
+                            .then(|| event.get("escalation_reason")?.as_str().map(str::to_owned))?
+                    })
+                }
+                _ => None,
+            }).collect::<Vec<_>>();
+            for reason in &signals {
+                state.request_escalation(reason);
+            }
+            if !recovered.is_empty() || !signals.is_empty() {
+                if let Err(error) = harness.set_fact(
+                    "main",
+                    "fusion_state",
+                    serde_json::to_string(state).expect("Fusion state is serializable"),
+                ) {
+                    harness_journal_error = Some(error);
+                }
+            }
+        }
+        // Older Fusion runs could downgrade the main lane to the sidekick.
+        // Restore the selected main model before constructing the runtime.
+        if let Some(state) = restored_fusion.as_ref() {
+            if effective_model != state.main_model {
+                effective_model = state.main_model.clone();
+                if let Some(harness) = harness.as_mut() {
+                    if let Err(error) = harness.set_fact("main", "model", effective_model.clone()) {
+                        harness_journal_error = Some(error);
+                    }
                 }
             }
         }
@@ -654,6 +813,16 @@ impl CodingAgent {
                 panic!("Failed to create agent runtime: {error}");
             })
         };
+        if effective_model != options.model {
+            let (key, account) = crate::credentials::provider_credentials(&effective_model);
+            if !key.trim().is_empty() {
+                agent.set_credentials(key, account);
+            }
+            crate::credentials::refresh_provider_for_model(
+                &agent.provider_client_arc(),
+                &effective_model,
+            );
+        }
         agent
             .turn
             .try_lock()
@@ -710,7 +879,7 @@ impl CodingAgent {
         let completed_subagent_lanes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let hub = super::mailbox::SubagentHub::new();
         let fusion: Arc<std::sync::Mutex<Option<threadlane_orchestrator::FusionState>>> =
-            Arc::new(std::sync::Mutex::new(None));
+            Arc::new(std::sync::Mutex::new(restored_fusion));
         let runner_fusion = fusion.clone();
         // Cloned separately for the `hub revive` spawner below; the
         // `agent_runner` closure moves its own copies.
@@ -727,6 +896,7 @@ impl CodingAgent {
         let revive_parent_leaf = dispatch_parent_leaf.clone();
         let revive_completed_lanes = completed_subagent_lanes.clone();
         let revive_parent_session_id = session_id.clone();
+        let revive_fusion = fusion.clone();
         let runner_parent_leaf = dispatch_parent_leaf.clone();
         let runner_completed_lanes = completed_subagent_lanes.clone();
         let runner_hub = hub.clone();
@@ -777,11 +947,6 @@ impl CodingAgent {
                     }
                 };
                 let child_reasoning_effort = fusion_effort.unwrap_or(parent_reasoning_effort);
-                if let Ok(mut guard) = fusion.lock() {
-                    if let Some(state) = guard.as_mut() {
-                        state.record_delegation();
-                    }
-                }
                 // Fusion sidekick lanes run under the sidekick contract:
                 // implement and verify mechanically, never guess at ambiguous
                 // intent. Stamped onto every delegated child while armed so
@@ -858,7 +1023,14 @@ impl CodingAgent {
                 let parent_leaf = revive_parent_leaf.clone();
                 let completed_lanes = revive_completed_lanes.clone();
                 let parent_session_id = revive_parent_session_id.clone();
+                let fusion = revive_fusion.clone();
                 Box::pin(async move {
+                    let compatible = fusion.lock().ok().and_then(|state| {
+                        state.as_ref().map(|state| state.sidekick_model == req.model)
+                    });
+                    if compatible != Some(true) {
+                        return Err("Fusion lane model changed; start a new child instead of reviving stale context".into());
+                    }
                     let parent_reasoning_effort = {
                         let state = state.lock().await;
                         state.reasoning_effort()
@@ -1830,14 +2002,16 @@ impl CodingAgent {
                     }
                     let task_prompt = objective.trim();
                     if task_prompt.is_empty() {
-                        return Some(Ok("Usage: /fusion <task objective> - route with frontier main + sidekick lanes, switching at compaction.".into()));
+                        return Some(Ok("Usage: /fusion <task objective> - run a main agent with sidekick child lanes.".into()));
                     }
-                    if let Some(message) = self.arm_fusion(task_prompt).await {
-                        let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
-                            model: self.agent.model(),
-                            message,
-                        });
-                    }
+                    let message = match self.arm_fusion(task_prompt).await {
+                        Ok(message) => message,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
+                        model: self.agent.model(),
+                        message,
+                    });
                     effective_input = task_prompt.to_string();
                     // Explicit re-arm replaces the router state, so refresh
                     // the injected directive too instead of keeping the
@@ -1854,20 +2028,25 @@ impl CodingAgent {
         // --- Fusion router. Stored `OrchestratorMode::Fusion` arms every
         // prompt; `/fusion` can explicitly re-arm a task in that mode.
         if fusion_directive.is_none()
-            && self
+            && self.agent.config().orchestrator_mode.is_fusion()
+            && !effective_input.trim().is_empty()
+        {
+            if self
                 .fusion
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .is_none()
-            && self.agent.config().orchestrator_mode.is_fusion()
-            && !effective_input.trim().is_empty()
-        {
-            if let Some(message) = self.arm_fusion(&effective_input.clone()).await {
+            {
+                let message = match self.arm_fusion(&effective_input.clone()).await {
+                    Ok(message) => message,
+                    Err(error) => return Some(Err(error)),
+                };
                 let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
                     model: self.agent.model(),
                     message,
                 });
             }
+            self.strip_fusion_directive().await;
             fusion_directive = self.fusion_directive_for_prompt(&effective_input);
         }
 
@@ -1896,6 +2075,19 @@ impl CodingAgent {
             };
         }
 
+        let fusion_route = self
+            .fusion
+            .lock()
+            .ok()
+            .and_then(|state| state.as_ref().map(|state| (state.sidekick_model.clone(), state.compaction_generation)))
+            .map(|(sidekick, generation)| {
+                (
+                    threadlane_orchestrator::evaluate_fusion_prompt(&effective_input, &sidekick),
+                    threadlane_orchestrator::classify_fusion_prompt(&effective_input),
+                    sidekick,
+                    generation,
+                )
+            });
         let msg = AgentMessage::user(effective_input, images);
         let harness_run_id = match self.begin_harness_run(msg.clone()).await {
             Ok(run_id) => run_id,
@@ -1907,6 +2099,60 @@ impl CodingAgent {
                 return Some(Err(message));
             }
         };
+        if let (Some((route, classification, sidekick, generation)), Some(run), Some(harness)) = (
+            fusion_route,
+            harness_run_id.as_ref(),
+            self.harness.as_mut(),
+        ) {
+            let active_model = self.agent.model();
+            let cache_capabilities = self
+                .agent
+                .provider_client()
+                .cache_capabilities(&active_model);
+            let sidekick_cache_capabilities = self
+                .agent
+                .provider_client()
+                .cache_capabilities(&sidekick);
+            let (decision, reason) = match route {
+                threadlane_orchestrator::FusionDecision::DelegateToSidekick { reason } => {
+                    ("delegate", reason)
+                }
+                threadlane_orchestrator::FusionDecision::KeepOnMain { reason } => {
+                    ("main", reason)
+                }
+            };
+            if let Err(error) = harness.record_fusion_audit(
+                "main",
+                Some(&run.run_id),
+                serde_json::json!({
+                    "version": 1,
+                    "kind": "route",
+                    "decision": decision,
+                    "reason": reason,
+                    "classifier_version": classification.version,
+                    "confidence_percent": classification.confidence_percent,
+                    "reason_codes": classification.reason_codes,
+                    "abstain": classification.abstain,
+                    "active_model": active_model,
+                    "sidekick_model": sidekick,
+                    "compaction_generation": generation,
+                    "cache_capabilities": cache_capabilities,
+                    "sidekick_cache_capabilities": sidekick_cache_capabilities,
+                    "cache_key_identity": if cache_capabilities.accepts_cache_key { Some(self.session_id.as_str()) } else { None },
+                    "provider_cache_hit": null,
+                    "estimated_cost_usd": null,
+                }),
+            ) {
+                let _ = self
+                    .finish_harness_run(
+                        Some(&run.run_id),
+                        OperationOutcome::Failed,
+                        Some(error.clone()),
+                    )
+                    .await;
+                return Some(Err(format!("Harness Error: {error}")));
+            }
+        }
         let parent_leaf = self.prompt_parent_leaf(msg.clone(), harness_run_id.is_some());
         *self
             .dispatch_parent_leaf
@@ -2079,6 +2325,7 @@ mod compaction_sync_tests {
     use threadlane_prompt::SystemPromptConfig;
     use threadlane_protocol::browser::BrowserBridge;
     use threadlane_protocol::{AgentMessage, AgentToolResult};
+    use threadlane_protocol::OrchestratorMode;
     use threadlane_protocol::{
         DeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall,
         RuntimeToolCallFunction, RuntimeUsage,
@@ -2189,6 +2436,145 @@ mod compaction_sync_tests {
         if !ag_key.trim().is_empty() {
             assert_eq!(agent.agent.api_key, ag_key);
         }
+    }
+
+    #[tokio::test]
+    async fn fusion_router_and_compaction_model_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fusion.jsonl");
+        let mut config = threadlane_runtime::AgentConfig::default();
+        config.orchestrator_mode = OrchestratorMode::Fusion;
+        config.model_roles.fast = Some("side".into());
+        let options = |config: threadlane_runtime::AgentConfig| CodingAgentOptions {
+            api_key: "test".into(),
+            account_id: None,
+            model: "main".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(path.clone()),
+            system_prompt: SystemPromptConfig::default(),
+            agent_config: Some(config),
+            coding_config: None,
+            browser: BrowserBridge::unavailable(),
+        };
+        let provider = Arc::new(RecordingProvider::default());
+        let mut first = CodingAgent::new_with_provider(options(config.clone()), provider.clone());
+        first.arm_fusion("Remove deprecated code").await.unwrap();
+        let state = {
+            let mut guard = first.fusion.lock().unwrap();
+            let state = guard.as_mut().unwrap();
+            for _ in 0..3 {
+                state.record_delegation();
+                state.record_sidekick_result(false);
+            }
+            state.clone()
+        };
+        first
+            .set_fact("fusion_state", &serde_json::to_string(&state).unwrap())
+            .unwrap();
+        first.apply_fusion_compaction_routing().await;
+        assert_eq!(first.agent.model(), "main");
+        // Simulate a session persisted by the older main-lane downgrade rule.
+        first.set_fact("model", "side").unwrap();
+        drop(first);
+
+        let mut resumed = CodingAgent::new_with_provider(options(config.clone()), provider.clone());
+        assert_eq!(resumed.agent.model(), "main");
+        assert_eq!(JsonlStore::open_read_only(&path).unwrap().facts()["model"], "main");
+        let state = resumed.fusion.lock().unwrap().clone().unwrap();
+        assert_eq!(state.delegated, 3);
+        assert_eq!(state.compaction_generation, 1);
+        assert!(resumed.fusion_directive_for_prompt("Review the design").is_some());
+        let facts = JsonlStore::open_read_only(&path).unwrap().facts().clone();
+        assert!(facts.keys().any(|key| key.starts_with("fusion_audit:")));
+
+        let state = {
+            let mut guard = resumed.fusion.lock().unwrap();
+            let state = guard.as_mut().unwrap();
+            state.record_sidekick_result(true);
+            state.record_sidekick_result(true);
+            state.clone()
+        };
+        resumed
+            .set_fact("fusion_state", &serde_json::to_string(&state).unwrap())
+            .unwrap();
+        resumed.apply_fusion_compaction_routing().await;
+        assert_eq!(resumed.agent.model(), "main");
+        drop(resumed);
+        let mut recovered = CodingAgent::new_with_provider(options(config.clone()), provider);
+        let state = recovered.fusion.lock().unwrap().clone().unwrap();
+        assert_eq!(state.escalated, 1);
+        assert_eq!(state.consecutive_sidekick_errors, 0);
+        assert_eq!(state.compaction_generation, 2);
+        recovered.set_model("new-main".into()).await.unwrap();
+        assert!(recovered.fusion.lock().unwrap().is_none());
+        assert_eq!(
+            JsonlStore::open_read_only(&path).unwrap().facts()["fusion_state"],
+            ""
+        );
+
+        config.model_roles.fast = Some("different".into());
+        let stale = CodingAgent::new_with_provider(options(config), Arc::new(RecordingProvider::default()));
+        assert!(stale.fusion.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn fusion_replays_child_completion_after_torn_state_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fusion-replay.jsonl");
+        let mut config = threadlane_runtime::AgentConfig::default();
+        config.orchestrator_mode = OrchestratorMode::Fusion;
+        config.model_roles.fast = Some("side".into());
+        let options = || CodingAgentOptions {
+            api_key: "test".into(),
+            account_id: None,
+            model: "main".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(path.clone()),
+            system_prompt: SystemPromptConfig::default(),
+            agent_config: Some(config.clone()),
+            coding_config: None,
+            browser: BrowserBridge::unavailable(),
+        };
+        let provider = Arc::new(RecordingProvider::default());
+        let mut first = CodingAgent::new_with_provider(options(), provider.clone());
+        first.arm_fusion("Remove deprecated code").await.unwrap();
+        drop(first);
+        let mut journal = crate::harness::CodingSessionHarness::open(&path).unwrap();
+        let child = journal.start_subagent_lane("worker", "remove code", None).unwrap();
+        journal
+            .append_message_to_lane(
+                &child.identity.lane_name,
+                &child.identity.run_id,
+                AgentMessage::Assistant {
+                    content: Some("done".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            )
+            .unwrap();
+        journal
+            .finish_subagent_lane(
+                &child.identity.lane_name,
+                &child.identity.run_id,
+                OperationOutcome::Failed,
+                Some("verification failed".into()),
+            )
+            .unwrap();
+        drop(journal);
+
+        let resumed = CodingAgent::new_with_provider(options(), provider);
+        let state = resumed.fusion.lock().unwrap().clone().unwrap();
+        assert_eq!(state.delegated, 1);
+        assert_eq!(state.consecutive_sidekick_errors, 1);
+        assert_eq!(
+            serde_json::from_str::<threadlane_orchestrator::FusionState>(
+                &JsonlStore::open_read_only(&path).unwrap().facts()["fusion_state"]
+            )
+            .unwrap()
+            .delegated,
+            1
+        );
     }
 
     #[test]
@@ -2443,6 +2829,7 @@ mod compaction_sync_tests {
                     deferred_handle: None,
                 }],
                 error: None,
+                escalation_reason: None,
             });
 
         agent.commit_completed_subagent_lanes().unwrap();

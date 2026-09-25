@@ -24,6 +24,10 @@ use tokio_tungstenite::{
 const CODEX_SSE_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_WS_URL: &str = "wss://chatgpt.com/backend-api/codex/responses";
 const CODEX_WS_BETA: &str = "responses_websockets=2026-02-06";
+// The model endpoint filters inventory by Codex compatibility, independently of
+// Threadlane's version. GPT-6 Sol/Luna require at least 0.155.0; 0.157.0 is
+// verified against the live inventory. Keep CODEX_CLIENT_VERSION overridable.
+const CODEX_MODELS_CLIENT_VERSION: &str = "0.157.0";
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -776,18 +780,14 @@ fn parse_subscription_models(value: &Value) -> Vec<ModelInfo> {
         .collect()
 }
 
-async fn fetch_subscription_models_inner(
+fn subscription_models_request(
     access_token: &str,
     account_id: Option<&str>,
-) -> Option<Vec<ModelInfo>> {
-    if access_token.trim().is_empty() {
-        return None;
-    };
-    // Catalog visibility is gated by Codex client compatibility, not Threadlane's version.
-    let client_version = std::env::var("CODEX_CLIENT_VERSION").unwrap_or_else(|_| "0.154.0".into());
+    client_version: &str,
+) -> reqwest::RequestBuilder {
     let mut request = http_client()
         .get("https://chatgpt.com/backend-api/codex/models")
-        .query(&[("client_version", client_version.as_str())])
+        .query(&[("client_version", client_version)])
         .header(AUTHORIZATION, format!("Bearer {access_token}"))
         .header(CONTENT_TYPE, "application/json")
         .header("OpenAI-Beta", "responses=experimental")
@@ -796,7 +796,21 @@ async fn fetch_subscription_models_inner(
     if let Some(account_id) = account_id {
         request = request.header("ChatGPT-Account-Id", account_id);
     }
-    let response = request.send().await;
+    request
+}
+
+async fn fetch_subscription_models_inner(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Option<Vec<ModelInfo>> {
+    if access_token.trim().is_empty() {
+        return None;
+    }
+    let client_version = std::env::var("CODEX_CLIENT_VERSION")
+        .unwrap_or_else(|_| CODEX_MODELS_CLIENT_VERSION.into());
+    let response = subscription_models_request(access_token, account_id, &client_version)
+        .send()
+        .await;
     let Ok(response) = response else {
         return None;
     };
@@ -1609,6 +1623,45 @@ mod tests {
                 "content":[{"type":"output_text","text":"answer"}]
             })],
         }
+    }
+
+    #[test]
+    fn subscription_inventory_request_uses_current_codex_compatibility() {
+        for version in [super::CODEX_MODELS_CLIENT_VERSION, "0.155.0"] {
+            let request =
+                super::subscription_models_request("test-token", Some("test-account"), version)
+                    .build()
+                    .unwrap();
+            assert_eq!(request.url().path(), "/backend-api/codex/models");
+            assert_eq!(
+                request.url().query(),
+                Some(format!("client_version={version}").as_str())
+            );
+            assert_eq!(request.headers()["originator"], "threadlane");
+            assert_eq!(request.headers()["ChatGPT-Account-Id"], "test-account");
+        }
+        assert_eq!(super::CODEX_MODELS_CLIENT_VERSION, "0.157.0");
+    }
+
+    #[test]
+    fn subscription_inventory_keeps_visible_gpt6_models() {
+        let models = parse_subscription_models(&json!({"models": [
+            {"slug": "gpt-6-astra", "display_name": "GPT-6 Astra", "visibility": "list"},
+            {"slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list",
+             "default_reasoning_level": "medium"},
+            {"slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list",
+             "default_reasoning_level": "high"},
+            {"slug": "gpt-reserve", "visibility": "hide"}
+        ]}));
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]
+        );
+        assert_eq!(models[1].default_effort.as_deref(), Some("medium"));
+        assert_eq!(models[2].default_effort.as_deref(), Some("high"));
     }
 
     #[test]

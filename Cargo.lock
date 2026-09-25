@@ -8470,6 +8470,8 @@ dependencies = [
 name = "threadlane-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "threadlane-protocol",
 ]
 

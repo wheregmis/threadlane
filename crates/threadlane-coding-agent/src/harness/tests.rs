@@ -2010,6 +2010,85 @@ fn stale_metadata_and_chained_tool_results_remain_model_visible_and_get_lifecycl
 }
 
 #[test]
+fn tool_completion_stays_on_the_operations_lane() {
+    for complete_parent in [false, true] {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("parent-run", AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        harness.prepare_assistant_attempt("parent-run").unwrap();
+        let declaration = |call_id: &str| AgentMessage::Assistant {
+            content: None,
+            tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                id: call_id.into(),
+                r#type: "function".into(),
+                function: threadlane_provider::openai::ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }]),
+            stop_reason: None,
+            deferred_handle: None,
+        };
+        let result = AgentMessage::Tool {
+            tool_call_id: "shared-call".into(),
+            name: "read_file".into(),
+            content: "result".into(),
+            is_error: false,
+            terminate: false,
+            images: Vec::new(),
+        };
+        harness.append_message(declaration("shared-call")).unwrap();
+        if complete_parent {
+            harness.append_message(result.clone()).unwrap();
+        }
+        let child = harness
+            .start_subagent_lane("worker", "inspect", None)
+            .unwrap();
+        let lane = &child.identity.lane_name;
+        let run = &child.identity.run_id;
+        harness
+            .append_message_to_lane(lane, run, declaration("shared-call"))
+            .unwrap();
+        harness.append_message_to_lane(lane, run, result).unwrap();
+        // A child run must reconcile its own batch, not the foreground batch.
+        harness
+            .record_completed_tools_with_termination(run, &HashMap::new())
+            .unwrap();
+        assert_eq!(
+            harness
+                .record_completed_tools_with_termination("parent-run", &HashMap::new())
+                .is_ok(),
+            complete_parent,
+            "a child result must not satisfy the parent's matching call ID"
+        );
+        // Imported child transcripts can end with a declaration without a
+        // corresponding result. It must not become the parent's latest batch.
+        harness
+            .append_message_to_lane(lane, run, declaration("child-pending"))
+            .unwrap();
+        let completion =
+            harness.record_completed_tools_with_termination("parent-run", &HashMap::new());
+        if complete_parent {
+            completion.unwrap();
+            assert!(harness.store.records().iter().any(|record| matches!(
+                record,
+                HarnessRecord::ToolFinished { run_id, lane, tool_call_id, .. }
+                    if run_id == "parent-run" && lane == "main" && tool_call_id == "shared-call"
+            )));
+        } else {
+            // A matching call ID on another lane cannot fill a missing result.
+            assert_eq!(
+                completion.unwrap_err(),
+                "run parent-run has an incomplete tool batch"
+            );
+        }
+    }
+}
+
+#[test]
 fn sync_messages_persists_identical_empty_assistant_results_for_each_run() {
     let (_dir, path) = temp_session();
     let mut harness = CodingSessionHarness::open(&path).unwrap();
@@ -2444,6 +2523,71 @@ fn child_provider_trace_stays_on_child_lane() {
     assert!(harness.store.records().iter().any(|record| matches!(record,
         HarnessRecord::ProviderRequestFinished { lane, usage: Some(usage), .. }
             if lane == &child.identity.lane_name && usage.total_tokens == 13
+    )));
+}
+
+#[test]
+fn fusion_audit_replays_with_provider_usage_on_the_same_run() {
+    let (_dir, path) = temp_session();
+    let mut harness = CodingSessionHarness::open(&path).unwrap();
+    let child = harness
+        .start_subagent_lane("worker", "remove deprecated code", None)
+        .unwrap();
+    let lane = &child.identity.lane_name;
+    let run = &child.identity.run_id;
+    harness
+        .record_fusion_audit(
+            lane,
+            Some(run),
+            serde_json::json!({
+                "version": 1,
+                "kind": "sidekick_outcome",
+                "model": "luna",
+                "provider_cache_hit": null,
+                "estimated_cost_usd": null,
+            }),
+        )
+        .unwrap();
+    harness
+        .record_provider_trace_on_lane(
+            lane,
+            run,
+            ProviderTraceEvent::Started {
+                attempt: 1,
+                request_id: "request-1".into(),
+                model: "luna".into(),
+                provider: "codex".into(),
+            },
+        )
+        .unwrap();
+    harness
+        .record_provider_trace_on_lane(
+            lane,
+            run,
+            ProviderTraceEvent::Finished {
+                attempt: 1,
+                request_id: "request-1".into(),
+                outcome: threadlane_runtime::harness::ProviderOutcome::Completed,
+                error: None,
+                duration_ms: 12,
+                usage: Some(TokenUsage {
+                    cache_read_tokens: 8,
+                    total_tokens: 13,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+    drop(harness);
+    let replay = CodingSessionHarness::open(&path).unwrap();
+    assert!(replay.store.records().iter().any(|record| matches!(record,
+        HarnessRecord::FactSet { lane: record_lane, run_id: Some(record_run), key, value, .. }
+            if record_lane == lane && record_run == run && key.starts_with("fusion_audit:")
+                && value.contains("sidekick_outcome")
+    )));
+    assert!(replay.store.records().iter().any(|record| matches!(record,
+        HarnessRecord::ProviderRequestFinished { lane: record_lane, run_id: record_run, duration_ms: Some(12), usage: Some(usage), .. }
+            if record_lane == lane && record_run == run && usage.cache_read_tokens == 8
     )));
 }
 

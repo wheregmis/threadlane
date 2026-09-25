@@ -745,9 +745,7 @@ impl CodingAgent {
         let sync = self.sync_turn_from_model_context().await;
         persisted?;
         sync?;
-        // Fusion dynamic routing rides the compaction cache miss: evaluate the
-        // router now that history is compacted, switching the main-lane model
-        // for free when the policy says so.
+        // Evaluate Fusion routing after compaction has committed its new context.
         self.apply_fusion_compaction_routing().await;
         Ok(true)
     }
@@ -893,10 +891,8 @@ impl CodingAgent {
                     self.harness_journal_error = Some(error);
                     return;
                 }
-                // Fusion dynamic routing rides every compaction boundary,
-                // manual or automatic: sessions that never run `/compact`
-                // still switch the main-lane model where a cache miss
-                // happens anyway.
+                // Evaluate Fusion routing after every committed compaction,
+                // whether manual or automatic.
                 self.apply_fusion_compaction_routing().await;
                 if let Some(last_assistant) = state_messages
                     .iter()
@@ -982,24 +978,52 @@ impl CodingAgent {
                     self.interrupted_subagent_recovery = InterruptedSubagentRecoveryState::Pending;
                     return Err(error);
                 }
+                let fusion_generation = self.fusion.lock().ok().and_then(|state| {
+                    state.as_ref().map(|state| state.compaction_generation)
+                });
+                if let Some(generation) = fusion_generation {
+                    if let Err(error) = journal.record_fusion_audit(
+                        &lane.lane_name,
+                        Some(&lane.run_id),
+                        serde_json::json!({
+                            "version": 1,
+                            "kind": "sidekick_outcome",
+                            "model": lane.model,
+                            "compaction_generation": generation,
+                            "outcome": if matches!(lane.status, SubagentLaneStatus::Completed) { "completed" } else { "failed" },
+                            "error": lane.error,
+                            "escalation_reason": lane.escalation_reason,
+                            "provider_cache_hit": null,
+                            "estimated_cost_usd": null,
+                        }),
+                    ) {
+                        self.completed_subagent_lanes
+                            .lock()
+                            .map_err(|_| "Completed subagent lane sink is unavailable".to_string())?
+                            .extend_from_slice(&lanes[index..]);
+                        self.interrupted_subagent_recovery = InterruptedSubagentRecoveryState::Pending;
+                        return Err(error);
+                    }
+                }
             }
         }
-        // Fusion bookkeeping: sidekick lane outcomes feed the router's error
-        // streak, which must survive until the compaction router consumes it:
-        // clearing it here would make `escalation_needed()` unreachable and
-        // the upgrade-to-main branch dead. Successes reset the streak so
-        // clean mechanical stretches can downgrade at the next compaction
-        // boundary. A newly crossed threshold surfaces one `FusionUpdate`
-        // event so the trajectory shows when and why the main agent took
-        // over; the streak itself is cleared only when the compaction router
-        // actually switches the main lane back (`record_escalation` there).
+        // Sidekick outcomes feed the error streak until the main agent
+        // acknowledges escalation at compaction. Main remains on its model.
         let mut failed_lanes: Vec<(String, String, String)> = Vec::new();
+        let mut fusion_snapshot = None;
+        let mut escalation_note = None;
         if let Ok(mut guard) = self.fusion.lock() {
             if let Some(state) = guard.as_mut() {
-                let pre_streak = state.consecutive_sidekick_errors;
+                let pre_escalation = state.escalation_needed();
+                let mut signals = Vec::new();
                 for lane in &lanes {
                     let failed = matches!(lane.status, SubagentLaneStatus::Failed);
+                    state.record_delegation();
                     state.record_sidekick_result(failed);
+                    if let Some(reason) = lane.escalation_reason.as_deref() {
+                        state.request_escalation(reason);
+                        signals.push(format!("`{}`: {reason}", lane.lane_name));
+                    }
                     if failed {
                         failed_lanes.push((
                             lane.lane_name.clone(),
@@ -1010,23 +1034,42 @@ impl CodingAgent {
                         ));
                     }
                 }
-                if !failed_lanes.is_empty()
-                    && pre_streak < threadlane_orchestrator::FUSION_ESCALATION_THRESHOLD
-                    && state.escalation_needed()
-                {
-                    let lanes_note = failed_lanes
+                if !pre_escalation && state.escalation_needed() {
+                    let mut notes = failed_lanes
                         .iter()
                         .map(|(lane, model, error)| format!("`{lane}` ({model}): {error}"))
-                        .collect::<Vec<_>>()
-                        .join("; ");
+                        .collect::<Vec<_>>();
+                    notes.extend(signals);
+                    let note = notes.join("; ");
+                    escalation_note = Some(note.clone());
                     let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
                         model: state.main_model.clone(),
                         message: format!(
-                            "Fusion escalated to main: sidekick lane(s) failed — {lanes_note}. Main owns the remainder."
+                            "Fusion sidekick escalation requested: {note}. Main owns review now; the signal clears at compaction."
                         ),
                     });
                 }
+                fusion_snapshot = Some(state.clone());
             }
+        }
+        let escalation_target = fusion_snapshot.as_ref().map(|state| state.main_model.clone());
+        if let Some(state) = fusion_snapshot {
+            self.set_fact(
+                "fusion_state",
+                &serde_json::to_string(&state).map_err(|error| error.to_string())?,
+            )?;
+        }
+        if let (Some(note), Some(harness)) = (escalation_note, self.harness.as_mut()) {
+            harness.record_fusion_audit(
+                "main",
+                None,
+                serde_json::json!({
+                    "version": 1,
+                    "kind": "escalation_requested",
+                    "reason": note,
+                    "target_model": escalation_target,
+                }),
+            )?;
         }
         Ok(())
     }

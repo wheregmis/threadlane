@@ -216,6 +216,15 @@ impl ProviderPort for ProviderClient {
         self.provider_kind(model)
     }
 
+    fn cache_capabilities(&self, model: &str) -> threadlane_protocol::ProviderCacheCapabilities {
+        let provider = self.provider_kind(model);
+        threadlane_protocol::ProviderCacheCapabilities {
+            accepts_cache_key: provider == "openai" || provider == "codex",
+            reports_cached_tokens: matches!(provider, "openai" | "codex" | "antigravity"),
+            ttl_seconds: None,
+        }
+    }
+
     fn refresh_openai_credentials(&self, api_key: String, account_id: Option<String>) {
         self.openai.refresh_credentials(api_key.clone(), account_id.clone());
         self.refresh_fallback_clients(&api_key);

@@ -140,7 +140,7 @@ pub(crate) async fn execute_slash_command(
         }
         CommandAction::Fusion(objective) => {
             if objective.trim().is_empty() {
-                "Usage: /fusion <task objective> to route with frontier main + sidekick lanes, switching at compaction.".to_string()
+                "Usage: /fusion <task objective> to run a main agent with sidekick child lanes.".to_string()
             } else {
                 format!("Fusion initiated for: {}", objective.trim())
             }
