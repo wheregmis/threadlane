@@ -5975,14 +5975,8 @@ impl ChatListView {
                 .into_iter()
                 .fold(menu, |menu, mode| {
                     let model = mode_model.clone();
-                    let label = match mode {
-                        threadlane_protocol::OrchestratorMode::Normal => {
-                            "Normal · Direct execution"
-                        }
-                        threadlane_protocol::OrchestratorMode::Fusion => "Fusion · Main + sidekick",
-                    };
                     menu.item(
-                        PopupMenuItem::new(label)
+                        PopupMenuItem::new(mode.label())
                             .checked(mode == orchestrator_mode)
                             .on_click(move |_event, _window, cx| {
                                 model.update(cx, |state, cx| {

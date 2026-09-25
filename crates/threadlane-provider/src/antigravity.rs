@@ -424,14 +424,12 @@ impl AntigravityClient {
                 safe_error_text(&text)
             );
             // A 429 is not authoritative: prod can 429 every generation call
-            // for an account while daily returns 200 (verified live), so fall
-            // through and let the other host try. Other 4xx responses (bad
-            // token, unknown model, malformed request) would fail identically
-            // everywhere, so keep them terminal.
-            if status.is_client_error() && status.as_u16() != 429 {
-                break;
-            }
-            if !matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504) {
+            // for an account while daily returns 200 (verified live). A 403 can
+            // likewise be host-specific (the daily host may impose an account
+            // verification gate that prod does not), so try the other host
+            // before surfacing it. Other 4xx responses describe the request or
+            // credentials and would fail identically everywhere.
+            if !should_try_next_endpoint(status) {
                 break;
             }
         }
@@ -535,6 +533,9 @@ fn credential_cache_key(
     hasher.finalize().into()
 }
 
+fn should_try_next_endpoint(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 403 | 429 | 500 | 502 | 503 | 504)
+}
 fn endpoint_candidates() -> Vec<String> {
     if let Ok(raw) = std::env::var("ANTIGRAVITY_BASE_URL") {
         if let Ok(url) = url::Url::parse(raw.trim()) {
@@ -1721,6 +1722,15 @@ mod tests {
             resolve_runtime_model("claude-opus-4-6", "high"),
             "claude-opus-4-6-thinking"
         );
+    }
+
+    #[test]
+    fn endpoint_fallback_includes_host_specific_forbidden_responses() {
+        assert!(should_try_next_endpoint(reqwest::StatusCode::FORBIDDEN));
+        assert!(should_try_next_endpoint(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(should_try_next_endpoint(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(!should_try_next_endpoint(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(!should_try_next_endpoint(reqwest::StatusCode::BAD_REQUEST));
     }
 
     #[test]
