@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.22](https://github.com/wheregmis/threadlane/compare/v0.1.21...v0.1.22) (2026-09-25)
+
+
+### CI
+
+* Align release toolchain with Rust 1.95 ([616e6d9](https://github.com/wheregmis/threadlane/commit/616e6d9208be0d9e21bb027b9a320d5c2a952eae))
+
 ## [0.1.21](https://github.com/wheregmis/threadlane/compare/v0.1.20...v0.1.21) (2026-09-25)
 
 
