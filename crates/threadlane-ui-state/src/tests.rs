@@ -4120,6 +4120,7 @@ fn active_session_loading_requires_matching_message_hydration() {
         session_id: "session-1".into(),
         session_file: session_file.clone(),
         reload_messages: true,
+        runtime_options: None,
     });
     assert!(state.active_session_is_loading());
 
@@ -4127,5 +4128,16 @@ fn active_session_loading_requires_matching_message_hydration() {
     assert!(!state.active_session_is_loading());
     state.pending_hydrations[0].reload_messages = true;
     state.pending_hydrations[0].session_id = "session-2".into();
+    assert!(!state.active_session_is_loading());
+    state.pending_hydrations[0].session_id = "session-1".into();
+    state.pending_hydrations.push(state.pending_hydrations[0].clone());
+
+    state.take_pending_hydrations();
+    assert!(state.pending_hydrations.is_empty());
+    assert!(state.active_session_is_loading());
+
+    state.finish_session_hydration("session-1", &session_file);
+    assert!(state.active_session_is_loading());
+    state.finish_session_hydration("session-1", &session_file);
     assert!(!state.active_session_is_loading());
 }

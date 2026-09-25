@@ -232,6 +232,7 @@ impl WorkspaceView {
                     .spawn(async move { compute_session_messages(&history_file) })
                     .await;
                 let _ = model.update(cx, |state, cx| {
+                    state.finish_session_hydration(&request.session_id, &request.session_file);
                     if !state.active_session_matches(&request.session_id, &request.session_file) {
                         return;
                     }
@@ -385,9 +386,8 @@ impl WorkspaceView {
                     while model_wake_rx.try_recv().is_ok() {}
                     let hydration_requests = this
                         .update(cx, |this, cx| {
-                            this.model.update(cx, |state, _cx| {
-                                std::mem::take(&mut state.pending_hydrations)
-                            })
+                            this.model
+                                .update(cx, |state, _cx| state.take_pending_hydrations())
                         })
                         .unwrap_or_default();
                     for request in hydration_requests {
@@ -467,9 +467,9 @@ impl WorkspaceView {
             }
         });
         view.update(cx, |view, cx| {
-            let hydration_requests = view.model.update(cx, |state, _cx| {
-                std::mem::take(&mut state.pending_hydrations)
-            });
+            let hydration_requests = view
+                .model
+                .update(cx, |state, _cx| state.take_pending_hydrations());
             if !hydration_requests.is_empty() {
                 let model = view.model.clone();
                 cx.spawn(async move |_view, cx| {
