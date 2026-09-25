@@ -2,21 +2,18 @@
   <img src="assets/images/threadlane-logo.svg" width="48" align="top" style="vertical-align: top;" alt="Threadlane application icon">&nbsp;Threadlane
 </h1>
 
-<p align="center">
-  A fast, native AI coding workspace built in Rust with GPUI.
-</p>
+<p align="center">A native desktop workspace for AI-assisted software development, built in Rust with GPUI.</p>
 
 <p align="center">
   <a href="https://github.com/wheregmis/threadlane/actions/workflows/release.yml"><img alt="macOS release workflow" src="https://github.com/wheregmis/threadlane/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/wheregmis/threadlane/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/wheregmis/threadlane?display_name=tag&sort=semver"></a>
   <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-d65d0e?logo=rust&logoColor=white">
   <img alt="GPUI" src="https://img.shields.io/badge/UI-GPUI-6f8cff">
-  <a href="#license"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-3da639"></a>
 </p>
 
-Threadlane combines a GPU-accelerated desktop interface with a high-performance coding agent runtime. It brings multi-project workspaces, persistent multi-lane conversation trees, intent-first durable execution, sandboxed WASI extensions, MCP integrations, and external ACP agents together into a single focused, native application.
+Threadlane brings project workspaces, persistent conversation sessions, coding-agent execution, and developer tools into one native application. Its Rust workspace includes provider integrations, external ACP agents, MCP support, and sandboxed WASI extensions.
 
-> **Release status:** Automated release packages target Apple Silicon macOS (`.dmg`, `.app.tar.gz`) and Ubuntu 24.04 x86_64 (`.deb`). Can also be built from source on other platforms supported by GPUI.
+> **Release status:** The release workflow currently builds signed Apple Silicon macOS artifacts. The application can also be built from source on platforms supported by its dependencies.
 
 <p align="center">
   <a href="assets/images/threadlane-workspace.png">
@@ -24,325 +21,136 @@ Threadlane combines a GPU-accelerated desktop interface with a high-performance 
   </a>
 </p>
 
-<p align="center"><em>Native GPUI workspace featuring project-aware sessions, persistent PTY terminals, streamed agent operations, and keyboard-first command discovery.</em></p>
+## Highlights
 
----
-
-## Why Threadlane?
-
-- **Native & Ultra-Responsive** — Built from the ground up in Rust using GPUI for sub-millisecond input handling, smooth 120 FPS rendering, and instant streaming.
-- **Harness V2 Durable Runtime** — Intent-first state machine with multi-lane reducer, deterministic crash/interruption recovery, monotonic sequence accounting, and append-only JSONL storage.
-- **Provider-Neutral Routing** — Unified streaming support for Google Antigravity (Cloud Code Assist), OpenAI / Codex, OpenCode, and external Agent Client Protocol (ACP) agents.
-- **Precision Workspace Tools** — Workspace-contained file ops, AST/ripgrep pattern search, sandboxed execution, and drift-resistant `line:hash` anchor edits via `threadlane-hashline`.
-- **Extensible Sandbox** — Sandboxed WebAssembly (WASI) extensions brokered via `threadlane_host`, long-lived MCP servers, and dynamic SKILL.md discovery.
-- **Session-Scoped Plans & Trajectory** — Model-managed persistent todo plans alongside an interactive canonical Trajectory inspector for fine-grained execution forensics.
-- **Integrated Persistent PTY** — Full interactive terminal emulation (`portable-pty` + `vt100`) grouped per project workspace.
-- **Signed Auto-Updates** — Background update checks with cryptographic signature validation and in-app relaunch on macOS.
-
----
-
-## Architecture: Harness V2
-
-Threadlane's architecture centers around the **Harness V2** runtime: an intent-first, multi-lane state machine that decouples the user interface from agent orchestration, provider communication, and tool execution while guaranteeing durable crash recovery and replay safety.
-
-```mermaid
-flowchart TD
-    subgraph UI["Native GPUI Desktop Shell"]
-        ChatView["Chat Transcript & Plan Tracker"]
-        TrajectoryView["Trajectory Forensics Navigator"]
-        PtyTerm["Persistent PTY Terminal"]
-        GitPanel["Git Diffs & Branch Control"]
-        SettingsView["Extension & Provider Settings"]
-    end
-
-    subgraph Harness["Coding Agent & Harness V2 Core"]
-        CSH["CodingSessionHarness"]
-        SessionController["SessionController (Interactive)"]
-        AgentHarness["AgentHarness State Machine"]
-
-        subgraph Reducer["Multi-Lane Reducer"]
-            MainLane["Main Conversation Lane"]
-            SubLanes["Child Subagent Lanes (Scout / Worker)"]
-            SeqAlloc["Monotonic Sequence Allocator"]
-            Recovery["Crash Recovery & Safe Tool Replay"]
-        end
-
-        IntentLog["Intent-First Durability\n(OperationStarted • StepAttempt • ToolStarted • QueueEnqueued)"]
-    end
-
-    subgraph Store["Durable Storage Layer"]
-        JSONL["Canonical Session JSONL\n(Append-Only Entries & Records)"]
-        Snapshots["In-Memory Live Stream Projections"]
-    end
-
-    subgraph Ports["Execution Ports & Capability Broker"]
-        ProviderRouter["Provider Router (threadlane-provider)"]
-        ToolsEngine["Workspace Tools (threadlane-tools & hashline)"]
-        McpEngine["Long-Lived MCP Client (threadlane-mcp)"]
-        WasiBroker["WASI Host Broker (threadlane-wasi)"]
-        SkillScanner["Skill & Prompt Registry (threadlane-skills)"]
-    end
-
-    subgraph Backends["External Services & Runtimes"]
-        Antigravity["Google Antigravity (v1internal OAuth)"]
-        OpenAI["OpenAI / Codex (PKCE Device Flow)"]
-        OpenCode["OpenCode Go Client"]
-        AcpAgents["External ACP Agents (Gemini CLI / Claude Code)"]
-        WasiModules["Wasm Extensions (web_ext, debug_ext DAP, lsp_ext)"]
-        McpServers["MCP JSON-RPC Servers"]
-    end
-
-    %% UI Connections
-    ChatView <--> CSH
-    TrajectoryView <--> AgentHarness
-    SessionController <--> AgentHarness
-    CSH --> AgentHarness
-
-    %% Harness Internal Connections
-    AgentHarness --> Reducer
-    AgentHarness --> IntentLog
-    Reducer --> SeqAlloc
-    Reducer --> Recovery
-
-    %% Storage Connections
-    AgentHarness <--> Store
-    IntentLog --> JSONL
-    Reducer --> JSONL
-    AgentHarness -.-> Snapshots
-    Snapshots -.-> ChatView
-
-    %% Ports Connections
-    AgentHarness --> Ports
-    ProviderRouter --> Antigravity & OpenAI & OpenCode & AcpAgents
-    ToolsEngine --> WorkspaceFS[(Local Workspace Filesystem)]
-    McpEngine --> McpServers
-    WasiBroker --> WasiModules
-    SkillScanner --> SkillFiles[(~/.agents/skills & .threadlane/skills)]
-
-    %% Event dispatch back to UI
-    AgentHarness == Canonical Events ==> ChatView & TrajectoryView
-```
-
-### Core Architecture Invariants
-
-1. **Intent-First Durability:** Durable records (`OperationStarted`, `StepAttempt`, `ToolStarted`, `QueueEnqueued`) are written to canonical JSONL *before* dispatching provider or physical tool actions.
-2. **Multi-Lane Execution:** Foreground chat runs in `main`, while delegated subagents (`scout`, `worker`) execute in dedicated child lanes keyed by deterministic parent session + tool call ID.
-3. **Safe Replay & Crash Recovery:** Reopening a session reduces persisted records without side effects. Interrupted tools with matching declarations replay safely; unfinished unverified operations synthesize interrupted results without corrupting state.
-4. **Append-Only Ledger:** Sequence numbers and usage accounting (tokens, provider queries, physical tool operations) are monotonic and reduced from immutable historical records.
-
----
-
-## Highlights & Capabilities
-
-| Capability | What It Provides |
-| --- | --- |
-| **Native GPUI Desktop UI** | Streaming markdown, rich syntax-highlighted diffs, tool activity widgets, reasoning/thinking dropdowns, image attachments, keyboard shortcuts, and split-screen layouts. |
-| **Multi-Project Workspace** | Attach and switch between multiple repositories; project-scoped sessions, drafts, skill configurations, and persistent PTY terminal groups. |
-| **Trajectory Inspector** | Forensic execution view showing raw canonical entries, step attempts, retries, multi-lane subagent streams, and tool correlation metadata. |
-| **Session-Scoped Plan Tracker** | Model-controlled todo lists persisted in `session_plan` records, rendered above the composer without leaking across global tasks. |
-| **Multi-Provider Routing** | First-class routing for Google Antigravity (`antigravity/`), OpenAI / Codex (PKCE device login), OpenCode (`opencode-go/`), and ACP agents (`acp/`). |
-| **External ACP Agents** | Run third-party Agent Client Protocol agents (e.g. Gemini CLI, Claude Code) over stdio with full UI event streaming. |
-| **Precision File Editing** | Drift-resistant line replacement using `threadlane-hashline` line:hash anchors, preventing collision during multi-turn refactors. |
-| **Sandboxed WASI Extensions** | WebAssembly extensions for web search (`web_ext`), interactive DAP debugging (`debug_ext`), LSP assistance (`lsp_ext`), and custom tools. |
-| **Model Context Protocol (MCP)** | High-performance, long-lived JSON-RPC MCP server connections with concurrent tool dispatch and automatic session recovery. |
-| **Integrated Git & Diff Viewer** | Staged/unstaged file navigation, interactive diff viewer, one-click commit message generation, and GitHub PR compare links. |
-| **Signed Auto-Updates** | In-app background checks, Ed25519 signature verification, download progress, and restart-to-update on macOS. |
-
----
+- **Native desktop workspace** — A Rust and GPUI application with multi-project workspaces, session trees, and integrated PTY terminals.
+- **Coding-agent runtime** — Durable session orchestration, streamed agent activity, context compaction, plans, and execution history.
+- **Provider and agent integrations** — Google Antigravity, OpenAI/Codex, OpenCode, and externally configured ACP agents.
+- **Developer tooling** — Workspace file tools, ripgrep search, sandboxed process execution, MCP servers, and `line:hash`-anchored edits.
+- **Extensibility** — Sandboxed WebAssembly System Interface (WASI) extensions and discovered skills.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Rust 1.95.0 or later (the repository pins 1.95.0 automatically through
-  `rust-toolchain.toml`; install it with `rustup toolchain install 1.95.0`).
-- WebAssembly target: `rustup target add wasm32-wasip1`.
-- Native C toolchain (standard Xcode Command Line Tools on macOS; `build-essential` on Ubuntu).
+- Rust 1.95.0 or later. The repository pins this version in [`rust-toolchain.toml`](rust-toolchain.toml).
+- The WASI target: `rustup target add wasm32-wasip1`.
+- A native C toolchain, such as Xcode Command Line Tools on macOS or `build-essential` on Ubuntu.
 
-### Build & Run
+### Build and run
 
 ```bash
 # Clone the repository
 git clone https://github.com/wheregmis/threadlane.git
 cd threadlane
 
-# Build bundled WASI extensions (web_ext, debug_ext, lsp_ext, etc.)
+# Build and install bundled WASI extensions for the local checkout
 ./scripts/build_extensions.sh
 
-# Run the native GPUI desktop application
-# macOS: the app must run from a bundle, so use the dev-run script
+# macOS: build a development app bundle and run it
 ./scripts/run-gpui-macos.sh
 
-# Linux / other platforms
+# Linux and other supported environments
 cargo run -p threadlane-gpui
 ```
 
-> **macOS:** `cargo run -p threadlane-gpui` aborts with `bundleProxyForCurrentProcess is nil`.
-> Startup reaches `UNUserNotificationCenter`, which macOS refuses to hand to a process that is
-> not inside an app bundle. `./scripts/run-gpui-macos.sh` builds the same binary, wraps it in
-> `target/debug/Threadlane-dev.app`, and runs it in the foreground, so `RUST_LOG`, stdout, and
-> Ctrl-C behave as usual. Pass `--release` for a release build.
+On macOS, use `./scripts/run-gpui-macos.sh` rather than `cargo run -p threadlane-gpui`. Some framework calls require the application to run from an app bundle. The script creates `target/debug/Threadlane-dev.app`, preserves standard output and `RUST_LOG`, and accepts `--release` for a release build.
 
-### Provider Authentication
+## Configure providers and agents
 
-Threadlane supports multiple provider backends:
+Threadlane supports the following connection methods:
 
-- **Google Antigravity:** Supports Antigravity OAuth credentials with automatic Cloud Code Assist endpoint discovery.
-- **OpenAI / Codex:** Use the built-in PKCE device authorization flow (`~/.threadlane/auth.json`) or configure your API key in Settings.
-- **External ACP Agents:** Configure binaries in `~/.threadlane/acp.json` or `<project>/.threadlane/acp.json`,
-  or from Settings → ACP Agents. The agent signs itself in, so no Threadlane provider credential is needed.
-  Select it afterwards from the model picker or `/model` as `acp/<id>`.
+- **Google Antigravity** — OAuth credentials with Cloud Code Assist endpoint discovery.
+- **OpenAI/Codex** — Use the built-in PKCE device-authorization flow or configure an API key in Settings. Threadlane stores its credentials under `~/.threadlane` and can read Codex CLI credentials from `~/.codex/auth.json`.
+- **External ACP agents** — Configure agent binaries in `~/.threadlane/acp.json` or `<project>/.threadlane/acp.json`, or use **Settings → ACP Agents**. Authenticate the external agent separately, then select it from the model picker or with `/model` as `acp/<id>`.
 
-  ```jsonc
-  // ~/.threadlane/acp.json
-  {
-    "agents": [
-      {
-        "id": "claude_code",
-        "name": "Claude Code",
-        // An app launched from Finder inherits no shell PATH, so a
-        // version-manager binary such as npx needs an absolute path here.
-        "command": "/usr/local/bin/npx",
-        "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
-        "enabled": true
-      },
-      {
-        "id": "gemini",
-        "name": "Gemini CLI",
-        "command": "gemini",
-        "args": ["--experimental-acp"],
-        "enabled": true
-      }
-    ]
-  }
-  ```
+Example ACP configuration:
 
-  Claude Code uses the credentials of the `claude` CLI; run `claude /login` once if it reports that
-  sign-in is required. Project entries shadow global entries sharing an `id`, and `scope` is always
-  taken from the file an entry was read from rather than from the entry itself.
-
-### Structured Logging
-
-Control console verbosity at launch using `RUST_LOG`:
-
-```bash
-# Default info logging
-./scripts/run-gpui-macos.sh
-
-# Debug logging for harness events, revision bumps, and UI state
-RUST_LOG=threadlane_gpui=debug ./scripts/run-gpui-macos.sh
-
-# Deep trace of agent execution loops & harness records
-RUST_LOG=threadlane_gpui=debug,threadlane_agent=trace ./scripts/run-gpui-macos.sh
-
-# GPUI frame-time overlay (current, slowest 1%/10%, max, and frame count)
-THREADLANE_GPUI_PROFILE=1 cargo run -p threadlane-gpui --features gpui-profiler
+```jsonc
+// ~/.threadlane/acp.json
+{
+  "agents": [
+    {
+      "id": "claude_code",
+      "name": "Claude Code",
+      // Applications launched from Finder do not inherit a shell PATH.
+      // Use an absolute path for version-manager binaries such as npx.
+      "command": "/Users/you/.nvm/versions/node/v22.0.0/bin/npx",
+      "args": ["-y", "@zed-industries/claude-code-acp"]
+    }
+  ]
+}
 ```
 
-On Linux, substitute `cargo run -p threadlane-gpui` for the script in each of the above.
+To add an API key from the terminal, start Threadlane and open **Settings → Providers**.
 
----
+## Common commands
 
-## Slash Commands
-
-Type `/` in the composer to activate command completion:
+Type `/` in the composer to open command completion.
 
 | Command | Description |
 | --- | --- |
-| `/model` | Inspect or switch the active model / ACP agent. |
-| `/compact` | Compact the active context window while preserving session summaries. |
-| `/session` | View active session details, token usage, and lane stats. |
+| `/model` | Inspect or change the active model or ACP agent. |
+| `/compact` | Compact the active context while preserving session summaries. |
+| `/session` | View session details, token usage, and lane statistics. |
 | `/name` | Rename the current session. |
 | `/tree` | Navigate branching conversation history. |
-| `/fork` | Fork the conversation into a new independent branch. |
+| `/fork` | Create an independent branch from the current conversation. |
 | `/clone` | Clone the current session tree. |
-| `/skill` | Manually load and activate a discovered skill. |
+| `/skill` | Load a discovered skill. |
 | `/quit` | Exit the application. |
 
-*Discovered skills and WASI extension commands are automatically indexed into slash completion.*
+Discovered skills and WASI extension commands are included in command completion.
 
----
+## Project layout
 
-## Repository Map
+The workspace is organized as focused crates. Key entry points include:
 
-The Threadlane workspace is modularized into focused crates:
-
-| Crate | Path | Responsibility |
+| Area | Location | Responsibility |
 | --- | --- | --- |
-| `threadlane-gpui` | [`crates/threadlane-gpui`](crates/threadlane-gpui) | Native GPUI desktop application, view hierarchy, PTY terminal, and UI event loops. |
-| `threadlane-coding-agent` | [`crates/threadlane-coding-agent`](crates/threadlane-coding-agent) | Coding agent orchestration, `CodingSessionHarness`, `SessionController`, subagents, and ACP engine wiring. |
-| `threadlane-runtime` | [`crates/threadlane-runtime`](crates/threadlane-runtime) | Core agent loop, `AgentHarness` V2 state machine, multi-lane reducer, and session trees. |
-| `threadlane-provider` | [`crates/threadlane-provider`](crates/threadlane-provider) | Multi-provider routing (Antigravity, OpenAI/Codex, OpenCode) and streaming parsers. |
-| `threadlane-tools` | [`crates/threadlane-tools`](crates/threadlane-tools) | Workspace-contained file tools, ripgrep search, and sandboxed process execution. |
-| `threadlane-hashline` | [`crates/threadlane-hashline`](crates/threadlane-hashline) | High-precision `line:hash` anchor calculation and drift-proof text editing. |
-| `threadlane-mcp` | [`crates/threadlane-mcp`](crates/threadlane-mcp) | Long-lived Model Context Protocol (MCP) JSON-RPC client and tool executor. |
-| `threadlane-skills` | [`crates/threadlane-skills`](crates/threadlane-skills) | SKILL.md discovery, YAML frontmatter parsing, and project skill filtering. |
-| `threadlane-wasi` | [`crates/threadlane-wasi`](crates/threadlane-wasi) | WebAssembly (WASI) runtime and `threadlane_host` capability broker. |
-| `threadlane-git` | [`crates/threadlane-git`](crates/threadlane-git) | Git status inspection, branch checkout, diff generation, and worktree helpers. |
-| `threadlane-auth` | [`crates/threadlane-auth`](crates/threadlane-auth) | Trait-based credential storage and OAuth PKCE device flows. |
-| `threadlane-updater` | [`crates/threadlane-updater`](crates/threadlane-updater) | Signed update discovery, verified bundle downloads, and packaged app relaunch. |
+| Desktop application | [`crates/threadlane-gpui`](crates/threadlane-gpui) | GPUI application binary and window setup. |
+| Workspace UI | [`crates/threadlane-ui-workspace`](crates/threadlane-ui-workspace) | Root workspace view, panels, terminals, settings, and event pumps. |
+| Coding agent | [`crates/threadlane-coding-agent`](crates/threadlane-coding-agent) | Session orchestration, subagents, and ACP engine wiring. |
+| Runtime | [`crates/threadlane-runtime`](crates/threadlane-runtime) | Agent state machine, reducer, and session trees. |
+| Providers | [`crates/threadlane-provider`](crates/threadlane-provider) | Provider routing and streaming parsers. |
+| Tools | [`crates/threadlane-tools`](crates/threadlane-tools) | Workspace file tools, search, and process execution. |
+| Extensions | [`crates/threadlane-wasi`](crates/threadlane-wasi) | WASI host and extension execution. |
 
----
+For repository conventions and the complete crate map, see [`AGENTS.md`](AGENTS.md).
 
-## Extensions & Debugging
+## Development and verification
 
-Threadlane bundles sandboxed WASI extensions located in `extensions/`:
-
-- **`web_ext`**: Sandboxed HTTP client (`fetch`) and DuckDuckGo search (`web_search`) governed by permission prompts (`.threadlane/permissions.json`).
-- **`debug_ext`**: Debug Adapter Protocol (DAP) client enabling the agent to set breakpoints, step through code, inspect variables, and evaluate stack traces via `lldb-dap`, `debugpy`, `dlv dap`, or `js-debug-adapter`.
-- **`lsp_ext`**: Language Server Protocol bridge for real-time diagnostics and code intelligence.
-- **`goal_ext`**: Goal decomposition and autonomous objective tracking.
-
-To build and package all extensions:
-```bash
-./scripts/build_extensions.sh
-```
-
----
-
-## Development & Verification
-
-Follow the standard validation pipeline before submitting changes:
+Run focused checks while developing, then use the full workspace suite before submitting broader changes:
 
 ```bash
-# Fast desktop application check
+# Desktop application
 cargo check -p threadlane-gpui
 
-# Check patch whitespace
-git diff --check
-
-# Focused crate tests
+# Focused tests
 cargo test -p threadlane-runtime
-cargo test -p threadlane-session
 cargo test -p threadlane-updater
 
 # Full workspace test suite
 cargo test --workspace
 ```
 
-For coding agent rules and repository conventions, consult [`AGENTS.md`](AGENTS.md).
+## Packaging and releases
 
----
-
-## Packaging & Releases
-
-Threadlane utilizes `cargo-packager` and GitHub Actions for continuous delivery:
+Releases use `cargo-packager`, GitHub Actions, and [Release Please](https://github.com/googleapis/release-please). To create a local release package:
 
 ```bash
-# Install packaging toolchain
+# Install packaging tools
 cargo install --locked cargo-packager --version 0.11.8
 cargo install --locked --git https://github.com/project-robius/robius-packaging-commands.git
 
-# Package release binary
+# Build bundled extensions and package the application
 ./scripts/build_extensions.sh
 cargo build --release --bin threadlane-gpui
 cargo packager --release --manifest-path crates/threadlane-gpui/Cargo.toml
 ```
 
-Updates are cryptographically signed using Ed25519 keys via `cargo-packager-updater` and published automatically via [Release Please](https://github.com/googleapis/release-please).
-
----
+Update artifacts are signed with Ed25519 keys through `cargo-packager-updater`.
 
 ## License
 
-Threadlane is open-source software licensed under the [MIT License](LICENSE).
+This repository does not currently include a license file.
