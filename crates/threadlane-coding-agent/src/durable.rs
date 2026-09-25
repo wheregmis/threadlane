@@ -979,7 +979,9 @@ impl CodingAgent {
         // Fusion bookkeeping: sidekick lane outcomes feed the router's error
         // streak. Failures escalate back to the main agent; successes reset
         // the streak so clean mechanical stretches can downgrade at the next
-        // compaction boundary.
+        // compaction boundary. Escalations surface as `FusionUpdate` events
+        // so the trajectory shows when and why the main agent took over.
+        let mut escalated_lanes: Vec<(String, String, String)> = Vec::new();
         if let Ok(mut guard) = self.fusion.lock() {
             if let Some(state) = guard.as_mut() {
                 for lane in &lanes {
@@ -987,7 +989,29 @@ impl CodingAgent {
                     state.record_sidekick_result(failed);
                     if failed {
                         state.record_escalation();
+                        escalated_lanes.push((
+                            lane.lane_name.clone(),
+                            lane.model.clone(),
+                            lane.error
+                                .clone()
+                                .unwrap_or_else(|| "lane failed".to_string()),
+                        ));
                     }
+                }
+                if !escalated_lanes.is_empty() {
+                    let lanes_note = escalated_lanes
+                        .iter()
+                        .map(|(lane, model, error)| {
+                            format!("`{lane}` ({model}): {error}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
+                        model: state.main_model.clone(),
+                        message: format!(
+                            "Fusion escalated to main: sidekick lane(s) failed — {lanes_note}. Main owns the remainder."
+                        ),
+                    });
                 }
             }
         }

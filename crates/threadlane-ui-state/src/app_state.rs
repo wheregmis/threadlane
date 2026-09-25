@@ -616,14 +616,21 @@ impl AppState {
             return;
         }
         self.orchestrator_mode = mode;
-        if let Some((runtime, _)) = self.active_session_runtime() {
-            if runtime.is_generating() {
-                self.session_status = Some("Mode changed; it will apply to the next turn".into());
-                return;
-            }
-            self.drop_session_runtime(&runtime.session_file);
-            self.active_session_runtime();
+        // Rebuild only a live runtime; a missing one is constructed on
+        // demand from the saved settings by hydration or the next prompt.
+        let Some(session_id) = self.active_session_id.clone() else {
+            return;
+        };
+        let session_file = self.session_file(&work_dir, &session_id);
+        let Some(runtime) = self.session_runtimes.get(&session_file).cloned() else {
+            return;
+        };
+        if runtime.is_generating() {
+            self.session_status = Some("Mode changed; it will apply to the next turn".into());
+            return;
         }
+        self.drop_session_runtime(&session_file);
+        self.active_session_runtime();
     }
 
     /// Re-read the orchestration mode from the active project's stored
@@ -846,7 +853,8 @@ impl AppState {
         self.active_work_dir = Some(work_dir.clone());
         self.active_session_id = Some(session_id.clone());
         self.is_new_task = false;
-        self.refresh_orchestrator_mode();        let project_work_dir = self
+        self.refresh_orchestrator_mode();
+        let project_work_dir = self
             .projects
             .iter()
             .find(|project| {
@@ -3298,11 +3306,14 @@ impl AppState {
             AgentEvent::SubagentStarted {
                 journal_run_id,
                 task_index,
+                model,
                 ..
             } => Some((
                 "Subagent",
                 format!("Subagent {task_index} started"),
-                journal_run_id.clone(),
+                // The model names the lane's driver at a glance: frontier
+                // main-model lanes vs. cheap Fusion sidekick lanes.
+                format!("{model} · {journal_run_id}"),
                 Some(journal_run_id.clone()),
             )),
             AgentEvent::SubagentFinished {

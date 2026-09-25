@@ -1660,6 +1660,14 @@ impl ChatListView {
                             theme.primary,
                             "SUBAGENT".into(),
                         ),
+                        // Fusion routing transitions (armed, delegated,
+                        // escalated, compaction-switched) get their own
+                        // badge so mode activity stands out from tool noise.
+                        "Router" => (
+                            theme.accent.opacity(0.16),
+                            theme.accent,
+                            "ROUTER".into(),
+                        ),
                         _ => (
                             theme.muted.opacity(0.5),
                             theme.muted_foreground,
@@ -1681,6 +1689,8 @@ impl ChatListView {
                     theme.warning
                 } else if entry.category == "Request" {
                     theme.primary
+                } else if entry.category == "Router" {
+                    theme.accent
                 } else {
                     theme.muted_foreground
                 };
@@ -5800,14 +5810,20 @@ impl ChatListView {
         // every prompt directly on the selected model, Fusion routes through
         // frontier-main + sidekick lanes.
         let mode_model = self.model.clone();
+        let has_mode_project = self.model.read(cx).active_work_dir.is_some();
         let mode_picker = Button::new("composer-mode-picker")
             .debug_selector(|| "composer-mode-picker".into())
             .small()
             .label(orchestrator_mode.label())
             .accessibility_label(format!("Mode: {}", orchestrator_mode.label()))
-            .tooltip("Session mode: Normal or Fusion")
+            .tooltip(if has_mode_project {
+                "Session mode: Normal or Fusion".to_string()
+            } else {
+                "Attach a project to switch session modes".to_string()
+            })
             .dropdown_caret(true)
             .ghost()
+            .disabled(!has_mode_project)
             .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, _window, _cx| {
                 let menu = menu.check_side(gpui_component::Side::Right);
                 [

@@ -20,6 +20,6 @@ pub mod fusion;
 pub use fusion::{
     FUSION_MAIN_FOOTER, FUSION_MAIN_HEADER, FUSION_SIDEKICK_HEADER, FusionComplexity, FusionDecision,
     FusionState, build_fusion_main_directive, build_fusion_sidekick_directive,
-    classify_fusion_task, evaluate_fusion_prompt, fusion_would_be_noop, is_frontier_only_tool,
-    is_sidekick_eligible_tool, resolve_sidekick_model, select_model_at_compaction,
+    classify_fusion_task, evaluate_fusion_prompt, fusion_would_be_noop, resolve_sidekick_model,
+    select_model_at_compaction,
 };

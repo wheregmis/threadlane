@@ -92,36 +92,6 @@ pub fn classify_fusion_task(prompt: &str) -> FusionComplexity {
     }
 }
 
-/// Tools the sidekick lane is allowed to own. The main agent keeps plan
-/// authorship (`update_plan`), user ambiguity (`ask_question`), and delivery
-/// (`create_draft_pull_request`, `manage_subagent_branch`); everything else
-/// mechanical (reads, edits, test runs) hands off. Unknown tools fail closed
-/// to the main agent.
-pub fn is_sidekick_eligible_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "read_file"
-            | "grep_search"
-            | "list_files"
-            | "file_search"
-            | "edit_file_hashline"
-            | "edit_files_hashline"
-            | "write_file"
-            | "apply_workspace_edit_plan"
-            | "run_command"
-            | "context_snapshot"
-            | "subagent_context"
-    )
-}
-
-/// Frontier-only tools that must stay on the main agent even in Fusion mode.
-pub fn is_frontier_only_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "update_plan" | "ask_question" | "create_draft_pull_request" | "manage_subagent_branch"
-    )
-}
-
 /// Resolve which model the sidekick lanes run. Preference order mirrors the
 /// existing session wiring: explicit subagent model, then the sidekick
 /// (fast) model, then the active model (which makes Fusion a noop that
@@ -201,11 +171,6 @@ pub struct FusionState {
     pub escalated: u64,
     /// Consecutive sidekick tool errors (resets on success).
     pub consecutive_sidekick_errors: u32,
-    /// Whether this arming came from explicit `/fusion` (true) or stored
-    /// `OrchestratorMode::Fusion` (false).
-    pub explicit: bool,
-    /// When the mode was armed (for observability logging).
-    pub started_at: std::time::Instant,
 }
 
 impl FusionState {
@@ -215,7 +180,6 @@ impl FusionState {
         main_model: String,
         sidekick_model: String,
         sidekick_effort: Option<ReasoningEffort>,
-        explicit: bool,
     ) -> Self {
         Self {
             main_model,
@@ -224,8 +188,6 @@ impl FusionState {
             delegated: 0,
             escalated: 0,
             consecutive_sidekick_errors: 0,
-            explicit,
-            started_at: std::time::Instant::now(),
         }
     }
 
@@ -352,18 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn sidekick_tool_gates_match_contract() {
-        assert!(is_sidekick_eligible_tool("edit_file_hashline"));
-        assert!(is_sidekick_eligible_tool("run_command"));
-        assert!(!is_sidekick_eligible_tool("update_plan"));
-        assert!(!is_sidekick_eligible_tool("ask_question"));
-        assert!(is_frontier_only_tool("update_plan"));
-        assert!(!is_frontier_only_tool("read_file"));
-        // Unknown tools fail closed to main.
-        assert!(!is_sidekick_eligible_tool("computer_act"));
-    }
-
-    #[test]
     fn sidekick_resolution_prefers_subagent_then_fast() {
         assert_eq!(
             resolve_sidekick_model("main", Some("fast"), Some("child")),
@@ -377,7 +327,7 @@ mod tests {
 
     #[test]
     fn error_streak_drives_escalation_and_compaction_upgrade() {
-        let mut state = FusionState::new("main".into(), "side".into(), None, true);
+        let mut state = FusionState::new("main".into(), "side".into(), None);
         assert!(!state.escalation_needed());
         state.record_sidekick_result(true);
         assert!(!state.escalation_needed());
@@ -394,7 +344,7 @@ mod tests {
 
     #[test]
     fn clean_mechanical_stretch_downgrades_at_compaction() {
-        let mut state = FusionState::new("main".into(), "side".into(), None, false);
+        let mut state = FusionState::new("main".into(), "side".into(), None);
         for _ in 0..4 {
             state.record_delegation();
             state.record_sidekick_result(false);
@@ -405,7 +355,7 @@ mod tests {
         );
         // No churn when already on the cheap model or when sidekick is a noop.
         assert_eq!(select_model_at_compaction("side", &state), None);
-        let noop = FusionState::new("same".into(), "same".into(), None, false);
+        let noop = FusionState::new("same".into(), "same".into(), None);
         assert_eq!(select_model_at_compaction("same", &noop), None);
     }
 

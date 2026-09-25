@@ -404,7 +404,7 @@ impl CodingAgent {
 
     /// Arm Fusion for one run. Returns the user-visible notice, or `None`
     /// when the sidekick resolves to the active model (noop).
-    pub(crate) async fn arm_fusion(&self, explicit: bool, prompt: &str) -> Option<String> {
+    pub(crate) async fn arm_fusion(&self, prompt: &str) -> Option<String> {
         let active_model = self.agent.turn.lock().await.model.clone();
         let (sidekick, effort) = self.resolve_fusion_sidekick(&active_model);
         if threadlane_orchestrator::fusion_would_be_noop(&active_model, &sidekick) {
@@ -418,7 +418,6 @@ impl CodingAgent {
                 active_model.clone(),
                 sidekick.clone(),
                 effort,
-                explicit,
             ));
         let route = threadlane_orchestrator::evaluate_fusion_prompt(prompt, &sidekick);
         let route_note = match route {
@@ -732,6 +731,7 @@ impl CodingAgent {
                     })
                     .map(|(m, e)| (Some(m), e))
                     .unwrap_or((None, None));
+                let fusion_armed = fusion_sidekick.is_some();
                 let child_model = fusion_sidekick.or(runner_config.subagent_model.clone())
                     .unwrap_or_else(|| model.clone());
                 // Resolve live: the parent may have switched providers since
@@ -753,6 +753,27 @@ impl CodingAgent {
                         state.record_delegation();
                     }
                 }
+                // Fusion sidekick lanes run under the sidekick contract:
+                // implement and verify mechanically, never guess at ambiguous
+                // intent. Stamped onto every delegated child while armed so
+                // the directive the main agent was given actually reaches the
+                // lane doing the work.
+                let tasks = if fusion_armed {
+                    let directive =
+                        threadlane_orchestrator::build_fusion_sidekick_directive();
+                    tasks
+                        .into_iter()
+                        .map(|mut task| {
+                            task.instructions = Some(match task.instructions.take() {
+                                Some(existing) => format!("{existing}\n{directive}"),
+                                None => directive.clone(),
+                            });
+                            task
+                        })
+                        .collect()
+                } else {
+                    tasks
+                };
                 #[cfg(test)]
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
@@ -1773,7 +1794,7 @@ impl CodingAgent {
                     if task_prompt.is_empty() {
                         return Some(Ok("Usage: /fusion <task objective> - route with frontier main + sidekick lanes, switching at compaction.".into()));
                     }
-                    if let Some(message) = self.arm_fusion(true, task_prompt).await {
+                    if let Some(message) = self.arm_fusion(task_prompt).await {
                         let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
                             model: self.agent.model(),
                             message,
@@ -1800,7 +1821,7 @@ impl CodingAgent {
             && self.agent.config().orchestrator_mode.is_fusion()
             && !effective_input.trim().is_empty()
         {
-            if let Some(message) = self.arm_fusion(false, &effective_input.clone()).await {
+            if let Some(message) = self.arm_fusion(&effective_input.clone()).await {
                 let _ = self.agent.event_tx.send(AgentEvent::FusionUpdate {
                     model: self.agent.model(),
                     message,
