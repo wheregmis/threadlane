@@ -1050,6 +1050,11 @@ impl Render for MirrorView {
             )
             .child(
                 Button::new("mirror-expand")
+                    .accessibility_label(if expanded {
+                        "Shrink the mirror"
+                    } else {
+                        "Expand the mirror to fill the chat"
+                    })
                     .icon(if expanded {
                         IconName::Minimize
                     } else {
@@ -1066,6 +1071,7 @@ impl Render for MirrorView {
             )
             .child(
                 Button::new("mirror-close")
+                    .accessibility_label("Close computer mirror")
                     .icon(IconName::Close)
                     .ghost()
                     .xsmall()
