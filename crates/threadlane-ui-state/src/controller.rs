@@ -10,6 +10,11 @@ use crate::AppState;
 /// which the workspace pump drains; the return value carries nothing.
 pub fn dispatch(state: &mut AppState, action: AppAction) {
     match action {
+        AppAction::RecreateActiveWorktree => {
+            if let Err(error) = state.recreate_active_worktree() {
+                state.session_status = Some(error);
+            }
+        }
         AppAction::AttachProject(path) => {
             if let Err(error) = state.attach_project(path) {
                 state.session_status = Some(error);

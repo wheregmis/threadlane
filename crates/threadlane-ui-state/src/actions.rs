@@ -5,6 +5,7 @@ use threadlane_protocol::{ImageAttachment, OrchestratorMode, ReasoningEffort};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppAction {
+    RecreateActiveWorktree,
     AttachProject(PathBuf),
     SelectSession {
         work_dir: PathBuf,

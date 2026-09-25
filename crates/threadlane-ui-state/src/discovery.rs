@@ -177,7 +177,28 @@ pub fn discover_sessions_in_project_cached(
         let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
         let modified = metadata.and_then(|metadata| metadata.modified().ok());
         let info = match cache.entries.get(&path) {
-            Some(cached) if cached.len == len && cached.modified == modified => cached.info.clone(),
+            Some(cached) if cached.len == len && cached.modified == modified => {
+                // Session files do not change when a worktree is deleted or
+                // recreated, so a metadata cache hit can carry a stale
+                // `worktree_available`. Recompute that one cheap probe per pass.
+                let worktree_available =
+                    !cached.info.is_worktree || cached.info.runtime_work_dir.is_dir();
+                if worktree_available == cached.info.worktree_available {
+                    cached.info.clone()
+                } else {
+                    let mut info = cached.info.clone();
+                    info.worktree_available = worktree_available;
+                    cache.entries.insert(
+                        path.clone(),
+                        SessionDiscoveryCacheEntry {
+                            len,
+                            modified,
+                            info: info.clone(),
+                        },
+                    );
+                    info
+                }
+            }
             _ => {
                 let id = path
                     .file_stem()

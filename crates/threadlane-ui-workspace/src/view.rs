@@ -118,20 +118,20 @@ enum GitEvent {
 enum WorkspacePumpEvent {
     Git(GitEvent),
     Updater(UpdaterEvent),
-    Sessions(PathBuf, Vec<SessionInfo>),
+    Sessions(u64, PathBuf, Vec<SessionInfo>),
     Model,
 }
 
 async fn next_workspace_event(
     git_rx: &mut tokio::sync::mpsc::UnboundedReceiver<GitEvent>,
     updater_rx: &mut tokio::sync::mpsc::UnboundedReceiver<UpdaterEvent>,
-    sessions_rx: &mut tokio::sync::mpsc::UnboundedReceiver<(PathBuf, Vec<SessionInfo>)>,
+    sessions_rx: &mut tokio::sync::mpsc::UnboundedReceiver<(u64, PathBuf, Vec<SessionInfo>)>,
     model_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> Option<WorkspacePumpEvent> {
     tokio::select! {
         event = git_rx.recv() => event.map(WorkspacePumpEvent::Git),
         event = updater_rx.recv() => event.map(WorkspacePumpEvent::Updater),
-        event = sessions_rx.recv() => event.map(|(work_dir, sessions)| WorkspacePumpEvent::Sessions(work_dir, sessions)),
+        event = sessions_rx.recv() => event.map(|(generation, work_dir, sessions)| WorkspacePumpEvent::Sessions(generation, work_dir, sessions)),
         event = model_rx.recv() => event.map(|()| WorkspacePumpEvent::Model),
     }
 }
@@ -335,24 +335,39 @@ impl WorkspaceView {
                     model.update(cx, |state, _cx| state.requested_terminal_command.take())
                 {
                     this.bottom_panel_visible = true;
-                    let term = if let Some(work_dir) = model.read(cx).active_work_dir.clone() {
-                        this.get_or_create_active_terminal(&work_dir, cx)
-                    } else {
-                        this.fallback_terminal(cx)
+                    let state = model.read(cx);
+                    let group_key = state.terminal_group_key();
+                    let work_dir = state.active_git_work_dir();
+                    let unavailable = state.active_worktree_unavailable();
+                    let term = match (group_key, work_dir) {
+                        (Some(group_key), Some(work_dir)) => Some(
+                            this.get_or_create_active_terminal(&group_key, &work_dir, cx),
+                        ),
+                        _ => (!unavailable).then(|| this.fallback_terminal(cx)),
                     };
-                    term.update(cx, |term, _cx| {
-                        let trimmed = cmd.trim_end();
-                        term.send_input(&format!("{trimmed}\n"));
-                    });
+                    if let Some(term) = term {
+                        term.update(cx, |term, _cx| {
+                            let trimmed = cmd.trim_end();
+                            term.send_input(&format!("{trimmed}\n"));
+                        });
+                    } else {
+                        model.update(cx, |state, _cx| {
+                            state.session_status = Some("The active worktree is unavailable".into());
+                        });
+                    }
                 }
                 if let Some(work_dir) =
                     model.update(cx, |state, _cx| state.requested_terminal_work_dir.take())
                 {
                     this.bottom_panel_visible = true;
-                    if let Some(project) = model.read(cx).active_work_dir.clone() {
-                        this.add_terminal_tab_for_project(project, work_dir, cx);
-                    } else {
-                        this.get_or_create_active_terminal(&work_dir, cx);
+                    let state = model.read(cx);
+                    let group_key = state.terminal_group_key();
+                    let project = state.active_git_work_dir();
+                    let unavailable = state.active_worktree_unavailable();
+                    if let (Some(group_key), Some(_)) = (group_key, project) {
+                        this.add_terminal_tab_for_project(group_key, work_dir, cx);
+                    } else if !unavailable {
+                        this.get_or_create_active_terminal(&work_dir, &work_dir, cx);
                     }
                 }
                 let _ = model_wake_tx.send(());
@@ -374,8 +389,8 @@ impl WorkspaceView {
                     match event {
                         WorkspacePumpEvent::Git(event) => git_events.push(event),
                         WorkspacePumpEvent::Updater(event) => updater_events.push(event),
-                        WorkspacePumpEvent::Sessions(work_dir, sessions) => {
-                            session_refreshes.push((work_dir, sessions));
+                        WorkspacePumpEvent::Sessions(generation, work_dir, sessions) => {
+                            session_refreshes.push((generation, work_dir, sessions));
                         }
                         WorkspacePumpEvent::Model => {}
                     }
@@ -402,8 +417,9 @@ impl WorkspaceView {
                     let _ = this.update(cx, |this, cx| {
                         let mut changed = has_events;
                         this.model.update(cx, |state, cx| {
-                            for (work_dir, sessions) in session_refreshes {
-                                changed |= state.apply_session_refresh(work_dir, sessions);
+                            for (generation, work_dir, sessions) in session_refreshes {
+                                changed |=
+                                    state.apply_session_refresh(work_dir, sessions, generation);
                             }
                             if changed {
                                 cx.notify();
@@ -594,10 +610,11 @@ impl WorkspaceView {
 
     fn get_or_create_active_terminal(
         &mut self,
-        project: &PathBuf,
+        group_key: &PathBuf,
+        cwd: &PathBuf,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
-        let group = self.get_or_create_terminal_group(project, cx);
+        let group = self.get_or_create_terminal_group_with_cwd(group_key, cwd, cx);
         group.tabs[group.active_tab].clone()
     }
 
@@ -606,29 +623,44 @@ impl WorkspaceView {
         project: &PathBuf,
         cx: &mut Context<Self>,
     ) -> &mut TerminalGroup {
+        self.get_or_create_terminal_group_with_cwd(project, project, cx)
+    }
+
+    fn get_or_create_terminal_group_with_cwd(
+        &mut self,
+        group_key: &PathBuf,
+        cwd: &PathBuf,
+        cx: &mut Context<Self>,
+    ) -> &mut TerminalGroup {
         let group = self
             .terminal_groups
-            .entry(project.clone())
+            .entry(group_key.clone())
             .or_insert_with(|| TerminalGroup {
-                tabs: vec![cx.new(|cx| TerminalView::new(project.clone(), cx))],
+                tabs: vec![cx.new(|cx| TerminalView::new(cwd.clone(), cx))],
                 active_tab: 0,
             });
         if group.tabs.is_empty() {
             group
                 .tabs
-                .push(cx.new(|cx| TerminalView::new(project.clone(), cx)));
+                .push(cx.new(|cx| TerminalView::new(cwd.clone(), cx)));
             group.active_tab = 0;
         }
         group.active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
         group
     }
 
-    fn add_terminal_tab(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let terminal = cx.new(|cx| TerminalView::new(project.clone(), cx));
+    fn add_terminal_tab(
+        &mut self,
+        group_key: PathBuf,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal = cx.new(|cx| TerminalView::new(cwd, cx));
         terminal.read(cx).focus_handle(cx).focus(window, cx);
         let group = self
             .terminal_groups
-            .entry(project)
+            .entry(group_key)
             .or_insert(TerminalGroup {
                 tabs: Vec::new(),
                 active_tab: 0,
@@ -690,7 +722,18 @@ impl WorkspaceView {
             cx.notify();
             return;
         }
-        self.pending_terminal_close = None;        if let Some(group) = self.terminal_groups.get_mut(project) {
+        self.pending_terminal_close = None;
+        // Replacement shells open in the session checkout, not the project
+        // root, when this group belongs to the active project.
+        let replacement_cwd = self
+            .model
+            .read(cx)
+            .active_git_work_dir()
+            .filter(|_| {
+                self.model.read(cx).terminal_group_key().as_ref() == Some(project)
+            })
+            .unwrap_or_else(|| project.clone());
+        if let Some(group) = self.terminal_groups.get_mut(project) {
             if tab >= group.tabs.len() {
                 return;
             }
@@ -702,7 +745,7 @@ impl WorkspaceView {
                     group.active_tab = group.active_tab.min(group.tabs.len() - 1);
                 }
             } else {
-                group.tabs = vec![cx.new(|cx| TerminalView::new(project.clone(), cx))];
+                group.tabs = vec![cx.new(|cx| TerminalView::new(replacement_cwd.clone(), cx))];
                 group.active_tab = 0;
                 self.bottom_panel_visible = false;
             }
@@ -1687,15 +1730,19 @@ impl WorkspaceView {
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.bottom_panel_visible = !this.bottom_panel_visible;
                                 if this.bottom_panel_visible {
-                                    let project = this.model.read(cx).active_work_dir.clone();
-                                    let terminal = project
-                                        .as_ref()
-                                        .and_then(|project| this.terminal_groups.get(project))
-                                        .and_then(|group| group.tabs.get(group.active_tab))
-                                        .cloned()
-                                        .unwrap_or_else(|| this.fallback_terminal(cx));
-                                    let focus = terminal.read(cx).focus_handle(cx);
-                                    focus.focus(window, cx);
+                                    let state = this.model.read(cx);
+                                    let project = state.terminal_group_key();
+                                    let unavailable = state.active_worktree_unavailable();
+                                    if !unavailable {
+                                        let terminal = project
+                                            .as_ref()
+                                            .and_then(|project| this.terminal_groups.get(project))
+                                            .and_then(|group| group.tabs.get(group.active_tab))
+                                            .cloned()
+                                            .unwrap_or_else(|| this.fallback_terminal(cx));
+                                        let focus = terminal.read(cx).focus_handle(cx);
+                                        focus.focus(window, cx);
+                                    }
                                 }
                                 cx.notify();
                             })),
@@ -1749,15 +1796,19 @@ impl WorkspaceView {
     ) {
         self.bottom_panel_visible = !self.bottom_panel_visible;
         if self.bottom_panel_visible {
-            let project = self.model.read(cx).active_work_dir.clone();
-            let terminal = project
-                .as_ref()
-                .and_then(|project| self.terminal_groups.get(project))
-                .and_then(|group| group.tabs.get(group.active_tab))
-                .cloned()
-                .unwrap_or_else(|| self.fallback_terminal(cx));
-            let focus = terminal.read(cx).focus_handle(cx);
-            focus.focus(window, cx);
+            let state = self.model.read(cx);
+            let project = state.terminal_group_key();
+            let unavailable = state.active_worktree_unavailable();
+            if !unavailable {
+                let terminal = project
+                    .as_ref()
+                    .and_then(|project| self.terminal_groups.get(project))
+                    .and_then(|group| group.tabs.get(group.active_tab))
+                    .cloned()
+                    .unwrap_or_else(|| self.fallback_terminal(cx));
+                let focus = terminal.read(cx).focus_handle(cx);
+                focus.focus(window, cx);
+            }
         }
         cx.notify();
     }
@@ -1877,19 +1928,29 @@ impl Render for WorkspaceView {
                 });
             }
         }
-        let terminal_project = self.model.read(cx).active_work_dir.clone();
+        let state = self.model.read(cx);
+        let terminal_key = state.terminal_group_key();
+        let terminal_cwd = state.active_git_work_dir();
+        let terminal_unavailable = state.active_worktree_unavailable();
         let (terminal_tabs, active_terminal_tab, active_terminal) =
-            if let Some(project) = &terminal_project {
-                let group = self.get_or_create_terminal_group(project, cx);
-                (
-                    group.tabs.clone(),
-                    group.active_tab,
-                    group.tabs[group.active_tab].clone(),
-                )
-            } else {
-                let fallback = self.fallback_terminal(cx);
-                (vec![fallback.clone()], 0, fallback)
+            match (&terminal_key, &terminal_cwd) {
+                (Some(key), Some(cwd)) => {
+                    let group = self.get_or_create_terminal_group_with_cwd(key, cwd, cx);
+                    (
+                        group.tabs.clone(),
+                        group.active_tab,
+                        Some(group.tabs[group.active_tab].clone()),
+                    )
+                }
+                _ if terminal_unavailable => (Vec::new(), 0, None),
+                _ => {
+                    let fallback = self.fallback_terminal(cx);
+                    (vec![fallback.clone()], 0, Some(fallback))
+                }
             };
+        let terminal_project = terminal_key;
+        let new_tab_cwd =
+            terminal_cwd.or_else(|| terminal_project.clone());
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Expand sidebar"
         } else {
@@ -1976,11 +2037,112 @@ impl Render for WorkspaceView {
             };
 
             let main_content = if self.bottom_panel_visible {
+                if terminal_unavailable {
+                    let recreate_model = self.model.clone();
+                    let local_model = self.model.clone();
+                    let close_view = cx.entity().clone();
+                    let terminal_panel = div()
+                        .size_full()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .bg(theme.background)
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .h(rems(2.125))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .px_2()
+                                .bg(theme.title_bar)
+                                .border_b_1()
+                                .border_color(theme.title_bar_border)
+                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Terminal"))
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new("terminal-unavailable-close")
+                                        .icon(IconName::Close)
+                                        .accessibility_label("Hide terminal")
+                                        .tooltip("Hide terminal (Cmd+J)")
+                                        .ghost()
+                                        .small()
+                                        .on_click(move |_event, _window, cx| {
+                                            close_view.update(cx, |this, cx| {
+                                                this.bottom_panel_visible = false;
+                                                cx.notify();
+                                            });
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_3()
+                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Worktree unavailable"))
+                                .child(div().text_xs().text_color(theme.muted_foreground).child("This session's worktree is not checked out"))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("terminal-recreate-worktree")
+                                                .label("Recreate worktree")
+                                                .small()
+                                                .on_click(move |_event, _window, cx| {
+                                                    recreate_model.update(cx, |state, cx| {
+                                                        controller::dispatch(state, AppAction::RecreateActiveWorktree);
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("terminal-use-project-folder")
+                                                .label("Use project folder")
+                                                .small()
+                                                .ghost()
+                                                .on_click(move |_event, _window, cx| {
+                                                    local_model.update(cx, |state, cx| {
+                                                        if let Some(work_dir) = state.active_work_dir.clone() {
+                                                            controller::dispatch(
+                                                                state,
+                                                                AppAction::SelectDraftProject(work_dir),
+                                                            );
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        ),
+                                ),
+                        );
+                    v_resizable("workspace-main-bottom-split")
+                        .with_state(&self.bottom_panel_resizable_state)
+                        .on_resize(cx.listener(|this, state: &Entity<ResizableState>, window, cx| {
+                            if let Some(size) = state.read(cx).sizes().get(1) {
+                                this.preferred_panel_sizes[2] = *size / window.rem_size();
+                            }
+                        }))
+                        .child(resizable_panel().child(upper_content))
+                        .child(
+                            resizable_panel()
+                                .size(rem * 14.0)
+                                .size_range(rem * 8.0..(viewport.height - rem * 24.0).max(rem * 8.0))
+                                .child(terminal_panel),
+                        )
+                        .into_any_element()
+                } else {
                 let tab_buttons = terminal_tabs.iter().enumerate().map(|(tab, _)| {
                     let select_project = terminal_project.clone();
                     let close_project = terminal_project.clone();
                     let other_project = terminal_project.clone();
                     let new_tab_project = terminal_project.clone();
+                    let new_tab_cwd = new_tab_cwd.clone();
                     let restart_terminal = terminal_tabs[tab].clone();
                     let select_view = cx.entity().clone();
                     let close_view = cx.entity().clone();
@@ -2060,13 +2222,17 @@ impl Render for WorkspaceView {
                                     ));
 
                                     let n_proj = new_tab_project.clone();
+                                    let n_cwd = new_tab_cwd.clone();
                                     let n_view = new_view.clone();
                                     menu.item(PopupMenuItem::new("New Terminal Tab").on_click(
                                         move |_event, window, cx| {
-                                            if let Some(project) = &n_proj {
+                                            if let (Some(project), Some(cwd)) =
+                                                (n_proj.as_ref(), n_cwd.as_ref())
+                                            {
                                                 n_view.update(cx, |this, cx| {
                                                     this.add_terminal_tab(
                                                         project.clone(),
+                                                        cwd.clone(),
                                                         window,
                                                         cx,
                                                     );
@@ -2112,9 +2278,11 @@ impl Render for WorkspaceView {
                         })
                 });
 
+                let active_terminal = active_terminal.expect("available terminal");
                 let active_terminal_clear = active_terminal.clone();
                 let active_terminal_restart = active_terminal.clone();
                 let new_project = terminal_project.clone();
+                let new_cwd = new_tab_cwd.clone();
                 let new_view = cx.entity().clone();
                 let close_panel_view = cx.entity().clone();
 
@@ -2151,6 +2319,7 @@ impl Render for WorkspaceView {
                     .items_center()
                     .gap_1()
                     .children(new_project.clone().map(|project| {
+                        let cwd = new_cwd.clone().unwrap_or_else(|| project.clone());
                         Button::new("terminal-new-tab")
                             .icon(IconName::Plus)
                             .accessibility_label("New terminal tab")
@@ -2159,7 +2328,7 @@ impl Render for WorkspaceView {
                             .small()
                             .on_click(move |_event, window, cx| {
                                 new_view.update(cx, |this, cx| {
-                                    this.add_terminal_tab(project.clone(), window, cx)
+                                    this.add_terminal_tab(project.clone(), cwd.clone(), window, cx)
                                 });
                             })
                     }))
@@ -2243,6 +2412,7 @@ impl Render for WorkspaceView {
                             .child(terminal_panel),
                     )
                     .into_any_element()
+                }
             } else {
                 upper_content
             };
@@ -2551,7 +2721,7 @@ mod tests {
         let (_git_tx, mut git_rx) = tokio::sync::mpsc::unbounded_channel::<GitEvent>();
         let (_updater_tx, mut updater_rx) = tokio::sync::mpsc::unbounded_channel::<UpdaterEvent>();
         let (_sessions_tx, mut sessions_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(PathBuf, Vec<SessionInfo>)>();
+            tokio::sync::mpsc::unbounded_channel::<(u64, PathBuf, Vec<SessionInfo>)>();
         let (model_tx, mut model_rx) = tokio::sync::mpsc::unbounded_channel();
 
         assert!(tokio::time::timeout(

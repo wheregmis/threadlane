@@ -100,9 +100,13 @@ pub struct AppState {
     pub requested_terminal_work_dir: Option<PathBuf>,
     stream_tx: tokio::sync::mpsc::UnboundedSender<ChatStreamEvent>,
     pub stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>>,
-    session_refresh_tx: Sender<PathBuf>,
+    session_refresh_tx: Sender<(u64, PathBuf)>,
     pub session_refresh_rx:
-        Option<tokio::sync::mpsc::UnboundedReceiver<(PathBuf, Vec<SessionInfo>)>>,
+        Option<tokio::sync::mpsc::UnboundedReceiver<(u64, PathBuf, Vec<SessionInfo>)>>,
+    /// Monotonic generation for session discovery refreshes. Bumped whenever
+    /// `recreate_active_worktree` replaces a checkout so late results captured
+    /// before the recreation cannot overwrite the fresh sessions.
+    session_refresh_generation: u64,
     pub session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
     scheduler_handles: HashMap<PathBuf, SchedulerSupervisorHandle>,
     scheduler_results:
@@ -174,6 +178,33 @@ impl AppState {
         }
     }
 
+    pub fn active_worktree_unavailable(&self) -> bool {
+        let (Some(work_dir), Some(session_id)) =
+            (self.active_work_dir.as_ref(), self.active_session_id.as_ref())
+        else {
+            return false;
+        };
+        self.projects
+            .iter()
+            .find(|project| project.work_dir == *work_dir)
+            .and_then(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == *session_id)
+            })
+            .is_some_and(|session| session.is_worktree && !session.worktree_available)
+    }
+
+    /// Canonical attached-project directory used as the terminal group key.
+    /// Shells for every session (including worktree sessions) in one project
+    /// share a group so switching sessions retains running terminals; the
+    /// per-session checkout from `active_git_work_dir` is only the cwd for
+    /// newly created shells.
+    pub fn terminal_group_key(&self) -> Option<PathBuf> {
+        self.active_work_dir.clone()
+    }
+
     pub(crate) fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
         #[cfg(not(test))]
         let mut registry_projects = registry_projects;
@@ -240,15 +271,15 @@ impl AppState {
             threadlane_coding_agent::credentials::opencode_api_key().unwrap_or_default();
 
         let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<PathBuf>();
+        let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<(u64, PathBuf)>();
         let (session_refresh_results_tx, session_refresh_rx) =
             tokio::sync::mpsc::unbounded_channel();
         std::thread::spawn(move || {
             let mut discovery_cache = SessionDiscoveryCache::default();
-            while let Ok(work_dir) = session_refresh_requests.recv() {
+            while let Ok((generation, work_dir)) = session_refresh_requests.recv() {
                 let sessions = discover_sessions_in_project_cached(&work_dir, &mut discovery_cache);
                 if session_refresh_results_tx
-                    .send((work_dir, sessions))
+                    .send((generation, work_dir, sessions))
                     .is_err()
                 {
                     break;
@@ -256,7 +287,7 @@ impl AppState {
             }
         });
         for project in &project_infos {
-            let _ = session_refresh_tx.send(project.work_dir.clone());
+            let _ = session_refresh_tx.send((0, project.work_dir.clone()));
         }
         let selected_model =
             threadlane_ui_catalog::default_model_for_project(active_work_dir.as_deref())
@@ -330,6 +361,7 @@ impl AppState {
             stream_rx: Some(stream_rx),
             session_refresh_tx,
             session_refresh_rx: Some(session_refresh_rx),
+            session_refresh_generation: 0,
             session_runtimes,
             scheduler_handles: HashMap::new(),
             scheduler_results: HashMap::new(),
@@ -669,19 +701,115 @@ impl AppState {
     }
 
     fn request_session_refresh(&self, work_dir: &Path) {
-        let _ = self.session_refresh_tx.send(work_dir.to_path_buf());
+        let _ = self.session_refresh_tx.send((
+            self.session_refresh_generation,
+            work_dir.to_path_buf(),
+        ));
     }
 
-    pub fn apply_session_refresh(&mut self, work_dir: PathBuf, sessions: Vec<SessionInfo>) -> bool {
-        let Some(project) = self
+    pub fn apply_session_refresh(
+        &mut self,
+        work_dir: PathBuf,
+        sessions: Vec<SessionInfo>,
+        generation: u64,
+    ) -> bool {
+        if generation != self.session_refresh_generation {
+            return false;
+        }
+        let active_project = self.active_work_dir.as_ref() == Some(&work_dir);
+        let active_session_id = self.active_session_id.clone();
+        let selected_session_missing = {
+            let Some(project) = self
+                .projects
+                .iter_mut()
+                .find(|project| project.work_dir == work_dir)
+            else {
+                return false;
+            };
+            project.sessions = sessions;
+            active_project
+                && active_session_id.as_ref().is_some_and(|session_id| {
+                    !project.sessions.iter().any(|session| session.id == *session_id)
+                })
+        };
+        if selected_session_missing {
+            self.active_session_id = None;
+        }
+        true
+    }
+
+    /// Recreates the missing worktree checkout for the active session.
+    ///
+    /// This runs synchronously on the UI thread: the blocking portion is two
+    /// short Git subprocesses (`prune_worktrees`, `create_worktree`) plus one
+    /// uncached discovery pass, all user-initiated and infrequent, so moving it
+    /// to the background executor would add a plan/apply round-trip for little
+    /// gain. The generation bump below keeps that tradeoff safe: any refresh
+    /// result captured before the new checkout is discarded by
+    /// `apply_session_refresh`.
+    pub(crate) fn recreate_active_worktree(&mut self) -> Result<(), String> {
+        let work_dir = self.active_work_dir.clone().ok_or("No active project")?;
+        let session_id = self.active_session_id.clone().ok_or("No active session")?;
+        let session = self
+            .projects
+            .iter()
+            .find(|project| project.work_dir == work_dir)
+            .and_then(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+            })
+            .cloned()
+            .ok_or("Active session was not found")?;
+        if !session.is_worktree {
+            return Err("The active session does not use a worktree".into());
+        }
+        if session.worktree_available {
+            return Err("The active worktree is already available".into());
+        }
+        let expected_path = Self::canonical_worktree_dir(&work_dir, &session_id);
+        if session.runtime_work_dir != expected_path {
+            return Err("The recorded worktree path is not safe to recreate".into());
+        }
+        let branch = session
+            .git_branch
+            .as_deref()
+            .ok_or("The session has no recorded Git branch")?;
+        let branches = threadlane_git::inspect(&work_dir)
+            .map_err(|error| format!("Could not inspect project branches: {error}"))?
+            .branches;
+        if !branches.iter().any(|candidate| candidate == branch) {
+            return Err(format!("Branch '{branch}' no longer exists in the project"));
+        }
+        threadlane_git::prune_worktrees(&work_dir)
+            .map_err(|error| format!("Could not prune stale worktrees: {error}"))?;
+        threadlane_git::create_worktree(&work_dir, &session.runtime_work_dir, branch)
+            .map_err(|error| format!("Could not recreate worktree: {error}"))?;
+
+        let sessions = discover_sessions_in_project(&work_dir);
+        let recreated = sessions
+            .iter()
+            .any(|candidate| candidate.id == session_id && candidate.worktree_available);
+        // Invalidate refresh results captured before the new checkout existed;
+        // the background worker recomputes `worktree_available` per pass (see
+        // `discover_sessions_in_project_cached`) so the follow-up refresh
+        // cannot reuse the stale unavailable entry either.
+        self.session_refresh_generation = self.session_refresh_generation.wrapping_add(1);
+        if let Some(project) = self
             .projects
             .iter_mut()
             .find(|project| project.work_dir == work_dir)
-        else {
-            return false;
-        };
-        project.sessions = sessions;
-        true
+        {
+            project.sessions = sessions;
+        }
+        if !recreated {
+            return Err("Worktree was recreated, but the session could not be rediscovered".into());
+        }
+        self.select_session(work_dir.clone(), session_id);
+        self.request_session_refresh(&work_dir);
+        self.session_status = None;
+        Ok(())
     }
 
     fn refresh_active_session(&mut self) {
@@ -1283,7 +1411,10 @@ impl AppState {
         for request in requests.iter().filter(|request| request.reload_messages) {
             *self
                 .in_flight_hydrations
-                .entry(Self::projection_key(&request.session_id, &request.session_file))
+                .entry(Self::projection_key(
+                    &request.session_id,
+                    &request.session_file,
+                ))
                 .or_default() += 1;
         }
         requests
@@ -3386,12 +3517,9 @@ impl AppState {
                 reminder.clone(),
                 None,
             )),
-            AgentEvent::FusionUpdate { model, message } => Some((
-                "Router",
-                format!("Fusion → {model}"),
-                message.clone(),
-                None,
-            )),
+            AgentEvent::FusionUpdate { model, message } => {
+                Some(("Router", format!("Fusion → {model}"), message.clone(), None))
+            }
             _ => None,
         };
         if let Some((category, summary, detail, lane)) = entry {
@@ -3747,27 +3875,24 @@ impl AppState {
         self.run_timings.insert(key.clone(), timing);
     }
 
-
     /// Applies a durable runtime event to the session projection.
     ///
     /// Record-backed events remain authoritative for the session projection and
     /// are intentionally left for the existing journal hydration path.
     pub fn apply_durable_event(&mut self, session_id: &str, event: HarnessEvent) -> bool {
         match event.payload() {
-            EventPayload::Agent(agent_event) => self.drain_chat_stream(vec![
-                ChatStreamEvent::Agent {
+            EventPayload::Agent(agent_event) => {
+                self.drain_chat_stream(vec![ChatStreamEvent::Agent {
                     session_id: session_id.to_owned(),
                     event: agent_event.clone(),
+                }])
+            }
+            EventPayload::Fault(error) => self.drain_chat_stream(vec![ChatStreamEvent::Agent {
+                session_id: session_id.to_owned(),
+                event: AgentEvent::AgentError {
+                    error: error.clone(),
                 },
-            ]),
-            EventPayload::Fault(error) => self.drain_chat_stream(vec![
-                ChatStreamEvent::Agent {
-                    session_id: session_id.to_owned(),
-                    event: AgentEvent::AgentError {
-                        error: error.clone(),
-                    },
-                },
-            ]),
+            }]),
             _ => false,
         }
     }
@@ -3776,7 +3901,8 @@ impl AppState {
     pub fn subscribe_durable_events(
         &self,
         runtime: &SessionRuntime,
-    ) -> Result<threadlane_runtime::harness::Subscription, threadlane_runtime::harness::EventError> {
+    ) -> Result<threadlane_runtime::harness::Subscription, threadlane_runtime::harness::EventError>
+    {
         runtime.subscribe_durable_events()
     }
     /// Polls a runtime subscription and applies any durable agent events.
@@ -3818,13 +3944,11 @@ impl AppState {
                         SchedulerSupervisorEvent::Agent(event) => {
                             ChatStreamEvent::Agent { session_id, event }
                         }
-                        SchedulerSupervisorEvent::Completed(result) => {
-                            ChatStreamEvent::Scheduled {
-                                session_id,
-                                session_file: session_file.clone(),
-                                result,
-                            }
-                        }
+                        SchedulerSupervisorEvent::Completed(result) => ChatStreamEvent::Scheduled {
+                            session_id,
+                            session_file: session_file.clone(),
+                            result,
+                        },
                     });
                 }
             }

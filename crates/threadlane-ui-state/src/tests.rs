@@ -188,15 +188,91 @@ fn active_git_work_dir_uses_the_active_session_checkout_when_available() {
     state.active_session_id = Some("session".into());
 
     assert_eq!(state.active_git_work_dir(), Some(worktree.clone()));
+    assert!(!state.active_worktree_unavailable());
 
     state.projects[0].sessions[0].worktree_available = false;
 
     assert_eq!(state.active_git_work_dir(), None);
+    assert!(state.active_worktree_unavailable());
 
     state.projects[0].sessions.clear();
     state.active_session_id = Some("missing-session".into());
 
     assert_eq!(state.active_git_work_dir(), None);
+    // No session record exists, so there is no worktree to recreate: the
+    // terminal falls back instead of offering recovery that would fail with
+    // "Active session was not found".
+    assert!(!state.active_worktree_unavailable());
+}
+
+#[test]
+fn stale_session_refresh_results_are_discarded() {
+    let project = PathBuf::from("/projects/local");
+    let mut state = AppState::load_from_registry(Vec::new());
+    state.projects = vec![ProjectInfo {
+        name: "Local".into(),
+        work_dir: project.clone(),
+        sessions: Vec::new(),
+        is_expanded: true,
+    }];
+    state.active_work_dir = Some(project.clone());
+    state.active_session_id = Some("session".into());
+
+    // A result captured before a worktree recreation (older generation) must
+    // not overwrite current sessions.
+    state.session_refresh_generation = 1;
+    assert!(!state.apply_session_refresh(project.clone(), Vec::new(), 0));
+    assert!(state.active_session_id.as_deref() == Some("session"));
+    assert!(state.apply_session_refresh(project.clone(), Vec::new(), 1));
+    // The refreshed list omits the selected session, so the selection clears
+    // instead of pointing at a record that no longer exists.
+    assert!(state.active_session_id.is_none());
+}
+
+
+#[test]
+fn recreate_active_worktree_restores_the_recorded_session_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = init_test_repo(&dir);
+    std::fs::write(project.join("base.txt"), "base\n").unwrap();
+    run_git(&project, &["add", "."]);
+    run_git(&project, &["commit", "-qm", "initial"]);
+    run_git(&project, &["branch", "worktree/session"]);
+
+    let session_id = "session";
+    let worktree = project.join(".threadlane/worktrees/session");
+    let session_file = project.join(".threadlane/sessions/session.jsonl");
+    std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+    let mut store = JsonlStore::open(&session_file).unwrap();
+    store.append_fact("main", "is_worktree", "true", None).unwrap();
+    store
+        .append_fact("main", "worktree_path", &worktree.to_string_lossy(), None)
+        .unwrap();
+    store
+        .append_fact("main", "git_branch", "worktree/session", None)
+        .unwrap();
+    drop(store);
+
+    let mut state = AppState::load_from_registry(Vec::new());
+    state.projects.push(ProjectInfo {
+        name: "project".into(),
+        work_dir: project.clone(),
+        sessions: discover_sessions_in_project(&project),
+        is_expanded: true,
+    });
+    state.active_work_dir = Some(project.clone());
+    state.active_session_id = Some(session_id.into());
+
+    assert!(state.active_worktree_unavailable());
+    state.recreate_active_worktree().unwrap();
+
+    assert_eq!(state.active_git_work_dir(), Some(worktree.clone()));
+    assert!(worktree.is_dir());
+    assert_eq!(
+        threadlane_git::current_branch(&worktree).unwrap().as_deref(),
+        Some("worktree/session")
+    );
+    assert!(!state.active_worktree_unavailable());
 }
 
 #[test]
@@ -402,11 +478,13 @@ fn model_picker_preserves_current_selection_while_runtime_is_busy() {
     let _settings = runtime.agent.try_lock().unwrap();
     state.set_selected_model("opencode-go/minimax-m2.7".into());
     assert_eq!(state.selected_model, "gpt-4o");
-    assert!(state
-        .session_status
-        .as_deref()
-        .unwrap()
-        .contains("settings are still loading"));
+    assert!(
+        state
+            .session_status
+            .as_deref()
+            .unwrap()
+            .contains("settings are still loading")
+    );
     assert!(Arc::ptr_eq(
         &state.session_runtimes[&session_file],
         &runtime
@@ -464,11 +542,13 @@ fn model_picker_ignores_acp_replies_from_replaced_or_inactive_runtimes() {
         ChatStreamEvent::AcpConfigOptions {
             session_id: "session".into(),
             source: Arc::downgrade(runtime),
-            options: vec![serde_json::from_value(serde_json::json!({
-                "id": "model", "name": "Model", "category": "model",
-                "currentValue": "model", "options": [{ "value": "model", "name": label }]
-            }))
-            .unwrap()],
+            options: vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "model", "name": "Model", "category": "model",
+                    "currentValue": "model", "options": [{ "value": "model", "name": label }]
+                }))
+                .unwrap(),
+            ],
             error: error.map(str::to_string),
             failed_config: None,
         }
@@ -1002,10 +1082,12 @@ fn removing_worktree_session_removes_checkout_and_metadata_stub() {
 
     assert!(!worktree.exists());
     assert!(!stub.exists());
-    assert!(threadlane_git::list_worktrees(&project)
-        .unwrap()
-        .iter()
-        .all(|entry| entry.branch.as_deref() != Some("worktree/session")));
+    assert!(
+        threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.branch.as_deref() != Some("worktree/session"))
+    );
 }
 
 #[test]
@@ -1048,10 +1130,12 @@ fn removing_worktree_session_retains_checkout_when_requested() {
 
     assert!(worktree.exists());
     assert!(!stub.exists());
-    assert!(threadlane_git::list_worktrees(&project)
-        .unwrap()
-        .iter()
-        .any(|entry| entry.branch.as_deref() == Some("worktree/session")));
+    assert!(
+        threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.branch.as_deref() == Some("worktree/session"))
+    );
 }
 
 #[test]
@@ -1098,10 +1182,12 @@ fn settling_worktree_session_removes_checkout_when_requested() {
     assert!(archive_file.exists());
     assert!(!worktree.exists());
     assert!(!stub.exists());
-    assert!(threadlane_git::list_worktrees(&project)
-        .unwrap()
-        .iter()
-        .all(|entry| entry.branch.as_deref() != Some("worktree/session")));
+    assert!(
+        threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.branch.as_deref() != Some("worktree/session"))
+    );
 }
 
 #[test]
@@ -1148,10 +1234,12 @@ fn settling_worktree_session_retains_checkout_when_requested() {
     assert!(archive_file.exists());
     assert!(worktree.exists());
     assert!(!stub.exists());
-    assert!(threadlane_git::list_worktrees(&project)
-        .unwrap()
-        .iter()
-        .any(|entry| entry.branch.as_deref() == Some("worktree/session")));
+    assert!(
+        threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.branch.as_deref() == Some("worktree/session"))
+    );
 }
 
 #[test]
@@ -1428,9 +1516,11 @@ fn issue_work_session_persists_link_and_uses_isolated_worktree() {
                 .as_ref()
         )
     );
-    assert!(facts
-        .get("git_branch")
-        .is_some_and(|branch| branch.starts_with("issue/42-fix-flaky-auth-")));
+    assert!(
+        facts
+            .get("git_branch")
+            .is_some_and(|branch| branch.starts_with("issue/42-fix-flaky-auth-"))
+    );
     assert_eq!(
         facts.get("github_issue"),
         Some(&serde_json::to_string(&issue).unwrap())
@@ -1686,7 +1776,7 @@ async fn reported_session_shape_keeps_total_processed_separate() {
     assert!(!projected_context.context_limit_is_estimate);
 
     // Inspect the production journal again, independently of the GPUI projection above.
-    use threadlane_runtime::harness::{read_transcript_page, CompactionReason, TranscriptItem};
+    use threadlane_runtime::harness::{CompactionReason, TranscriptItem, read_transcript_page};
 
     let store = JsonlStore::open(&path).unwrap();
     let records = store.records();
@@ -2045,9 +2135,11 @@ async fn transcript_marker_survives_reload_without_summary_content() {
         first.iter().map(|row| &row.id).collect::<Vec<_>>(),
         second.iter().map(|row| &row.id).collect::<Vec<_>>()
     );
-    assert!(!first
-        .iter()
-        .any(|message| message.content.contains("Context checkpoint from")));
+    assert!(
+        !first
+            .iter()
+            .any(|message| message.content.contains("Context checkpoint from"))
+    );
     assert!(first.iter().any(|message| {
         message.role == MessageRole::User && message.content == "continue the cached tool loop"
     }));
@@ -2082,10 +2174,12 @@ fn legacy_session_without_compaction_has_no_fabricated_marker() {
         })
         .unwrap();
     drop(store);
-    assert!(compute_session_messages(&path)
-        .unwrap()
-        .iter()
-        .all(|message| message.role != MessageRole::ContextMarker));
+    assert!(
+        compute_session_messages(&path)
+            .unwrap()
+            .iter()
+            .all(|message| message.role != MessageRole::ContextMarker)
+    );
     assert_eq!(
         compute_full_session_projection(&path)
             .unwrap()
@@ -2334,8 +2428,9 @@ fn startup_seeds_session_rows_without_reducing_every_journal() {
     let mut receiver = state.session_refresh_rx.take().unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let (work_dir, sessions) = loop {
-        if let Ok(refresh) = receiver.try_recv() {
-            break refresh;
+        if let Ok((generation, work_dir, sessions)) = receiver.try_recv() {
+            assert_eq!(generation, 0);
+            break (work_dir, sessions);
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -2343,7 +2438,7 @@ fn startup_seeds_session_rows_without_reducing_every_journal() {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    assert!(state.apply_session_refresh(work_dir, sessions));
+    assert!(state.apply_session_refresh(work_dir, sessions, 0));
     let deferred = state.projects[0]
         .sessions
         .iter()
@@ -2957,10 +3052,12 @@ fn durable_subagent_projection_ignores_unrelated_named_lanes() {
         .unwrap();
     drop(store);
 
-    assert!(compute_full_session_projection(&path)
-        .unwrap()
-        .subagents
-        .is_empty());
+    assert!(
+        compute_full_session_projection(&path)
+            .unwrap()
+            .subagents
+            .is_empty()
+    );
 }
 
 #[test]
@@ -3339,9 +3436,11 @@ fn durable_trajectory_hydrates_after_session_switch() {
 
     let trajectory = &state.trajectory_by_session[&cached_key(&state, "old-session")];
     assert!(trajectory.iter().any(|entry| entry.category == "Operation"));
-    assert!(trajectory
-        .iter()
-        .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" }));
+    assert!(
+        trajectory
+            .iter()
+            .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" })
+    );
     assert!(trajectory.iter().any(|entry| entry.category == "Step"));
     assert!(trajectory.iter().any(|entry| {
         entry.category == "Tool"
@@ -3802,12 +3901,16 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
         .trajectory_by_session
         .get(&cached_key(&state, "branch-session"))
         .unwrap();
-    assert!(trajectory
-        .iter()
-        .any(|t| t.run_id.as_deref() == Some("run-branch-a")));
-    assert!(trajectory
-        .iter()
-        .any(|t| t.run_id.as_deref() == Some("run-branch-b")));
+    assert!(
+        trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-a"))
+    );
+    assert!(
+        trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-b"))
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
