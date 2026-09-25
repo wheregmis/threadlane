@@ -23,7 +23,7 @@ use super::scripts::{
     annotate_install_js, annotate_poll_js, annotate_uninstall_js, unwrap_callback_payload,
 };
 
-const DEFAULT_URL: &str = "https://gpui-kit.com";
+const DEFAULT_URL: &str = "https://github.com/wheregmis/threadlane";
 
 struct BrowserTab {
     id: usize,
