@@ -5481,7 +5481,7 @@ pub fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {    fn vis
 mod dialog_keyboard_tests {
     use super::RightPanelView;
     use gpui::{AppContext, Context, Entity, FocusHandle, Render, Window, IntoElement, div,
-        InteractiveElement, StatefulInteractiveElement, ParentElement, Styled, Role, TestAppContext};
+        InteractiveElement, StatefulInteractiveElement, Styled, Role, TestAppContext};
     use gpui_component::{Root, WindowExt};
     use threadlane_ui_state::AppState;
 
@@ -5491,7 +5491,6 @@ mod dialog_keyboard_tests {
             self.panel.update(cx, |panel, cx| panel.sync_git_dialog(window, cx));
             div().id("dialog-host").track_focus(&self.trigger).role(Role::Application)
                 .tab_group().size_full()
-                .children(Root::render_dialog_layer(window, cx))
         }
     }
 

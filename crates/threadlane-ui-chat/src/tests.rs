@@ -180,10 +180,9 @@ fn restoring_a_stash_preserves_unsent_text_and_images(cx: &mut gpui::TestAppCont
         holder_clone.borrow_mut().replace(chat.clone());
         struct DialogHost(gpui::Entity<super::ChatListView>);
         impl gpui::Render for DialogHost {
-            fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+            fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
                 use gpui::{ParentElement as _, Styled as _};
                 gpui::div().size_full().child(self.0.clone())
-                    .children(gpui_component::Root::render_dialog_layer(window, cx))
             }
         }
         let host = cx.new(|_| DialogHost(chat));
@@ -1553,10 +1552,9 @@ fn permission_details_are_bound_to_the_request_that_opened_them(cx: &mut gpui::T
     use gpui_component::WindowExt as _;
     struct DialogHost(gpui::Entity<super::ChatListView>);
     impl gpui::Render for DialogHost {
-        fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
             use gpui::{ParentElement as _, Styled as _};
             gpui::div().size_full().child(self.0.clone())
-                .children(gpui_component::Root::render_dialog_layer(window, cx))
         }
     }
     cx.update(gpui_component::init);

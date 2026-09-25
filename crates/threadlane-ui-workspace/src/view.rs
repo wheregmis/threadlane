@@ -9,7 +9,7 @@ use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable};
+use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Selectable, Sizable};
 
 actions!(
     threadlane_workspace,
@@ -2379,9 +2379,6 @@ impl Render for WorkspaceView {
                     .then(|| self.render_command_palette(cx)),
             )
             .children(self.render_update_notice(cx))
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
-            .children(Root::render_sheet_layer(window, cx))
     }
 }
 
@@ -2429,16 +2426,15 @@ mod tests {
 
     #[gpui::test]
     fn escape_dismisses_dialog_before_cancelling_generation(cx: &mut gpui::TestAppContext) {
-        use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, Styled as _};
+        use gpui::{AppContext as _, InteractiveElement as _, Styled as _};
         use gpui_component::{Root, WindowExt as _};
         use std::rc::Rc;
         struct DialogHost(Rc<Cell<bool>>);
         impl gpui::Render for DialogHost {
-            fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+            fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
                 let cancelled = self.0.clone();
                 gpui::div().size_full().key_context("ThreadlaneWorkspace")
                     .on_action(move |_: &super::CancelActiveGeneration, _, _| cancelled.set(true))
-                    .children(Root::render_dialog_layer(window, cx))
             }
         }
         cx.update(|cx| { gpui_component::init(cx); super::init(cx); });
