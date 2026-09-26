@@ -2756,9 +2756,18 @@ impl ChatListView {
 
         let new_rows = build_transcript_rows(&messages, generating);
         let new_row_count = new_rows.len();
+        // Only splice the Working row when the remaining rows are unchanged.
+        // Generation toggles also filter queued messages, which requires a reset.
         let working_changed = !session_changed
             && new_message_count == old_message_count
-            && generating != self.transcript_generating;
+            && generating != self.transcript_generating
+            && new_rows
+                .strip_suffix(&[TranscriptRow::Working])
+                .unwrap_or(&new_rows)
+                == self
+                    .transcript_rows
+                    .strip_suffix(&[TranscriptRow::Working])
+                    .unwrap_or(&self.transcript_rows);
         let prepended = !session_changed
             && new_message_count > old_message_count
             && self

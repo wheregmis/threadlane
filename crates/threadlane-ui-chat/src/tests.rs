@@ -1086,6 +1086,49 @@ fn queued_messages_leave_transcript_only_while_generating() {
 }
 
 #[gpui::test]
+fn queue_filter_transitions_keep_retained_list_in_sync(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| threadlane_ui_state::AppState::default());
+    let (chat, cx) = cx.add_window_view(move |window, cx| {
+        super::ChatListView::new(model, window, cx)
+    });
+    chat.update(cx, |chat, _| {
+        for queued_count in 0..=3 {
+            let messages = std::sync::Arc::new(
+                (0..=queued_count)
+                    .map(|index| ChatMessageInfo {
+                        id: if index == 0 {
+                            "user".into()
+                        } else {
+                            format!("queued-user-session-{index}")
+                        },
+                        role: MessageRole::User,
+                        content: format!("Message {index}"),
+                        tool_activities: Vec::new(),
+                        streaming: false,
+                        reasoning_content: None,
+                        reasoning_expanded: false,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            chat.sync_transcript_rows(messages.clone(), true, true);
+            for generating in [false, true, false] {
+                chat.sync_transcript_rows(messages.clone(), generating, false);
+                let expected = build_transcript_rows(&messages, generating);
+                assert_eq!(chat.transcript_rows, expected);
+                assert_eq!(
+                    chat.transcript_list_state.item_count(),
+                    expected.len(),
+                    "queue size {queued_count}, generating {generating}"
+                );
+            }
+        }
+    });
+}
+
+#[gpui::test]
 fn queued_panel_tracks_active_messages_and_generation(cx: &mut gpui::TestAppContext) {
     use gpui::AppContext as _;
     cx.update(gpui_component::init);
