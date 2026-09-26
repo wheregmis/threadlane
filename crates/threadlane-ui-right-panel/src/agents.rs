@@ -192,6 +192,7 @@ impl AgentsPanel {
             MessageRole::ContextMarker => "Context",
         };
         div()
+            .debug_selector(|| "agent-activity-message".into())
             .flex()
             .flex_col()
             .gap_2()
@@ -352,6 +353,7 @@ impl AgentsPanel {
         let model = self.model.clone();
         let branch_controls = self.render_branch_controls(item, cx);
         div()
+            .debug_selector(|| "agent-detail".into())
             .flex_1()
             .min_h_0()
             .flex()
@@ -360,6 +362,7 @@ impl AgentsPanel {
             .border_color(theme.border)
             .child(
                 div()
+                    .debug_selector(|| "agent-detail-header".into())
                     .px_3()
                     .pt_3()
                     .pb_2()
@@ -801,7 +804,8 @@ impl Render for AgentsPanel {
             .px_3()
             .pt_2()
             .pb_2()
-            .min_h(rems(5.5))
+            // Scrollable defaults to full height; reserve the rest for activity.
+            .h(rems(5.5))
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.title_bar.opacity(0.35))
@@ -992,6 +996,103 @@ impl Render for AgentsPanel {
 mod tests {
     use super::AgentsPanel;
     use threadlane_ui_state::SubagentActivityStatus;
+
+    #[gpui::test]
+    fn selected_agent_activity_fits_below_profile_strip(cx: &mut gpui::TestAppContext) {
+        use gpui::{px, size, AppContext as _};
+        use threadlane_protocol::{AgentEvent, SubagentProgressUpdate};
+        use threadlane_ui_state::{AppState, ChatStreamEvent};
+
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| {
+            let mut state = AppState::default();
+            state.active_work_dir = Some(std::env::temp_dir().join("threadlane-agent-layout-test"));
+            state.active_session_id = Some("session".into());
+            state.drain_chat_stream(vec![
+                ChatStreamEvent::Agent {
+                    session_id: "session".into(),
+                    event: AgentEvent::SubagentQueued {
+                        run_id: 1,
+                        task_index: 0,
+                        agent: "worker".into(),
+                        task: "Inspect the repository".into(),
+                    },
+                },
+                ChatStreamEvent::Agent {
+                    session_id: "session".into(),
+                    event: AgentEvent::SubagentStarted {
+                        run_id: 1,
+                        task_index: 0,
+                        journal_run_id: "child-run".into(),
+                        lane: "child-lane".into(),
+                        agent: "worker".into(),
+                        task: "Inspect the repository".into(),
+                        model: "sidekick".into(),
+                        isolation: None,
+                    },
+                },
+            ]);
+            state
+        });
+        let panel_model = model.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let panel = cx.new(|cx| AgentsPanel::new(panel_model, window, cx));
+            gpui_component::Root::new(panel, window, cx)
+        });
+        for width in [280.0, 640.0] {
+            cx.simulate_resize(size(px(width), px(650.0)));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let detail = cx
+                .debug_bounds("agent-detail")
+                .expect("selected agent detail");
+            assert!(
+                detail.size.height > px(300.0),
+                "activity area collapsed: {detail:?}"
+            );
+            let header = cx
+                .debug_bounds("agent-detail-header")
+                .expect("agent prompt and status");
+            assert!(
+                header.top() >= px(0.0) && header.bottom() < px(650.0),
+                "header offscreen: {header:?}"
+            );
+        }
+        for update in [
+            SubagentProgressUpdate::ToolStarted {
+                tool_call_id: "read-1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"README.md"}"#.into(),
+            },
+            SubagentProgressUpdate::TextDelta {
+                delta: "Found the relevant code".into(),
+            },
+        ] {
+            model.update(cx, |state, cx| {
+                state.drain_chat_stream(vec![ChatStreamEvent::Agent {
+                    session_id: "session".into(),
+                    event: AgentEvent::SubagentUpdate {
+                        run_id: 1,
+                        task_index: 0,
+                        journal_run_id: "child-run".into(),
+                        lane: "child-lane".into(),
+                        update,
+                    },
+                }]);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let message = cx
+                .debug_bounds("agent-activity-message")
+                .expect("live agent activity is rendered");
+            assert!(message.size.height > px(0.0));
+            assert!(
+                message.top() >= px(0.0) && message.bottom() <= px(650.0),
+                "activity offscreen: {message:?}"
+            );
+        }
+    }
 
     #[test]
     fn queued_selection_survives_agent_start() {
