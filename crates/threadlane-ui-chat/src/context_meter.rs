@@ -112,6 +112,21 @@ pub fn subagent_status_rank(status: SubagentActivityStatus) -> u8 {
     }
 }
 
+pub fn subagent_group_label(status: SubagentActivityStatus) -> &'static str {
+    match status {
+        SubagentActivityStatus::Running | SubagentActivityStatus::Queued => "Working",
+        SubagentActivityStatus::Failed | SubagentActivityStatus::Cancelled => "Needs attention",
+        SubagentActivityStatus::Completed => "Finished",
+    }
+}
+
+pub fn adjacent_index(len: usize, current: usize, offset: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    current.saturating_add_signed(offset).min(len - 1)
+}
+
 pub fn format_meter_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)

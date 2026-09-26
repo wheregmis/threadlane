@@ -195,6 +195,31 @@ fn progress_header_prefix(is_error: bool) -> &'static str {
     }
 }
 
+fn subagent_run_id(item: &SubagentActivityInfo) -> String {
+    item.journal_run_id
+        .clone()
+        .unwrap_or_else(|| format!("queued-{}-{}", item.batch_run_id, item.task_index))
+}
+
+fn subagent_latest_activity(item: &SubagentActivityInfo) -> Option<String> {
+    item.messages.iter().rev().find_map(|message| {
+        message
+            .tool_activities
+            .last()
+            .map(|activity| {
+                if activity.display_summary.trim().is_empty() {
+                    activity.title.clone()
+                } else {
+                    activity.display_summary.clone()
+                }
+            })
+            .or_else(|| {
+                (!message.content.trim().is_empty())
+                    .then(|| truncate_preview_text(&message.content, 90))
+            })
+    })
+}
+
 fn skills_chip_label(active_count: usize) -> String {
     if active_count == 0 {
         "Skills".to_string()
@@ -316,6 +341,8 @@ actions!(
         SelectPreviousSlashCommand,
         SelectNextSlashCommand,
         DismissSlashCommand,
+        SelectPreviousSubagent,
+        SelectNextSubagent,
     ]
 );
 
@@ -354,6 +381,8 @@ pub fn init(cx: &mut App) {
             DismissSlashCommand,
             Some(SLASH_COMMAND_BINDING_CONTEXT),
         ),
+        KeyBinding::new("up", SelectPreviousSubagent, Some("SubagentPopover")),
+        KeyBinding::new("down", SelectNextSubagent, Some("SubagentPopover")),
     ]);
 }
 
@@ -412,6 +441,7 @@ pub struct ChatListView {
     question_inputs: std::collections::HashMap<String, Entity<InputState>>,
     subagents_popover_open: bool,
     selected_subagent_run_id: Option<String>,
+    expanded_subagent_histories: HashSet<String>,
     copied_code_block: Option<(String, std::time::Instant)>,
     copied_message: Option<(String, std::time::Instant)>,
     expanded_tool_aggregates: HashSet<String>,
@@ -720,6 +750,7 @@ impl ChatListView {
             question_inputs: std::collections::HashMap::new(),
             subagents_popover_open: false,
             selected_subagent_run_id: None,
+            expanded_subagent_histories: HashSet::new(),
             copied_code_block: None,
             copied_message: None,
             expanded_tool_aggregates: HashSet::new(),
@@ -4652,6 +4683,50 @@ impl ChatListView {
         commands
     }
 
+    fn select_adjacent_subagent(&mut self, offset: isize, cx: &mut Context<Self>) {
+        let mut subagents = self
+            .model
+            .read(cx)
+            .active_subagents()
+            .iter()
+            .collect::<Vec<_>>();
+        subagents.sort_by_key(|item| subagent_status_rank(item.status));
+        if subagents.is_empty() {
+            return;
+        }
+        let current = self
+            .selected_subagent_run_id
+            .as_deref()
+            .and_then(|selected| {
+                subagents
+                    .iter()
+                    .position(|item| subagent_run_id(item) == selected)
+            })
+            .unwrap_or(0);
+        self.selected_subagent_run_id = Some(subagent_run_id(
+            subagents[adjacent_index(subagents.len(), current, offset)],
+        ));
+        cx.notify();
+    }
+
+    fn select_previous_subagent(
+        &mut self,
+        _: &SelectPreviousSubagent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_adjacent_subagent(-1, cx);
+    }
+
+    fn select_next_subagent(
+        &mut self,
+        _: &SelectNextSubagent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_adjacent_subagent(1, cx);
+    }
+
     fn render_subagent_popover(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (count, active_count) = subagent_popover_counts(
             self.model
@@ -4660,6 +4735,13 @@ impl ChatListView {
                 .iter()
                 .map(|item| item.status),
         )?;
+        let failed_count = self
+            .model
+            .read(cx)
+            .active_subagents()
+            .iter()
+            .filter(|item| item.status == SubagentActivityStatus::Failed)
+            .count();
         let open = self.subagents_popover_open;
         let toggle_entity = cx.entity();
         let sync_entity = cx.entity();
@@ -4680,12 +4762,19 @@ impl ChatListView {
                     toggle: Toggle::new("subagents-popover-trigger")
                         .ghost()
                         .rounded_full()
-                        .tooltip("View subagent activity")
+                        .tooltip(if failed_count > 0 {
+                            format!("View subagent activity · {failed_count} need attention")
+                        } else {
+                            "View subagent activity".into()
+                        })
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_1()
+                                .when(failed_count > 0, |indicator| {
+                                    indicator.text_color(cx.theme().colors.danger)
+                                })
                                 .child(Icon::new(IconName::Bot).small())
                                 .child(
                                     div()
@@ -4725,26 +4814,44 @@ impl ChatListView {
             .filter(|run_id| {
                 subagents
                     .iter()
-                    .any(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
+                    .any(|item| subagent_run_id(item) == *run_id)
             })
             .or_else(|| {
                 subagents
                     .iter()
-                    .find(|item| item.status == SubagentActivityStatus::Running)
+                    .find(|item| item.status == SubagentActivityStatus::Failed)
+                    .or_else(|| {
+                        subagents
+                            .iter()
+                            .find(|item| item.status == SubagentActivityStatus::Running)
+                    })
                     .or_else(|| subagents.last())
-                    .and_then(|item| item.journal_run_id.clone())
+                    .map(subagent_run_id)
             });
         let selected = selected_run_id.as_ref().and_then(|run_id| {
             subagents
                 .iter()
-                .find(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
+                .find(|item| subagent_run_id(item) == *run_id)
         });
         let mut rows = Vec::new();
+        let mut previous_group = None;
         for item in ordered_subagents {
-            let run_id = item
-                .journal_run_id
-                .clone()
-                .unwrap_or_else(|| format!("queued-{}-{}", item.batch_run_id, item.task_index));
+            let group = subagent_group_label(item.status);
+            if previous_group != Some(group) {
+                rows.push(
+                    div()
+                        .px_3()
+                        .pt_2()
+                        .pb_1()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground)
+                        .child(group)
+                        .into_any_element(),
+                );
+                previous_group = Some(group);
+            }
+            let run_id = subagent_run_id(item);
             let row_id = run_id.clone();
             let is_selected = selected_run_id.as_deref() == Some(run_id.as_str());
             let (marker, color, status) = match item.status {
@@ -4755,6 +4862,12 @@ impl ChatListView {
                 SubagentActivityStatus::Cancelled => ("×", theme.warning, "Cancelled"),
             };
             let entity = cx.entity();
+            let latest_activity = matches!(
+                item.status,
+                SubagentActivityStatus::Running | SubagentActivityStatus::Queued
+            )
+            .then(|| subagent_latest_activity(item))
+            .flatten();
             rows.push(
                 Button::new(SharedString::from(format!("subagent-popup-row-{row_id}")))
                     .accessibility_label(format!("{} · {status}", item.agent))
@@ -4828,8 +4941,16 @@ impl ChatListView {
                                     } else {
                                         item.task.clone()
                                     }),
-                            ),
-                    ),
+                            )
+                            .children(latest_activity.map(|activity| {
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.foreground)
+                                    .child(activity)
+                            })),
+                    )
+                    .into_any_element(),
             );
         }
         let detail = selected.map(|item| self.render_subagent_detail(item, cx));
@@ -4838,6 +4959,9 @@ impl ChatListView {
             active => format!("{active} active · {} total", subagents.len()),
         };
         div()
+            .key_context("SubagentPopover")
+            .on_action(cx.listener(Self::select_previous_subagent))
+            .on_action(cx.listener(Self::select_next_subagent))
             .w(rems(42.5))
             .max_w(rems(CHAT_CONTENT_MAX_WIDTH - 2.0))
             .max_h(rems(38.0))
@@ -4911,11 +5035,18 @@ impl ChatListView {
             SubagentActivityStatus::Failed => "Failed",
             SubagentActivityStatus::Cancelled => "Cancelled",
         };
+        let run_id = subagent_run_id(item);
+        let history_expanded = self.expanded_subagent_histories.contains(&run_id);
+        let visible_message_count = if history_expanded {
+            item.messages.len()
+        } else {
+            item.messages.len().min(20)
+        };
         let messages = item
             .messages
             .iter()
             .rev()
-            .take(20)
+            .take(visible_message_count)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -5111,6 +5242,35 @@ impl ChatListView {
                 ),
             )
         });
+        let target = item.lane.as_deref().unwrap_or(&item.agent).to_owned();
+        let prepare_model = self.model.clone();
+        let prepare_label = if matches!(
+            item.status,
+            SubagentActivityStatus::Queued | SubagentActivityStatus::Running
+        ) {
+            "Message…"
+        } else {
+            "Continue…"
+        };
+        let prepare_prompt = if prepare_label == "Message…" {
+            format!("Send this message to subagent {target}: ")
+        } else {
+            format!("Continue subagent {target} with this follow-up: ")
+        };
+        let prepare_action = Button::new(SharedString::from(format!(
+            "prepare-subagent-message-{run_id}"
+        )))
+        .label(prepare_label)
+        .outline()
+        .xsmall()
+        .on_click(cx.listener(move |this, _, _, cx| {
+            prepare_model.update(cx, |state, cx| {
+                state.request_composer_prompt(prepare_prompt.clone());
+                cx.notify();
+            });
+            this.subagents_popover_open = false;
+            cx.notify();
+        }));
         div()
             .w_full()
             .flex()
@@ -5135,9 +5295,16 @@ impl ChatListView {
                             )
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(status),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(status),
+                                    )
+                                    .child(prepare_action),
                             ),
                     )
                     .when_some(item.model.as_ref(), |header, model| {
@@ -5163,13 +5330,32 @@ impl ChatListView {
             )
             .children(branch_controls)
             .children((item.messages.len() > 20).then(|| {
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "Showing the latest 20 of {} messages",
-                        item.messages.len()
-                    ))
+                if history_expanded {
+                    return div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Showing all {} messages", item.messages.len()))
+                        .into_any_element();
+                }
+                let entity = cx.entity();
+                let expand_run_id = run_id.clone();
+                Button::new(SharedString::from(format!(
+                    "show-earlier-subagent-messages-{run_id}"
+                )))
+                .label(format!(
+                    "Show {} earlier messages",
+                    item.messages.len() - visible_message_count
+                ))
+                .ghost()
+                .xsmall()
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.expanded_subagent_histories
+                            .insert(expand_run_id.clone());
+                        cx.notify();
+                    });
+                })
+                .into_any_element()
             }))
             .children(item.error.as_ref().map(|error| {
                 div()
@@ -7085,6 +7271,7 @@ impl Render for ChatListView {
             self.trajectory_raw_json = None;
             self.subagents_popover_open = false;
             self.selected_subagent_run_id = None;
+            self.expanded_subagent_histories.clear();
             self.selected_slash_index = 0;
             self.dismiss_slash_menu = false;
             self.question_selections.clear();
