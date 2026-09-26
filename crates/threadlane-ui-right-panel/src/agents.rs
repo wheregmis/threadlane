@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 use threadlane_ui_state::{actions::AppAction, controller};
 use threadlane_ui_state::{
@@ -10,23 +11,27 @@ use threadlane_ui_state::{
 pub struct AgentsPanel {
     model: Entity<AppState>,
     selected_run_id: Option<String>,
+    transcript_list: ListState,
+    transcript_run_id: Option<String>,
+    transcript_count: usize,
     _model_subscription: Subscription,
 }
 
 impl AgentsPanel {
-    pub fn new(model: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&model, |_, _, cx| cx.notify());
         Self {
             model,
             selected_run_id: None,
+            transcript_list: ListState::new(0, ListAlignment::Top, window.rem_size() * 8.0),
+            transcript_run_id: None,
+            transcript_count: 0,
             _model_subscription: subscription,
         }
     }
 
     fn run_id(item: &SubagentActivityInfo) -> String {
-        item.journal_run_id
-            .clone()
-            .unwrap_or_else(|| format!("queued-{}-{}", item.batch_run_id, item.task_index))
+        format!("queued-{}-{}", item.batch_run_id, item.task_index)
     }
 
     fn rank(status: SubagentActivityStatus) -> u8 {
@@ -137,7 +142,7 @@ impl AgentsPanel {
             }))
     }
 
-    fn render_message(message: &ChatMessageInfo, cx: &App) -> AnyElement {
+    fn render_message(&mut self, message: &ChatMessageInfo, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         let role = match message.role {
             MessageRole::User => "Instruction",
@@ -170,6 +175,11 @@ impl AgentsPanel {
                     .text_color(theme.foreground)
                     .child(message.content.clone())
             }))
+            .children(message.reasoning_content.as_ref().filter(|text| !text.trim().is_empty()).map(|text| {
+                div().text_xs().text_color(theme.muted_foreground)
+                    .child(if message.streaming { "Thinking…" } else { "Thought process" })
+                    .child(div().whitespace_normal().child(text.clone()))
+            }))
             .children(message.tool_activities.iter().map(|activity| {
                 div()
                     .flex()
@@ -193,11 +203,18 @@ impl AgentsPanel {
                     .child(
                         div()
                             .min_w_0()
+                            .flex()
+                            .flex_col()
                             .child(if activity.display_summary.trim().is_empty() {
                                 activity.title.clone()
                             } else {
                                 activity.display_summary.clone()
-                            }),
+                            })
+                            .children((!activity.detail.trim().is_empty()).then(|| {
+                                div().mt_1().p_2().rounded_md().bg(theme.title_bar)
+                                    .text_color(if activity.category == "Error" { theme.danger } else { theme.muted_foreground })
+                                    .child(activity.detail.clone())
+                            })),
                     )
             }))
             .into_any_element()
@@ -274,34 +291,38 @@ impl AgentsPanel {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .children(item.error.as_ref().map(|error| {
-                        div()
-                            .p_2()
-                            .rounded_lg()
-                            .bg(theme.danger.opacity(0.08))
-                            .text_sm()
-                            .text_color(theme.danger)
-                            .child(error.clone())
-                    }))
-                    .children(
-                        item.messages
-                            .iter()
-                            .map(|message| Self::render_message(message, cx)),
-                    )
-                    .children(item.messages.is_empty().then(|| {
-                        div()
-                            .py_6()
-                            .text_center()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("Waiting for this agent to report activity…")
-                    })),
+                    .relative()
+                    .child(list(self.transcript_list.clone(), cx.processor(Self::render_transcript_row))
+                        .size_full()
+                        .with_sizing_behavior(ListSizingBehavior::Auto))
+                    .child(div().absolute().inset_0().child(Scrollbar::vertical(&self.transcript_list))),
             )
+    }
+
+    fn render_transcript_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let message = self.transcript_run_id.as_ref().and_then(|id| {
+            self.model.read(cx).active_subagents().iter()
+                .find(|item| Self::run_id(item) == *id)
+                .and_then(|item| item.messages.get(index.checked_sub(1)?))
+                .cloned()
+        });
+        if index == 0 {
+            let error = self.transcript_run_id.as_ref().and_then(|id| {
+                self.model.read(cx).active_subagents().iter()
+                    .find(|item| Self::run_id(item) == *id)
+                    .and_then(|item| item.error.clone())
+            });
+            return div().p_3().children(error.map(|error| {
+                div().p_2().rounded_lg().text_color(cx.theme().colors.danger).child(error)
+            })).into_any_element();
+        }
+        div().p_3().children(message.as_ref().map(|message| self.render_message(message, cx)))
+            .into_any_element()
     }
 
     fn render_branch_controls(
@@ -509,28 +530,57 @@ impl AgentsPanel {
 impl Render for AgentsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let mut subagents = self.model.read(cx).active_subagents().to_vec();
-        subagents.sort_by_key(|item| Self::rank(item.status));
+        let state = self.model.read(cx);
+        let mut subagents: Vec<_> = state.active_subagents().iter().map(|item| {
+            let preview = Self::latest_activity(item);
+            let metadata = SubagentActivityInfo {
+                batch_run_id: item.batch_run_id,
+                task_index: item.task_index,
+                journal_run_id: item.journal_run_id.clone(),
+                lane: item.lane.clone(),
+                agent: item.agent.clone(),
+                task: item.task.clone(),
+                model: item.model.clone(),
+                status: item.status,
+                messages: Vec::new(),
+                isolation: item.isolation.clone(),
+                error: item.error.clone(),
+            };
+            (metadata, preview, item.messages.len())
+        }).collect();
+        drop(state);
+        subagents.sort_by_key(|item| Self::rank(item.0.status));
         let selected_id = self
             .selected_run_id
             .clone()
-            .filter(|id| subagents.iter().any(|item| Self::run_id(item) == *id))
+            .filter(|id| subagents.iter().any(|item| Self::run_id(&item.0) == *id))
             .or_else(|| {
                 subagents
                     .iter()
-                    .find(|item| item.status == SubagentActivityStatus::Failed)
+                    .find(|item| item.0.status == SubagentActivityStatus::Failed)
                     .or_else(|| subagents.first())
-                    .map(Self::run_id)
+                    .map(|item| Self::run_id(&item.0))
             });
-        let selected = selected_id
-            .as_ref()
-            .and_then(|id| subagents.iter().find(|item| Self::run_id(item) == *id))
-            .cloned();
+        let selected = selected_id.as_ref()
+            .and_then(|id| subagents.iter().find(|item| Self::run_id(&item.0) == *id))
+            .map(|(item, _, count)| (item.clone(), *count));
+        let count = selected.as_ref().map_or(0, |(_, count)| count + 1);
+        if self.transcript_run_id != selected_id {
+            self.transcript_list.reset(count);
+            self.transcript_run_id = selected_id.clone();
+        } else if count > self.transcript_count {
+            self.transcript_list.splice(self.transcript_count..self.transcript_count, count - self.transcript_count);
+        } else if count < self.transcript_count {
+            self.transcript_list.reset(count);
+        } else {
+            self.transcript_list.remeasure();
+        }
+        self.transcript_count = count;
         self.selected_run_id = selected_id.clone();
 
         let mut rows = Vec::new();
         let mut previous_group = None;
-        for item in &subagents {
+        for (item, preview, _) in &subagents {
             let group = Self::group(item.status);
             if previous_group != Some(group) {
                 rows.push(
@@ -592,7 +642,7 @@ impl Render for AgentsPanel {
                                             .child(Self::status(item.status)),
                                     ),
                             )
-                            .children(Self::latest_activity(item).map(|activity| {
+                            .children(preview.clone().map(|activity| {
                                 div()
                                     .truncate()
                                     .text_xs()
@@ -624,7 +674,7 @@ impl Render for AgentsPanel {
                             .child("No delegated agents in this session")
                     })),
             )
-            .children(selected.map(|item| self.render_detail(&item, cx)))
+            .children(selected.map(|(item, _)| self.render_detail(&item, cx)))
     }
 }
 
@@ -632,6 +682,27 @@ impl Render for AgentsPanel {
 mod tests {
     use super::AgentsPanel;
     use threadlane_ui_state::SubagentActivityStatus;
+
+    #[test]
+    fn queued_selection_survives_agent_start() {
+        let mut item = threadlane_ui_state::SubagentActivityInfo {
+            batch_run_id: 12,
+            task_index: 2,
+            journal_run_id: None,
+            lane: None,
+            agent: "worker".into(),
+            task: "task".into(),
+            model: None,
+            status: SubagentActivityStatus::Queued,
+            messages: Vec::new(),
+            isolation: None,
+            error: None,
+        };
+        let selected = AgentsPanel::run_id(&item);
+        item.journal_run_id = Some("journal-123".into());
+        item.status = SubagentActivityStatus::Running;
+        assert_eq!(AgentsPanel::run_id(&item), selected);
+    }
 
     #[test]
     fn attention_and_live_agents_sort_before_finished_agents() {

@@ -102,7 +102,7 @@ pub struct RightPanelView {
 
 impl RightPanelView {
     pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let agents = cx.new(|cx| AgentsPanel::new(model.clone(), cx));
+        let agents = cx.new(|cx| AgentsPanel::new(model.clone(), window, cx));
         let document_state = cx.new(|cx| TextViewState::markdown("", cx));
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let commit_message_input =
