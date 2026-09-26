@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.25](https://github.com/wheregmis/threadlane/compare/v0.1.24...v0.1.25) (2026-09-26)
+
+
+### Features
+
+* **agents:** add resizable split between overview and detail ([dd5e0f1](https://github.com/wheregmis/threadlane/commit/dd5e0f1f46f26376dc6f78c2e02e0b640db695a0))
+* **agents:** show agent status and task in panel ([23eb745](https://github.com/wheregmis/threadlane/commit/23eb745d893693ec3d8664e7f8632cbda0d3369a))
+* **terminal:** add display options for font, spacing, and background ([f8cd307](https://github.com/wheregmis/threadlane/commit/f8cd307e9725d90df0c7ee34b49c87df43d2a47a))
+* **ui:** add GitHub sidebar navigation ([9df5424](https://github.com/wheregmis/threadlane/commit/9df5424b3bca54a52985195cdf01eab444b693be))
+* **ui:** Redesign agents panel with profile tabs ([e025219](https://github.com/wheregmis/threadlane/commit/e0252196f048cc5e8ae8ea90799e3e5a058a9751))
+
+
+### Bug Fixes
+
+* **agents:** select available agent and clarify panel labels ([c18780c](https://github.com/wheregmis/threadlane/commit/c18780ca07fdb39ec4b9b1a26b48fd26c493b538))
+* **github:** Keep PR code view responsive ([54aa3a9](https://github.com/wheregmis/threadlane/commit/54aa3a971e0e6a650ded366dbea57ee8c753a5ff))
+* **ui:** improve agents panel profile layout ([ac62e47](https://github.com/wheregmis/threadlane/commit/ac62e47a5404860076b3d08f496ef0375aaab73c))
+
 ## [0.1.24](https://github.com/wheregmis/threadlane/compare/v0.1.23...v0.1.24) (2026-09-26)
 
 
