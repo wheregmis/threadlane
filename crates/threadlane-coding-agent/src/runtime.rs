@@ -2675,6 +2675,7 @@ mod compaction_sync_tests {
                 .map(|tool| tool.name)
                 .collect();
             assert_eq!(names.iter().any(|name| name == "subagent"), expected);
+            assert_eq!(names.iter().any(|name| name == "hub"), expected);
         }
     }
 
