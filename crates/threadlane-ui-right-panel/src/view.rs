@@ -143,7 +143,6 @@ impl RightPanelView {
                 while let Some(request) = browser_rx.recv().await {
                     let step = this
                         .update_in(cx, |this, window, cx| {
-                            this.ensure_browser(window, cx);
                             start_browser_request(this, request.command, window, cx)
                         })
                         .unwrap_or_else(|_| {
@@ -1348,6 +1347,7 @@ impl RightPanelView {
             match command {
                 BrowserCommand::Tabs { action } => {
                     use threadlane_protocol::browser::BrowserTabAction;
+                    let reveal = !matches!(action, BrowserTabAction::List);
                     browser.update(cx, |browser, cx| -> Result<(), String> {
                         match action {
                             BrowserTabAction::List => {}
@@ -1372,7 +1372,9 @@ impl RightPanelView {
                         }
                         Ok(())
                     })?;
-                    self.open_surface(Surface::Browser, cx);
+                    if reveal {
+                        self.open_surface(Surface::Browser, cx);
+                    }
                     let browser = browser.read(cx);
                     let tabs: Vec<_> = browser
                         .tabs(cx)
@@ -5455,6 +5457,18 @@ enum BrowserReply {
 /// front so a cut tail still orients the model.
 const MAX_BROWSER_EVAL_CHARS: usize = 8_000;
 
+// Keep this aligned with the surface switches in the browser command handlers.
+fn browser_command_reveals_surface(command: &threadlane_protocol::browser::BrowserCommand) -> bool {
+    use threadlane_protocol::browser::{BrowserCommand, BrowserTabAction};
+    matches!(command,
+        BrowserCommand::Tabs { action: BrowserTabAction::Open { .. } | BrowserTabAction::Select { .. } | BrowserTabAction::Close { .. } }
+        | BrowserCommand::Navigate { .. }
+        | BrowserCommand::Back
+        | BrowserCommand::Screenshot
+        | BrowserCommand::Wait { .. }
+    )
+}
+
 fn start_browser_request(
     panel: &mut RightPanelView,
     command: threadlane_protocol::browser::BrowserCommand,
@@ -5462,6 +5476,14 @@ fn start_browser_request(
     cx: &mut Context<RightPanelView>,
 ) -> BrowserReply {
     use threadlane_protocol::browser::BrowserCommand;
+    // open_surface closes the document. Refuse before mutating any tabs or pages,
+    // rather than silently dropping an unsaved editor buffer to reveal the browser.
+    if panel.is_dirty && browser_command_reveals_surface(&command) {
+        return BrowserReply::Ready(Err(
+            "The editor has unsaved changes. Ask the user to save or discard them before switching to the browser.".into(),
+        ));
+    }
+    panel.ensure_browser(window, cx);
     match command {
         BrowserCommand::Screenshot => {
             #[cfg(target_os = "macos")]
@@ -5857,5 +5879,51 @@ mod review_layout_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod browser_editor_safety_tests {
+    use super::{browser_command_reveals_surface, start_browser_request, BrowserReply, RightPanelView, Surface};
+    use gpui::{AppContext, TestAppContext};
+    use threadlane_protocol::browser::{BrowserCommand, BrowserTabAction};
+    use threadlane_ui_state::AppState;
+
+    #[test]
+    fn listing_tabs_does_not_reveal_browser() {
+        assert!(!browser_command_reveals_surface(&BrowserCommand::Tabs { action: BrowserTabAction::List }));
+    }
+
+    #[gpui::test]
+    fn browser_commands_preserve_dirty_document(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| AppState::default());
+        let (panel, cx) = cx.add_window_view(|window, cx| RightPanelView::new(model, window, cx));
+        panel.update_in(cx, |panel, window, cx| {
+            for surface in [Surface::Review, Surface::Files] {
+                panel.active_surface = Some(surface);
+                panel.pending_document = Some(("draft.rs".into(), "unsaved buffer".into()));
+                panel.sync_pending_document(window, cx);
+                panel.is_dirty = true;
+                let editor = panel.editor_state.clone().expect("editor");
+                for command in [
+                    BrowserCommand::Tabs { action: BrowserTabAction::Open { url: "example.com".into() } },
+                    BrowserCommand::Tabs { action: BrowserTabAction::Select { tab_id: 1 } },
+                    BrowserCommand::Tabs { action: BrowserTabAction::Close { tab_id: 1 } },
+                    BrowserCommand::Navigate { url: "example.com".into() },
+                    BrowserCommand::Back,
+                    BrowserCommand::Screenshot,
+                    BrowserCommand::Wait { selector: None, text: None, timeout_ms: 100 },
+                ] {
+                    let result = start_browser_request(panel, command, window, cx);
+                    assert!(matches!(result, BrowserReply::Ready(Err(error)) if error.contains("unsaved changes")));
+                    assert_eq!(panel.active_surface, Some(surface));
+                    assert!(panel.is_dirty);
+                    assert_eq!(panel.editor_state.as_ref(), Some(&editor));
+                    assert_eq!(panel.saved_content, "unsaved buffer");
+                    assert!(panel.browser.is_none());
+                }
+            }
+        });
     }
 }
