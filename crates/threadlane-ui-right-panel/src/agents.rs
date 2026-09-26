@@ -65,6 +65,30 @@ impl AgentsPanel {
         }
     }
 
+    fn status_color(status: SubagentActivityStatus, cx: &App) -> gpui::Hsla {
+        let colors = cx.theme().colors;
+        match status {
+            SubagentActivityStatus::Running => colors.success,
+            SubagentActivityStatus::Queued => colors.warning,
+            SubagentActivityStatus::Failed => colors.danger,
+            SubagentActivityStatus::Cancelled => colors.muted_foreground,
+            SubagentActivityStatus::Completed => colors.muted_foreground,
+        }
+    }
+
+    fn status_pill(status: SubagentActivityStatus, cx: &App) -> Div {
+        let color = Self::status_color(status, cx);
+        div()
+            .rounded_full()
+            .px_2()
+            .py_0p5()
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .bg(color.opacity(0.14))
+            .text_color(color)
+            .child(Self::status(status))
+    }
+
     fn latest_activity(item: &SubagentActivityInfo) -> Option<String> {
         item.messages.iter().rev().find_map(|message| {
             message
@@ -101,40 +125,48 @@ impl AgentsPanel {
             .find(|message| message.role == MessageRole::Assistant)
             .and_then(|message| {
                 let text = message.content.trim();
-                (!text.is_empty()).then(|| text.chars().take(120).collect::<String>())
+                (!text.is_empty()).then(|| text.chars().take(140).collect::<String>())
             });
+        let working = state.is_generating;
+        let pill_color = if working {
+            theme.primary
+        } else {
+            theme.muted_foreground
+        };
         div()
             .mx_3()
             .mt_3()
             .p_3()
-            .rounded_lg()
+            .rounded_xl()
             .border_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_2()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(Icon::new(IconName::Bot).small())
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Main agent"))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_sm()
+                            .child("Main agent"),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
+                            .rounded_full()
+                            .px_2()
+                            .py_0p5()
                             .text_xs()
-                            .text_color(if state.is_generating {
-                                theme.primary
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(if state.is_generating {
-                                "Working"
-                            } else {
-                                "Ready"
-                            }),
+                            .font_weight(FontWeight::MEDIUM)
+                            .bg(pill_color.opacity(0.14))
+                            .text_color(pill_color)
+                            .child(if working { "Working" } else { "Ready" }),
                     ),
             )
             .children(latest.map(|text| {
@@ -162,10 +194,12 @@ impl AgentsPanel {
         div()
             .flex()
             .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_lg()
-            .bg(theme.muted.opacity(0.45))
+            .gap_2()
+            .p_3()
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.muted.opacity(0.3))
             .child(
                 div()
                     .text_xs()
@@ -319,53 +353,52 @@ impl AgentsPanel {
             .border_color(theme.border)
             .child(
                 div()
-                    .p_3()
+                    .px_3()
+                    .pt_3()
+                    .pb_2()
                     .flex()
-                    .items_start()
+                    .flex_col()
                     .gap_2()
                     .child(
                         div()
-                            .min_w_0()
-                            .flex_1()
                             .flex()
-                            .flex_col()
-                            .gap_1()
+                            .items_center()
+                            .gap_2()
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
+                                    .text_sm()
                                     .child(item.agent.clone()),
                             )
+                            .child(Self::status_pill(item.status, cx))
+                            .child(div().flex_1())
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if item.status == SubagentActivityStatus::Failed {
-                                        theme.danger
-                                    } else {
-                                        theme.muted_foreground
-                                    })
-                                    .child(Self::status(item.status)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(item.task.clone()),
+                                Button::new(SharedString::from(format!(
+                                    "agents-panel-message-{}",
+                                    Self::run_id(item)
+                                )))
+                                .label(label)
+                                .outline()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    model.update(cx, |state, cx| {
+                                        state.request_composer_prompt(prompt.clone());
+                                        cx.notify();
+                                    });
+                                }),
                             ),
                     )
                     .child(
-                        Button::new(SharedString::from(format!(
-                            "agents-panel-message-{}",
-                            Self::run_id(item)
-                        )))
-                        .label(label)
-                        .outline()
-                        .xsmall()
-                        .on_click(move |_, _, cx| {
-                            model.update(cx, |state, cx| {
-                                state.request_composer_prompt(prompt.clone());
-                                cx.notify();
-                            });
-                        }),
+                        div()
+                            .p_2p5()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.muted.opacity(0.3))
+                            .text_sm()
+                            .text_color(theme.foreground)
+                            .whitespace_normal()
+                            .child(item.task.clone()),
                     ),
             )
             .children(branch_controls)
@@ -376,10 +409,28 @@ impl AgentsPanel {
                     .relative()
                     .children(item.messages.is_empty().then(|| {
                         div()
-                            .p_4()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("No recorded activity for this agent yet. The prompt is shown above.")
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .p_6()
+                            .text_center()
+                            .child(Icon::new(IconName::Bot).large().text_color(theme.muted_foreground.opacity(0.6)))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.muted_foreground)
+                                    .child("No activity yet"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground.opacity(0.8))
+                                    .child("The prompt is shown above. New tool calls and replies will appear here."),
+                            )
                     }))
                     .child(
                         list(
@@ -442,7 +493,8 @@ impl AgentsPanel {
                 .into_any_element();
         }
         div()
-            .p_3()
+            .px_3()
+            .py_2()
             .children(
                 message
                     .as_ref()
@@ -481,10 +533,11 @@ impl AgentsPanel {
             div()
                 .mx_3()
                 .mb_2()
-                .p_2()
-                .rounded_lg()
+                .p_2p5()
+                .rounded_xl()
                 .border_1()
                 .border_color(theme.border)
+                .bg(theme.muted.opacity(0.2))
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -723,14 +776,23 @@ impl Render for AgentsPanel {
         self.selected_run_id = selected_id.clone();
 
         let main_selected = selected_id.as_deref() == Some("main");
+        let main_dot = if main_working {
+            theme.primary
+        } else {
+            theme.muted_foreground.opacity(0.5)
+        };
         let tabs = div()
             .flex()
             .flex_none()
+            .items_start()
             .gap_1()
-            .px_2()
-            .py_2()
+            .px_3()
+            .pt_2()
+            .pb_2()
+            .min_h(rems(4.75))
             .border_b_1()
             .border_color(theme.border)
+            .bg(theme.title_bar.opacity(0.35))
             .overflow_x_scrollbar()
             .child(
                 Button::new("agents-profile-main")
@@ -746,9 +808,38 @@ impl Render for AgentsPanel {
                             .flex()
                             .flex_col()
                             .items_center()
-                            .gap_1()
-                            .child(Avatar::new().name("Main").small())
-                            .child(div().text_xs().child("Main")),
+                            .gap_1p5()
+                            .px_2()
+                            .py_1()
+                            .min_w(rems(4.0))
+                            .child(
+                                div().relative().child(Avatar::new().name("Main").small()).child(
+                                    div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .right_0()
+                                        .size(rems(0.625))
+                                        .rounded_full()
+                                        .border_2()
+                                        .border_color(theme.title_bar)
+                                        .bg(main_dot),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(if main_selected {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if main_selected {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child("Main"),
+                            ),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.selected_run_id = Some("main".to_string());
@@ -768,6 +859,7 @@ impl Render for AgentsPanel {
                 } else {
                     item.agent.clone()
                 };
+                let dot = Self::status_color(item.status, cx);
                 Button::new(SharedString::from(format!("agents-profile-{id}")))
                     .ghost()
                     .selected(selected)
@@ -782,9 +874,41 @@ impl Render for AgentsPanel {
                             .flex()
                             .flex_col()
                             .items_center()
-                            .gap_1()
-                            .child(Avatar::new().name(name.clone()).small())
-                            .child(div().text_xs().max_w(rems(5.0)).truncate().child(name)),
+                            .gap_1p5()
+                            .px_2()
+                            .py_1()
+                            .min_w(rems(4.0))
+                            .child(
+                                div().relative().child(Avatar::new().name(name.clone()).small()).child(
+                                    div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .right_0()
+                                        .size(rems(0.625))
+                                        .rounded_full()
+                                        .border_2()
+                                        .border_color(theme.title_bar)
+                                        .bg(dot),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_center()
+                                    .max_w(rems(6.0))
+                                    .truncate()
+                                    .font_weight(if selected {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if selected {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(name),
+                            ),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected_run_id = Some(select_id.clone());
@@ -806,10 +930,28 @@ impl Render for AgentsPanel {
                         .relative()
                         .children((main_count == 0).then(|| {
                             div()
-                                .p_4()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child("No main-agent activity recorded yet. Select an agent above to inspect its work.")
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_2()
+                                .p_6()
+                                .text_center()
+                                .child(Icon::new(IconName::Bot).large().text_color(theme.muted_foreground.opacity(0.6)))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.muted_foreground)
+                                        .child("No main-agent activity yet"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground.opacity(0.8))
+                                        .child("Select an agent above to inspect its work.")
+                                )
                         }))
                         .children((main_count > 0).then(|| {
                             list(
