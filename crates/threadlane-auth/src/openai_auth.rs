@@ -172,12 +172,19 @@ pub struct CodexAccountsStore {
 
 impl CodexAccountsStore {
     fn active_account(&self) -> Option<&CodexAccount> {
-        if let Some(active_id) = &self.active_account_id {
-            if let Some(acc) = self.accounts.iter().find(|a| &a.id == active_id) {
-                return Some(acc);
-            }
-        }
-        self.accounts.first()
+        self.accounts
+            .iter()
+            .find(|account| {
+                self.active_account_id.as_deref() == Some(account.id.as_str())
+                    && is_own_source(&account.source)
+            })
+            .or_else(|| self.accounts.iter().find(|account| is_own_source(&account.source)))
+            .or_else(|| {
+                self.accounts
+                    .iter()
+                    .find(|account| self.active_account_id.as_deref() == Some(account.id.as_str()))
+            })
+            .or_else(|| self.accounts.first())
     }
 }
 
@@ -600,7 +607,11 @@ pub fn load_all_codex_accounts() -> Vec<CodexAccount> {
 
 /// Lists all accounts in the injected store's location.
 pub(crate) fn load_all_codex_accounts_in(locations: &CredentialStore) -> Vec<CodexAccount> {
-    load_credentials_store_in(locations).accounts
+    let mut accounts = load_credentials_store_in(locations).accounts;
+    if accounts.iter().any(|account| is_own_source(&account.source)) {
+        accounts.retain(|account| is_own_source(&account.source));
+    }
+    accounts
 }
 
 pub fn get_active_codex_account() -> Option<CodexAccount> {
@@ -653,10 +664,10 @@ pub fn get_backup_codex_accounts() -> Vec<CodexAccount> {
 pub(crate) fn get_backup_codex_accounts_in(locations: &CredentialStore) -> Vec<CodexAccount> {
     let store = load_credentials_store_in(locations);
     let active_id = store.active_account().map(|a| a.id.clone());
-    store
-        .accounts
+    let has_own = store.accounts.iter().any(|a| is_own_source(&a.source));
+    store.accounts
         .into_iter()
-        .filter(|a| Some(&a.id) != active_id.as_ref())
+        .filter(|a| Some(&a.id) != active_id.as_ref() && (!has_own || is_own_source(&a.source)))
         .collect()
 }
 
@@ -668,7 +679,8 @@ pub fn set_active_codex_account(id: &str) -> Result<(), String> {
 pub(crate) fn set_active_codex_account_in(id: &str, locations: &CredentialStore) -> Result<(), String> {
     let _guard = account_store_guard();
     let mut store = load_credentials_store_unlocked_in(locations);
-    if !store.accounts.iter().any(|a| a.id == id) {
+    if !store.accounts.iter().any(|a| a.id == id && (is_own_source(&a.source)
+        || !store.accounts.iter().any(|account| is_own_source(&account.source)))) {
         return Err(format!("Account '{id}' not found"));
     }
     store.active_account_id = Some(id.to_string());
@@ -1690,6 +1702,33 @@ mod tests {
         assert_eq!(load_all_codex_accounts().len(), 1);
         assert_eq!(get_active_codex_account().unwrap().id, "acc_work");
 
+        let _ = env;
+    }
+
+    #[test]
+    fn own_login_wins_over_active_codex_cli_import() {
+        let env = TestHomeGuard::new("own-account-precedence");
+        let own = add_or_update_account(&OAuthTokens {
+            access_token: "own-token".into(),
+            refresh_token: Some("own-refresh".into()),
+            expires_in: Some(3600),
+            id_token: None,
+            account_id: Some("own-account".into()),
+        })
+        .unwrap();
+        let mut store = load_credentials_store();
+        let mut imported = own.clone();
+        imported.id = "imported-account".into();
+        imported.source = "~/.codex/auth.json".into();
+        store.accounts.push(imported);
+        store.active_account_id = Some("imported-account".into());
+        save_credentials_store_in(&store, &CredentialStore::default()).unwrap();
+
+        assert_eq!(get_active_codex_account().unwrap().id, own.id);
+        assert_eq!(load_credentials().unwrap().access_token, "own-token");
+        assert_eq!(load_all_codex_accounts().len(), 1);
+        assert!(get_backup_codex_accounts().is_empty());
+        assert!(set_active_codex_account("imported-account").is_err());
         let _ = env;
     }
 

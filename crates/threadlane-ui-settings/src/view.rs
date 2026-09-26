@@ -2027,6 +2027,10 @@ impl SettingsView {
                                                      this.refresh_providers_snapshot();
                                                      cx.notify();
                                                  });
+                                                 let model = model_active.clone();
+                                                 cx.spawn(async move |cx| {
+                                                     crate::refresh_openai_models_and_update(model, cx).await;
+                                                 }).detach();
                                              })
                                     }))
                                     .child(
@@ -2047,6 +2051,10 @@ impl SettingsView {
                                                      this.refresh_providers_snapshot();
                                                      cx.notify();
                                                  });
+                                                 let model = model_remove.clone();
+                                                 cx.spawn(async move |cx| {
+                                                     crate::refresh_openai_models_and_update(model, cx).await;
+                                                 }).detach();
                                              }),
                                     ),
                             )

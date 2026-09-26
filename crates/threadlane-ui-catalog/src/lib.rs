@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelProvider {
@@ -166,8 +167,16 @@ static DISCOVERED_OPENAI: std::sync::OnceLock<
         std::time::Instant,
         Vec<ModelOption>,
         Vec<threadlane_provider::model_registry::ModelInfo>,
+        u64,
     )>,
 > = std::sync::OnceLock::new();
+
+fn openai_catalog_key(api_key: Option<&str>, login_id: Option<&str>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    api_key.hash(&mut hasher);
+    login_id.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Pulls the live OpenAI model list and caches it for the picker. Skips the
 /// network without credentials or while the cache is fresh; failures keep
@@ -176,45 +185,51 @@ pub async fn refresh_openai_models() {
     if !credentials_allow(ModelProvider::OpenAi) {
         return;
     }
+    let api_key = threadlane_auth::openai_auth::load_openai_api_key()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|key| !key.trim().is_empty()));
+    let login = threadlane_auth::openai_auth::get_active_codex_account()
+        .filter(|account| threadlane_auth::openai_auth::is_own_source(&account.source));
+    let cache_key = openai_catalog_key(api_key.as_deref(), login.as_ref().map(|a| a.id.as_str()));
     let fresh = DISCOVERED_OPENAI
         .get()
         .and_then(|cache| cache.lock().ok())
-        .is_some_and(|guard| guard.0.elapsed() < std::time::Duration::from_secs(5 * 60));
+        .is_some_and(|guard| {
+            guard.3 == cache_key && guard.0.elapsed() < std::time::Duration::from_secs(5 * 60)
+        });
     if fresh {
         return;
     }
-    // Same precedence as session credential resolution: stored API key,
-    // ChatGPT login, environment. A Codex-subscription token 401s on
-    // `/v1/models`; subscription models arrive via the ChatGPT backend below.
-    let (api_key, account_id) = threadlane_coding_agent::credentials::provider_credentials("gpt-4o");
-    if api_key.trim().is_empty() {
-        return;
-    }
-    let general =
-        threadlane_provider::openai::try_fetch_available_models(&api_key, account_id.as_deref())
-            .await;
-    // Subscription inventory signs with the stored ChatGPT login (own
-    // source), never the API key: a key 401s on the subscription endpoint.
-    let login = threadlane_auth::openai_auth::load_credentials()
-        .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source));
-    let subscription = match login.as_ref() {
-        Some(credentials) => {
-            threadlane_provider::openai::try_fetch_subscription_models(
-                &credentials.access_token,
-                credentials.account_id.as_deref(),
-            )
-            .await
-        }
+    let general = match api_key.as_deref() {
+        Some(key) => threadlane_provider::openai::try_fetch_available_models(key, None).await,
         None => None,
     };
+    // Resolve the active login through the same refresh path as provider
+    // requests; a stored access token may have expired since sign-in.
+    let subscription = match login.as_ref() {
+        Some(account) => match threadlane_auth::openai_auth::get_valid_codex_account_token(&account.id).await {
+            Ok(token) => threadlane_provider::openai::try_fetch_subscription_models(
+                &token,
+                account.account_id.as_deref(),
+            ).await,
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let general = general.filter(|models| !models.is_empty());
+    let subscription = subscription.filter(|models| !models.is_empty());
     if general.is_none() && subscription.is_none() {
         return;
     }
     let cache = DISCOVERED_OPENAI
-        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new(), Vec::new())));
+        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new(), Vec::new(), cache_key)));
     let Ok(mut guard) = cache.lock() else {
         return;
     };
+    if guard.3 != cache_key {
+        guard.1.clear();
+        guard.2.clear();
+    }
     if let Some(general) = general {
         guard.1 = general
             .into_iter()
@@ -233,15 +248,23 @@ pub async fn refresh_openai_models() {
         guard.2 = subscription;
     }
     guard.0 = std::time::Instant::now();
+    guard.3 = cache_key;
 }
 
 fn merge_discovered_openai_models(models: &mut Vec<ModelOption>) {
     if !credentials_allow(ModelProvider::OpenAi) {
         return;
     }
+    let api_key = threadlane_auth::openai_auth::load_openai_api_key()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|key| !key.trim().is_empty()));
+    let login = threadlane_auth::openai_auth::get_active_codex_account()
+        .filter(|account| threadlane_auth::openai_auth::is_own_source(&account.source));
+    let cache_key = openai_catalog_key(api_key.as_deref(), login.as_ref().map(|a| a.id.as_str()));
     let Some((mut discovered, subscription)) = DISCOVERED_OPENAI
         .get()
         .and_then(|cache| cache.lock().ok())
+        .filter(|guard| guard.3 == cache_key)
         .map(|guard| (guard.1.clone(), guard.2.clone()))
     else {
         return;
@@ -761,6 +784,14 @@ pub fn format_tokens(tokens: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_catalog_cache_is_scoped_to_credentials() {
+        let first = openai_catalog_key(None, Some("account-a"));
+        assert_eq!(first, openai_catalog_key(None, Some("account-a")));
+        assert_ne!(first, openai_catalog_key(None, Some("account-b")));
+        assert_ne!(first, openai_catalog_key(Some("api-key"), Some("account-a")));
+    }
 
     #[test]
     fn no_credentials_produce_no_provider_models() {
