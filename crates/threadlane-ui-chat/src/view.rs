@@ -4716,6 +4716,8 @@ impl ChatListView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let subagents = self.model.read(cx).active_subagents().to_vec();
+        let mut ordered_subagents = subagents.iter().collect::<Vec<_>>();
+        ordered_subagents.sort_by_key(|item| subagent_status_rank(item.status));
         let theme = cx.theme().colors;
         let selected_run_id = self
             .selected_subagent_run_id
@@ -4738,7 +4740,7 @@ impl ChatListView {
                 .find(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
         });
         let mut rows = Vec::new();
-        for item in &subagents {
+        for item in ordered_subagents {
             let run_id = item
                 .journal_run_id
                 .clone()
@@ -4831,15 +4833,14 @@ impl ChatListView {
             );
         }
         let detail = selected.map(|item| self.render_subagent_detail(item, cx));
-        let count_label = if active_count > 0 {
-            format!("{active_count} active")
-        } else {
-            format!("{} total", subagents.len())
+        let count_label = match active_count {
+            0 => format!("{} total", subagents.len()),
+            active => format!("{active} active · {} total", subagents.len()),
         };
         div()
-            .w(rems(32.5))
+            .w(rems(42.5))
             .max_w(rems(CHAT_CONTENT_MAX_WIDTH - 2.0))
-            .max_h(rems(32.5))
+            .max_h(rems(38.0))
             .rounded_xl()
             .border_1()
             .border_color(theme.border)
@@ -4873,10 +4874,11 @@ impl ChatListView {
             .child(
                 div()
                     .flex()
+                    .min_h_0()
                     .min_h(rems(15.0))
                     .child(
                         div()
-                            .w(rems(13.125))
+                            .w(rems(15.0))
                             .flex_none()
                             .p_2()
                             .border_r_1()
@@ -4913,7 +4915,7 @@ impl ChatListView {
             .messages
             .iter()
             .rev()
-            .take(8)
+            .take(20)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -5160,6 +5162,15 @@ impl ChatListView {
                     }),
             )
             .children(branch_controls)
+            .children((item.messages.len() > 20).then(|| {
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "Showing the latest 20 of {} messages",
+                        item.messages.len()
+                    ))
+            }))
             .children(item.error.as_ref().map(|error| {
                 div()
                     .p_2()

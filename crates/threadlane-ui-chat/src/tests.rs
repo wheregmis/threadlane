@@ -422,6 +422,7 @@ use super::{
     format_trajectory_raw_json, grouped_tool_activities, is_terminal_runnable_language,
     markdown_cache_exceeded, next_chat_stream_batch, normalize_terminal_command,
     reconcile_trajectory_entries, reconcile_trajectory_entries_by_epoch, subagent_popover_counts,
+    subagent_status_rank,
     summarize_trajectory, ChatLinkTarget, ContextMeterContext, ContextMeterMetrics,
     MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryInspectorTab, TrajectoryMode,
     TrajectoryRenderCache, TrajectoryRow, TrajectorySummary,
@@ -686,6 +687,26 @@ fn subagent_popover_counts_items_without_owning_them() {
             SubagentActivityStatus::Completed,
         ]),
         Some((3, 2))
+    );
+}
+
+#[test]
+fn subagent_status_rank_keeps_live_work_first() {
+    let mut statuses = [
+        SubagentActivityStatus::Completed,
+        SubagentActivityStatus::Queued,
+        SubagentActivityStatus::Failed,
+        SubagentActivityStatus::Running,
+    ];
+    statuses.sort_by_key(|status| subagent_status_rank(*status));
+    assert_eq!(
+        statuses,
+        [
+            SubagentActivityStatus::Running,
+            SubagentActivityStatus::Queued,
+            SubagentActivityStatus::Failed,
+            SubagentActivityStatus::Completed,
+        ]
     );
 }
 

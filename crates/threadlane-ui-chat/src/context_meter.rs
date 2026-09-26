@@ -102,6 +102,16 @@ pub fn subagent_popover_counts(
     (count > 0).then_some((count, active_count))
 }
 
+pub fn subagent_status_rank(status: SubagentActivityStatus) -> u8 {
+    match status {
+        SubagentActivityStatus::Running => 0,
+        SubagentActivityStatus::Queued => 1,
+        SubagentActivityStatus::Failed => 2,
+        SubagentActivityStatus::Cancelled => 3,
+        SubagentActivityStatus::Completed => 4,
+    }
+}
+
 pub fn format_meter_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
