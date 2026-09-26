@@ -28,7 +28,7 @@ pub use types::{
     hash_session_identity, ChatMessageInfo, ChatStreamEvent, MessageRole, RequestedComposerInsert,
     RequestedEditorTarget, SessionAttention, SessionHealth, SessionHydrationRequest, SessionInfo,
     SubagentActivityInfo, SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode,
-    WorkspacePage,
+    GitHubTab, WorkspacePage,
 };
 
 #[cfg(any(test, feature = "test-support"))]

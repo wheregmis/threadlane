@@ -16,7 +16,9 @@ use gpui_component::theme::ActiveTheme;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
 
-use threadlane_ui_state::{AppState, SessionAttention, SessionInfo, TrajectoryEntry};
+use threadlane_ui_state::{
+    AppState, GitHubTab, SessionAttention, SessionInfo, TrajectoryEntry, WorkspacePage,
+};
 use threadlane_ui_state::{actions::AppAction, controller};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -532,6 +534,7 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
     state.active_work_dir.hash(&mut hasher);
     state.active_session_id.hash(&mut hasher);
     state.workspace_page.hash(&mut hasher);
+    state.github_tab.hash(&mut hasher);
     state.sidebar_project_filter.hash(&mut hasher);
     for byte in state.search_query.trim().bytes() {
         hasher.write_u8(byte.to_ascii_lowercase());
@@ -662,40 +665,48 @@ impl SidebarView {
         div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
             .px_3()
             .pt(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE)
             .pb_1()
             .bg(theme.title_bar)
             .child(
                 Button::new("new-task-btn")
-                    .icon(IconName::Plus)
-                    .label("New task")
                     .accessibility_label("Start a new task (⌘N)")
-                    .outline()
-                    .small()
+                    .ghost()
                     .w_full()
-                    .justify_between()
+                    .justify_start()
                     .tooltip("Start a new task (⌘N)")
                     .child(
                         div()
-                            .px_1p5()
-                            .py(rems(0.03125))
-                            .rounded_sm()
-                            .bg(theme.muted)
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("⌘N"),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .w_full()
+                            .child(Icon::new(IconName::Plus).size_4())
+                            .child(div().flex_1().child("New task"))
+                            .child(
+                                div()
+                                    .px_1p5()
+                                    .py(rems(0.03125))
+                                    .rounded_sm()
+                                    .bg(theme.muted)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("⌘N"),
+                            ),
                     )
                     .on_click(move |_event, window, cx| {
                         window.dispatch_action(Box::new(crate::BeginNewTask), cx);
                     }),
             )
+            .child(self.render_github_nav(cx))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .mt_2()
                     .px_2()
                     .h(rems(2.25))
                     .rounded_md()
@@ -1712,6 +1723,53 @@ impl SidebarView {
         )
     }
 
+    fn render_github_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.model.read(cx);
+        div().flex().flex_col().gap_1().children(
+            [
+                (GitHubTab::Issues, "sidebar-issues", "icons/git/issue.svg"),
+                (
+                    GitHubTab::PullRequests,
+                    "sidebar-pull-requests",
+                    "icons/git/pull-request.svg",
+                ),
+            ]
+            .into_iter()
+            .map(|(tab, id, icon)| {
+                let model = self.model.clone();
+                let label = format!("Open GitHub {}", tab.label().to_lowercase());
+                let selected = state.workspace_page == WorkspacePage::GitHub && state.github_tab == tab;
+                Button::new(id)
+                    .debug_selector(move || id.into())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .w_full()
+                            .child(Icon::default().path(icon).size_4())
+                            .child(tab.label()),
+                    )
+                    .accessibility_label(if selected {
+                        format!("{label}, current view")
+                    } else {
+                        label.clone()
+                    })
+                    .tooltip(label)
+                    .ghost()
+                    .selected(selected)
+                    .w_full()
+                    .justify_start()
+                    .on_click(move |_event, _window, cx| {
+                        model.update(cx, |state, cx| {
+                            controller::dispatch(state, AppAction::OpenGitHubTab(tab));
+                            cx.notify();
+                        });
+                    })
+            }),
+        )
+    }
+
     /// Filter, group, and sort sessions for the history list. Only runs when
     /// `sidebar_fingerprint` changes; `render_history` otherwise reuses the
     /// cached result instead of cloning and sorting every row per frame.
@@ -1803,7 +1861,8 @@ impl SidebarView {
                 .into_any_element(),
             Some(HistoryRow::Session(session, attention)) => {
                 let state = self.model.read(cx);
-                let is_active = state.active_work_dir.as_ref() == Some(&session.work_dir)
+                let is_active = state.workspace_page == WorkspacePage::Chat
+                    && state.active_work_dir.as_ref() == Some(&session.work_dir)
                     && state.active_session_id.as_deref() == Some(session.id.as_str());
                 self.render_session_card(&session, attention, is_active, cx)
                     .into_any_element()
@@ -1950,7 +2009,7 @@ mod tests {
     ) {
         use gpui::*;
         use std::{cell::Cell, rc::Rc};
-        use threadlane_ui_state::{AppState, WorkspacePage};
+        use threadlane_ui_state::{AppState, GitHubTab, WorkspacePage};
 
         struct Harness {
             sidebar: Entity<super::SidebarView>,
@@ -1969,6 +2028,7 @@ mod tests {
                             false,
                             cx,
                         ))
+                        .child(sidebar.render_github_nav(cx))
                         .child(sidebar.render_footer(cx))
                         .into_any_element()
                 })
@@ -2039,7 +2099,11 @@ mod tests {
         }
 
         cx.update(|window, cx| window.focus_next(cx)); // Archive remains separate.
-        for page in [WorkspacePage::Settings] {
+        for (page, tab) in [
+            (WorkspacePage::GitHub, GitHubTab::Issues),
+            (WorkspacePage::GitHub, GitHubTab::PullRequests),
+            (WorkspacePage::Settings, GitHubTab::PullRequests),
+        ] {
             cx.update(|window, cx| {
                 window.focus_next(cx);
                 window.draw(cx).clear(cx);
@@ -2051,7 +2115,24 @@ mod tests {
                 prefer_character_input: false,
             });
             cx.simulate_event(KeyUpEvent { keystroke });
-            model.read_with(cx, |state, _| assert_eq!(state.workspace_page, page));
+            model.read_with(cx, |state, _| {
+                assert_eq!(state.workspace_page, page);
+                assert_eq!(state.github_tab, tab);
+                assert_eq!(state.active_session_id.as_deref(), Some("keyboard-task"));
+            });
+        }
+        for (id, tab) in [
+            ("sidebar-issues", GitHubTab::Issues),
+            ("sidebar-pull-requests", GitHubTab::PullRequests),
+        ] {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let bounds = cx.debug_bounds(id).unwrap();
+            assert!(bounds.right() <= px(223.0));
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            model.read_with(cx, |state, _| {
+                assert_eq!(state.workspace_page, WorkspacePage::GitHub);
+                assert_eq!(state.github_tab, tab);
+            });
         }
     }
 

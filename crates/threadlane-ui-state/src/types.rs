@@ -330,6 +330,22 @@ pub struct PendingComposerMessage {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GitHubTab {
+    #[default]
+    Issues,
+    PullRequests,
+}
+
+impl GitHubTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Issues => "Issues",
+            Self::PullRequests => "Pull requests",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WorkspacePage {
     #[default]
     Chat,

@@ -93,6 +93,10 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
             state.set_acp_config_option(config_id, value)
         }
         AppAction::OpenGitHub => state.open_github(),
+        AppAction::OpenGitHubTab(tab) => {
+            state.github_tab = tab;
+            state.open_github();
+        }
         AppAction::OpenGitHubIssue { work_dir, number } => {
             state.open_github_issue(work_dir, number)
         }

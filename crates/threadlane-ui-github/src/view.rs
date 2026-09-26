@@ -379,6 +379,8 @@ pub struct GitHubView {
     scope_initialized: bool,
     last_targets: Vec<PathBuf>,
     repository: Option<GitHubRepository>,
+    /// Last applied navigation target, retained with the list/request state.
+    /// AppState owns navigation so the sidebar and in-page tabs stay in sync.
     tab: GitHubTab,
     state_filter: GitHubStateFilter,
     query_input: Entity<InputState>,
@@ -468,11 +470,13 @@ impl GitHubView {
         });
         let detail_split_state = cx.new(|_| ResizableState::default());
         let linked_sessions_fingerprint = github_link_fingerprint(model.read(cx));
+        let tab = model.read(cx).github_tab;
 
         let model_subscription = cx.observe(&model, |this, model, cx| {
             let state = model.read(cx);
             let linked_sessions_fingerprint = github_link_fingerprint(state);
             let github_list_revision = state.github_list_revision;
+            let tab = state.github_tab;
             let attached: Vec<PathBuf> =
                 state.projects.iter().map(|p| p.work_dir.clone()).collect();
             let scope_valid = match &this.scope {
@@ -517,6 +521,7 @@ impl GitHubView {
                 this.last_github_list_revision = github_list_revision;
                 this.fetch_list(cx);
             }
+            this.select_tab(tab, cx);
         });
         let input_subscription = cx.subscribe_in(
             &query_input,
@@ -568,7 +573,7 @@ impl GitHubView {
             scope_initialized: false,
             last_targets: Vec::new(),
             repository: None,
-            tab: GitHubTab::Issues,
+            tab,
             state_filter: GitHubStateFilter::Open,
             query_input,
             query_revision: 0,
@@ -683,7 +688,7 @@ impl GitHubView {
         number: u64,
         cx: &mut Context<Self>,
     ) {
-        self.tab = GitHubTab::Issues;
+        self.set_tab(GitHubTab::Issues, cx);
         self.project_work_dir = Some(work_dir.clone());
         self.scope = GitHubScope::Project(work_dir.clone());
         self.scope_initialized = true;
@@ -1090,12 +1095,22 @@ impl GitHubView {
         .detach();
     }
 
+    fn set_tab(&mut self, tab: GitHubTab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        self.state_filter = github_state_for_tab(self.state_filter, tab);
+        if self.model.read(cx).github_tab != tab {
+            self.model.update(cx, |state, cx| {
+                state.github_tab = tab;
+                cx.notify();
+            });
+        }
+    }
+
     fn select_tab(&mut self, tab: GitHubTab, cx: &mut Context<Self>) {
         if self.tab == tab {
             return;
         }
-        self.tab = tab;
-        self.state_filter = github_state_for_tab(self.state_filter, tab);
+        self.set_tab(tab, cx);
         self.query_revision = self.query_revision.saturating_add(1);
         self.clear_selection();
         self.fetch_list(cx);
@@ -1903,7 +1918,7 @@ impl GitHubView {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .truncate()
-                    .child("Issues & pull requests"),
+                    .child(self.tab.label()),
             )
             .children(
                 (self.tab == GitHubTab::PullRequests && self.current_pr_tab() == PrDetailTab::Code)
@@ -1917,24 +1932,6 @@ impl GitHubView {
                                 this.select_pr_tab(PrDetailTab::Summary, cx)
                             }))
                     }),
-            )
-            .child(
-                Button::new("github-tab-issues")
-                    .label("Issues")
-                    .ghost()
-                    .small()
-                    .selected(self.tab == GitHubTab::Issues)
-                    .on_click(cx.listener(|this, _, _, cx| this.select_tab(GitHubTab::Issues, cx))),
-            )
-            .child(
-                Button::new("github-tab-prs")
-                    .label("Pull requests")
-                    .ghost()
-                    .small()
-                    .selected(self.tab == GitHubTab::PullRequests)
-                    .on_click(
-                        cx.listener(|this, _, _, cx| this.select_tab(GitHubTab::PullRequests, cx)),
-                    ),
             )
             .into_any_element()
     }
@@ -4268,6 +4265,7 @@ mod tests {
         ];
         view.model.update(cx, |model, _cx| {
             model.projects.clear();
+            model.github_tab = GitHubTab::PullRequests;
             threadlane_ui_state::activate_test_session(model, "app", &project.join("fixture.jsonl"));
         });
         view.project_work_dir = Some(project.clone());
@@ -4302,6 +4300,54 @@ mod tests {
     #[test]
     fn github_pr_merged_filter_uses_merged_state() {
         assert_eq!(GitHubStateFilter::Merged.value(), "merged");
+    }
+
+    #[gpui::test]
+    fn github_sidebar_navigation_and_page_tabs_stay_synchronized(cx: &mut gpui::TestAppContext) {
+        use threadlane_ui_state::{actions::AppAction, controller, WorkspacePage};
+
+        cx.update(gpui_component::init);
+        let mut github = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| {
+                let mut state = AppState::default();
+                state.projects.clear();
+                state.active_session_id = Some("keep-current-chat".into());
+                state
+            });
+            let view = cx.new(|cx| GitHubView::new(model, window, cx));
+            github = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = github.unwrap();
+        let model = view.read_with(cx, |view, _| view.model.clone());
+
+        model.update(cx, |state, cx| {
+            controller::dispatch(state, AppAction::OpenGitHubTab(GitHubTab::PullRequests));
+            cx.notify();
+        });
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.tab, GitHubTab::PullRequests);
+            assert_eq!(view.scope, GitHubScope::All);
+        });
+        view.update(cx, |view, cx| {
+            view.state_filter = GitHubStateFilter::Merged;
+            view.select_tab(GitHubTab::Issues, cx);
+            assert_eq!(view.state_filter, GitHubStateFilter::Open);
+        });
+        model.read_with(cx, |state, _| {
+            assert_eq!(state.workspace_page, WorkspacePage::GitHub);
+            assert_eq!(state.github_tab, GitHubTab::Issues);
+            assert_eq!(state.active_session_id.as_deref(), Some("keep-current-chat"));
+        });
+        view.update(cx, |view, cx| view.select_tab(GitHubTab::PullRequests, cx));
+        model.update(cx, |state, cx| {
+            controller::dispatch(state, AppAction::CloseGitHub);
+            controller::dispatch(state, AppAction::OpenGitHub);
+            cx.notify();
+        });
+        assert_eq!(model.read_with(cx, |state, _| state.github_tab), GitHubTab::PullRequests);
+        assert_eq!(view.read_with(cx, |view, _| view.tab), GitHubTab::PullRequests);
     }
 
     #[gpui::test]
@@ -5067,6 +5113,7 @@ mod tests {
                 )
                 .unwrap();
             view.tab = GitHubTab::Issues;
+            view.model.update(cx, |state, _| state.github_tab = GitHubTab::Issues);
             attempt
         });
 
@@ -6253,6 +6300,7 @@ mod tests {
 
         view.update(cx, |view, cx| {
             view.tab = GitHubTab::Issues;
+            view.model.update(cx, |state, _| state.github_tab = GitHubTab::Issues);
             view.selected_issue = Some(GitHubItemKey {
                 project: PathBuf::from("/projects/app"),
                 number: 1,

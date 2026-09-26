@@ -88,6 +88,8 @@ pub struct AppState {
     /// session runtime reads it when it is (re)built.
     pub orchestrator_mode: OrchestratorMode,
     pub workspace_page: WorkspacePage,
+    /// GitHub navigation shared by the sidebar and the GitHub screen.
+    pub github_tab: GitHubTab,
     pub openai_key: String,
     pub opencode_key: String,
     pub auth_status_msg: Option<String>,
@@ -347,6 +349,7 @@ impl AppState {
             reasoning_effort: ReasoningEffort::default(),
             orchestrator_mode,
             workspace_page: WorkspacePage::Chat,
+            github_tab: GitHubTab::default(),
             openai_key,
             opencode_key,
             auth_status_msg: None,
@@ -688,6 +691,7 @@ impl AppState {
 
     pub(crate) fn open_github_issue(&mut self, work_dir: PathBuf, number: u64) {
         self.workspace_page = WorkspacePage::GitHub;
+        self.github_tab = GitHubTab::Issues;
         self.requested_github_issue = Some((work_dir, number));
     }
 

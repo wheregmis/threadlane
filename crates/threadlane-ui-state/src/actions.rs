@@ -57,6 +57,7 @@ pub enum AppAction {
         value: String,
     },
     OpenGitHub,
+    OpenGitHubTab(crate::GitHubTab),
     OpenGitHubIssue {
         work_dir: PathBuf,
         number: u64,

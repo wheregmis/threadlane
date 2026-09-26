@@ -9,26 +9,12 @@ use threadlane_git::{
 };
 
 use threadlane_ui_state::SessionInfo;
+pub use threadlane_ui_state::GitHubTab;
 
 pub const GITHUB_LIST_CONTEXT: &str = "GitHubList";
 pub const GITHUB_PR_TABS_CONTEXT: &str = "GitHubPullRequestTabs";
 pub const GITHUB_PR_FILE_LIST_CONTEXT: &str = "GitHubPullRequestFiles";
 pub const PAGE_SIZE: usize = 50;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GitHubTab {
-    Issues,
-    PullRequests,
-}
-
-impl GitHubTab {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Issues => "Issues",
-            Self::PullRequests => "Pull requests",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitHubStateFilter {
