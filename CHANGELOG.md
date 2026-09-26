@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.23](https://github.com/wheregmis/threadlane/compare/v0.1.22...v0.1.23) (2026-09-26)
+
+
+### Features
+
+* **github:** offer Fusion mode in issue Start Task dialog ([9f452e7](https://github.com/wheregmis/threadlane/commit/9f452e79462a9f8a8a35aa28e915e2794cbb439d))
+* **github:** offer Fusion mode in issue Start Task dialog ([5683d5f](https://github.com/wheregmis/threadlane/commit/5683d5fcfa644c169bb729881f995b3a47a8e8cd)), closes [#243](https://github.com/wheregmis/threadlane/issues/243)
+* Support ACP commit messages ([e8eeab7](https://github.com/wheregmis/threadlane/commit/e8eeab7365ee4df852717e35b3628d1831cac24b))
+* **worktree:** add recovery for unavailable session worktrees ([08d3508](https://github.com/wheregmis/threadlane/commit/08d3508839f4864ad6cf97e4aa33da4fbed4c688))
+
+
+### Bug Fixes
+
+* **openai:** Prefer owned logins in model refresh ([6c53810](https://github.com/wheregmis/threadlane/commit/6c5381074272543f862bfe7389d8b79c843ae047))
+* Preserve sibling directories during tree scans ([ec0eb63](https://github.com/wheregmis/threadlane/commit/ec0eb639c781591c09d3c7b40f024b79598a190a))
+* remove duplicated toast ([b73d50a](https://github.com/wheregmis/threadlane/commit/b73d50ad188ed91407a874892a1e26dcb72204b4))
+* **workspace:** address PR review comments on worktree recovery ([185fd56](https://github.com/wheregmis/threadlane/commit/185fd569a5f120ce3e1cf4a211412e03280e38e8))
+* **workspace:** use active git work directory for terminals ([651eb51](https://github.com/wheregmis/threadlane/commit/651eb5162e5d99e161a5cc5ef87d3fcd39d7c3d0))
+* **workspace:** use active git work directory for terminals ([a4356b6](https://github.com/wheregmis/threadlane/commit/a4356b6cd610485aecfbe8db2f69b14e99ee2f17))
+
 ## [0.1.22](https://github.com/wheregmis/threadlane/compare/v0.1.21...v0.1.22) (2026-09-25)
 
 
