@@ -538,6 +538,14 @@ fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String>
         ));
     }
 
+    // The session-scoped hub is registered by the coding-agent capability, not
+    // by the workspace-only dyn runner. Never suggest a JSON syntax fix here:
+    // even valid JSON cannot reach the live subagent mailbox through dyn.
+    if tool_name == "hub" || tool_name == "message_peer" {
+        return Err(format!(
+            "'{tool_name}' is a session-scoped agent tool and is unavailable through dyn. Use the native {tool_name} tool if exposed; otherwise spawn subagents with wait=true."
+        ));
+    }
     let args_json = if remaining.starts_with('{') {
         remaining.to_string()
     } else if remaining.is_empty() {

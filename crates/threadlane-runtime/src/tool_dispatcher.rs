@@ -438,6 +438,9 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "write_file",
     "run_command",
     "subagent",
+    // Session-scoped parent supervision, registered alongside `subagent` in
+    // Fusion mode. Keep it visible to the provider's filtered tool schema.
+    "hub",
     // Registered only for issue tasks; their publish step must be model-visible.
     "create_draft_pull_request",
     // Embedded browser panel (`threadlane-browser`). The tools
