@@ -4,6 +4,117 @@ use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaSta
 use threadlane_automation::{new_id, now, Schedule};
 use threadlane_protocol::ReasoningEffort;
 
+fn default_project(state: &AppState) -> Option<&std::path::PathBuf> {
+    state
+        .projects
+        .iter()
+        .find(|p| state.active_work_dir.as_ref() == Some(&p.work_dir))
+        .or_else(|| state.projects.first())
+        .map(|p| &p.work_dir)
+}
+
+fn project_model(models: &[threadlane_ui_catalog::ModelOption], preferred: &str) -> String {
+    let mut native = models.iter().filter(|m| !m.id.starts_with("acp/"));
+    native
+        .clone()
+        .find(|m| m.id == preferred)
+        .or_else(|| native.next())
+        .map(|m| m.id.clone())
+        .unwrap_or_default()
+}
+
+fn calendar_cadence(days: &[u32]) -> &'static str {
+    match days {
+        [0, 1, 2, 3, 4, 5, 6] => "daily",
+        [0, 1, 2, 3, 4] => "weekdays",
+        [_] => "weekly",
+        _ => "custom",
+    }
+}
+
+fn calendar_days(cadence: &str, weekday: u32, original: &Schedule) -> Vec<u32> {
+    match cadence {
+        "daily" => (0..7).collect(),
+        "weekdays" => (0..5).collect(),
+        "custom" => match original {
+            Schedule::Calendar { days, .. } => days.clone(),
+            _ => Vec::new(),
+        },
+        _ => vec![weekday],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{calendar_cadence, calendar_days, default_project, project_model};
+    use threadlane_automation::Schedule;
+    use threadlane_ui_catalog::{ModelOption, ModelProvider};
+    use threadlane_ui_state::{activate_test_session, AppState};
+
+    #[test]
+    fn unrelated_edits_preserve_every_calendar_day_set_and_order() {
+        // Includes all valid nonempty subsets plus unordered weekday/daily sets.
+        let mut sets: Vec<Vec<u32>> = (1..128)
+            .map(|mask| (0..7).filter(|d| mask & (1 << d) != 0).collect())
+            .collect();
+        sets.extend([
+            vec![4, 2, 0, 3, 1],
+            vec![6, 5, 4, 3, 2, 1, 0],
+            vec![0, 0, 0, 0, 0, 0, 0],
+        ]);
+        for days in sets {
+            let schedule = Schedule::Calendar {
+                hour: 9,
+                minute: 0,
+                days: days.clone(),
+                timezone: "America/Toronto".into(),
+            };
+            assert_eq!(
+                calendar_days(calendar_cadence(&days), days[0], &schedule),
+                days
+            );
+            // Explicit cadence changes may replace the old set.
+            assert_eq!(calendar_days("weekly", 3, &schedule), vec![3]);
+        }
+    }
+
+    #[test]
+    fn defaults_and_project_switches_use_the_destination_catalog() {
+        let mut state = AppState::default();
+        state.projects.clear();
+        activate_test_session(&mut state, "a", std::path::Path::new("/project-a/a.jsonl"));
+        activate_test_session(&mut state, "b", std::path::Path::new("/project-b/b.jsonl"));
+        state.selected_model = "project-b-model".into();
+        assert_eq!(
+            default_project(&state).unwrap().clone(),
+            std::path::PathBuf::from("/project-b")
+        );
+        let models = [
+            ModelOption {
+                id: "acp/external".into(),
+                label: "External".into(),
+                provider: ModelProvider::Acp,
+            },
+            ModelOption {
+                id: "project-a-model".into(),
+                label: "A".into(),
+                provider: ModelProvider::OpenAi,
+            },
+        ];
+        assert_eq!(
+            project_model(&models, &state.selected_model),
+            "project-a-model"
+        );
+        assert_eq!(project_model(&models, "project-a-model"), "project-a-model");
+        assert_eq!(project_model(&[], &state.selected_model), "");
+        state.active_work_dir = None;
+        assert_eq!(
+            default_project(&state).unwrap().clone(),
+            std::path::PathBuf::from("/project-a")
+        );
+    }
+}
+
 struct Editor {
     model: Entity<AppState>,
     definition: Definition,
@@ -28,25 +139,34 @@ pub(super) fn open(
     cx: &mut App,
 ) {
     let state = model.read(cx);
-    let Some(project) = state.projects.first() else {
+    let Some(project) = default_project(state) else {
         return;
     };
-    let definition = definition.unwrap_or_else(|| Definition {
-        id: new_id(),
-        revision: 0,
-        name: String::new(),
-        prompt: String::new(),
-        project: project.work_dir.clone(),
-        model: state.selected_model.clone(),
-        effort: state.reasoning_effort.label().into(),
-        worktree: true,
-        schedule: Schedule::Interval { minutes: 60 },
-        enabled: true,
-        notify_all: false,
-        anchor: now(),
-        next_at: None,
-        failures: 0,
-        paused_reason: None,
+    let definition = definition.unwrap_or_else(|| {
+        let models = threadlane_ui_catalog::available_models_for_project(Some(project));
+        let selected_model = project_model(&models, &state.selected_model);
+        let effort = threadlane_provider::model_registry::effective_effort(
+            &selected_model,
+            state.reasoning_effort.clone(),
+            Some(project),
+        );
+        Definition {
+            id: new_id(),
+            revision: 0,
+            name: String::new(),
+            prompt: String::new(),
+            project: project.clone(),
+            model: selected_model,
+            effort: effort.label().into(),
+            worktree: true,
+            schedule: Schedule::Interval { minutes: 60 },
+            enabled: true,
+            notify_all: false,
+            anchor: now(),
+            next_at: None,
+            failures: 0,
+            paused_reason: None,
+        }
     });
     let title = if definition.revision == 0 {
         "New automation"
@@ -68,13 +188,7 @@ pub(super) fn open(
             days,
             timezone,
         } => (
-            if days.len() == 7 {
-                "daily"
-            } else if days == &[0, 1, 2, 3, 4] {
-                "weekdays"
-            } else {
-                "weekly"
-            },
+            calendar_cadence(days),
             "60".into(),
             format!("{hour:02}:{minute:02}"),
             timezone.clone(),
@@ -181,11 +295,7 @@ impl Editor {
                 Ok(Schedule::Calendar {
                     hour: hour.parse().map_err(|_| "Invalid hour")?,
                     minute: minute.parse().map_err(|_| "Invalid minute")?,
-                    days: match self.cadence.as_str() {
-                        "daily" => (0..7).collect(),
-                        "weekdays" => (0..5).collect(),
-                        _ => vec![self.weekday],
-                    },
+                    days: calendar_days(&self.cadence, self.weekday, &self.definition.schedule),
                     timezone: self.timezone.read(cx).value().trim().into(),
                 })
             }
@@ -270,6 +380,14 @@ impl Render for Editor {
                     this.models = threadlane_ui_catalog::available_models_for_project(Some(
                         &this.definition.project,
                     ));
+                    this.definition.model = project_model(&this.models, &this.definition.model);
+                    this.definition.effort = threadlane_provider::model_registry::effective_effort(
+                        &this.definition.model,
+                        ReasoningEffort::from_label(&this.definition.effort).unwrap_or_default(),
+                        Some(&this.definition.project),
+                    )
+                    .label()
+                    .into();
                     cx.notify();
                 });
             },
@@ -323,13 +441,17 @@ impl Render for Editor {
                 });
             },
         );
-        let cadences = vec![
+        let mut cadences = vec![
             ("manual", "Manual"),
             ("interval", "Every N minutes"),
             ("daily", "Daily"),
             ("weekdays", "Weekdays"),
             ("weekly", "Weekly"),
         ];
+        if matches!(&self.definition.schedule, Schedule::Calendar { days, .. } if calendar_cadence(days) == "custom")
+        {
+            cadences.push(("custom", "Custom days"));
+        }
         let label = cadences
             .iter()
             .find(|(id, _)| *id == self.cadence)
@@ -387,7 +509,26 @@ impl Render for Editor {
                     .disabled(self.busy),
             ));
         }
-        if ["daily", "weekdays", "weekly"].contains(&self.cadence.as_str()) {
+        if self.cadence == "custom" {
+            if let Schedule::Calendar { days, .. } = &self.definition.schedule {
+                let labels = [
+                    "Monday",
+                    "Tuesday",
+                    "Wednesday",
+                    "Thursday",
+                    "Friday",
+                    "Saturday",
+                    "Sunday",
+                ];
+                let days = days
+                    .iter()
+                    .filter_map(|d| labels.get(*d as usize).copied())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                body = body.child(div().text_sm().child(format!("Days: {days}")));
+            }
+        }
+        if ["daily", "weekdays", "weekly", "custom"].contains(&self.cadence.as_str()) {
             body = body
                 .child(field(
                     "Time (HH:MM)",

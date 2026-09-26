@@ -317,14 +317,8 @@ impl Actor {
         {
             return Err("Choose an attached project".into());
         }
-        if !threadlane_ui_catalog::available_models_for_project(Some(&definition.project))
-            .iter()
-            .any(|m| m.id == definition.model)
-        {
-            return Err(
-                "The selected model is unavailable. Choose an available native model".into(),
-            );
-        }
+        // A missing picker entry is not authoritative while live discovery is cold.
+        // Definition validation still rejects empty IDs and unsupported ACP models.
         let saved = self.store.create_once(definition, now())?;
         self.projection.error = None;
         Ok(saved)
@@ -385,9 +379,21 @@ impl Actor {
                 let tx = self.tx.clone();
                 threadlane_provider::exec::get_runtime().spawn(async move {
                     let id = run.id.clone();
-                    let available = threadlane_ui_catalog::available_models_for_project(Some(&run.definition.project))
-                        .iter().any(|model| model.id == run.definition.model);
-                    let result = if available { prepare(run).await } else { Err("The saved model is unavailable. Edit the automation to choose a model.".into()) };
+                    let model = run.definition.model.clone();
+                    // Picker caches may be empty at startup or after discovery failures.
+                    // Preserve the saved model; its provider is authoritative at execution.
+                    let result = prepare(run).await;
+                    if result.is_ok() {
+                        // Await discovery before the first provider turn (also populates live
+                        // runtime mappings). A failed/empty refresh is not proof of removal.
+                        if model.starts_with("opencode-go/") {
+                            threadlane_ui_catalog::refresh_discovered_models().await;
+                        } else if model.starts_with("antigravity/") {
+                            threadlane_ui_catalog::refresh_antigravity_models().await;
+                        } else {
+                            threadlane_ui_catalog::refresh_openai_models().await;
+                        }
+                    }
                     let _ = tx.send(Event::Prepared(id, result));
                 });
             }
@@ -770,6 +776,30 @@ mod tests {
         service.store.enqueue("automation-test", false, 2).unwrap();
         service.recover().unwrap();
         assert_eq!(service.store.snapshot().runs[1].status, RunStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn cold_picker_cache_does_not_reject_a_saved_live_only_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut actor = make_actor(&temp.path().join("automations"));
+        let mut definition = definition(temp.path());
+        definition.model = "opencode-go/live-only-regression-model".into();
+        definition.enabled = true;
+        definition.schedule = Schedule::Interval { minutes: 1 };
+        actor.store.save(definition, now() - 120).unwrap();
+        actor.schedule().unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(10), actor.rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // This unattached temporary project stops preparation before credentials/provider use.
+        // Reaching that check proves cache absence did not fail the occurrence first.
+        let Event::Prepared(_, Err(error)) = event else {
+            panic!("expected project validation")
+        };
+        assert_eq!(error, "Attach this automation's project before running it");
+        assert_eq!(actor.store.snapshot().runs[0].status, RunStatus::Starting);
+        assert_eq!(actor.store.snapshot().definitions[0].failures, 0);
     }
     #[test]
     fn automation_navigation_preserves_chat_and_project_scope() {
