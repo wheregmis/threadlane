@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.24](https://github.com/wheregmis/threadlane/compare/v0.1.23...v0.1.24) (2026-09-26)
+
+
+### Features
+
+* **chat:** expand subagent activity UX ([ab524ee](https://github.com/wheregmis/threadlane/commit/ab524ee3429ee225551b45f2810c5d61f8c74dda))
+* **chat:** improve subagent activity popover ([7456b39](https://github.com/wheregmis/threadlane/commit/7456b391f1779c3debb1ea7c1618906fc383e3da))
+* **ui:** move agent activity into right panel ([597589c](https://github.com/wheregmis/threadlane/commit/597589cd11b09cb7f384d6938b4546dff63b9b50))
+
+
+### Bug Fixes
+
+* expose hub in filtered tool schemas ([fb621bf](https://github.com/wheregmis/threadlane/commit/fb621bf3cf71b4d228a2becd8bdc149d1e3efd61))
+* expose hub in filtered tool schemas ([1e6cde4](https://github.com/wheregmis/threadlane/commit/1e6cde47cf5eb122588fe52314a6f4305974b8f1))
+
+
+### Performance Improvements
+
+* **github:** coalesce list requests across repository checkouts ([dec0c48](https://github.com/wheregmis/threadlane/commit/dec0c48e36694f2f059e74b18927e5f24d3b47a8))
+
 ## [0.1.23](https://github.com/wheregmis/threadlane/compare/v0.1.22...v0.1.23) (2026-09-26)
 
 

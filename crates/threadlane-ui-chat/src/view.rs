@@ -288,7 +288,7 @@ fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) 
                     }))
                     .child(
                         Button::new(SharedString::from(format!("chat-error-copy-{id}")))
-                            .label("Copy details")
+                            .icon(IconName::Copy)
                             .accessibility_label("Copy full error to clipboard")
                             .ghost()
                             .small()
@@ -3459,7 +3459,6 @@ impl ChatListView {
                 } else {
                     IconName::Copy
                 })
-                .label(if is_copied { "Copied" } else { "Copy" })
                 .xsmall()
                 .ghost()
                 .tooltip(if is_copied {
@@ -3474,10 +3473,9 @@ impl ChatListView {
                 })
                 .debug_selector(|| "message-copy".into())
                 .when(is_copied, |btn| btn.text_color(theme.success))
-                .on_click(cx.listener(move |this, _event, window, cx| {
+                .on_click(cx.listener(move |this, _event, _window, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
                     this.copied_message = Some((copy_key_click.clone(), std::time::Instant::now()));
-                    window.push_notification(Notification::info("Copied to clipboard"), cx);
                     cx.notify();
                 })),
         )
