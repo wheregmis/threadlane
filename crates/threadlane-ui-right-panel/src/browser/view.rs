@@ -203,10 +203,18 @@ impl BrowserView {
         cx.notify();
     }
 
-    pub fn tabs(&self) -> Vec<(usize, String)> {
+    pub fn tabs(&self, cx: &App) -> Vec<(usize, String)> {
         self.tabs
             .iter()
-            .map(|tab| (tab.id, tab.url.clone()))
+            .map(|tab| {
+                let url = tab
+                    .webview
+                    .as_ref()
+                    .and_then(|webview| webview.read(cx).raw().url().ok())
+                    .filter(|url| !url.is_empty())
+                    .unwrap_or_else(|| tab.url.clone());
+                (tab.id, url)
+            })
             .collect()
     }
 
@@ -607,7 +615,7 @@ impl Render for BrowserView {
             self.tab_scroll.scroll_to_item(self.active_tab);
             self.revealed_tab = selection;
         }
-        let tabs = self.tabs();
+        let tabs = self.tabs(cx);
         let annotating = self.annotating;
         div()
             .id("browser-panel")
