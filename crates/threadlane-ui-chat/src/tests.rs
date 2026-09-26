@@ -1053,6 +1053,98 @@ fn transcript_rows_group_consecutive_tool_only_messages() {
 }
 
 #[test]
+fn queued_messages_leave_transcript_only_while_generating() {
+    let messages: Vec<_> = [
+        "user",
+        "queued-user-session-1",
+        "steered-user-session-2",
+        "queued-user-session-3",
+    ]
+    .into_iter()
+    .map(|id| ChatMessageInfo {
+        id: id.into(),
+        role: MessageRole::User,
+        content: id.into(),
+        tool_activities: Vec::new(),
+        streaming: false,
+        reasoning_content: None,
+        reasoning_expanded: false,
+    })
+    .collect();
+    assert_eq!(
+        build_transcript_rows(&messages, true),
+        vec![
+            TranscriptRow::Message(0),
+            TranscriptRow::Message(2),
+            TranscriptRow::Working
+        ]
+    );
+    assert_eq!(
+        build_transcript_rows(&messages, false),
+        (0..4).map(TranscriptRow::Message).collect::<Vec<_>>()
+    );
+}
+
+#[gpui::test]
+fn queued_panel_tracks_active_messages_and_generation(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.is_new_task = false;
+        state.is_generating = true;
+        threadlane_ui_state::activate_test_session(
+            &mut state,
+            "session-1",
+            std::path::Path::new("/test-project/.threadlane/sessions/session-1.jsonl"),
+        );
+        state.messages = (0..2)
+            .map(|index| ChatMessageInfo {
+                id: format!("queued-user-session-1-{index}"),
+                role: MessageRole::User,
+                content: format!("Follow-up {index}\nKeep the full multiline message visible"),
+                tool_activities: Vec::new(),
+                streaming: false,
+                reasoning_content: None,
+                reasoning_expanded: false,
+            })
+            .collect::<Vec<_>>()
+            .into();
+        state
+    });
+    let retained_model = model.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let chat = cx.new(|cx| super::ChatListView::new(model, window, cx));
+        gpui_component::Root::new(chat, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("queued-messages-panel").is_some());
+    assert!(cx.debug_bounds("queued-message-row").is_some());
+    retained_model.update(cx, |state, cx| {
+        state.is_generating = false;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("queued-messages-panel").is_none());
+    retained_model.update(cx, |state, cx| {
+        state.is_generating = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("queued-messages-panel").is_some());
+    retained_model.update(cx, |state, cx| {
+        state.messages = Vec::new().into();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("queued-messages-panel").is_none());
+}
+
+#[test]
 fn selected_trajectory_entry_formats_as_raw_json() {
     let entry = TrajectoryEntry {
         seq: Some(1),
