@@ -350,6 +350,7 @@ pub enum WorkspacePage {
     #[default]
     Chat,
     GitHub,
+    Automations,
     Settings,
 }
 

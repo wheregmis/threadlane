@@ -535,6 +535,7 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
     state.active_session_id.hash(&mut hasher);
     state.workspace_page.hash(&mut hasher);
     state.github_tab.hash(&mut hasher);
+    state.automations.snapshot.revision.hash(&mut hasher);
     state.sidebar_project_filter.hash(&mut hasher);
     for byte in state.search_query.trim().bytes() {
         hasher.write_u8(byte.to_ascii_lowercase());
@@ -1725,7 +1726,19 @@ impl SidebarView {
 
     fn render_github_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.model.read(cx);
-        div().flex().flex_col().gap_1().children(
+        let automation_model = self.model.clone();
+        let attention = state.automations.snapshot.runs.iter().filter(|run| run.needs_attention()).count();
+        let label = if attention == 0 { "Automations".to_string() } else { format!("Automations · {attention}") };
+        div().flex().flex_col().gap_1()
+            .child(Button::new("sidebar-automations").debug_selector(|| "sidebar-automations".into())
+                .child(div().flex().items_center().gap_2().w_full()
+                    .child(Icon::from(IconName::Calendar).size_4()).child(label))
+                .accessibility_label(format!("Automations, {attention} runs need attention"))
+                .ghost().w_full().justify_start().selected(state.workspace_page == WorkspacePage::Automations)
+                .on_click(move |_, _, cx| automation_model.update(cx, |state, cx| {
+                    controller::dispatch(state, AppAction::OpenAutomations); cx.notify();
+                })))
+            .children(
             [
                 (GitHubTab::Issues, "sidebar-issues", "icons/git/issue.svg"),
                 (
@@ -2100,6 +2113,7 @@ mod tests {
 
         cx.update(|window, cx| window.focus_next(cx)); // Archive remains separate.
         for (page, tab) in [
+            (WorkspacePage::Automations, GitHubTab::Issues),
             (WorkspacePage::GitHub, GitHubTab::Issues),
             (WorkspacePage::GitHub, GitHubTab::PullRequests),
             (WorkspacePage::Settings, GitHubTab::PullRequests),

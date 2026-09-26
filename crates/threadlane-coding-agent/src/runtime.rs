@@ -1105,6 +1105,11 @@ impl CodingAgent {
             Some(options.work_dir.clone()),
         ));
         let mut registry = threadlane_runtime::CapabilityRegistry::new();
+        if let Some(session_file) = options.session_file.clone() {
+            registry.register(Box::new(crate::automation_tool::AutomationCapability {
+                work_dir: options.work_dir.clone(), session_file, model: effective_model.clone(),
+            }));
+        }
         registry.register(Box::new(SkillCapability {
             skills: skills.clone(),
         }));

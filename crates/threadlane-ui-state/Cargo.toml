@@ -15,6 +15,7 @@ tracing.workspace = true
 threadlane-acp.workspace = true
 threadlane-acp-engine.workspace = true
 threadlane-auth.workspace = true
+threadlane-automation.workspace = true
 threadlane-coding-agent.workspace = true
 threadlane-context.workspace = true
 threadlane-git.workspace = true

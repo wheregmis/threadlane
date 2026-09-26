@@ -34,6 +34,8 @@ use threadlane_git::GitStatus;
 use threadlane_ui_state::{actions::AppAction, controller};
 use threadlane_ui_chat::ChatListView;
 use threadlane_ui_github::GitHubView;
+use threadlane_ui_automation::AutomationsView;
+use gpui_component::WindowExt;
 use threadlane_ui_right_panel::RightPanelView;
 use threadlane_ui_settings::SettingsView;
 use threadlane_ui_sidebar::SidebarView;
@@ -75,6 +77,7 @@ fn update_notice_key(status: &UpdateStatus) -> String {
 }
 
 pub fn init(cx: &mut App) {
+    threadlane_ui_automation::init(cx);
     threadlane_ui_github::view::init(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-k", ToggleCommandPalette, None),
@@ -177,6 +180,7 @@ pub struct WorkspaceView {
     sidebar: Entity<SidebarView>,
     chat_list: Entity<ChatListView>,
     github: Entity<GitHubView>,
+    automations: Entity<AutomationsView>,
     settings: Entity<SettingsView>,
     right_panel: Entity<RightPanelView>,
     fallback_terminal: Option<Entity<TerminalView>>,
@@ -306,6 +310,8 @@ impl WorkspaceView {
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
         let github = cx.new(|cx| GitHubView::new(model.clone(), window, cx));
+        let automations = cx.new(|cx| AutomationsView::new(model.clone(), cx));
+        let mut automation_updates = model.update(cx, |state, _| state.start_automations());
         let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
         let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
@@ -327,6 +333,21 @@ impl WorkspaceView {
 
         let model_clone = model.clone();
         let view = cx.new(|cx| {
+            cx.spawn_in(window, async move |this, cx| {
+                let mut last_notification = None;
+                while automation_updates.changed().await.is_ok() {
+                    let projection = automation_updates.borrow_and_update().clone();
+                    if this.update_in(cx, |this: &mut Self, window, cx| {
+                        if let Some((id, message)) = &projection.notification {
+                            if last_notification.as_ref() != Some(id) {
+                                window.push_notification(message.clone(), cx);
+                                last_notification = Some(id.clone());
+                            }
+                        }
+                        this.model.update(cx, |state, cx| { state.apply_automation_projection(projection); cx.notify(); });
+                    }).is_err() { break; }
+                }
+            }).detach();
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window, cx);
             let sub = cx.observe(&model_clone, move |this: &mut Self, model, cx| {
@@ -458,6 +479,7 @@ impl WorkspaceView {
                 sidebar,
                 chat_list,
                 github,
+                automations,
                 settings,
                 right_panel,
                 fallback_terminal: None,
@@ -832,6 +854,9 @@ impl WorkspaceView {
                 .detach();
             }
             "git" => self.open_git_review(cx),
+            "automations" => {
+                self.model.update(cx, |state, cx| { controller::dispatch(state, AppAction::OpenAutomations); cx.notify(); });
+            }
             "github" => {
                 model.update(cx, |state, cx| {
                     open_github_from_palette(state, || cx.notify());
@@ -1217,7 +1242,7 @@ impl WorkspaceView {
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let commands: [(&str, &str, &str, Icon, &[&str], &str); 21] = [
+        let commands: [(&str, &str, &str, Icon, &[&str], &str); 22] = [
             (
                 "New Task",
                 "Start a fresh session",
@@ -1312,6 +1337,14 @@ impl WorkspaceView {
                 "git",
                 Icon::default().path("icons/git/commit.svg"),
                 &["git", "diff", "review", "commit", "stage"],
+                "",
+            ),
+            (
+                "Automations",
+                "Schedule recurring prompts and review runs",
+                "automations",
+                Icon::from(IconName::Calendar),
+                &["automation", "schedule", "recurring", "runs"],
                 "",
             ),
             (
@@ -2435,6 +2468,7 @@ impl Render for WorkspaceView {
         let central_content = match workspace_page {
             WorkspacePage::Chat => chat_page_content.into_any_element(),
             WorkspacePage::GitHub => self.github.clone().into_any_element(),
+            WorkspacePage::Automations => self.automations.clone().into_any_element(),
             WorkspacePage::Settings => self.settings.clone().into_any_element(),
         };
         let page_content = if workspace_page != WorkspacePage::Settings && show_sidebar {

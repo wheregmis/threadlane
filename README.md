@@ -28,6 +28,7 @@ Threadlane brings project workspaces, persistent conversation sessions, coding-a
 - **Provider and agent integrations** — Google Antigravity, OpenAI/Codex, OpenCode, and externally configured ACP agents.
 - **Developer tooling** — Workspace file tools, ripgrep search, sandboxed process execution, MCP servers, and `line:hash`-anchored edits.
 - **Extensibility** — Sandboxed WebAssembly System Interface (WASI) extensions and discovered skills.
+- **Automations** — Recurring prompts with durable run history, fresh chats, optional isolated worktrees, and explicit permission handling.
 
 ## Quick Start
 
@@ -83,6 +84,18 @@ Example ACP configuration:
 ```
 
 To add an API key, open **Settings → Providers** in Threadlane.
+
+## Automations
+
+Open **Automations** in the sidebar (or command palette), choose **New automation…**, and save a prompt, attached project, model, and schedule. Schedules support manual runs, intervals of at least one minute, daily, weekdays, and weekly times in an explicit IANA timezone. The editor previews the next three occurrences. **Run now** starts one run without changing a paused schedule.
+
+You can also ask in a native-agent chat: “Every weekday at 9am America/Toronto, review this project's open changes and summarize risks.” The agent uses `create_automation` to save through the same service and confirms the next run. Project, model, and reasoning effort default to the chat; requests with an unclear schedule or timezone should be clarified first. Creation does not immediately execute the prompt, and retrying the same creation request does not duplicate it. Manage or pause it from the Automations sidebar.
+
+Automations run while Threadlane is open and the computer is awake. After sleep or restart, missed occurrences are combined into one run; they are not replayed as a backlog. One automation runs at a time, including while it waits for a permission or answer. Open its chat to respond, inspect changes, or continue interactively. Existing-chat heartbeats, external ACP agents, and execution while Threadlane is closed are not supported yet.
+
+Git projects default to a fresh worktree per run. Choosing the project checkout permits changes there. Failed worktree creation never falls back to the main checkout. **Pause** stops future scheduled dispatch; **Cancel run** stops the current run. Deleting a definition preserves chats, run history, and worktrees. Runs stop after one hour of active execution, and three consecutive failures pause the automation for review.
+
+Definitions and run metadata live under `~/.threadlane/automations`; transcripts use the normal session storage. History keeps the newest 200 reviewed, finished runs per automation, plus every active or unreviewed run; pruning metadata never deletes chats or worktrees. A file lock allows one Threadlane process to own the scheduler. Ambiguous execution after a crash is marked interrupted and requires a new explicit run rather than replaying possible side effects. Notifications appear in the app for requests and failures, with an option for every completion.
 
 ## Common commands
 

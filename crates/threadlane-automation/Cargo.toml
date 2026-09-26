@@ -1,0 +1,12 @@
+[package]
+name = "threadlane-automation"
+version = "0.1.0"
+edition = "2021"
+description = "Durable recurring tasks and calendar scheduling, independent of UI and execution"
+
+[dependencies]
+chrono = "0.4"
+chrono-tz = "0.10"
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
