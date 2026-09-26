@@ -441,6 +441,8 @@ const CORE_TOOL_NAMES: &[&str] = &[
     // Session-scoped parent supervision, registered alongside `subagent` in
     // Fusion mode. Keep it visible to the provider's filtered tool schema.
     "hub",
+    // Chat-created automations are handled by the desktop scheduler service.
+    "create_automation",
     // Registered only for issue tasks; their publish step must be model-visible.
     "create_draft_pull_request",
     // Embedded browser panel (`threadlane-browser`). The tools
