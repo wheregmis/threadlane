@@ -263,6 +263,16 @@ impl AgentsPanel {
                             .child(
                                 div()
                                     .text_xs()
+                                    .text_color(if item.status == SubagentActivityStatus::Failed {
+                                        theme.danger
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(Self::status(item.status)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(item.task.clone()),
                             ),
@@ -642,6 +652,13 @@ impl Render for AgentsPanel {
                                             .text_color(color)
                                             .child(Self::status(item.status)),
                                     ),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.foreground)
+                                    .child(item.task.clone()),
                             )
                             .children(preview.clone().map(|activity| {
                                 div()
