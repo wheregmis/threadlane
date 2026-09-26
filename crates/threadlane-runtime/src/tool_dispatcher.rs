@@ -422,7 +422,6 @@ pub struct ToolDispatcher {
     pub tool_completion_recorder: Option<ToolCompletionRecorder>,
     pub tool_execution_trace_recorder: Option<crate::provider::ToolExecutionTraceRecorder>,
     pub(crate) allowed_tool_names: Option<HashSet<String>>,
-    pub(crate) core_tool_schema_mode: bool,
     pub(crate) work_dir: Option<PathBuf>,
     pub(crate) session_id: String,
 
@@ -431,47 +430,6 @@ pub struct ToolDispatcher {
     repetition: RepetitionCacheHandle,
 }
 
-const CORE_TOOL_NAMES: &[&str] = &[
-    "read_file",
-    "edit_file_hashline",
-    "edit_files_hashline",
-    "write_file",
-    "run_command",
-    "subagent",
-    // Session-scoped parent supervision, registered alongside `subagent` in
-    // Fusion mode. Keep it visible to the provider's filtered tool schema.
-    "hub",
-    // Chat-created automations are handled by the desktop scheduler service.
-    "create_automation",
-    // Registered only for issue tasks; their publish step must be model-visible.
-    "create_draft_pull_request",
-    // Embedded browser panel (`threadlane-browser`). The tools
-    // report a helpful error when no panel is attached, so they are safe to
-    // advertise unconditionally.
-    "browser_tabs",
-    "browser_navigate",
-    "browser_back",
-    "browser_reload",
-    "browser_current_url",
-    "browser_snapshot",
-    "browser_act",
-    "browser_evaluate_script",
-    "browser_screenshot",
-    "browser_console_logs",
-    "browser_wait",
-    // Computer use through the CUA driver (`threadlane-computer`, approved
-    // through `threadlane-permission`). Every screenshot, accessibility
-    // snapshot with pixels, input action, and mutating cua_call re-prompts
-    // for approval, so the schemas are safe to advertise; unattended
-    // sessions deny at execution.
-    "computer_status",
-    "computer_windows",
-    "computer_screenshot",
-    "computer_ax",
-    "computer_interact",
-    "computer_act",
-    "cua_call",
-];
 
 impl ToolDispatcher {
     /// Creates a dispatcher backed by the given event channel and hook registry.
@@ -483,7 +441,6 @@ impl ToolDispatcher {
             tool_completion_recorder: None,
             tool_execution_trace_recorder: None,
             allowed_tool_names: None,
-            core_tool_schema_mode: true,
             work_dir: None,
             session_id: String::new(),
             tool_executors: vec![builtin_tool_executor()],
@@ -506,9 +463,6 @@ impl ToolDispatcher {
         let mut definitions = collect_tool_definitions(&self.tool_executors);
         if let Some(allowed) = &self.allowed_tool_names {
             definitions.retain(|d| allowed.contains(&d.name));
-        }
-        if self.core_tool_schema_mode {
-            definitions.retain(|d| CORE_TOOL_NAMES.contains(&d.name.as_str()));
         }
         definitions
     }
@@ -1678,32 +1632,19 @@ mod tests {
     }
 
     #[test]
-    fn test_core_tool_schema_mode_filters_definitions() {
+    fn registered_tools_are_visible_by_default_and_allowlist_filters_them() {
         let (event_tx, _) = broadcast::channel(8);
         let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
 
-        assert!(CORE_TOOL_NAMES.contains(&"browser_tabs"));
-        assert!(!CACHEABLE_TOOLS.contains(&"browser_tabs"));
-        // Default has core_tool_schema_mode: true
-        assert!(dispatcher.core_tool_schema_mode);
         let defs = dispatcher.configured_tool_definitions();
-        for def in &defs {
-            assert!(
-                CORE_TOOL_NAMES.contains(&def.name.as_str()),
-                "tool '{}' should be in CORE_TOOL_NAMES",
-                def.name
-            );
-        }
-        // Auxiliary tools like list_dir or grep_search should be excluded from configured schemas
-        assert!(!defs.iter().any(|d| d.name == "list_dir"));
-        assert!(!defs.iter().any(|d| d.name == "grep_search"));
-        assert!(!defs.iter().any(|d| d.name == "manage_memory"));
+        assert!(defs.iter().any(|d| d.name == "list_dir"));
+        assert!(defs.iter().any(|d| d.name == "grep_search"));
+        assert!(defs.iter().any(|d| d.name == "manage_memory"));
 
-        // When core_tool_schema_mode is disabled, all registered tools appear
-        dispatcher.core_tool_schema_mode = false;
-        let all_defs = dispatcher.configured_tool_definitions();
-        assert!(all_defs.iter().any(|d| d.name == "list_dir"));
-        assert!(all_defs.iter().any(|d| d.name == "grep_search"));
+        dispatcher.allowed_tool_names = Some(HashSet::from(["list_dir".to_string()]));
+        let filtered = dispatcher.configured_tool_definitions();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "list_dir");
     }
 }
 

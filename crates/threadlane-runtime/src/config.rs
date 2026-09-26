@@ -80,20 +80,9 @@ pub struct AgentConfig {
     /// no limit.
     max_tool_output_bytes: Option<usize>,
 
-    /// When enabled, restricts the model-visible JSON tool schema to the essential core tools
-    /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent,
-    /// plus the browser_* panel and computer_* native tools).
-    /// Auxiliary tools remain executable directly or via the in-process `dyn` CLI.
-    #[serde(default = "default_core_tool_schema_mode")]
-    pub(crate) core_tool_schema_mode: bool,
-
     // ── Event Channel ───────────────────────────────────────────────────
     /// Capacity of the broadcast channel for [`AgentEvent`]s.
     pub(crate) event_channel_capacity: usize,
-}
-
-fn default_core_tool_schema_mode() -> bool {
-    true
 }
 
 fn default_loop_guard_enabled() -> bool {
@@ -130,7 +119,6 @@ impl Default for AgentConfig {
             model_roles: ModelRoles::default(),
             fast_reasoning_effort: None,
             orchestrator_mode: OrchestratorMode::default(),
-            core_tool_schema_mode: true,
             loop_guard_enabled: true,
             loop_identical_limit: 5,
             loop_pingpong_rounds: 3,
@@ -250,11 +238,6 @@ impl AgentConfigBuilder {
 
     pub fn event_channel_capacity(mut self, value: usize) -> Self {
         self.config.event_channel_capacity = value;
-        self
-    }
-
-    pub fn core_tool_schema_mode(mut self, value: bool) -> Self {
-        self.config.core_tool_schema_mode = value;
         self
     }
 

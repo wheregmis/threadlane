@@ -1094,7 +1094,6 @@ pub(crate) async fn run_subagent_task(
         &model,
         Some(&subagent_session),
         threadlane_runtime::AgentConfig::builder()
-            .core_tool_schema_mode(config.tools.is_none())
             .build(),
         Arc::new(crate::credentials::provider_client_for(
             context.api_key.clone(),
@@ -1988,8 +1987,7 @@ mod result_tests {
             "test-model",
             Some(&dir.path().join("session.jsonl")),
             threadlane_runtime::AgentConfig::builder()
-                .core_tool_schema_mode(config.tools.is_none())
-                .build(),
+                    .build(),
             Arc::new(threadlane_provider::router::ProviderClient::new("", None)),
         )
         .unwrap();

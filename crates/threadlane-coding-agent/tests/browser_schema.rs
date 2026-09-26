@@ -1,5 +1,4 @@
-//! Regression: core_tool_schema_mode strips every non-core schema from the
-//! provider payload. The browser tools must stay model-visible.
+//! Regression: registered browser tools are model-visible by default.
 //!
 //! Relocated from `threadlane-session::browser` (compatibility shim) so the
 //! session facade can be removed; the behavior under test belongs to the
@@ -13,7 +12,7 @@ use threadlane_protocol::browser::{
 };
 
 #[test]
-fn browser_tools_survive_core_schema_filter() {
+fn browser_tools_are_visible_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let session_file = dir.path().join("session.jsonl");
     let agent = CodingAgent::new(CodingAgentOptions {

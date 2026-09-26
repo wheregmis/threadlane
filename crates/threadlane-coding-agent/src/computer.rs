@@ -37,9 +37,7 @@ mod tests {
     };
 
     #[test]
-    fn computer_tools_survive_core_schema_filter() {
-        // Regression shape of the browser discovery bug: core_tool_schema_mode
-        // strips every non-core schema from the provider payload.
+    fn computer_tools_are_visible_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
         let agent = crate::runtime::CodingAgent::new(crate::options::CodingAgentOptions {
