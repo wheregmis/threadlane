@@ -25,7 +25,7 @@ use threadlane_ui_mirror::MirrorView;
 use threadlane_ui_state::{actions::AppAction, controller};
 use threadlane_ui_state::{
     AppState, ChatMessageInfo, ChatStreamEvent, MessageRole, SessionAttention,
-    SubagentActivityInfo, SubagentActivityStatus, ToolActivityInfo, WorkMode,
+    SubagentActivityStatus, ToolActivityInfo, WorkMode,
 };
 
 use super::composer::*;
@@ -410,8 +410,6 @@ pub struct ChatListView {
     /// Entities are created lazily when the card renders and dropped on
     /// submit/dismiss/session-switch.
     question_inputs: std::collections::HashMap<String, Entity<InputState>>,
-    subagents_popover_open: bool,
-    selected_subagent_run_id: Option<String>,
     copied_code_block: Option<(String, std::time::Instant)>,
     copied_message: Option<(String, std::time::Instant)>,
     expanded_tool_aggregates: HashSet<String>,
@@ -718,8 +716,6 @@ impl ChatListView {
             context_meter_open: false,
             question_selections: std::collections::HashMap::new(),
             question_inputs: std::collections::HashMap::new(),
-            subagents_popover_open: false,
-            selected_subagent_run_id: None,
             copied_code_block: None,
             copied_message: None,
             expanded_tool_aggregates: HashSet::new(),
@@ -4660,531 +4656,45 @@ impl ChatListView {
                 .iter()
                 .map(|item| item.status),
         )?;
-        let open = self.subagents_popover_open;
-        let toggle_entity = cx.entity();
-        let sync_entity = cx.entity();
-        let content_entity = cx.entity();
-        Some(
-            Popover::new("subagents-popover")
-                .anchor(Anchor::BottomRight)
-                .appearance(false)
-                .open(open)
-                .on_open_change(move |open, _window, cx| {
-                    sync_entity.update(cx, |this, cx| {
-                        this.subagents_popover_open = *open;
-                        cx.notify();
-                    });
-                })
-                .trigger(SubagentPopoverTrigger {
-                    selected: open,
-                    toggle: Toggle::new("subagents-popover-trigger")
-                        .ghost()
-                        .rounded_full()
-                        .tooltip("View subagent activity")
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(Icon::new(IconName::Bot).small())
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(count.to_string()),
-                                ),
-                        )
-                        .on_click(move |open, _window, cx| {
-                            toggle_entity.update(cx, |this, cx| {
-                                this.subagents_popover_open = *open;
-                                cx.notify();
-                            });
-                        }),
-                })
-                .content(move |_state, _window, cx| {
-                    content_entity.update(cx, |this, cx| {
-                        this.render_subagent_popover_content(active_count, cx)
-                    })
-                })
-                .into_any_element(),
-        )
-    }
-
-    fn render_subagent_popover_content(
-        &mut self,
-        active_count: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let subagents = self.model.read(cx).active_subagents().to_vec();
-        let theme = cx.theme().colors;
-        let selected_run_id = self
-            .selected_subagent_run_id
-            .clone()
-            .filter(|run_id| {
-                subagents
-                    .iter()
-                    .any(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
-            })
-            .or_else(|| {
-                subagents
-                    .iter()
-                    .find(|item| item.status == SubagentActivityStatus::Running)
-                    .or_else(|| subagents.last())
-                    .and_then(|item| item.journal_run_id.clone())
-            });
-        let selected = selected_run_id.as_ref().and_then(|run_id| {
-            subagents
-                .iter()
-                .find(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
-        });
-        let mut rows = Vec::new();
-        for item in &subagents {
-            let run_id = item
-                .journal_run_id
-                .clone()
-                .unwrap_or_else(|| format!("queued-{}-{}", item.batch_run_id, item.task_index));
-            let row_id = run_id.clone();
-            let is_selected = selected_run_id.as_deref() == Some(run_id.as_str());
-            let (marker, color, status) = match item.status {
-                SubagentActivityStatus::Queued => ("○", theme.muted_foreground, "Queued"),
-                SubagentActivityStatus::Running => ("◌", theme.primary, "Working"),
-                SubagentActivityStatus::Completed => ("✓", theme.success, "Completed"),
-                SubagentActivityStatus::Failed => ("!", theme.danger, "Failed"),
-                SubagentActivityStatus::Cancelled => ("×", theme.warning, "Cancelled"),
-            };
-            let entity = cx.entity();
-            rows.push(
-                Button::new(SharedString::from(format!("subagent-popup-row-{row_id}")))
-                    .accessibility_label(format!("{} · {status}", item.agent))
-                    .ghost()
-                    .h_auto()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .when(is_selected, |row| row.bg(theme.muted))
-                    .flex()
-                    .items_start()
-                    .text_left()
-                    .gap_2()
-                    .on_click(move |_event, _window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.selected_subagent_run_id = Some(run_id.clone());
-                            cx.notify();
-                        });
-                    })
-                    .child(
-                        div()
-                            .w(rems(1.125))
-                            .flex_none()
-                            .text_center()
-                            .text_color(color)
-                            .font_weight(FontWeight::BOLD)
-                            .child(marker),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.foreground)
-                                            .child(item.agent.clone()),
-                                    )
-                                    .child(
-                                        div().flex_none().text_xs().text_color(color).child(status),
-                                    ),
-                            )
-                            .children(item.model.as_ref().map(|model| {
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(
-                                        threadlane_ui_catalog::label_for(model)
-                                            .unwrap_or_else(|| model.clone()),
-                                    )
-                            }))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(if item.task.is_empty() {
-                                        item.lane.clone().unwrap_or_default()
-                                    } else {
-                                        item.task.clone()
-                                    }),
-                            ),
-                    ),
-            );
-        }
-        let detail = selected.map(|item| self.render_subagent_detail(item, cx));
-        let count_label = if active_count > 0 {
-            format!("{active_count} active")
-        } else {
-            format!("{} total", subagents.len())
-        };
-        div()
-            .w(rems(32.5))
-            .max_w(rems(CHAT_CONTENT_MAX_WIDTH - 2.0))
-            .max_h(rems(32.5))
-            .rounded_xl()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child("Subagents"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(count_label),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .min_h(rems(15.0))
-                    .child(
-                        div()
-                            .w(rems(13.125))
-                            .flex_none()
-                            .p_2()
-                            .border_r_1()
-                            .border_color(theme.border)
-                            .overflow_y_scrollbar()
-                            .children(rows),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .p_3()
-                            .overflow_y_scrollbar()
-                            .children(detail),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_subagent_detail(
-        &mut self,
-        item: &SubagentActivityInfo,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().colors;
-        let status = match item.status {
-            SubagentActivityStatus::Queued => "Queued",
-            SubagentActivityStatus::Running => "Working",
-            SubagentActivityStatus::Completed => "Completed",
-            SubagentActivityStatus::Failed => "Failed",
-            SubagentActivityStatus::Cancelled => "Cancelled",
-        };
-        let messages = item
-            .messages
+        let failed_count = self
+            .model
+            .read(cx)
+            .active_subagents()
             .iter()
-            .rev()
-            .take(8)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|message| self.render_message(message, cx))
-            .collect::<Vec<_>>();
-        let workspace = item
-            .isolation
-            .as_ref()
-            .map(|isolation| (isolation.workspace.clone(), isolation.branch.clone()));
-        let branch_controls = workspace.and_then(|(worktree, branch)| {
-            // No active project (or a deleted work dir) hides the worktree
-            // controls instead of panicking the render.
-            let inspect_model = self.model.clone();
-            let inspect_root = self.model.read(cx).active_git_work_dir()?;
-            let inspect_branch = branch.clone();
-            let apply_model = self.model.clone();
-            let apply_root = inspect_root.clone();
-            let apply_branch = branch.clone();
-            let apply_worktree = worktree.clone();
-            let discard_model = self.model.clone();
-            let discard_root = inspect_root.clone();
-            let discard_branch = branch.clone();
-            let discard_worktree = worktree.clone();
-            let terminal_model = self.model.clone();
-            let terminal_worktree = worktree.clone();
-            let worktree_available = worktree.is_dir();
-            Some(
-                div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_2()
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
+            .filter(|item| item.status == SubagentActivityStatus::Failed)
+            .count();
+        let label = if failed_count > 0 {
+            format!("{failed_count} need attention · {active_count} active · {count} total")
+        } else {
+            format!("{active_count} active · {count} total")
+        };
+        Some(
+            Button::new("open-agents-panel")
+                .accessibility_label(format!("Open Agents panel, {label}"))
+                .tooltip(format!("Open Agents panel · {label}"))
+                .ghost()
+                .rounded_full()
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(Icon::default().path("icons/git/branch.svg").xsmall())
-                        .child(branch.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
+                        .when(failed_count > 0, |indicator| {
+                            indicator.text_color(cx.theme().colors.danger)
+                        })
+                        .child(Icon::new(IconName::Bot).small())
                         .child(
-                            Button::new(SharedString::from(format!("inspect-{branch}")))
-                                .label("Inspect diff")
-                                .outline()
-                                .xsmall()
-                                .on_click(move |_, _, cx| {
-                                    let branch = inspect_branch.clone();
-                                    let root = inspect_root.clone();
-                                    let task = cx.background_executor().spawn(async move {
-                                        threadlane_git::diff_branch(&root, &branch)
-                                            .map(|diff| (root, branch, diff))
-                                            .map_err(|error| error.to_string())
-                                    });
-                                    let model = inspect_model.clone();
-                                    cx.spawn(async move |cx| {
-                                        let result = task.await;
-                                        let _ = model.update(cx, |state, cx| {
-                                            match result {
-                                                Ok((root, branch, diff)) => state.request_open_diff(
-                                                    root,
-                                                    format!("{branch}.diff"),
-                                                    if diff.is_empty() {
-                                                        "No committed changes on this branch."
-                                                            .into()
-                                                    } else {
-                                                        diff
-                                                    },
-                                                ),
-                                                Err(error) => state.session_status = Some(error),
-                                            }
-                                            cx.notify();
-                                        });
-                                    })
-                                    .detach();
-                                }),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("terminal-{branch}")))
-                                .label("Terminal")
-                                .ghost()
-                                .xsmall()
-                                .disabled(!worktree_available)
-                                .tooltip(if worktree_available {
-                                    format!("Open terminal in {}", worktree.display())
-                                } else {
-                                    "This worktree was cleaned up; the branch is still available."
-                                        .into()
-                                })
-                                .on_click(move |_, _, cx| {
-                                    terminal_model.update(cx, |state, cx| {
-                                        controller::dispatch(
-                                            state,
-                                            AppAction::OpenTerminalAt(terminal_worktree.clone()),
-                                        );
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("apply-{branch}")))
-                                .label("Apply")
-                                .xsmall()
-                                .disabled(item.status != SubagentActivityStatus::Completed)
-                                .on_click(move |_, _, cx| {
-                                    let root = apply_root.clone();
-                                    let branch = apply_branch.clone();
-                                    let worktree = apply_worktree.clone();
-                                    let task = cx.background_executor().spawn(async move {
-                                        let parent = threadlane_git::inspect(&root)
-                                            .map_err(|error| error.to_string())?;
-                                        if parent.has_changes {
-                                            return Err("Commit or stash parent changes before applying a subagent branch.".into());
-                                        }
-                                        if worktree.is_dir()
-                                            && threadlane_git::inspect(&worktree)
-                                                .map_err(|error| error.to_string())?
-                                                .has_changes
-                                        {
-                                            return Err("The subagent worktree has uncommitted changes; commit them before applying.".into());
-                                        }
-                                        threadlane_git::merge(&root, &branch)
-                                            .map_err(|error| error.to_string())?;
-                                        if worktree.is_dir() {
-                                            threadlane_git::remove_worktree(&root, &worktree, false)
-                                                .map_err(|error| error.to_string())?;
-                                        }
-                                        threadlane_git::delete_branch(&root, &branch, false)
-                                            .map_err(|error| error.to_string())?;
-                                        Ok(format!("Applied {branch}"))
-                                    });
-                                    let model = apply_model.clone();
-                                    cx.spawn(async move |cx| {
-                                        let result = task.await;
-                                        let _ = model.update(cx, |state, cx| {
-                                            state.session_status = Some(result.unwrap_or_else(|error| error));
-                                            cx.notify();
-                                        });
-                                    })
-                                    .detach();
-                                }),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("discard-{branch}")))
-                                .label("Discard…")
-                                .ghost()
-                                .xsmall()
-                                .on_click(move |_, _, cx| {
-                                    let root = discard_root.clone();
-                                    let branch = discard_branch.clone();
-                                    let worktree = discard_worktree.clone();
-                                    let model = discard_model.clone();
-                                    cx.spawn(async move |cx| {
-                                        let confirmed = rfd::AsyncMessageDialog::new()
-                                            .set_title("Discard subagent branch?")
-                                            .set_description(format!(
-                                                "Delete {branch} and its worktree? This cannot be undone."
-                                            ))
-                                            .set_buttons(rfd::MessageButtons::YesNo)
-                                            .show()
-                                            .await;
-                                        if !matches!(confirmed, rfd::MessageDialogResult::Yes) {
-                                            return;
-                                        }
-                                        let task = cx.background_executor().spawn(async move {
-                                            if worktree.is_dir() {
-                                                threadlane_git::remove_worktree(&root, &worktree, true)
-                                                    .map_err(|error| error.to_string())?;
-                                            }
-                                            threadlane_git::delete_branch(&root, &branch, true)
-                                                .map_err(|error| error.to_string())?;
-                                            let _ = threadlane_git::prune_worktrees(&root);
-                                            Ok::<_, String>(format!("Discarded {branch}"))
-                                        });
-                                        let result = task.await;
-                                        let _ = model.update(cx, |state, cx| {
-                                            state.session_status = Some(result.unwrap_or_else(|error| error));
-                                            cx.notify();
-                                        });
-                                    })
-                                    .detach();
-                                }),
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(count.to_string()),
                         ),
-                ),
-            )
-        });
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child(item.agent.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(status),
-                            ),
-                    )
-                    .when_some(item.model.as_ref(), |header, model| {
-                        header.child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.muted_foreground)
-                                .child(
-                                    threadlane_ui_catalog::label_for(model)
-                                        .unwrap_or_else(|| model.clone()),
-                                ),
-                        )
-                    })
-                    .when(!item.task.is_empty(), |header| {
-                        header.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(item.task.clone()),
-                        )
-                    }),
-            )
-            .children(branch_controls)
-            .children(item.error.as_ref().map(|error| {
-                div()
-                    .p_2()
-                    .rounded_md()
-                    .bg(theme.danger.opacity(0.08))
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .child(error.clone())
-            }))
-            .children(messages.is_empty().then(|| {
-                div().w_full().flex().justify_center().py_4().child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.title_bar)
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("No messages yet — the subagent hasn't responded."),
                 )
-            }))
-            .children(messages)
-            .into_any_element()
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(crate::OpenWorkspaceAgents), cx);
+                })
+                .into_any_element(),
+        )
     }
 
     fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -7072,8 +6582,6 @@ impl Render for ChatListView {
             self.trajectory_search.clear();
             self.trajectory_cache = None;
             self.trajectory_raw_json = None;
-            self.subagents_popover_open = false;
-            self.selected_subagent_run_id = None;
             self.selected_slash_index = 0;
             self.dismiss_slash_menu = false;
             self.question_selections.clear();

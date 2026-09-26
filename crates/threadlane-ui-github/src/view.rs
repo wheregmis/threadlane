@@ -839,6 +839,16 @@ impl GitHubView {
                 cx.background_executor()
                     .spawn(async move {
                         let server_query = github_server_query(&query);
+                        // Multiple attached checkouts can refer to one GitHub repository.
+                        // Coalesce before issuing any list request, retaining the first
+                        // checkout as the path used for subsequent item actions.
+                        let mut seen = std::collections::HashSet::new();
+                        let targets: Vec<_> = targets
+                            .into_iter()
+                            .filter(|(_, dir)| {
+                                seen.insert(threadlane_git::github_list_repository_key(dir))
+                            })
+                            .collect();
                         match tab {
                             GitHubTab::Issues => {
                                 let mut rows = Vec::new();

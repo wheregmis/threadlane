@@ -4,6 +4,7 @@
 //! surfaces. Module layout mirrors the former `screens::right_panel` tree.
 
 mod browser;
+mod agents;
 mod draft_pr;
 #[cfg(test)]
 mod tests;

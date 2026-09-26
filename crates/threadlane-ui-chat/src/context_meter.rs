@@ -1,7 +1,6 @@
 use gpui::*;
 use gpui_component::button::Toggle;
 use gpui_component::Selectable;
-
 use threadlane_ui_state::SubagentActivityStatus;
 
 pub const CONTEXT_METER_WARN_PCT: f64 = 80.0;
@@ -56,29 +55,6 @@ impl Selectable for ContextMeterTrigger {
 }
 
 impl RenderOnce for ContextMeterTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        self.toggle.checked(self.selected)
-    }
-}
-
-#[derive(IntoElement)]
-pub struct SubagentPopoverTrigger {
-    pub toggle: Toggle,
-    pub selected: bool,
-}
-
-impl Selectable for SubagentPopoverTrigger {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.selected
-    }
-}
-
-impl RenderOnce for SubagentPopoverTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         self.toggle.checked(self.selected)
     }

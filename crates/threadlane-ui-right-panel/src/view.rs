@@ -25,6 +25,7 @@ use threadlane_project::watcher::WorkspaceWatcher;
 use threadlane_ui_state::AppState;
 use threadlane_ui_state::next_event_batch;
 
+use super::agents::AgentsPanel;
 use super::browser::BrowserView;
 use super::draft_pr::{DraftPrContextKey, DraftPrDialogView, draft_pr_prefill};
 pub use super::types::{
@@ -36,6 +37,7 @@ pub use super::types::{
 
 pub struct RightPanelView {
     model: Entity<AppState>,
+    agents: Entity<AgentsPanel>,
     active_surface: Option<Surface>,
     visible: bool,
     project: Option<PathBuf>,
@@ -100,6 +102,7 @@ pub struct RightPanelView {
 
 impl RightPanelView {
     pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let agents = cx.new(|cx| AgentsPanel::new(model.clone(), window, cx));
         let document_state = cx.new(|cx| TextViewState::markdown("", cx));
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let commit_message_input =
@@ -278,6 +281,7 @@ impl RightPanelView {
 
         let mut panel = Self {
             model,
+            agents,
             active_surface: None,
             visible: false,
             project: None,
@@ -536,6 +540,7 @@ impl RightPanelView {
         };
         let tx = self.event_tx.clone();
         std::thread::spawn(move || match surface {
+            Surface::Agents => {}
             Surface::Files => {
                 let nodes = scan_project_tree(&project, 500);
                 let _ = tx.send(PanelEvent::FilesLoaded { project, nodes });
@@ -1509,7 +1514,7 @@ impl RightPanelView {
                             })),
                     )
                     .child(div().flex_1())
-                    .child(
+                    .children((self.active_surface != Some(Surface::Agents)).then(|| {
                         Button::new("right-panel-refresh")
                             .accessibility_label("Refresh surface")
                             .icon(Icon::default().path("icons/refresh-cw.svg"))
@@ -1519,8 +1524,8 @@ impl RightPanelView {
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.refresh_active_surface();
                                 cx.notify();
-                            })),
-                    ),
+                            }))
+                    })),
             )
     }
 
@@ -5360,8 +5365,8 @@ impl Render for RightPanelView {
         }
         self.sync_pending_document(window, cx);
         let theme = cx.theme().colors;
-        let unavailable_non_browser =
-            self.worktree_unavailable && self.active_surface != Some(Surface::Browser);
+        let unavailable_non_browser = self.worktree_unavailable
+            && !matches!(self.active_surface, Some(Surface::Browser | Surface::Agents));
         let body = if unavailable_non_browser {
             self.render_empty(
                 "Worktree unavailable",
@@ -5371,6 +5376,7 @@ impl Render for RightPanelView {
         } else {
             match self.active_surface {
                 None => self.render_chooser(cx).into_any_element(),
+                Some(Surface::Agents) => self.agents.clone().into_any_element(),
                 Some(Surface::Review) if self.document_title.is_some() => self.render_files(cx),
                 Some(Surface::Review) => self.render_review(window, cx),
                 Some(Surface::Files) => self.render_files(cx),
