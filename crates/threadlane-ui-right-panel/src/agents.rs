@@ -223,19 +223,16 @@ impl AgentsPanel {
     fn render_detail(&mut self, item: &SubagentActivityInfo, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().colors;
         let target = item.lane.as_deref().unwrap_or(&item.agent).to_owned();
-        let prompt = if matches!(
+        let live = matches!(
             item.status,
             SubagentActivityStatus::Queued | SubagentActivityStatus::Running
-        ) {
+        );
+        let prompt = if live {
             format!("Send this message to subagent {target}: ")
         } else {
             format!("Continue subagent {target} with this follow-up: ")
         };
-        let label = if item.status == SubagentActivityStatus::Running {
-            "Message…"
-        } else {
-            "Continue…"
-        };
+        let label = if live { "Message…" } else { "Continue…" };
         let model = self.model.clone();
         let branch_controls = self.render_branch_controls(item, cx);
         div()
@@ -485,6 +482,10 @@ impl AgentsPanel {
                                 .label("Discard…")
                                 .ghost()
                                 .xsmall()
+                                .disabled(matches!(
+                                    item.status,
+                                    SubagentActivityStatus::Queued | SubagentActivityStatus::Running
+                                ))
                                 .on_click(move |_, _, cx| {
                                     let root = discard_root.clone();
                                     let branch = discard_branch.clone();
