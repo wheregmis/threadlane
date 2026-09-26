@@ -111,6 +111,7 @@ pub fn try_execute_tool_in_workspace_with(
                 .ok_or_else(|| "Error: 'pattern' parameter is required".to_string())?;
             let glob = args.get("glob").and_then(Value::as_str);
             search::grep_search(workspace_root, pattern, glob)
+                .map(|output| truncate_tool_output(&output))
                 .map_err(|error| format!("Error searching workspace: {error}"))
         }
         "read_file" => {
@@ -161,11 +162,26 @@ pub fn try_execute_tool_in_workspace_with(
                     },
                 };
 
+            if validated_path.is_dir() {
+                return Err(format!(
+                    "Error: '{raw_path}' is a directory, not a file. Use `list_dir` with {{\"path\": \"{raw_path}\"}} to browse it instead; do not retry `read_file` on it."
+                ));
+            }
+
             let start = args.get("start_line").and_then(|v| v.as_u64()).map(|n| n as usize);
             let end = args.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
 
-            let content = fs::read_to_string(&validated_path)
-                .map_err(|e| format!("Error reading file '{raw_path}': {e}"))?;
+            let content = fs::read_to_string(&validated_path).map_err(|e| {
+                let base = format!("Error reading file '{raw_path}': {e}");
+                // Zero-candidate misses (no fuzzy suggestion fired) start
+                // guess chains — 31 such failures in one session. Point at
+                // discovery instead of inviting another blind guess.
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    format!("{base} Use `list_dir` on the parent directory or `grep_search` to discover the correct path; do not retry blind path guesses.")
+                } else {
+                    base
+                }
+            })?;
             let lines: Vec<&str> = content.lines().collect();
             let start_idx = start.unwrap_or(1).saturating_sub(1);
             let end_idx = end.unwrap_or(lines.len()).min(lines.len());
@@ -276,8 +292,14 @@ pub fn try_execute_tool_in_workspace_with(
             let edits: Vec<hashline::HashlineEdit> = serde_json::from_value(edits_value.clone())
                 .map_err(|err| format!("Error parsing 'edits' argument: {err}"))?;
 
-            let content = fs::read_to_string(&validated_path)
-                .map_err(|e| format!("Error reading file '{raw_path}': {e}"))?;
+            let content = fs::read_to_string(&validated_path).map_err(|e| {
+                let base = format!("Error reading file '{raw_path}': {e}");
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    format!("{base} Use `list_dir` on the parent directory or `grep_search` to discover the correct path; do not retry blind path guesses.")
+                } else {
+                    base
+                }
+            })?;
             let result = hashline::apply_hashline_edits_detailed(&content, &edits, 5)
                 .map_err(|e| format!("Error applying hashline edits to '{raw_path}': {e}"))?;
             fs::write(&validated_path, result.new_content)
@@ -417,6 +439,9 @@ pub fn try_execute_tool_in_workspace_with(
                 .ok_or_else(|| "Error: 'command' parameter is required".to_string())?;
 
             let trimmed_cmd = cmd_str.trim();
+            if trimmed_cmd.is_empty() {
+                return Err("Error: 'command' must be a non-empty shell command (e.g. {\"command\": \"git status --short\"}). Empty commands waste a full provider round-trip; omit the call instead.".to_string());
+            }
             let raw_cwd = args.get("cwd").and_then(|v| v.as_str());
             let validated_cwd = validate_cwd_in_workspace(raw_cwd, workspace_root)?;
             if trimmed_cmd == "dyn" || trimmed_cmd.starts_with("dyn ") {
@@ -498,6 +523,20 @@ pub(crate) fn worktree_cargo_target_dir(workspace_root: &Path) -> Option<PathBuf
     (!lane.is_empty()).then(|| threadlane.join("cache/target").join(lane))
 }
 
+/// Strips one layer of matching outer shell quotes (`'...'` or `"..."`) so
+/// `dyn <tool> '{"a": 1}'` works like `dyn <tool> {"a": 1}`. Returns `None`
+/// when the input is not quoted.
+fn strip_matching_outer_quotes(input: &str) -> Option<&str> {
+    let bytes = input.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'\'' || first == b'"') && first == last {
+            return Some(&input[1..input.len() - 1]);
+        }
+    }
+    None
+}
+
 /// Dispatches an in-process CLI tool invocation via `dyn <tool> [args]`.
 fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String> {
     let input = input.trim();
@@ -550,8 +589,16 @@ fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String>
         remaining.to_string()
     } else if remaining.is_empty() {
         "{}".to_string()
+    } else if let Some(unquoted) = strip_matching_outer_quotes(remaining) {
+        // Shell quoting habit (`dyn <tool> '{"a": 1}'`): accept it instead of
+        // failing. 42 such failures observed; each cost a full round-trip.
+        if unquoted.trim_start().starts_with('{') {
+            unquoted.to_string()
+        } else {
+            return Err("dyn requires JSON arguments as an object, e.g. dyn complete_prewalk {\"summary\": \"done\"} (no shell quotes or pipes); run 'dyn <tool_name> --help' for the schema.".into());
+        }
     } else {
-        return Err("dyn requires JSON arguments as an object".into());
+        return Err("dyn requires JSON arguments as an object, e.g. dyn complete_prewalk {\"summary\": \"done\"} (no shell quotes or pipes); run 'dyn <tool_name> --help' for the schema.".into());
     };
 
     let result = try_execute_tool_in_workspace(tool_name, &args_json, workspace_root)?;

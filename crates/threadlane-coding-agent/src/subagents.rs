@@ -36,6 +36,16 @@ use tokio::time::{timeout, Duration};
 pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
 pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
 const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Timeout rejection with salvage pointers: a timed-out lane keeps its durable
+/// transcript, so the parent can `hub read` partial progress or `hub revive`
+/// with a narrower task instead of respawning the identical task (9 timeouts
+/// in one heavy-fanout session burned full budgets with no salvage hint).
+fn subagent_timeout_message(lane_name: &str, timeout: Duration) -> String {
+    format!(
+        "Subagent timed out after {timeout:?} with no result. Use `hub read` on lane `{lane_name}` for partial progress, or `hub revive` with a narrower task; do not respawn the identical task."
+    )
+}
 const SUBAGENT_RECOVERY_PROMPT: &str =
     "Continue from the recovered checkpoint and finish the assigned task.";
 pub(crate) static NEXT_SUBAGENT_UI_RUN_ID: AtomicU64 = AtomicU64::new(1);
@@ -618,7 +628,9 @@ pub(crate) async fn run_subagents_with_context(
                                 ),
                             )
                             .await
-                            .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+                            .unwrap_or_else(|_| {
+                                Err(subagent_timeout_message(&identity.lane_name, child_timeout))
+                            });
                             hub_for_settle.mark_settled(&settle_lane, false);
                             if let Some((work_dir, branch)) = workspace {
                                 let note = match threadlane_git::remove_worktree(
@@ -914,7 +926,7 @@ pub(crate) async fn revive_subagent_lane(
             ),
         )
         .await
-        .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+        .unwrap_or_else(|_| Err(subagent_timeout_message(&settle_lane, SUBAGENT_TIMEOUT)));
         let (succeeded, error) = match &result {
             Ok(result) if result.error.is_none() => (true, None),
             Ok(result) => (false, result.error.clone()),
@@ -1508,6 +1520,19 @@ pub(crate) async fn run_subagent_task(
 mod result_tests {
     use super::*;
     use threadlane_runtime::harness::JsonlStore;
+
+    #[test]
+    fn timeout_message_points_at_salvage_paths() {
+        let message = subagent_timeout_message("worker-3", Duration::from_secs(600));
+        assert!(message.contains("Subagent timed out"), "lost cause: {message}");
+        assert!(message.contains("worker-3"), "lost lane: {message}");
+        assert!(message.contains("hub read"), "no salvage path: {message}");
+        assert!(message.contains("hub revive"), "no revive path: {message}");
+        assert!(
+            message.contains("do not respawn"),
+            "no respawn guard: {message}"
+        );
+    }
 
     async fn snapshot_session() -> (tempfile::TempDir, PathBuf, Vec<String>) {
         let dir = tempfile::tempdir().unwrap();

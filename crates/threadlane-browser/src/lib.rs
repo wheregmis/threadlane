@@ -24,6 +24,11 @@ pub struct BrowserToolExecutor {
     bridge: BrowserBridge,
 }
 
+/// Appended to screenshot capture failures so the model adapts (snapshot or a
+/// different URL) instead of retrying the identical capture: one session
+/// retried the same TIFF-extraction failure 7 times verbatim.
+const SCREENSHOT_FAILURE_GUIDANCE: &str = "Screenshot capture failed; do not retry the identical screenshot. Use `browser_snapshot` for page structure instead, or navigate to a different URL first.";
+
 impl BrowserToolExecutor {
     pub fn new(bridge: BrowserBridge) -> Self {
         Self { bridge }
@@ -332,7 +337,7 @@ impl ToolExecutor for BrowserToolExecutor {
                     }
                     Some(Ok(ToolOutput::from(payload)))
                 }
-                Err(err) => Some(Err(err)),
+                Err(err) => Some(Err(format!("{err} {SCREENSHOT_FAILURE_GUIDANCE}"))),
             }
         } else {
             self.execute_tool(name, args)
@@ -661,5 +666,29 @@ mod tests {
         }
         req.reply.send(Ok("waited".into())).expect("reply");
         assert_eq!(t2.await.unwrap().unwrap().unwrap(), "waited");
+    }
+
+    #[tokio::test]
+    async fn screenshot_failure_steers_away_from_verbatim_retry() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let executor = BrowserToolExecutor::new(BrowserBridge::new(tx));
+        let task = tokio::spawn(async move {
+            executor
+                .execute_tool_with_output_in_workspace(BROWSER_SCREENSHOT_TOOL, "{}", None)
+                .await
+        });
+        let req = rx.recv().await.expect("req");
+        assert!(matches!(req.command, BrowserCommand::Screenshot));
+        req.reply
+            .send(Err("Failed to extract TIFF from snapshot image.".into()))
+            .expect("reply");
+        let err = task
+            .await
+            .expect("task")
+            .expect("handled")
+            .expect_err("screenshot failure must be Err");
+        assert!(err.contains("Failed to extract TIFF"), "lost cause: {err}");
+        assert!(err.contains("browser_snapshot"), "no alternative: {err}");
+        assert!(err.contains("do not retry"), "no retry guard: {err}");
     }
 }

@@ -337,6 +337,88 @@ fn test_workspace_containment_command_cwd_escape() {
 }
 
 #[test]
+fn run_command_rejects_empty_command_without_spawning_shell() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    for args in [
+        r#"{"command": ""}"#,
+        r#"{"command": "   ", "cwd": "."}"#,
+    ] {
+        let res = execute_tool_in_workspace("run_command", args, root);
+        assert!(
+            res.contains("must be a non-empty shell command"),
+            "unexpected: {res}"
+        );
+        assert!(
+            try_execute_tool_in_workspace("run_command", args, root).is_err(),
+            "empty command must be Err, not Ok"
+        );
+    }
+}
+
+#[test]
+fn read_file_on_directory_steers_to_list_dir() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    for path in [".", "sub"] {
+        let args = format!(r#"{{"path": "{path}", "start_line": 1, "end_line": 200}}"#);
+        let res = execute_tool_in_workspace("read_file", &args, dir.path());
+        assert!(res.contains("is a directory"), "unexpected: {res}");
+        assert!(res.contains("list_dir"), "no alternative: {res}");
+        assert!(res.contains("do not retry"), "no retry guard: {res}");
+        assert!(
+            try_execute_tool_in_workspace("read_file", &args, dir.path()).is_err(),
+            "directory read must be Err, not Ok"
+        );
+    }
+}
+
+#[test]
+fn grep_search_caps_output_like_other_tools() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("big.txt");
+    fs::write(&file, "needle here\n".repeat(400)).unwrap();
+    let res = execute_tool_in_workspace(
+        "grep_search",
+        r#"{"pattern": "needle"}"#,
+        dir.path(),
+    );
+    assert!(res.contains("[... Output truncated:"), "uncapped: {} chars", res.len());
+    assert!(res.chars().count() < 4_000, "too long: {} chars", res.chars().count());
+    // Small result sets pass through untouched (no truncation notice).
+    let small = execute_tool_in_workspace(
+        "grep_search",
+        r#"{"pattern": "needle", "glob": "*.md"}"#,
+        dir.path(),
+    );
+    assert!(!small.contains("Output truncated"), "over-truncated: {small}");
+}
+
+#[test]
+fn missing_paths_point_at_discovery_instead_of_inviting_guesses() {
+    let dir = tempdir().unwrap();
+    for (tool, args) in [
+        (
+            "read_file",
+            r#"{"path": "no/such/file.rs", "start_line": 1, "end_line": 10}"#,
+        ),
+        (
+            "edit_file_hashline",
+            r#"{"path": "no/such/file.rs", "edits": []}"#,
+        ),
+    ] {
+        let res = execute_tool_in_workspace(tool, args, dir.path());
+        assert!(res.contains("No such file"), "unexpected: {res}");
+        assert!(res.contains("list_dir"), "no discovery path: {res}");
+        assert!(res.contains("do not retry blind"), "no retry guard: {res}");
+        assert!(
+            try_execute_tool_in_workspace(tool, args, dir.path()).is_err(),
+            "missing path must be Err, not Ok"
+        );
+    }
+}
+
+#[test]
 fn test_read_file_rejects_reversed_line_range_without_panicking() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("sample.txt");
@@ -850,6 +932,24 @@ fn test_read_file_auto_resolves_unique_workspace_suffix() {
 }
 
 #[test]
+fn test_read_file_falls_back_to_filename_for_moved_files() {
+    let dir = tempdir().unwrap();
+    let new_home = dir.path().join("crates").join("new-crate").join("src");
+    fs::create_dir_all(&new_home).unwrap();
+    fs::write(new_home.join("state.rs"), "pub struct State;\n").unwrap();
+
+    // Stale multi-component guess from before the move: suffix matches nothing,
+    // but the file name is unique, so it auto-resolves instead of failing raw.
+    let args = json!({ "path": "crates/old-crate/src/state.rs" }).to_string();
+    let result = try_execute_tool_in_workspace("read_file", &args, dir.path()).unwrap();
+    assert!(
+        result.contains("[Notice: Auto-resolved 'crates/old-crate/src/state.rs' to 'crates/new-crate/src/state.rs']"),
+        "unexpected: {result}"
+    );
+    assert!(result.contains("pub struct State;"));
+}
+
+#[test]
 fn test_read_file_errors_with_suggestions_when_path_is_ambiguous() {
     let dir = tempdir().unwrap();
     let sub1 = dir.path().join("crate_a").join("src");
@@ -894,6 +994,28 @@ fn test_run_command_dyn_cli() {
 
     let escaped_cwd = json!({ "command": "dyn", "cwd": "../outside" }).to_string();
     assert!(try_execute_tool_in_workspace("run_command", &escaped_cwd, dir.path()).is_err());
+}
+
+#[test]
+fn dyn_accepts_shell_quoted_json_and_examples_on_rejection() {
+    let dir = tempdir().unwrap();
+    // Shell-quoted JSON object passes the args gate (unknown tool proves it
+    // got past JSON validation to tool lookup).
+    let quoted = json!({ "command": "dyn nosuchtool_xyz '{\"a\": 1}'" }).to_string();
+    let err = try_execute_tool_in_workspace("run_command", &quoted, dir.path()).unwrap_err();
+    assert!(err.contains("Unknown tool 'nosuchtool_xyz'"), "unexpected: {err}");
+
+    // Bare words still fail, but now with a concrete example and schema hint.
+    let bare = json!({ "command": "dyn nosuchtool_xyz hello" }).to_string();
+    let err = try_execute_tool_in_workspace("run_command", &bare, dir.path()).unwrap_err();
+    assert!(err.contains("e.g. dyn"), "no example: {err}");
+    assert!(err.contains("--help"), "no schema hint: {err}");
+
+    // Shell pipelines are not dyn syntax either (observed: `dyn --help | head -70`
+    // failing bare in a live session); they get the same example-bearing error.
+    let piped = json!({ "command": "dyn --help | head -70" }).to_string();
+    let err = try_execute_tool_in_workspace("run_command", &piped, dir.path()).unwrap_err();
+    assert!(err.contains("e.g. dyn"), "no example: {err}");
 }
 
 #[test]

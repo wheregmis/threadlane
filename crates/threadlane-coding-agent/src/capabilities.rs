@@ -834,6 +834,16 @@ async fn dispatch_hook_requests_isolated(
     }
 }
 
+/// Rejection for mutating tools while the read-only tool policy is active.
+/// Names the read-only alternatives so the turn adapts instead of retrying
+/// blocked tools: 41 blocked calls observed, including `git status` retried
+/// verbatim while every `run_command` was refused.
+pub(crate) fn read_only_policy_block_message(tool_name: &str) -> String {
+    format!(
+        "Tool `{tool_name}` is blocked because read-only tool policy is ACTIVE. Use read-only tools (read_file, grep_search, list_dir, get_repo_map) instead; do not retry blocked tools until the policy is lifted."
+    )
+}
+
 pub(crate) fn extension_before_tool_hook_handler(
     tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     extensions: Arc<WasiExtensionManager>,
@@ -860,9 +870,7 @@ pub(crate) fn extension_before_tool_hook_handler(
                         | MANAGE_SUBAGENT_BRANCH_TOOL_NAME
                 )
             {
-                return Err(format!(
-                    "Tool `{tool_name}` is blocked because read-only tool policy is ACTIVE."
-                ));
+                return Err(read_only_policy_block_message(tool_name));
             }
 
             let arguments = serde_json::json!({
@@ -1183,5 +1191,18 @@ mod github_tests {
             .expect_err("missing fields should fail");
 
         assert_eq!(result, "missing required string field `title`");
+    }
+}
+
+#[cfg(test)]
+mod read_only_policy_tests {
+    use super::read_only_policy_block_message;
+
+    #[test]
+    fn block_message_names_alternatives_and_forbids_retry() {
+        let message = read_only_policy_block_message("run_command");
+        assert!(message.contains("`run_command`"), "lost cause: {message}");
+        assert!(message.contains("read_file"), "no alternative: {message}");
+        assert!(message.contains("do not retry"), "no retry guard: {message}");
     }
 }

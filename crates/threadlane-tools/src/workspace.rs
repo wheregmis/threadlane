@@ -235,6 +235,25 @@ pub(crate) fn find_fuzzy_workspace_path(
         &mut candidates,
     );
 
+    // Stale multi-component guesses (e.g. a file moved by a refactor) match
+    // no suffix, yet their file name is usually still unique: 123 unguided
+    // not-found errors observed, topped by repeatedly guessed moved files.
+    // Fall back to a name-only scan so those resolve or suggest instead of
+    // failing raw. Suffix matches keep priority: this runs only when the
+    // suffix scan found nothing.
+    if candidates.is_empty() && raw.components().count() > 1 {
+        if let Some(name) = target_name {
+            let name_path = Path::new(name);
+            scan_dir(
+                &canonical_root,
+                &canonical_root,
+                name_path,
+                Some(name),
+                &mut candidates,
+            );
+        }
+    }
+
     if candidates.len() == 1 {
         let matched = candidates.remove(0);
         let rel = matched

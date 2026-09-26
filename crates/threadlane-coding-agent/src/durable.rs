@@ -59,7 +59,16 @@ pub(crate) fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
 }
 
 pub(crate) fn is_retryable_generation_error(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
+    let lower = error.to_ascii_lowercase();
+    // Protocol/validation failures (e.g. Codex "No tool output found for function
+    // call") are deterministic: retrying the identical request always fails.
+    // Never retry them; surface immediately so the turn can repair history.
+    if lower.contains("no tool output found for function call")
+        || lower.contains("invalid_request_error")
+        || lower.contains("stream_closed_without_terminal_event")
+    {
+        return false;
+    }
     [
         "timeout",
         "timed out",
@@ -73,7 +82,7 @@ pub(crate) fn is_retryable_generation_error(error: &str) -> bool {
         "status 504",
     ]
     .iter()
-    .any(|marker| error.contains(marker))
+    .any(|marker| lower.contains(marker))
 }
 
 pub(crate) fn generation_event_drain_error(
@@ -1484,5 +1493,30 @@ impl CodingAgent {
             return Vec::new();
         }
         self.agent.execute_tools_for_replay(&calls).await
+    }
+}
+
+#[cfg(test)]
+mod retry_classification_tests {
+    use super::is_retryable_generation_error;
+
+    #[test]
+    fn protocol_errors_are_never_retryable() {
+        assert!(!is_retryable_generation_error(
+            "OpenAI WebSocket Error [error]: No tool output found for function call call_abc."
+        ));
+        assert!(!is_retryable_generation_error(
+            "stream_closed_without_terminal_event"
+        ));
+        assert!(!is_retryable_generation_error(
+            "invalid_request_error: missing tool output"
+        ));
+    }
+
+    #[test]
+    fn transient_errors_remain_retryable() {
+        assert!(is_retryable_generation_error("request timed out"));
+        assert!(is_retryable_generation_error("status 503 Service Unavailable"));
+        assert!(is_retryable_generation_error("rate limit exceeded"));
     }
 }
