@@ -160,7 +160,7 @@ impl Schedule {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Definition {
     pub id: String,
     pub revision: u64,
@@ -405,6 +405,43 @@ impl Store {
             Ok(())
         })
     }
+    /// A retried chat request reuses its saved definition without resetting its schedule.
+    pub fn create_once(
+        &mut self,
+        mut definition: Definition,
+        at: i64,
+    ) -> Result<Definition, String> {
+        definition.validate()?;
+        if definition.revision != 0 {
+            return Err("Creation requires a new definition".into());
+        }
+        if let Some(existing) = self
+            .snapshot
+            .definitions
+            .iter()
+            .find(|d| d.id == definition.id)
+        {
+            definition.revision = existing.revision;
+            definition.anchor = existing.anchor;
+            definition.next_at = existing.next_at;
+            definition.failures = existing.failures;
+            definition.paused_reason = existing.paused_reason.clone();
+            return if &definition == existing {
+                Ok(existing.clone())
+            } else {
+                Err("This request_key already names a different or edited automation. Use a new key for a new automation; edit existing ones in the sidebar".into())
+            };
+        }
+        let id = definition.id.clone();
+        self.save(definition, at)?;
+        Ok(self
+            .snapshot
+            .definitions
+            .iter()
+            .find(|d| d.id == id)
+            .unwrap()
+            .clone())
+    }
     pub fn set_enabled(&mut self, id: &str, enabled: bool, at: i64) -> Result<(), String> {
         self.commit(|state| {
             let d = state
@@ -634,6 +671,21 @@ mod tests {
             std::fs::read(dir.path().join("state.json")).unwrap(),
             b"broken"
         );
+    }
+
+    #[test]
+    fn chat_creation_retry_does_not_reset_or_overwrite_the_saved_schedule() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let saved = store.create_once(definition(), 1000).unwrap();
+        assert_eq!(saved.next_at, Some(1060));
+        drop(store);
+        let mut store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.create_once(definition(), 2000).unwrap(), saved);
+        let mut changed = definition();
+        changed.prompt = "Different work".into();
+        assert!(store.create_once(changed, 2000).is_err());
+        assert_eq!(store.snapshot().definitions, vec![saved]);
     }
 
     #[test]

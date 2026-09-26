@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 use threadlane_automation::{now, Definition, Run, RunStatus, Snapshot, Store};
+use threadlane_coding_agent::automation_tool::{install_creator, CreationRequest};
 use threadlane_coding_agent::{
     automation::{durable_status, prepare, record_outcome, PreparedRun},
     controller::{SessionController, SessionStatus},
@@ -41,29 +42,39 @@ pub struct AutomationService {
     commands: mpsc::UnboundedSender<Request>,
     pub projection: watch::Receiver<Projection>,
     events: broadcast::Sender<ChatStreamEvent>,
+    chat_commands: mpsc::UnboundedSender<CreationRequest>,
 }
 impl AutomationService {
     pub fn shared() -> Arc<Self> {
         static SERVICE: OnceLock<Arc<AutomationService>> = OnceLock::new();
         SERVICE
             .get_or_init(|| {
-                Self::start(threadlane_project::global_threadlane_dir().join("automations"))
+                let service =
+                    Self::start(threadlane_project::global_threadlane_dir().join("automations"));
+                install_creator(service.chat_commands.clone());
+                service
             })
             .clone()
     }
     fn start(root: PathBuf) -> Arc<Self> {
         let (commands, receiver) = mpsc::unbounded_channel();
+        let (chat_commands, chat_receiver) = mpsc::unbounded_channel();
         let (projection_tx, projection) = watch::channel(Projection::default());
         let (events, _) = broadcast::channel(2048);
         let service = Arc::new(Self {
             commands,
             projection,
             events: events.clone(),
+            chat_commands,
         });
         threadlane_provider::exec::get_runtime().spawn(async move {
             let store = Store::open(&root);
             match store {
-                Ok(store) => Actor::new(store, projection_tx, events).run(receiver).await,
+                Ok(store) => {
+                    Actor::new(store, projection_tx, events)
+                        .run(receiver, chat_receiver)
+                        .await
+                }
                 Err(error) => {
                     projection_tx.send_replace(Projection {
                         error: Some(error),
@@ -185,7 +196,11 @@ impl Actor {
         }
         Ok(())
     }
-    async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Request>) {
+    async fn run(
+        mut self,
+        mut commands: mpsc::UnboundedReceiver<Request>,
+        mut chat_commands: mpsc::UnboundedReceiver<CreationRequest>,
+    ) {
         if let Err(error) = self.recover() {
             self.projection.error = Some(error);
             self.publish();
@@ -197,6 +212,12 @@ impl Actor {
         let mut last = Instant::now();
         loop {
             let result = tokio::select! {
+                Some(request) = chat_commands.recv() => {
+                    let result = self.create_from_chat(request.definition);
+                    let error = result.as_ref().err().cloned();
+                    let _ = request.reply.send(result);
+                    error.map_or(Ok(()), Err)
+                }
                 Some((command, reply)) = commands.recv() => {
                     let result = self.command(command);
                     let _ = reply.send(result.clone());
@@ -288,6 +309,25 @@ impl Actor {
         }
         self.projection.error = None;
         self.schedule()
+    }
+    fn create_from_chat(&mut self, definition: Definition) -> Result<Definition, String> {
+        if !threadlane_project::load_project_registry()
+            .iter()
+            .any(|p| p.path == definition.project)
+        {
+            return Err("Choose an attached project".into());
+        }
+        if !threadlane_ui_catalog::available_models_for_project(Some(&definition.project))
+            .iter()
+            .any(|m| m.id == definition.model)
+        {
+            return Err(
+                "The selected model is unavailable. Choose an available native model".into(),
+            );
+        }
+        let saved = self.store.create_once(definition, now())?;
+        self.projection.error = None;
+        Ok(saved)
     }
     fn schedule(&mut self) -> Result<(), String> {
         if let Some((id, (status, error))) = self

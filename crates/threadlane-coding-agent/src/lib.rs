@@ -32,3 +32,4 @@ pub use controller::SchedulerSupervisorHandle;
 pub use options::CodingAgentOptions;
 pub use runtime::CodingAgent;
 pub mod automation;
+pub mod automation_tool;

@@ -93,6 +93,10 @@ Validation: focused `cargo nextest run -p <touched-package> <filter>` tests firs
 
 ## Follow-up scope
 
-After v1 is reliable: existing-chat heartbeat mode (defer while busy, never steer an unrelated turn), automation-owned persistent chats, one-shot schedules, cron, and creation from chat. Agent-authored definitions must go through the same validated service and explicit user-visible activation flow.
+Chat creation is implemented through `create_automation`, forwarding to the application service with a session-scoped retry key. It defaults to the chat's owning project and saved model/effort, persists before reporting success, and returns the saved definition and next occurrence. The user must explicitly request automation; unclear scheduling details are clarified in chat.
+
+Chat-creation validation: 11 focused domain, tool, and automation-service tests passed, including default resolution, provider-prefix preservation, save acknowledgment, duplicate retries after reload, conflicts, invalid timezone/project, and a stopped service channel. `cargo check -p threadlane-gpui` passed. No live provider was charged for this verification.
+
+After v1 is reliable: existing-chat heartbeat mode (defer while busy, never steer an unrelated turn), automation-owned persistent chats, one-shot schedules, and cron.
 
 Defer daemon/OS wake scheduling, remote execution, workflow graphs, AI-evaluated stop conditions, arbitrary retry policies, and automatic worktree cleanup. Each adds a separate lifecycle contract; none is needed for the first useful recurring-task feature.
