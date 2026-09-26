@@ -7,6 +7,7 @@
 //! its modules directly.
 
 pub mod actions;
+pub mod automation;
 pub mod agent_events;
 mod app_state;
 pub mod chat;

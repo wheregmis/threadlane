@@ -110,6 +110,11 @@ pub mod test_support {
     ) -> CodingAgent {
         CodingAgent::new_with_provider(options, provider)
     }
+
+    pub fn session_controller_with_provider(options: CodingAgentOptions, provider: Arc<dyn ProviderPort>) -> Arc<super::SessionController> {
+        let path = options.session_file.clone().expect("test session requires a durable file");
+        super::SessionController::from_agent(path, CodingAgent::new_with_provider(options, provider))
+    }
 }
 
 /// Unified execution controller for an agent session.
@@ -163,6 +168,10 @@ impl SessionController {
             .clone()
             .expect("SessionController requires a durable session file");
         let agent = CodingAgent::new(options);
+        Self::from_agent(session_file, agent)
+    }
+
+    fn from_agent(session_file: PathBuf, agent: CodingAgent) -> Arc<Self> {
         let cancellation = agent.cancellation_handle();
         let work_handle = agent.work_handle();
         let permission_handle = agent.permission_handle();

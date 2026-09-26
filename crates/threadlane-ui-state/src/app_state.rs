@@ -22,6 +22,8 @@ pub use crate::types::*;
 use threadlane_runtime::harness::{tool_activity_display_summary, tool_activity_summary};
 
 pub struct AppState {
+    pub automation_service: Option<Arc<crate::automation::AutomationService>>,
+    pub automations: crate::automation::Projection,
     pub projects: Vec<ProjectInfo>,
     pub active_work_dir: Option<PathBuf>,
     pub active_session_id: Option<String>,
@@ -350,6 +352,8 @@ impl AppState {
             orchestrator_mode,
             workspace_page: WorkspacePage::Chat,
             github_tab: GitHubTab::default(),
+            automation_service: None,
+            automations: Default::default(),
             openai_key,
             opencode_key,
             auth_status_msg: None,
@@ -408,6 +412,61 @@ impl AppState {
 
     pub fn available_models(&self) -> &[threadlane_ui_catalog::ModelOption] {
         &self.available_models
+    }
+
+    pub fn start_automations(&mut self) -> tokio::sync::watch::Receiver<crate::automation::Projection> {
+        let service = crate::automation::AutomationService::shared();
+        let mut events = service.subscribe();
+        let tx = self.stream_tx.clone();
+        threadlane_provider::exec::get_runtime().spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(event) => if tx.send(event).is_err() { break; },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+        let updates = service.projection.clone();
+        self.automation_service = Some(service);
+        self.apply_automation_projection(updates.borrow().clone());
+        updates
+    }
+
+    pub fn apply_automation_projection(&mut self, projection: crate::automation::Projection) {
+        for (session, old) in &self.automations.permissions {
+            if !projection.permissions.contains_key(session) && self.pending_permissions.get(session).is_some_and(|p| p.id == old.id) {
+                self.pending_permissions.remove(session);
+            }
+        }
+        for (session, old) in &self.automations.questions {
+            if !projection.questions.contains_key(session) && self.pending_questions.get(session).is_some_and(|q| q.id == old.id) {
+                self.pending_questions.remove(session);
+            }
+        }
+        if let Some(runtime) = &projection.active_runtime {
+            let path = runtime.session_file().to_path_buf();
+            if !self.session_runtimes.contains_key(&path) { self.register_session_runtime(path, runtime.clone()); }
+        }
+        for run in &projection.snapshot.runs {
+            if self.automations.snapshot.runs.iter().find(|old| old.id == run.id)
+                .is_none_or(|old| old.status != run.status || old.session_file != run.session_file) {
+                self.request_session_refresh(&run.definition.project);
+            }
+        }
+        self.pending_permissions.extend(projection.permissions.clone());
+        self.pending_questions.extend(projection.questions.clone());
+        self.automations = projection;
+    }
+
+    pub fn open_automation_run(&mut self, id: &str) -> Result<(), String> {
+        let run = self.automations.snapshot.runs.iter().find(|r| r.id == id).cloned().ok_or("Run no longer exists")?;
+        if run.session_file.as_ref().is_none_or(|path| !path.exists()) { return Err("This run has no chat yet".into()); }
+        let project = self.projects.iter_mut().find(|p| p.work_dir == run.definition.project).ok_or("Attach this run's project to open its chat")?;
+        project.sessions = discover_session_stubs_in_project(&project.work_dir);
+        self.select_session(run.definition.project, run.session_id);
+        self.workspace_page = WorkspacePage::Chat;
+        Ok(())
     }
 
     pub fn refresh_available_models(&mut self) {
@@ -1255,6 +1314,7 @@ impl AppState {
             .is_some_and(|runtime| runtime.resolve_permission(request_id, decision));
         if resolved {
             self.pending_permissions.remove(&session_id);
+            if let Some(service) = &self.automation_service { service.resolved(session_id.clone(), request_id.into()); }
         }
         resolved
     }
@@ -1279,6 +1339,7 @@ impl AppState {
             .is_some_and(|runtime| runtime.resolve_question(request_id, answer));
         if resolved {
             self.pending_questions.remove(&session_id);
+            if let Some(service) = &self.automation_service { service.resolved(session_id.clone(), request_id.into()); }
         }
         resolved
     }
@@ -1303,6 +1364,7 @@ impl AppState {
             .is_some_and(|runtime| runtime.resolve_question(request_id, answer));
         if resolved {
             self.pending_questions.remove(&session_id);
+            if let Some(service) = &self.automation_service { service.resolved(session_id.clone(), request_id.into()); }
         }
         resolved
     }

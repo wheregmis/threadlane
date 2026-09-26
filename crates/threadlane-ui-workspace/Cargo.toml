@@ -11,6 +11,7 @@ rfd.workspace = true
 threadlane-coding-agent.workspace = true
 threadlane-git.workspace = true
 threadlane-ui-chat.workspace = true
+threadlane-ui-automation.workspace = true
 threadlane-ui-editor.workspace = true
 threadlane-ui-github.workspace = true
 threadlane-ui-right-panel.workspace = true

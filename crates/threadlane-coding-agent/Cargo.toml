@@ -24,6 +24,7 @@ reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 threadlane-acp.workspace = true
 threadlane-acp-engine.workspace = true
 threadlane-auth.workspace = true
+threadlane-automation.workspace = true
 threadlane-browser.workspace = true
 threadlane-compaction.workspace = true
 threadlane-computer.workspace = true

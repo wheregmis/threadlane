@@ -1,0 +1,21 @@
+[package]
+name = "threadlane-ui-automation"
+version = "0.1.0"
+edition = "2021"
+description = "Native automation definitions and run history"
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
+threadlane-automation.workspace = true
+threadlane-ui-state.workspace = true
+threadlane-ui-catalog.workspace = true
+threadlane-ui-theme.workspace = true
+threadlane-provider.workspace = true
+threadlane-protocol.workspace = true
+threadlane-git.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+threadlane-ui-state = { workspace = true, features = ["test-support"] }

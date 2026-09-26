@@ -14,6 +14,7 @@ edition = "2021"
 threadlane-acp = { version = "0.1.0", path = "crates/threadlane-acp" }
 threadlane-acp-engine = { version = "0.1.0", path = "crates/threadlane-acp-engine" }
 threadlane-auth = { version = "0.1.0", path = "crates/threadlane-auth" }
+threadlane-automation = { version = "0.1.0", path = "crates/threadlane-automation" }
 threadlane-benchmarks = { version = "0.0.0", path = "crates/threadlane-benchmarks" }
 threadlane-browser = { version = "0.1.0", path = "crates/threadlane-browser" }
 threadlane-coding-agent = { version = "0.1.0", path = "crates/threadlane-coding-agent" }
@@ -37,6 +38,7 @@ threadlane-runtime = { version = "0.1.0", path = "crates/threadlane-runtime" }
 threadlane-skills = { version = "0.1.0", path = "crates/threadlane-skills" }
 threadlane-tools = { version = "0.1.0", path = "crates/threadlane-tools" }
 threadlane-ui-catalog = { version = "0.1.0", path = "crates/threadlane-ui-catalog" }
+threadlane-ui-automation = { version = "0.1.0", path = "crates/threadlane-ui-automation" }
 threadlane-ui-chat = { version = "0.1.0", path = "crates/threadlane-ui-chat" }
 threadlane-ui-editor = { version = "0.1.0", path = "crates/threadlane-ui-editor" }
 threadlane-ui-github = { version = "0.1.0", path = "crates/threadlane-ui-github" }

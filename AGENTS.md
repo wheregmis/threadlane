@@ -115,6 +115,8 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 
 ## Session and Context-Menu Behavior
 
+- Automation calendar intent lives in the GPUI-free `threadlane-automation` crate; its OS-locked snapshot commits occurrence claims before dispatch. `threadlane-ui-state::automation` owns the application service, while `threadlane-coding-agent::automation` prepares ordinary durable sessions and worktrees. Keep this separate from the session-local `AgentWorkScheduler`. Automation navigation must not change the active chat or project filter. Recovery must reconcile the original harness operation, never replay an uncertain run; pause/delete must preserve transcripts and worktrees. Permission/question resolution must also notify the automation service so its waiting state and timeout accounting remain synchronized.
+
 - Project terminal groups are keyed by canonical project work directory, not by session ID. Each project can own multiple independent shell tabs; switching sessions in one project must retain its shells, active tab, and output, while switching projects selects that project's terminal group.
 - The GPUI terminal is a persistent `portable-pty` shell parsed through `vt100`, not a command-by-command `sh -lc` console. Keep PTY reads off the UI thread, apply parser updates through GPUI entity updates, forward focused keyboard input directly to the PTY, and retain terminal entities by project when switching workspaces.
 - Subagent dispatch creates and commits a dedicated child harness lane before provider execution. Execute the child with the `AcceptedRun` for that existing lane; never call foreground prompt acceptance on `main`, append a duplicate child prompt, or treat an agent role name as a lane selector.
