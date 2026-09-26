@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.26](https://github.com/wheregmis/threadlane/compare/v0.1.25...v0.1.26) (2026-09-26)
+
+
+### Features
+
+* **automations:** add durable sidebar automations ([e108f3e](https://github.com/wheregmis/threadlane/commit/e108f3e6dbf8f225fa01ddbc8815edf66466addb))
+* **automations:** add durable sidebar automations ([801adda](https://github.com/wheregmis/threadlane/commit/801addaa5106bb3d117bfbde3d9e6dc63cba7ebc))
+* **automations:** create scheduled tasks from chat ([1dae746](https://github.com/wheregmis/threadlane/commit/1dae7465b6ed7231e8ed00616ca7c082eb34bcee))
+* **browser:** expose existing browser tabs to agents ([86114d4](https://github.com/wheregmis/threadlane/commit/86114d4a3f4aaaa27788a638618079bc95ab2193))
+* **browser:** let agents manage multiple browser tabs ([de0b316](https://github.com/wheregmis/threadlane/commit/de0b316a69e8b8b8c968bda62f5b6bdbd8689f1c))
+* **chat:** show queued messages above the composer ([f2705e2](https://github.com/wheregmis/threadlane/commit/f2705e2df81de07f69b6bd887cb6ac81fb905af1))
+* **chat:** show queued messages above the composer ([4426780](https://github.com/wheregmis/threadlane/commit/44267803fdb3d4cc935389188ac21e2d9efe384b))
+
+
+### Bug Fixes
+
+* **automations:** bound reviewed history and keep dispatch resilient ([cd6a8ba](https://github.com/wheregmis/threadlane/commit/cd6a8bacafe23e364833927e141454daca011cf9))
+* **automations:** preserve schedules and project-scoped defaults ([5435128](https://github.com/wheregmis/threadlane/commit/5435128f1909725dbdab653037ed9975d4e5c43d))
+* **browser:** preserve unsaved editor work during agent tab operations ([b800329](https://github.com/wheregmis/threadlane/commit/b800329c013240fb8f4834a461960d99c139a90f))
+* **chat:** reset transcript list when queue filtering changes rows ([cbd2935](https://github.com/wheregmis/threadlane/commit/cbd29350dd1b64bcd0b391f87f9b9fde39106c09))
+
 ## [0.1.25](https://github.com/wheregmis/threadlane/compare/v0.1.24...v0.1.25) (2026-09-26)
 
 
