@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::scroll::Scrollbar;
+use gpui_component::resizable::{ResizableState, resizable_panel, v_resizable};
+use gpui_component::scroll::{ScrollableElement, Scrollbar};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 use std::collections::HashSet;
 use threadlane_ui_state::{
@@ -16,6 +16,7 @@ pub struct AgentsPanel {
     transcript_run_id: Option<String>,
     transcript_count: usize,
     collapsed_tool_details: HashSet<String>,
+    overview_split: Entity<ResizableState>,
     _model_subscription: Subscription,
 }
 
@@ -29,6 +30,7 @@ impl AgentsPanel {
             transcript_run_id: None,
             transcript_count: 0,
             collapsed_tool_details: HashSet::new(),
+            overview_split: cx.new(|_| ResizableState::default()),
             _model_subscription: subscription,
         }
     }
@@ -643,7 +645,7 @@ impl AgentsPanel {
 }
 
 impl Render for AgentsPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
         let mut subagents: Vec<_> = state
@@ -784,27 +786,43 @@ impl Render for AgentsPanel {
             );
         }
 
+        let overview = div()
+            .size_full()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .children(rows)
+            .children(subagents.is_empty().then(|| {
+                div()
+                    .p_6()
+                    .text_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("No delegated agents in this session")
+            }));
+        let detail = selected.map(|(item, _)| self.render_detail(&item, cx));
+        let rem = window.rem_size();
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(self.render_main_agent(cx))
             .child(
-                div()
-                    .mt_2()
-                    .max_h(rems(16.0))
-                    .overflow_y_scrollbar()
-                    .children(rows)
-                    .children(subagents.is_empty().then(|| {
-                        div()
-                            .p_6()
-                            .text_center()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("No delegated agents in this session")
-                    })),
+                div().flex_1().min_h_0().child(
+                    v_resizable("agents-overview-detail-split")
+                        .with_state(&self.overview_split)
+                        .child(
+                            resizable_panel()
+                                .size(rem * 12.0)
+                                .size_range(rem * 6.0..Pixels::MAX)
+                                .child(overview),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size_range(rem * 8.0..Pixels::MAX)
+                                .child(div().size_full().children(detail)),
+                        ),
+                ),
             )
-            .children(selected.map(|(item, _)| self.render_detail(&item, cx)))
     }
 }
 
