@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use threadlane_acp::{AcpAgentConfig, AcpScope, AcpSettings};
-use threadlane_acp_engine::{AcpEngine, generate_title};
+use threadlane_acp_engine::{AcpEngine, generate_commit_message, generate_title};
 use threadlane_permission::{PermissionDecision, PermissionHandle};
 use threadlane_protocol::{AgentEvent, ImageAttachment, ReasoningEffort};
 use tokio::sync::broadcast;
@@ -516,6 +516,20 @@ async fn a_title_comes_from_the_selected_agent() {
     // Only the agent's message text becomes the title; its thoughts and tool
     // output must not leak into a session name.
     assert_eq!(title, "hello world");
+}
+
+#[tokio::test]
+async fn a_commit_message_comes_from_the_selected_agent() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let work = work_dir(&temp);
+    std::fs::create_dir_all(&work).unwrap();
+    configure_stub(&global, "stream");
+
+    let message = generate_commit_message(Some(global), work, "stub", "diff --git a/a b/a")
+        .await
+        .expect("the agent should answer");
+    assert_eq!(message, "hello world");
 }
 
 #[tokio::test]

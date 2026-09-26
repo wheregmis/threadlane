@@ -8707,6 +8707,7 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "serde_json",
+ "threadlane-acp-engine",
  "threadlane-coding-agent",
  "threadlane-git",
  "threadlane-project",

@@ -17,7 +17,7 @@ pub use presets::{
     add_acp_agent, configured_acp_agents, remove_acp_agent, set_acp_enabled,
     set_acp_preset_enabled, upgrade_acp_presets, AcpPreset, ACP_PRESETS,
 };
-pub use runtime::{generate_title, AcpEngine};
+pub use runtime::{generate_commit_message, generate_title, AcpEngine};
 pub use threadlane_acp::AcpWorkspaceClient;
 
 use std::path::PathBuf;

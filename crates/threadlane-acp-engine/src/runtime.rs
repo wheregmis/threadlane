@@ -579,6 +579,33 @@ pub async fn generate_title(
     agent_id: &str,
     prompt: &str,
 ) -> Result<String, String> {
+    generate_text(global_dir, work_dir, agent_id, TITLE_INSTRUCTION, prompt).await
+}
+
+/// Generates a commit subject without letting the agent inspect or change files.
+pub async fn generate_commit_message(
+    global_dir: Option<PathBuf>,
+    work_dir: PathBuf,
+    agent_id: &str,
+    diff: &str,
+) -> Result<String, String> {
+    generate_text(
+        global_dir,
+        work_dir,
+        agent_id,
+        "Return only one Conventional Commit subject under 72 characters, in the form <type>: <imperative description>. Use a lowercase type such as feat, fix, chore, docs, or refactor. Do not use tools, read files, or take any action; answer from the diff alone.",
+        diff,
+    )
+    .await
+}
+
+async fn generate_text(
+    global_dir: Option<PathBuf>,
+    work_dir: PathBuf,
+    agent_id: &str,
+    instruction: &str,
+    prompt: &str,
+) -> Result<String, String> {
     let (updates_tx, mut updates) = mpsc::unbounded_channel();
     let manager = AcpManager::new(global_dir, Some(work_dir.clone()));
     let session = manager
@@ -594,7 +621,7 @@ pub async fn generate_title(
 
     let session_id = session.session_id().to_string();
     let blocks = vec![AcpContentBlock::text(format!(
-        "{TITLE_INSTRUCTION}\n\n{prompt}"
+        "{instruction}\n\n{prompt}"
     ))];
     let turn = session.prompt(blocks);
     tokio::pin!(turn);
@@ -623,7 +650,7 @@ pub async fn generate_title(
         Ok(Ok(_)) => Ok(title),
         Ok(Err(error)) => Err(error),
         Err(_) => Err(format!(
-            "ACP agent '{agent_id}' did not return a title within {}s",
+            "ACP agent '{agent_id}' did not return text within {}s",
             TITLE_TIMEOUT.as_secs()
         )),
     }

@@ -924,12 +924,21 @@ impl RightPanelView {
                 } else {
                     diff
                 };
-                let raw = match threadlane_coding_agent::credentials::provider_client_for(
-                    api_key, account_id,
-                )
-                .generate_commit_message(&model, &diff)
-                .await
+                let generated = if let Some(agent_id) = threadlane_acp_engine::acp_agent_id(&model)
                 {
+                    threadlane_acp_engine::generate_commit_message(
+                        threadlane_project::default_global_threadlane_dir(),
+                        work_dir.clone(),
+                        agent_id,
+                        &diff,
+                    )
+                    .await
+                } else {
+                    threadlane_coding_agent::credentials::provider_client_for(api_key, account_id)
+                        .generate_commit_message(&model, &diff)
+                        .await
+                };
+                let raw = match generated {
                     Ok(raw) => raw,
                     Err(error) => return (Err(error.to_string()), diff_truncated),
                 };
