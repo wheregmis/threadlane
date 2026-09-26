@@ -2756,9 +2756,18 @@ impl ChatListView {
 
         let new_rows = build_transcript_rows(&messages, generating);
         let new_row_count = new_rows.len();
+        // Only splice the Working row when the remaining rows are unchanged.
+        // Generation toggles also filter queued messages, which requires a reset.
         let working_changed = !session_changed
             && new_message_count == old_message_count
-            && generating != self.transcript_generating;
+            && generating != self.transcript_generating
+            && new_rows
+                .strip_suffix(&[TranscriptRow::Working])
+                .unwrap_or(&new_rows)
+                == self
+                    .transcript_rows
+                    .strip_suffix(&[TranscriptRow::Working])
+                    .unwrap_or(&self.transcript_rows);
         let prepended = !session_changed
             && new_message_count > old_message_count
             && self
@@ -5153,6 +5162,67 @@ impl ChatListView {
                     .child(branch)
             }));
 
+        let queued_messages: Vec<_> = self
+            .model
+            .read(cx)
+            .messages
+            .iter()
+            .filter(|message| crate::transcript::is_queued_message(message, is_generating))
+            .map(|message| message.content.clone())
+            .collect();
+        let queued_preview = (!queued_messages.is_empty()).then(|| {
+            div()
+                .debug_selector(|| "queued-messages-panel".into())
+                .w_full()
+                .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .mb_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.title_bar)
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .child(div().text_color(theme.foreground).child("Queued Messages"))
+                        .child(
+                            Tag::new()
+                                .child(queued_messages.len().to_string())
+                                .with_variant(TagVariant::Secondary)
+                                .small(),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child("Sends after agent finishes working"),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("queued-messages-list")
+                        .max_h(rems(10.0))
+                        .overflow_y_scrollbar()
+                        .children(queued_messages.into_iter().map(|text| {
+                            div()
+                                .debug_selector(|| "queued-message-row".into())
+                                .w_full()
+                                .min_w_0()
+                                .px_3()
+                                .py_2()
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .text_sm()
+                                .text_color(theme.foreground)
+                                .child(text)
+                        })),
+                )
+        });
         let pending_preview = pending_message.map(|text| {
             div()
                 .debug_selector(|| "pending-preview-row".into())
@@ -6053,6 +6123,7 @@ impl ChatListView {
                     .into_any_element()
             }))
             .children(pending_preview)
+            .children(queued_preview)
             .child(composer_context_bar)
             .child(
                 div()

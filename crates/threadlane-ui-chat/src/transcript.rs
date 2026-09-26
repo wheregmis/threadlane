@@ -2,6 +2,10 @@ use std::ops::Range;
 
 use threadlane_ui_state::{ChatMessageInfo, MessageRole, ToolActivityInfo};
 
+pub fn is_queued_message(message: &ChatMessageInfo, generating: bool) -> bool {
+    generating && message.role == MessageRole::User && message.id.starts_with("queued-user-")
+}
+
 pub fn current_turn_latest_tool(messages: &[ChatMessageInfo]) -> Option<&ToolActivityInfo> {
     messages
         .iter()
@@ -40,6 +44,11 @@ pub fn build_transcript_rows(
     let mut rows = Vec::with_capacity(messages.len().saturating_add(1));
     let mut index = 0;
     while index < messages.len() {
+        // Pending follow-ups live above the composer, not in the accepted transcript.
+        if is_queued_message(&messages[index], generating) {
+            index += 1;
+            continue;
+        }
         if !is_activity_only(&messages[index]) {
             rows.push(TranscriptRow::Message(index));
             index += 1;
