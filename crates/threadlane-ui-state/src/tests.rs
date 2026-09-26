@@ -1483,6 +1483,7 @@ fn issue_work_session_persists_link_and_uses_isolated_worktree() {
             "Fix flaky auth!".into(),
             "opencode-go/test-model".into(),
             ReasoningEffort::High,
+            threadlane_protocol::OrchestratorMode::Fusion,
             |state, prompt| {
                 assert_eq!(state.selected_model, "opencode-go/test-model");
                 assert_eq!(state.reasoning_effort, ReasoningEffort::High);
@@ -1504,6 +1505,18 @@ fn issue_work_session_persists_link_and_uses_isolated_worktree() {
     assert_eq!(
         facts.get("reasoning_effort").map(String::as_str),
         Some("High")
+    );
+    assert_eq!(
+        facts.get("orchestrator_mode").map(String::as_str),
+        Some("fusion")
+    );
+    assert_eq!(
+        threadlane_project::subagent_settings::load(&work_dir).orchestrator_mode,
+        threadlane_protocol::OrchestratorMode::Fusion
+    );
+    assert_eq!(
+        state.orchestrator_mode,
+        threadlane_protocol::OrchestratorMode::Fusion
     );
     assert_eq!(facts.get("is_worktree").map(String::as_str), Some("true"));
     assert_eq!(
@@ -1557,6 +1570,7 @@ fn issue_work_failure_never_selects_or_runs_in_canonical_checkout() {
             "Unborn".into(),
             "test-model".into(),
             ReasoningEffort::High,
+            threadlane_protocol::OrchestratorMode::Normal,
             |_, _| panic!("must not run"),
         )
         .unwrap_err();
@@ -1610,6 +1624,7 @@ fn issue_work_prompt_failure_rolls_back_artifacts_and_selection() {
             "Prompt failure".into(),
             "test-model".into(),
             ReasoningEffort::High,
+            threadlane_protocol::OrchestratorMode::Fusion,
             |_, prompt| {
                 assert!(prompt.contains("create_draft_pull_request"));
                 assert!(prompt.contains("publish the issue branch to origin"));
@@ -1623,6 +1638,14 @@ fn issue_work_prompt_failure_rolls_back_artifacts_and_selection() {
     assert_eq!(error, "prompt acceptance failed");
     assert_eq!(state.selected_model, prior_model);
     assert_eq!(state.reasoning_effort, prior_effort);
+    assert_eq!(
+        state.orchestrator_mode,
+        threadlane_protocol::OrchestratorMode::Normal
+    );
+    assert_eq!(
+        threadlane_project::subagent_settings::load(&work_dir).orchestrator_mode,
+        threadlane_protocol::OrchestratorMode::Normal
+    );
     assert_eq!(state.active_work_dir, active_work_dir);
     assert_eq!(state.active_session_id, active_session_id);
     assert_eq!(state.is_new_task, is_new_task);

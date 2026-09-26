@@ -6,7 +6,7 @@ use gpui_component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme, Disableable, WindowExt};
 use threadlane_git::GitHubIssueRef;
-use threadlane_protocol::ReasoningEffort;
+use threadlane_protocol::{OrchestratorMode, ReasoningEffort};
 use threadlane_provider::model_registry::effective_effort;
 
 use threadlane_ui_state::AppState;
@@ -81,6 +81,7 @@ pub struct IssueStartDialog {
     pub confirmation: IssueStartConfirmation,
     pub error: Option<String>,
     effort: ReasoningEffort,
+    mode: OrchestratorMode,
     models: Vec<threadlane_ui_catalog::ModelOption>,
 }
 
@@ -94,6 +95,7 @@ impl IssueStartDialog {
                     self.title.clone(),
                     self.confirmation.model.clone(),
                     self.effort,
+                    self.mode,
                 );
                 if let Err(error) = &result {
                     state.session_status = Some(error.clone());
@@ -191,6 +193,33 @@ impl Render for IssueStartDialog {
                     )
                 })
             });
+        let mode = self.mode;
+        let owner = cx.entity().downgrade();
+        let mode_picker = Button::new("issue-task-mode")
+            .debug_selector(|| "issue-task-mode".into())
+            .label(mode.label())
+            .accessibility_label(format!("Session mode: {}", mode.label()))
+            .tooltip("Agent runs directly on the selected model; Fusion delegates work to the configured Fusion model.")
+            .dropdown_caret(true)
+            .w_full()
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                [OrchestratorMode::Normal, OrchestratorMode::Fusion]
+                    .into_iter()
+                    .fold(menu, |menu, option| {
+                        let owner = owner.clone();
+                        menu.item(
+                            PopupMenuItem::new(option.label())
+                                .checked(option == mode)
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner.update(cx, |this, cx| {
+                                        this.mode = option;
+                                        this.error = None;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
+            });
         let confirmation = &self.confirmation;
         div()
             .flex()
@@ -228,6 +257,14 @@ impl Render for IssueStartDialog {
                     .child("Reasoning effort")
                     .child(effort_picker)
             }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("Mode")
+                    .child(mode_picker),
+            )
             .children(self.models.is_empty().then(|| {
                 div()
                     .text_color(theme.warning)
@@ -265,6 +302,7 @@ pub fn open_issue_start_dialog(
         let state = model.read(cx);
         (state.selected_model.clone(), state.reasoning_effort)
     };
+    let mode = threadlane_project::subagent_settings::load(&work_dir).orchestrator_mode;
     let confirmation = issue_start_confirmation(
         &issue,
         &title,
@@ -285,6 +323,7 @@ pub fn open_issue_start_dialog(
         title,
         confirmation,
         effort,
+        mode,
         models,
         error: None,
     });
@@ -454,7 +493,7 @@ pub fn open_issue_create_dialog(
 mod tests {
     use super::{issue_start_confirmation, IssueStartDialog};
     use gpui::{AppContext, Modifiers, TestAppContext};
-    use threadlane_protocol::ReasoningEffort;
+    use threadlane_protocol::{OrchestratorMode, ReasoningEffort};
     use threadlane_ui_catalog::{ModelOption, ModelProvider};
     use threadlane_ui_state::AppState;
 
@@ -488,6 +527,7 @@ mod tests {
             title: "Fix an issue".into(),
             error: None,
             effort: ReasoningEffort::High,
+            mode: OrchestratorMode::Normal,
             models: vec![ModelOption {
                 id: "acp/test-agent".into(),
                 label: "Test agent".into(),
@@ -522,6 +562,53 @@ mod tests {
                 (state.selected_model.clone(), state.reasoning_effort),
                 original
             )
+        });
+    }
+
+    #[gpui::test]
+    fn issue_start_mode_picker_keeps_change_local(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| AppState::default());
+        let original_mode =
+            model.read_with(cx, |state, _| state.orchestrator_mode);
+        let issue = threadlane_git::GitHubIssueRef {
+            owner: "example".into(),
+            repo: "app".into(),
+            number: 7,
+            ..Default::default()
+        };
+        let state = cx.new(|_| IssueStartDialog {
+            model: model.clone(),
+            work_dir: std::env::temp_dir(),
+            confirmation: issue_start_confirmation(
+                &issue,
+                "Fix an issue",
+                "test-model",
+                "High",
+                true,
+                false,
+            ),
+            issue,
+            title: "Fix an issue".into(),
+            error: None,
+            effort: ReasoningEffort::High,
+            mode: OrchestratorMode::Normal,
+            models: Vec::new(),
+        });
+        let view = state.clone();
+        let (_, cx) =
+            cx.add_window_view(move |window, cx| gpui_component::Root::new(view, window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let picker = cx.debug_bounds("issue-task-mode").unwrap();
+        cx.simulate_click(picker.center(), Modifiers::default());
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.mode, OrchestratorMode::Fusion)
+        });
+        model.read_with(cx, |state, _| {
+            assert_eq!(state.orchestrator_mode, original_mode)
         });
     }
 }

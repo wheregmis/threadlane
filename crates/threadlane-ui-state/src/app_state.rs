@@ -1874,6 +1874,7 @@ impl AppState {
             title,
             self.selected_model.clone(),
             self.reasoning_effort,
+            self.orchestrator_mode,
         )
     }
 
@@ -1884,6 +1885,7 @@ impl AppState {
         title: String,
         model: String,
         effort: ReasoningEffort,
+        orchestrator_mode: OrchestratorMode,
     ) -> Result<String, String> {
         let (api_key, _) = threadlane_coding_agent::credentials::provider_credentials(&model);
         if api_key.is_empty() && !threadlane_acp_engine::is_acp_model(&model) {
@@ -1891,9 +1893,15 @@ impl AppState {
                 "Connect the provider for `{model}` in Settings before starting the task."
             ));
         }
-        self.start_issue_work_with_prompt(work_dir, issue, title, model, effort, |state, prompt| {
-            state.send_prompt(prompt)
-        })
+        self.start_issue_work_with_prompt(
+            work_dir,
+            issue,
+            title,
+            model,
+            effort,
+            orchestrator_mode,
+            |state, prompt| state.send_prompt(prompt),
+        )
     }
 
     fn start_issue_work_with_prompt<F>(
@@ -1903,6 +1911,7 @@ impl AppState {
         title: String,
         model: String,
         effort: ReasoningEffort,
+        orchestrator_mode: OrchestratorMode,
         accept_prompt: F,
     ) -> Result<String, String>
     where
@@ -1991,6 +2000,12 @@ impl AppState {
             ("github_issue", github_issue),
             ("model", model.clone()),
             ("reasoning_effort", effort.label().to_string()),
+            (
+                "orchestrator_mode",
+                serde_json::to_string(&orchestrator_mode)
+                    .map(|mode| mode.trim_matches('"').to_string())
+                    .unwrap_or_else(|_| "normal".to_string()),
+            ),
             ("name", format!("#{} {title}", issue.number)),
         ] {
             if let Err(error) =
@@ -2017,6 +2032,22 @@ impl AppState {
         let selection = IssueWorkSelection::capture(self);
         self.selected_model = model.clone();
         self.reasoning_effort = effort;
+        // Persist the dialog's mode choice to the project before the new
+        // session's runtime is constructed so the first turn already routes
+        // through it; the composer dropdown refreshes from the same store.
+        let previous_mode =
+            threadlane_project::subagent_settings::load(&work_dir).orchestrator_mode;
+        if previous_mode != orchestrator_mode {
+            let mut settings = threadlane_project::subagent_settings::load(&work_dir);
+            settings.orchestrator_mode = orchestrator_mode;
+            if let Err(error) =
+                threadlane_project::subagent_settings::save(&work_dir, &settings)
+            {
+                selection.restore(self);
+                return Err(format!("Could not save session mode: {error}"));
+            }
+        }
+        self.orchestrator_mode = orchestrator_mode;
         self.select_session_with_persistence(work_dir.clone(), session_id.clone(), false);
         let publish = if threadlane_acp_engine::is_acp_model(&model) {
             "Use your available GitHub tools or gh pr create --draft to push the issue branch to origin and create the draft PR."
@@ -2030,6 +2061,11 @@ impl AppState {
         if let Err(error) = accept_prompt(self, prompt) {
             cleanup(&work_dir, &worktree_dir, &session_file);
             self.drop_session_runtime(&session_file);
+            if previous_mode != orchestrator_mode {
+                let mut settings = threadlane_project::subagent_settings::load(&work_dir);
+                settings.orchestrator_mode = previous_mode;
+                let _ = threadlane_project::subagent_settings::save(&work_dir, &settings);
+            }
             if let Some(project) = self
                 .projects
                 .iter_mut()

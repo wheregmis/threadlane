@@ -404,6 +404,7 @@ pub struct SessionDiscoveryCacheEntry {
 pub struct IssueWorkSelection {
     pub selected_model: String,
     pub reasoning_effort: threadlane_protocol::ReasoningEffort,
+    pub orchestrator_mode: threadlane_protocol::OrchestratorMode,
     pub active_work_dir: Option<PathBuf>,
     pub active_session_id: Option<String>,
     pub is_new_task: bool,
@@ -422,6 +423,7 @@ impl IssueWorkSelection {
         Self {
             selected_model: state.selected_model.clone(),
             reasoning_effort: state.reasoning_effort,
+            orchestrator_mode: state.orchestrator_mode,
             active_work_dir: state.active_work_dir.clone(),
             active_session_id: state.active_session_id.clone(),
             is_new_task: state.is_new_task,
@@ -439,6 +441,7 @@ impl IssueWorkSelection {
     pub fn restore(self, state: &mut AppState) {
         state.selected_model = self.selected_model;
         state.reasoning_effort = self.reasoning_effort;
+        state.orchestrator_mode = self.orchestrator_mode;
         state.active_work_dir = self.active_work_dir;
         state.active_session_id = self.active_session_id;
         state.is_new_task = self.is_new_task;
