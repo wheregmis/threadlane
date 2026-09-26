@@ -17,6 +17,33 @@ use crate::types::{
 };
 
 // Background readers share results; explicit refresh and mutations invalidate them.
+/// Identity of the origin repository for coalescing GitHub list requests.
+/// Falls back to the checkout path when origin is unavailable or unrecognized.
+pub fn github_list_repository_key(work_dir: &Path) -> String {
+    let fallback = repository_key(work_dir).to_string_lossy().into_owned();
+    let Ok(remote) = command(work_dir, &["config", "--get", "remote.origin.url"]) else {
+        return fallback;
+    };
+    let remote = remote.trim().trim_end_matches('/').trim_end_matches(".git");
+    let normalized = if let Some((_, path)) = remote.split_once("://") {
+        let path = path.split_once('@').map_or(path, |(_, rest)| rest);
+        path.split_once('/')
+    } else if let Some((_, path)) = remote.split_once('@') {
+        path.split_once(':')
+    } else {
+        None
+    };
+    match normalized {
+        Some((host, repo)) if !host.is_empty() && !repo.is_empty() => {
+            format!(
+                "{}/{}",
+                host.to_ascii_lowercase(),
+                repo.to_ascii_lowercase()
+            )
+        }
+        _ => fallback,
+    }
+}
 const PR_INSPECTION_TTL: Duration = Duration::from_secs(120);
 const GITHUB_RESPONSE_TTL: Duration = Duration::from_secs(300);
 
