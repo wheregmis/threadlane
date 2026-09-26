@@ -8477,6 +8477,7 @@ dependencies = [
  "hotpath",
  "tempfile",
  "threadlane-coding-agent",
+ "threadlane-project",
  "threadlane-ui-chat",
  "threadlane-ui-theme",
  "threadlane-ui-workspace",

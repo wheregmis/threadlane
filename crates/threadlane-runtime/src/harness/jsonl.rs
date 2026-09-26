@@ -1041,6 +1041,9 @@ fn append_json_line<T: serde::Serialize>(
     sync_policy: SyncPolicy,
 ) -> Result<(), ReduceError> {
     append_session_json_line_with_policy(path, value, sync_policy)
+        .inspect_err(|error| {
+            tracing::error!(session_file = %path.display(), %error, "session journal append failed");
+        })
         .map_err(|error| ReduceError::Storage(error.to_string()))
 }
 
@@ -1055,12 +1058,18 @@ fn append_atomic_batch_line(path: &Path, value: &AtomicBatchLine) -> Result<(), 
         .read(true)
         .append(true)
         .open(path)
+        .inspect_err(|error| {
+            tracing::error!(session_file = %path.display(), %error, "session journal open failed");
+        })
         .map_err(|error| ReduceError::Storage(error.to_string()))?;
     prepare_append_boundary(&mut file)
         .and_then(|_| file.write_all(ATOMIC_FRAME_SENTINEL.as_bytes()))
         .and_then(|_| file.write_all(&encoded))
         .and_then(|_| file.write_all(b"\n"))
         .and_then(|_| file.sync_all())
+        .inspect_err(|error| {
+            tracing::error!(session_file = %path.display(), %error, "session journal atomic append failed");
+        })
         .map_err(|error| ReduceError::Storage(error.to_string()))
 }
 
@@ -1274,6 +1283,8 @@ fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
         match serde_json::from_str(payload) {
             Ok(value) => values.push(value),
             Err(_error) if is_recoverable_atomic_fragment(line.as_bytes(), is_physical_eof) => {
+                tracing::warn!(session_file = %path.display(), line = index + 1,
+                    "skipping incomplete session journal frame; interruption cause unknown");
                 continue
             }
             Err(error) => return Err(invalid_line(path, index + 1, error)),
@@ -1283,6 +1294,7 @@ fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
 }
 
 fn invalid_line(path: &Path, line: usize, error: impl std::fmt::Display) -> io::Error {
+    tracing::error!(session_file = %path.display(), line, %error, "invalid session journal record");
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!("{} line {line}: {error}", path.display()),

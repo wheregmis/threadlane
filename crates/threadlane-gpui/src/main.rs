@@ -6,6 +6,7 @@ use threadlane_ui_theme::{init as init_theme, Assets};
 use threadlane_ui_workspace::{init as init_workspace, StartupView};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod diagnostics;
 mod process_environment;
 
 #[hotpath::main]
@@ -19,6 +20,19 @@ fn main() {
         }
         return;
     }
+    let diagnostics = diagnostics::ProcessLog::open()
+        .map(Some)
+        .unwrap_or_else(|error| {
+            eprintln!("Threadlane could not open persistent diagnostics: {error}");
+            None
+        });
+    let file_layer = diagnostics.as_ref().map(|log| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_thread_ids(true)
+            .with_thread_names(true)
+            .with_writer(log.writer())
+    });
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
             "info,gpui_component::text::format::markdown=error,gpui_base::text::format::markdown=error",
@@ -28,7 +42,10 @@ fn main() {
         .with_target(true)
         .with_thread_ids(true)
         .with_thread_names(true);
-    let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
+    let registry = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .with(file_layer);
     if std::env::var_os("THREADLANE_TRACE_JSON").is_some() {
         registry
             .with(tracing_subscriber::fmt::layer().json())
@@ -39,7 +56,17 @@ fn main() {
 
     let app = gpui_platform::application().with_assets(Assets);
 
+    let shutdown_log = diagnostics.clone();
     app.run(move |cx| {
+        if let Some(log) = shutdown_log {
+            cx.on_app_quit(move |_| {
+                if let Err(error) = log.shutdown_requested() {
+                    eprintln!("Threadlane could not record shutdown request: {error}");
+                }
+                async {}
+            })
+            .detach();
+        }
         gpui_component::init(cx);
         init_chat(cx);
         init_workspace(cx);
@@ -80,9 +107,14 @@ fn main() {
             {
                 // A window failure must report, not panic the spawn task:
                 // without a window there is nothing to render into.
-                eprintln!("Threadlane could not open its window: {error:?}");
+                tracing::error!(?error, "Threadlane could not open its window");
             }
         })
         .detach();
     });
+    if let Some(log) = diagnostics {
+        if let Err(error) = log.finish() {
+            eprintln!("Threadlane could not record normal shutdown: {error}");
+        }
+    }
 }
