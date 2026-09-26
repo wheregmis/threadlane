@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.28](https://github.com/wheregmis/threadlane/compare/v0.1.27...v0.1.28) (2026-09-26)
+
+
+### Bug Fixes
+
+* **tools,runtime,browser:** steer model away from verbatim-retry waste loops ([7a96180](https://github.com/wheregmis/threadlane/commit/7a961808dd01e26a543f23c09123d09907e6e56b))
+
 ## [0.1.27](https://github.com/wheregmis/threadlane/compare/v0.1.26...v0.1.27) (2026-09-26)
 
 
