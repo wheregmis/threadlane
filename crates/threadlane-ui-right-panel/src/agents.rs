@@ -1,6 +1,6 @@
 use gpui::*;
+use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::resizable::{ResizableState, resizable_panel, v_resizable};
 use gpui_component::scroll::{ScrollableElement, Scrollbar};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 use std::collections::HashSet;
@@ -16,7 +16,6 @@ pub struct AgentsPanel {
     transcript_run_id: Option<String>,
     transcript_count: usize,
     collapsed_tool_details: HashSet<String>,
-    overview_split: Entity<ResizableState>,
     _model_subscription: Subscription,
 }
 
@@ -30,7 +29,6 @@ impl AgentsPanel {
             transcript_run_id: None,
             transcript_count: 0,
             collapsed_tool_details: HashSet::new(),
-            overview_split: cx.new(|_| ResizableState::default()),
             _model_subscription: subscription,
         }
     }
@@ -376,6 +374,13 @@ impl AgentsPanel {
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    .children(item.messages.is_empty().then(|| {
+                        div()
+                            .p_4()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("No recorded activity for this agent yet. The prompt is shown above.")
+                    }))
                     .child(
                         list(
                             self.transcript_list.clone(),
@@ -400,6 +405,14 @@ impl AgentsPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let message = self.transcript_run_id.as_ref().and_then(|id| {
+            if id == "main" {
+                return self
+                    .model
+                    .read(cx)
+                    .messages
+                    .get(index.checked_sub(1)?)
+                    .cloned();
+            }
             self.model
                 .read(cx)
                 .active_subagents()
@@ -645,14 +658,15 @@ impl AgentsPanel {
 }
 
 impl Render for AgentsPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
+        let main_count = state.messages.len();
+        let main_working = state.is_generating;
         let mut subagents: Vec<_> = state
             .active_subagents()
             .iter()
             .map(|item| {
-                let preview = Self::latest_activity(item);
                 let metadata = SubagentActivityInfo {
                     batch_run_id: item.batch_run_id,
                     task_index: item.task_index,
@@ -662,31 +676,31 @@ impl Render for AgentsPanel {
                     task: item.task.clone(),
                     model: item.model.clone(),
                     status: item.status,
-                    messages: Vec::new(),
+                    messages: item.messages.clone(),
                     isolation: item.isolation.clone(),
                     error: item.error.clone(),
                 };
-                (metadata, preview, item.messages.len())
+                (metadata, item.messages.len())
             })
             .collect();
-        drop(state);
         subagents.sort_by_key(|item| Self::rank(item.0.status));
         let selected_id = self
             .selected_run_id
             .clone()
-            .filter(|id| subagents.iter().any(|item| Self::run_id(&item.0) == *id))
-            .or_else(|| {
-                subagents
-                    .iter()
-                    .find(|item| item.0.status == SubagentActivityStatus::Failed)
-                    .or_else(|| subagents.first())
-                    .map(|item| Self::run_id(&item.0))
-            });
-        let selected = selected_id
-            .as_ref()
-            .and_then(|id| subagents.iter().find(|item| Self::run_id(&item.0) == *id))
-            .map(|(item, _, count)| (item.clone(), *count));
-        let count = selected.as_ref().map_or(0, |(_, count)| count + 1);
+            .filter(|id| {
+                id == "main" || subagents.iter().any(|(item, _)| Self::run_id(item) == *id)
+            })
+            .unwrap_or_else(|| "main".to_string());
+        let selected = subagents
+            .iter()
+            .find(|(item, _)| Self::run_id(item) == selected_id)
+            .map(|(item, count)| (item.clone(), *count));
+        let count = if selected_id == "main" {
+            main_count + 1
+        } else {
+            selected.as_ref().map_or(0, |(_, count)| count + 1)
+        };
+        let selected_id = Some(selected_id);
         if self.transcript_run_id != selected_id {
             self.transcript_list.reset(count);
             self.transcript_run_id = selected_id.clone();
@@ -703,126 +717,103 @@ impl Render for AgentsPanel {
         self.transcript_count = count;
         self.selected_run_id = selected_id.clone();
 
-        let mut rows = Vec::new();
-        let mut previous_group = None;
-        for (item, preview, _) in &subagents {
-            let group = Self::group(item.status);
-            if previous_group != Some(group) {
-                rows.push(
-                    div()
-                        .px_3()
-                        .pt_3()
-                        .pb_1()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.muted_foreground)
-                        .child(group)
-                        .into_any_element(),
-                );
-                previous_group = Some(group);
-            }
-            let id = Self::run_id(item);
-            let select_id = id.clone();
-            let selected = selected_id.as_deref() == Some(id.as_str());
-            let color = match item.status {
-                SubagentActivityStatus::Failed => theme.danger,
-                SubagentActivityStatus::Running => theme.primary,
-                _ => theme.muted_foreground,
-            };
-            rows.push(
-                Button::new(SharedString::from(format!("agents-panel-row-{id}")))
+        let main_selected = selected_id.as_deref() == Some("main");
+        let tabs = div()
+            .flex()
+            .flex_none()
+            .gap_1()
+            .px_2()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .overflow_x_scrollbar()
+            .child(
+                Button::new("agents-profile-main")
+                    .ghost()
+                    .selected(main_selected)
+                    .tooltip(if main_working {
+                        "Main agent · Working"
+                    } else {
+                        "Main agent · Ready"
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1()
+                            .child(Avatar::new().name("Main").small())
+                            .child(div().text_xs().child("Main")),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.selected_run_id = Some("main".to_string());
+                        cx.notify();
+                    })),
+            )
+            .children(subagents.iter().map(|(item, _)| {
+                let id = Self::run_id(item);
+                let select_id = id.clone();
+                let selected = selected_id.as_deref() == Some(id.as_str());
+                let name = item.agent.clone();
+                Button::new(SharedString::from(format!("agents-profile-{id}")))
                     .ghost()
                     .selected(selected)
-                    .w_full()
-                    .h_auto()
-                    .px_3()
-                    .py_2()
+                    .tooltip(format!(
+                        "{} · {}\n{}",
+                        name,
+                        Self::status(item.status),
+                        item.task
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1()
+                            .child(Avatar::new().name(name.clone()).small())
+                            .child(div().text_xs().max_w(rems(5.0)).truncate().child(name)),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected_run_id = Some(select_id.clone());
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .truncate()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(item.agent.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(color)
-                                            .child(Self::status(item.status)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(theme.foreground)
-                                    .child(item.task.clone()),
-                            )
-                            .children(preview.clone().map(|activity| {
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(activity)
-                            })),
-                    )
-                    .into_any_element(),
-            );
-        }
-
-        let overview = div()
-            .size_full()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .children(rows)
-            .children(subagents.is_empty().then(|| {
-                div()
-                    .p_6()
-                    .text_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("No delegated agents in this session")
             }));
-        let detail = selected.map(|(item, _)| self.render_detail(&item, cx));
-        let rem = window.rem_size();
+        let profile = if let Some((item, _)) = selected {
+            self.render_detail(&item, cx).into_any_element()
+        } else {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.render_main_agent(cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(
+                            list(
+                                self.transcript_list.clone(),
+                                cx.processor(Self::render_transcript_row),
+                            )
+                            .size_full()
+                            .with_sizing_behavior(ListSizingBehavior::Auto),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .child(Scrollbar::vertical(&self.transcript_list)),
+                        ),
+                )
+                .into_any_element()
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
-            .child(self.render_main_agent(cx))
-            .child(
-                div().flex_1().min_h_0().child(
-                    v_resizable("agents-overview-detail-split")
-                        .with_state(&self.overview_split)
-                        .child(
-                            resizable_panel()
-                                .size(rem * 12.0)
-                                .size_range(rem * 6.0..Pixels::MAX)
-                                .child(overview),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size_range(rem * 8.0..Pixels::MAX)
-                                .child(div().size_full().children(detail)),
-                        ),
-                ),
-            )
+            .child(tabs)
+            .child(div().flex_1().min_h_0().child(profile))
     }
 }
 
