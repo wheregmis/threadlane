@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.27](https://github.com/wheregmis/threadlane/compare/v0.1.26...v0.1.27) (2026-09-26)
+
+
+### Features
+
+* Add persistent process diagnostics ([771fa56](https://github.com/wheregmis/threadlane/commit/771fa568260ca71ccb964a7c80028e8e9dab30d0))
+
+
+### Bug Fixes
+
+* expose create_automation in the filtered tool schema ([4e67e52](https://github.com/wheregmis/threadlane/commit/4e67e52879f3e485a8c4baf1be7a0f2764bd5334))
+* **runtime:** expose all registered tools to the model by default ([25c1668](https://github.com/wheregmis/threadlane/commit/25c1668e67babd6ffb00093cab7f15d010efc871))
+* **ui:** Preserve agent activity panel space ([942f162](https://github.com/wheregmis/threadlane/commit/942f162c049a3673bc035e2fcba9428634b28ae8))
+
 ## [0.1.26](https://github.com/wheregmis/threadlane/compare/v0.1.25...v0.1.26) (2026-09-26)
 
 
