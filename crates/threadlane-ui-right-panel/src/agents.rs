@@ -789,7 +789,7 @@ impl Render for AgentsPanel {
             .px_3()
             .pt_2()
             .pb_2()
-            .min_h(rems(4.75))
+            .min_h(rems(5.5))
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.title_bar.opacity(0.35))
@@ -797,6 +797,7 @@ impl Render for AgentsPanel {
             .child(
                 Button::new("agents-profile-main")
                     .ghost()
+                    .h(rems(3.5))
                     .selected(main_selected)
                     .tooltip(if main_working {
                         "Main agent · Working"
@@ -862,6 +863,7 @@ impl Render for AgentsPanel {
                 let dot = Self::status_color(item.status, cx);
                 Button::new(SharedString::from(format!("agents-profile-{id}")))
                     .ghost()
+                    .h(rems(3.5))
                     .selected(selected)
                     .tooltip(format!(
                         "{} · {}\n{}",
@@ -975,7 +977,7 @@ impl Render for AgentsPanel {
             .flex()
             .flex_col()
             .child(tabs)
-            .child(div().flex_1().min_h_0().child(profile))
+            .child(div().flex_1().min_h_0().flex().flex_col().child(profile))
     }
 }
 
