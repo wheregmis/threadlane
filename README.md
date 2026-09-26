@@ -95,7 +95,7 @@ Automations run while Threadlane is open and the computer is awake. After sleep 
 
 Git projects default to a fresh worktree per run. Choosing the project checkout permits changes there. Failed worktree creation never falls back to the main checkout. **Pause** stops future scheduled dispatch; **Cancel run** stops the current run. Deleting a definition preserves chats, run history, and worktrees. Runs stop after one hour of active execution, and three consecutive failures pause the automation for review.
 
-Definitions and run metadata live under `~/.threadlane/automations`; transcripts use the normal session storage. A file lock allows one Threadlane process to own the scheduler. Ambiguous execution after a crash is marked interrupted and requires a new explicit run rather than replaying possible side effects. Notifications appear in the app for requests and failures, with an option for every completion.
+Definitions and run metadata live under `~/.threadlane/automations`; transcripts use the normal session storage. History keeps the newest 200 reviewed, finished runs per automation, plus every active or unreviewed run; pruning metadata never deletes chats or worktrees. A file lock allows one Threadlane process to own the scheduler. Ambiguous execution after a crash is marked interrupted and requires a new explicit run rather than replaying possible side effects. Notifications appear in the app for requests and failures, with an option for every completion.
 
 ## Common commands
 

@@ -12,6 +12,40 @@ use threadlane_runtime::harness::{
 };
 
 #[test]
+fn automation_projection_refreshes_each_changed_project_once() {
+    let mut state = AppState::load_from_registry(vec![]);
+    let (tx, rx) = mpsc::channel();
+    state.session_refresh_tx = tx;
+    let definition = threadlane_automation::Definition {
+        id: "test".into(), revision: 1, name: "Test".into(), prompt: "Test".into(),
+        project: PathBuf::from("/project-a"), model: "model".into(), effort: "medium".into(),
+        worktree: false, schedule: threadlane_automation::Schedule::Manual,
+        enabled: false, notify_all: false, anchor: 0, next_at: None, failures: 0,
+        paused_reason: None,
+    };
+    let mut projection = crate::automation::Projection::default();
+    for n in 0..4 {
+        let mut definition = definition.clone();
+        if n == 3 { definition.project = PathBuf::from("/project-b"); }
+        projection.snapshot.runs.push(threadlane_automation::Run {
+            id: n.to_string(), definition, scheduled_for: None, created_at: n,
+            finished_at: Some(n), status: threadlane_automation::RunStatus::Succeeded,
+            session_id: format!("automation_{n}"), session_file: None, error: None, reviewed: false,
+        });
+    }
+    state.apply_automation_projection(projection.clone());
+    let projects: Vec<_> = rx.try_iter().map(|(_, path)| path).collect();
+    assert_eq!(projects.len(), 2);
+    assert_eq!(projects.into_iter().collect::<HashSet<_>>(), HashSet::from([PathBuf::from("/project-a"), PathBuf::from("/project-b")]));
+    state.apply_automation_projection(projection.clone());
+    assert!(rx.try_recv().is_err());
+    projection.snapshot.runs[0].session_file = Some(PathBuf::from("/chat.jsonl"));
+    projection.snapshot.runs[1].status = threadlane_automation::RunStatus::Failed;
+    state.apply_automation_projection(projection);
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![(0, PathBuf::from("/project-a"))]);
+}
+
+#[test]
 fn fusion_project_model_overrides_old_fast_role() {
     let dir = tempfile::tempdir().unwrap();
     let mut settings = threadlane_project::subagent_settings::SubagentSettings::default();

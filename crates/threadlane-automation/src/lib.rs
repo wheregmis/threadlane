@@ -349,9 +349,20 @@ impl Store {
         &mut self,
         change: impl FnOnce(&mut Snapshot) -> Result<T, String>,
     ) -> Result<T, String> {
-        // ponytail: whole-history snapshots keep atomic claims simple; use an indexed store if run history makes writes costly.
+        // ponytail: unreviewed history remains unbounded; use an indexed store if it makes writes costly.
         let mut next = self.snapshot.clone();
         let result = change(&mut next)?;
+        let mut kept = std::collections::HashMap::new();
+        next.runs.reverse();
+        next.runs.retain(|run| {
+            if run.status.active() || !run.reviewed {
+                return true;
+            }
+            let count = kept.entry(run.definition.id.clone()).or_insert(0);
+            *count += 1;
+            *count <= 200
+        });
+        next.runs.reverse();
         next.revision += 1;
         let mut file = tempfile::NamedTempFile::new_in(&self.root).map_err(|e| e.to_string())?;
         serde_json::to_writer(&mut file, &next).map_err(|e| e.to_string())?;
@@ -377,6 +388,11 @@ impl Store {
                 }
                 definition.revision += 1;
                 definition.failures = old.failures;
+                definition.paused_reason = old.paused_reason.clone();
+                if old.enabled != definition.enabled {
+                    definition.failures = 0;
+                    definition.paused_reason = None;
+                }
                 if old.schedule == definition.schedule && old.enabled == definition.enabled {
                     definition.anchor = old.anchor;
                     definition.next_at = old.next_at;
@@ -717,6 +733,61 @@ mod tests {
         assert!(!store.snapshot().definitions[0].enabled);
         assert!(store.snapshot().definitions[0].paused_reason.is_some());
         assert_eq!(store.snapshot().runs[0].id, queued);
+        let mut edit = store.snapshot().definitions[0].clone();
+        edit.name = "Renamed".into();
+        edit.paused_reason = None;
+        store.save(edit, 1300).unwrap();
+        assert_eq!(store.snapshot().definitions[0].failures, 3);
+        assert!(store.snapshot().definitions[0].paused_reason.is_some());
+        let mut edit = store.snapshot().definitions[0].clone();
+        edit.enabled = true;
+        store.save(edit, 1400).unwrap();
+        assert_eq!(store.snapshot().definitions[0].failures, 0);
+        assert!(store.snapshot().definitions[0].paused_reason.is_none());
+        assert_eq!(store.snapshot().definitions[0].next_at, Some(1460));
+        let run = store.enqueue("test", true, 1460).unwrap();
+        store.update_run(&run, RunStatus::Failed, None, None, 1461).unwrap();
+        assert!(store.snapshot().definitions[0].enabled);
+    }
+
+    #[test]
+    fn retention_preserves_active_unreviewed_and_newest_reviewed_runs_per_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        store.save(definition(), 0).unwrap();
+        store.enqueue("test", false, 1).unwrap();
+        let template = store.snapshot().runs[0].clone();
+        store.commit(|state| {
+            state.runs.clear();
+            for project in ["test", "deleted"] {
+                for n in 0..205 {
+                    let mut run = template.clone();
+                    run.id = format!("{project}-{n}");
+                    run.session_id = format!("automation_{}", run.id);
+                    run.definition.id = project.into();
+                    run.status = if n == 0 { RunStatus::Running } else { RunStatus::Succeeded };
+                    run.reviewed = n != 1;
+                    state.runs.push(run);
+                }
+            }
+            Ok(())
+        }).unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        let expected: Vec<_> = ["test", "deleted"].into_iter()
+            .flat_map(|project| [0, 1].into_iter().chain(5..205)
+                .map(move |n| format!("{project}-{n}"))).collect();
+        assert_eq!(store.snapshot().runs.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn save_rejects_external_agent_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let mut definition = definition();
+        definition.model = "acp/test".into();
+        assert!(store.save(definition, 0).unwrap_err().contains("external agents"));
+        assert!(store.snapshot().definitions.is_empty());
     }
 
     #[test]

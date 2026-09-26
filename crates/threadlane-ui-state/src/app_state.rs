@@ -448,11 +448,14 @@ impl AppState {
             let path = runtime.session_file().to_path_buf();
             if !self.session_runtimes.contains_key(&path) { self.register_session_runtime(path, runtime.clone()); }
         }
-        for run in &projection.snapshot.runs {
-            if self.automations.snapshot.runs.iter().find(|old| old.id == run.id)
-                .is_none_or(|old| old.status != run.status || old.session_file != run.session_file) {
-                self.request_session_refresh(&run.definition.project);
-            }
+        let previous: HashMap<_, _> = self.automations.snapshot.runs.iter()
+            .map(|run| (&run.id, run)).collect();
+        let changed: HashSet<_> = projection.snapshot.runs.iter()
+            .filter(|run| previous.get(&run.id)
+                .is_none_or(|old| old.status != run.status || old.session_file != run.session_file))
+            .map(|run| &run.definition.project).collect();
+        for project in changed {
+            self.request_session_refresh(project);
         }
         self.pending_permissions.extend(projection.permissions.clone());
         self.pending_questions.extend(projection.questions.clone());

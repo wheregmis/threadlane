@@ -186,9 +186,9 @@ impl Actor {
             self.store.update_run(
                 &run.id,
                 status,
-                Some(
+                (status != RunStatus::Succeeded).then(||
                     "Recovered after Threadlane stopped. Review the chat before running again."
-                        .into(),
+                        .into()
                 ),
                 None,
                 now(),
@@ -542,8 +542,9 @@ impl Actor {
             return Ok(());
         };
         active.completion = Some((status, error.clone()));
+        let mut error = error;
         if let Some(runtime) = &active.runtime {
-            record_outcome(
+            if let Err(write_error) = record_outcome(
                 runtime,
                 match status {
                     RunStatus::Succeeded => "succeeded",
@@ -551,7 +552,13 @@ impl Actor {
                     RunStatus::Interrupted => "interrupted",
                     _ => "failed",
                 },
-            )?;
+            ) {
+                let message = format!("Could not record outcome: {write_error}");
+                error = Some(match error {
+                    Some(error) => format!("{error}; {message}"),
+                    None => message,
+                });
+            }
         }
         self.store.update_run(id, status, error, None, now())?;
         if let Some(runtime) = &active.runtime {
@@ -776,6 +783,47 @@ mod tests {
         service.store.enqueue("automation-test", false, 2).unwrap();
         service.recover().unwrap();
         assert_eq!(service.store.snapshot().runs[1].status, RunStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn outcome_write_failure_releases_dispatch_and_successful_recovery_has_no_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let mut actor = make_actor(&root.join("automations"));
+        actor.store.save(definition(&root), 0).unwrap();
+        let id = actor.store.enqueue("automation-test", false, 1).unwrap();
+        let session = root.join("session.jsonl");
+        let options = crate::projection::coding_agent_options(
+            root.clone(), session.clone(), "gpt-4o".into(),
+            Default::default(), Default::default(),
+        );
+        let runtime = tokio::task::spawn_blocking(move || {
+            threadlane_coding_agent::controller::test_support::session_controller_with_provider(
+                options, Arc::new(Provider::default()),
+            )
+        }).await.unwrap();
+        actor.store.update_run(&id, RunStatus::Running, None, Some(session.clone()), 1).unwrap();
+        record_outcome(&runtime, "succeeded").unwrap();
+        actor.recover().unwrap();
+        assert_eq!(actor.store.snapshot().runs[0].status, RunStatus::Succeeded);
+        assert!(actor.store.snapshot().runs[0].error.is_none());
+
+        let id = actor.store.enqueue("automation-test", false, 2).unwrap();
+        actor.active = Some(Active {
+            run: actor.store.snapshot().runs[1].clone(),
+            runtime: Some(runtime), elapsed: Duration::ZERO,
+            cancellation: None, completion: None, error: None,
+        });
+        // A broken transcript must not prevent the independent automation store from settling.
+        std::fs::rename(&session, root.join("saved-session.jsonl")).unwrap();
+        std::fs::create_dir(&session).unwrap();
+        actor.finish(&id, RunStatus::Failed, Some("Provider failed".into())).unwrap();
+        assert!(actor.active.is_none());
+        let error = actor.store.snapshot().runs[1].error.as_deref().unwrap();
+        assert!(error.starts_with("Provider failed; Could not record outcome:"));
+        actor.store.enqueue("automation-test", false, 3).unwrap();
+        actor.schedule().unwrap();
+        assert!(actor.active.is_some());
     }
 
     #[tokio::test]
