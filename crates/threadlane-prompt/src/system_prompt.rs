@@ -183,6 +183,11 @@ pub fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
                 );
             }
         }
+        if available_tool_names.contains("browser_tabs") {
+            add_tool_guideline(
+                "Use `browser_tabs` to list, open, select, or close embedded browser tabs by stable ID. Other browser tools act on the selected tab. Run tab selection and subsequent page operations sequentially, and take a fresh snapshot after switching tabs; never reuse refs from another tab.",
+            );
+        }
         if available_tool_names.contains("browser_navigate") {
             add_tool_guideline(
                 "To drive the embedded browser panel: open pages with `browser_navigate`, read the page with `browser_snapshot`, then operate elements with `browser_act` using snapshot refs. Refs expire on re-render, so take a fresh snapshot when an act reports a stale ref. Prefer snapshot/act over `browser_evaluate_script`. The panel is visible to the user, so narrate what you open.",
@@ -398,6 +403,10 @@ mod tests {
         let with_browser = build(&[tool("browser_navigate", "navigate")]);
         assert!(with_browser.contains("browser_snapshot"));
         assert!(with_browser.contains("browser_act"));
+        assert!(!with_browser.contains("browser_tabs"));
+        let with_tabs = build(&[tool("browser_tabs", "tabs")]);
+        assert!(with_tabs.contains("stable ID"));
+        assert!(with_tabs.contains("sequentially"));
     }
 
     #[test]

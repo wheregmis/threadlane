@@ -139,11 +139,12 @@ impl RightPanelView {
         // Script evaluations park here on a oneshot without blocking the UI;
         // the session side bounds every round-trip with its own timeout.
         if let Some(mut browser_rx) = model.read(cx).browser_bridge.take_receiver() {
-            cx.spawn(async move |this, cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 while let Some(request) = browser_rx.recv().await {
                     let step = this
-                        .update(cx, |this, cx| {
-                            start_browser_request(this, request.command, cx)
+                        .update_in(cx, |this, window, cx| {
+                            this.ensure_browser(window, cx);
+                            start_browser_request(this, request.command, window, cx)
                         })
                         .unwrap_or_else(|_| {
                             BrowserReply::Ready(Err(
@@ -1329,11 +1330,12 @@ impl RightPanelView {
     fn apply_browser_command(
         &mut self,
         command: threadlane_protocol::browser::BrowserCommand,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (command, cx);
+            let _ = (command, window, cx);
             return Err("The embedded browser is available on macOS only.".to_string());
         }
         #[cfg(target_os = "macos")]
@@ -1344,6 +1346,44 @@ impl RightPanelView {
                 return Err("The browser panel is not ready.".to_string());
             };
             match command {
+                BrowserCommand::Tabs { action } => {
+                    use threadlane_protocol::browser::BrowserTabAction;
+                    browser.update(cx, |browser, cx| -> Result<(), String> {
+                        match action {
+                            BrowserTabAction::List => {}
+                            BrowserTabAction::Open { url } => {
+                                let url = match resolve_address(&url) {
+                                    Some(AddressTarget::Url(url)) => url,
+                                    Some(AddressTarget::Search(query)) => search_url(&query),
+                                    None => return Err("`browser_tabs` open requires a non-empty `url`.".into()),
+                                };
+                                browser.open_tab(&url, window, cx);
+                            }
+                            BrowserTabAction::Select { tab_id } | BrowserTabAction::Close { tab_id } => {
+                                if !browser.tabs(cx).iter().any(|(id, _)| *id == tab_id) {
+                                    return Err(format!("Browser tab {tab_id} does not exist. Use browser_tabs list to get current IDs."));
+                                }
+                                if matches!(action, BrowserTabAction::Select { .. }) {
+                                    browser.switch_tab(tab_id, window, cx);
+                                } else {
+                                    browser.close_tab(tab_id, window, cx);
+                                }
+                            }
+                        }
+                        Ok(())
+                    })?;
+                    self.open_surface(Surface::Browser, cx);
+                    let browser = browser.read(cx);
+                    let tabs: Vec<_> = browser
+                        .tabs(cx)
+                        .into_iter()
+                        .map(|(id, url)| serde_json::json!({"tab_id": id, "url": url}))
+                        .collect();
+                    Ok(serde_json::json!({
+                        "active_tab_id": browser.active_tab_id(),
+                        "tabs": tabs,
+                    }).to_string())
+                }
                 BrowserCommand::Navigate { url } => {
                     let final_url = match resolve_address(&url) {
                         None => {
@@ -5418,6 +5458,7 @@ const MAX_BROWSER_EVAL_CHARS: usize = 8_000;
 fn start_browser_request(
     panel: &mut RightPanelView,
     command: threadlane_protocol::browser::BrowserCommand,
+    window: &mut Window,
     cx: &mut Context<RightPanelView>,
 ) -> BrowserReply {
     use threadlane_protocol::browser::BrowserCommand;
@@ -5499,7 +5540,7 @@ fn start_browser_request(
                     Ok(rx) => BrowserReply::PendingEval(rx),
                     Err(error) => BrowserReply::Ready(Err(error)),
                 },
-                None => BrowserReply::Ready(panel.apply_browser_command(command, cx)),
+                None => BrowserReply::Ready(panel.apply_browser_command(command, window, cx)),
             }
         }
     }

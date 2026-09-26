@@ -31,6 +31,7 @@ pub const BROWSER_EVALUATE_TOOL: &str = "browser_evaluate_script";
 pub const BROWSER_SCREENSHOT_TOOL: &str = "browser_screenshot";
 pub const BROWSER_CONSOLE_LOGS_TOOL: &str = "browser_console_logs";
 pub const BROWSER_WAIT_TOOL: &str = "browser_wait";
+pub const BROWSER_TABS_TOOL: &str = "browser_tabs";
 
 const BROWSER_ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -39,6 +40,9 @@ pub(crate) const BROWSER_UNAVAILABLE: &str = "The embedded browser is unavailabl
 /// A single intent for the panel's browser view.
 #[derive(Debug)]
 pub enum BrowserCommand {
+    Tabs {
+        action: BrowserTabAction,
+    },
     Navigate {
         url: String,
     },
@@ -65,6 +69,15 @@ pub enum BrowserCommand {
         text: Option<String>,
         timeout_ms: u64,
     },
+}
+
+/// Tab operations use stable IDs, never positions in the tab strip.
+#[derive(Debug)]
+pub enum BrowserTabAction {
+    List,
+    Open { url: String },
+    Select { tab_id: usize },
+    Close { tab_id: usize },
 }
 
 /// Addressable element for [`BrowserCommand::Act`]: a `browser_snapshot` ref

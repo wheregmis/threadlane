@@ -446,6 +446,7 @@ const CORE_TOOL_NAMES: &[&str] = &[
     // Embedded browser panel (`threadlane-browser`). The tools
     // report a helpful error when no panel is attached, so they are safe to
     // advertise unconditionally.
+    "browser_tabs",
     "browser_navigate",
     "browser_back",
     "browser_reload",
@@ -1679,6 +1680,8 @@ mod tests {
         let (event_tx, _) = broadcast::channel(8);
         let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
 
+        assert!(CORE_TOOL_NAMES.contains(&"browser_tabs"));
+        assert!(!CACHEABLE_TOOLS.contains(&"browser_tabs"));
         // Default has core_tool_schema_mode: true
         assert!(dispatcher.core_tool_schema_mode);
         let defs = dispatcher.configured_tool_definitions();
