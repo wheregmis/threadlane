@@ -1686,7 +1686,7 @@ impl SidebarView {
         div().flex_none().px_3().py_2().child(
             Button::new("sidebar-settings")
                 .debug_selector(|| "sidebar-settings".into())
-                .accessibility_label("Settings")
+                .accessibility_label("Open settings")
                 .tooltip("Open settings")
                 .child(
                     div()
