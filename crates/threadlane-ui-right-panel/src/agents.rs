@@ -690,7 +690,12 @@ impl Render for AgentsPanel {
             .filter(|id| {
                 id == "main" || subagents.iter().any(|(item, _)| Self::run_id(item) == *id)
             })
-            .unwrap_or_else(|| "main".to_string());
+            .unwrap_or_else(|| {
+                subagents
+                    .first()
+                    .map(|(item, _)| Self::run_id(item))
+                    .unwrap_or_else(|| "main".to_string())
+            });
         let selected = subagents
             .iter()
             .find(|(item, _)| Self::run_id(item) == selected_id)
@@ -754,7 +759,15 @@ impl Render for AgentsPanel {
                 let id = Self::run_id(item);
                 let select_id = id.clone();
                 let selected = selected_id.as_deref() == Some(id.as_str());
-                let name = item.agent.clone();
+                let duplicate_count = subagents
+                    .iter()
+                    .filter(|(other, _)| other.agent == item.agent)
+                    .count();
+                let name = if duplicate_count > 1 {
+                    format!("{} {}", item.agent, item.task_index + 1)
+                } else {
+                    item.agent.clone()
+                };
                 Button::new(SharedString::from(format!("agents-profile-{id}")))
                     .ghost()
                     .selected(selected)
@@ -791,20 +804,27 @@ impl Render for AgentsPanel {
                         .flex_1()
                         .min_h_0()
                         .relative()
-                        .child(
+                        .children((main_count == 0).then(|| {
+                            div()
+                                .p_4()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("No main-agent activity recorded yet. Select an agent above to inspect its work.")
+                        }))
+                        .children((main_count > 0).then(|| {
                             list(
                                 self.transcript_list.clone(),
                                 cx.processor(Self::render_transcript_row),
                             )
                             .size_full()
-                            .with_sizing_behavior(ListSizingBehavior::Auto),
-                        )
-                        .child(
+                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                        }))
+                        .children((main_count > 0).then(|| {
                             div()
                                 .absolute()
                                 .inset_0()
-                                .child(Scrollbar::vertical(&self.transcript_list)),
-                        ),
+                                .child(Scrollbar::vertical(&self.transcript_list))
+                        })),
                 )
                 .into_any_element()
         };
