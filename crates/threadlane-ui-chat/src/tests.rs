@@ -421,8 +421,7 @@ use super::{
     extend_trajectory_rows, extend_trajectory_summary, extract_markdown_segments,
     format_trajectory_raw_json, grouped_tool_activities, is_terminal_runnable_language,
     markdown_cache_exceeded, next_chat_stream_batch, normalize_terminal_command,
-    adjacent_index, reconcile_trajectory_entries, reconcile_trajectory_entries_by_epoch,
-    subagent_group_label, subagent_popover_counts, subagent_status_rank,
+    reconcile_trajectory_entries, reconcile_trajectory_entries_by_epoch, subagent_popover_counts,
     summarize_trajectory, ChatLinkTarget, ContextMeterContext, ContextMeterMetrics,
     MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryInspectorTab, TrajectoryMode,
     TrajectoryRenderCache, TrajectoryRow, TrajectorySummary,
@@ -688,41 +687,6 @@ fn subagent_popover_counts_items_without_owning_them() {
         ]),
         Some((3, 2))
     );
-}
-
-#[test]
-fn subagent_status_rank_keeps_live_work_first() {
-    let mut statuses = [
-        SubagentActivityStatus::Completed,
-        SubagentActivityStatus::Queued,
-        SubagentActivityStatus::Failed,
-        SubagentActivityStatus::Running,
-    ];
-    statuses.sort_by_key(|status| subagent_status_rank(*status));
-    assert_eq!(
-        statuses,
-        [
-            SubagentActivityStatus::Running,
-            SubagentActivityStatus::Queued,
-            SubagentActivityStatus::Failed,
-            SubagentActivityStatus::Completed,
-        ]
-    );
-}
-
-#[test]
-fn subagent_groups_and_keyboard_navigation_are_stable() {
-    assert_eq!(
-        subagent_group_label(SubagentActivityStatus::Failed),
-        "Needs attention"
-    );
-    assert_eq!(
-        subagent_group_label(SubagentActivityStatus::Completed),
-        "Finished"
-    );
-    assert_eq!(adjacent_index(4, 1, 1), 2);
-    assert_eq!(adjacent_index(4, 0, -1), 0);
-    assert_eq!(adjacent_index(4, 3, 1), 3);
 }
 
 #[test]

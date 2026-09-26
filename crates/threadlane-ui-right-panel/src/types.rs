@@ -97,6 +97,7 @@ pub enum ReviewViewMode {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Surface {
+    Agents,
     Review,
     Files,
     Browser,
@@ -104,7 +105,7 @@ pub enum Surface {
 
 impl Surface {
     pub(crate) fn all() -> Vec<Self> {
-        let mut surfaces = vec![Self::Review, Self::Files];
+        let mut surfaces = vec![Self::Agents, Self::Review, Self::Files];
         #[cfg(target_os = "macos")]
         surfaces.push(Self::Browser);
         surfaces
@@ -112,6 +113,7 @@ impl Surface {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::Agents => "Agents",
             Self::Review => "Review",
             Self::Files => "Files",
             Self::Browser => "Browser",
@@ -120,6 +122,7 @@ impl Surface {
 
     pub(crate) fn icon(self) -> IconName {
         match self {
+            Self::Agents => IconName::Bot,
             Self::Review => IconName::File,
             Self::Files => IconName::Folder,
             Self::Browser => IconName::Globe,

@@ -1,7 +1,6 @@
 use gpui::*;
 use gpui_component::button::Toggle;
 use gpui_component::Selectable;
-
 use threadlane_ui_state::SubagentActivityStatus;
 
 pub const CONTEXT_METER_WARN_PCT: f64 = 80.0;
@@ -61,29 +60,6 @@ impl RenderOnce for ContextMeterTrigger {
     }
 }
 
-#[derive(IntoElement)]
-pub struct SubagentPopoverTrigger {
-    pub toggle: Toggle,
-    pub selected: bool,
-}
-
-impl Selectable for SubagentPopoverTrigger {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.selected
-    }
-}
-
-impl RenderOnce for SubagentPopoverTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        self.toggle.checked(self.selected)
-    }
-}
-
 pub fn subagent_popover_counts(
     statuses: impl IntoIterator<Item = SubagentActivityStatus>,
 ) -> Option<(usize, usize)> {
@@ -100,31 +76,6 @@ pub fn subagent_popover_counts(
             )
         });
     (count > 0).then_some((count, active_count))
-}
-
-pub fn subagent_status_rank(status: SubagentActivityStatus) -> u8 {
-    match status {
-        SubagentActivityStatus::Running => 0,
-        SubagentActivityStatus::Queued => 1,
-        SubagentActivityStatus::Failed => 2,
-        SubagentActivityStatus::Cancelled => 3,
-        SubagentActivityStatus::Completed => 4,
-    }
-}
-
-pub fn subagent_group_label(status: SubagentActivityStatus) -> &'static str {
-    match status {
-        SubagentActivityStatus::Running | SubagentActivityStatus::Queued => "Working",
-        SubagentActivityStatus::Failed | SubagentActivityStatus::Cancelled => "Needs attention",
-        SubagentActivityStatus::Completed => "Finished",
-    }
-}
-
-pub fn adjacent_index(len: usize, current: usize, offset: isize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    current.saturating_add_signed(offset).min(len - 1)
 }
 
 pub fn format_meter_tokens(tokens: u64) -> String {

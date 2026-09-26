@@ -569,6 +569,18 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn open_agents_panel(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |state, cx| {
+            state.workspace_page = WorkspacePage::Chat;
+            cx.notify();
+        });
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_surface(threadlane_ui_right_panel::Surface::Agents, cx);
+        });
+        cx.notify();
+    }
+
     fn open_git_branches(&mut self, cx: &mut Context<Self>) {
         self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
@@ -2482,6 +2494,9 @@ impl Render for WorkspaceView {
                     panel.open_surface(threadlane_ui_right_panel::Surface::Files, cx);
                 });
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &threadlane_ui_chat::OpenWorkspaceAgents, _, cx| {
+                this.open_agents_panel(cx);
             }))
             .on_action(cx.listener(Self::toggle_terminal_action))
             .on_action(cx.listener(Self::begin_new_task_action))
