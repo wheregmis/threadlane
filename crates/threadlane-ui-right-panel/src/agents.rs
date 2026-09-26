@@ -237,8 +237,10 @@ impl AgentsPanel {
             .children(message.tool_activities.iter().enumerate().map(
                 |(activity_index, activity)| {
                     let key = format!(
-                        "{}:{row_index}:{activity_index}",
-                        self.transcript_run_id.as_deref().unwrap_or("")
+                        "{}:{}:{}:{activity_index}",
+                        self.model.read(cx).active_session_id.as_deref().unwrap_or(""),
+                        self.transcript_run_id.as_deref().unwrap_or(""),
+                        message.id,
                     );
                     let expanded = self.collapsed_tool_details.contains(&key);
                     div()
@@ -329,7 +331,12 @@ impl AgentsPanel {
             .into_any_element()
     }
 
-    fn render_detail(&mut self, item: &SubagentActivityInfo, cx: &mut Context<Self>) -> Div {
+    fn render_detail(
+        &mut self,
+        item: &SubagentActivityInfo,
+        has_messages: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = cx.theme().colors;
         let target = item.lane.as_deref().unwrap_or(&item.agent).to_owned();
         let live = matches!(
@@ -407,7 +414,7 @@ impl AgentsPanel {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .children(item.messages.is_empty().then(|| {
+                    .children((!has_messages).then(|| {
                         div()
                             .flex_1()
                             .flex()
@@ -729,7 +736,7 @@ impl Render for AgentsPanel {
                     task: item.task.clone(),
                     model: item.model.clone(),
                     status: item.status,
-                    messages: item.messages.clone(),
+                    messages: Vec::new(),
                     isolation: item.isolation.clone(),
                     error: item.error.clone(),
                 };
@@ -781,6 +788,11 @@ impl Render for AgentsPanel {
         } else {
             theme.muted_foreground.opacity(0.5)
         };
+        let main_description = if main_working {
+            "Main agent · Working"
+        } else {
+            "Main agent · Ready"
+        };
         let tabs = div()
             .flex()
             .flex_none()
@@ -799,11 +811,8 @@ impl Render for AgentsPanel {
                     .ghost()
                     .h(rems(3.5))
                     .selected(main_selected)
-                    .tooltip(if main_working {
-                        "Main agent · Working"
-                    } else {
-                        "Main agent · Ready"
-                    })
+                    .tooltip(main_description)
+                    .accessibility_label(main_description)
                     .child(
                         div()
                             .flex()
@@ -861,16 +870,14 @@ impl Render for AgentsPanel {
                     item.agent.clone()
                 };
                 let dot = Self::status_color(item.status, cx);
+                let description =
+                    format!("{} · {}\n{}", name, Self::status(item.status), item.task);
                 Button::new(SharedString::from(format!("agents-profile-{id}")))
                     .ghost()
                     .h(rems(3.5))
                     .selected(selected)
-                    .tooltip(format!(
-                        "{} · {}\n{}",
-                        name,
-                        Self::status(item.status),
-                        item.task
-                    ))
+                    .tooltip(description.clone())
+                    .accessibility_label(description)
                     .child(
                         div()
                             .flex()
@@ -917,8 +924,8 @@ impl Render for AgentsPanel {
                         cx.notify();
                     }))
             }));
-        let profile = if let Some((item, _)) = selected {
-            self.render_detail(&item, cx).into_any_element()
+        let profile = if let Some((item, count)) = selected {
+            self.render_detail(&item, count > 0, cx).into_any_element()
         } else {
             div()
                 .size_full()
