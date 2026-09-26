@@ -1920,19 +1920,6 @@ impl GitHubView {
                     .truncate()
                     .child(self.tab.label()),
             )
-            .children(
-                (self.tab == GitHubTab::PullRequests && self.current_pr_tab() == PrDetailTab::Code)
-                    .then(|| {
-                        Button::new("github-back-to-pr-list")
-                            .debug_selector(|| "github-back-to-pr-list".into())
-                            .label("Back to list")
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.select_pr_tab(PrDetailTab::Summary, cx)
-                            }))
-                    }),
-            )
             .into_any_element()
     }
 
@@ -4145,9 +4132,7 @@ impl Render for GitHubView {
             .child(self.render_filters(cx))
             .child(div().flex_1().min_h_0().child(self.render_list(window, cx)));
         let detail = self.render_detail(window, cx);
-        let content = if self.tab == GitHubTab::PullRequests && self.current_pr_tab() == PrDetailTab::Code {
-            detail
-        } else if narrow {
+        let content = if narrow {
             div()
                 .size_full()
                 .min_h_0()
