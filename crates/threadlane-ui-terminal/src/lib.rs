@@ -24,11 +24,11 @@ const TERMINAL_PARSE_BUDGET_PER_FRAME: usize = TERMINAL_READ_CHUNK_BYTES * 2;
 /// Terminal text metrics. The painted glyph size, row height, hit-testing,
 /// and resize math must all agree; they share these constants so a font
 /// change cannot drift click-to-select away from what is painted.
-/// Row height = font size × line height (13.0 × 1.35 = 17.55).
+/// Row height = selected font size × selected line height.
 /// The screen container uses `p_3`, so the content inset is 12px per side.
 const TERMINAL_FONT_SIZE: f32 = 13.0;
 const TERMINAL_LINE_HEIGHT: f32 = 1.35;
-const TERMINAL_ROW_HEIGHT: f32 = TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT;
+const TERMINAL_COMPACT_LINE_HEIGHT: f32 = 1.15;
 const TERMINAL_CONTENT_INSET: f32 = 12.0;
 /// Fallback advance width until the text system measures `.ZedMono`.
 const TERMINAL_CELL_WIDTH_FALLBACK: f32 = 7.8;
@@ -276,6 +276,9 @@ pub struct TerminalView {
     selection_anchor: Option<(u16, u16)>,
     selection_head: Option<(u16, u16)>,
     cell_width: f32,
+    font_size: f32,
+    compact: bool,
+    translucent_background: bool,
     cursor_visible: bool,
     scrollback_offset: usize,
     scroll_accumulator: f32,
@@ -330,6 +333,9 @@ impl TerminalView {
             selection_anchor: None,
             selection_head: None,
             cell_width: TERMINAL_CELL_WIDTH_FALLBACK,
+            font_size: TERMINAL_FONT_SIZE,
+            compact: false,
+            translucent_background: false,
             cursor_visible: true,
             scrollback_offset: 0,
             scroll_accumulator: 0.0,
@@ -669,11 +675,22 @@ impl TerminalView {
         text
     }
 
+    fn line_height(&self) -> f32 {
+        if self.compact {
+            TERMINAL_COMPACT_LINE_HEIGHT
+        } else {
+            TERMINAL_LINE_HEIGHT
+        }
+    }
+
+    fn row_height(&self) -> f32 {
+        self.font_size * self.line_height()
+    }
+
     fn cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
         let bounds = self.screen_bounds?;
         let x = ((position.x - bounds.left()).as_f32() - TERMINAL_CONTENT_INSET) / self.cell_width;
-        let y =
-            ((position.y - bounds.top()).as_f32() - TERMINAL_CONTENT_INSET) / TERMINAL_ROW_HEIGHT;
+        let y = ((position.y - bounds.top()).as_f32() - TERMINAL_CONTENT_INSET) / self.row_height();
         Some((
             y.floor()
                 .max(0.0)
@@ -848,12 +865,15 @@ impl Render for TerminalView {
         let font_id = window.text_system().resolve_font(&font(".ZedMono"));
         let measured_cell_width = window
             .text_system()
-            .layout_width(font_id, px(TERMINAL_FONT_SIZE), '0')
+            .layout_width(font_id, px(self.font_size), '0')
             .as_f32();
         if measured_cell_width > 0.0 {
             self.cell_width = measured_cell_width;
         }
         let cell_width = self.cell_width;
+        let font_size = self.font_size;
+        let line_height = self.line_height();
+        let row_height = self.row_height();
 
         let screen = &self.screen;
         let (cursor_row, cursor_col) = screen.cursor_position();
@@ -967,7 +987,7 @@ impl Render for TerminalView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .h(px(TERMINAL_ROW_HEIGHT))
+                    .h(px(row_height))
                     .children(row_spans),
             );
         }
@@ -1065,7 +1085,11 @@ impl Render for TerminalView {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(theme.background)
+            .bg(theme.background.opacity(if self.translucent_background {
+                0.92
+            } else {
+                1.0
+            }))
             .rounded_md()
             .border_1()
             .border_color(gpui::transparent_black())
@@ -1081,23 +1105,25 @@ impl Render for TerminalView {
                     .min_h_0()
                     .p_3()
                     .font_family(".ZedMono")
-                    // Raster-bound: glyph size must match TERMINAL_ROW_HEIGHT
+                    // Raster-bound: glyph size must match row_height
                     // and the measured cell width; not a type-scale step.
-                    .text_size(px(TERMINAL_FONT_SIZE))
-                    .line_height(relative(TERMINAL_LINE_HEIGHT))
+                    .text_size(px(font_size))
+                    .line_height(relative(line_height))
                     .cursor_text()
-                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
-                        let delta = match event.delta {
-                            ScrollDelta::Lines(lines) => lines.y * 2.0,
-                            ScrollDelta::Pixels(pixels) => pixels.y.as_f32() / TERMINAL_ROW_HEIGHT,
-                        };
-                        if delta.abs() > 0.01 {
-                            this.scroll_by(delta, cx);
-                        }
-                    }))
+                    .on_scroll_wheel(cx.listener(
+                        move |this, event: &ScrollWheelEvent, _window, cx| {
+                            let delta = match event.delta {
+                                ScrollDelta::Lines(lines) => lines.y * 2.0,
+                                ScrollDelta::Pixels(pixels) => pixels.y.as_f32() / row_height,
+                            };
+                            if delta.abs() > 0.01 {
+                                this.scroll_by(delta, cx);
+                            }
+                        },
+                    ))
                     .on_prepaint(move |bounds, _, cx| {
                         let rows = ((bounds.size.height.as_f32() - TERMINAL_CONTENT_INSET * 2.0)
-                            / TERMINAL_ROW_HEIGHT)
+                            / row_height)
                             .floor() as u16;
                         let cols = ((bounds.size.width.as_f32() - TERMINAL_CONTENT_INSET * 2.0)
                             / cell_width)
@@ -1135,6 +1161,48 @@ impl Render for TerminalView {
                             let t_select = terminal.clone();
                             let t_clear = terminal.clone();
                             let t_restart = terminal.clone();
+                            let (font_size, compact, translucent_background) = {
+                                let view = terminal.read(cx);
+                                (view.font_size, view.compact, view.translucent_background)
+                            };
+                            for (label, size) in
+                                [("Small", 11.0), ("Medium", 13.0), ("Large", 16.0)]
+                            {
+                                let target = terminal.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(format!("Font size: {label}"))
+                                        .checked(font_size == size)
+                                        .on_click(move |_, _, cx| {
+                                            target.update(cx, |view, cx| {
+                                                view.font_size = size;
+                                                cx.notify();
+                                            });
+                                        }),
+                                );
+                            }
+                            let compact_target = terminal.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new("Compact lines")
+                                    .checked(compact)
+                                    .on_click(move |_, _, cx| {
+                                        compact_target.update(cx, |view, cx| {
+                                            view.compact = !view.compact;
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                            let background_target = terminal.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new("Blend background")
+                                    .checked(translucent_background)
+                                    .on_click(move |_, _, cx| {
+                                        background_target.update(cx, |view, cx| {
+                                            view.translucent_background =
+                                                !view.translucent_background;
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
                             menu.item(PopupMenuItem::new("Copy Terminal Output").on_click(
                                 move |_event, _window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(

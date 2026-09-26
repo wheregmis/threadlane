@@ -1,12 +1,13 @@
 use gpui::*;
+use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::scroll::Scrollbar;
+use gpui_component::scroll::{ScrollableElement, Scrollbar};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
-use threadlane_ui_state::{actions::AppAction, controller};
+use std::collections::HashSet;
 use threadlane_ui_state::{
     AppState, ChatMessageInfo, MessageRole, SubagentActivityInfo, SubagentActivityStatus,
 };
+use threadlane_ui_state::{actions::AppAction, controller};
 
 pub struct AgentsPanel {
     model: Entity<AppState>,
@@ -14,6 +15,7 @@ pub struct AgentsPanel {
     transcript_list: ListState,
     transcript_run_id: Option<String>,
     transcript_count: usize,
+    collapsed_tool_details: HashSet<String>,
     _model_subscription: Subscription,
 }
 
@@ -26,6 +28,7 @@ impl AgentsPanel {
             transcript_list: ListState::new(0, ListAlignment::Top, window.rem_size() * 8.0),
             transcript_run_id: None,
             transcript_count: 0,
+            collapsed_tool_details: HashSet::new(),
             _model_subscription: subscription,
         }
     }
@@ -60,6 +63,30 @@ impl AgentsPanel {
             SubagentActivityStatus::Failed => "Failed",
             SubagentActivityStatus::Cancelled => "Cancelled",
         }
+    }
+
+    fn status_color(status: SubagentActivityStatus, cx: &App) -> gpui::Hsla {
+        let colors = cx.theme().colors;
+        match status {
+            SubagentActivityStatus::Running => colors.success,
+            SubagentActivityStatus::Queued => colors.warning,
+            SubagentActivityStatus::Failed => colors.danger,
+            SubagentActivityStatus::Cancelled => colors.muted_foreground,
+            SubagentActivityStatus::Completed => colors.muted_foreground,
+        }
+    }
+
+    fn status_pill(status: SubagentActivityStatus, cx: &App) -> Div {
+        let color = Self::status_color(status, cx);
+        div()
+            .rounded_full()
+            .px_2()
+            .py_0p5()
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .bg(color.opacity(0.14))
+            .text_color(color)
+            .child(Self::status(status))
     }
 
     fn latest_activity(item: &SubagentActivityInfo) -> Option<String> {
@@ -98,40 +125,48 @@ impl AgentsPanel {
             .find(|message| message.role == MessageRole::Assistant)
             .and_then(|message| {
                 let text = message.content.trim();
-                (!text.is_empty()).then(|| text.chars().take(120).collect::<String>())
+                (!text.is_empty()).then(|| text.chars().take(140).collect::<String>())
             });
+        let working = state.is_generating;
+        let pill_color = if working {
+            theme.primary
+        } else {
+            theme.muted_foreground
+        };
         div()
             .mx_3()
             .mt_3()
             .p_3()
-            .rounded_lg()
+            .rounded_xl()
             .border_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_2()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(Icon::new(IconName::Bot).small())
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Main agent"))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_sm()
+                            .child("Main agent"),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
+                            .rounded_full()
+                            .px_2()
+                            .py_0p5()
                             .text_xs()
-                            .text_color(if state.is_generating {
-                                theme.primary
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(if state.is_generating {
-                                "Working"
-                            } else {
-                                "Ready"
-                            }),
+                            .font_weight(FontWeight::MEDIUM)
+                            .bg(pill_color.opacity(0.14))
+                            .text_color(pill_color)
+                            .child(if working { "Working" } else { "Ready" }),
                     ),
             )
             .children(latest.map(|text| {
@@ -142,7 +177,12 @@ impl AgentsPanel {
             }))
     }
 
-    fn render_message(&mut self, message: &ChatMessageInfo, cx: &mut Context<Self>) -> AnyElement {
+    fn render_message(
+        &mut self,
+        message: &ChatMessageInfo,
+        row_index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().colors;
         let role = match message.role {
             MessageRole::User => "Instruction",
@@ -154,10 +194,12 @@ impl AgentsPanel {
         div()
             .flex()
             .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_lg()
-            .bg(theme.muted.opacity(0.45))
+            .gap_2()
+            .p_3()
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.muted.opacity(0.3))
             .child(
                 div()
                     .text_xs()
@@ -175,52 +217,126 @@ impl AgentsPanel {
                     .text_color(theme.foreground)
                     .child(message.content.clone())
             }))
-            .children(message.reasoning_content.as_ref().filter(|text| !text.trim().is_empty()).map(|text| {
-                div().text_xs().text_color(theme.muted_foreground)
-                    .child(if message.streaming { "Thinking…" } else { "Thought process" })
-                    .child(div().whitespace_normal().child(text.clone()))
-            }))
-            .children(message.tool_activities.iter().map(|activity| {
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .text_xs()
-                    .child(
+            .children(
+                message
+                    .reasoning_content
+                    .as_ref()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(|text| {
                         div()
-                            .flex_none()
-                            .text_color(if activity.category == "Error" {
-                                theme.danger
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(if message.streaming {
+                                "Thinking…"
                             } else {
-                                theme.muted_foreground
+                                "Thought process"
                             })
-                            .child(if activity.category == "Error" {
-                                "!"
-                            } else {
-                                "•"
-                            }),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(if activity.display_summary.trim().is_empty() {
-                                activity.title.clone()
-                            } else {
-                                activity.display_summary.clone()
-                            })
-                            .children((!activity.detail.trim().is_empty()).then(|| {
-                                div().mt_1().p_2().rounded_md().bg(theme.title_bar)
-                                    .text_color(if activity.category == "Error" { theme.danger } else { theme.muted_foreground })
-                                    .child(activity.detail.clone())
-                            })),
-                    )
-            }))
+                            .child(div().whitespace_normal().child(text.clone()))
+                    }),
+            )
+            .children(message.tool_activities.iter().enumerate().map(
+                |(activity_index, activity)| {
+                    let key = format!(
+                        "{}:{}:{}:{activity_index}",
+                        self.model.read(cx).active_session_id.as_deref().unwrap_or(""),
+                        self.transcript_run_id.as_deref().unwrap_or(""),
+                        message.id,
+                    );
+                    let expanded = self.collapsed_tool_details.contains(&key);
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .text_xs()
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(if activity.category == "Error" {
+                                    theme.danger
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .child(if activity.category == "Error" {
+                                    "!"
+                                } else {
+                                    "•"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            activity
+                                                .display_summary
+                                                .trim()
+                                                .is_empty()
+                                                .then(|| activity.title.clone())
+                                                .unwrap_or_else(|| {
+                                                    activity.display_summary.clone()
+                                                }),
+                                        )
+                                        .children((!activity.detail.trim().is_empty()).then(
+                                            || {
+                                                let toggle_key = key.clone();
+                                                Button::new(SharedString::from(format!(
+                                                    "agent-tool-detail-{row_index}-{activity_index}"
+                                                )))
+                                                .label(if expanded {
+                                                    "Hide details"
+                                                } else {
+                                                    "Show details"
+                                                })
+                                                .ghost()
+                                                .xsmall()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if !this
+                                                        .collapsed_tool_details
+                                                        .insert(toggle_key.clone())
+                                                    {
+                                                        this.collapsed_tool_details
+                                                            .remove(&toggle_key);
+                                                    }
+                                                    cx.notify();
+                                                }))
+                                            },
+                                        )),
+                                )
+                                .children((expanded && !activity.detail.trim().is_empty()).then(
+                                    || {
+                                        div()
+                                            .mt_1()
+                                            .p_2()
+                                            .rounded_md()
+                                            .max_h(rems(12.0))
+                                            .overflow_y_scrollbar()
+                                            .whitespace_normal()
+                                            .text_color(if activity.category == "Error" {
+                                                theme.danger
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(activity.detail.clone())
+                                    },
+                                )),
+                        )
+                },
+            ))
             .into_any_element()
     }
 
-    fn render_detail(&mut self, item: &SubagentActivityInfo, cx: &mut Context<Self>) -> Div {
+    fn render_detail(
+        &mut self,
+        item: &SubagentActivityInfo,
+        has_messages: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = cx.theme().colors;
         let target = item.lane.as_deref().unwrap_or(&item.agent).to_owned();
         let live = matches!(
@@ -244,43 +360,52 @@ impl AgentsPanel {
             .border_color(theme.border)
             .child(
                 div()
-                    .p_3()
+                    .px_3()
+                    .pt_3()
+                    .pb_2()
                     .flex()
-                    .items_start()
+                    .flex_col()
                     .gap_2()
                     .child(
                         div()
-                            .min_w_0()
-                            .flex_1()
                             .flex()
-                            .flex_col()
-                            .gap_1()
+                            .items_center()
+                            .gap_2()
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
+                                    .text_sm()
                                     .child(item.agent.clone()),
                             )
+                            .child(Self::status_pill(item.status, cx))
+                            .child(div().flex_1())
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(item.task.clone()),
+                                Button::new(SharedString::from(format!(
+                                    "agents-panel-message-{}",
+                                    Self::run_id(item)
+                                )))
+                                .label(label)
+                                .outline()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    model.update(cx, |state, cx| {
+                                        state.request_composer_prompt(prompt.clone());
+                                        cx.notify();
+                                    });
+                                }),
                             ),
                     )
                     .child(
-                        Button::new(SharedString::from(format!(
-                            "agents-panel-message-{}",
-                            Self::run_id(item)
-                        )))
-                        .label(label)
-                        .outline()
-                        .xsmall()
-                        .on_click(move |_, _, cx| {
-                            model.update(cx, |state, cx| {
-                                state.request_composer_prompt(prompt.clone());
-                                cx.notify();
-                            });
-                        }),
+                        div()
+                            .p_2p5()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.muted.opacity(0.3))
+                            .text_sm()
+                            .text_color(theme.foreground)
+                            .whitespace_normal()
+                            .child(item.task.clone()),
                     ),
             )
             .children(branch_controls)
@@ -289,10 +414,45 @@ impl AgentsPanel {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(list(self.transcript_list.clone(), cx.processor(Self::render_transcript_row))
+                    .children((!has_messages).then(|| {
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .p_6()
+                            .text_center()
+                            .child(Icon::new(IconName::Bot).large().text_color(theme.muted_foreground.opacity(0.6)))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.muted_foreground)
+                                    .child("No activity yet"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground.opacity(0.8))
+                                    .child("The prompt is shown above. New tool calls and replies will appear here."),
+                            )
+                    }))
+                    .child(
+                        list(
+                            self.transcript_list.clone(),
+                            cx.processor(Self::render_transcript_row),
+                        )
                         .size_full()
-                        .with_sizing_behavior(ListSizingBehavior::Auto))
-                    .child(div().absolute().inset_0().child(Scrollbar::vertical(&self.transcript_list))),
+                        .with_sizing_behavior(ListSizingBehavior::Auto),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .child(Scrollbar::vertical(&self.transcript_list)),
+                    ),
             )
     }
 
@@ -303,22 +463,50 @@ impl AgentsPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let message = self.transcript_run_id.as_ref().and_then(|id| {
-            self.model.read(cx).active_subagents().iter()
+            if id == "main" {
+                return self
+                    .model
+                    .read(cx)
+                    .messages
+                    .get(index.checked_sub(1)?)
+                    .cloned();
+            }
+            self.model
+                .read(cx)
+                .active_subagents()
+                .iter()
                 .find(|item| Self::run_id(item) == *id)
                 .and_then(|item| item.messages.get(index.checked_sub(1)?))
                 .cloned()
         });
         if index == 0 {
             let error = self.transcript_run_id.as_ref().and_then(|id| {
-                self.model.read(cx).active_subagents().iter()
+                self.model
+                    .read(cx)
+                    .active_subagents()
+                    .iter()
                     .find(|item| Self::run_id(item) == *id)
                     .and_then(|item| item.error.clone())
             });
-            return div().p_3().children(error.map(|error| {
-                div().p_2().rounded_lg().text_color(cx.theme().colors.danger).child(error)
-            })).into_any_element();
+            return div()
+                .p_3()
+                .children(error.map(|error| {
+                    div()
+                        .p_2()
+                        .rounded_lg()
+                        .text_color(cx.theme().colors.danger)
+                        .child(error)
+                }))
+                .into_any_element();
         }
-        div().p_3().children(message.as_ref().map(|message| self.render_message(message, cx)))
+        div()
+            .px_3()
+            .py_2()
+            .children(
+                message
+                    .as_ref()
+                    .map(|message| self.render_message(message, index, cx)),
+            )
             .into_any_element()
     }
 
@@ -352,10 +540,11 @@ impl AgentsPanel {
             div()
                 .mx_3()
                 .mb_2()
-                .p_2()
-                .rounded_lg()
+                .p_2p5()
+                .rounded_xl()
                 .border_1()
                 .border_color(theme.border)
+                .bg(theme.muted.opacity(0.2))
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -529,48 +718,62 @@ impl AgentsPanel {
 }
 
 impl Render for AgentsPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
-        let mut subagents: Vec<_> = state.active_subagents().iter().map(|item| {
-            let preview = Self::latest_activity(item);
-            let metadata = SubagentActivityInfo {
-                batch_run_id: item.batch_run_id,
-                task_index: item.task_index,
-                journal_run_id: item.journal_run_id.clone(),
-                lane: item.lane.clone(),
-                agent: item.agent.clone(),
-                task: item.task.clone(),
-                model: item.model.clone(),
-                status: item.status,
-                messages: Vec::new(),
-                isolation: item.isolation.clone(),
-                error: item.error.clone(),
-            };
-            (metadata, preview, item.messages.len())
-        }).collect();
-        drop(state);
+        let main_count = state.messages.len();
+        let main_working = state.is_generating;
+        let mut subagents: Vec<_> = state
+            .active_subagents()
+            .iter()
+            .map(|item| {
+                let metadata = SubagentActivityInfo {
+                    batch_run_id: item.batch_run_id,
+                    task_index: item.task_index,
+                    journal_run_id: item.journal_run_id.clone(),
+                    lane: item.lane.clone(),
+                    agent: item.agent.clone(),
+                    task: item.task.clone(),
+                    model: item.model.clone(),
+                    status: item.status,
+                    messages: Vec::new(),
+                    isolation: item.isolation.clone(),
+                    error: item.error.clone(),
+                };
+                (metadata, item.messages.len())
+            })
+            .collect();
         subagents.sort_by_key(|item| Self::rank(item.0.status));
         let selected_id = self
             .selected_run_id
             .clone()
-            .filter(|id| subagents.iter().any(|item| Self::run_id(&item.0) == *id))
-            .or_else(|| {
+            .filter(|id| {
+                id == "main" || subagents.iter().any(|(item, _)| Self::run_id(item) == *id)
+            })
+            .unwrap_or_else(|| {
                 subagents
-                    .iter()
-                    .find(|item| item.0.status == SubagentActivityStatus::Failed)
-                    .or_else(|| subagents.first())
-                    .map(|item| Self::run_id(&item.0))
+                    .first()
+                    .map(|(item, _)| Self::run_id(item))
+                    .unwrap_or_else(|| "main".to_string())
             });
-        let selected = selected_id.as_ref()
-            .and_then(|id| subagents.iter().find(|item| Self::run_id(&item.0) == *id))
-            .map(|(item, _, count)| (item.clone(), *count));
-        let count = selected.as_ref().map_or(0, |(_, count)| count + 1);
+        let selected = subagents
+            .iter()
+            .find(|(item, _)| Self::run_id(item) == selected_id)
+            .map(|(item, count)| (item.clone(), *count));
+        let count = if selected_id == "main" {
+            main_count + 1
+        } else {
+            selected.as_ref().map_or(0, |(_, count)| count + 1)
+        };
+        let selected_id = Some(selected_id);
         if self.transcript_run_id != selected_id {
             self.transcript_list.reset(count);
             self.transcript_run_id = selected_id.clone();
         } else if count > self.transcript_count {
-            self.transcript_list.splice(self.transcript_count..self.transcript_count, count - self.transcript_count);
+            self.transcript_list.splice(
+                self.transcript_count..self.transcript_count,
+                count - self.transcript_count,
+            );
         } else if count < self.transcript_count {
             self.transcript_list.reset(count);
         } else {
@@ -579,103 +782,209 @@ impl Render for AgentsPanel {
         self.transcript_count = count;
         self.selected_run_id = selected_id.clone();
 
-        let mut rows = Vec::new();
-        let mut previous_group = None;
-        for (item, preview, _) in &subagents {
-            let group = Self::group(item.status);
-            if previous_group != Some(group) {
-                rows.push(
-                    div()
-                        .px_3()
-                        .pt_3()
-                        .pb_1()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.muted_foreground)
-                        .child(group)
-                        .into_any_element(),
-                );
-                previous_group = Some(group);
-            }
-            let id = Self::run_id(item);
-            let select_id = id.clone();
-            let selected = selected_id.as_deref() == Some(id.as_str());
-            let color = match item.status {
-                SubagentActivityStatus::Failed => theme.danger,
-                SubagentActivityStatus::Running => theme.primary,
-                _ => theme.muted_foreground,
-            };
-            rows.push(
-                Button::new(SharedString::from(format!("agents-panel-row-{id}")))
+        let main_selected = selected_id.as_deref() == Some("main");
+        let main_dot = if main_working {
+            theme.primary
+        } else {
+            theme.muted_foreground.opacity(0.5)
+        };
+        let main_description = if main_working {
+            "Main agent · Working"
+        } else {
+            "Main agent · Ready"
+        };
+        let tabs = div()
+            .flex()
+            .flex_none()
+            .items_start()
+            .gap_1()
+            .px_3()
+            .pt_2()
+            .pb_2()
+            .min_h(rems(5.5))
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar.opacity(0.35))
+            .overflow_x_scrollbar()
+            .child(
+                Button::new("agents-profile-main")
                     .ghost()
+                    .h(rems(3.5))
+                    .selected(main_selected)
+                    .tooltip(main_description)
+                    .accessibility_label(main_description)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1p5()
+                            .px_2()
+                            .py_1()
+                            .min_w(rems(4.0))
+                            .child(
+                                div().relative().child(Avatar::new().name("Main").small()).child(
+                                    div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .right_0()
+                                        .size(rems(0.625))
+                                        .rounded_full()
+                                        .border_2()
+                                        .border_color(theme.title_bar)
+                                        .bg(main_dot),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(if main_selected {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if main_selected {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child("Main"),
+                            ),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.selected_run_id = Some("main".to_string());
+                        cx.notify();
+                    })),
+            )
+            .children(subagents.iter().map(|(item, _)| {
+                let id = Self::run_id(item);
+                let select_id = id.clone();
+                let selected = selected_id.as_deref() == Some(id.as_str());
+                let duplicate_count = subagents
+                    .iter()
+                    .filter(|(other, _)| other.agent == item.agent)
+                    .count();
+                let name = if duplicate_count > 1 {
+                    format!("{} {}", item.agent, item.task_index + 1)
+                } else {
+                    item.agent.clone()
+                };
+                let dot = Self::status_color(item.status, cx);
+                let description =
+                    format!("{} · {}\n{}", name, Self::status(item.status), item.task);
+                Button::new(SharedString::from(format!("agents-profile-{id}")))
+                    .ghost()
+                    .h(rems(3.5))
                     .selected(selected)
-                    .w_full()
-                    .h_auto()
-                    .px_3()
-                    .py_2()
+                    .tooltip(description.clone())
+                    .accessibility_label(description)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1p5()
+                            .px_2()
+                            .py_1()
+                            .min_w(rems(4.0))
+                            .child(
+                                div().relative().child(Avatar::new().name(name.clone()).small()).child(
+                                    div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .right_0()
+                                        .size(rems(0.625))
+                                        .rounded_full()
+                                        .border_2()
+                                        .border_color(theme.title_bar)
+                                        .bg(dot),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_center()
+                                    .max_w(rems(6.0))
+                                    .truncate()
+                                    .font_weight(if selected {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if selected {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(name),
+                            ),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected_run_id = Some(select_id.clone());
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .truncate()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(item.agent.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(color)
-                                            .child(Self::status(item.status)),
-                                    ),
+            }));
+        let profile = if let Some((item, count)) = selected {
+            self.render_detail(&item, count > 0, cx).into_any_element()
+        } else {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.render_main_agent(cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .children((main_count == 0).then(|| {
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_2()
+                                .p_6()
+                                .text_center()
+                                .child(Icon::new(IconName::Bot).large().text_color(theme.muted_foreground.opacity(0.6)))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.muted_foreground)
+                                        .child("No main-agent activity yet"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground.opacity(0.8))
+                                        .child("Select an agent above to inspect its work.")
+                                )
+                        }))
+                        .children((main_count > 0).then(|| {
+                            list(
+                                self.transcript_list.clone(),
+                                cx.processor(Self::render_transcript_row),
                             )
-                            .children(preview.clone().map(|activity| {
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(activity)
-                            })),
-                    )
-                    .into_any_element(),
-            );
-        }
-
+                            .size_full()
+                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                        }))
+                        .children((main_count > 0).then(|| {
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .child(Scrollbar::vertical(&self.transcript_list))
+                        })),
+                )
+                .into_any_element()
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
-            .child(self.render_main_agent(cx))
-            .child(
-                div()
-                    .mt_2()
-                    .max_h(rems(16.0))
-                    .overflow_y_scrollbar()
-                    .children(rows)
-                    .children(subagents.is_empty().then(|| {
-                        div()
-                            .p_6()
-                            .text_center()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("No delegated agents in this session")
-                    })),
-            )
-            .children(selected.map(|(item, _)| self.render_detail(&item, cx)))
+            .child(tabs)
+            .child(div().flex_1().min_h_0().flex().flex_col().child(profile))
     }
 }
 

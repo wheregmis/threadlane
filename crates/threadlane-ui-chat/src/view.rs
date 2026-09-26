@@ -6210,11 +6210,11 @@ impl ChatListView {
                                         .small()
                                         .icon(IconName::ArrowUp)
                                         .accessibility_label(if needs_provider {
-                                            "Send message (connect a model provider in Settings first)"
+                                            "Connect a model provider in Settings before sending"
                                         } else if has_prompt {
                                             "Send message (Enter)"
                                         } else {
-                                            "Send message (type a message first)"
+                                            "Type a message to send"
                                         })
                                         .tooltip(if needs_provider {
                                             "Connect a model provider in Settings before sending"
