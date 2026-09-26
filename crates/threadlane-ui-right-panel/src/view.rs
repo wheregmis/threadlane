@@ -5605,21 +5605,16 @@ pub fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
             *count += 1;
             let path = relative.join(&name);
             let rel_str = path.to_string_lossy().into_owned();
-            if is_dir {
-                let sub_children = visit(root, &path, depth + 1, limit, count);
-                nodes.push(FileNode {
-                    relative_path: rel_str,
-                    name,
-                    is_dir: true,
-                    children: sub_children,
-                });
-            } else {
-                nodes.push(FileNode {
-                    relative_path: rel_str,
-                    name,
-                    is_dir: false,
-                    children: Vec::new(),
-                });
+            nodes.push(FileNode {
+                relative_path: rel_str,
+                name,
+                is_dir,
+                children: Vec::new(),
+            });
+        }
+        for node in &mut nodes {
+            if node.is_dir {
+                node.children = visit(root, Path::new(&node.relative_path), depth + 1, limit, count);
             }
         }
         nodes

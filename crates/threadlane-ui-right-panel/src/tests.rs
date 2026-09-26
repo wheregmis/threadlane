@@ -359,6 +359,28 @@ fn project_scan_is_bounded_and_skips_generated_roots() {
 }
 
 #[test]
+fn project_scan_keeps_root_siblings_when_early_directory_is_large() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("threadlane-panel-siblings-{nonce}"));
+    std::fs::create_dir_all(root.join(".agents/deep")).unwrap();
+    std::fs::create_dir_all(root.join("crates")).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    for index in 0..10 {
+        std::fs::write(root.join(format!(".agents/deep/{index}")), "x").unwrap();
+    }
+
+    let items = scan_project_tree(&root, 4);
+    assert_eq!(
+        items.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
+        vec![".agents", "crates", "docs"]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn discard_options_for_single_file() {
     let selected = vec!["src/a.rs".to_string()];
     let options = discard_options("src/a.rs", &selected, 1);
