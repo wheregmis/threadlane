@@ -51,7 +51,7 @@ jobs:
 #        with:
 #          ref: ${{ env.RELEASE_TAG }}
 #
-#      - uses: dtolnay/rust-toolchain@1.95.0
+#      - uses: dtolnay/rust-toolchain@1.120.0
 #
 #      - name: Verify release tag
 #        shell: bash
@@ -100,7 +100,7 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.120.0
 
       - name: Verify release tag
         shell: bash
