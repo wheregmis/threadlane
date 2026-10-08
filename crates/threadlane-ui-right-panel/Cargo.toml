@@ -37,7 +37,7 @@ raw-window-handle = "0.6"
 gtk = "0.18"
 gdkx11 = "0.18"
 webkit2gtk = "=2.0.1"
-cairo-rs = { version = "0.18", features = ["png"] }
+cairo-rs = { version = "0.22", features = ["png"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wry = { version = "0.53.3", package = "lb-wry" }
