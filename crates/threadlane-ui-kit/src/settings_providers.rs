@@ -4,7 +4,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::TextView;
-use gpui_component::{ActiveTheme, IconName, Sizable};
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +25,17 @@ impl SettingsProvider {
             Self::GitLab => "gitlab",
             Self::OpenAI => "openai",
             Self::OpenCode => "opencode",
+        }
+    }
+    /// Brand marks shared with the model picker (`threadlane-daemon::catalog`);
+    /// GitLab has no vendored mark.
+    fn icon(self) -> Icon {
+        match self {
+            Self::ChatGPT | Self::OpenAI => Icon::default().path("icons/providers/openai.svg"),
+            Self::Antigravity => Icon::default().path("icons/providers/google.svg"),
+            Self::OpenCode => Icon::default().path("icons/providers/opencode.svg"),
+            Self::GitHub => Icon::new(IconName::Github),
+            Self::GitLab => Icon::new(IconName::Globe),
         }
     }
     fn title(self) -> &'static str {
@@ -124,16 +135,7 @@ pub fn settings_provider_connection(
                         } else {
                             cx.theme().muted_foreground
                         })
-                        .child(
-                            if matches!(
-                                provider,
-                                SettingsProvider::GitHub | SettingsProvider::GitLab
-                            ) {
-                                IconName::Globe
-                            } else {
-                                IconName::Bot
-                            },
-                        ),
+                        .child(provider.icon()),
                 )
                 .child(
                     div()

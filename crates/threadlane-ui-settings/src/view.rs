@@ -147,7 +147,7 @@ impl SettingsView {
                 .default_value(&github_token)
                 .masked(true)
         });
-        let acp_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Claude Code"));
+        let acp_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Agent name"));
         let acp_command_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("npx -y @agentclientprotocol/claude-agent-acp")
         });
@@ -310,7 +310,7 @@ impl SettingsView {
         let Some(page) = threadlane_ui_kit::settings_search_page(id) else { return; };
         self.page = page;
         match self.page {
-            SettingsPage::Providers => self.refresh_providers_snapshot(),
+            SettingsPage::Providers => self.enter_providers_page(cx),
             SettingsPage::Skills => { self.capability_status = None; self.refresh_skills(cx); }
             SettingsPage::Extensions => { self.capability_status = None; self.refresh_extensions(cx); }
             SettingsPage::AcpAgents => { self.capability_status = None; self.refresh_acp(cx); }
@@ -335,6 +335,26 @@ impl SettingsView {
 
     fn refresh_providers_snapshot(&mut self) {
         self.providers_snapshot = Some(ProvidersStatusSnapshot::load());
+    }
+
+    /// Entering Providers drops finished auth results, which go stale beside the
+    /// freshly loaded status (a failed `gh` connect kept reporting failure after
+    /// GitHub connected), but keeps an in-progress flow's instructions such as a
+    /// device code.
+    fn enter_providers_page(&mut self, cx: &mut Context<Self>) {
+        if self
+            .auth_message
+            .as_ref()
+            .is_some_and(|message| message.kind != AuthStatusKind::Info)
+        {
+            self.auth_message = None;
+        }
+        self.model.update(cx, |state, cx| {
+            if state.auth_status_msg.take().is_some() {
+                cx.notify();
+            }
+        });
+        self.refresh_providers_snapshot();
     }
 
     fn refresh_acp(&mut self, cx: &mut Context<Self>) {
@@ -382,7 +402,7 @@ impl SettingsView {
                     SettingsAction::Page(page) => {
                         this.page = page;
                         match page {
-                            SettingsPage::Providers => this.refresh_providers_snapshot(),
+                            SettingsPage::Providers => this.enter_providers_page(cx),
                             SettingsPage::Subagents => this.capability_status = None,
                             SettingsPage::Skills => { this.capability_status = None; this.refresh_skills(cx); }
                             SettingsPage::Extensions => { this.capability_status = None; this.refresh_extensions(cx); }

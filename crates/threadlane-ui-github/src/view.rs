@@ -323,7 +323,10 @@ fn scope_context_line(owner: &str, repo: &str, project_name: &str) -> String {
 
 fn github_error_message(error: &str) -> String {
     let normalized = error.to_lowercase();
-    if normalized.contains("rate limit")
+    // A missing binary fails at spawn, before gh can report anything itself.
+    if normalized.contains("could not start gh") {
+        "GitHub CLI (gh) isn’t installed or isn’t on PATH. Install it, then refresh.".into()
+    } else if normalized.contains("rate limit")
         || normalized.contains("rate_limit")
         || normalized.contains("http 429")
     {
@@ -2031,8 +2034,11 @@ impl GitHubView {
         inset: Option<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.window_controls_inset = inset;
-        cx.notify();
+        // The workspace forwards its layout inset every frame; only a change redraws.
+        if self.window_controls_inset != inset {
+            self.window_controls_inset = inset;
+            cx.notify();
+        }
     }
 
     fn apply_list_action(
@@ -3025,7 +3031,17 @@ impl GitHubView {
 
     fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.selected_ix().is_none() {
-            return self.render_empty("Select an item to see details.", cx);
+            let nothing_loaded = match self.tab {
+                GitHubTab::Issues => self.issues.is_empty(),
+                GitHubTab::PullRequests => self.pull_requests.is_empty(),
+            };
+            // A failed, empty list offers nothing to select; don't ask for it.
+            let message = if self.list_error.is_some() && nothing_loaded {
+                "Details appear here once the list loads."
+            } else {
+                "Select an item to see details."
+            };
+            return self.render_empty(message, cx);
         }
         if let Some(error) = &self.detail_error {
             return self.render_error("detail", error, cx);
@@ -3168,7 +3184,8 @@ impl GitHubView {
         kit_github::github_detail_surface(header, body.into_any_element()).into_any_element()
     }
 
-    fn render_status_bar(&self, cx: &App) -> impl IntoElement {
+    /// List summary for the workspace status bar while this page is shown.
+    pub fn status_text(&self, cx: &App) -> String {
         let count = match self.tab {
             GitHubTab::Issues => self.issues.len(),
             GitHubTab::PullRequests => self.pull_requests.len(),
@@ -3178,7 +3195,7 @@ impl GitHubView {
             GitHubTab::PullRequests => !self.pr_review_draft.is_empty(),
         };
         let projects = self.attached_projects(cx);
-        kit_github::github_status(count, self.tab.label(), self.scope.label(&projects), self.state_filter, has_draft)
+        kit_github::github_status_text(count, self.tab.label(), self.scope.label(&projects), self.state_filter, has_draft)
     }
 }
 
@@ -3210,7 +3227,6 @@ impl Render for GitHubView {
             .flex_col()
             .child(self.render_toolbar(cx))
             .child(div().flex_1().min_h_0().child(content))
-            .child(self.render_status_bar(cx))
     }
 }
 
@@ -3479,8 +3495,10 @@ mod tests {
             cx.run_until_parked();
             cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(cx); });
             let heading = cx.debug_bounds("github-page-heading").expect("named page heading");
-            assert!(heading.top() >= threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE,
-                "{tab:?} header must retain the shared window-controls clearance: {heading:?}");
+            // The heading shares Chat's header row: inside the window-controls band.
+            assert!(heading.top() > gpui::px(0.)
+                    && heading.bottom() <= threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE,
+                "{tab:?} heading must sit in the shared window-controls header row: {heading:?}");
         }
 
         model.update(cx, |state, cx| {
@@ -3541,6 +3559,10 @@ mod tests {
             "GitHub’s API limit has been reached. Wait before retrying."
         );
         assert!(super::github_error_message("HTTP 429 from GitHub").contains("API limit"));
+        assert!(super::github_error_message(
+            "/repo: could not start gh: No such file or directory (os error 2)"
+        )
+        .contains("isn’t installed"));
         assert!(super::github_error_message(&"unknown provider body ".repeat(100)).len() < 120);
         cx.update(gpui_component::init);
         let (harness, cx) = cx.add_window_view(|window, cx| {

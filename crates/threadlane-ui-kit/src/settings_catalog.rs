@@ -43,6 +43,11 @@ impl SettingsCatalogStatus {
             Self::Overridden => "Overridden",
         }
     }
+    /// Enabled/Disabled repeat the row's switch, so only states the switch
+    /// cannot show (active, invalid, overridden) get a tag.
+    fn shows_tag(self) -> bool {
+        !matches!(self, Self::Enabled | Self::Disabled)
+    }
     fn variant(self) -> TagVariant {
         match self {
             Self::Enabled | Self::Active => TagVariant::Success,
@@ -241,6 +246,11 @@ pub fn settings_catalog_row(
                                 .when(kind == SettingsCatalogKind::Extensions, |text| {
                                     text.truncate()
                                 })
+                                // Skill descriptions run to several sentences of model
+                                // guidance; two lines identify the skill.
+                                .when(kind == SettingsCatalogKind::Skills, |text| {
+                                    text.line_clamp(2).text_ellipsis()
+                                })
                                 .child(row.description.clone()),
                         )
                         .child(
@@ -256,12 +266,12 @@ pub fn settings_catalog_row(
                                         .with_variant(TagVariant::Secondary)
                                         .small(),
                                 )
-                                .child(
+                                .children(row.status.shows_tag().then(|| {
                                     Tag::new()
                                         .child(row.status.label())
                                         .with_variant(row.status.variant())
-                                        .small(),
-                                ),
+                                        .small()
+                                })),
                         ),
                 ),
         )

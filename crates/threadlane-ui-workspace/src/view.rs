@@ -2071,6 +2071,9 @@ impl WorkspaceView {
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let page_summary = (self.model.read(cx).workspace_page == WorkspacePage::GitHub)
+            .then(|| self.github.read(cx).status_text(cx));
+        let muted = cx.theme().muted_foreground;
         let state = self.model.read(cx);
 
         let git_status =
@@ -2187,7 +2190,10 @@ impl WorkspaceView {
                                 this.open_git_review(cx);
                             }))
                     }))
-                    .children(pr_badge),
+                    .children(pr_badge)
+                    .children(page_summary.map(|summary| {
+                        div().pl_2().text_xs().text_color(muted).child(summary)
+                    })),
             )
             .right(
                 div()
@@ -2419,7 +2425,10 @@ impl Render for WorkspaceView {
                 cx.on_next_frame(window, |this, window, cx| {
                     if this.model.read(cx).workspace_page == WorkspacePage::Chat {
                         this.chat_list.update(cx, |chat, cx| chat.focus_composer(window, cx));
-                    } else {
+                    } else if window.last_input_was_keyboard() {
+                        // Keyboard entry (cmd-,) moves focus into the page. A click
+                        // keeps it on the workspace (Tab still enters the page), so
+                        // the first nav row does not draw an unrequested focus ring.
                         window.focus_next(cx);
                     }
                 });
@@ -2527,6 +2536,16 @@ impl Render for WorkspaceView {
                 cx.notify();
             });
         }
+        // GitHub and Automations headers share the window-controls row, so they
+        // need the same inset whenever the sidebar is hidden, including the
+        // narrow-window auto-hide.
+        let page_header_inset = (!layout.sidebar_visible).then_some(header_inset);
+        self.github.update(cx, |github, cx| {
+            github.set_window_controls_inset(page_header_inset, cx);
+        });
+        self.automations.update(cx, |automations, cx| {
+            automations.set_header_inset(page_header_inset, cx);
+        });
 
         let environment_width = layout.environment_width;
         self.chat_list.update(cx, |chat, cx| {
@@ -2741,12 +2760,11 @@ impl Render for WorkspaceView {
             central_content
         };
 
-        let view_with_status_bar = if workspace_page == WorkspacePage::GitHub {
-            page_content
-        } else {
+        // One full-width status bar on every page; GitHub contributes its list
+        // summary to it instead of drawing a second, content-width bar.
+        let view_with_status_bar =
             threadlane_ui_kit::workspace_with_status(page_content, self.render_status_bar(cx))
-                .into_any_element()
-        };
+                .into_any_element();
 
         self.right_panel
             .update(cx, |panel, cx| panel.sync_git_dialog(window, cx));
