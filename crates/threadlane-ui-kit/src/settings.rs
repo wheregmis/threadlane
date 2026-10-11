@@ -99,7 +99,8 @@ impl SettingsPage {
             Self::General => IconName::Settings,
             Self::Appearance => IconName::Palette,
             Self::Keybindings => IconName::SquareTerminal,
-            Self::Providers | Self::Subagents => IconName::Bot,
+            Self::Providers => IconName::Cpu,
+            Self::Subagents => IconName::Bot,
             Self::Skills => IconName::BookOpen,
             Self::Extensions => IconName::HardDrive,
             Self::AcpAgents => IconName::Network,
@@ -377,7 +378,8 @@ pub fn settings_general(
                             .child(
                                 Tag::new()
                                     .child(format!("v{}", general.version))
-                                    .with_variant(TagVariant::Primary)
+                                    // Information, not a success state.
+                                    .with_variant(TagVariant::Secondary)
                                     .small(),
                             ),
                     )
@@ -484,22 +486,13 @@ pub fn settings_general(
                                     .flex()
                                     .items_center()
                                     .gap_2()
+                                    // The switch beside it already shows on/off.
                                     .child(
                                         div()
                                             .text_sm()
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.foreground)
                                             .child("Auto-Address PR Reviews"),
-                                    )
-                                    .child(
-                                        Tag::new()
-                                            .child(if general.auto_address_reviews { "Enabled" } else { "Disabled" })
-                                            .with_variant(if general.auto_address_reviews {
-                                                TagVariant::Success
-                                            } else {
-                                                TagVariant::Secondary
-                                            })
-                                            .small(),
                                     ),
                             )
                             .child(

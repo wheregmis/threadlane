@@ -45,6 +45,17 @@ pub enum SettingsExternalAgentAction {
 }
 type Callback = Rc<dyn Fn(SettingsExternalAgentAction, &mut Window, &mut App)>;
 
+/// Bundled presets (`threadlane-acp-engine::presets`) whose vendor has a vendored
+/// mark get it; other and custom agents keep the generic ACP mark.
+fn agent_icon(id: &str) -> &'static str {
+    match id {
+        "codex" => "icons/providers/openai.svg",
+        "opencode2" => "icons/providers/opencode.svg",
+        "antigravity" => "icons/providers/google.svg",
+        _ => "icons/providers/acp.svg",
+    }
+}
+
 pub fn settings_external_agent_row(
     row: &SettingsExternalAgentRow,
     has_project: bool,
@@ -153,7 +164,7 @@ pub fn settings_external_agent_row(
                         .items_center()
                         .justify_center()
                         .text_color(cx.theme().muted_foreground)
-                        .child(Icon::default().path("icons/providers/acp.svg")),
+                        .child(Icon::default().path(agent_icon(&row.id))),
                 )
                 .child(
                     div()

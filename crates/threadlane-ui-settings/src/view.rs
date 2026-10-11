@@ -147,7 +147,7 @@ impl SettingsView {
                 .default_value(&github_token)
                 .masked(true)
         });
-        let acp_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Claude Code"));
+        let acp_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Agent name"));
         let acp_command_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("npx -y @agentclientprotocol/claude-agent-acp")
         });

@@ -123,11 +123,19 @@ pub fn automation_screen(
             .filter(|d| scope.as_ref().is_none_or(|p| *p == d.project))
             .collect();
         if definitions.is_empty() {
-            content = content.child(if empty_projects {
-                "Attach a project from the sidebar to create an automation."
-            } else {
-                "Schedule a prompt to run in a fresh chat. Choose New automation… to begin."
-            });
+            // The header's primary New automation… button is the action; the
+            // empty state only explains what an automation is.
+            content = content.child(
+                div()
+                    .debug_selector(|| "automation-empty".into())
+                    .text_sm()
+                    .text_color(muted)
+                    .child(if empty_projects {
+                        "Attach a project from the sidebar to create an automation."
+                    } else {
+                        "No automations yet. An automation runs a saved prompt in a fresh chat on a schedule."
+                    }),
+            );
         }
         for d in definitions {
             let latest = snapshot.runs.iter().rev().find(|r| r.definition.id == d.id);
@@ -265,7 +273,7 @@ pub fn automation_screen(
                 .child(scope_picker).child(div().flex_1())
                 .child(Button::new("automation-history").debug_selector(|| "automation-history".into()).label(if view.history { "All automations" } else { "Run history" }).ghost().selected(view.history)
                     .on_click(request(&on_action, AutomationAction::History(!view.history))))
-                .child(Button::new("new-automation").debug_selector(|| "new-automation".into()).label("New automation…").disabled(empty_projects || view.busy)
+                .child(Button::new("new-automation").debug_selector(|| "new-automation".into()).label("New automation…").primary().disabled(empty_projects || view.busy)
                     .tooltip(if empty_projects { "Attach a project from the sidebar to create an automation" } else { "Create an automation" })
                     .accessibility_label(if empty_projects { "New automation, attach a project from the sidebar first" } else { "New automation" })
                     .on_click(request(&on_action, AutomationAction::Edit(None)))))
