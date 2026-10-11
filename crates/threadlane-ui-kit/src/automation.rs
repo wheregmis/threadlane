@@ -40,6 +40,9 @@ pub struct AutomationScreen {
     pub page: usize,
     pub error: Option<String>,
     pub busy: bool,
+    /// Leading header inset that clears the window controls when the sidebar
+    /// is hidden; `None` keeps the default padding.
+    pub header_inset: Option<Pixels>,
 }
 
 type Callback = Rc<dyn Fn(AutomationAction, &mut Window, &mut App)>;
@@ -268,8 +271,11 @@ pub fn automation_screen(
         }
     }
     div().flex().flex_col().size_full().bg(cx.theme().background)
-            .child(div().flex().flex_wrap().items_center().gap_3().px_4().pb_3().pt(threadlane_ui_theme::theme::WINDOW_CONTROLS_CLEARANCE)
-                .child(div().id("automation-heading").role(Role::Heading).aria_label("Automations").text_lg().font_semibold().child("Automations"))
+            // Shared header row (as Chat and GitHub): title in the window-controls band.
+            // It wraps onto a second line at narrow widths rather than overflowing.
+            .child(div().flex_none().flex().flex_wrap().items_center().gap_3().px_4().py_1().when_some(view.header_inset, |row, inset| row.pl(inset))
+                .min_h(threadlane_ui_theme::theme::WINDOW_CONTROLS_CLEARANCE).border_b_1().border_color(cx.theme().title_bar_border).bg(cx.theme().title_bar)
+                .child(div().id("automation-heading").role(Role::Heading).aria_label("Automations").text_sm().font_semibold().child("Automations"))
                 .child(scope_picker).child(div().flex_1())
                 .child(Button::new("automation-history").debug_selector(|| "automation-history".into()).label(if view.history { "All automations" } else { "Run history" }).ghost().selected(view.history)
                     .on_click(request(&on_action, AutomationAction::History(!view.history))))
@@ -277,7 +283,7 @@ pub fn automation_screen(
                     .tooltip(if empty_projects { "Attach a project from the sidebar to create an automation" } else { "Create an automation" })
                     .accessibility_label(if empty_projects { "New automation, attach a project from the sidebar first" } else { "New automation" })
                     .on_click(request(&on_action, AutomationAction::Edit(None)))))
-            .child(div().px_4().pb_3().text_sm().text_color(muted).child("Runs while Threadlane is open and your computer is awake. Missed runs are combined into one."))
+            .child(div().px_4().pt_3().pb_3().text_sm().text_color(muted).child("Runs while Threadlane is open and your computer is awake. Missed runs are combined into one."))
             .child(div().debug_selector(|| "automation-content".into()).flex_1().min_h_0().overflow_y_scrollbar().child(content))
 }
 

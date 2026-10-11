@@ -802,7 +802,8 @@ fn collection_preserves_scoped_identity_keyboard_search_and_recovery(cx: &mut Te
         cx.update(|_, cx| gpui_component::Theme::global_mut(cx).font_size = gpui::px(font));
         draw(cx);
         let heading = cx.debug_bounds("github-page-heading").unwrap();
-        assert!(heading.top() >= threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE);
+        // Shared header row: the heading sits inside the window-controls band.
+        assert!(heading.bottom() <= threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE, "{heading:?}");
         let search = cx.debug_bounds("github-search-field").unwrap();
         let results = cx.debug_bounds("github-result-list").unwrap();
         assert!(search.left() > results.left() && search.right() < results.right());

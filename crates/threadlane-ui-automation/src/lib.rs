@@ -19,6 +19,7 @@ pub struct AutomationsView {
     page: usize,
     error: Option<String>,
     busy: bool,
+    header_inset: Option<Pixels>,
     _subscription: Subscription,
 }
 
@@ -40,7 +41,16 @@ impl AutomationsView {
             page: 0,
             error: None,
             busy: false,
+            header_inset: None,
             _subscription: subscription,
+        }
+    }
+
+    /// Window-controls inset for the header while the sidebar is hidden.
+    pub fn set_header_inset(&mut self, inset: Option<Pixels>, cx: &mut Context<Self>) {
+        if self.header_inset != inset {
+            self.header_inset = inset;
+            cx.notify();
         }
     }
     /// Dispatch one daemon mutation, retaining selection on failure and showing its error.
@@ -111,6 +121,7 @@ impl Render for AutomationsView {
             attention_only: self.attention_only,
             page: self.page,
             busy: self.busy,
+            header_inset: self.header_inset,
             error: self
                 .error
                 .clone()

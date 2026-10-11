@@ -2034,8 +2034,11 @@ impl GitHubView {
         inset: Option<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.window_controls_inset = inset;
-        cx.notify();
+        // The workspace forwards its layout inset every frame; only a change redraws.
+        if self.window_controls_inset != inset {
+            self.window_controls_inset = inset;
+            cx.notify();
+        }
     }
 
     fn apply_list_action(
@@ -3181,7 +3184,8 @@ impl GitHubView {
         kit_github::github_detail_surface(header, body.into_any_element()).into_any_element()
     }
 
-    fn render_status_bar(&self, cx: &App) -> impl IntoElement {
+    /// List summary for the workspace status bar while this page is shown.
+    pub fn status_text(&self, cx: &App) -> String {
         let count = match self.tab {
             GitHubTab::Issues => self.issues.len(),
             GitHubTab::PullRequests => self.pull_requests.len(),
@@ -3191,7 +3195,7 @@ impl GitHubView {
             GitHubTab::PullRequests => !self.pr_review_draft.is_empty(),
         };
         let projects = self.attached_projects(cx);
-        kit_github::github_status(count, self.tab.label(), self.scope.label(&projects), self.state_filter, has_draft)
+        kit_github::github_status_text(count, self.tab.label(), self.scope.label(&projects), self.state_filter, has_draft)
     }
 }
 
@@ -3223,7 +3227,6 @@ impl Render for GitHubView {
             .flex_col()
             .child(self.render_toolbar(cx))
             .child(div().flex_1().min_h_0().child(content))
-            .child(self.render_status_bar(cx))
     }
 }
 
@@ -3492,8 +3495,10 @@ mod tests {
             cx.run_until_parked();
             cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(cx); });
             let heading = cx.debug_bounds("github-page-heading").expect("named page heading");
-            assert!(heading.top() >= threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE,
-                "{tab:?} header must retain the shared window-controls clearance: {heading:?}");
+            // The heading shares Chat's header row: inside the window-controls band.
+            assert!(heading.top() > gpui::px(0.)
+                    && heading.bottom() <= threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE,
+                "{tab:?} heading must sit in the shared window-controls header row: {heading:?}");
         }
 
         model.update(cx, |state, cx| {

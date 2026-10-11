@@ -96,8 +96,10 @@ pub fn github_toolbar(
         .border_b_1()
         .border_color(cx.theme().title_bar_border)
         .bg(cx.theme().title_bar)
-        .py_2()
-        .pt(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE)
+        // One shared header row: the title sits in the window-controls band
+        // like Chat's header; `inset` clears the traffic lights when the
+        // sidebar is hidden.
+        .min_h(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE)
         .px_4()
         .when_some(inset, |row, inset| row.pl(inset))
         .flex()
@@ -677,6 +679,30 @@ pub fn github_master_detail(
     }
 }
 
+/// List summary ("2 issues · all projects · open"). The desktop shows it in the
+/// shared workspace status bar so every page keeps one full-width bar.
+pub fn github_status_text(
+    count: usize,
+    title: &'static str,
+    scope: String,
+    state: GitHubStateFilter,
+    has_draft: bool,
+) -> String {
+    let item = match (title, count) {
+        ("Issues", 1) => "issue".into(),
+        ("Pull requests", 1) => "pull request".into(),
+        _ => title.to_lowercase(),
+    };
+    format!(
+        "{count} {} · {} · {}{}",
+        item,
+        scope.to_lowercase(),
+        state.value(),
+        if has_draft { " · Unsaved draft" } else { "" }
+    )
+}
+
+/// Standalone status bar for hosts without a workspace bar (the preview).
 pub fn github_status(
     count: usize,
     title: &'static str,
@@ -684,16 +710,5 @@ pub fn github_status(
     state: GitHubStateFilter,
     has_draft: bool,
 ) -> StatusBar {
-    let item = match (title, count) {
-        ("Issues", 1) => "issue".into(),
-        ("Pull requests", 1) => "pull request".into(),
-        _ => title.to_lowercase(),
-    };
-    StatusBar::new().left(format!(
-        "{count} {} · {} · {}{}",
-        item,
-        scope.to_lowercase(),
-        state.value(),
-        if has_draft { " · Unsaved draft" } else { "" }
-    ))
+    StatusBar::new().left(github_status_text(count, title, scope, state, has_draft))
 }
