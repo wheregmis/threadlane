@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.1.50](https://github.com/wheregmis/threadlane/compare/v0.1.49...v0.1.50) (2026-10-11)
+
+
+### Bug Fixes
+
+* **automation:** make New automation the primary action ([8a46161](https://github.com/wheregmis/threadlane/commit/8a46161b6e7d902e7b59a213344531684d17d7e0))
+* **chat:** give the provider-less new-task screen one clear next step ([026d6da](https://github.com/wheregmis/threadlane/commit/026d6dab17481557a670ab89952146abad7f3cc6))
+* **github:** keep issue and PR bodies below the detail title in hierarchy ([daafda9](https://github.com/wheregmis/threadlane/commit/daafda9f7aa5933b12fb716f7a23e31343a5966b))
+* **github:** name a missing gh CLI and stop asking to select from a failed list ([05e43d1](https://github.com/wheregmis/threadlane/commit/05e43d1dcff01c0dd8942cada60cf7aecb029d9f))
+* **right-panel:** show the panel chooser alone until a panel is open ([7d6fe9a](https://github.com/wheregmis/threadlane/commit/7d6fe9ab0414b90c1f4ab43e920e50d90210897e))
+* **settings:** clear stale provider auth results on page entry ([41bda94](https://github.com/wheregmis/threadlane/commit/41bda940aa8cc92042cafed95b88f1d396fbf13a))
+* **settings:** drop badges that repeat a switch and give pages distinct icons ([135842d](https://github.com/wheregmis/threadlane/commit/135842d273aa6d49e56c7ea033e58c5751b65d3c))
+* **settings:** group Providers and name settings pages by their nav label ([037db22](https://github.com/wheregmis/threadlane/commit/037db220a5f7560b86eac11e51b7cc2b2f6b3483))
+* **settings:** stop the custom ACP agent name reading as a filled value ([27b5966](https://github.com/wheregmis/threadlane/commit/27b59664dfe59db609fa4d29575bf4998110cdf2))
+* **ui:** clarify right panel, new-task, GitHub detail and Providers screens ([7dbb796](https://github.com/wheregmis/threadlane/commit/7dbb796d162a2b58eb27941d8484a86e208836cc))
+* **ui:** clear stale provider errors, name a missing gh, and focus Settings only on keyboard entry ([b5e04ef](https://github.com/wheregmis/threadlane/commit/b5e04efb4e35b688eacae8213ec8031fc207aac8))
+* **ui:** keep sidebar empty-state copy on one line ([38c1b6f](https://github.com/wheregmis/threadlane/commit/38c1b6f7bf233c335ba172f79fb652fcfb5ee810))
+* **ui:** remove redundant badges, distinguish icons, and promote primary actions ([f334575](https://github.com/wheregmis/threadlane/commit/f334575b670feb684c19b49a3b696c31e32623b0))
+* **ui:** share one header row and status bar across workspace pages ([0f23c9f](https://github.com/wheregmis/threadlane/commit/0f23c9f327c09bf1fd99d9cb5ad89210e3694832))
+* **ui:** share one header row and status bar across workspace pages ([81f33db](https://github.com/wheregmis/threadlane/commit/81f33dbc6ff2f292ce91e45cc4329a0ee6ee7d26))
+* **ui:** stop wrapped text overlapping in sidebar and settings ([a86ebfb](https://github.com/wheregmis/threadlane/commit/a86ebfbf3d43e0a211738571a579ad332b8b80a0))
+* **ui:** stop wrapped text overlapping in sidebar and settings ([3af1bd6](https://github.com/wheregmis/threadlane/commit/3af1bd6157dbdf3398c14af7fdfde351595ede5a))
+* **workspace:** only move focus into Settings on keyboard entry ([ea423e3](https://github.com/wheregmis/threadlane/commit/ea423e3ed3c32f163077e0a5124f6e32e4b74843))
+
 ## [0.1.49](https://github.com/wheregmis/threadlane/compare/v0.1.48...v0.1.49) (2026-10-09)
 
 
