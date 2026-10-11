@@ -2419,7 +2419,10 @@ impl Render for WorkspaceView {
                 cx.on_next_frame(window, |this, window, cx| {
                     if this.model.read(cx).workspace_page == WorkspacePage::Chat {
                         this.chat_list.update(cx, |chat, cx| chat.focus_composer(window, cx));
-                    } else {
+                    } else if window.last_input_was_keyboard() {
+                        // Keyboard entry (cmd-,) moves focus into the page. A click
+                        // keeps it on the workspace (Tab still enters the page), so
+                        // the first nav row does not draw an unrequested focus ring.
                         window.focus_next(cx);
                     }
                 });

@@ -323,7 +323,10 @@ fn scope_context_line(owner: &str, repo: &str, project_name: &str) -> String {
 
 fn github_error_message(error: &str) -> String {
     let normalized = error.to_lowercase();
-    if normalized.contains("rate limit")
+    // A missing binary fails at spawn, before gh can report anything itself.
+    if normalized.contains("could not start gh") {
+        "GitHub CLI (gh) isn’t installed or isn’t on PATH. Install it, then refresh.".into()
+    } else if normalized.contains("rate limit")
         || normalized.contains("rate_limit")
         || normalized.contains("http 429")
     {
@@ -3025,7 +3028,17 @@ impl GitHubView {
 
     fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.selected_ix().is_none() {
-            return self.render_empty("Select an item to see details.", cx);
+            let nothing_loaded = match self.tab {
+                GitHubTab::Issues => self.issues.is_empty(),
+                GitHubTab::PullRequests => self.pull_requests.is_empty(),
+            };
+            // A failed, empty list offers nothing to select; don't ask for it.
+            let message = if self.list_error.is_some() && nothing_loaded {
+                "Details appear here once the list loads."
+            } else {
+                "Select an item to see details."
+            };
+            return self.render_empty(message, cx);
         }
         if let Some(error) = &self.detail_error {
             return self.render_error("detail", error, cx);
@@ -3541,6 +3554,10 @@ mod tests {
             "GitHub’s API limit has been reached. Wait before retrying."
         );
         assert!(super::github_error_message("HTTP 429 from GitHub").contains("API limit"));
+        assert!(super::github_error_message(
+            "/repo: could not start gh: No such file or directory (os error 2)"
+        )
+        .contains("isn’t installed"));
         assert!(super::github_error_message(&"unknown provider body ".repeat(100)).len() < 120);
         cx.update(gpui_component::init);
         let (harness, cx) = cx.add_window_view(|window, cx| {
