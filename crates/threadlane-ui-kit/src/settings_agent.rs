@@ -61,8 +61,10 @@ fn field(
         .gap_4()
         .when(stacked, |row| row.flex_col().items_start())
         .child(
+            // Auto basis: a zero basis (`flex_1`) can leave a wrapping
+            // description at zero width, painting one glyph per line.
             div()
-                .flex_1()
+                .flex_auto()
                 .min_w_0()
                 .when(stacked, |label| label.flex_none().w_full())
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))

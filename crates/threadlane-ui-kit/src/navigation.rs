@@ -773,6 +773,7 @@ pub fn sidebar_history_empty(
     let theme = cx.theme().colors;
     let request = std::rc::Rc::new(on_action);
     div()
+        .w_full()
         .flex()
         .flex_col()
         .items_center()
@@ -801,7 +802,12 @@ pub fn sidebar_history_empty(
                 ),
         )
         .child(
+            // Single-line copy: the retained text measurement can paint a
+            // wrap taken in an earlier, narrower pass inside one reserved
+            // line, drawing the tail over the button. Copy fits the 12rem
+            // minimum sidebar; the ellipsis only guards larger fonts.
             div()
+                .w_full()
                 .flex()
                 .flex_col()
                 .items_center()
@@ -819,13 +825,17 @@ pub fn sidebar_history_empty(
                 )
                 .child(
                     div()
+                        .w_full()
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .text_center()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .overflow_hidden()
                         .child(if has_filters {
                             "Try a different project"
                         } else {
-                            "Start a new session to begin coding"
+                            "Start a task to begin coding"
                         }),
                 ),
         )
