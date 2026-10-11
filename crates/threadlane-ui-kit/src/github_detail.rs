@@ -6,7 +6,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::spinner::Spinner;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::Tag;
-use gpui_component::text::{TextView, TextViewState};
+use gpui_component::text::{TextView, TextViewState, TextViewStyle};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Sizable};
 use std::rc::Rc;
 use threadlane_protocol::repo::{GitHubIssueDetail, GitHubPrInfo, PrCheckStatus};
@@ -100,8 +100,8 @@ pub fn github_pr_summary(
                     .items_center()
                     .gap_2()
                     .flex_wrap()
+                    // State is already in the header metadata line, as for issues.
                     .children(detail.is_draft.then(|| Tag::new().small().child("Draft")))
-                    .child(Tag::new().small().child(detail.state.clone()))
                     .children(
                         detail
                             .review_decision
@@ -123,13 +123,16 @@ pub fn github_pr_summary(
                 div()
                     .mt_2()
                     .text_sm()
+                    // Prose reads at ~90 characters; tables and diffs keep the
+                    // full detail width.
+                    .max_w(rems(40.))
                     .child(if detail.body.trim().is_empty() {
                         div()
                             .text_color(theme.muted_foreground)
                             .child("No description provided.")
                             .into_any_element()
                     } else {
-                        TextView::new(body).selectable(true).into_any_element()
+                        TextView::new(body).style(detail_markdown_style()).selectable(true).into_any_element()
                     }),
             )
             .child(
@@ -606,6 +609,7 @@ pub fn github_comment(id: String, author: String, time: String, body: String, cx
                 .into_any_element()
         } else {
             TextView::markdown(SharedString::from(id), body)
+                .style(detail_markdown_style())
                 .selectable(true)
                 .into_any_element()
         }))
@@ -656,13 +660,14 @@ pub fn github_issue_body(
                         .mt_5()
                         .debug_selector(|| "github-detail-description".into())
                         .text_sm()
+                        .max_w(rems(40.))
                         .child(if detail.body.trim().is_empty() {
                             div()
                                 .text_color(cx.theme().muted_foreground)
                                 .child("No description provided.")
                                 .into_any_element()
                         } else {
-                            TextView::new(body).selectable(true).into_any_element()
+                            TextView::new(body).style(detail_markdown_style()).selectable(true).into_any_element()
                         }),
                 )
                 .children((!linked_tasks.is_empty()).then(|| {
@@ -713,4 +718,18 @@ pub fn github_issue_body(
 // One content spine keeps detail headers, descriptions and checks aligned at every width.
 fn detail_content() -> Div {
     div().w_full().max_w(rems(52.)).mx_auto().px_5()
+}
+
+/// Markdown headings inside an issue/PR body stay at or below the detail title
+/// (`text_lg`). The default scale renders `#`/`##` at 28/21px, outranking the
+/// page they belong to.
+fn detail_markdown_style() -> TextViewStyle {
+    TextViewStyle::default().heading_font_size(|level, base| {
+        base * match level {
+            1 => 1.25,
+            2 => 1.15,
+            3 => 1.075,
+            _ => 1.0,
+        }
+    })
 }

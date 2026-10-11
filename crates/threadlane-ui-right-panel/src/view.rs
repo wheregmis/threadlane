@@ -3714,7 +3714,9 @@ mod review_layout_tests {
                     ("right-panel-tab-Files", "right-panel-choice-Files"),
                     ("right-panel-tab-Browser", "right-panel-choice-Browser"),
                 ].into_iter().take(available_surfaces().len()) {
-                    for selector in [tab, choice] {
+                    // Nothing is open yet, so the chooser is the only control.
+                    assert!(cx.debug_bounds(tab).is_none(), "{tab} repeats the chooser");
+                    for selector in [choice] {
                         let bounds = cx.debug_bounds(selector).expect("surface control rendered");
                         assert!(bounds.left() >= px(0.0) && bounds.right() <= px(width),
                             "{selector} overflows at width {width}, rem {rem_size}: {bounds:?}");

@@ -84,7 +84,10 @@ pub fn right_panel_header(
                         .child(active.map_or("Tools", RightPanelSurface::label)),
                 ),
         )
-        .child(
+        // Switching tabs only once something is open: with nothing open the
+        // chooser below is the one control, and a tab strip would both repeat
+        // it and mark its first entry as selected.
+        .when(active.is_some(), |header| header.child(
             div()
                 .flex_none()
                 .min_h(rems(2.0))
@@ -103,7 +106,7 @@ pub fn right_panel_header(
                                 .min_w_0()
                                 .segmented()
                                 .small()
-                                .selected_index(selected.unwrap_or(0))
+                                .selected_index(selected.unwrap_or_default())
                                 .children(surfaces.iter().map(|surface| {
                                     let label = surface.label();
                                     Tab::new()
@@ -122,7 +125,7 @@ pub fn right_panel_header(
                         )
                         .children(refresh),
                 ),
-        )
+        ))
 }
 
 /// The host supplies refresh eligibility and its callback.
@@ -159,14 +162,15 @@ pub fn right_panel_chooser(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .child("Open a surface"),
+                        .child("Open a panel"),
                 )
                 .child(
                     div()
                         .mt_1()
                         .text_xs()
+                        .text_center()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Choose what to show in the right panel"),
+                        .child("Pick what to show beside the chat"),
                 )
                 .child(div().mt_4().w_full().flex().flex_col().gap_2().children(
                     surfaces.iter().copied().map(|surface| {

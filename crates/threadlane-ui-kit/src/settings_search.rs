@@ -24,19 +24,19 @@ pub const SETTINGS_SEARCH_ITEMS: &[SettingsSearchItem] = &[
     },
     SettingsSearchItem {
         id: "appearance",
-        title: "Appearance & Themes",
+        title: "Appearance",
         page: "Appearance",
         keywords: &["theme", "dark", "light", "color"],
     },
     SettingsSearchItem {
         id: "keybindings",
-        title: "Keybindings",
-        page: "Keybindings",
+        title: "Shortcuts",
+        page: "Shortcuts",
         keywords: &["shortcuts", "keyboard", "hotkeys"],
     },
     SettingsSearchItem {
         id: "providers",
-        title: "Models & Providers",
+        title: "Providers",
         page: "Providers",
         keywords: &[
             "github token",
@@ -61,7 +61,7 @@ pub const SETTINGS_SEARCH_ITEMS: &[SettingsSearchItem] = &[
     },
     SettingsSearchItem {
         id: "skills",
-        title: "Skills Catalog",
+        title: "Skills",
         page: "Skills",
         keywords: &["skill", "capability"],
     },

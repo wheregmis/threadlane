@@ -4,7 +4,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::TextView;
-use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Sizable};
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -361,7 +361,8 @@ pub fn settings_provider_key(
         )))
         .debug_selector(move || format!("provider-key-save-{}", provider.id()))
         .label("Save")
-        .primary()
+        // One of several per page; an empty field clears the key, so it stays enabled.
+        .outline()
         .accessibility_label(format!("Save {label}"))
         .on_click(move |_, window, cx| save(SettingsProviderAction::SaveKey(provider), window, cx)),
     );
@@ -396,8 +397,7 @@ fn connection_controls(provider: SettingsProvider, connected: bool, callback: Ca
         match provider {
             SettingsProvider::ChatGPT => "Sign in with ChatGPT…",
             SettingsProvider::Antigravity => "Sign in with Google…",
-            SettingsProvider::GitHub => "Connect via gh CLI",
-            _ => "Disconnect",
+            _ => "Connect via gh CLI",
         }
     };
     div()
@@ -428,21 +428,17 @@ fn connection_controls(provider: SettingsProvider, connected: bool, callback: Ca
                 )
             },
         )
-        .child(
+        // GitLab is detected, never signed in here: with nothing connected there is
+        // no action to offer, rather than a disabled "Disconnect".
+        .when(provider != SettingsProvider::GitLab || connected, |row| row.child(
             Button::new(SharedString::from(format!(
                 "provider-auth-{}",
                 provider.id()
             )))
             .debug_selector(move || format!("provider-auth-{}", provider.id()))
             .label(label)
-            .when(connected, |button| button.ghost())
-            .when(!connected, |button| button.outline())
-            .disabled(provider == SettingsProvider::GitLab && !connected)
-            .accessibility_label(if provider == SettingsProvider::GitLab && !connected {
-                "GitLab is not connected".into()
-            } else {
-                format!("{label}: {}", provider.title())
-            })
+            .outline()
+            .accessibility_label(format!("{label}: {}", provider.title()))
             .on_click(move |_, window, cx| {
                 connect(
                     if connected {
@@ -454,7 +450,7 @@ fn connection_controls(provider: SettingsProvider, connected: bool, callback: Ca
                     cx,
                 )
             }),
-        )
+        ))
 }
 
 /// Manual escape hatch for a stale picker: clears the cached model lists
@@ -577,115 +573,60 @@ pub fn settings_providers(
         }))
         .when(providers.accounts.len() > 1, |rows| rows.child(div().mt_1().text_xs().text_color(cx.theme().muted_foreground)
             .child("When the active account reaches a rate limit or quota, requests can use a backup account.")));
-    let mut page = super::settings_group(cx)
-        .debug_selector(|| "settings-provider-panel".into())
-        .mt_5()
-        .py_0()
-        .flex_col()
-        .when_some(providers.status.clone(), |page, status| {
-            let (background, border, foreground) = match status.kind {
-                SettingsProviderStatusKind::Success => (
-                    cx.theme().success.opacity(0.12),
-                    cx.theme().success.opacity(0.4),
-                    cx.theme().success,
-                ),
-                SettingsProviderStatusKind::Error => (
-                    cx.theme().danger.opacity(0.12),
-                    cx.theme().danger.opacity(0.4),
-                    cx.theme().danger,
-                ),
-                SettingsProviderStatusKind::Info => {
-                    (cx.theme().muted, cx.theme().border, cx.theme().foreground)
-                }
-            };
-            page.child(
-                div()
-                    .id("provider-auth-status")
-                    .mt_4()
-                    .debug_selector(|| "provider-auth-status".into())
-                    .role(Role::Alert)
-                    .rounded_md()
-                    .border_1()
-                    .border_color(border)
-                    .bg(background)
-                    .p_3()
-                    .text_xs()
-                    .text_color(foreground)
-                    .child(
-                        TextView::markdown("provider-auth-status-markdown", status.text)
-                            .selectable(true),
-                    ),
+    let status_banner = providers.status.clone().map(|status| {
+        let (background, border, foreground) = match status.kind {
+            SettingsProviderStatusKind::Success => (
+                cx.theme().success.opacity(0.12),
+                cx.theme().success.opacity(0.4),
+                cx.theme().success,
+            ),
+            SettingsProviderStatusKind::Error => (
+                cx.theme().danger.opacity(0.12),
+                cx.theme().danger.opacity(0.4),
+                cx.theme().danger,
+            ),
+            SettingsProviderStatusKind::Info => {
+                (cx.theme().muted, cx.theme().border, cx.theme().foreground)
+            }
+        };
+        div()
+            .id("provider-auth-status")
+            .debug_selector(|| "provider-auth-status".into())
+            .role(Role::Alert)
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .bg(background)
+            .p_3()
+            .text_xs()
+            .text_color(foreground)
+            .child(
+                TextView::markdown("provider-auth-status-markdown", status.text).selectable(true),
             )
-        })
+    });
+
+    // Model providers: sign-ins, API keys and the shared model catalog.
+    let antigravity = providers.antigravity_connected;
+    let mut models = group_card(cx)
         .child(separator(
             div()
                 .child(chatgpt)
                 .when(connected, |row| row.child(accounts)),
             cx,
-        ));
-    for (provider, connected, status, description) in [
-        (
-            SettingsProvider::Antigravity,
-            providers.antigravity_connected,
-            if providers.antigravity_connected {
-                "Connected"
-            } else {
-                "Not connected"
-            }
-            .into(),
-            "Gemini and other models via Google OAuth PKCE.",
-        ),
-        (
-            SettingsProvider::GitHub,
-            providers.github_status.is_some(),
-            providers
-                .github_status
-                .clone()
-                .unwrap_or_else(|| "Not connected".into()),
-            "Connect GitHub to inspect pull requests and issues.",
-        ),
-    ] {
-        page = page.child(separator(
+        ))
+        .child(separator(
             settings_provider_connection(
-                provider,
-                connected,
-                status,
-                description,
-                connection_controls(provider, connected, callback.clone()).into_any_element(),
+                SettingsProvider::Antigravity,
+                antigravity,
+                if antigravity { "Connected" } else { "Not connected" }.into(),
+                "Gemini and other models via Google OAuth PKCE.",
+                connection_controls(SettingsProvider::Antigravity, antigravity, callback.clone())
+                    .into_any_element(),
                 window,
                 cx,
             ),
             cx,
         ));
-    }
-    let save = callback.clone();
-    page = page.child(separator(
-        settings_provider_key(
-            SettingsProvider::GitHub,
-            github,
-            move |action, window, cx| save(action, window, cx),
-            window,
-            cx,
-        ),
-        cx,
-    ));
-    let connected = providers.gitlab_status.is_some();
-    page = page.child(separator(
-        settings_provider_connection(
-            SettingsProvider::GitLab,
-            connected,
-            providers
-                .gitlab_status
-                .clone()
-                .unwrap_or_else(|| "Not connected".into()),
-            "Connect GitLab to inspect merge requests and issues.",
-            connection_controls(SettingsProvider::GitLab, connected, callback.clone())
-                .into_any_element(),
-            window,
-            cx,
-        ),
-        cx,
-    ));
     for (provider, input) in [
         (SettingsProvider::OpenAI, openai),
         (SettingsProvider::OpenCode, opencode),
@@ -698,8 +639,77 @@ pub fn settings_providers(
             window,
             cx,
         );
-        page = page.child(separator(row, cx));
+        models = models.child(separator(row, cx));
     }
-    page = page.child(model_catalog_row(callback.clone(), cx));
-    page.into_any_element()
+    models = models.child(model_catalog_row(callback.clone(), cx));
+
+    // Code hosts: repository access for issues, pull requests and reviews.
+    let github_connected = providers.github_status.is_some();
+    let gitlab_connected = providers.gitlab_status.is_some();
+    let save = callback.clone();
+    let hosts = group_card(cx)
+        .child(separator(
+            settings_provider_connection(
+                SettingsProvider::GitHub,
+                github_connected,
+                providers
+                    .github_status
+                    .clone()
+                    .unwrap_or_else(|| "Not connected".into()),
+                "Connect GitHub to inspect pull requests and issues.",
+                connection_controls(SettingsProvider::GitHub, github_connected, callback.clone())
+                    .into_any_element(),
+                window,
+                cx,
+            ),
+            cx,
+        ))
+        .child(separator(
+            settings_provider_key(
+                SettingsProvider::GitHub,
+                github,
+                move |action, window, cx| save(action, window, cx),
+                window,
+                cx,
+            ),
+            cx,
+        ))
+        .child(settings_provider_connection(
+            SettingsProvider::GitLab,
+            gitlab_connected,
+            providers
+                .gitlab_status
+                .clone()
+                .unwrap_or_else(|| "Not connected".into()),
+            "Connect GitLab to inspect merge requests and issues.",
+            connection_controls(SettingsProvider::GitLab, gitlab_connected, callback.clone())
+                .into_any_element(),
+            window,
+            cx,
+        ));
+
+    div()
+        .debug_selector(|| "settings-provider-panel".into())
+        .mt_5()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .children(status_banner)
+        .child(group_label("Model providers", cx))
+        .child(models)
+        .child(group_label("Code hosts", cx).mt_2())
+        .child(hosts)
+        .into_any_element()
+}
+
+fn group_label(title: &'static str, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(title)
+}
+
+fn group_card(cx: &App) -> Div {
+    super::settings_group(cx).py_0().flex_col()
 }

@@ -94,20 +94,9 @@ fn provider_controls_select_accounts_mask_keys_and_fit(cx: &mut TestAppContext) 
     }));
     click(cx, "provider-auth-gitlab");
     assert!(preview.read_with(cx, |view, _| view.providers.gitlab_status.is_none()));
-    let status = preview.read_with(cx, |view, _| {
-        view.providers.status.as_ref().unwrap().text.clone()
-    });
-    click(cx, "provider-auth-gitlab");
-    assert_eq!(
-        status,
-        preview.read_with(cx, |view, _| view
-            .providers
-            .status
-            .as_ref()
-            .unwrap()
-            .text
-            .clone())
-    );
+    // A disconnected GitLab has no sign-in flow here, so it offers no action.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("provider-auth-gitlab").is_none());
 
     for (width, font) in [(480.0, 14.0), (800.0, 16.0), (1100.0, 20.0)] {
         cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(3000.0)));

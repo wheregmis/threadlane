@@ -75,13 +75,10 @@ impl SettingsPage {
             Self::AcpAgents => "ACP Agents",
         }
     }
+    /// Page heading: the navigation label, so the page you open is named the
+    /// way the row you clicked was.
     pub fn title(self) -> &'static str {
-        match self {
-            Self::Appearance => "Appearance & Themes",
-            Self::Providers => "Models & Providers",
-            Self::Skills => "Skills Catalog",
-            _ => self.label(),
-        }
+        self.label()
     }
     pub fn description(self) -> &'static str {
         match self {

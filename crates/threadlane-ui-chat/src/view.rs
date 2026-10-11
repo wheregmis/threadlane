@@ -1797,13 +1797,13 @@ impl ChatListView {
                     "Workspace changes · {count} {}",
                     if count == 1 { "file" } else { "files" }
                 ))
-                .child(div().flex_1())
+                // Beside the count it reviews, and outlined so it reads as a control.
                 .child(
                     Button::new("review-workspace-changes")
                         .debug_selector(|| "workspace-changes-review".into())
                         .label("Review")
-                        .ghost()
-                        .small()
+                        .outline()
+                        .xsmall()
                         .rounded_full()
                         .accessibility_label(format!(
                             "Review {count} uncommitted {}",
@@ -2936,7 +2936,9 @@ impl ChatListView {
                         });
                     })
             }))
-            .child(
+            // Starter prompts appear once a provider is connected; before that the
+            // hero's one next step is connecting, and disabled chips read as broken.
+            .children((!needs_provider).then(|| {
                 div()
                     .flex()
                     .flex_wrap()
@@ -2954,15 +2956,14 @@ impl ChatListView {
                             .outline()
                             .small()
                             .rounded_full()
-                            .disabled(needs_provider)
                             .on_click(move |_event, window, cx| {
                                 input.update(cx, |input, cx| {
                                     input.set_value(&prompt_str, window, cx);
                                     input.focus(window, cx);
                                 });
                             })
-                    })),
-            )
+                    }))
+            }))
             .into_any_element()
     }
 
@@ -3708,7 +3709,12 @@ impl ChatListView {
         let has_models = !model_options.is_empty();
         let needs_provider = !has_models;
         let preparing_worktree = self.model.read(cx).active_worktree_setup().is_some();
-        let composer_shortcut_hint = "Enter to send · Shift+Enter for a new line";
+        // Shortcuts are only worth advertising once a message can be sent.
+        let composer_shortcut_hint = if needs_provider {
+            "Connect a provider to send messages"
+        } else {
+            "Enter to send · Shift+Enter for a new line"
+        };
         let model_label = selected_option
             .as_ref()
             .map(|option| option.label.clone())

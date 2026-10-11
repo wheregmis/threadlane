@@ -1,5 +1,5 @@
 //! Discussion, editable drafts and commits. Hosts own projection, input and publish guards.
-use super::detail_content;
+use super::{detail_content, detail_markdown_style};
 use gpui::{prelude::*, *};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Textarea, TextareaState};
@@ -110,6 +110,7 @@ pub fn github_conversation_row(
                         SharedString::from(format!("github-pr-conversation-body-{}", row.id)),
                         row.body,
                     )
+                    .style(detail_markdown_style())
                     .selectable(true),
                 )
                 .into_any_element()
