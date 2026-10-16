@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.53](https://github.com/wheregmis/threadlane/compare/v0.1.52...v0.1.53) (2026-10-16)
+
+
+### Bug Fixes
+
+* **github:** mark issue Delete as destructive ([5adc14a](https://github.com/wheregmis/threadlane/commit/5adc14ace48785f58f92c38812c312437c1adc84))
+* **queue:** limit pending input projection to session hydration ([1d89e23](https://github.com/wheregmis/threadlane/commit/1d89e2314af732ffc401df5e1ea27903f990d7ed))
+* **queue:** restore pending messages when switching sessions ([6f6fe6f](https://github.com/wheregmis/threadlane/commit/6f6fe6f95ba3cbd9c634cdbcf105c318b720d446))
+* **ui:** mark issue Delete as destructive and replace misleading redo icons ([582bcba](https://github.com/wheregmis/threadlane/commit/582bcbaa4d3682d572010e4414deb2bf3396b483))
+* **ui:** replace redo arrows on refresh, restart, merge and pull actions ([6effd0d](https://github.com/wheregmis/threadlane/commit/6effd0d2ec3b82fd9b6038c0bfc16b8f652579e1))
+
 ## [0.1.52](https://github.com/wheregmis/threadlane/compare/v0.1.51...v0.1.52) (2026-10-15)
 
 
