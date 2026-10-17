@@ -3099,6 +3099,13 @@ fn shared_code_blocks_preserve_native_guards_and_copy(cx: &mut gpui::TestAppCont
                     window.refresh();
                     window.draw(cx).clear(cx);
                 });
+                // The provider banner above the composer must not grow tall enough to
+                // push the composer off-screen and collapse the transcript.
+                let composer = cx.debug_bounds("composer-surface").unwrap();
+                assert!(
+                    composer.bottom() <= gpui::px(900.),
+                    "composer stays in the window at font {font}, width {width}"
+                );
                 assert!(cx.debug_bounds("code-block-code-0").is_some());
                 for selector in ["copy-code-code-0", "run-term-code-0", "open-edit-code-0"] {
                     let bounds = cx.debug_bounds(selector);

@@ -3825,11 +3825,16 @@ impl ChatListView {
                 .border_color(theme.warning.opacity(0.45))
                 .bg(theme.warning.opacity(0.08))
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap_3()
                 .child(
+                    // `flex_auto`, not `flex_1`: with a zero basis the button kept its
+                    // width and squeezed this copy to one word per line (an ~800px banner
+                    // at a large font in a narrow window, pushing the composer off-screen).
+                    // Sized to its text, the button wraps below it instead.
                     div()
-                        .flex_1()
+                        .flex_auto()
                         .min_w_0()
                         .flex()
                         .flex_col()
