@@ -4766,10 +4766,10 @@ mod tests {
             confirmation.branch_preview,
             "issue/42-fix-linked-task-browser-xxxxxx"
         );
-        assert!(confirmation
-            .copy
-            .contains("pushes to origin"));
-        assert!(confirmation.copy.contains("draft PR on GitHub"));
+        // The shared kit copy describes the PR-readiness workflow; its key promise is
+        // that the agent never merges.
+        assert_eq!(confirmation.copy, threadlane_ui_kit::github::ISSUE_TASK_DESCRIPTION);
+        assert!(confirmation.copy.contains("It does not merge."));
         assert_eq!(confirmation.start_label, "Start task");
         assert_eq!(
             confirmation.branch_disclosure,
