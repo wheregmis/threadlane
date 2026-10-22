@@ -5,9 +5,7 @@
 
 ### Maintenance
 
-* **deps:** bump tokio from 1.53.2 to 1.53.3 ([b271082](https://github.com/wheregmis/threadlane/commit/b2710821c5d6c748a57ee1e9299e603ecb19791b))
 * **deps:** bump tokio from 1.53.2 to 1.53.3 ([b8255f4](https://github.com/wheregmis/threadlane/commit/b8255f48fa9a8fa051bdeb40e02ce2080bcc8a0b))
-* Fix hotpath-cloud workflow ([be1dec2](https://github.com/wheregmis/threadlane/commit/be1dec2f5263620c65993a78e669ec3c2f2b5f0e))
 * Fix hotpath-cloud workflow ([563b3c9](https://github.com/wheregmis/threadlane/commit/563b3c9ddae69d70968dd198c9b76cbf66c61a38))
 
 ## [0.1.53](https://github.com/wheregmis/threadlane/compare/v0.1.52...v0.1.53) (2026-10-18)
