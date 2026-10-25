@@ -9,6 +9,7 @@
   <a href="https://github.com/wheregmis/threadlane/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/wheregmis/threadlane?display_name=tag&sort=semver"></a>
   <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-d65d0e?logo=rust&logoColor=white">
   <img alt="GPUI" src="https://img.shields.io/badge/UI-GPUI-6f8cff">
+  <a href="https://hotpath.rs/app/repos/wheregmis/threadlane"><img alt="hotpath-cloud" src="https://img.shields.io/endpoint?url=https://hotpath.rs/badge-cloud.json"></a>
 </p>
 
 Threadlane brings project workspaces, persistent conversation sessions, coding-agent execution, and developer tools into one native application. Its Rust workspace includes provider integrations, external ACP agents, MCP support, and sandboxed WASI extensions.

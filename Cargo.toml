@@ -73,7 +73,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "0.3.3", features = [
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "134ddaa0906fbfc688255b33daef0e803a039050" }
 gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "134ddaa0906fbfc688255b33daef0e803a039050" }
 gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "134ddaa0906fbfc688255b33daef0e803a039050" }
-hotpath = "0.28"
+hotpath = "0.29"
 image = "0.25"
 notify = "8.2"
 portable-pty = "0.9"
