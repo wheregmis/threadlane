@@ -191,8 +191,8 @@ pub fn next_find_match(selected: Option<usize>, count: usize, previous: bool) ->
 #[cfg(test)]
 mod search_tests {
     use super::{
-        build_transcript_rows, find_conversation_messages, first_conversation_match,
-        transcript_rows, TranscriptRow,
+        TranscriptRow, build_transcript_rows, find_conversation_messages, first_conversation_match,
+        prompt_excerpt, prompt_landmarks, transcript_rows,
     };
     use crate::daemon::{ChatMessageInfo, MessageRole, ToolActivityInfo};
 
@@ -271,7 +271,10 @@ mod search_tests {
                 TranscriptRow::Message(3)
             ]
         );
-        assert_eq!(build_transcript_rows(&[], true), vec![TranscriptRow::Working]);
+        assert_eq!(
+            build_transcript_rows(&[], true),
+            vec![TranscriptRow::Working]
+        );
     }
 
     #[test]
@@ -282,6 +285,86 @@ mod search_tests {
         assert_eq!(
             hit.excerpt,
             format!("…{}İstanbul NEEDLE{}…", "é".repeat(31), "λ".repeat(114))
+        );
+    }
+
+    fn old_prompt_excerpt(content: &str) -> String {
+        let mut normalized = String::with_capacity(content.len());
+        let mut last_was_space = true;
+        for ch in content.trim().chars() {
+            if ch.is_whitespace() {
+                if !last_was_space {
+                    normalized.push(' ');
+                }
+                last_was_space = true;
+            } else {
+                normalized.push(ch);
+                last_was_space = false;
+            }
+        }
+        let mut chars = normalized.chars();
+        let excerpt: String = chars.by_ref().take(96).collect();
+        if chars.next().is_some() {
+            format!("{excerpt}…")
+        } else {
+            excerpt
+        }
+    }
+
+    #[test]
+    fn prompt_excerpt_matches_old_reference() {
+        let cases = [
+            "x".repeat(95),
+            "x".repeat(96),
+            "x".repeat(97),
+            format!("{}   x", "x".repeat(95)),
+            format!("{}   x", "x".repeat(94)),
+            format!("{}   \t\n", "x".repeat(96)),
+            "  \t\n  ".to_owned(),
+            format!("  {}\u{2003}{}  ", "é".repeat(50), "λ".repeat(80)),
+            format!("{}   tail", "wide界".repeat(10_000)),
+        ];
+        for content in cases {
+            assert_eq!(prompt_excerpt(&content), old_prompt_excerpt(&content));
+        }
+    }
+
+    #[test]
+    fn prompt_landmarks_keep_transcript_row_indices() {
+        let mut activity = message("activity", MessageRole::Assistant, "");
+        activity.tool_activities.push(ToolActivityInfo {
+            title: "read_file".into(),
+            id: "call".into(),
+            category: "Loaded".into(),
+            display_summary: String::new(),
+            detail: String::new(),
+            arguments: String::new(),
+            is_expanded: false,
+        });
+        let messages = vec![
+            message("user-1", MessageRole::User, "first"),
+            activity,
+            message("queued-user-1", MessageRole::User, "queued"),
+            message("steered-user-1", MessageRole::User, "steered"),
+            message("assistant", MessageRole::Assistant, "reply"),
+            message("user-2", MessageRole::User, "second"),
+        ];
+        let marks = prompt_landmarks(&messages, true);
+        assert_eq!(
+            marks
+                .iter()
+                .map(|m| (
+                    m.message_id.as_str(),
+                    m.row_index,
+                    m.ordinal,
+                    m.pending_echo
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("user-1", 0, 1, false),
+                ("steered-user-1", 2, 2, true),
+                ("user-2", 4, 3, false),
+            ]
         );
     }
 }
@@ -310,14 +393,11 @@ pub struct PromptLandmark {
 /// activity-only and excluded messages never appear as landmarks.
 pub fn prompt_landmarks(messages: &[ChatMessageInfo], generating: bool) -> Vec<PromptLandmark> {
     let mut landmarks = Vec::new();
-    for (row_index, row) in build_transcript_rows(messages, generating)
-        .iter()
-        .enumerate()
-    {
+    for (row_index, row) in transcript_rows(messages, generating).enumerate() {
         let TranscriptRow::Message(index) = row else {
             continue;
         };
-        let message = &messages[*index];
+        let message = &messages[index];
         if message.role != MessageRole::User {
             continue;
         }
@@ -337,26 +417,31 @@ pub fn prompt_landmarks(messages: &[ChatMessageInfo], generating: bool) -> Vec<P
 /// Whitespace-normalized, `PROMPT_EXCERPT_CHARS`-bounded excerpt of a prompt
 /// for compact list display; appends `…` when truncated.
 fn prompt_excerpt(content: &str) -> String {
-    let mut normalized = String::with_capacity(content.len());
-    let mut last_was_space = true;
-    for ch in content.trim().chars() {
+    let mut excerpt = String::with_capacity(PROMPT_EXCERPT_CHARS + 1);
+    let mut pending_space = false;
+    let mut count = 0;
+    for ch in content.chars() {
         if ch.is_whitespace() {
-            if !last_was_space {
-                normalized.push(' ');
-            }
-            last_was_space = true;
-        } else {
-            normalized.push(ch);
-            last_was_space = false;
+            pending_space = !excerpt.is_empty();
+            continue;
         }
+        if pending_space {
+            if count == PROMPT_EXCERPT_CHARS {
+                excerpt.push('…');
+                return excerpt;
+            }
+            excerpt.push(' ');
+            count += 1;
+            pending_space = false;
+        }
+        if count == PROMPT_EXCERPT_CHARS {
+            excerpt.push('…');
+            return excerpt;
+        }
+        excerpt.push(ch);
+        count += 1;
     }
-    let mut chars = normalized.chars();
-    let excerpt: String = chars.by_ref().take(PROMPT_EXCERPT_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{excerpt}…")
-    } else {
-        excerpt
-    }
+    excerpt
 }
 
 /// Outcome of stepping the composer prompt-recall cursor with Up/Down.
