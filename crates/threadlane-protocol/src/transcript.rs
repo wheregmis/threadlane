@@ -191,8 +191,8 @@ pub fn next_find_match(selected: Option<usize>, count: usize, previous: bool) ->
 #[cfg(test)]
 mod search_tests {
     use super::{
-        build_transcript_rows, find_conversation_messages, first_conversation_match,
-        transcript_rows, TranscriptRow,
+        TranscriptRow, build_transcript_rows, find_conversation_messages, first_conversation_match,
+        transcript_rows,
     };
     use crate::daemon::{ChatMessageInfo, MessageRole, ToolActivityInfo};
 
@@ -271,7 +271,10 @@ mod search_tests {
                 TranscriptRow::Message(3)
             ]
         );
-        assert_eq!(build_transcript_rows(&[], true), vec![TranscriptRow::Working]);
+        assert_eq!(
+            build_transcript_rows(&[], true),
+            vec![TranscriptRow::Working]
+        );
     }
 
     #[test]
@@ -310,14 +313,11 @@ pub struct PromptLandmark {
 /// activity-only and excluded messages never appear as landmarks.
 pub fn prompt_landmarks(messages: &[ChatMessageInfo], generating: bool) -> Vec<PromptLandmark> {
     let mut landmarks = Vec::new();
-    for (row_index, row) in build_transcript_rows(messages, generating)
-        .iter()
-        .enumerate()
-    {
+    for (row_index, row) in transcript_rows(messages, generating).enumerate() {
         let TranscriptRow::Message(index) = row else {
             continue;
         };
-        let message = &messages[*index];
+        let message = &messages[index];
         if message.role != MessageRole::User {
             continue;
         }
@@ -337,26 +337,32 @@ pub fn prompt_landmarks(messages: &[ChatMessageInfo], generating: bool) -> Vec<P
 /// Whitespace-normalized, `PROMPT_EXCERPT_CHARS`-bounded excerpt of a prompt
 /// for compact list display; appends `…` when truncated.
 fn prompt_excerpt(content: &str) -> String {
-    let mut normalized = String::with_capacity(content.len());
-    let mut last_was_space = true;
-    for ch in content.trim().chars() {
+    let mut excerpt = String::with_capacity(PROMPT_EXCERPT_CHARS + 1);
+    let mut pending_space = false;
+    let mut count = 0;
+    let mut chars = content.chars().peekable();
+    while let Some(ch) = chars.next() {
         if ch.is_whitespace() {
-            if !last_was_space {
-                normalized.push(' ');
+            pending_space = !excerpt.is_empty();
+            continue;
+        }
+        if pending_space {
+            excerpt.push(' ');
+            count += 1;
+            pending_space = false;
+            if count > PROMPT_EXCERPT_CHARS {
+                excerpt.push('…');
+                return excerpt;
             }
-            last_was_space = true;
-        } else {
-            normalized.push(ch);
-            last_was_space = false;
+        }
+        excerpt.push(ch);
+        count += 1;
+        if count > PROMPT_EXCERPT_CHARS {
+            excerpt.push('…');
+            return excerpt;
         }
     }
-    let mut chars = normalized.chars();
-    let excerpt: String = chars.by_ref().take(PROMPT_EXCERPT_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{excerpt}…")
-    } else {
-        excerpt
-    }
+    excerpt
 }
 
 /// Outcome of stepping the composer prompt-recall cursor with Up/Down.
