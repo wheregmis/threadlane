@@ -10,6 +10,7 @@ default = []
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath-alloc"]
 hotpath-cloud = ["hotpath/hotpath-cloud"]
+hotpath-callgrind = ["hotpath/hotpath-callgrind"]
 
 [dependencies]
 async-trait.workspace = true
