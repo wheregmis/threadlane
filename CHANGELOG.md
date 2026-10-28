@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.54](https://github.com/wheregmis/threadlane/compare/v0.1.53...v0.1.54) (2026-10-28)
+
+
+### Performance Improvements
+
+* bound prompt excerpt work and avoid temporary transcript rows ([ebb689d](https://github.com/wheregmis/threadlane/commit/ebb689df323471acde3b787806daadc55480d21c))
+
+
+### Maintenance
+
+* **deps:** bump notify from 8.2.0 to 8.2.1 ([4555523](https://github.com/wheregmis/threadlane/commit/45555237bade20e1271bca351367b6748d3891d3))
+* **deps:** bump tokio from 1.53.2 to 1.53.3 ([b8255f4](https://github.com/wheregmis/threadlane/commit/b8255f48fa9a8fa051bdeb40e02ce2080bcc8a0b))
+* **deps:** bump tokio from 1.54.0 to 1.54.1 ([6ca16c1](https://github.com/wheregmis/threadlane/commit/6ca16c1daef3c52fa38c11c50a219e4a939923bf))
+* Fix hotpath-cloud workflow ([563b3c9](https://github.com/wheregmis/threadlane/commit/563b3c9ddae69d70968dd198c9b76cbf66c61a38))
+
 ## [0.1.53](https://github.com/wheregmis/threadlane/compare/v0.1.52...v0.1.53) (2026-10-18)
 
 
