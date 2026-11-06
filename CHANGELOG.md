@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.54](https://github.com/wheregmis/threadlane/compare/v0.1.53...v0.1.54) (2026-11-06)
+
+
+### Performance Improvements
+
+* bound prompt excerpt work and avoid temporary transcript rows ([ebb689d](https://github.com/wheregmis/threadlane/commit/ebb689df323471acde3b787806daadc55480d21c))
+
+
+### Maintenance
+
+* **deps:** bump hotpath from 0.29.2 to 0.30.3 ([9664a2f](https://github.com/wheregmis/threadlane/commit/9664a2f287320d2f2e797e7122cc0155edcbf2fc))
+* **deps:** bump hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml ([1503cf7](https://github.com/wheregmis/threadlane/commit/1503cf79d6e8ba89932abf46f56e4e42f781d4ec))
+* **deps:** bump hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml from 0.29.2 to 0.30.3 ([88b5547](https://github.com/wheregmis/threadlane/commit/88b554711d72a630e64c97c55677b59a8efcff18))
+* **deps:** bump log from 0.4.34 to 0.4.35 ([6df91b3](https://github.com/wheregmis/threadlane/commit/6df91b3b54ccb5a2b6e16d3292f96fe67d35882b))
+* **deps:** bump notify from 8.2.0 to 8.2.1 ([4555523](https://github.com/wheregmis/threadlane/commit/45555237bade20e1271bca351367b6748d3891d3))
+* **deps:** bump robius-open from `aea7a4f` to `9b235c3` ([6d4b28f](https://github.com/wheregmis/threadlane/commit/6d4b28fc093d68a49f4f55060c990170f3dfb2d6))
+* **deps:** bump rustix from 1.1.5 to 1.1.6 ([5ad152f](https://github.com/wheregmis/threadlane/commit/5ad152f28db93b4a82465dd41a0ea6c2c7463819))
+* **deps:** bump tokio from 1.53.2 to 1.53.3 ([b8255f4](https://github.com/wheregmis/threadlane/commit/b8255f48fa9a8fa051bdeb40e02ce2080bcc8a0b))
+* **deps:** bump tokio from 1.54.0 to 1.54.1 ([6ca16c1](https://github.com/wheregmis/threadlane/commit/6ca16c1daef3c52fa38c11c50a219e4a939923bf))
+* Fix hotpath-cloud workflow ([563b3c9](https://github.com/wheregmis/threadlane/commit/563b3c9ddae69d70968dd198c9b76cbf66c61a38))
+
 ## [0.1.53](https://github.com/wheregmis/threadlane/compare/v0.1.52...v0.1.53) (2026-10-18)
 
 
