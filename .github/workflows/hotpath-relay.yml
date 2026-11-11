@@ -12,7 +12,7 @@ jobs:
       matrix:
         suite: [provider, dispatch]
     # Keep the tag in step with the `hotpath` version in Cargo.lock.
-    uses: hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml@d1689a707565a67f4ff0b81cdb1b26c7351abede # v0.30.3
+    uses: hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml@3ed8abc83adcb36d8eabe33a8c919752e6966b37 # v0.31.1
     permissions:
       actions: read # download the artifact of the benchmark run
       id-token: write # authenticate the upload
