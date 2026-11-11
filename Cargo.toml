@@ -80,7 +80,7 @@ portable-pty = "0.9"
 qrcode = { version = "0.14", default-features = false }
 regex = "1.10"
 reqwest = { version = "0.12", default-features = false }
-rfd = "0.17.2"
+rfd = "0.18.0"
 robius-open = { git = "https://github.com/project-robius/robius.git" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
