@@ -111,9 +111,8 @@ impl AppState {
                                 ),
                                 None => summary.machine.clone().unwrap_or_default(),
                             },
-                            (TaskStatus::Queued, None) => task
-                                .waiting_reason
-                                .clone()
+                            (TaskStatus::Queued, None) => self
+                                .queued_reason(space, project, summary)
                                 .unwrap_or_else(|| "waiting for a machine".to_owned()),
                             (TaskStatus::Sleeping, None) => {
                                 "waiting for a timer or an event".to_owned()
