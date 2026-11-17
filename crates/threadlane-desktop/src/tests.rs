@@ -8,31 +8,37 @@ use tempfile::TempDir;
 use threadlane_client::ClientDirs;
 use threadlane_core::client::{
     Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, OrgReply,
-    OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest, UserMessage,
+    OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest, RunSummary,
+    UserMessage,
 };
-use threadlane_core::ids::{LaneId, OutboxId};
+use threadlane_core::ids::{AgentId, LaneId, MachineId, OutboxId, RunId, SessionId};
 use threadlane_core::model::{
-    DecisionKind, DecisionOption, DecisionStatus, Mode, OutboxMessage, OutboxStatus, Urgency,
+    BackendKind, DecisionKind, DecisionOption, DecisionStatus, Mode, OutboxMessage, OutboxStatus,
+    Run, RunOutcome, RunStatus, Task, TaskOrigin, TaskStatus, Urgency,
 };
 use threadlane_core::time::Timestamp;
 
 use super::*;
 
-/// A hub with one project, `api`, and the decisions it was given. While
-/// `down`, it answers nothing.
-#[derive(Debug)]
+/// A hub with one project, `api`, and what it was given. While `down`, it
+/// answers nothing.
+#[derive(Debug, Default)]
 struct FakeHub {
     space: String,
     down: AtomicBool,
     decisions: Mutex<Vec<Decision>>,
+    tasks: Mutex<Vec<TaskSummary>>,
+    history: Mutex<Vec<ConversationEntry>>,
+    recent: Mutex<Vec<FeedItem>>,
+    bindings: Mutex<Vec<BindingSummary>>,
 }
 
 impl FakeHub {
     fn new(space: &str, decisions: Vec<Decision>) -> Arc<Self> {
         Arc::new(Self {
             space: space.to_owned(),
-            down: AtomicBool::new(false),
             decisions: Mutex::new(decisions),
+            ..Self::default()
         })
     }
 
@@ -58,12 +64,20 @@ impl HubApi for FakeHub {
 
     async fn projects(&self) -> Result<Vec<ProjectSummary>, ApiError> {
         self.up()?;
-        Ok(vec![ProjectSummary {
-            id: ProjectId(1),
-            name: "api".to_owned(),
-            is_general: false,
-            paused: false,
-        }])
+        Ok(vec![
+            ProjectSummary {
+                id: ProjectId(1),
+                name: "api".to_owned(),
+                is_general: false,
+                paused: false,
+            },
+            ProjectSummary {
+                id: ProjectId(2),
+                name: "General".to_owned(),
+                is_general: true,
+                paused: false,
+            },
+        ])
     }
 
     async fn send_message(&self, _message: &UserMessage) -> Result<Accepted, ApiError> {
@@ -74,8 +88,28 @@ impl HubApi for FakeHub {
         Err(ApiError::Invalid("unsupported".to_owned()))
     }
 
-    async fn org(&self, _request: OrgRequest) -> Result<OrgReply, ApiError> {
-        Err(ApiError::Invalid("unsupported".to_owned()))
+    async fn org(&self, request: OrgRequest) -> Result<OrgReply, ApiError> {
+        self.up()?;
+        let mut bindings = self.bindings.lock().expect("lock");
+        match request {
+            OrgRequest::Bindings { .. } => Ok(OrgReply::Bindings {
+                bindings: bindings.clone(),
+            }),
+            OrgRequest::Repositories { .. } => Ok(OrgReply::Repositories {
+                repositories: Vec::new(),
+            }),
+            OrgRequest::SetMode { agent, mode, .. } => {
+                let binding = bindings
+                    .iter_mut()
+                    .find(|binding| binding.agent == agent)
+                    .ok_or(ApiError::NotFound(agent))?;
+                binding.mode = mode;
+                Ok(OrgReply::Binding {
+                    binding: binding.clone(),
+                })
+            }
+            other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
+        }
     }
 
     async fn decisions(&self, request: DecisionRequest) -> Result<DecisionReply, ApiError> {
@@ -104,8 +138,26 @@ impl HubApi for FakeHub {
     async fn pairing(&self, _request: PairingRequest) -> Result<PairingReply, ApiError> {
         Err(ApiError::Invalid("unsupported".to_owned()))
     }
-    async fn overview(&self, _request: OverviewRequest) -> Result<OverviewReply, ApiError> {
-        Err(ApiError::Invalid("unsupported".to_owned()))
+
+    async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
+        self.up()?;
+        let tasks = self.tasks.lock().expect("lock").clone();
+        match request {
+            OverviewRequest::Tasks { .. } => Ok(OverviewReply::Tasks { tasks }),
+            OverviewRequest::Running => Ok(OverviewReply::Tasks {
+                tasks: tasks
+                    .into_iter()
+                    .filter(|summary| summary.task.status == TaskStatus::Running)
+                    .collect(),
+            }),
+            OverviewRequest::Conversation { .. } => Ok(OverviewReply::Conversation {
+                entries: self.history.lock().expect("lock").clone(),
+            }),
+            OverviewRequest::Recent { .. } => Ok(OverviewReply::Recent {
+                items: self.recent.lock().expect("lock").clone(),
+            }),
+            other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
+        }
     }
 }
 
@@ -139,34 +191,83 @@ fn decision(id: i64, created_at: i64) -> Decision {
     }
 }
 
+fn feed_item(seq: i64, kind: OutboxKind, body: Json, at: i64) -> FeedItem {
+    FeedItem {
+        seq,
+        message: OutboxMessage {
+            id: OutboxId(seq),
+            project_id: Some(ProjectId(1)),
+            lane_id: None,
+            session_id: None,
+            run_id: None,
+            tool_call_id: None,
+            kind,
+            decision_id: None,
+            channel: "client".to_owned(),
+            body,
+            urgency: Urgency::Normal,
+            status: OutboxStatus::Sent,
+            not_before: None,
+            attempts: 1,
+            channel_message_id: None,
+            created_at: Timestamp::from_millis(at),
+            sent_at: Some(Timestamp::from_millis(at)),
+            delivery_seq: Some(seq),
+        },
+        project_name: Some("api".to_owned()),
+        delivered_at: Timestamp::from_millis(at),
+    }
+}
+
 fn item(space: &str, seq: i64, kind: OutboxKind, body: Json) -> SpaceFeedItem {
     SpaceFeedItem {
         space: space.to_owned(),
-        item: FeedItem {
-            seq,
-            message: OutboxMessage {
-                id: OutboxId(seq),
-                project_id: Some(ProjectId(1)),
-                lane_id: None,
-                session_id: None,
-                run_id: None,
-                tool_call_id: None,
-                kind,
-                decision_id: None,
-                channel: "client".to_owned(),
-                body,
-                urgency: Urgency::Normal,
-                status: OutboxStatus::Sent,
-                not_before: None,
-                attempts: 1,
-                channel_message_id: None,
-                created_at: Timestamp::from_millis(1_000),
-                sent_at: Some(Timestamp::from_millis(2_000)),
-                delivery_seq: Some(seq),
-            },
-            project_name: Some("api".to_owned()),
-            delivered_at: Timestamp::from_millis(2_000),
+        item: feed_item(seq, kind, body, 2_000),
+    }
+}
+
+/// A space-wide account notice, as the hub keys it.
+fn account_notice(seq: i64, key: &str, text: &str) -> FeedItem {
+    let mut notice = feed_item(seq, OutboxKind::SystemNotice, json!({ "text": text }), seq);
+    notice.message.project_id = None;
+    notice.project_name = None;
+    notice.message.tool_call_id = Some(key.to_owned());
+    notice
+}
+
+fn task(id: i64, status: TaskStatus, waiting_reason: Option<&str>) -> TaskSummary {
+    TaskSummary {
+        task: Task {
+            id: TaskId(id),
+            project_id: ProjectId(1),
+            lane_id: LaneId(10 + id),
+            agent_id: AgentId(2),
+            title: format!("Task {id}"),
+            goal: String::new(),
+            repositories: Vec::new(),
+            parent_task_id: None,
+            depends_on: Vec::new(),
+            origin: TaskOrigin::User,
+            status,
+            priority: 0,
+            created_by_call: None,
+            last_machine_id: None,
+            waiting_reason: waiting_reason.map(str::to_owned),
+            result: None,
+            created_at: Timestamp::from_millis(1_000),
         },
+        project: "api".to_owned(),
+        agent: "Engineer".to_owned(),
+        machine: (status == TaskStatus::Running).then(|| "macbook".to_owned()),
+        running_since: (status == TaskStatus::Running).then(|| Timestamp::from_millis(0)),
+    }
+}
+
+/// Twelve minutes after the epoch, in UTC.
+fn when() -> When {
+    When {
+        now: Timestamp::from_millis(12 * 60_000),
+        offset_minutes: 0,
     }
 }
 
@@ -218,6 +319,10 @@ async fn decisions_from_two_hubs_merge_oldest_first() {
 #[tokio::test]
 async fn an_unreachable_hub_does_not_hide_the_others() {
     let work = FakeHub::new("Work", vec![decision(1, 1_000)]);
+    work.tasks
+        .lock()
+        .expect("lock")
+        .push(task(1, TaskStatus::Running, None));
     let home = FakeHub::new("Home", vec![decision(1, 2_000)]);
     let (_dir, core) = core(&[("work", &work), ("home", &home)]);
     let mut state = AppState::default();
@@ -229,7 +334,8 @@ async fn an_unreachable_hub_does_not_hide_the_others() {
 
     let work_space = &state.spaces()[0];
     assert!(work_space.unreachable.is_some(), "work is shown as away");
-    assert_eq!(work_space.projects.len(), 1, "its last projects are kept");
+    assert_eq!(work_space.projects.len(), 2, "its last projects are kept");
+    assert_eq!(work_space.running.len(), 1, "and what it last ran");
     assert!(state.spaces()[1].unreachable.is_none());
     assert_eq!(
         queue(&state),
@@ -243,12 +349,31 @@ async fn an_unreachable_hub_does_not_hide_the_others() {
 }
 
 #[tokio::test]
-async fn answering_removes_the_decision_from_the_queue() {
-    let work = FakeHub::new("Work", vec![decision(1, 1_000), decision(2, 2_000)]);
+async fn answering_removes_the_decision_from_the_queue_counts_and_board() {
+    let mut in_task = decision(1, 1_000);
+    in_task.task_id = Some(TaskId(7));
+    let work = FakeHub::new("Work", vec![in_task, decision(2, 2_000)]);
+    work.tasks
+        .lock()
+        .expect("lock")
+        .push(task(7, TaskStatus::WaitingOnYou, None));
     let (_dir, core) = core(&[("work", &work)]);
     let mut state = AppState::default();
     state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
     assert!(state.is_pending("work", "D-0001"));
+    assert_eq!(state.open_in("work", ProjectId(1)), 2, "per-project count");
+    assert_eq!(state.open_in("work", ProjectId(2)), 0);
+    let waiting = |state: &AppState| {
+        state
+            .board("work", "api", &when())
+            .into_iter()
+            .find(|column| column.title == "Waiting on you")
+            .expect("column")
+            .cards
+    };
+    assert_eq!(waiting(&state)[0].decision, Some(DecisionId(1)));
+    assert_eq!(waiting(&state)[0].meta, "Engineer · D-0001 open");
 
     let answer = core
         .answer(Some("work"), "D-0001", "approve", Some("go ahead"))
@@ -258,6 +383,8 @@ async fn answering_removes_the_decision_from_the_queue() {
 
     assert!(!state.is_pending("work", "D-0001"));
     assert_eq!(queue(&state), [pair("work", "D-0002")]);
+    assert_eq!(state.open_in("work", ProjectId(1)), 1);
+    assert_eq!(waiting(&state)[0].decision, None, "no Answer button");
     state.apply(refresh(&core).await);
     assert_eq!(queue(&state), [pair("work", "D-0002")], "the hub agrees");
 }
@@ -308,6 +435,95 @@ fn decisions_and_notices_raise_one_notification_and_messages_none() {
     );
 }
 
+fn said(lines: &[Line]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| match line {
+            Line::Day(day) => format!("-- {day}"),
+            Line::You { text, .. } => format!("you: {text}"),
+            Line::Lead { text, .. } => format!("lead: {text}"),
+            Line::Notice { text, .. } => format!("notice: {text}"),
+            Line::Decision { card, pending, .. } => format!("{}: pending {pending}", card.id),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_conversation_merges_history_your_messages_and_the_feed_once_each() {
+    let day = 86_400_000;
+    let work = FakeHub::new("Work", Vec::new());
+    *work.history.lock().expect("lock") = vec![
+        ConversationEntry::You {
+            event_id: EventId(1),
+            text: "Fix the refunds".to_owned(),
+            at: Timestamp::from_millis(1_000),
+        },
+        ConversationEntry::Delivered {
+            item: feed_item(1, OutboxKind::Message, json!({ "text": "On it" }), 2_000),
+        },
+        ConversationEntry::Delivered {
+            item: feed_item(
+                2,
+                OutboxKind::Decision,
+                json!({ "decision": "D-0001", "question": "Open it?", "options": ["yes"] }),
+                day + 1_000,
+            ),
+        },
+    ];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    // The feed delivers the same lead message again, and one more; you send
+    // a message the history does not have yet.
+    state.receive(SpaceFeedItem {
+        space: "work".to_owned(),
+        item: feed_item(1, OutboxKind::Message, json!({ "text": "On it" }), 2_000),
+    });
+    state.receive(SpaceFeedItem {
+        space: "work".to_owned(),
+        item: feed_item(
+            3,
+            OutboxKind::Message,
+            json!({ "text": "Done" }),
+            day + 3_000,
+        ),
+    });
+    let sent_at = Timestamp::from_millis(day + 2_000);
+    state.sent("work", "api", "Also the changelog", EventId(2), sent_at);
+    // The next history load has your message too, under the same event id.
+    work.history
+        .lock()
+        .expect("lock")
+        .push(ConversationEntry::You {
+            event_id: EventId(2),
+            text: "Also the changelog".to_owned(),
+            at: sent_at,
+        });
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let when = When {
+        now: Timestamp::from_millis(day + 5_000),
+        offset_minutes: 0,
+    };
+    assert_eq!(
+        said(&state.conversation("work", "api", &when)),
+        [
+            "-- Yesterday",
+            "you: Fix the refunds",
+            "lead: On it",
+            "-- Today",
+            "D-0001: pending false",
+            "you: Also the changelog",
+            "lead: Done",
+        ]
+    );
+    assert!(state.conversation("work", "General", &when).is_empty());
+    assert!(state.conversation("home", "api", &when).is_empty());
+    assert_eq!(state.earlier("work", "api"), None, "one page holds it all");
+}
+
 #[test]
 fn an_item_seen_twice_is_shown_once() {
     let mut state = AppState::default();
@@ -322,7 +538,277 @@ fn an_item_seen_twice_is_shown_once() {
         json!({ "text": "hi" }),
     ));
 
-    assert_eq!(state.conversation("work", "api").count(), 1);
-    assert_eq!(state.conversation("home", "api").count(), 1);
-    assert_eq!(state.conversation("work", "other").count(), 0);
+    let lines = |space| said(&state.conversation(space, "api", &when()));
+    assert_eq!(lines("work"), ["-- Today", "lead: hi"]);
+    assert_eq!(lines("home"), ["-- Today", "lead: hi"]);
+    assert!(state.conversation("work", "other", &when()).is_empty());
+}
+
+#[tokio::test]
+async fn the_board_groups_tasks_by_status_and_says_why_one_waits() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().expect("lock") = vec![
+        task(1, TaskStatus::Queued, Some("waiting for T-0002 to be done")),
+        task(2, TaskStatus::Running, None),
+        task(3, TaskStatus::Queued, Some(BLOCKED_FOR_TEST)),
+        task(4, TaskStatus::Done, None),
+        task(5, TaskStatus::Queued, None),
+    ];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let board: Vec<(&str, Vec<(TaskId, String)>)> = state
+        .board("work", "api", &when())
+        .into_iter()
+        .map(|column| {
+            (
+                column.title,
+                column
+                    .cards
+                    .into_iter()
+                    .map(|card| (card.id, card.meta))
+                    .collect(),
+            )
+        })
+        .collect();
+    let card = |id, meta: &str| (TaskId(id), meta.to_owned());
+    assert_eq!(
+        board,
+        [
+            (
+                "Queued",
+                vec![
+                    card(1, "Engineer · waiting for T-0002 to be done"),
+                    card(5, "Engineer · waiting for a machine"),
+                ]
+            ),
+            (
+                "Blocked",
+                vec![card(3, &format!("Engineer · {BLOCKED_FOR_TEST}"))]
+            ),
+            ("Running", vec![card(2, "Engineer · macbook · 12 min")]),
+            ("Waiting on you", vec![]),
+            ("Done", vec![card(4, "Engineer")]),
+        ]
+    );
+    assert!(
+        state
+            .board("work", "other", &when())
+            .iter()
+            .all(|c| c.cards.is_empty())
+    );
+}
+
+const BLOCKED_FOR_TEST: &str = "blocked: every model account it can use is at its usage limit";
+
+#[tokio::test]
+async fn home_lists_what_runs_and_the_latest_result_per_project_filtered_by_space() {
+    let work = FakeHub::new("Work", vec![decision(1, 1_000)]);
+    *work.tasks.lock().expect("lock") = vec![
+        task(1, TaskStatus::Running, None),
+        task(2, TaskStatus::Queued, None),
+    ];
+    *work.recent.lock().expect("lock") = vec![
+        feed_item(1, OutboxKind::Message, json!({ "text": "older" }), 1_000),
+        feed_item(2, OutboxKind::Message, json!({ "text": "newer" }), 2_000),
+    ];
+    let home = FakeHub::new("Home", Vec::new());
+    *home.recent.lock().expect("lock") = vec![feed_item(
+        1,
+        OutboxKind::Message,
+        json!({ "text": "home result" }),
+        3_000,
+    )];
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    let running: Vec<_> = state
+        .running()
+        .into_iter()
+        .map(|(space, summary)| (space, summary.task.id))
+        .collect();
+    assert_eq!(running, [("work", TaskId(1))]);
+    let recent: Vec<_> = state
+        .recent()
+        .into_iter()
+        .map(|item| (item.space.as_str(), item.text()))
+        .collect();
+    assert_eq!(
+        recent,
+        [
+            ("home", "home result".to_owned()),
+            ("work", "newer".to_owned())
+        ]
+    );
+    assert_eq!(
+        state.status_line(),
+        "2 spaces reachable · 1 running · 1 need you · 0 of 0 machines online"
+    );
+    assert_eq!(
+        state.target(),
+        Some(("work", "General")),
+        "General by default"
+    );
+
+    state.set_filter(Some("home"));
+    assert!(state.running().is_empty());
+    assert_eq!(state.needs_you().count(), 0);
+    assert_eq!(state.recent().len(), 1);
+    assert_eq!(state.target(), Some(("home", "General")));
+    state.set_target("work", "api");
+    assert_eq!(state.target(), Some(("work", "api")), "the last one chosen");
+}
+
+#[tokio::test]
+async fn a_space_is_blocked_from_its_blocked_notice_until_one_says_it_resumed() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(state.blocked("work"), None);
+
+    let notice = |seq, key: &str, text: &str| SpaceFeedItem {
+        space: "work".to_owned(),
+        item: account_notice(seq, key, text),
+    };
+    state.receive(notice(1, "system:account:1:blocked", "No account left."));
+    assert_eq!(state.blocked("work").as_deref(), Some("No account left."));
+    assert_eq!(state.blocked("home"), None, "per space");
+    // Another notice does not end it.
+    state.receive(item(
+        "work",
+        2,
+        OutboxKind::SystemNotice,
+        json!({ "text": "the lead stopped" }),
+    ));
+    assert!(state.blocked("work").is_some());
+    state.receive(notice(3, "system:account:1:resumed", "Resumed."));
+    assert_eq!(state.blocked("work"), None);
+
+    // From history after a restart: the latest one counts.
+    *work.recent.lock().expect("lock") = vec![account_notice(
+        4,
+        "system:account:2:blocked",
+        "Blocked again.",
+    )];
+    state.apply(refresh(&core).await);
+    assert_eq!(state.blocked("work").as_deref(), Some("Blocked again."));
+}
+
+#[tokio::test]
+async fn a_mode_change_shows_in_the_project_at_once() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.bindings.lock().expect("lock") = vec![BindingSummary {
+        agent: "Engineer".to_owned(),
+        role: "engineer".to_owned(),
+        mode: Mode::OnRequest,
+        is_lead: false,
+    }];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let binding = core
+        .set_mode(Some("work"), Some("api"), "Engineer", Mode::Assisted)
+        .await
+        .expect("set mode");
+    state.mode_set("work", "api", binding);
+
+    let modes: Vec<_> = state
+        .project("work", "api")
+        .expect("loaded")
+        .bindings
+        .iter()
+        .map(|binding| (binding.agent.as_str(), binding.mode))
+        .collect();
+    assert_eq!(modes, [("Engineer", Mode::Assisted)]);
+}
+
+#[test]
+fn a_task_s_timeline_has_its_runs_decisions_and_result() {
+    let mut summary = task(7, TaskStatus::Done, None);
+    summary.machine = Some("linux-box".to_owned());
+    summary.task.result = Some(json!({ "summary": "Refunds are idempotent." }));
+    let run = |id, started, ended, status, outcome| RunSummary {
+        run: Run {
+            id: RunId(id),
+            lane_id: LaneId(17),
+            session_id: SessionId(1),
+            machine_id: MachineId(2),
+            lease_epoch: 1,
+            agent_id: Some(AgentId(2)),
+            backend: Some(BackendKind::Claude),
+            status,
+            outcome,
+            rationale: None,
+            error: (status == RunStatus::Failed).then(|| "usage limit".to_owned()),
+            started_at: Timestamp::from_millis(started),
+            ended_at: Some(Timestamp::from_millis(ended)),
+        },
+        machine: "linux-box".to_owned(),
+    };
+    let mut asked = decision(3, 200_000);
+    asked.task_id = Some(TaskId(7));
+    asked.status = DecisionStatus::Answered;
+    asked.answer = Some(json!({ "option": 0, "note": "draft", "answered_at": 300_000 }));
+    let detail = TaskDetail {
+        summary,
+        branch: "threadlane/T-0007".to_owned(),
+        repositories: vec!["payments-service".to_owned()],
+        runs: vec![
+            run(1, 60_000, 120_000, RunStatus::Failed, None),
+            run(
+                2,
+                120_000,
+                180_000 + 60_000 * 28,
+                RunStatus::Committed,
+                Some(RunOutcome::Deferred),
+            ),
+            run(
+                3,
+                400_000,
+                460_000,
+                RunStatus::Committed,
+                Some(RunOutcome::Sent),
+            ),
+        ],
+        decisions: vec![asked],
+        related: Vec::new(),
+    };
+    let when = When {
+        now: Timestamp::from_millis(3_600_000),
+        offset_minutes: 0,
+    };
+
+    assert_eq!(
+        chips(&detail),
+        [
+            "Engineer",
+            "claude",
+            "linux-box",
+            "payments-service",
+            "threadlane/T-0007",
+            "Requested by you",
+            "Done"
+        ]
+    );
+    let moments: Vec<_> = timeline(&detail, &when)
+        .into_iter()
+        .map(|moment| format!("{} {}", moment.time, moment.text))
+        .collect();
+    assert_eq!(
+        moments,
+        [
+            "00:00 Created: Task 7. Requested by you.",
+            "00:01 Engineer on linux-box with claude: worked for 1 min, failed: usage limit",
+            "00:02 Engineer on linux-box with claude: worked for 29 min, stopped to ask you",
+            "00:03 Asked D-0003: Question 3?",
+            "00:05 You answered D-0003: approve with the note \"draft\"",
+            "00:06 Engineer on linux-box with claude: worked for 1 min, reported back",
+            "00:31 Done: Refunds are idempotent.",
+        ]
+    );
 }
