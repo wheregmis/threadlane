@@ -4,9 +4,9 @@
 //! can press it.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Selectable as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_desktop::{Part, Reach};
+use threadlane_desktop::{Activity, Part, Reach};
 
 use super::{gap_line, section};
 use crate::{Desktop, Screen, Tab};
@@ -90,6 +90,31 @@ impl Desktop {
                 self.screen == Screen::Machines,
                 cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx)),
             ))
+    }
+}
+
+impl Desktop {
+    /// The status area under every screen: the last action and where it
+    /// stands, until the next one.
+    pub(crate) fn activity(&self, cx: &App) -> Option<Div> {
+        let activity = self.state.activity()?;
+        let (mark, color) = match activity {
+            Activity::Working(_) => ("…", cx.theme().muted_foreground),
+            Activity::Done(_) => ("✓", cx.theme().foreground),
+            Activity::Failed(_) => ("!", cx.theme().danger),
+        };
+        Some(
+            h_flex()
+                .flex_none()
+                .gap_2()
+                .pt_2()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_sm()
+                .text_color(color)
+                .child(mark)
+                .child(div().min_w_0().child(activity.text().to_owned())),
+        )
     }
 }
 

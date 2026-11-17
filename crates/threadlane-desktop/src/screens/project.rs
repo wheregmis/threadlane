@@ -1,8 +1,8 @@
 //! A project (wireframes 2, 3, 4): its tasks by status, the conversation
-//! with its lead, and the mode of each agent bound in it.
+//! with its lead, the mode of each agent bound in it, and its memory.
 
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
@@ -30,7 +30,7 @@ impl Desktop {
         when: &When,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tabs = [Tab::Tasks, Tab::Conversation, Tab::Agents];
+        let tabs = [Tab::Tasks, Tab::Conversation, Tab::Agents, Tab::Memory];
         let selected = tabs.iter().position(|known| *known == tab).unwrap_or(0);
         let (in_space, named) = (space.to_owned(), project.to_owned());
         let bar = TabBar::new("project-tabs")
@@ -49,7 +49,8 @@ impl Desktop {
             }))
             .child("Tasks")
             .child("Conversation")
-            .child("Agents");
+            .child("Agents")
+            .child("Memory");
         let paused = self
             .state
             .space(space)
@@ -60,6 +61,7 @@ impl Desktop {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
             Tab::Conversation => self.conversation_tab(space, project, when, cx),
             Tab::Agents => self.agents_tab(space, project, cx),
+            Tab::Memory => self.memory_tab(space, project, when, cx),
         };
         v_flex()
             .flex_1()
@@ -416,6 +418,32 @@ impl Desktop {
                     ),
             );
         }
+        side = side.child(section("What the lead knows"));
+        match self.state.lead_knows(space, project) {
+            Some(knows) => {
+                for line in knows.lines() {
+                    side = side.child(div().text_sm().child(line));
+                }
+            }
+            None => {
+                let gap = self
+                    .state
+                    .memory_gap(space, project)
+                    .unwrap_or(threadlane_desktop::Gap::Loading);
+                side = side.child(gap_line(&gap, "the memory", cx));
+            }
+        }
+        let memory = Screen::Project {
+            space: space.to_owned(),
+            project: project.to_owned(),
+            tab: Tab::Memory,
+        };
+        side = side.child(
+            Button::new("open-memory")
+                .small()
+                .label("Open memory")
+                .on_click(cx.listener(move |this, _, _, cx| this.go(memory.clone(), cx))),
+        );
 
         h_flex()
             .flex_1()
@@ -440,6 +468,169 @@ impl Desktop {
                     ),
             )
             .child(side)
+            .into_any_element()
+    }
+
+    /// The files this project's runs can see, by group, and the one selected
+    /// with its versions and your Edit / Save / Delete (wireframe "Memory").
+    fn memory_tab(
+        &self,
+        space: &str,
+        project: &str,
+        when: &When,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let mut list = v_flex()
+            .id("memory-list")
+            .w(px(300.))
+            .flex_none()
+            .h_full()
+            .overflow_y_scroll()
+            .gap_2();
+        if let Some(gap) = self.state.memory_gap(space, project) {
+            list = list.child(gap_line(&gap, "the memory", cx));
+        }
+        let groups = self.state.memory_groups(space, project);
+        if groups.is_empty() && self.state.memory_gap(space, project).is_none() {
+            list = list.child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("Nothing remembered yet."),
+            );
+        }
+        for group in groups {
+            list = list.child(section(group.title));
+            for row in group.files {
+                let shown = row.path.clone();
+                let (in_space, named, path) = (space.to_owned(), project.to_owned(), row.path);
+                list = list.child(
+                    v_flex()
+                        .child(
+                            link(format!("memory-{path}"), row.title)
+                                .selected(row.selected)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.select_memory(&in_space, &named, &path, cx);
+                                })),
+                        )
+                        .child(div().text_xs().text_color(muted).child(shown)),
+                );
+            }
+        }
+
+        let mut detail = v_flex()
+            .id("memory-file")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .gap_2();
+        match self.state.memory_selected(space, project) {
+            None => {
+                detail = detail.child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("Choose a file to see what it says and who wrote it."),
+                );
+            }
+            Some(path) => {
+                let file = self.state.memory_file(space, project);
+                let editing = self.state.memory_editing(space, project);
+                detail = detail.child(section(path.to_owned()));
+                let mut actions = h_flex().gap_2();
+                if file.is_some() && threadlane_desktop::editable(path) {
+                    let (in_space, named) = (space.to_owned(), project.to_owned());
+                    if editing {
+                        let (save_space, save_project) = (in_space.clone(), named.clone());
+                        actions = actions
+                            .child(Button::new("memory-save").primary().label("Save").on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.change_memory(
+                                        save_space.clone(),
+                                        save_project.clone(),
+                                        true,
+                                        cx,
+                                    );
+                                }),
+                            ))
+                            .child(Button::new("memory-cancel").label("Cancel").on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.edit_memory(&in_space, &named, false, cx);
+                                }),
+                            ));
+                    } else {
+                        let (delete_space, delete_project) = (in_space.clone(), named.clone());
+                        actions =
+                            actions
+                                .child(Button::new("memory-edit").label("Edit").on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.edit_memory(&in_space, &named, true, cx);
+                                    }),
+                                ))
+                                .child(
+                                    Button::new("memory-delete")
+                                        .ghost()
+                                        .label("Delete")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.change_memory(
+                                                delete_space.clone(),
+                                                delete_project.clone(),
+                                                false,
+                                                cx,
+                                            );
+                                        })),
+                                );
+                    }
+                } else if file.is_some() {
+                    actions = actions.child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("Written by the hub from the files next to it."),
+                    );
+                }
+                detail = detail.child(actions);
+                if let Some(why) = self.state.memory_refused(space, project) {
+                    detail = detail.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .child(why.to_owned()),
+                    );
+                }
+                detail = match (file, editing) {
+                    (Some(_), true) => detail.child(Textarea::new(&self.memory_editor)),
+                    (Some(file), false) => detail.child(
+                        div()
+                            .p_2()
+                            .text_sm()
+                            .bg(cx.theme().muted)
+                            .rounded(cx.theme().radius)
+                            .whitespace_normal()
+                            .child(file.content.clone()),
+                    ),
+                    (None, _) => detail.child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("This file is deleted."),
+                    ),
+                };
+                detail = detail.child(section("Versions"));
+                for line in self.state.memory_versions(space, project, when) {
+                    detail = detail.child(div().text_sm().text_color(muted).child(line));
+                }
+            }
+        }
+        h_flex()
+            .flex_1()
+            .min_h_0()
+            .items_start()
+            .gap_4()
+            .child(list)
+            .child(detail)
             .into_any_element()
     }
 

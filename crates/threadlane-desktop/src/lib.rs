@@ -800,6 +800,19 @@ impl AppState {
             .find(|queued| queued.space == space && queued.decision.task_id == Some(task))
     }
 
+    /// What the task screen's composer says about where a message goes: to
+    /// the task, and while a decision is open there, that it declines it.
+    #[must_use]
+    pub fn task_hint(&self, space: &str, task: TaskId) -> String {
+        match self.open_for(space, task) {
+            Some(queued) => format!(
+                "Goes to {task}, not the lead. Sending declines {} with your message as the note.",
+                queued.decision.id
+            ),
+            None => format!("Goes to {task}, not the lead."),
+        }
+    }
+
     /// The running tasks Home lists, with their space, oldest first.
     #[must_use]
     pub fn running(&self) -> Vec<(&str, &TaskSummary)> {
