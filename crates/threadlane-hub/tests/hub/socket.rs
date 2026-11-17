@@ -67,6 +67,7 @@ async fn a_served_hub_answers_a_local_client() {
             project: None,
             text: "Hello over the socket".into(),
             client_message_id: "sock-1".into(),
+            task: None,
         })
         .await
         .unwrap();

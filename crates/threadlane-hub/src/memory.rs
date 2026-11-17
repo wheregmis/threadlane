@@ -87,7 +87,7 @@ pub(crate) fn scope(project: ProjectId, kind: LaneKind, path: &str) -> Result<St
 }
 
 /// A stored path as the run sees it, if [`scope`] lets the run see it.
-fn visible(project: ProjectId, kind: LaneKind, stored: &str) -> Option<String> {
+pub(crate) fn visible(project: ProjectId, kind: LaneKind, stored: &str) -> Option<String> {
     let own = format!("projects/{}/", project.get());
     let named = match stored.strip_prefix(&own) {
         Some(rest) => format!("project/{rest}"),

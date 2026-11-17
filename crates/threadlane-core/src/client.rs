@@ -4,7 +4,7 @@
 //! implements it; a transport carries it to clients as [`ClientRequest`] and
 //! [`ClientResponse`]. Later milestones add capabilities; so far: who am I
 //! talking to, send a message, follow the feed, the organization, decisions,
-//! pairing, and the overview the app's screens show.
+//! pairing, the overview the app's screens show, and memory.
 
 use std::fmt;
 use std::time::Duration;
@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::admission::AdmittedKey;
 use crate::ids::{DecisionId, EventId, ProjectId, TaskId};
-use crate::model::{Account, Agent, Decision, Machine, Mode, OutboxMessage, Repository, Run, Task};
+use crate::model::{
+    Account, Agent, Decision, Machine, MemoryFile, Mode, OutboxMessage, Repository, Run, Task,
+};
 use crate::time::Timestamp;
 
 /// What a hub says about itself.
@@ -35,7 +37,7 @@ pub struct ProjectSummary {
     pub paused: bool,
 }
 
-/// A message from you to a project's lead.
+/// A message from you to a project's lead, or to one of its tasks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMessage {
     /// The project's name. `None` means the General project.
@@ -44,6 +46,12 @@ pub struct UserMessage {
     /// Chosen by the client, unique per message. Sending the same id twice
     /// is a successful no-op, so a client may retry freely.
     pub client_message_id: String,
+    /// The task whose lane it goes to instead of the lead's (Plan.md §4.2).
+    /// While a decision is open there, it declines it with the message as
+    /// the note (§9.4). The task names its project, so `project` is then
+    /// ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskId>,
 }
 
 /// The hub's acknowledgement of a [`UserMessage`].
@@ -231,6 +239,10 @@ pub struct TaskDetail {
     pub decisions: Vec<Decision>,
     /// The tasks it depends on and the tasks that depend on it.
     pub related: Vec<TaskSummary>,
+    /// Your messages to its lane, oldest first: only
+    /// [`ConversationEntry::You`] entries.
+    #[serde(default)]
+    pub messages: Vec<ConversationEntry>,
 }
 
 /// One entry of the conversation with a project's lead.
@@ -310,6 +322,54 @@ pub enum OverviewReply {
     },
 }
 
+/// The Memory capability (Plan.md §8.3, §11.1 "Memory"): the files a
+/// project's runs can see, with the lead's reach, and your own changes.
+/// Paths are as agents name them, `space/…` and `project/…`, and map to
+/// stored ones by the same rules as the agents' memory tools, so no path
+/// reaches another project (invariant 12). `None` as the project means the
+/// General project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemoryRequest {
+    /// Every current file the project's lead can see, by path.
+    List { project: Option<String> },
+    /// The current version of one file.
+    Read {
+        project: Option<String>,
+        path: String,
+    },
+    /// Every version of one file, oldest first.
+    History {
+        project: Option<String>,
+        path: String,
+    },
+    /// Writes a file as you: a new version with no run, refused like an
+    /// agent's when over budget, without a title line where an index lists
+    /// it, or at an `INDEX.md`.
+    Write {
+        project: Option<String>,
+        path: String,
+        content: String,
+    },
+    /// Deletes a file as you, as a new version.
+    Delete {
+        project: Option<String>,
+        path: String,
+    },
+}
+
+/// The answer to a [`MemoryRequest`]. Every file's `path` is as agents
+/// name it, and `written_by_run` is `None` for a version you wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemoryReply {
+    Files { files: Vec<MemoryFile> },
+    File { file: MemoryFile },
+    History { versions: Vec<MemoryFile> },
+}
+
 /// Why a client request failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", content = "message", rename_all = "snake_case")]
@@ -346,6 +406,8 @@ pub trait HubApi: Send + Sync + fmt::Debug {
     async fn pairing(&self, request: PairingRequest) -> Result<PairingReply, ApiError>;
     /// Reads the tasks, conversation history, and machines the app shows.
     async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError>;
+    /// Reads a project's memory, and makes your own changes to it.
+    async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError>;
 }
 
 /// [`HubApi`] as it crosses a transport.
@@ -361,6 +423,7 @@ pub enum ClientRequest {
     Decisions { request: DecisionRequest },
     Pairing { request: PairingRequest },
     Overview { request: OverviewRequest },
+    Memory { request: MemoryRequest },
 }
 
 /// The answer to a [`ClientRequest`].
@@ -380,6 +443,7 @@ pub enum ClientResponse {
     Decisions { reply: DecisionReply },
     Pairing { reply: PairingReply },
     Overview { reply: OverviewReply },
+    Memory { reply: MemoryReply },
     Error { error: ApiError },
 }
 
@@ -415,6 +479,10 @@ pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientRespons
             .overview(request)
             .await
             .map(|reply| ClientResponse::Overview { reply }),
+        ClientRequest::Memory { request } => api
+            .memory(request)
+            .await
+            .map(|reply| ClientResponse::Memory { reply }),
     };
     result.unwrap_or_else(|error| ClientResponse::Error { error })
 }

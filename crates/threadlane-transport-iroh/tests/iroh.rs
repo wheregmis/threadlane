@@ -11,11 +11,11 @@ use async_trait::async_trait;
 use serde_json::json;
 use threadlane_core::admission::{AdmittedKey, KeyRole};
 use threadlane_core::client::{
-    Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, OrgReply,
-    OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest, ProjectSummary,
-    UserMessage,
+    Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
+    MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
+    PairingRequest, ProjectSummary, UserMessage,
 };
-use threadlane_core::ids::{EventId, OutboxId, ProjectId};
+use threadlane_core::ids::{EventId, OutboxId, ProjectId, TaskId};
 use threadlane_core::model::{Mode, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
 use threadlane_core::time::Timestamp;
 use threadlane_transport_iroh::{
@@ -151,6 +151,15 @@ impl HubApi for FakeHub {
                 accounts: Vec::new(),
             }),
             _ => Err(ApiError::Invalid("unsupported".to_owned())),
+        }
+    }
+
+    async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError> {
+        match request {
+            MemoryRequest::List { .. } => Ok(MemoryReply::Files { files: Vec::new() }),
+            _ => Err(ApiError::NotFound(
+                "there is no file at project/a.md".to_owned(),
+            )),
         }
     }
 }
@@ -323,6 +332,7 @@ async fn every_request_kind_round_trips() {
         project: None,
         text: "hello".to_owned(),
         client_message_id: "m-1".to_owned(),
+        task: Some(TaskId(4)),
     };
     assert_eq!(
         client.send_message(&message).await,
@@ -337,6 +347,7 @@ async fn every_request_kind_round_trips() {
         project: Some("missing".to_owned()),
         text: "hello".to_owned(),
         client_message_id: "m-2".to_owned(),
+        task: None,
     };
     assert_eq!(
         client.send_message(&missing).await,
@@ -366,6 +377,21 @@ async fn every_request_kind_round_trips() {
             machines: Vec::new(),
             accounts: Vec::new()
         })
+    );
+    assert_eq!(
+        client.memory(MemoryRequest::List { project: None }).await,
+        Ok(MemoryReply::Files { files: Vec::new() })
+    );
+    assert_eq!(
+        client
+            .memory(MemoryRequest::Read {
+                project: None,
+                path: "project/a.md".to_owned()
+            })
+            .await,
+        Err(ApiError::NotFound(
+            "there is no file at project/a.md".to_owned()
+        ))
     );
     assert_eq!(client.feed(0, Duration::ZERO).await, Ok(vec![item(1)]));
 

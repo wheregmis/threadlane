@@ -4,10 +4,12 @@
 //! you triggered.
 
 use serde_json::{Value as Json, json};
+use threadlane_core::client::{ApiError, MemoryReply, MemoryRequest};
 use threadlane_core::ids::DecisionId;
 use threadlane_core::link::{Begin, HubLink, Perform, RunAssignment};
 use threadlane_core::model::{LaneKind, Lease, Mode, NewAgent, NewBinding, NewProject, RunOutcome};
 use threadlane_core::store::{DecisionStore, MemoryStore, OrgStore};
+use threadlane_core::time::Clock as _;
 use threadlane_core::tools::ToolError;
 use threadlane_hub::{
     CREATE_TASK, FINISH_TASK, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW,
@@ -466,6 +468,7 @@ async fn a_run_never_reaches_memory_outside_its_project_and_the_spaces_notes() {
             project: Some("Alpha".into()),
             text: "Remember the secret".into(),
             client_message_id: "a-1".into(),
+            task: None,
         })
         .await
         .unwrap();
@@ -720,4 +723,211 @@ async fn instructions_change_in_a_run_you_triggered_and_otherwise_wait_for_your_
     }
     .end()
     .await;
+}
+
+/// The Memory capability's answer as the files it lists, by path.
+fn paths(reply: MemoryReply) -> Vec<String> {
+    match reply {
+        MemoryReply::Files { files } => files.into_iter().map(|file| file.path).collect(),
+        other => panic!("not a listing: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn you_see_a_projects_memory_as_its_lead_does_and_change_it_as_yourself() {
+    let hub = TestHub::start().await;
+    let other = hub
+        .db
+        .create_project(&NewProject {
+            name: "Other".into(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    let now = hub.clock.now();
+    hub.db
+        .write_by_owner(
+            &format!("projects/{}/notes/secret.md", other.id.get()),
+            "# S\nSecret.",
+            now,
+        )
+        .await
+        .unwrap();
+    hub.db
+        .write_by_owner("space/notes/style.md", "# Style\nShort.", now)
+        .await
+        .unwrap();
+    let memory = |request| hub.api.memory(request);
+    let write = |path: &str, content: &str| MemoryRequest::Write {
+        project: None,
+        path: path.to_owned(),
+        content: content.to_owned(),
+    };
+
+    // You may write instructions: you are the owner (Plan.md §8.3).
+    let written = memory(write("project/instructions.md", "Be brief."))
+        .await
+        .unwrap();
+    let MemoryReply::File { file } = written else {
+        panic!("not a file: {written:?}");
+    };
+    assert_eq!(
+        (file.path.as_str(), file.version, file.written_by_run),
+        ("project/instructions.md", 1, None)
+    );
+    memory(write("project/notes/build.md", "# Build\nRun make."))
+        .await
+        .unwrap();
+    assert_eq!(
+        paths(memory(MemoryRequest::List { project: None }).await.unwrap()),
+        [
+            "space/notes/INDEX.md",
+            "space/notes/style.md",
+            "project/instructions.md",
+            "project/notes/INDEX.md",
+            "project/notes/build.md",
+        ],
+        "the other project's files are not listed"
+    );
+    assert_eq!(
+        memory(MemoryRequest::Read {
+            project: None,
+            path: "project/notes/INDEX.md".to_owned(),
+        })
+        .await
+        .unwrap(),
+        MemoryReply::File {
+            file: hub
+                .db
+                .read(&format!(
+                    "projects/{}/notes/INDEX.md",
+                    hub.general().await.id.get()
+                ))
+                .await
+                .unwrap()
+                .map(|mut file| {
+                    file.path = "project/notes/INDEX.md".to_owned();
+                    file
+                })
+                .unwrap()
+        }
+    );
+
+    // The store's refusals, with paths as you name them.
+    let over = "x".repeat(threadlane_core::memory::INSTRUCTIONS_BUDGET + 1);
+    for (path, content, why) in [
+        (
+            "project/instructions.md",
+            over.as_str(),
+            "project/instructions.md would be",
+        ),
+        ("project/notes/a.md", "no description", "title line"),
+        (
+            "project/notes/INDEX.md",
+            "# A\nForged.",
+            "written by the system",
+        ),
+    ] {
+        let refused = memory(write(path, content)).await;
+        assert!(
+            matches!(&refused, Err(ApiError::Invalid(message)) if message.contains(why)
+                && !message.contains("projects/")),
+            "{path}: {refused:?}"
+        );
+    }
+
+    memory(MemoryRequest::Delete {
+        project: None,
+        path: "project/notes/build.md".to_owned(),
+    })
+    .await
+    .unwrap();
+    let history = memory(MemoryRequest::History {
+        project: None,
+        path: "project/notes/build.md".to_owned(),
+    })
+    .await
+    .unwrap();
+    let MemoryReply::History { versions } = history else {
+        panic!("not a history: {history:?}");
+    };
+    assert_eq!(
+        versions
+            .iter()
+            .map(|v| (v.path.as_str(), v.version, v.deleted, v.written_by_run))
+            .collect::<Vec<_>>(),
+        [
+            ("project/notes/build.md", 1, false, None),
+            ("project/notes/build.md", 2, true, None)
+        ]
+    );
+    assert!(matches!(
+        memory(MemoryRequest::Read {
+            project: None,
+            path: "project/notes/build.md".to_owned(),
+        })
+        .await,
+        Err(ApiError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn no_memory_request_reaches_another_project() {
+    // Invariant 12: every path maps into the named project or the space.
+    let hub = TestHub::start().await;
+    let other = hub
+        .db
+        .create_project(&NewProject {
+            name: "Other".into(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    let theirs = format!("projects/{}/notes/secret.md", other.id.get());
+    hub.db
+        .write_by_owner(&theirs, "# S\nSecret.", hub.clock.now())
+        .await
+        .unwrap();
+    for path in [
+        theirs.clone(),
+        format!("project/../projects/{}/notes/secret.md", other.id.get()),
+        "/space/notes/a.md".to_owned(),
+        "space/other.md".to_owned(),
+        "notes/a.md".to_owned(),
+    ] {
+        for request in [
+            MemoryRequest::Read {
+                project: None,
+                path: path.clone(),
+            },
+            MemoryRequest::History {
+                project: None,
+                path: path.clone(),
+            },
+            MemoryRequest::Write {
+                project: None,
+                path: path.clone(),
+                content: "# X\nOverwritten.".to_owned(),
+            },
+            MemoryRequest::Delete {
+                project: None,
+                path: path.clone(),
+            },
+        ] {
+            let answer = hub.api.memory(request.clone()).await;
+            assert!(
+                matches!(answer, Err(ApiError::Invalid(_))),
+                "{request:?}: {answer:?}"
+            );
+        }
+    }
+    assert_eq!(hub.db.history(&theirs).await.unwrap().len(), 1);
+    assert!(matches!(
+        hub.api
+            .memory(MemoryRequest::List {
+                project: Some("Nowhere".to_owned())
+            })
+            .await,
+        Err(ApiError::NotFound(_))
+    ));
 }

@@ -25,8 +25,9 @@ use serde_json::Value as Json;
 use threadlane_core::admission::AdmittedKey;
 use threadlane_core::client::{
     Accepted, ApiError, BindingSummary, ConversationEntry, DecisionReply, DecisionRequest,
-    FeedItem, HubApi, HubInfo, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
-    PairingRequest, ProjectSummary, TaskDetail, TaskSummary, UserMessage,
+    FeedItem, HubApi, HubInfo, MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply,
+    OverviewRequest, PairingReply, PairingRequest, ProjectSummary, TaskDetail, TaskSummary,
+    UserMessage,
 };
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::model::{Account, Agent, Decision, Machine, Mode, OutboxKind, Repository};
@@ -176,7 +177,8 @@ impl HubStatus {
 pub struct Sent {
     /// The space it went to.
     pub space: String,
-    /// The project named when sending; `None` means the General project.
+    /// The project named when sending; `None` means the General project,
+    /// or none, for a message to a task.
     pub project: Option<String>,
     /// The id the client chose; sending it again is a no-op on the hub.
     pub client_message_id: String,
@@ -1213,6 +1215,7 @@ impl ClientCore {
             project: project.map(str::to_owned),
             text: text.to_owned(),
             client_message_id: uuid::Uuid::new_v4().to_string(),
+            task: None,
         };
         let accepted = api
             .send_message(&message)
@@ -1224,6 +1227,62 @@ impl ClientCore {
             client_message_id: message.client_message_id,
             accepted,
         })
+    }
+
+    /// Sends `text` to task `task` (`T-0142`) of one space, with a fresh
+    /// `client_message_id`: it goes to the task's lane, and declines the
+    /// decision open there with `text` as the note (Plan.md §9.4). `None`
+    /// means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, an id that is not a
+    /// task's, or the hub's error.
+    pub async fn send_to_task(
+        &self,
+        space: Option<&str>,
+        task: &str,
+        text: &str,
+    ) -> Result<Sent, ClientError> {
+        let (space, api) = self.target(space)?;
+        let id = TaskId::parse(task).ok_or_else(|| {
+            api_error(
+                &space,
+                ApiError::Invalid(format!("{task:?} is not a task id like T-0142")),
+            )
+        })?;
+        let message = UserMessage {
+            project: None,
+            text: text.to_owned(),
+            client_message_id: uuid::Uuid::new_v4().to_string(),
+            task: Some(id),
+        };
+        let accepted = api
+            .send_message(&message)
+            .await
+            .map_err(|e| api_error(&space, e))?;
+        Ok(Sent {
+            space,
+            project: None,
+            client_message_id: message.client_message_id,
+            accepted,
+        })
+    }
+
+    /// Reads a project's memory in one space, or changes it as you
+    /// (Plan.md §8.3). `None` means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error: a path
+    /// outside the project, or a change the store refuses, with its reason.
+    pub async fn memory(
+        &self,
+        space: Option<&str>,
+        request: MemoryRequest,
+    ) -> Result<MemoryReply, ClientError> {
+        let (space, api) = self.target(space)?;
+        api.memory(request).await.map_err(|e| api_error(&space, e))
     }
 
     /// The feed items of one space after its cursor, oldest first, waiting up

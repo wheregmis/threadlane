@@ -2,7 +2,7 @@
 //! §11.1).
 
 use serde_json::Value as Json;
-use threadlane_core::client::TaskDetail;
+use threadlane_core::client::{ConversationEntry, TaskDetail};
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::model::{DecisionStatus, RunOutcome, RunStatus, TaskOrigin, TaskStatus};
 use threadlane_core::time::Timestamp;
@@ -257,6 +257,11 @@ pub fn timeline(detail: &TaskDetail, when: &When) -> Vec<Moment> {
                 format!("{} expired unanswered", decision.id),
             )),
             _ => {}
+        }
+    }
+    for entry in &detail.messages {
+        if let ConversationEntry::You { text, at, .. } = entry {
+            moments.push((*at, format!("You wrote: {text}")));
         }
     }
     if task.status.is_terminal() {

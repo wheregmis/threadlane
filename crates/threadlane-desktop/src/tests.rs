@@ -7,9 +7,9 @@ use serde_json::json;
 use tempfile::TempDir;
 use threadlane_client::ClientDirs;
 use threadlane_core::client::{
-    Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, OrgReply,
-    OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest, RunSummary,
-    UserMessage,
+    Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
+    MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
+    PairingRequest, RunSummary, UserMessage,
 };
 use threadlane_core::ids::{AgentId, LaneId, MachineId, OutboxId, RunId, SessionId};
 use threadlane_core::model::{
@@ -218,11 +218,16 @@ impl HubApi for FakeHub {
                         runs: Vec::new(),
                         decisions: Vec::new(),
                         related: Vec::new(),
+                        messages: Vec::new(),
                     }),
                 })
             }
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
+    }
+
+    async fn memory(&self, _request: MemoryRequest) -> Result<MemoryReply, ApiError> {
+        Err(ApiError::Invalid("unsupported".to_owned()))
     }
 }
 
@@ -847,6 +852,11 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
         ],
         decisions: vec![asked],
         related: Vec::new(),
+        messages: vec![ConversationEntry::You {
+            event_id: EventId(9),
+            text: "Use the ledger.".to_owned(),
+            at: Timestamp::from_millis(350_000),
+        }],
     };
     let when = When {
         now: Timestamp::from_millis(3_600_000),
@@ -877,6 +887,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
             "00:02 Engineer on linux-box with claude: worked for 29 min, stopped to ask you",
             "00:03 Asked D-0003: Question 3?",
             "00:05 You answered D-0003: approve with the note \"draft\"",
+            "00:05 You wrote: Use the ledger.",
             "00:06 Engineer on linux-box with claude: worked for 1 min, reported back",
             "00:31 Done: Refunds are idempotent.",
         ]

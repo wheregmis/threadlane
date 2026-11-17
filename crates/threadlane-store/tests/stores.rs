@@ -1581,7 +1581,11 @@ async fn your_own_changes_need_no_run_keep_the_rules_and_rewrite_the_index() {
         .await
         .unwrap();
     assert_eq!((edited.version, edited.written_by_run), (2, None));
-    let index = hub.read("projects/1/notes/INDEX.md").await.unwrap().unwrap();
+    let index = hub
+        .read("projects/1/notes/INDEX.md")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(index.content, "- [Build](build.md): By you.\n");
     assert_eq!(index.written_by_run, None);
     let authors: Vec<_> = hub
@@ -1598,7 +1602,11 @@ async fn your_own_changes_need_no_run_keep_the_rules_and_rewrite_the_index() {
     for (path, content, why) in [
         ("space/instructions.md", over.as_str(), "trim it"),
         ("projects/1/notes/a.md", "no description", "title line"),
-        ("projects/1/notes/INDEX.md", "# A\nForged.", "written by the system"),
+        (
+            "projects/1/notes/INDEX.md",
+            "# A\nForged.",
+            "written by the system",
+        ),
         ("projects/1/../2/a.md", "x", "memory path"),
     ] {
         assert!(

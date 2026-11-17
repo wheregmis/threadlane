@@ -3,9 +3,9 @@
 //! and the indexes it changes are rewritten in the same transaction.
 
 use async_trait::async_trait;
+use threadlane_core::ids::RunId;
 use threadlane_core::memory::{INDEX_FILE, check, index_for, not_an_index, render_index};
 use threadlane_core::model::{MemoryAuthor, MemoryFile};
-use threadlane_core::ids::RunId;
 use threadlane_core::store::{MemoryStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
 use turso::{Connection, Row, Value};
@@ -176,15 +176,7 @@ async fn write_version(
         "INSERT INTO memory_versions
              (path, version, content, deleted, written_by_run, written_at, written_by_call)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
-        params![
-            path,
-            version,
-            content,
-            deleted,
-            run,
-            at,
-            call
-        ],
+        params![path, version, content, deleted, run, at, call],
         |row| Cols(row).i64(0),
     )
     .await?;

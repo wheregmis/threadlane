@@ -362,6 +362,7 @@ mod tests {
                 project: Some("Alpha".into()),
                 text: "hello".into(),
                 client_message_id: "m-1".into(),
+                task: None,
             })
             .await
             .unwrap();
@@ -388,6 +389,7 @@ mod tests {
                 project: Some("Alpha".into()),
                 text: "hello".into(),
                 client_message_id: "m-1".into(),
+                task: None,
             })
             .await;
         assert!(
@@ -507,6 +509,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Nothing ne
                     project: None,
                     text: "Anything new?".into(),
                     client_message_id: "m-1".into(),
+                    task: None,
                 })
                 .await
                 .unwrap();
