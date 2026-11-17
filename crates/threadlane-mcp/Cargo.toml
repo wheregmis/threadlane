@@ -1,0 +1,24 @@
+[package]
+name = "threadlane-mcp"
+description = "Serves the system's tools to a running backend over MCP on loopback HTTP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+threadlane-core.workspace = true
+tokio = { workspace = true, features = ["net", "sync", "rt", "time"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
+
+[lints]
+workspace = true

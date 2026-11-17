@@ -1,0 +1,241 @@
+//! Drives the Claude command-line agent (Plan.md §5.7).
+//!
+//! See `docs/milestone-1.md` §5. [`ClaudeBackend`] runs `claude -p` with the
+//! stream-json output format, serves the run's tools to it through a
+//! [`threadlane_mcp::McpServer`], and maps its output to
+//! [`BackendEvent`](threadlane_core::backend::BackendEvent)s.
+
+mod run;
+mod stream;
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use serde_json::{Value as Json, json};
+use threadlane_core::backend::{
+    AgentBackend, AskRequest, BackendError, BackendRun, Probe, RunRequest,
+};
+use threadlane_core::model::BackendKind;
+use threadlane_mcp::{McpServer, SERVER_NAME};
+use tokio::process::Command;
+
+use crate::run::{ClaudeRun, Launch};
+
+/// How long `claude --version` and `claude auth status` may take.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Where and how to run Claude.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeConfig {
+    /// The `claude` executable: a path, or a name looked up on `PATH`.
+    pub program: PathBuf,
+    /// Sets `CLAUDE_CONFIG_DIR`, so this membership uses a separate login
+    /// (Plan.md §9.3). `None` uses the machine's ordinary login.
+    pub config_dir: Option<PathBuf>,
+}
+
+impl Default for ClaudeConfig {
+    fn default() -> Self {
+        Self {
+            program: PathBuf::from("claude"),
+            config_dir: None,
+        }
+    }
+}
+
+/// The Claude command-line agent as an [`AgentBackend`].
+#[derive(Debug, Clone)]
+pub struct ClaudeBackend {
+    config: ClaudeConfig,
+}
+
+impl ClaudeBackend {
+    /// A backend that runs `config.program`.
+    #[must_use]
+    pub fn new(config: ClaudeConfig) -> Self {
+        Self { config }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.config.program);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(dir) = &self.config.config_dir {
+            command.env("CLAUDE_CONFIG_DIR", dir);
+        }
+        command
+    }
+
+    /// Runs `claude <args>` to completion and returns its output.
+    async fn output(&self, args: &[&str]) -> Result<std::process::Output, ProbeError> {
+        let mut command = self.command();
+        command.args(args);
+        match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
+            Err(_) => Err(ProbeError::Timeout),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(ProbeError::NotInstalled)
+            }
+            Ok(Err(error)) => Err(ProbeError::Io(error)),
+            Ok(Ok(output)) => Ok(output),
+        }
+    }
+}
+
+impl Default for ClaudeBackend {
+    fn default() -> Self {
+        Self::new(ClaudeConfig::default())
+    }
+}
+
+enum ProbeError {
+    NotInstalled,
+    Timeout,
+    Io(std::io::Error),
+}
+
+#[async_trait]
+impl AgentBackend for ClaudeBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Claude
+    }
+
+    async fn probe(&self) -> Result<Probe, BackendError> {
+        let failed = |what: &str, error: ProbeError| match error {
+            ProbeError::NotInstalled => BackendError::NotInstalled,
+            ProbeError::Timeout => BackendError::Timeout,
+            ProbeError::Io(error) => BackendError::Failed(format!("{what}: {error}")),
+        };
+        let version = match self.output(&["--version"]).await {
+            Ok(output) if output.status.success() => output,
+            Ok(output) => {
+                return Err(BackendError::Failed(format!(
+                    "claude --version failed ({}): {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            Err(ProbeError::NotInstalled) => {
+                return Ok(Probe {
+                    installed: false,
+                    version: None,
+                    logged_in: false,
+                    account_label: None,
+                });
+            }
+            Err(error) => return Err(failed("claude --version", error)),
+        };
+        let version = String::from_utf8_lossy(&version.stdout)
+            .split_whitespace()
+            .next()
+            .map(str::to_owned);
+
+        let auth = self
+            .output(&["auth", "status"])
+            .await
+            .map_err(|error| failed("claude auth status", error))?;
+        let logged_in = match serde_json::from_slice::<Json>(&auth.stdout) {
+            Ok(status) => status.get("loggedIn").and_then(Json::as_bool) == Some(true),
+            // Logged out may be reported only through the exit status.
+            Err(_) if !auth.status.success() => false,
+            Err(error) => {
+                return Err(BackendError::Failed(format!(
+                    "claude auth status printed something other than JSON: {error}"
+                )));
+            }
+        };
+        Ok(Probe {
+            installed: true,
+            version,
+            logged_in,
+            account_label: None,
+        })
+    }
+
+    async fn run(&self, request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
+        if !request.working_dir.is_dir() {
+            return Err(BackendError::Failed(format!(
+                "working directory {} does not exist",
+                request.working_dir.display()
+            )));
+        }
+        let (server, config_dir, mcp_config) = match request.tools {
+            Some(endpoint) => {
+                let server = McpServer::start(endpoint).await.map_err(|error| {
+                    BackendError::Failed(format!("could not start the tool server: {error}"))
+                })?;
+                let dir = tempfile::Builder::new()
+                    .prefix("threadlane-claude-")
+                    .tempdir()
+                    .map_err(|error| {
+                        BackendError::Failed(format!("could not create a temp directory: {error}"))
+                    })?;
+                let path = dir.path().join("mcp.json");
+                write_private(&path, &mcp_config(&server))
+                    .await
+                    .map_err(|error| {
+                        BackendError::Failed(format!("could not write the MCP config: {error}"))
+                    })?;
+                (Some(server), Some(dir), Some(path))
+            }
+            None => (None, None, None),
+        };
+        let launch = Launch {
+            program: self.config.program.clone(),
+            config_dir: self.config.config_dir.clone(),
+            working_dir: request.working_dir,
+            prompt: request.prompt,
+            model: request.model,
+            appended_instructions: request.appended_instructions,
+            mcp_config,
+            remove_builtin_tools: request.remove_builtin_tools,
+            deny_rules: request.deny_rules,
+            max_turns: request.max_turns,
+        };
+        match ClaudeRun::start(launch, request.session, server, config_dir) {
+            Ok(run) => Ok(Box::new(run)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(BackendError::NotInstalled)
+            }
+            Err(error) => Err(BackendError::Failed(format!(
+                "could not start claude: {error}"
+            ))),
+        }
+    }
+
+    async fn ask(&self, _request: AskRequest) -> Result<Json, BackendError> {
+        Err(BackendError::Failed(
+            "ask is not implemented for the Claude backend yet".to_owned(),
+        ))
+    }
+}
+
+fn mcp_config(server: &McpServer) -> String {
+    json!({
+        "mcpServers": {
+            SERVER_NAME: {
+                "type": "http",
+                "url": server.url(),
+                "headers": {"Authorization": format!("Bearer {}", server.token())},
+            }
+        }
+    })
+    .to_string()
+}
+
+/// Writes a file only the current user can read: it holds the bearer token.
+async fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
+    file.write_all(contents.as_bytes()).await?;
+    file.flush().await
+}

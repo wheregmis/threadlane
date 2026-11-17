@@ -1443,34 +1443,40 @@ Two things hold throughout:
 
 ### Milestone 0: Foundations
 
-- Project skeleton, configuration, structured logging.
-- Schema and migrations for every table in this document, on Turso, behind the store interfaces. One writer per hub.
-- Database checks from section 18.4: the schema smoke test, and repeated kills during writes.
-- Interfaces from section 3.4 with in-memory fakes.
-- Test harness: fake clock, scripted backend, crash-injection hooks at every step boundary.
+**Status:** done.
+
+- [x] Project skeleton, configuration, structured logging.
+- [x] Schema and migrations for every table in this document, on Turso, behind the store interfaces. One writer per hub.
+- [x] Database checks from section 18.4: the schema smoke test, and repeated kills during writes.
+- [x] Interfaces from section 3.4 with in-memory fakes.
+- [x] Test harness: fake clock, scripted backend, crash-injection hooks at every step boundary.
 
 **Exit:** A test can script a backend, advance time, and kill a component at a named step. The database gate in section 18.1 has passed, or the store has been moved to SQLite.
 
 ### Milestone 1: One lane, one node
 
-- Handler with one source (a message from you), deduplication, wake hint.
-- Lanes, leases with fencing, heartbeat, sweep.
-- Runner on the hub; the cycle in section 4.3 for a single lead lane.
-- Claude backend driver: probe, run, events, stop, native resume.
-- Tool server; at-most-once calls to the system's tools (section 4.6).
-- Run limits, failure and retry, dead events.
-- `send_message`, outbox, pass-through dispatcher.
-- The client core, and a command-line client on it, connected to the hub on the same computer.
+**Status:** done. Exit tests in `crates/threadlane-hub/tests/exit/` pass; the live `claude` tests are ignored by default.
+
+- [x] Handler with one source (a message from you), deduplication, wake hint.
+- [x] Lanes, leases with fencing, heartbeat, sweep.
+- [x] Runner on the hub; the cycle in section 4.3 for a single lead lane.
+- [x] Claude backend driver: probe, run, events, stop, native resume.
+- [x] Tool server; at-most-once calls to the system's tools (section 4.6).
+- [x] Run limits, failure and retry, dead events.
+- [x] `send_message`, outbox, pass-through dispatcher.
+- [x] The client core, and a command-line client on it, connected to the hub on the same computer.
 
 **Exit:** A message produces one reply. Three rapid messages produce one reply. Killing the runner at every step boundary still yields exactly one reply and no lost event. Invariants 1, 2, 3, 5, 6, 9, 10.
 
 ### Milestone 2: Projects and agents
 
-- Organization store and its client interface.
-- Space settings; built-in General project; one lead lane per project.
-- Two hubs on one computer, each with its own data directory, process, and runner membership.
-- Project and lane routing (section 4.2).
-- Agent definitions and bindings; modes stored but all treated as On request; Off enforced.
+**Status:** done. The client interface covers creating projects and agents, listing bindings, and setting a mode; repositories and editing wait for the milestones that need them.
+
+- [x] Organization store and its client interface.
+- [x] Space settings; built-in General project; one lead lane per project.
+- [x] Two hubs on one computer, each with its own data directory, process, and runner membership.
+- [x] Project and lane routing (section 4.2).
+- [x] Agent definitions and bindings; modes stored but all treated as On request; Off enforced.
 
 **Exit:** Messages to two projects run in two lanes at the same time. The Work hub and the Personal hub run side by side on one computer and neither holds anything of the other's. An agent set to Off never runs. Invariant 17.
 

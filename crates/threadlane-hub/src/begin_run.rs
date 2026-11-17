@@ -1,0 +1,453 @@
+//! Starting a run inside the hub: Plan.md §4.3 steps 2 to 5.3, §4.4, §8.5
+//! (docs/milestone-1.md §9 "begin_run").
+
+use std::collections::HashMap;
+
+use serde_json::Value as Json;
+use threadlane_core::backend::{NativeSession, usable_backends};
+use threadlane_core::ids::{EventId, SessionId};
+use threadlane_core::link::{Begin, LinkError, RunAssignment};
+use threadlane_core::model::{
+    Agent, BackendKind, Binding, Event, Lane, LaneKind, Lease, Mode, Session, SessionChoice,
+    SessionStatus, StartRun,
+};
+use threadlane_core::runtime::steps::begin_run as step;
+use threadlane_core::store::{
+    DecisionStore, InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore, TaskStore,
+};
+use threadlane_core::time::Timestamp;
+use uuid::Uuid;
+
+use crate::context::{PromptParts, appended_instructions, render_prompt};
+use crate::error::link_error;
+use crate::link::LocalLink;
+
+/// Why events were skipped by the initiative check (Plan.md §4.3 step 3).
+pub const SKIP_REASON: &str = "not requested, and the lead works on request only";
+
+/// Why events were skipped because the lane's agent is Off in its project
+/// (invariant 14).
+pub const OFF_REASON: &str = "the agent is off in this project";
+
+/// The session a run will work in, as decided before `start_run`.
+struct SessionPlan {
+    choice: SessionChoice,
+    native: NativeSession,
+    /// The id chosen for a new session; `None` when resuming.
+    new_native_id: Option<String>,
+}
+
+impl LocalLink {
+    pub(crate) async fn begin(&self, lease: &Lease) -> Result<Begin, LinkError> {
+        let inner = &self.core.inner;
+        let db = &inner.db;
+        let lane = self.check_lease(lease).await?;
+        let now = inner.clock.now();
+
+        // 1. Pending events.
+        let pending = db.pending_events(lane.id).await.map_err(link_error)?;
+        inner.hook.reach(step::AFTER_READ_PENDING)?;
+        if pending.is_empty() || lane.backoff_until.is_some_and(|until| until > now) {
+            return Ok(Begin::Idle);
+        }
+
+        // 2. Initiative. An agent that is effectively Off never starts
+        // (invariant 14); above Off, until milestone 9 every binding acts as
+        // On request.
+        let (agent, binding) = self.lane_agent(&lane).await?;
+        let off = match &binding {
+            Some(binding) => {
+                let ceiling = db
+                    .effective_ceiling(lane.project_id)
+                    .await
+                    .map_err(link_error)?;
+                binding.mode.stricter(ceiling) == Mode::Off
+            }
+            None => false,
+        };
+        let skip = if off {
+            Some(OFF_REASON)
+        } else if pending.iter().all(|event| !event.requested) {
+            Some(SKIP_REASON)
+        } else {
+            None
+        };
+        if let Some(reason) = skip {
+            let ids: Vec<EventId> = pending.iter().map(|event| event.id).collect();
+            db.skip_events(lease, &ids, reason)
+                .await
+                .map_err(link_error)?;
+            inner.hook.reach(step::AFTER_INITIATIVE_CHECK)?;
+            return Ok(Begin::Idle);
+        }
+        inner.hook.reach(step::AFTER_INITIATIVE_CHECK)?;
+
+        // 3. Session routing, grouping, isolation.
+        let (session, events) = self.choose_batch(&lane, pending, now).await?;
+
+        // 4. Backend.
+        let backend = self.choose_backend(&agent).await?;
+
+        // 5. Native session.
+        let plan = self.plan_session(session, backend).await?;
+
+        // 6. Open the run and claim its events.
+        let run = db
+            .start_run(
+                lease,
+                &StartRun {
+                    session: plan.choice,
+                    agent_id: Some(agent.id),
+                    backend: Some(backend),
+                    native_session_id: plan.new_native_id.clone(),
+                    events: events.iter().map(|event| event.id).collect(),
+                    started_at: now,
+                },
+            )
+            .await
+            .map_err(link_error)?;
+        inner.hook.reach(step::AFTER_START_RUN)?;
+
+        // 7. Context.
+        let project = db
+            .project(lane.project_id)
+            .await
+            .map_err(link_error)?
+            .ok_or_else(|| LinkError::Rejected(format!("project {} not found", lane.project_id)))?;
+        let recent = if plan.new_native_id.is_some() && lane.kind == LaneKind::Lead {
+            let mut recent = db
+                .recent_messages(project.id, inner.settings.recent_messages)
+                .await
+                .map_err(link_error)?;
+            recent.reverse();
+            recent
+        } else {
+            Vec::new()
+        };
+        let decisions = db.pending_decisions(lane.id).await.map_err(link_error)?;
+        let prompt = render_prompt(&PromptParts {
+            project: &project,
+            recent: &recent,
+            decisions: &decisions,
+            events: &events,
+        });
+        let appended_instructions = appended_instructions(&agent, lane.kind);
+        inner.hook.reach(step::AFTER_ASSEMBLE_CONTEXT)?;
+
+        // 8. The assignment.
+        Ok(Begin::Run(Box::new(RunAssignment {
+            run_id: run.id,
+            session_id: run.session_id,
+            project_id: project.id,
+            lane_kind: lane.kind,
+            events: events.iter().map(|event| event.id).collect(),
+            backend,
+            model: model_for(
+                binding.as_ref(),
+                &agent,
+                backend,
+                &inner.settings.default_models,
+            ),
+            native_session: plan.native,
+            appended_instructions,
+            prompt,
+            tools: inner.tools.definitions(),
+            remove_builtin_tools: lane.kind == LaneKind::Lead,
+            deny_rules: Vec::new(),
+            wall_time_limit: inner.settings.wall_time_limit,
+            max_turns: inner.settings.max_turns,
+        })))
+    }
+
+    /// The agent working the lane: the project's lead for a lead lane, the
+    /// task's agent for a task lane.
+    async fn lane_agent(&self, lane: &Lane) -> Result<(Agent, Option<Binding>), LinkError> {
+        let db = &self.core.inner.db;
+        let (agent_id, binding) = match lane.kind {
+            LaneKind::Lead => {
+                let binding = db
+                    .lead_binding(lane.project_id)
+                    .await
+                    .map_err(link_error)?
+                    .ok_or_else(|| {
+                        LinkError::Rejected(format!(
+                            "project {} has no lead binding",
+                            lane.project_id
+                        ))
+                    })?;
+                (binding.agent_id, Some(binding))
+            }
+            LaneKind::Task => {
+                let task_id = lane.task_id.ok_or_else(|| {
+                    LinkError::Rejected(format!("task lane {} has no task", lane.id))
+                })?;
+                let task = db
+                    .task(task_id)
+                    .await
+                    .map_err(link_error)?
+                    .ok_or_else(|| LinkError::Rejected(format!("task {task_id} not found")))?;
+                let binding = db
+                    .bindings(lane.project_id)
+                    .await
+                    .map_err(link_error)?
+                    .into_iter()
+                    .find(|binding| binding.agent_id == task.agent_id);
+                (task.agent_id, binding)
+            }
+        };
+        let agent = db
+            .agent(agent_id)
+            .await
+            .map_err(link_error)?
+            .ok_or_else(|| LinkError::Rejected(format!("agent {agent_id} not found")))?;
+        Ok((agent, binding))
+    }
+
+    /// Routes each pending event to a session and picks the group holding the
+    /// oldest event. A group with an event that already failed
+    /// `isolate_after_attempts` times is cut to its oldest event.
+    async fn choose_batch(
+        &self,
+        lane: &Lane,
+        pending: Vec<Event>,
+        now: Timestamp,
+    ) -> Result<(Option<Session>, Vec<Event>), LinkError> {
+        let mut routed: Vec<(Event, Option<Session>)> = Vec::with_capacity(pending.len());
+        for event in pending {
+            let session = self.route(lane, &event, now).await?;
+            routed.push((event, session));
+        }
+        let first_key = routed
+            .first()
+            .map(|(_, session)| session.as_ref().map(|session| session.id));
+        let session = routed.first().and_then(|(_, session)| session.clone());
+        let mut events: Vec<Event> = routed
+            .into_iter()
+            .filter(|(_, session)| Some(session.as_ref().map(|session| session.id)) == first_key)
+            .map(|(event, _)| event)
+            .collect();
+        let isolate = self.core.inner.settings.isolate_after_attempts;
+        if events.iter().any(|event| event.attempts >= isolate) {
+            events.truncate(1);
+        }
+        Ok((session, events))
+    }
+
+    /// Plan.md §4.4, first match wins. `None` means a new session.
+    async fn route(
+        &self,
+        lane: &Lane,
+        event: &Event,
+        now: Timestamp,
+    ) -> Result<Option<Session>, LinkError> {
+        let db = &self.core.inner.db;
+        // 1. The answer to a decision resumes the decision's session.
+        if let Some(decision_id) = event.decision_ref {
+            let session_id = db
+                .decision(decision_id)
+                .await
+                .map_err(link_error)?
+                .and_then(|decision| decision.session_id);
+            if let Some(session) = self.open_session_in_lane(lane, session_id).await? {
+                return Ok(Some(session));
+            }
+        }
+        // 2. An explicit session reference, if that session is open.
+        if let Some(session) = self.open_session_in_lane(lane, event.session_ref).await? {
+            return Ok(Some(session));
+        }
+        // 3. A reply to an outbox message resumes the session that sent it.
+        if let Some(outbox_id) = event.reply_to_ref {
+            let session_id = db
+                .message(outbox_id)
+                .await
+                .map_err(link_error)?
+                .and_then(|message| message.session_id);
+            if let Some(session) = self.open_session_in_lane(lane, session_id).await? {
+                return Ok(Some(session));
+            }
+        }
+        let latest = db.latest_open_session(lane.id).await.map_err(link_error)?;
+        Ok(match lane.kind {
+            // 4. A task lane resumes its current session.
+            LaneKind::Task => latest,
+            // 5. A lead lane resumes its latest session if recently active.
+            LaneKind::Lead => latest.filter(|session| {
+                now.saturating_since(session.last_active_at) <= self.core.inner.settings.idle_window
+            }),
+        })
+        // 6. Otherwise a new session (`None`).
+    }
+
+    async fn open_session_in_lane(
+        &self,
+        lane: &Lane,
+        session_id: Option<SessionId>,
+    ) -> Result<Option<Session>, LinkError> {
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .core
+            .inner
+            .db
+            .session(session_id)
+            .await
+            .map_err(link_error)?
+            .filter(|session| session.status == SessionStatus::Open && session.lane_id == lane.id))
+    }
+
+    /// The first of the agent's backends (all, in [`BackendKind::ALL`] order,
+    /// if it names none) that this machine reported usable.
+    async fn choose_backend(&self, agent: &Agent) -> Result<BackendKind, LinkError> {
+        let machine = self
+            .core
+            .inner
+            .db
+            .machine(self.machine)
+            .await
+            .map_err(link_error)?
+            .ok_or_else(|| LinkError::Rejected(format!("machine {} not found", self.machine)))?;
+        let usable = usable_backends(&machine.backends);
+        let preferred: &[BackendKind] = if agent.backends.is_empty() {
+            BackendKind::ALL
+        } else {
+            &agent.backends
+        };
+        preferred
+            .iter()
+            .copied()
+            .find(|backend| usable.contains(backend))
+            .ok_or_else(|| {
+                LinkError::Rejected(format!(
+                    "machine {} has none of agent {}'s backends usable",
+                    self.machine, agent.name
+                ))
+            })
+    }
+
+    /// Resume the backend's own session only on the same machine and backend
+    /// with a known native id; otherwise close the session and start fresh
+    /// (Plan.md §8.6).
+    async fn plan_session(
+        &self,
+        session: Option<Session>,
+        backend: BackendKind,
+    ) -> Result<SessionPlan, LinkError> {
+        if let Some(session) = session {
+            match &session.native_session_id {
+                Some(native)
+                    if session.machine_id == Some(self.machine)
+                        && session.backend == Some(backend) =>
+                {
+                    return Ok(SessionPlan {
+                        choice: SessionChoice::Resume(session.id),
+                        native: NativeSession::Resume { id: native.clone() },
+                        new_native_id: None,
+                    });
+                }
+                _ => {
+                    self.core
+                        .inner
+                        .db
+                        .close_session(session.id)
+                        .await
+                        .map_err(link_error)?;
+                }
+            }
+        }
+        let id = Uuid::new_v4().to_string();
+        Ok(SessionPlan {
+            choice: SessionChoice::New,
+            native: NativeSession::Start { id: id.clone() },
+            new_native_id: Some(id),
+        })
+    }
+}
+
+/// The model for `backend`: the binding's choice, else the agent's, else the
+/// hub's configured default for the backend, else `None` (the backend's own
+/// default).
+fn model_for(
+    binding: Option<&Binding>,
+    agent: &Agent,
+    backend: BackendKind,
+    defaults: &HashMap<BackendKind, String>,
+) -> Option<String> {
+    let pick = |models: &Json| {
+        models
+            .get(backend.as_str())
+            .and_then(Json::as_str)
+            .map(str::to_owned)
+    };
+    binding
+        .and_then(|binding| pick(&binding.models))
+        .or_else(|| pick(&agent.models))
+        .or_else(|| defaults.get(&backend).cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use threadlane_core::ids::{AgentId, BindingId, ProjectId};
+
+    use super::*;
+
+    fn agent(models: Json) -> Agent {
+        Agent {
+            id: AgentId(1),
+            name: "Lead".into(),
+            role: "lead".into(),
+            instructions: String::new(),
+            backends: Vec::new(),
+            models,
+            tools: json!({}),
+            requirements: json!({}),
+        }
+    }
+
+    fn binding(models: Json) -> Binding {
+        Binding {
+            id: BindingId(1),
+            project_id: ProjectId(1),
+            agent_id: AgentId(1),
+            mode: Mode::OnRequest,
+            is_lead: true,
+            models,
+            max_parallel: 1,
+            overrides: json!({}),
+        }
+    }
+
+    #[test]
+    fn the_model_is_the_binding_s_then_the_agent_s_then_the_hub_default() {
+        let claude = BackendKind::Claude;
+        let defaults = HashMap::from([(claude, "haiku".to_owned())]);
+        let none = HashMap::new();
+        let bound = binding(json!({ "claude": "opus" }));
+        let unbound = binding(json!({ "codex": "gpt" }));
+        let named = agent(json!({ "claude": "sonnet" }));
+        let unnamed = agent(json!({}));
+
+        let model = |binding, agent, defaults| model_for(binding, agent, claude, defaults);
+        assert_eq!(
+            model(Some(&bound), &named, &defaults).as_deref(),
+            Some("opus")
+        );
+        assert_eq!(
+            model(Some(&unbound), &named, &defaults).as_deref(),
+            Some("sonnet")
+        );
+        assert_eq!(model(None, &named, &defaults).as_deref(), Some("sonnet"));
+        assert_eq!(
+            model(Some(&unbound), &unnamed, &defaults).as_deref(),
+            Some("haiku")
+        );
+        assert_eq!(model(None, &unnamed, &none), None);
+        assert_eq!(
+            model_for(None, &unnamed, BackendKind::Codex, &defaults),
+            None,
+            "a default for another backend does not apply"
+        );
+    }
+}

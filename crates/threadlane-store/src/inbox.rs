@@ -1,0 +1,368 @@
+//! [`InboxStore`] on the hub database: lanes, leases, and events (Plan.md §6).
+
+use std::time::Duration;
+
+use async_trait::async_trait;
+use threadlane_core::ids::{EventId, LaneId, MachineId};
+use threadlane_core::model::{Event, EventStatus, Inserted, Lane, Lease, NewEvent, RunStatus};
+use threadlane_core::store::{InboxStore, StoreError, StoreResult};
+use threadlane_core::time::Timestamp;
+use turso::{Connection, Row};
+
+use crate::HubDb;
+use crate::db::{exec, query_all, query_one, query_opt};
+use crate::row::{Cols, json_text, opt_raw, params};
+
+pub(crate) const EVENT_FIELDS: &str = "id, project_id, lane_id, source, source_event_id, kind,
+    payload, trust, requested, session_ref, decision_ref, reply_to_ref, status, claimed_by_run,
+    attempts, received_at, status_reason";
+
+pub(crate) fn decode_event(row: &Row) -> StoreResult<Event> {
+    let c = Cols(row);
+    Ok(Event {
+        id: c.id(0)?,
+        project_id: c.id(1)?,
+        lane_id: c.id(2)?,
+        source: c.text(3)?,
+        source_event_id: c.text(4)?,
+        kind: c.parse(5)?,
+        payload: c.json(6)?,
+        trust: c.parse(7)?,
+        requested: c.bool(8)?,
+        session_ref: c.opt_id(9)?,
+        decision_ref: c.opt_id(10)?,
+        reply_to_ref: c.opt_id(11)?,
+        status: c.parse(12)?,
+        claimed_by_run: c.opt_id(13)?,
+        attempts: c.u32(14)?,
+        received_at: c.ts(15)?,
+        status_reason: c.opt_text(16)?,
+    })
+}
+
+const LANE_FIELDS: &str = "id, project_id, kind, task_id, lease_owner, lease_expires_at,
+    lease_epoch, backoff_until, last_machine_id";
+
+fn decode_lane(row: &Row) -> StoreResult<Lane> {
+    let c = Cols(row);
+    Ok(Lane {
+        id: c.id(0)?,
+        project_id: c.id(1)?,
+        kind: c.parse(2)?,
+        task_id: c.opt_id(3)?,
+        lease_owner: c.opt_id(4)?,
+        lease_expires_at: c.opt_ts(5)?,
+        lease_epoch: c.i64(6)?,
+        backoff_until: c.opt_ts(7)?,
+        last_machine_id: c.opt_id(8)?,
+    })
+}
+
+/// Fails with [`StoreError::StaleLease`] unless `lease` is the lane's current
+/// lease. Called first in every write a run makes (Plan.md invariant 10).
+pub(crate) async fn check_lease(conn: &Connection, lease: &Lease) -> StoreResult<()> {
+    let current = query_opt(
+        conn,
+        "SELECT lease_epoch, lease_owner FROM lanes WHERE id = ?1",
+        params![lease.lane_id.get()],
+        |row| {
+            let c = Cols(row);
+            Ok((c.i64(0)?, c.opt_id::<MachineId>(1)?))
+        },
+    )
+    .await?
+    .ok_or_else(|| StoreError::not_found("lane", lease.lane_id))?;
+    match current {
+        (epoch, Some(owner)) if epoch == lease.epoch && owner == lease.machine_id => Ok(()),
+        (epoch, _) => Err(StoreError::StaleLease {
+            lane_id: lease.lane_id,
+            held: lease.epoch,
+            current: epoch,
+        }),
+    }
+}
+
+/// Inserts an event inside the caller's transaction, deduplicating on
+/// `(source, source_event_id)`.
+pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> StoreResult<Inserted> {
+    let existing: Option<EventId> = query_opt(
+        conn,
+        "SELECT id FROM events WHERE source = ?1 AND source_event_id = ?2",
+        params![event.source.as_str(), event.source_event_id.as_str()],
+        |row| Cols(row).id(0),
+    )
+    .await?;
+    if let Some(id) = existing {
+        return Ok(Inserted::Duplicate(id));
+    }
+    let lane_project: Option<i64> = query_opt(
+        conn,
+        "SELECT project_id FROM lanes WHERE id = ?1",
+        params![event.lane_id.get()],
+        |row| Cols(row).i64(0),
+    )
+    .await?;
+    match lane_project {
+        None => return Err(StoreError::not_found("lane", event.lane_id)),
+        Some(project) if project != event.project_id.get() => {
+            return Err(StoreError::Invalid(format!(
+                "lane {} belongs to project {project}, not {}",
+                event.lane_id, event.project_id
+            )));
+        }
+        Some(_) => {}
+    }
+    let id = query_one(
+        conn,
+        "INSERT INTO events (project_id, lane_id, source, source_event_id, kind, payload, trust,
+             requested, session_ref, decision_ref, reply_to_ref, status, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'pending', ?12) RETURNING id",
+        params![
+            event.project_id.get(),
+            event.lane_id.get(),
+            event.source.as_str(),
+            event.source_event_id.as_str(),
+            event.kind.as_str(),
+            json_text(&event.payload)?,
+            event.trust.as_str(),
+            event.requested,
+            opt_raw(event.session_ref, |id| id.get()),
+            opt_raw(event.decision_ref, |id| id.get()),
+            opt_raw(event.reply_to_ref, |id| id.get()),
+            event.received_at.as_millis(),
+        ],
+        |row| Cols(row).id(0),
+    )
+    .await?;
+    Ok(Inserted::New(id))
+}
+
+/// Ends whatever was in flight on a lane whose lease is going away: claimed
+/// events return to pending and active runs are abandoned.
+async fn reclaim_lane(conn: &Connection, lane_id: LaneId, now: Timestamp) -> StoreResult<()> {
+    exec(
+        conn,
+        "UPDATE events SET status = 'pending', claimed_by_run = NULL
+         WHERE lane_id = ?1 AND status = 'claimed'",
+        params![lane_id.get()],
+    )
+    .await?;
+    exec(
+        conn,
+        "UPDATE runs SET status = ?1, ended_at = ?2, error = 'lease ended'
+         WHERE lane_id = ?3 AND status = 'active'",
+        params![
+            RunStatus::Abandoned.as_str(),
+            now.as_millis(),
+            lane_id.get()
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+fn ttl_millis(ttl: Duration) -> StoreResult<i64> {
+    i64::try_from(ttl.as_millis()).map_err(|_| StoreError::Invalid(format!("lease ttl {ttl:?}")))
+}
+
+#[async_trait]
+impl InboxStore for HubDb {
+    async fn lane(&self, id: LaneId) -> StoreResult<Option<Lane>> {
+        let conn = self.db.reader()?;
+        query_opt(
+            &conn,
+            &format!("SELECT {LANE_FIELDS} FROM lanes WHERE id = ?1"),
+            params![id.get()],
+            decode_lane,
+        )
+        .await
+    }
+
+    async fn insert_event(&self, event: &NewEvent) -> StoreResult<Inserted> {
+        let tx = self.db.begin().await?;
+        let inserted = insert_event_in(tx.conn(), event).await?;
+        tx.commit().await?;
+        Ok(inserted)
+    }
+
+    async fn event(&self, id: EventId) -> StoreResult<Option<Event>> {
+        let conn = self.db.reader()?;
+        query_opt(
+            &conn,
+            &format!("SELECT {EVENT_FIELDS} FROM events WHERE id = ?1"),
+            params![id.get()],
+            decode_event,
+        )
+        .await
+    }
+
+    async fn pending_events(&self, lane_id: LaneId) -> StoreResult<Vec<Event>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {EVENT_FIELDS} FROM events WHERE lane_id = ?1 AND status = 'pending' ORDER BY id"
+            ),
+            params![lane_id.get()],
+            decode_event,
+        )
+        .await
+    }
+
+    async fn skip_events(
+        &self,
+        lease: &Lease,
+        events: &[EventId],
+        reason: &str,
+    ) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        check_lease(tx.conn(), lease).await?;
+        for event in events {
+            let changed = exec(
+                tx.conn(),
+                "UPDATE events SET status = ?1, status_reason = ?2
+                 WHERE id = ?3 AND lane_id = ?4 AND status = 'pending'",
+                params![
+                    EventStatus::Skipped.as_str(),
+                    reason,
+                    event.get(),
+                    lease.lane_id.get()
+                ],
+            )
+            .await?;
+            if changed != 1 {
+                return Err(StoreError::Conflict(format!(
+                    "event {event} is not pending in lane {}",
+                    lease.lane_id
+                )));
+            }
+        }
+        tx.commit().await
+    }
+
+    async fn ready_lanes(&self, now: Timestamp) -> StoreResult<Vec<LaneId>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            "SELECT l.id FROM lanes l
+             JOIN projects p ON p.id = l.project_id
+             JOIN events e ON e.lane_id = l.id AND e.status = 'pending'
+             WHERE p.paused = 0
+               AND (l.lease_owner IS NULL OR l.lease_expires_at <= ?1)
+               AND (l.backoff_until IS NULL OR l.backoff_until <= ?1)
+             GROUP BY l.id
+             ORDER BY MIN(e.id)",
+            params![now.as_millis()],
+            |row| Cols(row).id(0),
+        )
+        .await
+    }
+
+    async fn grant_lease(
+        &self,
+        lane_id: LaneId,
+        machine_id: MachineId,
+        now: Timestamp,
+        ttl: Duration,
+    ) -> StoreResult<Option<Lease>> {
+        let expires_at = Timestamp::from_millis(now.as_millis() + ttl_millis(ttl)?);
+        let tx = self.db.begin().await?;
+        let lane = query_opt(
+            tx.conn(),
+            &format!("SELECT {LANE_FIELDS} FROM lanes WHERE id = ?1"),
+            params![lane_id.get()],
+            decode_lane,
+        )
+        .await?
+        .ok_or_else(|| StoreError::not_found("lane", lane_id))?;
+        let live = lane.lease_owner.is_some()
+            && lane.lease_expires_at.is_some_and(|expires| expires > now);
+        if live {
+            return Ok(None);
+        }
+        if lane.lease_owner.is_some() {
+            // Taking over an expired lease ends the previous holder's run.
+            reclaim_lane(tx.conn(), lane_id, now).await?;
+        }
+        let epoch = query_one(
+            tx.conn(),
+            "UPDATE lanes SET lease_owner = ?1, lease_expires_at = ?2,
+                 lease_epoch = lease_epoch + 1, last_machine_id = ?1
+             WHERE id = ?3 RETURNING lease_epoch",
+            params![machine_id.get(), expires_at.as_millis(), lane_id.get()],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(Lease {
+            lane_id,
+            machine_id,
+            epoch,
+            expires_at,
+        }))
+    }
+
+    async fn renew_lease(
+        &self,
+        lease: &Lease,
+        now: Timestamp,
+        ttl: Duration,
+    ) -> StoreResult<Lease> {
+        let expires_at = Timestamp::from_millis(now.as_millis() + ttl_millis(ttl)?);
+        let tx = self.db.begin().await?;
+        check_lease(tx.conn(), lease).await?;
+        exec(
+            tx.conn(),
+            "UPDATE lanes SET lease_expires_at = ?1 WHERE id = ?2",
+            params![expires_at.as_millis(), lease.lane_id.get()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Lease {
+            expires_at,
+            ..*lease
+        })
+    }
+
+    async fn release_lease(&self, lease: &Lease) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        match check_lease(tx.conn(), lease).await {
+            Ok(()) => {}
+            Err(StoreError::StaleLease { .. }) => return Ok(()),
+            Err(other) => return Err(other),
+        }
+        reclaim_lane(tx.conn(), lease.lane_id, self.now()).await?;
+        exec(
+            tx.conn(),
+            "UPDATE lanes SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ?1",
+            params![lease.lane_id.get()],
+        )
+        .await?;
+        tx.commit().await
+    }
+
+    async fn expire_leases(&self, now: Timestamp) -> StoreResult<Vec<LaneId>> {
+        let tx = self.db.begin().await?;
+        let expired: Vec<LaneId> = query_all(
+            tx.conn(),
+            "SELECT id FROM lanes WHERE lease_owner IS NOT NULL AND lease_expires_at <= ?1 ORDER BY id",
+            params![now.as_millis()],
+            |row| Cols(row).id(0),
+        )
+        .await?;
+        for lane_id in &expired {
+            reclaim_lane(tx.conn(), *lane_id, now).await?;
+            exec(
+                tx.conn(),
+                "UPDATE lanes SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ?1",
+                params![lane_id.get()],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        if !expired.is_empty() {
+            tracing::info!(count = expired.len(), "expired lane leases");
+        }
+        Ok(expired)
+    }
+}
