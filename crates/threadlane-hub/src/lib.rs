@@ -20,6 +20,7 @@ mod gateway;
 mod handler;
 mod link;
 mod node;
+mod pairing;
 mod placement;
 mod publish;
 mod settings;
@@ -43,6 +44,7 @@ pub use crate::dispatcher::ClientChannel;
 pub use crate::error::HubError;
 pub use crate::handler::CLIENT_SOURCE;
 pub use crate::node::Hub;
+pub use crate::pairing::JOIN_CODE_TTL;
 pub use crate::settings::HubSettings;
 pub use crate::tools::{
     CANCEL_TASK, CLIENT_CHANNEL, CREATE_TASK, CombinedTools, FINISH_TASK, HubTools, LIST_TASKS,

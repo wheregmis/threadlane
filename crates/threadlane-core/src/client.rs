@@ -3,8 +3,8 @@
 //! [`HubApi`] describes one space and has no notion of any other. The hub
 //! implements it; a transport carries it to clients as [`ClientRequest`] and
 //! [`ClientResponse`]. Later milestones add capabilities; so far: who am I
-//! talking to, send a message, follow the feed, the organization, and
-//! decisions.
+//! talking to, send a message, follow the feed, the organization, decisions,
+//! and pairing.
 
 use std::fmt;
 use std::time::Duration;
@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::admission::AdmittedKey;
 use crate::ids::{DecisionId, EventId, ProjectId};
 use crate::model::{Agent, Decision, Mode, OutboxMessage, Repository};
 use crate::time::Timestamp;
@@ -159,6 +160,38 @@ pub enum DecisionReply {
     },
 }
 
+/// The Pairing capability (Plan.md §11.2): join codes and admitted clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PairingRequest {
+    /// A new one-time join code for a client, valid for a few minutes.
+    IssueJoinCode,
+    /// Every admitted key, revoked ones included.
+    Clients,
+    /// Revokes the active key of this name and closes its connections.
+    Revoke { name: String },
+}
+
+/// The answer to a [`PairingRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PairingReply {
+    /// The code to give the new client. It carries the hub's id, how to reach
+    /// it, and a one-time secret.
+    JoinCode {
+        code: String,
+        expires_at: Timestamp,
+    },
+    Clients {
+        clients: Vec<AdmittedKey>,
+    },
+    Revoked {
+        client: AdmittedKey,
+    },
+}
+
 /// Why a client request failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", content = "message", rename_all = "snake_case")]
@@ -191,6 +224,8 @@ pub trait HubApi: Send + Sync + fmt::Debug {
     async fn org(&self, request: OrgRequest) -> Result<OrgReply, ApiError>;
     /// Lists or answers the decisions waiting on you.
     async fn decisions(&self, request: DecisionRequest) -> Result<DecisionReply, ApiError>;
+    /// Issues join codes, lists admitted keys, revokes them.
+    async fn pairing(&self, request: PairingRequest) -> Result<PairingReply, ApiError>;
 }
 
 /// [`HubApi`] as it crosses a transport.
@@ -204,6 +239,7 @@ pub enum ClientRequest {
     Feed { after: i64, wait_ms: u64 },
     Org { request: OrgRequest },
     Decisions { request: DecisionRequest },
+    Pairing { request: PairingRequest },
 }
 
 /// The answer to a [`ClientRequest`].
@@ -217,6 +253,7 @@ pub enum ClientResponse {
     Feed { items: Vec<FeedItem> },
     Org { reply: OrgReply },
     Decisions { reply: DecisionReply },
+    Pairing { reply: PairingReply },
     Error { error: ApiError },
 }
 
@@ -244,6 +281,10 @@ pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientRespons
             .decisions(request)
             .await
             .map(|reply| ClientResponse::Decisions { reply }),
+        ClientRequest::Pairing { request } => api
+            .pairing(request)
+            .await
+            .map(|reply| ClientResponse::Pairing { reply }),
     };
     result.unwrap_or_else(|error| ClientResponse::Error { error })
 }

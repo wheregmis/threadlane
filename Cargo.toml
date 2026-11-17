@@ -20,6 +20,7 @@ threadlane-runner = { path = "crates/threadlane-runner" }
 threadlane-store = { path = "crates/threadlane-store" }
 threadlane-testkit = { path = "crates/threadlane-testkit" }
 threadlane-transport-local = { path = "crates/threadlane-transport-local" }
+threadlane-transport-iroh = { path = "crates/threadlane-transport-iroh" }
 
 anyhow = "1"
 async-trait = "0.1"
@@ -38,6 +39,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 turso = { version = "=0.8.3", default-features = false }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"
+# Pinned: iroh's API changes between releases. No default features: no
+# portmapper (it talks to the router) and no metrics; ring for TLS.
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
+# Local discovery, which iroh keeps in this separate crate.
+iroh-mdns-address-lookup = "=0.6.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

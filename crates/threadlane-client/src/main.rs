@@ -10,9 +10,7 @@ use clap::{Parser, Subcommand};
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
 use threadlane_core::client::ApiError;
 use threadlane_core::model::{Mode, OutboxKind};
-
-/// How long one feed request waits while following.
-const FOLLOW_WAIT: Duration = Duration::from_secs(30);
+use threadlane_core::time::{Clock as _, SystemClock};
 
 /// Talk to your Threadlane hubs.
 #[derive(Debug, Parser)]
@@ -126,6 +124,26 @@ enum Command {
         /// The option, for example approve or decline.
         option: String,
     },
+    /// Ask a hub for a new one-time join code, for pairing another client.
+    PairCode {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+    },
+    /// List the clients a hub has admitted.
+    Clients {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+    },
+    /// Revoke a client at a hub; its connections close at once.
+    Revoke {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The client's name, as `threadlane clients` lists it.
+        name: String,
+    },
     /// Show new messages, decisions, and notices from a space.
     Feed {
         /// The space (paired hub name); may be left out if only one is paired.
@@ -202,6 +220,13 @@ enum HubCommand {
         /// The hub's data directory or socket file.
         path: PathBuf,
     },
+    /// Pair a hub over iroh with a join code it gave.
+    Join {
+        /// The name to show its space under.
+        name: String,
+        /// The join code, from the hub's first start or `threadlane pair-code`.
+        code: String,
+    },
     /// List the paired hubs.
     List,
     /// Forget a hub.
@@ -224,9 +249,35 @@ async fn main() -> ExitCode {
 }
 
 async fn run(command: Command) -> anyhow::Result<ExitCode> {
-    let mut core = ClientCore::load(ClientDirs::from_env()?)?;
+    // Local discovery finds hubs whose address changed; THREADLANE_LOCAL_DISCOVERY=off turns it off.
+    let local_discovery = std::env::var("THREADLANE_LOCAL_DISCOVERY").map_or(true, |value| {
+        !matches!(value.as_str(), "off" | "0" | "false")
+    });
+    let mut core = ClientCore::load(ClientDirs::from_env()?)?.with_local_discovery(local_discovery);
     match command {
-        Command::Hub { command } => hub(&mut core, command)?,
+        Command::Hub { command } => hub(&mut core, command).await?,
+        Command::PairCode { space } => {
+            let issued = core.pair_code(space.as_deref()).await?;
+            let minutes = issued
+                .expires_at
+                .saturating_since(SystemClock.now())
+                .as_secs()
+                .div_ceil(60);
+            println!(
+                "[{}] join code, for one use within {minutes} minutes:\n{}",
+                issued.space, issued.code
+            );
+        }
+        Command::Clients { space } => {
+            for client in core.clients(space.as_deref()).await? {
+                let revoked = if client.is_active() { "" } else { " (revoked)" };
+                println!("{} ({}){revoked}", client.name, client.role);
+            }
+        }
+        Command::Revoke { space, name } => {
+            let client = core.revoke(space.as_deref(), &name).await?;
+            println!("revoked {}", client.name);
+        }
         Command::Status => return Ok(status(&core).await),
         Command::Projects { space } => {
             let listed = core.projects(space.as_deref()).await?;
@@ -405,16 +456,18 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 core.rewind_feed(space)?;
             }
             if follow {
+                // Pushed by the hub over iroh, long-polled over a socket.
+                let mut feed = core.follow(space)?;
                 let mut interrupted = std::pin::pin!(tokio::signal::ctrl_c());
                 loop {
-                    let items = tokio::select! {
-                        items = core.poll_feed(space, FOLLOW_WAIT) => items?,
+                    let item = tokio::select! {
+                        item = feed.recv() => item,
                         _ = &mut interrupted => break,
                     };
-                    for item in &items {
-                        print_item(item);
-                    }
-                    core.commit_feed()?;
+                    let Some(item) = item else { break };
+                    let item = item?;
+                    print_item(&item);
+                    core.acknowledge(&item)?;
                 }
             } else {
                 for item in core.poll_feed(space, Duration::ZERO).await? {
@@ -427,12 +480,18 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn hub(core: &mut ClientCore, command: HubCommand) -> anyhow::Result<()> {
+async fn hub(core: &mut ClientCore, command: HubCommand) -> anyhow::Result<()> {
     match command {
         HubCommand::Add { name, path } => {
             core.pair(&name, path)?;
             if let Some(hub) = core.hubs().iter().find(|hub| hub.name == name) {
-                println!("paired {}: {}", hub.name, hub.socket.display());
+                println!("paired {}: {}", hub.name, hub.reach);
+            }
+        }
+        HubCommand::Join { name, code } => {
+            core.join(&name, &code).await?;
+            if let Some(hub) = core.hubs().iter().find(|hub| hub.name == name) {
+                println!("paired {}: {}", hub.name, hub.reach);
             }
         }
         HubCommand::List => {
@@ -440,7 +499,7 @@ fn hub(core: &mut ClientCore, command: HubCommand) -> anyhow::Result<()> {
                 println!("no hubs paired");
             }
             for hub in core.hubs() {
-                println!("{}  {}", hub.name, hub.socket.display());
+                println!("{}  {}", hub.name, hub.reach);
             }
         }
         HubCommand::Remove { name } => {

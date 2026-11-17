@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use threadlane_core::client::{
     Accepted, ApiError, BindingSummary, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
-    OrgReply, OrgRequest, ProjectSummary, UserMessage,
+    OrgReply, OrgRequest, PairingReply, PairingRequest, ProjectSummary, UserMessage,
 };
 use threadlane_core::ids::ProjectId;
 use threadlane_core::model::{
@@ -458,6 +458,10 @@ impl HubApi for ClientApi {
             }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
+    }
+
+    async fn pairing(&self, request: PairingRequest) -> Result<PairingReply, ApiError> {
+        crate::pairing::handle(&self.core, request).await
     }
 }
 

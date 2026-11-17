@@ -15,7 +15,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use threadlane_core::client::{
     Accepted, ApiError, ClientRequest, ClientResponse, DecisionReply, DecisionRequest, FeedItem,
-    HubApi, HubInfo, OrgReply, OrgRequest, ProjectSummary, UserMessage, dispatch,
+    HubApi, HubInfo, OrgReply, OrgRequest, PairingReply, PairingRequest, ProjectSummary,
+    UserMessage, dispatch,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -112,7 +113,8 @@ impl LocalClient {
 }
 
 /// The error for an answer of the wrong kind; a hub error passes through.
-fn unexpected(response: ClientResponse, request: &str) -> ApiError {
+/// Shared with the other transports' clients.
+pub fn unexpected(response: ClientResponse, request: &str) -> ApiError {
     match response {
         ClientResponse::Error { error } => error,
         _ => ApiError::Internal(format!(
@@ -176,6 +178,16 @@ impl HubApi for LocalClient {
         {
             ClientResponse::Decisions { reply } => Ok(reply),
             other => Err(unexpected(other, "decisions")),
+        }
+    }
+
+    async fn pairing(&self, request: PairingRequest) -> Result<PairingReply, ApiError> {
+        match self
+            .call(&ClientRequest::Pairing { request }, REQUEST_TIMEOUT)
+            .await?
+        {
+            ClientResponse::Pairing { reply } => Ok(reply),
+            other => Err(unexpected(other, "pairing")),
         }
     }
 }
@@ -331,7 +343,10 @@ async fn serve_connection(mut stream: UnixStream, api: Arc<dyn HubApi>) {
     }
 }
 
-fn encode(response: &ClientResponse) -> Vec<u8> {
+/// A response as one JSON value, without the newline. An answer that cannot
+/// be encoded becomes an internal error. Shared with the other transports.
+#[must_use]
+pub fn encode(response: &ClientResponse) -> Vec<u8> {
     serde_json::to_vec(response).unwrap_or_else(|error| {
         let fallback = ClientResponse::Error {
             error: ApiError::Internal(format!("cannot encode the answer: {error}")),
@@ -341,7 +356,10 @@ fn encode(response: &ClientResponse) -> Vec<u8> {
     })
 }
 
-fn cap_wait(request: ClientRequest) -> ClientRequest {
+/// The request with its feed wait cut to [`MAX_FEED_WAIT`]. Shared with the
+/// other transports.
+#[must_use]
+pub fn cap_wait(request: ClientRequest) -> ClientRequest {
     let max_ms = u64::try_from(MAX_FEED_WAIT.as_millis()).unwrap_or(u64::MAX);
     match request {
         ClientRequest::Feed { after, wait_ms } => ClientRequest::Feed {

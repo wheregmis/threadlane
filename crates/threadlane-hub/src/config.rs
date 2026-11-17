@@ -1,5 +1,6 @@
 //! Hub configuration, read from `hub.toml` in the hub's data directory.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -25,6 +26,8 @@ pub const LANES_DIR: &str = "lanes";
 /// Name of the directory holding the embedded runner's clones and task
 /// worktrees.
 pub const WORKSPACES_DIR: &str = "workspaces";
+/// Name of the file holding the hub's iroh secret key, readable only by its owner.
+pub const KEY_FILE: &str = "hub.key";
 
 /// How the hub writes its logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -252,6 +255,30 @@ pub struct BackendsConfig {
     pub codex: CodexTable,
 }
 
+/// The `[iroh]` table: the client interface over iroh (Plan.md §3.5).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IrohConfig {
+    /// Serve clients over iroh, beside the Unix socket.
+    pub enabled: bool,
+    /// Announce the hub on the local network, so clients find it there even
+    /// after its address changes.
+    pub local_discovery: bool,
+    /// The UDP address to listen on. Unset means every interface, IPv4 and
+    /// IPv6, on a free port.
+    pub bind: Option<SocketAddr>,
+}
+
+impl Default for IrohConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            local_discovery: true,
+            bind: None,
+        }
+    }
+}
+
 /// Everything in `hub.toml`. Every table is optional.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -262,6 +289,7 @@ pub struct HubConfig {
     pub runs: RunsConfig,
     pub runner: RunnerTable,
     pub backends: BackendsConfig,
+    pub iroh: IrohConfig,
 }
 
 impl HubConfig {
@@ -456,6 +484,12 @@ impl DataDir {
     #[must_use]
     pub fn socket(&self) -> PathBuf {
         self.root.join(SOCKET_FILE)
+    }
+
+    /// The hub's iroh secret key.
+    #[must_use]
+    pub fn key(&self) -> PathBuf {
+        self.root.join(KEY_FILE)
     }
 
     /// Where the embedded runner keeps one working directory per lane.
@@ -657,6 +691,21 @@ mod tests {
             HubConfig::parse("[runner]\ndebounce_secs = 0").is_ok(),
             "no debounce is allowed"
         );
+    }
+
+    #[test]
+    fn iroh_settings_parse() {
+        let config = HubConfig::default();
+        assert!(config.iroh.enabled && config.iroh.local_discovery);
+        assert_eq!(config.iroh.bind, None);
+        let config = HubConfig::parse(
+            "[iroh]\nenabled = false\nlocal_discovery = false\nbind = \"127.0.0.1:7720\"",
+        )
+        .unwrap();
+        assert!(!config.iroh.enabled && !config.iroh.local_discovery);
+        assert_eq!(config.iroh.bind, Some("127.0.0.1:7720".parse().unwrap()));
+        assert!(HubConfig::parse("[iroh]\nrelay = true").is_err());
+        assert!(HubConfig::parse("[iroh]\nbind = \"not an address\"").is_err());
     }
 
     #[test]

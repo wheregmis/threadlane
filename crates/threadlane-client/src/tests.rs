@@ -84,6 +84,13 @@ impl HubApi for FakeHub {
             decisions: Vec::new(),
         })
     }
+
+    /// Answers every request with an empty client list.
+    async fn pairing(&self, _request: PairingRequest) -> Result<PairingReply, ApiError> {
+        Ok(PairingReply::Clients {
+            clients: Vec::new(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -112,6 +119,10 @@ impl HubApi for DownHub {
     }
 
     async fn decisions(&self, _request: DecisionRequest) -> Result<DecisionReply, ApiError> {
+        Err(ApiError::Unreachable("connection refused".to_owned()))
+    }
+
+    async fn pairing(&self, _request: PairingRequest) -> Result<PairingReply, ApiError> {
         Err(ApiError::Unreachable("connection refused".to_owned()))
     }
 }
@@ -344,11 +355,15 @@ async fn pairing_and_unpairing_persist() {
         [
             PairedHub {
                 name: "work".to_owned(),
-                socket: data_dir.join(SOCKET_FILE),
+                reach: Reach::Socket {
+                    socket: data_dir.join(SOCKET_FILE),
+                },
             },
             PairedHub {
                 name: "home".to_owned(),
-                socket: PathBuf::from("/srv/home/hub.sock"),
+                reach: Reach::Socket {
+                    socket: PathBuf::from("/srv/home/hub.sock"),
+                },
             },
         ]
     );
@@ -555,6 +570,84 @@ fn the_client_directory_comes_from_the_environment() {
         ClientDirs::resolve(env(&[])),
         Err(ClientError::NoClientDir)
     ));
+}
+
+#[tokio::test]
+async fn an_iroh_pairing_survives_a_reload_beside_a_socket_one() {
+    let (_dir, dirs) = client_dir();
+    fs::create_dir_all(&dirs.root).expect("mkdir");
+    let id = threadlane_transport_iroh::SecretKey::generate().public();
+    fs::write(
+        dirs.hubs_file(),
+        format!(
+            "[[hub]]\nname = \"work\"\nsocket = \"/srv/work/hub.sock\"\n\n\
+             [[hub]]\nname = \"home\"\nhub = \"{id}\"\naddrs = [\"127.0.0.1:4433\"]\n"
+        ),
+    )
+    .expect("write");
+    let iroh = Reach::Iroh {
+        hub: id,
+        addrs: vec!["127.0.0.1:4433".parse().expect("addr")],
+    };
+
+    let mut core = ClientCore::load(dirs.clone()).expect("load");
+    assert_eq!(core.hubs()[1].reach, iroh);
+    assert_eq!(
+        core.hubs()[1].reach.to_string(),
+        format!("iroh {}", id.fmt_short())
+    );
+    core.pair("play", PathBuf::from("/srv/play/hub.sock"))
+        .expect("pair");
+    let core = ClientCore::load(dirs).expect("reload");
+    assert_eq!(core.hubs().len(), 3);
+    assert_eq!(core.hubs()[1].reach, iroh, "written back as it was read");
+
+    // No key for it in this client directory: a clear error, not a panic.
+    let error = core.projects(Some("home")).await.expect_err("no key");
+    assert!(matches!(error, ClientError::Read { .. }), "{error:?}");
+}
+
+#[tokio::test]
+async fn following_every_hub_merges_their_feeds_labeled_with_their_spaces() {
+    let (_dir, dirs) = client_dir();
+    let work = FakeHub::new("Work");
+    work.push(message(1, "from work"));
+    let home = FakeHub::new("Home");
+    home.push(notice(1, "from home"));
+    home.push(notice(2, "again from home"));
+    let mut core = ClientCore::load(dirs.clone())
+        .expect("load")
+        .with_hub("work", work)
+        .with_hub("home", Arc::clone(&home) as Arc<dyn HubApi>);
+
+    let mut merged = core.follow_all().expect("follow");
+    let mut seen = Vec::new();
+    while seen.len() < 3 {
+        let item = merged.recv().await.expect("open").expect("an item");
+        seen.push(format!("{}: {}", item.label(), item.text()));
+        core.acknowledge(&item).expect("acknowledge");
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        [
+            "home: again from home",
+            "home: from home",
+            "work/General: from work"
+        ]
+    );
+    drop(merged);
+
+    // Acknowledged items are saved at once.
+    let mut core = ClientCore::load(dirs)
+        .expect("reload")
+        .with_hub("home", home as Arc<dyn HubApi>);
+    assert!(
+        core.poll_feed(Some("home"), Duration::ZERO)
+            .await
+            .expect("poll")
+            .is_empty()
+    );
 }
 
 #[test]
