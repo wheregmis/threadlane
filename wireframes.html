@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Threadlane: Wireframes</title>
+<style>
+  :root { --ink:#222; --mid:#777; --line:#999; --soft:#ddd; --fill:#f1f1f1; --paper:#fff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#e9e9e9; color:var(--ink); font:13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header.doc { background:var(--paper); border-bottom:2px solid var(--ink); padding:18px 28px; position:sticky; top:0; z-index:5; }
+  header.doc h1 { margin:0 0 4px; font-size:18px; }
+  header.doc p { margin:0 0 10px; color:var(--mid); }
+  header.doc nav a { display:inline-block; margin:0 6px 4px 0; padding:3px 10px; border:1.5px solid var(--ink); border-radius:999px; color:var(--ink); text-decoration:none; font-size:12px; background:var(--paper); }
+  header.doc nav a:hover { background:var(--ink); color:var(--paper); }
+  main { max-width:1180px; margin:0 auto; padding:28px; }
+  section.frame { margin:0 0 56px; scroll-margin-top:130px; }
+  section.frame > h2 { font-size:15px; margin:0 0 2px; }
+  section.frame > p.purpose { margin:0 0 12px; color:var(--mid); }
+
+  /* window */
+  .win { background:var(--paper); border:2px solid var(--ink); border-radius:8px; overflow:hidden; }
+  .chrome { display:flex; align-items:center; gap:6px; padding:7px 10px; border-bottom:2px solid var(--ink); background:var(--fill); font-size:12px; color:var(--mid); }
+  .chrome i { width:9px; height:9px; border:1.5px solid var(--ink); border-radius:50%; display:inline-block; }
+  .chrome span { margin-left:8px; }
+  .app { display:grid; grid-template-columns:196px 1fr; min-height:540px; }
+  .side { border-right:2px solid var(--ink); padding:12px 10px; background:#fafafa; }
+  .side .brand { font-weight:700; margin:0 4px 12px; }
+  .side h4 { margin:14px 4px 4px; font-size:10px; letter-spacing:.08em; color:var(--mid); text-transform:uppercase; display:flex; justify-content:space-between; align-items:center; }
+  .side h4 span { text-transform:none; letter-spacing:0; font-weight:400; }
+  .variant { margin-top:12px; border:1.5px dashed var(--line); border-radius:8px; padding:12px 14px; background:var(--paper); }
+  .variant > .label { font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--mid); margin-bottom:8px; }
+  .banner { border:1.5px solid var(--ink); border-radius:6px; padding:7px 10px; background:var(--fill); }
+  .side a { display:flex; justify-content:space-between; padding:4px 8px; border-radius:5px; color:var(--ink); text-decoration:none; }
+  .side a.on { background:var(--ink); color:var(--paper); }
+  .side a small { opacity:.75; }
+  .side hr { border:0; border-top:1.5px solid var(--soft); margin:12px 0; }
+  .body { padding:16px 18px; min-width:0; }
+
+  /* atoms */
+  h3 { font-size:14px; margin:0; }
+  h5 { font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--mid); margin:18px 0 8px; }
+  h5:first-child { margin-top:0; }
+  .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .between { justify-content:space-between; }
+  .muted { color:var(--mid); }
+  .small { font-size:11.5px; }
+  .chip { display:inline-block; padding:1px 8px; border:1.5px solid var(--line); border-radius:999px; font-size:11.5px; white-space:nowrap; background:var(--paper); }
+  .chip.solid { background:var(--ink); color:var(--paper); border-color:var(--ink); }
+  .chip.dash { border-style:dashed; color:var(--mid); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--ink); margin-right:4px; }
+  .dot.off { background:var(--paper); border:1.5px solid var(--line); }
+  .btn { display:inline-block; padding:4px 11px; border:1.5px solid var(--ink); border-radius:6px; background:var(--paper); font-size:12px; white-space:nowrap; }
+  .btn.pri { background:var(--ink); color:var(--paper); }
+  .btn.ghost { border-style:dashed; color:var(--mid); border-color:var(--line); }
+  .card { border:1.5px solid var(--ink); border-radius:7px; padding:12px; background:var(--paper); }
+  .card.soft { border-color:var(--line); }
+  .card.dash { border-style:dashed; border-color:var(--line); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  .split { display:grid; grid-template-columns:1fr 250px; gap:16px; }
+  .tabs { display:flex; gap:2px; border-bottom:2px solid var(--ink); margin:12px 0 14px; }
+  .tabs span { padding:5px 12px; border:1.5px solid transparent; border-bottom:0; border-radius:6px 6px 0 0; color:var(--mid); }
+  .tabs span.on { border-color:var(--ink); background:var(--ink); color:var(--paper); }
+  .seg { display:inline-flex; border:1.5px solid var(--ink); border-radius:6px; overflow:hidden; }
+  .seg span { padding:3px 9px; font-size:11.5px; border-right:1.5px solid var(--ink); white-space:nowrap; }
+  .seg span:last-child { border-right:0; }
+  .seg span.on { background:var(--ink); color:var(--paper); }
+  .seg span.locked { color:#bbb; text-decoration:line-through; background:var(--fill); }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--mid); font-weight:600; padding:5px 8px; border-bottom:1.5px solid var(--ink); }
+  td { padding:7px 8px; border-bottom:1px solid var(--soft); vertical-align:middle; }
+  tr:last-child td { border-bottom:0; }
+  .card table td, .card table th { white-space:nowrap; padding:5px 6px; }
+  .card table td:nth-child(3) { white-space:normal; min-width:160px; }
+  .grid2 > *, .grid3 > * { min-width:0; }
+  .card table .btn { padding:2px 7px; font-size:11px; }
+  .opt { display:flex; align-items:center; gap:8px; padding:6px 9px; border:1.5px solid var(--line); border-radius:6px; margin-top:6px; }
+  .opt b { display:inline-grid; place-items:center; width:19px; height:19px; border:1.5px solid var(--ink); border-radius:4px; font-size:11px; flex:none; }
+  .opt.rec { border-color:var(--ink); border-width:2px; }
+  .input { flex:1; border:1.5px solid var(--line); border-radius:6px; padding:6px 10px; color:var(--mid); background:var(--paper); min-width:120px; }
+  .composer { margin-top:18px; padding-top:12px; border-top:1.5px solid var(--soft); }
+  .check { display:inline-block; width:12px; height:12px; border:1.5px solid var(--ink); border-radius:3px; vertical-align:-2px; margin-right:5px; }
+  .pin { display:inline-grid; place-items:center; width:17px; height:17px; border-radius:50%; background:var(--ink); color:var(--paper); font-size:10px; font-weight:700; vertical-align:1px; margin-left:4px; }
+  .bar { height:7px; border:1.5px solid var(--ink); border-radius:999px; width:90px; display:inline-block; vertical-align:middle; overflow:hidden; }
+  .bar u { display:block; height:100%; background:var(--ink); }
+  code { font:11.5px ui-monospace, Menlo, monospace; background:var(--fill); padding:1px 5px; border-radius:4px; }
+
+  /* conversation */
+  .msg { padding:9px 0; border-bottom:1px solid var(--soft); }
+  .msg .who { font-weight:600; }
+  .msg time { color:var(--mid); font-size:11px; margin-left:7px; }
+  .quiet { color:var(--mid); font-size:11.5px; padding:7px 0; border-bottom:1px dashed var(--soft); }
+  .daymark { font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--mid); margin:12px 0 2px; }
+  .daymark:first-child { margin-top:0; }
+
+  /* board */
+  .board { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; }
+  .col { background:var(--fill); border-radius:7px; padding:8px; min-height:250px; }
+  .col h6 { margin:0 0 8px; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--mid); display:flex; justify-content:space-between; }
+  .tk { background:var(--paper); border:1.5px solid var(--line); border-radius:6px; padding:7px; margin-bottom:7px; font-size:12px; }
+  .tk.hot { border-color:var(--ink); border-width:2px; }
+  .tk.dash { border-style:dashed; }
+  .tk .meta { margin-top:5px; color:var(--mid); font-size:11px; }
+
+  /* timeline */
+  .tl { list-style:none; margin:0; padding:0 0 0 16px; border-left:2px solid var(--soft); }
+  .tl li { position:relative; padding:0 0 14px 12px; }
+  .tl li::before { content:""; position:absolute; left:-22px; top:4px; width:9px; height:9px; border-radius:50%; background:var(--paper); border:2px solid var(--ink); }
+  .tl li.now::before { background:var(--ink); }
+  .tl time { color:var(--mid); font-size:11px; margin-right:6px; }
+
+  /* matrix */
+  .mx td, .mx th { text-align:center; }
+  .mx td:first-child, .mx th:first-child { text-align:left; }
+  .mx tr.grp td { background:var(--fill); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--mid); padding:4px 8px; text-align:left; }
+  .m { display:inline-block; min-width:86px; padding:2px 6px; border:1.5px solid var(--line); border-radius:5px; font-size:11.5px; }
+  .m.a3 { background:var(--ink); color:var(--paper); border-color:var(--ink); }
+  .m.a2 { background:#bbb; border-color:var(--ink); }
+  .m.a1 { background:var(--paper); border-color:var(--ink); }
+  .m.a0 { border-style:dashed; color:#aaa; }
+
+  /* phone */
+  .phones { display:flex; gap:32px; justify-content:center; padding:24px; background:var(--paper); border:2px solid var(--ink); border-radius:8px; flex-wrap:wrap; }
+  .phone { width:290px; border:2px solid var(--ink); border-radius:30px; padding:14px 12px 18px; background:var(--paper); }
+  .phone .notch { width:86px; height:16px; border:1.5px solid var(--ink); border-radius:999px; margin:0 auto 12px; }
+  .phone .seg span { flex:1; text-align:center; padding:3px 4px; }
+  .phone .cap { text-align:center; color:var(--mid); font-size:11px; margin-top:12px; }
+  .lock { text-align:center; margin:8px 0 18px; }
+  .lock .time { font-size:38px; font-weight:300; line-height:1; }
+
+  /* notes */
+  ol.notes { margin:12px 0 0; padding:0; list-style:none; display:grid; grid-template-columns:1fr 1fr; gap:6px 24px; counter-reset:n; }
+  ol.notes li { counter-increment:n; padding-left:26px; position:relative; color:#444; }
+  ol.notes li::before { content:counter(n); position:absolute; left:0; top:1px; width:17px; height:17px; border-radius:50%; background:var(--ink); color:var(--paper); font-size:10px; font-weight:700; display:grid; place-items:center; }
+  ol.notes em { color:var(--mid); font-style:normal; }
+  @media (max-width:900px) { .app { grid-template-columns:1fr; } .side { display:none; } .split, .grid2, .grid3, ol.notes { grid-template-columns:1fr; } .board { grid-template-columns:1fr 1fr; } }
+</style>
+</head>
+<body>
+
+<header class="doc">
+  <h1>Threadlane: Wireframes</h1>
+  <p>Low-fidelity structure only. Layout, content, and controls; no visual design. Numbered pins refer to the notes under each screen. Section numbers refer to <code>Plan.md</code>.</p>
+  <nav>
+    <a href="#home">1 Home</a>
+    <a href="#project">2 Project</a>
+    <a href="#conversation">3 Conversation</a>
+    <a href="#project-agents">4 Project agents</a>
+    <a href="#task">5 Task</a>
+    <a href="#agents">6 Agents</a>
+    <a href="#machines">7 Machines</a>
+    <a href="#phone">8 Phone</a>
+  </nav>
+</header>
+
+<template id="sidebar">
+  <div class="brand">Threadlane</div>
+  <a data-k="home">Home <small>2</small></a>
+  <h4>Work <span><span class="dot"></span>macbook</span></h4>
+  <a data-k="payments">Payments API <small>1</small></a>
+  <a data-k="mobile">Mobile app</a>
+  <a data-k="work-general">General</a>
+  <h4>Personal <span><span class="dot"></span>macbook</span></h4>
+  <a data-k="blog">Blog <small>1</small></a>
+  <a data-k="homelab">Home lab</a>
+  <a data-k="personal-general">General</a>
+  <a class="muted">+ New project</a>
+  <a class="muted">+ Add space</a>
+  <hr>
+  <a data-k="agents">Agents</a>
+  <a data-k="machines">Machines <small>2 / 2</small></a>
+  <a data-k="routines">Routines</a>
+  <a data-k="memory">Memory</a>
+  <a data-k="settings">Settings</a>
+</template>
+
+<main>
+
+<!-- 1 HOME -->
+<section class="frame" id="home">
+  <h2>1. Home</h2>
+  <p class="purpose">Everything that needs you, across every project in every space. Then what is running, then what finished.</p>
+  <div class="win">
+    <div class="chrome"><i></i><i></i><i></i><span>Home</span></div>
+    <div class="app">
+      <aside class="side" data-active="home"></aside>
+      <div class="body">
+        <div class="row between">
+          <div class="row">
+            <span class="chip solid">All</span><span class="chip">Work</span><span class="chip">Personal</span><span class="pin">1</span>
+          </div>
+          <div class="muted small">2 spaces reachable · 3 running · 2 need you · 2 of 2 machines online</div>
+        </div>
+
+        <h5>Needs you (2) <span class="pin">2</span></h5>
+        <div class="grid2">
+          <div class="card">
+            <div class="row between small muted"><span>D-0012 · Work / Payments API · Engineer</span><span>T-0142</span></div>
+            <h3 style="margin-top:6px">Open a pull request for the refund fix?</h3>
+            <div class="small muted" style="margin-top:3px">Tests pass on linux-box. 4 files changed in payments-service.</div>
+            <div class="opt rec"><b>A</b> Open as draft <span class="chip solid" style="margin-left:auto">Recommended</span></div>
+            <div class="opt"><b>B</b> Open and request review</div>
+            <div class="opt"><b>C</b> Hold; I will look first</div>
+            <div class="small" style="margin-top:9px"><span class="check"></span>Always allow Engineer to open draft pull requests in Payments API <span class="pin">3</span></div>
+          </div>
+          <div class="card dash">
+            <div class="row between small muted"><span>D-0013 · Personal / Blog · Lead</span><span class="chip dash">Proposal</span></div>
+            <h3 style="margin-top:6px">The build on main has failed since last night. Investigate and fix?</h3>
+            <div class="small muted" style="margin-top:3px">You did not ask for this. Lead is Assisted here, so it proposes first.</div>
+            <div class="opt rec"><b>A</b> Start <span class="chip solid" style="margin-left:auto">Recommended</span></div>
+            <div class="opt"><b>B</b> Not now</div>
+            <div class="opt"><b>C</b> Do not propose this kind again</div>
+            <div class="small muted" style="margin-top:9px">Would run as: Engineer · any Personal machine <span class="pin">4</span></div>
+          </div>
+        </div>
+
+        <h5>Running now (3) <span class="pin">5</span></h5>
+        <table>
+          <tr><th>Task</th><th>Project</th><th>Agent</th><th>Machine</th><th>Running</th></tr>
+          <tr><td>T-0143 Add retry metrics to dashboard</td><td>Payments API</td><td>Engineer</td><td><span class="dot"></span>macbook</td><td>12 min</td></tr>
+          <tr><td>T-0145 Review T-0142 changes</td><td>Payments API</td><td>Reviewer</td><td><span class="dot"></span>linux-box</td><td>3 min</td></tr>
+          <tr><td>T-0088 Compare backup tools</td><td>Home lab</td><td>Researcher</td><td><span class="dot"></span>macbook</td><td>26 min</td></tr>
+        </table>
+
+        <h5>Recent results</h5>
+        <table>
+          <tr><td style="width:70px" class="muted">09:14</td><td><b>Payments API</b> · Refund endpoint now rejects duplicate requests. Draft pull request is waiting on your decision above.</td></tr>
+          <tr><td class="muted">Yesterday</td><td><b>Blog</b> · Published the draft you approved. No issues after deploy.</td></tr>
+          <tr><td class="muted">Yesterday</td><td><b>Home lab</b> · Weekly update check: 2 updates available, none urgent. <span class="chip dash">Routine</span></td></tr>
+        </table>
+
+        <div class="composer row">
+          <span class="chip">Work / Payments API ▾</span><span class="pin">6</span>
+          <span class="input">Tell your team what you need…</span>
+          <span class="btn pri">Send</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="variant">
+    <div class="label">State: away from the other machine <span class="pin">7</span></div>
+    <div class="banner row between">
+      <div><span class="dot off"></span><b>linux-box is out of reach.</b> <span class="muted">macbook is working alone. 1 task moved here from its checkpoint. 1 task needs linux-box and is waiting.</span></div>
+      <span class="btn">Details</span>
+    </div>
+    <div class="label" style="margin-top:14px">State: no model account available <span class="pin">8</span></div>
+    <div class="banner row between">
+      <div><span class="chip solid">System</span> <b>Personal is blocked until 14:20.</b> <span class="muted">Claude and Codex have both reached their limits. 3 tasks are waiting and will start by themselves. Your messages are held until then.</span></div>
+      <span class="btn">Accounts</span>
+    </div>
+    <div class="row small muted" style="margin-top:8px">
+      <span>In this state: waiting tasks show “Blocked” instead of “Queued”</span><span>·</span><span>nothing fails</span><span>·</span><span>one notice when it starts, one when it ends</span>
+    </div>
+  </div>
+  <ol class="notes">
+    <li>Space filter. Home merges what each paired hub reports; no hub or agent sees another space. <em>§2.1, §11.3</em></li>
+    <li>Decisions from every project in one queue, most urgent first. Each is a short list of options with one recommended. <em>§9.4</em></li>
+    <li>Ticking this creates a standing rule scoped to one agent, one project, one action. <em>§2.3</em></li>
+    <li>A proposal is a decision of kind "proposal": unrequested work in Assisted mode. Shown with a dashed border to read as "not started". <em>§2.3, §9.4</em></li>
+    <li>Each row is one lane with an active run. Agent and machine are always visible. <em>§4.1, §5.4</em></li>
+    <li>Every message goes to exactly one project's lead, at that space's hub. Defaults to the last used; General if none fits. <em>§2.1, §4.2</em></li>
+    <li>Without a relay, the secondary is reachable only on the primary's network. Away from it, the primary works alone and says which tasks moved and which are waiting. <em>§3.5, §5.8</em></li>
+    <li>The one kind of message that comes from the system rather than the lead: with no model account available, no agent can run to tell you. <em>§5.3, §10.2</em></li>
+  </ol>
+</section>
+
+<!-- 2 PROJECT -->
+<section class="frame" id="project">
+  <h2>2. Project</h2>
+  <p class="purpose">One project: its tasks by status, its repositories, and who works on it.</p>
+  <div class="win">
+    <div class="chrome"><i></i><i></i><i></i><span>Work / Payments API</span></div>
+    <div class="app">
+      <aside class="side" data-active="payments"></aside>
+      <div class="body">
+        <div class="row between">
+          <div class="row"><h3>Payments API</h3><span class="chip">Work</span><span class="chip">Ceiling: Assisted</span><span class="pin">1</span></div>
+          <div class="row"><span class="btn">Pause project</span><span class="btn pri">+ New task</span></div>
+        </div>
+        <div class="tabs"><span class="on">Tasks</span><span>Conversation</span><span>Agents</span><span>Routines</span><span>Memory</span><span>Settings</span></div>
+
+        <div class="split">
+          <div>
+            <div class="board">
+              <div class="col"><h6>Proposed <span>1</span></h6>
+                <div class="tk dash">T-0147 Upgrade payment SDK to next major<div class="meta">Lead proposes · Engineer</div><div class="row" style="margin-top:6px"><span class="btn">Start</span><span class="btn ghost">Decline</span></div></div>
+              </div>
+              <div class="col"><h6>Queued <span>2</span></h6>
+                <div class="tk">T-0146 Update API docs for refunds<div class="meta">Engineer · waits for T-0142 <span class="pin">2</span></div></div>
+                <div class="tk">T-0148 Load test refund path<div class="meta">Engineer · waits for T-0146</div></div>
+              </div>
+              <div class="col"><h6>Running <span>2</span></h6>
+                <div class="tk">T-0143 Add retry metrics to dashboard<div class="meta">Engineer · macbook · 12 min</div></div>
+                <div class="tk">T-0145 Review T-0142 changes<div class="meta">Reviewer · linux-box · 3 min</div></div>
+              </div>
+              <div class="col"><h6>Waiting on you <span>1</span></h6>
+                <div class="tk hot">T-0142 Add idempotency keys to refund endpoint<div class="meta">Engineer · D-0012 open</div><div class="row" style="margin-top:6px"><span class="btn pri">Answer</span></div></div>
+              </div>
+              <div class="col"><h6>Done <span>14</span></h6>
+                <div class="tk">T-0141 Fix flaky webhook test<div class="meta">Engineer · yesterday</div></div>
+                <div class="tk">T-0139 Rotate staging config<div class="meta">Engineer · 2 days ago</div></div>
+                <div class="small muted">12 more…</div>
+              </div>
+            </div>
+            <div class="composer row">
+              <span class="input">Give the lead a goal for Payments API…</span><span class="btn pri">Send</span><span class="pin">3</span>
+            </div>
+          </div>
+
+          <div>
+            <h5>Repositories (3) <span class="pin">4</span></h5>
+            <div class="card soft small">
+              <div class="row between"><b>payments-service</b><span class="muted">main</span></div>
+              <div class="row between" style="margin-top:5px"><b>payments-web</b><span class="muted">main</span></div>
+              <div class="row between" style="margin-top:5px"><b>infra</b><span class="muted">trunk</span></div>
+              <div class="muted" style="margin-top:8px">On GitHub as: your account</div>
+              <div style="margin-top:8px"><span class="btn ghost">+ Add repository</span></div>
+            </div>
+            <h5>Agents here</h5>
+            <div class="card soft small">
+              <div class="row between"><span>Lead</span><span class="chip">Assisted</span></div>
+              <div class="row between" style="margin-top:5px"><span>Engineer</span><span class="chip">Assisted</span></div>
+              <div class="row between" style="margin-top:5px"><span>Reviewer</span><span class="chip">On request</span></div>
+              <div class="row between" style="margin-top:5px"><span class="muted">Researcher</span><span class="chip dash">Off</span></div>
+            </div>
+            <h5>Machines <span class="pin">5</span></h5>
+            <div class="card soft small">
+              <div><span class="dot"></span>macbook <span class="muted">primary</span></div>
+              <div style="margin-top:4px"><span class="dot"></span>linux-box</div>
+              <div class="muted" style="margin-top:8px">Every machine joined to Work. Up to 3 tasks at once.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <ol class="notes">
+    <li>Space and ceiling are always visible in the project header. <em>§2.1, §2.3</em></li>
+    <li>Queued cards say why they are not running: a dependency, a capability, or a limit. <em>§5.2, §5.4</em></li>
+    <li>Goals go to the project's lead, which splits them into tasks. "+ New task" skips the lead and creates one task directly. <em>§5.1</em></li>
+    <li>A project holds several repositories; each belongs to exactly one project, in exactly one space. The app refuses a repository another space already has. <em>§2.1, §11.3</em></li>
+    <li>Any machine joined to the space can run its work; a project can narrow that. Machines joined only to Personal never appear here. <em>§2.4, §5.4</em></li>
+  </ol>
+</section>
+
+<!-- 3 CONVERSATION -->
+<section class="frame" id="conversation">
+  <h2>3. Conversation</h2>
+  <p class="purpose">Your conversation with a project's lead. This is where you give goals and hear results.</p>
+  <div class="win">
+    <div class="chrome"><i></i><i></i><i></i><span>Work / Payments API / Conversation</span></div>
+    <div class="app">
+      <aside class="side" data-active="payments"></aside>
+      <div class="body">
+        <div class="row between">
+          <div class="row"><h3>Payments API</h3><span class="chip">Work</span><span class="chip">Lead: Assisted</span><span class="pin">1</span></div>
+          <div class="row"><span class="small muted">Lead is working · started 09:20</span><span class="btn">Stop</span></div>
+        </div>
+        <div class="tabs"><span>Tasks</span><span class="on">Conversation</span><span>Agents</span><span>Routines</span><span>Memory</span><span>Settings</span></div>
+
+        <div class="split">
+          <div>
+            <div class="daymark">Yesterday</div>
+            <div class="quiet">2 earlier exchanges · Fix flaky webhook test · Rotate staging config <span class="btn ghost">Show</span></div>
+
+            <div class="daymark">Today <span class="pin">6</span></div>
+
+            <div class="msg">
+              <div><span class="who">You</span><time>08:41</time></div>
+              <div>Refunds can be submitted twice. Fix it.</div>
+            </div>
+
+            <div class="msg">
+              <div><span class="who">Lead</span><time>08:42</time></div>
+              <div>On it. I split this into three tasks, and the docs wait for the fix.</div>
+              <div class="row" style="margin-top:6px">
+                <span class="chip">T-0142 Fix · Engineer</span><span class="chip">T-0145 Review · Reviewer</span><span class="chip dash">T-0146 Docs · after T-0142</span><span class="pin">2</span>
+              </div>
+            </div>
+
+            <div class="quiet">Lead ran twice and stayed quiet · 08:55, 09:08 <span class="btn ghost">Why</span> <span class="pin">3</span></div>
+
+            <div class="msg">
+              <div><span class="who">Lead</span><time>09:14</time></div>
+              <div>The refund endpoint now rejects duplicate requests, and the tests pass. Engineer needs your answer before the pull request is opened.</div>
+              <div class="card" style="margin-top:8px; max-width:460px">
+                <div class="row between small muted"><span>D-0012 · Engineer · T-0142</span><span class="pin">4</span></div>
+                <div style="margin-top:4px"><b>Open a pull request for the refund fix?</b></div>
+                <div class="opt rec"><b>A</b> Open as draft <span class="chip solid" style="margin-left:auto">Recommended</span></div>
+                <div class="opt"><b>B</b> Open and request review</div>
+                <div class="opt"><b>C</b> Hold; I will look first</div>
+              </div>
+            </div>
+
+            <div class="msg">
+              <div><span class="who">You</span><time>09:20</time></div>
+              <div>Also add a line to the changelog.</div>
+            </div>
+            <div class="msg">
+              <div><span class="who">You</span><time>09:20</time></div>
+              <div>Under "Fixed", not "Changed".</div>
+              <div class="small muted" style="margin-top:3px">Read together with the message above <span class="pin">5</span></div>
+            </div>
+
+            <div class="composer row">
+              <span class="input">Message the lead of Payments API…</span><span class="btn pri">Send</span>
+            </div>
+          </div>
+
+          <div>
+            <h5>From this conversation</h5>
+            <div class="card soft small">
+              <div class="row between"><span>T-0142 Fix</span><span class="chip solid">Waiting on you</span></div>
+              <div class="row between" style="margin-top:5px"><span>T-0145 Review</span><span class="chip">Running</span></div>
+              <div class="row between" style="margin-top:5px"><span>T-0146 Docs</span><span class="chip dash">Queued</span></div>
+            </div>
+            <h5>Open decisions</h5>
+            <div class="card soft small">
+              <div>D-0012 Open a pull request?</div>
+              <div class="muted" style="margin-top:4px">Asked 09:14 · expires tomorrow</div>
+            </div>
+            <h5>What the lead knows</h5>
+            <div class="card soft small">
+              <div>Instructions for this project</div>
+              <div style="margin-top:4px">4 notes · 3 task progress files</div>
+              <div style="margin-top:8px"><span class="btn">Open memory</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <ol class="notes">
+    <li>One conversation per project, with that project's lead. Other agents never post here; their results reach you through the lead. <em>§4.5</em></li>
+    <li>Tasks the lead creates appear inline and open their own screens. <em>§5.1</em></li>
+    <li>Runs where the lead decided to say nothing are collapsed into one line, with the recorded reason one click away. Quiet by default, but not hidden. <em>§4.5</em></li>
+    <li>A decision from any agent in the project appears here as well as on Home. Answering in either place is the same answer. <em>§9.4</em></li>
+    <li>Messages sent close together are read as one. A message sent while the lead is working is folded in where the backend allows, otherwise answered next. <em>§4.7, §4.8</em></li>
+    <li>The conversation is continuous for you. Underneath, the lead starts a fresh session after a quiet period and carries continuity through memory, so the marks are days, not sessions. <em>§4.4, §8</em></li>
+  </ol>
+</section>
+
+<!-- 4 PROJECT AGENTS -->
+<section class="frame" id="project-agents">
+  <h2>4. Project agents</h2>
+  <p class="purpose">How much each agent may start and do in this project. The main control surface for modes.</p>
+  <div class="win">
+    <div class="chrome"><i></i><i></i><i></i><span>Work / Payments API / Agents</span></div>
+    <div class="app">
+      <aside class="side" data-active="payments"></aside>
+      <div class="body">
+        <div class="row"><h3>Payments API</h3><span class="chip">Work</span></div>
+        <div class="tabs"><span>Tasks</span><span>Conversation</span><span class="on">Agents</span><span>Routines</span><span>Memory</span><span>Settings</span></div>
+
+        <div class="card soft row between">
+          <div><b>Project ceiling</b> <span class="pin">1</span><div class="small muted">No agent in this project can go above this. Inherited from Work.</div></div>
+          <div class="seg"><span>On request</span><span class="on">Assisted</span><span class="locked">Autonomous</span></div>
+        </div>
+
+        <h5>Agents in this project</h5>
+        <table>
+          <tr><th>Agent</th><th>Mode <span class="pin">2</span></th><th>Model</th><th>At once</th><th></th></tr>
+          <tr>
+            <td><b>Lead</b><div class="small muted">Talks to you, splits goals</div></td>
+            <td><div class="seg"><span>Off</span><span>On request</span><span class="on">Assisted</span><span class="locked">Autonomous</span></div></td>
+            <td><span class="chip">Default ▾</span></td><td>1</td><td class="muted">▸</td>
+          </tr>
+          <tr>
+            <td><b>Engineer</b><div class="small muted">Writes and tests code</div></td>
+            <td><div class="seg"><span>Off</span><span>On request</span><span class="on">Assisted</span><span class="locked">Autonomous</span></div></td>
+            <td><span class="chip">Default ▾</span></td><td>3</td><td>▾</td>
+          </tr>
+          <tr>
+            <td colspan="5" style="background:var(--fill); padding:12px">
+              <div class="grid2">
+                <div>
+                  <div class="small" style="margin-bottom:6px"><b>What Engineer may do here without asking</b> <span class="pin">3</span></div>
+                  <table>
+                    <tr><td>Start work you did not request</td><td><span class="chip">Proposes first ▾</span></td></tr>
+                    <tr><td>Read</td><td><span class="chip solid">Yes</span></td></tr>
+                    <tr><td>Work locally <span class="muted small">edit, build, test, commit on task branch</span></td><td><span class="chip solid">Yes</span></td></tr>
+                    <tr><td>Shared, reversible <span class="muted small">push branch, draft pull request, comment</span></td><td><span class="chip">Reviewed automatically ▾</span></td></tr>
+                    <tr><td>Hard to undo <span class="muted small">merge, release, deploy</span></td><td><span class="chip">Always asks</span></td></tr>
+                    <tr><td>Forbidden <span class="muted small">delete repository, secrets, force-push</span></td><td><span class="chip dash">Blocked</span></td></tr>
+                  </table>
+                </div>
+                <div>
+                  <div class="small" style="margin-bottom:6px"><b>Standing rules (2)</b> <span class="pin">4</span></div>
+                  <div class="card soft small">
+                    <div class="row between"><span>Open draft pull request in <code>payments-service</code></span><span class="btn ghost">Revoke</span></div>
+                    <div class="muted">Granted from D-0009 · used 6 times</div>
+                  </div>
+                  <div class="card soft small" style="margin-top:6px">
+                    <div class="row between"><span>Comment on its own pull requests</span><span class="btn ghost">Revoke</span></div>
+                    <div class="muted">Granted from D-0004 · used 11 times</div>
+                  </div>
+                  <div class="small muted" style="margin-top:10px">When a run is triggered by outside content, Engineer works one mode lower for that run. <span class="pin">5</span></div>
+                </div>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td><b>Reviewer</b><div class="small muted">Reviews changes</div></td>
+            <td><div class="seg"><span>Off</span><span class="on">On request</span><span>Assisted</span><span class="locked">Autonomous</span></div></td>
+            <td><span class="chip">Default ▾</span></td><td>1</td><td class="muted">▸</td>
+          </tr>
+          <tr>
+            <td><span class="muted"><b>Researcher</b></span><div class="small muted">Investigates, compares</div></td>
+            <td><div class="seg"><span class="on">Off</span><span>On request</span><span>Assisted</span><span class="locked">Autonomous</span></div></td>
+            <td class="muted">–</td><td class="muted">–</td><td class="muted">▸</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  <ol class="notes">
+    <li>The ceiling caps every agent in the project. Options above it are shown but locked, so it is clear why they are unavailable. <em>§2.3</em></li>
+    <li>One control per agent sets both initiative and authority. Four positions: Off, On request, Assisted, Autonomous. <em>§2.3</em></li>
+    <li>Expanding a row shows the mode as plain statements. Rows with ▾ can be made stricter here; none can be loosened past the ceiling. These are rules the agent is set up to follow through the system's tools; agents run with your access and nothing confines them. <em>§2.3, §9.1, §9.2</em></li>
+    <li>Rules earned by answering decisions with "always allow". Each shows where it came from and can be revoked. <em>§2.3</em></li>
+    <li>Tainted runs step down one mode. Stated in the interface so the behavior is not a surprise. <em>§9.1</em></li>
+  </ol>
+</section>
+
+<!-- 5 TASK -->
+<section class="frame" id="task">
+  <h2>5. Task</h2>
+  <p class="purpose">One task from request to result: who took it, on which machine, and what happened.</p>
+  <div class="win">
+    <div class="chrome"><i></i><i></i><i></i><span>Work / Payments API / T-0142</span></div>
+    <div class="app">
+      <aside class="side" data-active="payments"></aside>
+      <div class="body">
+        <div class="row between">
+          <div class="row"><span class="muted">T-0142</span><h3>Add idempotency keys to refund endpoint</h3><span class="chip solid">Waiting on you</span></div>
+          <div class="row"><span class="btn">Pause</span><span class="btn">Move to another machine</span><span class="btn ghost">Cancel</span><span class="pin">1</span></div>
+        </div>
+        <div class="row small muted" style="margin:8px 0 16px">
+          <span class="chip">Engineer</span><span class="chip">Claude</span><span class="chip">Assisted</span><span class="chip"><span class="dot"></span>linux-box</span><span class="chip">payments-service</span><span class="chip">task/T-0142</span><span>Requested by you</span><span class="pin">2</span>
+        </div>
+
+        <div class="split">
+          <div>
+            <h5>Timeline</h5>
+            <ul class="tl">
+              <li><time>08:41</time><b>You</b> asked the lead: "Refunds can be submitted twice. Fix it."</li>
+              <li><time>08:42</time><b>Lead</b> created 3 tasks: T-0142 (this), T-0145 review, T-0146 docs.</li>
+              <li><time>08:42</time>Claimed by <b>linux-box</b>. Worktree prepared from <code>main</code>. <span class="pin">3</span></li>
+              <li><time>08:43</time><b>Engineer</b> worked for 28 min · 41 steps <span class="btn ghost">Show steps</span> <span class="pin">4</span></li>
+              <li><time>09:11</time>Checkpoint saved. Progress notes updated.</li>
+              <li class="now"><time>09:11</time><b>Decision D-0012</b> Open a pull request for the refund fix?
+                <div class="card" style="margin-top:6px; max-width:440px">
+                  <div class="opt rec"><b>A</b> Open as draft <span class="chip solid" style="margin-left:auto">Recommended</span></div>
+                  <div class="opt"><b>B</b> Open and request review</div>
+                  <div class="opt"><b>C</b> Hold; I will look first</div>
+                </div>
+              </li>
+            </ul>
+            <div class="composer row">
+              <span class="input">Add to this task…</span><span class="btn pri">Send</span><span class="pin">5</span>
+            </div>
+          </div>
+          <div>
+            <h5>Changes</h5>
+            <div class="card soft small">
+              <div>4 files · +120 −14</div>
+              <div class="muted" style="margin-top:4px">refunds/handler · refunds/store · 2 tests</div>
+              <div style="margin-top:8px"><span class="btn">View diff</span></div>
+            </div>
+            <h5>Related</h5>
+            <div class="card soft small">
+              <div>T-0145 Review <span class="chip">Running</span></div>
+              <div style="margin-top:5px">T-0146 Docs <span class="chip dash">Waits for this</span></div>
+            </div>
+            <h5>Checkpoint <span class="pin">6</span></h5>
+            <div class="card soft small">
+              <div>Saved 09:11 · 3 commits past <code>main</code></div>
+              <div class="muted" style="margin-top:4px">Can resume on: macbook</div>
+            </div>
+            <h5>Usage</h5>
+            <div class="card soft small">1 run · 28 min · usage as the backend reports it</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <ol class="notes">
+    <li>Moving a task releases its lane; another machine joined to the same space restores it from the checkpoint. <em>§5.4, §5.5</em></li>
+    <li>Agent, backend, effective mode, machine, repository, branch, and origin are always shown. Origin decides whether the initiative rule applied. <em>§2.3, §5.2</em></li>
+    <li>Claiming is visible as a timeline entry, so you can see which machine did what. <em>§5.4</em></li>
+    <li>Steps are collapsed by default. You get outcomes and a few details, not the step-by-step. <em>§10</em></li>
+    <li>A message here goes to this task's lane, not the lead. While a decision is open it answers the decision as "declined, with this note". <em>§4.2, §9.4</em></li>
+    <li>The checkpoint is what makes the task independent of the machine it started on. <em>§5.5</em></li>
+  </ol>
+</section>
+
+<!-- 6 AGENTS -->
+<section class="frame" id="agents">
+  <h2>6. Agents</h2>
+  <p class="purpose">Agent definitions per space, and every project-by-agent mode in one grid.</p>
+  <div class="win">
+    <div class="chrome"><i></i><i></i><i></i><span>Agents</span></div>
+    <div class="app">
+      <aside class="side" data-active="agents"></aside>
+      <div class="body">
+        <div class="row between"><h3>Agents</h3><span class="btn pri">+ New agent</span></div>
+
+        <div class="row between" style="margin-top:14px">
+          <div class="row"><h5 style="margin:0">Definitions in</h5><div class="seg"><span class="on">Work</span><span>Personal</span></div><span class="pin">1</span></div>
+          <span class="btn">Copy an agent to Personal…</span>
+        </div>
+        <div style="height:8px"></div>
+        <div class="grid2" style="grid-template-columns:repeat(4,1fr)">
+          <div class="card soft small"><b>Lead</b><div class="muted">Talks to you, splits goals, reports</div><div style="margin-top:6px"><span class="chip">Claude</span> <span class="chip dash">then Codex</span></div><div class="muted" style="margin-top:4px">Runs on: macbook (primary)</div></div>
+          <div class="card soft small"><b>Engineer</b><div class="muted">Writes and tests code</div><div style="margin-top:6px"><span class="chip">Claude</span> <span class="chip dash">then Codex</span></div><div class="muted" style="margin-top:4px">Runs on: 2 machines</div></div>
+          <div class="card soft small"><b>Reviewer</b><div class="muted">Reviews changes</div><div style="margin-top:6px"><span class="chip">Codex</span> <span class="chip dash">then Claude</span></div><div class="muted" style="margin-top:4px">Runs on: 2 machines</div></div>
+          <div class="card soft small"><b>Researcher</b><div class="muted">Investigates, compares</div><div style="margin-top:6px"><span class="chip">Either</span></div><div class="muted" style="margin-top:4px">Runs on: 2 machines</div></div>
+        </div>
+
+        <h5>Modes by project <span class="pin">2</span></h5>
+        <table class="mx">
+          <tr><th>Project</th><th>Ceiling</th><th>Lead</th><th>Engineer</th><th>Reviewer</th><th>Researcher</th></tr>
+          <tr class="grp"><td colspan="6">Work · ceiling Assisted</td></tr>
+          <tr><td>Payments API</td><td class="muted small">Assisted</td><td><span class="m a2">Assisted</span></td><td><span class="m a2">Assisted</span></td><td><span class="m a1">On request</span></td><td><span class="m a0">Off</span></td></tr>
+          <tr><td>Mobile app</td><td class="muted small">On request <span class="pin">3</span></td><td><span class="m a1">On request</span></td><td><span class="m a1">On request</span></td><td><span class="m a1">On request</span></td><td><span class="m a0">Off</span></td></tr>
+          <tr><td>General</td><td class="muted small">Assisted</td><td><span class="m a2">Assisted</span></td><td><span class="m a0">Off</span></td><td><span class="m a0">Off</span></td><td><span class="m a1">On request</span></td></tr>
+          <tr class="grp"><td colspan="6">Personal · ceiling Autonomous</td></tr>
+          <tr><td>Blog</td><td class="muted small">Autonomous</td><td><span class="m a2">Assisted</span></td><td><span class="m a3">Autonomous</span></td><td><span class="m a0">Off</span></td><td><span class="m a2">Assisted</span></td></tr>
+          <tr><td>Home lab</td><td class="muted small">Autonomous</td><td><span class="m a3">Autonomous</span></td><td><span class="m a3">Autonomous</span></td><td><span class="m a0">Off</span></td><td><span class="m a3">Autonomous</span></td></tr>
+          <tr><td>General</td><td class="muted small">Autonomous</td><td><span class="m a2">Assisted</span></td><td><span class="m a0">Off</span></td><td><span class="m a0">Off</span></td><td><span class="m a2">Assisted</span></td></tr>
+        </table>
+        <div class="row small muted" style="margin-top:10px">
+          <span class="m a0">Off</span><span class="m a1">On request</span><span class="m a2">Assisted</span><span class="m a3">Autonomous</span>
+          <span>Click a cell to change it. Darker means more independent.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <ol class="notes">
+    <li>Agents are defined per space: Work's Engineer and Personal's Engineer are separate. Copying one across is something you do here, never automatic. Each lists the tools it may run on, in order of preference; it runs on whichever is available and is blocked when none is. "Runs on" comes from which joined machines have that tool installed and logged in. <em>§2.2, §5.7, §11.3</em></li>
+    <li>The grid merges both hubs' reports into one work-versus-personal picture. Each cell is saved at its own space's hub. <em>§2.3, §11.3</em></li>
+    <li>A project can set a ceiling stricter than its space, never looser. <em>§2.3</em></li>
+  </ol>
+</section>
+
+<!-- 7 MACHINES -->
+<section class="frame" id="machines">
+  <h2>7. Spaces and machines</h2>
+  <p class="purpose">Which spaces this app is paired with, which computers are helping in each, and what each can run.</p>
+  <div class="win">
+    <div class="chrome"><i></i><i></i><i></i><span>Machines</span></div>
+    <div class="app">
+      <aside class="side" data-active="machines"></aside>
+      <div class="body">
+        <div class="row between"><h3>Spaces and machines</h3><span class="btn pri">+ Add machine</span></div>
+
+        <h5>Spaces <span class="pin">1</span></h5>
+        <div class="grid3">
+          <div class="card">
+            <div class="row between"><b>Work</b><span class="small"><span class="dot"></span>reachable</span></div>
+            <div class="small muted" style="margin-top:4px">Hub on macbook</div>
+            <div class="small" style="margin-top:6px">2 machines joined · 2 running</div>
+            <div class="row" style="margin-top:8px"><span class="btn">Settings</span><span class="btn ghost">Unpair this app</span></div>
+          </div>
+          <div class="card">
+            <div class="row between"><b>Personal</b><span class="small"><span class="dot"></span>reachable</span></div>
+            <div class="small muted" style="margin-top:4px">Hub on macbook</div>
+            <div class="small" style="margin-top:6px">2 machines joined · 1 running</div>
+            <div class="row" style="margin-top:8px"><span class="btn">Settings</span><span class="btn ghost">Unpair this app</span></div>
+          </div>
+          <div class="card dash">
+            <b class="muted">+ Add space</b>
+            <div class="small muted" style="margin-top:4px">Pair this app with another hub using its join code.</div>
+            <div class="row" style="margin-top:8px"><span class="input">Join code</span><span class="btn">Pair</span></div>
+          </div>
+        </div>
+
+        <h5>Machines <span class="pin">2</span></h5>
+
+        <div class="card">
+          <div class="row between"><div><span class="dot"></span><b>macbook</b> <span class="chip solid">Primary</span> <span class="chip">Hub for Work</span> <span class="chip">Hub for Personal</span> <span class="pin">3</span></div><span class="small muted">macOS · online</span></div>
+          <div class="small" style="margin-top:8px"><span class="muted">Installed and logged in</span> <span class="chip">gh</span> <span class="chip">claude</span> <span class="chip">codex</span> <span class="pin">4</span></div>
+          <table class="small" style="margin-top:8px">
+            <tr><th>Joined to</th><th>Load</th><th>Running</th><th></th></tr>
+            <tr><td><b>Work</b></td><td><span class="bar" style="width:50px"><u style="width:50%"></u></span> 1 of 2</td><td>T-0143 Retry metrics (Payments API)</td><td class="muted">Hub</td></tr>
+            <tr><td><b>Personal</b></td><td><span class="bar" style="width:50px"><u style="width:50%"></u></span> 1 of 2</td><td>T-0088 Compare backup tools (Home lab)</td><td class="muted">Hub</td></tr>
+          </table>
+          <div class="small" style="margin-top:6px"><span class="muted">At most</span> <span class="chip">3 ▾</span> <span class="muted">runs at once across both spaces, set on this machine</span></div>
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <div class="row between"><div><span class="dot"></span><b>linux-box</b> <span class="chip">Secondary</span> <span class="chip">In 2 spaces</span> <span class="pin">5</span></div><span class="small muted">Linux · online · same network</span></div>
+          <div class="small" style="margin-top:8px"><span class="muted">Installed and logged in</span> <span class="chip">gh</span> <span class="chip">claude</span> <span class="chip dash">codex · limit reached until 14:20</span> <span class="pin">6</span></div>
+          <table class="small" style="margin-top:8px">
+            <tr><th>Joined to</th><th>Load</th><th>Running</th><th></th></tr>
+            <tr><td><b>Work</b></td><td><span class="bar" style="width:50px"><u style="width:33%"></u></span> 1 of 3</td><td>T-0145 Review (Payments API)</td><td><span class="btn">Drain</span> <span class="btn ghost">Remove</span></td></tr>
+            <tr><td><b>Personal</b></td><td><span class="bar" style="width:50px"><u style="width:0%"></u></span> 0 of 3</td><td class="muted">idle</td><td><span class="btn">Drain</span> <span class="btn ghost">Remove</span> <span class="pin">7</span></td></tr>
+          </table>
+          <div class="small" style="margin-top:6px"><span class="muted">At most</span> <span class="chip">4 ▾</span> <span class="muted">runs at once across both spaces, set on this machine</span></div>
+        </div>
+
+        <h5>Add a machine <span class="pin">8</span></h5>
+        <div class="card dash">
+          <div class="row small"><span class="muted">Join it to</span><div class="seg"><span class="on">Work</span><span>Personal</span></div></div>
+          <div class="small" style="margin-top:8px">Run this on the computer. The code works once and expires in 10 minutes.</div>
+          <div style="margin-top:8px"><code>&lt;install command&gt; --join 7K4P-92QX</code> <span class="btn" style="margin-left:8px">Copy</span></div>
+          <div class="small muted" style="margin-top:8px">A code joins one space. To have a computer help in both, join it to each. It must be on the same network as the primary to connect.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <ol class="notes">
+    <li>Each space is its own hub. This app is paired with each one separately and merges what they report. The hubs do not know about each other, even on one computer. <em>§2.1, §11.3</em></li>
+    <li>Two computers to start: a Mac and a Linux machine. Either can be the primary. <em>§2.1</em></li>
+    <li>The primary hosts every hub and is also a machine in each space. It cannot be drained or removed from here. <em>§3.1</em></li>
+    <li>Which tools are installed and logged in. One <code>gh</code> login serves both spaces. The logins stay inside those tools; nothing here can show or copy a token. <em>§9.3</em></li>
+    <li>A computer in two spaces has two memberships: separate key, files, and limit. When it is off the primary's network it shows as out of reach and the primary works alone. <em>§5.3, §5.8</em></li>
+    <li>Usage limits belong to an account, not a machine. A task runs on whichever of Claude or Codex is available; with neither, it is blocked until a limit resets. <em>§5.3</em></li>
+    <li>Drain finishes current runs and takes no more. Remove stops admitting that membership's key, closes its connections, and releases its lanes. Per space. <em>§5.3</em></li>
+    <li>A join code belongs to one hub. After joining, the machine is identified there by its own key. <em>§3.5, §5.3</em></li>
+  </ol>
+</section>
+
+<!-- 8 PHONE -->
+<section class="frame" id="phone">
+  <h2>8. Phone</h2>
+  <p class="purpose">A sketch of a later phone app. Not scheduled: the desktop app comes first.</p>
+  <div class="phones">
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="lock"><div class="time">9:11</div><div class="muted small">Monday</div></div>
+      <div class="card">
+        <div class="row between small muted"><span>Threadlane · Payments API</span><span>now</span></div>
+        <div style="margin-top:4px"><b>Open a pull request for the refund fix?</b></div>
+        <div class="small muted">Tests pass. 4 files changed.</div>
+        <div class="opt rec"><b>A</b> Open as draft</div>
+        <div class="opt"><b>B</b> Open and request review</div>
+        <div class="opt"><b>C</b> Hold</div>
+      </div>
+      <div class="cap"><span class="chip dash">Not scheduled</span> Notification <span class="pin">1</span></div>
+    </div>
+
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="row between"><b>Needs you</b><span class="chip solid">2</span></div>
+      <div class="row" style="margin:8px 0"><span class="chip solid">All</span><span class="chip">Work</span><span class="chip">Personal</span></div>
+      <div class="card">
+        <div class="small muted">D-0012 · Payments API · Engineer</div>
+        <div style="margin-top:3px"><b>Open a pull request for the refund fix?</b></div>
+        <div class="opt rec"><b>A</b> Open as draft</div>
+        <div class="opt"><b>B</b> Open and request review</div>
+        <div class="opt"><b>C</b> Hold</div>
+        <div class="small" style="margin-top:7px"><span class="check"></span>Always allow this here</div>
+      </div>
+      <div class="card dash" style="margin-top:8px">
+        <div class="small muted">D-0013 · Blog · Lead · Proposal</div>
+        <div style="margin-top:3px"><b>Build on main is failing. Investigate and fix?</b></div>
+        <div class="row" style="margin-top:7px"><span class="btn pri">Start</span><span class="btn">Not now</span></div>
+      </div>
+      <div class="small muted" style="margin-top:12px">3 running · 2 of 2 machines online</div>
+      <div class="row" style="margin-top:10px"><span class="input">Tell your team…</span><span class="btn pri">Send</span></div>
+      <div class="cap">App home <span class="pin">2</span></div>
+    </div>
+
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="row between"><b>Payments API</b><span class="chip">Work</span></div>
+      <div class="small muted" style="margin:6px 0 10px">Agents in this project</div>
+      <div class="card soft small">
+        <b>Lead</b>
+        <div class="seg" style="margin-top:5px; display:flex"><span>Off</span><span>Request</span><span class="on">Assisted</span><span class="locked">Auto</span></div>
+      </div>
+      <div class="card soft small" style="margin-top:6px">
+        <b>Engineer</b>
+        <div class="seg" style="margin-top:5px; display:flex"><span>Off</span><span>Request</span><span class="on">Assisted</span><span class="locked">Auto</span></div>
+      </div>
+      <div class="card soft small" style="margin-top:6px">
+        <b>Reviewer</b>
+        <div class="seg" style="margin-top:5px; display:flex"><span>Off</span><span class="on">Request</span><span>Assisted</span><span class="locked">Auto</span></div>
+      </div>
+      <div class="card soft small" style="margin-top:6px">
+        <b class="muted">Researcher</b>
+        <div class="seg" style="margin-top:5px; display:flex"><span class="on">Off</span><span>Request</span><span>Assisted</span><span class="locked">Auto</span></div>
+      </div>
+      <div class="small muted" style="margin-top:10px">Ceiling: Assisted (from Work)</div>
+      <div class="cap">Project modes <span class="pin">3</span></div>
+    </div>
+  </div>
+  <ol class="notes">
+    <li>Not scheduled. Phone notifications need the platform's push service. Until then you are told by desktop notification and answer on the phone by opening the app. <em>§3.5, §15</em></li>
+    <li>The phone home is the Needs-you queue first, with everything else reduced to one status line. <em>§11.1</em></li>
+    <li>Modes can be changed from the phone, so you can dial an agent down quickly when away from a computer. <em>§2.3</em></li>
+  </ol>
+</section>
+
+</main>
+
+<script>
+  // Stamp the shared sidebar into each screen and mark the active item.
+  const tpl = document.getElementById('sidebar');
+  document.querySelectorAll('aside.side').forEach(side => {
+    side.appendChild(tpl.content.cloneNode(true));
+    const on = side.querySelector('[data-k="' + side.dataset.active + '"]');
+    if (on) on.classList.add('on');
+  });
+</script>
+</body>
+</html>
