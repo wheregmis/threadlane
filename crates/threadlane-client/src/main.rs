@@ -193,7 +193,11 @@ enum Command {
         /// The project; the General project if left out.
         #[arg(short, long)]
         project: Option<String>,
-        /// off, on_request, assisted, or autonomous; at most the space's.
+        /// Set the space's own ceiling instead, which caps every project's.
+        #[arg(long, conflicts_with = "project")]
+        space_wide: bool,
+        /// off, on_request, assisted, or autonomous; for a project, at most
+        /// the space's.
         mode: Mode,
     },
     /// List the standing rules of a project, or of every project.
@@ -209,6 +213,20 @@ enum Command {
     Rule {
         #[command(subcommand)]
         command: RuleCommand,
+    },
+    /// Set how many of an agent's tasks may run at the same time in a
+    /// project.
+    AtOnce {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project; the General project if left out.
+        #[arg(short, long)]
+        project: Option<String>,
+        /// The agent's name.
+        agent: String,
+        /// How many at once; 0 for no limit.
+        count: u32,
     },
 }
 
@@ -676,11 +694,15 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         Command::Ceiling {
             space,
             project,
+            space_wide,
             mode,
         } => {
-            let ceiling = core
-                .set_ceiling(space.as_deref(), project.as_deref(), mode)
-                .await?;
+            let ceiling = if space_wide {
+                core.set_space_ceiling(space.as_deref(), mode).await?
+            } else {
+                core.set_ceiling(space.as_deref(), project.as_deref(), mode)
+                    .await?
+            };
             println!("the ceiling is now {ceiling}");
         }
         Command::Rules { space, project } => {
@@ -708,6 +730,20 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         } => {
             let revoked = core.revoke_rule(space.as_deref(), &rule).await?;
             println!("revoked rule {}", revoked.rule.id);
+        }
+        Command::AtOnce {
+            space,
+            project,
+            agent,
+            count,
+        } => {
+            let binding = core
+                .set_max_parallel(space.as_deref(), project.as_deref(), &agent, count)
+                .await?;
+            match binding.max_parallel {
+                0 => println!("{} may run any number of tasks at once", binding.agent),
+                n => println!("{} may run {n} at once", binding.agent),
+            }
         }
     }
     Ok(ExitCode::SUCCESS)

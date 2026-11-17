@@ -107,6 +107,13 @@ pub trait OrgStore: Send + Sync {
     /// Replaces a binding's overrides: a JSON object from a tier to the cell
     /// it is set to (Plan.md §2.3 "Overrides").
     async fn set_binding_overrides(&self, id: BindingId, overrides: &Json) -> StoreResult<Binding>;
+    /// Changes how many of a binding's tasks may run at once; 0 means no
+    /// limit.
+    async fn set_binding_max_parallel(
+        &self,
+        id: BindingId,
+        max_parallel: u32,
+    ) -> StoreResult<Binding>;
 }
 
 /// Lanes, leases, and events (Plan.md §6).

@@ -71,12 +71,14 @@ fn projects() -> Vec<ProjectSummary> {
             name: "General".to_owned(),
             is_general: true,
             paused: false,
+            mode_ceiling: None,
         },
         ProjectSummary {
             id: ProjectId(2),
             name: "api".to_owned(),
             is_general: false,
             paused: true,
+            mode_ceiling: None,
         },
     ]
 }
@@ -128,6 +130,7 @@ impl HubApi for FakeHub {
                     name,
                     is_general: false,
                     paused: false,
+                    mode_ceiling: None,
                 },
             }),
             _ => Err(ApiError::Invalid("unsupported".to_owned())),
@@ -332,6 +335,7 @@ async fn every_request_kind_round_trips() {
         name: "web".to_owned(),
         is_general: false,
         paused: false,
+        mode_ceiling: None,
     };
     assert_eq!(
         client

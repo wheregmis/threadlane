@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 
 use threadlane_core::client::{
-    ApiError, DecisionReply, DecisionRequest, OrgReply, OrgRequest, StandingRuleSummary,
+    ApiError, BindingSummary, DecisionReply, DecisionRequest, OrgReply, OrgRequest,
+    StandingRuleSummary,
 };
 use threadlane_core::ids::StandingRuleId;
 use threadlane_core::model::{Cell, Mode};
@@ -129,6 +130,50 @@ impl ClientCore {
         {
             (_, DecisionReply::StandingRule { rule }) => Ok(rule),
             (space, _) => Err(wrong_reply(&space, "revoke rule")),
+        }
+    }
+
+    /// Sets how many of an agent's tasks may run at once in a project (0
+    /// for no limit), and returns the binding.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, project or binding, several hubs and none named, or the
+    /// hub's error.
+    pub async fn set_max_parallel(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+        agent: &str,
+        max_parallel: u32,
+    ) -> Result<BindingSummary, ClientError> {
+        let request = OrgRequest::SetMaxParallel {
+            project: project.map(str::to_owned),
+            agent: agent.to_owned(),
+            max_parallel,
+        };
+        match self.org(space, request).await? {
+            (_, OrgReply::Binding { binding }) => Ok(binding),
+            (space, _) => Err(wrong_reply(&space, "set max parallel")),
+        }
+    }
+
+    /// Sets the space's own ceiling, and returns it.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn set_space_ceiling(
+        &self,
+        space: Option<&str>,
+        mode: Mode,
+    ) -> Result<Mode, ClientError> {
+        match self
+            .org(space, OrgRequest::SetSpaceCeiling { mode })
+            .await?
+        {
+            (_, OrgReply::SpaceCeiling { ceiling }) => Ok(ceiling),
+            (space, _) => Err(wrong_reply(&space, "set space ceiling")),
         }
     }
 

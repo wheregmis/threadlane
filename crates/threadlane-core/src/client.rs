@@ -38,6 +38,9 @@ pub struct ProjectSummary {
     pub name: String,
     pub is_general: bool,
     pub paused: bool,
+    /// Its own ceiling, if set; the space's still caps it (Plan.md §2.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_ceiling: Option<Mode>,
 }
 
 /// A message from you to a project's lead, or to one of its tasks.
@@ -84,6 +87,13 @@ pub struct BindingSummary {
     pub role: String,
     pub mode: Mode,
     pub is_lead: bool,
+    /// How many of its tasks may run at once in the project; 0 means no
+    /// limit.
+    #[serde(default)]
+    pub max_parallel: u32,
+    /// The cell each overridden tier is set to (Plan.md §2.3 "Overrides").
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: BTreeMap<Tier, Cell>,
 }
 
 /// The Organization capability (Plan.md §11.2): projects, repositories,
@@ -146,6 +156,18 @@ pub enum OrgRequest {
         tier: Tier,
         cell: Option<Cell>,
     },
+    /// Sets how many of an agent's tasks may run at once in a project; 0
+    /// means no limit. Answered with the binding. `None` as the project
+    /// means the General project.
+    SetMaxParallel {
+        project: Option<String>,
+        agent: String,
+        max_parallel: u32,
+    },
+    /// Sets the space's own ceiling, which caps every project's (Plan.md
+    /// §2.3): lowering it lowers what every binding acts at, and raising it
+    /// lets projects without a stricter ceiling of their own go higher.
+    SetSpaceCeiling { mode: Mode },
 }
 
 /// The answer to an [`OrgRequest`].
@@ -188,6 +210,10 @@ pub enum OrgReply {
     Overrides {
         agent: String,
         overrides: BTreeMap<Tier, Cell>,
+    },
+    /// The space's ceiling after [`OrgRequest::SetSpaceCeiling`].
+    SpaceCeiling {
+        ceiling: Mode,
     },
 }
 

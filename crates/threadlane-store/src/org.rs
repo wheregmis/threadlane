@@ -426,4 +426,28 @@ impl OrgStore for HubDb {
         tx.commit().await?;
         Ok(updated)
     }
+
+    async fn set_binding_max_parallel(
+        &self,
+        id: BindingId,
+        max_parallel: u32,
+    ) -> StoreResult<Binding> {
+        let tx = self.db.begin().await?;
+        exec(
+            tx.conn(),
+            "UPDATE bindings SET max_parallel = ?2 WHERE id = ?1",
+            params![id.get(), i64::from(max_parallel)],
+        )
+        .await?;
+        let updated = query_opt(
+            tx.conn(),
+            &format!("SELECT {BINDING_COLUMNS} WHERE id = ?1"),
+            params![id.get()],
+            decode_binding,
+        )
+        .await?
+        .ok_or_else(|| StoreError::not_found("binding", id))?;
+        tx.commit().await?;
+        Ok(updated)
+    }
 }

@@ -88,12 +88,14 @@ impl HubApi for FakeHub {
                 name: "api".to_owned(),
                 is_general: false,
                 paused: false,
+                mode_ceiling: None,
             },
             ProjectSummary {
                 id: ProjectId(2),
                 name: "General".to_owned(),
                 is_general: true,
                 paused: false,
+                mode_ceiling: None,
             },
         ]
         .into_iter()
@@ -124,6 +126,8 @@ impl HubApi for FakeHub {
                     role: "reviewer".to_owned(),
                     mode,
                     is_lead: false,
+                    max_parallel: 1,
+                    overrides: Default::default(),
                 };
                 bindings.push(binding.clone());
                 Ok(OrgReply::Binding { binding })
@@ -192,6 +196,7 @@ impl HubApi for FakeHub {
                     name: project.unwrap_or_else(|| "General".to_owned()),
                     is_general: false,
                     paused,
+                    mode_ceiling: None,
                 },
             }),
             OrgRequest::CreateProject { name, .. } => {
@@ -201,6 +206,7 @@ impl HubApi for FakeHub {
                     name,
                     is_general: false,
                     paused: false,
+                    mode_ceiling: None,
                 };
                 created.push(project.clone());
                 Ok(OrgReply::Project { project })
@@ -1055,6 +1061,8 @@ async fn a_mode_change_shows_in_the_project_at_once() {
         role: "engineer".to_owned(),
         mode: Mode::OnRequest,
         is_lead: false,
+        max_parallel: 1,
+        overrides: Default::default(),
     }];
     let (_dir, core) = core(&[("work", &work)]);
     let mut state = AppState::default();
@@ -1398,6 +1406,8 @@ async fn the_modes_grid_has_a_row_per_project_and_a_cell_per_agent() {
         role: "engineer".to_owned(),
         mode: Mode::Assisted,
         is_lead: false,
+        max_parallel: 1,
+        overrides: Default::default(),
     }];
     let (_dir, core) = core(&[("work", &work)]);
     let mut state = AppState::default();
@@ -1500,6 +1510,7 @@ async fn a_new_project_shows_in_its_space_at_once() {
             name: "Elsewhere".to_owned(),
             is_general: false,
             paused: false,
+            mode_ceiling: None,
         },
     );
 
@@ -2110,6 +2121,8 @@ fn binding(agent: &str, mode: Mode) -> BindingSummary {
         role: "engineer".to_owned(),
         mode,
         is_lead: agent == "Lead",
+        max_parallel: 1,
+        overrides: Default::default(),
     }
 }
 

@@ -62,6 +62,7 @@ fn general() -> ProjectSummary {
         name: "General".to_owned(),
         is_general: true,
         paused: false,
+        mode_ceiling: None,
     }
 }
 
