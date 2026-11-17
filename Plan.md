@@ -1500,12 +1500,14 @@ Two things hold throughout:
 
 The smallest app that replaces the command line for daily use. The remaining screens wait for milestone 10.
 
-- Transport (section 3.5), reachability stage 1. The client core reaches hubs over it.
-- Pairing a client with a join code; the hub's list of admitted keys; revoking.
-- Pairing with more than one hub, and one merged queue of what needs you (section 11.3).
-- Desktop app in GPUI Kit (section 18.2) with three screens: Home, the conversation with a project's lead, and answering a decision.
-- The pushed feed.
-- System notifications for decisions and system notices.
+**Status:** built and passing its tests; the exit is only partly checked. Seen working on screen against a local hub with a fake `claude`: Home with a paired space and its project, the conversation updating live from the feed, and sending from the composer. Not yet checked: a decision in the queue and answering it, which needs a model run; a notification and answering from it, which need the app packaged as a macOS bundle; two hubs in one queue outside the tests; local-network discovery. Pairing is done from the command line.
+
+- [x] Transport (section 3.5), reachability stage 1. The client core reaches hubs over it.
+- [x] Pairing a client with a join code; the hub's list of admitted keys; revoking.
+- [x] Pairing with more than one hub, and one merged queue of what needs you (section 11.3).
+- [x] Desktop app in GPUI Kit (section 18.2) with three screens: Home, the conversation with a project's lead, and answering a decision.
+- [x] The pushed feed.
+- [ ] System notifications for decisions and system notices: written, not yet seen working.
 
 **Exit:** You give a lead a goal, follow its replies, and answer a decision in one click from a notification, without the command line. Decisions from two hubs appear in one queue, each answered at its own hub. A client with an unknown key cannot exchange any application data with a hub, and a revoked client is disconnected at once.
 

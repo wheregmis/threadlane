@@ -116,6 +116,10 @@ pub enum OrgRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "only with serde_json's preserve_order, which GPUI turns on in the workspace build"
+)]
 pub enum OrgReply {
     Project { project: ProjectSummary },
     Repository { repository: Repository },
@@ -246,6 +250,10 @@ pub enum ClientRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "only with serde_json's preserve_order, which GPUI turns on in the workspace build"
+)]
 pub enum ClientResponse {
     Info { info: HubInfo },
     Projects { projects: Vec<ProjectSummary> },
