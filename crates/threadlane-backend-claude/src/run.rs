@@ -32,6 +32,12 @@ const EXIT_AFTER_EOF: Duration = Duration::from_secs(10);
 /// How long to wait for a killed process to be reaped.
 const KILL_WAIT: Duration = Duration::from_secs(5);
 
+/// Set to `1` for every run: a headless `claude -p` exits when its turn
+/// ends, so a backgrounded command would die unseen. Documented on Claude
+/// Code's environment variables page: it removes `run_in_background` and
+/// stops timed-out shell commands moving to the background.
+const DISABLE_BACKGROUND_TASKS: &str = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS";
+
 /// How long to wait for the rest of stderr once the process has exited.
 const STDERR_DRAIN: Duration = Duration::from_secs(1);
 
@@ -109,6 +115,7 @@ impl Launch {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .env(DISABLE_BACKGROUND_TASKS, "1")
             .kill_on_drop(true);
         if let Some(dir) = &self.config_dir {
             command.env("CLAUDE_CONFIG_DIR", dir);

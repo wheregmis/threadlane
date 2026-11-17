@@ -247,6 +247,7 @@ for arg in "$@"; do
 done
 pwd -P > @DIR@/cwd
 printf '%s' "$CLAUDE_CONFIG_DIR" > @DIR@/config-dir
+printf '%s' "$CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" > @DIR@/no-background
 cat > @DIR@/stdin
 {}"#,
         prints(&[init("connected"), success("ok")])
@@ -312,6 +313,8 @@ async fn start_passes_every_option() {
     let work = fake.work.path().canonicalize().expect("canonical work dir");
     assert_eq!(fake.record("cwd").trim(), work.display().to_string());
     assert_eq!(fake.record("config-dir"), config_dir.display().to_string());
+    // Nothing backgrounded may outlive the headless turn.
+    assert_eq!(fake.record("no-background"), "1");
 
     let config: Json = serde_json::from_str(&fake.record("mcp-config")).expect("config is JSON");
     let server = &config["mcpServers"]["threadlane"];
@@ -398,6 +401,7 @@ async fn resume_passes_only_what_was_asked_for() {
     assert_eq!(fake.invocations(), vec![expected]);
     assert_eq!(fake.record("stdin"), "Say hello.");
     assert_eq!(fake.record("config-dir"), "");
+    assert_eq!(fake.record("no-background"), "1");
 }
 
 #[tokio::test]
