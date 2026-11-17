@@ -338,6 +338,17 @@ impl DecisionStore for HubDb {
         .await
     }
 
+    async fn lane_decisions(&self, lane_id: LaneId) -> StoreResult<Vec<Decision>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!("SELECT {DECISION_FIELDS} FROM decisions WHERE lane_id = ?1 ORDER BY id"),
+            params![lane_id.get()],
+            decode_decision,
+        )
+        .await
+    }
+
     async fn answer(&self, id: DecisionId, answer: &DecisionAnswer) -> StoreResult<Answered> {
         let tx = self.db.begin().await?;
         let conn = tx.conn();

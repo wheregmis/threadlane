@@ -623,4 +623,15 @@ impl SessionStore for HubDb {
         )
         .await
     }
+
+    async fn lane_runs(&self, lane_id: LaneId) -> StoreResult<Vec<Run>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!("SELECT {RUN_FIELDS} FROM runs WHERE lane_id = ?1 ORDER BY id"),
+            params![lane_id.get()],
+            decode_run,
+        )
+        .await
+    }
 }

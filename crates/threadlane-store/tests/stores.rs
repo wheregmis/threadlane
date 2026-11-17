@@ -2276,3 +2276,179 @@ async fn the_account_notices_are_queued_once_per_change() {
         .collect();
     assert_eq!(texts, ["blocked", "resumed", "blocked"]);
 }
+
+#[tokio::test]
+async fn the_client_history_queries_page_from_the_newest() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let other = hub
+        .create_project(&NewProject {
+            name: "Other".into(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    let at = |seconds: u64| T0 + Duration::from_secs(seconds);
+
+    // Your messages: only user messages of the lane, newest first, by time.
+    for (seconds, id) in [(0, "m1"), (10, "m2"), (20, "m3")] {
+        hub.insert_event(&NewEvent {
+            received_at: at(seconds),
+            ..message(&general, id)
+        })
+        .await
+        .unwrap();
+    }
+    hub.insert_event(&NewEvent {
+        kind: EventKind::OutsideEvent,
+        source: "test".into(),
+        received_at: at(5),
+        ..message(&general, "outside")
+    })
+    .await
+    .unwrap();
+    hub.insert_event(&message(&other, "elsewhere"))
+        .await
+        .unwrap();
+    let ids = |events: Vec<Event>| {
+        events
+            .iter()
+            .map(|e| e.source_event_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let lane = general.lead_lane_id;
+    assert_eq!(
+        ids(hub.user_messages(lane, None, 10).await.unwrap()),
+        ["m3", "m2", "m1"]
+    );
+    assert_eq!(
+        ids(hub.user_messages(lane, Some(at(20)), 1).await.unwrap()),
+        ["m2"]
+    );
+
+    // Sent messages: one project or any, newest first, before a time.
+    let new = |project: &Project, call: &str| NewOutboxMessage {
+        project_id: Some(project.id),
+        lane_id: Some(project.lead_lane_id),
+        session_id: None,
+        run_id: None,
+        tool_call_id: Some(call.into()),
+        kind: OutboxKind::Message,
+        decision_id: None,
+        channel: "client".into(),
+        body: json!({ "text": call }),
+        urgency: Urgency::Normal,
+        not_before: None,
+        created_at: T0,
+    };
+    for (seconds, project, call) in [(0, &general, "a"), (1, &other, "b"), (2, &general, "c")] {
+        let queued = hub.enqueue(&new(project, call)).await.unwrap();
+        hub.mark_sent(queued.id, None, at(seconds)).await.unwrap();
+    }
+    hub.enqueue(&new(&general, "unsent")).await.unwrap();
+    let calls = |messages: Vec<OutboxMessage>| {
+        messages
+            .iter()
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        calls(
+            hub.sent_before("client", Some(general.id), None, 10)
+                .await
+                .unwrap()
+        ),
+        ["c", "a"]
+    );
+    assert_eq!(
+        calls(hub.sent_before("client", None, None, 10).await.unwrap()),
+        ["c", "b", "a"]
+    );
+    assert_eq!(
+        calls(
+            hub.sent_before("client", None, Some(at(2)), 1)
+                .await
+                .unwrap()
+        ),
+        ["b"]
+    );
+    assert!(
+        hub.sent_before("slack", None, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Runs and decisions of a lane, in any status, oldest first.
+    let machine = machine(&hub, "box").await;
+    let (lease, first) = run_pending(&hub, lane, machine, at(100)).await;
+    hub.commit_run(&lease, first.id, RunOutcome::Silent, None, at(101))
+        .await
+        .unwrap();
+    hub.release_lease(&lease).await.unwrap();
+    hub.insert_event(&NewEvent {
+        received_at: at(102),
+        ..message(&general, "m4")
+    })
+    .await
+    .unwrap();
+    let (_lease, second) = run_pending(&hub, lane, machine, at(103)).await;
+    let runs = hub.lane_runs(lane).await.unwrap();
+    assert_eq!(
+        runs.iter()
+            .map(|run| (run.id, run.status))
+            .collect::<Vec<_>>(),
+        [
+            (first.id, RunStatus::Committed),
+            (second.id, RunStatus::Active)
+        ]
+    );
+    assert!(hub.lane_runs(other.lead_lane_id).await.unwrap().is_empty());
+
+    let decision = |call: &str| NewDecision {
+        project_id: general.id,
+        lane_id: lane,
+        task_id: None,
+        session_id: None,
+        run_id: Some(second.id),
+        tool_call_id: Some(call.into()),
+        tool: "ask_user".into(),
+        arguments: json!({}),
+        arguments_hash: String::new(),
+        kind: DecisionKind::Input,
+        question: format!("{call}?"),
+        context: String::new(),
+        options: vec![DecisionOption {
+            label: "yes".into(),
+            effect: json!({}),
+        }],
+        recommended: None,
+        offers_standing_rule: false,
+        expires_at: None,
+        created_at: at(104),
+    };
+    let asked = hub.open_decision(None, &decision("one")).await.unwrap();
+    hub.answer(
+        asked.id,
+        &DecisionAnswer {
+            option: 0,
+            note: None,
+            standing_rule: false,
+            answered_at: at(105),
+        },
+    )
+    .await
+    .unwrap();
+    let open = hub.open_decision(None, &decision("two")).await.unwrap();
+    let decisions = hub.lane_decisions(lane).await.unwrap();
+    assert_eq!(
+        decisions
+            .iter()
+            .map(|d| (d.id, d.status))
+            .collect::<Vec<_>>(),
+        [
+            (asked.id, DecisionStatus::Answered),
+            (open.id, DecisionStatus::Pending)
+        ]
+    );
+}

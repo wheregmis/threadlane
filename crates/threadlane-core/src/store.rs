@@ -147,6 +147,15 @@ pub trait InboxStore: Send + Sync {
     /// Releases every lease that expired at or before `now`. Their claimed
     /// events return to pending and their active runs are abandoned.
     async fn expire_leases(&self, now: Timestamp) -> StoreResult<Vec<LaneId>>;
+    /// Your messages in a lane, in any status, received before `before`
+    /// (all of them when `None`), newest first, at most `limit`. The
+    /// client's conversation history (Plan.md §11.1).
+    async fn user_messages(
+        &self,
+        lane_id: LaneId,
+        before: Option<Timestamp>,
+        limit: u32,
+    ) -> StoreResult<Vec<Event>>;
 }
 
 /// Sessions, runs, and calls to the system's tools (Plan.md §4).
@@ -224,6 +233,8 @@ pub trait SessionStore: Send + Sync {
     async fn append_journal(&self, lease: &Lease, entries: &[JournalEntry]) -> StoreResult<()>;
     /// A run's mirrored events, in order.
     async fn journal(&self, run_id: RunId) -> StoreResult<Vec<JournalEntry>>;
+    /// Every run in a lane, in any status, oldest first.
+    async fn lane_runs(&self, lane_id: LaneId) -> StoreResult<Vec<Run>>;
 }
 
 /// Follow-ups and routines (Plan.md §7).
@@ -373,6 +384,8 @@ pub trait DecisionStore: Send + Sync {
     async fn pending_decisions(&self, lane_id: LaneId) -> StoreResult<Vec<Decision>>;
     /// Every pending decision in the space, oldest first.
     async fn open_decisions(&self) -> StoreResult<Vec<Decision>>;
+    /// Every decision asked in a lane, in any status, oldest first.
+    async fn lane_decisions(&self, lane_id: LaneId) -> StoreResult<Vec<Decision>>;
     /// Records your answer and inserts the answer event into the decision's
     /// lane, in one transaction. A second answer is ignored.
     async fn answer(&self, id: DecisionId, answer: &DecisionAnswer) -> StoreResult<Answered>;
@@ -440,6 +453,16 @@ pub trait OutboxStore: Send + Sync {
         &self,
         channel: &str,
         after: i64,
+        limit: u32,
+    ) -> StoreResult<Vec<OutboxMessage>>;
+    /// Sent messages on a channel, of one project or of any when `None`,
+    /// sent before `before` (all of them when `None`), newest first, at
+    /// most `limit`. The client's history (Plan.md §11.1).
+    async fn sent_before(
+        &self,
+        channel: &str,
+        project_id: Option<ProjectId>,
+        before: Option<Timestamp>,
         limit: u32,
     ) -> StoreResult<Vec<OutboxMessage>>;
 }

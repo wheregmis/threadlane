@@ -390,4 +390,29 @@ impl InboxStore for HubDb {
         }
         Ok(expired)
     }
+
+    async fn user_messages(
+        &self,
+        lane_id: LaneId,
+        before: Option<Timestamp>,
+        limit: u32,
+    ) -> StoreResult<Vec<Event>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {EVENT_FIELDS} FROM events
+                 WHERE lane_id = ?1 AND kind = ?2 AND received_at < ?3
+                 ORDER BY received_at DESC, id DESC LIMIT ?4"
+            ),
+            params![
+                lane_id.get(),
+                EventKind::UserMessage.as_str(),
+                before.map_or(i64::MAX, Timestamp::as_millis),
+                i64::from(limit)
+            ],
+            decode_event,
+        )
+        .await
+    }
 }
