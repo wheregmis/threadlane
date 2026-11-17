@@ -2,6 +2,7 @@
 //! decision with its options.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
@@ -140,6 +141,17 @@ impl Desktop {
                     .map(|line| div().text_sm().child(line)),
             )
             .child(h_flex().gap_2().flex_wrap().children(options))
+            .children(self.state.always_offer(queued).map(|(label, ticked)| {
+                let (space, id) = (queued.space.clone(), decision.id);
+                Checkbox::new(SharedString::from(format!("always-{space}-{id}")))
+                    .checked(ticked)
+                    .label(label.clone())
+                    .accessibility_label(label)
+                    .on_click(cx.listener(move |this, _: &bool, _, cx| {
+                        this.state.toggle_always(&space, id);
+                        cx.notify();
+                    }))
+            }))
     }
 
     /// The note sent with the next answer.

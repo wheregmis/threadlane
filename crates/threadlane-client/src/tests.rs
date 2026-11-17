@@ -46,6 +46,7 @@ impl HubApi for FakeHub {
             name: "General".to_owned(),
             is_general: true,
             paused: false,
+            mode_ceiling: None,
         }])
     }
 

@@ -107,12 +107,7 @@ impl ClientApi {
             .await
             .map_err(api_error)?
             .ok_or_else(|| ApiError::Internal(format!("agent {} not found", binding.agent_id)))?;
-        Ok(BindingSummary {
-            agent: agent.name,
-            role: agent.role,
-            mode: binding.mode,
-            is_lead: binding.is_lead,
-        })
+        Ok(binding_summary(agent, &binding))
     }
 
     /// Answers a decision by option label; with `always`, also creates the
@@ -567,12 +562,7 @@ impl HubApi for ClientApi {
                 }
                 .map_err(api_error)?;
                 Ok(OrgReply::Binding {
-                    binding: BindingSummary {
-                        agent: agent.name,
-                        role: agent.role,
-                        mode: binding.mode,
-                        is_lead: binding.is_lead,
-                    },
+                    binding: binding_summary(agent, &binding),
                 })
             }
             OrgRequest::SetPaused { project, paused } => {
@@ -652,6 +642,41 @@ impl HubApi for ClientApi {
                     overrides,
                 })
             }
+            OrgRequest::SetMaxParallel {
+                project,
+                agent,
+                max_parallel,
+            } => {
+                let project = self.project_named(project.as_deref()).await?;
+                let agent = self.agent_named(&agent).await?;
+                let binding = db
+                    .bindings(project.id)
+                    .await
+                    .map_err(api_error)?
+                    .into_iter()
+                    .find(|binding| binding.agent_id == agent.id)
+                    .ok_or_else(|| {
+                        ApiError::NotFound(format!(
+                            "a binding of {:?} in project {:?}",
+                            agent.name, project.name
+                        ))
+                    })?;
+                let binding = db
+                    .set_binding_max_parallel(binding.id, max_parallel)
+                    .await
+                    .map_err(api_error)?;
+                // A raised limit may let a queued task start.
+                self.core.inner.wake.wake(WakeTarget::Runners);
+                Ok(OrgReply::Binding {
+                    binding: binding_summary(agent, &binding),
+                })
+            }
+            OrgRequest::SetSpaceCeiling { mode } => {
+                let mut space = db.space().await.map_err(api_error)?;
+                space.mode_ceiling = mode;
+                db.update_space(&space).await.map_err(api_error)?;
+                Ok(OrgReply::SpaceCeiling { ceiling: mode })
+            }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
     }
@@ -729,6 +754,19 @@ fn summary(project: Project) -> ProjectSummary {
         name: project.name,
         is_general: project.is_general,
         paused: project.paused,
+        mode_ceiling: project.mode_ceiling,
+    }
+}
+
+/// A binding of `agent` as a client lists it.
+fn binding_summary(agent: Agent, binding: &Binding) -> BindingSummary {
+    BindingSummary {
+        agent: agent.name,
+        role: agent.role,
+        mode: binding.mode,
+        is_lead: binding.is_lead,
+        max_parallel: binding.max_parallel,
+        overrides: gate::overrides(&binding.overrides),
     }
 }
 

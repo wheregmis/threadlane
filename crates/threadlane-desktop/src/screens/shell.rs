@@ -55,7 +55,8 @@ impl Desktop {
                     Screen::Project { space: open, project: name, .. }
                         if *open == space.name && *name == project.name
                 );
-                let open = self.state.open_in(&space.name, project.id);
+                let open = self.state.open_in(&space.name, project.id)
+                    + self.state.attention_in(&space.name, &project.name);
                 bar = bar.child(row(
                     format!("go-{}-{}", space.name, project.name),
                     count(&project.name, open),

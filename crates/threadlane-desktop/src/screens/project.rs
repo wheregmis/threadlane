@@ -6,10 +6,12 @@ use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::TabBar;
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 use threadlane_core::model::Mode;
-use threadlane_desktop::{Line, Part, When};
+use threadlane_desktop::{Line, ModeChoice, Part, When};
 
 use super::{gap_line, heading, link, section};
 use crate::{Desktop, Screen, Tab};
@@ -668,63 +670,373 @@ impl Desktop {
             .into_any_element()
     }
 
-    /// One row per agent bound here, its mode a segmented control.
+    /// The project ceiling, then one row per agent bound here: its mode a
+    /// segmented control with what is above the ceiling locked, how many of
+    /// its tasks run at once, and, expanded, what it may do here without
+    /// asking and its standing rules (wireframe 4).
     fn agents_tab(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let bindings = self
-            .state
-            .project(space, project)
-            .map(|view| view.bindings.as_slice())
-            .unwrap_or_default();
-        let mut rows = v_flex().gap_3().child(section("Agents in this project"));
+        let card = self.state.ceiling_card(space, project);
+        let (at_space, at_project, choices) =
+            (space.to_owned(), project.to_owned(), card.choices.clone());
+        let ceiling = mode_control(format!("ceiling-{project}"), &card.choices).on_click(
+            cx.listener(move |this, clicked: &Vec<usize>, _, cx| {
+                if let Some(mode) = unlocked(&choices, clicked) {
+                    this.set_ceiling(at_space.clone(), at_project.clone(), mode, cx);
+                }
+            }),
+        );
+        let mut rows = v_flex()
+            .id("agents-tab")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_4()
+                    .p_3()
+                    .justify_between()
+                    .bg(cx.theme().muted)
+                    .rounded(cx.theme().radius)
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(section("Project ceiling"))
+                            .child(div().text_sm().text_color(muted).child(card.note.clone())),
+                    )
+                    .child(ceiling),
+            )
+            .children(locked_note(&card.choices, muted))
+            .child(section("Agents in this project"));
         let gap = self.state.project_gap(space, project, Part::Bindings);
+        let agents = self.state.agent_rows(space, project);
         if let Some(gap) = &gap {
             rows = rows.child(gap_line(gap, "the agents", cx));
-        } else if bindings.is_empty() {
+        } else if agents.is_empty() {
             rows = rows.child(div().text_color(muted).child("No agent is bound here yet."));
         }
-        for binding in bindings {
-            let (space, project, agent) =
-                (space.to_owned(), project.to_owned(), binding.agent.clone());
-            let lead = if binding.is_lead { " · lead" } else { "" };
-            let control = ButtonGroup::new(SharedString::from(format!("mode-{agent}")))
-                .outline()
-                .compact()
-                .children(MODES.iter().map(|(mode, label)| {
-                    Button::new(SharedString::from(format!("mode-{agent}-{mode}")))
-                        .label(*label)
-                        .selected(binding.mode == *mode)
-                }))
-                .on_click(cx.listener(move |this, clicked: &Vec<usize>, _, cx| {
-                    let Some((mode, _)) = clicked.first().and_then(|index| MODES.get(*index))
-                    else {
-                        return;
-                    };
-                    this.set_mode(space.clone(), project.clone(), agent.clone(), *mode, cx);
+        for row in agents {
+            let agent = row.agent.clone();
+            let (in_space, in_project, named, choices) = (
+                space.to_owned(),
+                project.to_owned(),
+                agent.clone(),
+                row.choices.clone(),
+            );
+            let control = mode_control(format!("mode-{agent}"), &row.choices).on_click(
+                cx.listener(move |this, clicked: &Vec<usize>, _, cx| {
+                    if let Some(mode) = unlocked(&choices, clicked) {
+                        this.set_mode(
+                            in_space.clone(),
+                            in_project.clone(),
+                            named.clone(),
+                            mode,
+                            cx,
+                        );
+                    }
+                }),
+            );
+            let step = |id: &str, label: &'static str, name: String, to: Option<u32>| {
+                let (space, project, agent) = (space.to_owned(), project.to_owned(), agent.clone());
+                Button::new(SharedString::from(format!("{id}-{agent}")))
+                    .xsmall()
+                    .label(label)
+                    .accessibility_label(name)
+                    .disabled(to.is_none())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(to) = to {
+                            this.set_max_parallel(
+                                space.clone(),
+                                project.clone(),
+                                agent.clone(),
+                                to,
+                                cx,
+                            );
+                        }
+                    }))
+            };
+            let at_once = h_flex()
+                .gap_1()
+                .items_center()
+                .child(div().text_sm().text_color(muted).child("At once"))
+                .child(step(
+                    "fewer",
+                    "−",
+                    format!("Fewer of {agent}'s tasks at once"),
+                    row.at_once.fewer,
+                ))
+                .child(
+                    div()
+                        .text_sm()
+                        .min_w(px(56.))
+                        .child(row.at_once.label.clone()),
+                )
+                .child(step(
+                    "more",
+                    "+",
+                    format!("More of {agent}'s tasks at once"),
+                    row.at_once.more,
+                ));
+            let (toggle_space, toggle_project, toggle_agent) =
+                (space.to_owned(), project.to_owned(), agent.clone());
+            let expand = Button::new(SharedString::from(format!("expand-{agent}")))
+                .ghost()
+                .xsmall()
+                .label(if row.open { "▾" } else { "▸" })
+                .accessibility_label(if row.open {
+                    format!("Hide what {agent} may do here")
+                } else {
+                    format!("Show what {agent} may do here")
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state
+                        .toggle_agent(&toggle_space, &toggle_project, &toggle_agent);
+                    cx.notify();
                 }));
+            let lead = if row.is_lead { " · lead" } else { "" };
             rows = rows.child(
                 h_flex()
                     .gap_4()
+                    .items_center()
                     .child(
                         v_flex()
-                            .w(px(220.))
+                            .w(px(200.))
+                            .flex_none()
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("{}{lead}", binding.agent)),
+                                    .child(format!("{agent}{lead}")),
                             )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(muted)
-                                    .child(binding.role.clone()),
-                            ),
+                            .child(div().text_sm().text_color(muted).child(row.role.clone())),
                     )
-                    .child(control),
+                    .child(control)
+                    .child(at_once)
+                    .child(expand),
             );
+            rows = rows.children(locked_note(&row.choices, muted));
+            if row.open {
+                rows = rows.children(self.may_do(space, project, &agent, cx));
+            }
         }
         rows.into_any_element()
     }
+
+    /// The expanded part of `agent`'s row: the matrix as plain statements,
+    /// the rows that can change as dropdowns, and its standing rules.
+    fn may_do(
+        &self,
+        space: &str,
+        project: &str,
+        agent: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let muted = cx.theme().muted_foreground;
+        let may = self.state.may_do(space, project, agent)?;
+        let view = cx.entity().downgrade();
+        let mut statements = v_flex()
+            .gap_1()
+            .flex_1()
+            .min_w_0()
+            .child(section(may.title.clone()));
+        for (index, statement) in may.statements.into_iter().enumerate() {
+            let cell: AnyElement = match statement.tier {
+                Some(tier) if !statement.choices.is_empty() => {
+                    let (space, project, agent, view) = (
+                        space.to_owned(),
+                        project.to_owned(),
+                        agent.to_owned(),
+                        view.clone(),
+                    );
+                    let choices = statement.choices.clone();
+                    Button::new(SharedString::from(format!("cell-{agent}-{index}")))
+                        .xsmall()
+                        .label(format!("{} ▾", statement.cell))
+                        .accessibility_label(format!(
+                            "{}: {}. Change it",
+                            statement.what, statement.cell
+                        ))
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for choice in &choices {
+                                let (space, project, agent, view, cell) = (
+                                    space.clone(),
+                                    project.clone(),
+                                    agent.clone(),
+                                    view.clone(),
+                                    choice.cell,
+                                );
+                                menu = menu.item(
+                                    PopupMenuItem::new(choice.label.clone())
+                                        .checked(choice.selected)
+                                        .on_click(move |_, _, cx| {
+                                            let _gone = view.update(cx, |this, cx| {
+                                                this.set_override(
+                                                    space.clone(),
+                                                    project.clone(),
+                                                    agent.clone(),
+                                                    tier,
+                                                    cell,
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                );
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                }
+                _ => div()
+                    .text_sm()
+                    .child(statement.cell.clone())
+                    .into_any_element(),
+            };
+            statements = statements.child(
+                h_flex()
+                    .gap_3()
+                    .justify_between()
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(div().text_sm().child(statement.what))
+                            .child(div().text_xs().text_color(muted).child(statement.examples)),
+                    )
+                    .child(cell),
+            );
+        }
+        let mut rules = v_flex()
+            .gap_1()
+            .w(px(320.))
+            .flex_none()
+            .child(section(may.rules_title.clone()));
+        match may.rules {
+            Err(gap) => rules = rules.child(gap_line(&gap, "the standing rules", cx)),
+            Ok(listed) if listed.is_empty() => {
+                rules = rules.child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("None yet. Answering a decision with \"Always allow\" makes one."),
+                );
+            }
+            Ok(listed) => {
+                for rule in listed {
+                    let (space_revoke, id) = (space.to_owned(), rule.id);
+                    let actions = match &rule.confirm {
+                        None => h_flex().child(
+                            Button::new(SharedString::from(format!("revoke-{}", rule.id)))
+                                .ghost()
+                                .xsmall()
+                                .label("Revoke")
+                                .accessibility_label(format!("Revoke {}", rule.allows))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.state.ask_revoke(&space_revoke, id);
+                                    cx.notify();
+                                })),
+                        ),
+                        Some(_) => h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(SharedString::from(format!("revoke-yes-{}", rule.id)))
+                                    .danger()
+                                    .xsmall()
+                                    .label("Revoke")
+                                    .accessibility_label(format!(
+                                        "Confirm revoking {}",
+                                        rule.allows
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.revoke_rule(space_revoke.clone(), id, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("revoke-keep-{}", rule.id)))
+                                    .xsmall()
+                                    .label("Keep")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.state.keep_rule();
+                                        cx.notify();
+                                    })),
+                            ),
+                    };
+                    rules = rules.child(
+                        v_flex()
+                            .gap_1()
+                            .p_2()
+                            .bg(cx.theme().background)
+                            .rounded(cx.theme().radius)
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .justify_between()
+                                    .child(div().min_w_0().text_sm().child(rule.allows.clone()))
+                                    .child(actions),
+                            )
+                            .child(div().text_xs().text_color(muted).child(rule.from.clone()))
+                            .children(rule.confirm.map(|question| div().text_sm().child(question))),
+                    );
+                }
+            }
+        }
+        rules = rules.child(div().pt_2().text_sm().text_color(muted).child(may.tainted));
+        Some(
+            h_flex()
+                .items_start()
+                .gap_4()
+                .p_3()
+                .bg(cx.theme().muted)
+                .rounded(cx.theme().radius)
+                .child(statements)
+                .child(rules),
+        )
+    }
+}
+
+/// A segmented mode control: the locked positions struck through, not
+/// clickable, and named with why.
+fn mode_control(id: String, choices: &[ModeChoice]) -> ButtonGroup {
+    ButtonGroup::new(SharedString::from(id.clone()))
+        .outline()
+        .compact()
+        .children(choices.iter().map(|choice| {
+            let button = Button::new(SharedString::from(format!("{id}-{}", choice.mode)))
+                .selected(choice.selected);
+            match &choice.locked {
+                None => button.label(choice.label),
+                // A stored mode above the ceiling stays shown as selected.
+                Some(why) => button
+                    .disabled(!choice.selected)
+                    .tooltip(why.clone())
+                    .accessibility_label(format!("{}, locked: {why}", choice.label))
+                    .child(div().line_through().child(choice.label)),
+            }
+        }))
+}
+
+/// The mode of the clicked position, unless it is locked.
+fn unlocked(choices: &[ModeChoice], clicked: &[usize]) -> Option<Mode> {
+    let choice = choices.get(*clicked.first()?)?;
+    choice.locked.is_none().then_some(choice.mode)
+}
+
+/// `Autonomous is locked: above this project's ceiling, On request.`, for
+/// the locked positions of a control, if any.
+fn locked_note(choices: &[ModeChoice], muted: Hsla) -> Option<Div> {
+    let locked: Vec<&ModeChoice> = choices.iter().filter(|c| c.locked.is_some()).collect();
+    let why = locked.first()?.locked.clone()?;
+    let names: Vec<&str> = locked.iter().map(|choice| choice.label).collect();
+    let verb = if names.len() == 1 { "is" } else { "are" };
+    Some(div().text_xs().text_color(muted).child(
+        match locked.iter().find(|choice| choice.selected) {
+            Some(set) => format!(
+                "Set to {}, which is above the ceiling, so it acts at the ceiling. {} {verb} \
+                     locked: {why}.",
+                set.label,
+                names.join(" and ")
+            ),
+            None => format!("{} {verb} locked: {why}.", names.join(" and ")),
+        },
+    ))
 }
 
 /// How the mode control names `mode`.

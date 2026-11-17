@@ -122,12 +122,14 @@ impl HubApi for FakeHub {
                 name: "General".to_owned(),
                 is_general: true,
                 paused: false,
+                mode_ceiling: None,
             },
             ProjectSummary {
                 id: ProjectId(2),
                 name: "api".to_owned(),
                 is_general: false,
                 paused: true,
+                mode_ceiling: None,
             },
         ])
     }
@@ -193,6 +195,7 @@ impl HubApi for FakeHub {
                     name,
                     is_general: false,
                     paused: false,
+                    mode_ceiling: None,
                 },
             },
             OrgRequest::Agents => OrgReply::Agents {
@@ -212,6 +215,8 @@ impl HubApi for FakeHub {
                     role: "lead".to_owned(),
                     mode: Mode::OnRequest,
                     is_lead: true,
+                    max_parallel: 1,
+                    overrides: Default::default(),
                 }],
             },
             OrgRequest::AddRepository {
@@ -231,6 +236,8 @@ impl HubApi for FakeHub {
                     role: "reviewer".to_owned(),
                     mode,
                     is_lead: false,
+                    max_parallel: 1,
+                    overrides: Default::default(),
                 },
             },
             OrgRequest::SetPaused { project, paused } => OrgReply::Project {
@@ -239,6 +246,7 @@ impl HubApi for FakeHub {
                     name: project.unwrap_or_else(|| "General".to_owned()),
                     is_general: false,
                     paused,
+                    mode_ceiling: None,
                 },
             },
             OrgRequest::SetCeiling { mode, .. } if mode > Mode::Assisted => {
@@ -249,6 +257,21 @@ impl HubApi for FakeHub {
             OrgRequest::SetCeiling { project, mode } => OrgReply::Ceiling {
                 project: project.unwrap_or_else(|| "General".to_owned()),
                 ceiling: mode,
+            },
+            OrgRequest::SetSpaceCeiling { mode } => OrgReply::SpaceCeiling { ceiling: mode },
+            OrgRequest::SetMaxParallel {
+                agent,
+                max_parallel,
+                ..
+            } => OrgReply::Binding {
+                binding: BindingSummary {
+                    agent,
+                    role: "reviewer".to_owned(),
+                    mode: Mode::OnRequest,
+                    is_lead: false,
+                    max_parallel,
+                    overrides: Default::default(),
+                },
             },
             other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         })
@@ -938,6 +961,59 @@ async fn the_cli_sets_a_ceiling_answers_always_and_lists_and_revokes_rules() {
     expect_success(client_dir, &["rule", "revoke", "1"], "revoked rule 1\n").await;
     let output = threadlane(client_dir, &["rule", "revoke", "one"]).await;
     assert!(!output.status.success(), "not a rule number");
+    hub.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_sets_the_space_ceiling_and_how_many_tasks_run_at_once() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().expect("tempdir");
+    let client_dir = client.path();
+    let socket = hub.socket().display().to_string();
+    expect_success(
+        client_dir,
+        &["hub", "add", "work", &socket],
+        &format!("paired work: {socket}\n"),
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["ceiling", "autonomous", "--space-wide"],
+        "the ceiling is now autonomous\n",
+    )
+    .await;
+    assert_eq!(
+        hub.fake.0.org.lock().expect("lock").last(),
+        Some(&OrgRequest::SetSpaceCeiling {
+            mode: Mode::Autonomous
+        })
+    );
+    let output = threadlane(
+        client_dir,
+        &["ceiling", "assisted", "--space-wide", "-p", "api"],
+    )
+    .await;
+    assert!(!output.status.success(), "a project is not space-wide");
+    expect_success(
+        client_dir,
+        &["at-once", "Reviewer", "2", "-p", "api"],
+        "Reviewer may run 2 at once\n",
+    )
+    .await;
+    assert_eq!(
+        hub.fake.0.org.lock().expect("lock").last(),
+        Some(&OrgRequest::SetMaxParallel {
+            project: Some("api".to_owned()),
+            agent: "Reviewer".to_owned(),
+            max_parallel: 2,
+        })
+    );
+    expect_success(
+        client_dir,
+        &["at-once", "Reviewer", "0"],
+        "Reviewer may run any number of tasks at once\n",
+    )
+    .await;
     hub.stop().await;
 }
 

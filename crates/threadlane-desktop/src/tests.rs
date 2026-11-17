@@ -9,8 +9,8 @@ use threadlane_client::ClientDirs;
 use threadlane_core::client::{
     Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
     MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
-    PairingRequest, RecordedEvent, RunSummary, TaskReply, TaskRequest, TimerReply, TimerRequest,
-    UserMessage,
+    PairingRequest, RecordedEvent, RunSummary, StandingRuleSummary, TaskReply, TaskRequest,
+    TimerReply, TimerRequest, UserMessage,
 };
 use threadlane_core::ids::{
     AgentId, LaneId, MachineId, OutboxId, RepositoryId, RunId, SessionId, TimerId,
@@ -48,6 +48,13 @@ struct FakeHub {
     agents: Mutex<Vec<Agent>>,
     repositories: Mutex<Vec<Repository>>,
     recorded: Mutex<Vec<RecordedEvent>>,
+    rules: Mutex<Vec<StandingRuleSummary>>,
+    /// The space's ceiling; Assisted until set.
+    ceiling: Mutex<Option<Mode>>,
+    /// The project ceilings set, by project.
+    project_ceilings: Mutex<Vec<(Option<String>, Mode)>>,
+    /// The decisions answered with "always".
+    always: Mutex<Vec<DecisionId>>,
 }
 
 impl FakeHub {
@@ -74,7 +81,7 @@ impl HubApi for FakeHub {
         self.up()?;
         Ok(HubInfo {
             space: self.space.clone(),
-            mode_ceiling: Mode::Assisted,
+            mode_ceiling: self.ceiling.lock().expect("lock").unwrap_or(Mode::Assisted),
             schema_version: 1,
         })
     }
@@ -88,12 +95,14 @@ impl HubApi for FakeHub {
                 name: "api".to_owned(),
                 is_general: false,
                 paused: false,
+                mode_ceiling: None,
             },
             ProjectSummary {
                 id: ProjectId(2),
                 name: "General".to_owned(),
                 is_general: true,
                 paused: false,
+                mode_ceiling: None,
             },
         ]
         .into_iter()
@@ -124,6 +133,8 @@ impl HubApi for FakeHub {
                     role: "reviewer".to_owned(),
                     mode,
                     is_lead: false,
+                    max_parallel: 1,
+                    overrides: Default::default(),
                 };
                 bindings.push(binding.clone());
                 Ok(OrgReply::Binding { binding })
@@ -192,6 +203,7 @@ impl HubApi for FakeHub {
                     name: project.unwrap_or_else(|| "General".to_owned()),
                     is_general: false,
                     paused,
+                    mode_ceiling: None,
                 },
             }),
             OrgRequest::CreateProject { name, .. } => {
@@ -201,9 +213,54 @@ impl HubApi for FakeHub {
                     name,
                     is_general: false,
                     paused: false,
+                    mode_ceiling: None,
                 };
                 created.push(project.clone());
                 Ok(OrgReply::Project { project })
+            }
+            OrgRequest::SetSpaceCeiling { mode } => {
+                *self.ceiling.lock().expect("lock") = Some(mode);
+                Ok(OrgReply::SpaceCeiling { ceiling: mode })
+            }
+            OrgRequest::SetCeiling { project, mode } => {
+                self.project_ceilings
+                    .lock()
+                    .expect("lock")
+                    .push((project.clone(), mode));
+                Ok(OrgReply::Ceiling {
+                    project: project.unwrap_or_else(|| "General".to_owned()),
+                    ceiling: mode,
+                })
+            }
+            OrgRequest::SetOverride {
+                agent, tier, cell, ..
+            } => {
+                let binding = bindings
+                    .iter_mut()
+                    .find(|binding| binding.agent == agent)
+                    .ok_or(ApiError::NotFound(agent.clone()))?;
+                match cell {
+                    Some(cell) => binding.overrides.insert(tier, cell),
+                    None => binding.overrides.remove(&tier),
+                };
+                Ok(OrgReply::Overrides {
+                    agent,
+                    overrides: binding.overrides.clone(),
+                })
+            }
+            OrgRequest::SetMaxParallel {
+                agent,
+                max_parallel,
+                ..
+            } => {
+                let binding = bindings
+                    .iter_mut()
+                    .find(|binding| binding.agent == agent)
+                    .ok_or(ApiError::NotFound(agent))?;
+                binding.max_parallel = max_parallel;
+                Ok(OrgReply::Binding {
+                    binding: binding.clone(),
+                })
             }
             OrgRequest::SetMode { agent, mode, .. } => {
                 let binding = bindings
@@ -226,6 +283,33 @@ impl HubApi for FakeHub {
             DecisionRequest::Pending => Ok(DecisionReply::Pending {
                 decisions: decisions.clone(),
             }),
+            DecisionRequest::StandingRules { .. } => Ok(DecisionReply::StandingRules {
+                rules: self.rules.lock().expect("lock").clone(),
+            }),
+            DecisionRequest::RevokeRule { rule } => {
+                let mut rules = self.rules.lock().expect("lock");
+                let listed = rules
+                    .iter_mut()
+                    .find(|listed| listed.rule.id == rule)
+                    .ok_or_else(|| ApiError::NotFound(format!("standing rule {rule}")))?;
+                listed.rule.revoked_at = Some(Timestamp::from_millis(5_000));
+                Ok(DecisionReply::StandingRule {
+                    rule: listed.clone(),
+                })
+            }
+            DecisionRequest::AnswerAlways { decision: id, .. } => {
+                self.always.lock().expect("lock").push(id);
+                let index = decisions
+                    .iter()
+                    .position(|decision| decision.id == id)
+                    .ok_or_else(|| ApiError::NotFound(id.to_string()))?;
+                let mut decision = decisions.remove(index);
+                decision.status = DecisionStatus::Answered;
+                Ok(DecisionReply::Answered {
+                    decision: Box::new(decision),
+                    recorded: true,
+                })
+            }
             DecisionRequest::Answer { decision: id, .. } => {
                 let index = decisions
                     .iter()
@@ -1055,6 +1139,8 @@ async fn a_mode_change_shows_in_the_project_at_once() {
         role: "engineer".to_owned(),
         mode: Mode::OnRequest,
         is_lead: false,
+        max_parallel: 1,
+        overrides: Default::default(),
     }];
     let (_dir, core) = core(&[("work", &work)]);
     let mut state = AppState::default();
@@ -1398,6 +1484,8 @@ async fn the_modes_grid_has_a_row_per_project_and_a_cell_per_agent() {
         role: "engineer".to_owned(),
         mode: Mode::Assisted,
         is_lead: false,
+        max_parallel: 1,
+        overrides: Default::default(),
     }];
     let (_dir, core) = core(&[("work", &work)]);
     let mut state = AppState::default();
@@ -1500,6 +1588,7 @@ async fn a_new_project_shows_in_its_space_at_once() {
             name: "Elsewhere".to_owned(),
             is_general: false,
             paused: false,
+            mode_ceiling: None,
         },
     );
 
@@ -2110,6 +2199,8 @@ fn binding(agent: &str, mode: Mode) -> BindingSummary {
         role: "engineer".to_owned(),
         mode,
         is_lead: agent == "Lead",
+        max_parallel: 1,
+        overrides: Default::default(),
     }
 }
 
@@ -2532,5 +2623,495 @@ async fn a_sleeping_card_claims_a_follow_up_only_when_one_is_listed() {
             "Engineer · sleeping",
             "Engineer · sleeping",
         ]
+    );
+}
+
+/// A standing rule of Engineer in api, granted from decision 9.
+fn standing_rule(id: i64, tool: &str, pattern: Json, uses: u32) -> StandingRuleSummary {
+    StandingRuleSummary {
+        rule: threadlane_core::model::StandingRule {
+            id: threadlane_core::ids::StandingRuleId(id),
+            project_id: ProjectId(1),
+            agent_id: AgentId(2),
+            tool: tool.to_owned(),
+            pattern,
+            tier: threadlane_core::tools::Tier::SharedReversible,
+            created_from_decision: Some(DecisionId(9)),
+            created_at: Timestamp::from_millis(0),
+            revoked_at: None,
+            uses,
+        },
+        project: "api".to_owned(),
+        agent: "Engineer".to_owned(),
+    }
+}
+
+#[test]
+fn the_matrix_is_the_plans_table() {
+    use threadlane_core::model::Cell::{Allow, Ask, Block, Review};
+    use threadlane_core::tools::Tier;
+    // Plan.md §2.3 "The full matrix", columns On request, Assisted,
+    // Autonomous; a tier 3 standing rule is applied by the hub, not here.
+    let table = [
+        (Tier::Read, [Allow, Allow, Allow]),
+        (Tier::Local, [Allow, Allow, Allow]),
+        (Tier::SharedReversible, [Ask, Review, Review]),
+        (Tier::SharedHardToUndo, [Ask, Ask, Ask]),
+        (Tier::Forbidden, [Block, Block, Block]),
+    ];
+    for (tier, cells) in table {
+        for (mode, cell) in [Mode::OnRequest, Mode::Assisted, Mode::Autonomous]
+            .into_iter()
+            .zip(cells)
+        {
+            assert_eq!(matrix(tier, mode), cell, "{tier:?} in {mode}");
+        }
+        assert_eq!(matrix(tier, Mode::Off), Block, "{tier:?} when off");
+    }
+    // Overrides: stricter always, looser only up to the ceiling's column.
+    let set = |tier, cell| BTreeMap::from([(tier, cell)]);
+    let tier2 = Tier::SharedReversible;
+    assert_eq!(
+        applied(tier2, Mode::Autonomous, Mode::Autonomous, &set(tier2, Ask)),
+        Ask
+    );
+    assert_eq!(
+        applied(tier2, Mode::OnRequest, Mode::Autonomous, &set(tier2, Allow)),
+        Review
+    );
+    assert_eq!(
+        applied(
+            tier2,
+            Mode::Autonomous,
+            Mode::OnRequest,
+            &set(tier2, Review)
+        ),
+        Ask
+    );
+    assert_eq!(
+        applied(tier2, Mode::Autonomous, Mode::Assisted, &Default::default()),
+        Review
+    );
+    assert_eq!(
+        applied(Tier::Read, Mode::Assisted, Mode::Off, &Default::default()),
+        Block
+    );
+}
+
+#[tokio::test]
+async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.bindings.lock().expect("lock") = vec![
+        binding("Lead", Mode::OnRequest),
+        BindingSummary {
+            max_parallel: 3,
+            ..binding("Engineer", Mode::Assisted)
+        },
+    ];
+    *work.rules.lock().expect("lock") = vec![
+        standing_rule(1, "open_pull_request", json!({ "repository": "app" }), 6),
+        StandingRuleSummary {
+            agent: "Lead".to_owned(),
+            ..standing_rule(2, "publish_branch", json!({ "repository": "app" }), 1)
+        },
+    ];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    // The space allows Assisted: Autonomous is locked on the ceiling card.
+    let card = state.ceiling_card("work", "api");
+    assert_eq!(
+        card.note,
+        "No agent in this project can go above this. Inherited from work."
+    );
+    let locked: Vec<_> = card
+        .choices
+        .iter()
+        .map(|choice| (choice.label, choice.selected, choice.locked.is_some()))
+        .collect();
+    assert_eq!(
+        locked,
+        [
+            ("Off", false, false),
+            ("On request", false, false),
+            ("Assisted", true, false),
+            ("Autonomous", false, true),
+        ]
+    );
+    assert_eq!(
+        card.choices[3].locked.as_deref(),
+        Some("Above work's ceiling, Assisted; raise it in Settings")
+    );
+
+    // A project ceiling of On request locks Assisted for every agent.
+    core.set_ceiling(Some("work"), Some("api"), Mode::OnRequest)
+        .await
+        .expect("set");
+    state.ceiling_set("work", "api", Mode::OnRequest);
+    let rows = state.agent_rows("work", "api");
+    let engineer = &rows[1];
+    assert_eq!(engineer.at_once, at_once(3));
+    assert_eq!(at_once(3).fewer, Some(2));
+    assert_eq!(at_once(1).fewer, None);
+    assert_eq!(at_once(0).label, "No limit");
+    let modes: Vec<_> = engineer
+        .choices
+        .iter()
+        .map(|choice| (choice.selected, choice.locked.clone()))
+        .collect();
+    let above = Some("Above this project's ceiling, On request".to_owned());
+    assert_eq!(
+        modes,
+        [
+            (false, None),
+            (false, None),
+            (true, above.clone()),
+            (false, above)
+        ],
+        "its stored mode stays selected, and shows locked"
+    );
+
+    // Expanded: the matrix as the gate applies it, at the ceiling.
+    assert!(!engineer.open);
+    state.toggle_agent("work", "api", "Engineer");
+    assert!(state.agent_rows("work", "api")[1].open);
+    let may = state.may_do("work", "api", "Engineer").expect("bound");
+    assert_eq!(may.title, "What Engineer may do here without asking");
+    let cells: Vec<_> = may
+        .statements
+        .iter()
+        .map(|statement| {
+            (
+                statement.what,
+                statement.cell.as_str(),
+                statement.choices.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            (
+                "Start work you did not request",
+                "Recorded, not acted on",
+                0
+            ),
+            ("Read", "Yes", 4),
+            ("Work locally", "Yes", 4),
+            ("Shared, reversible", "Asks you", 2),
+            ("Hard to undo", "Asks you", 2),
+            ("Forbidden", "Blocked", 0),
+        ]
+    );
+    assert!(may.tainted.contains("Engineer works one mode lower"));
+
+    // An override makes a row stricter and can be cleared again.
+    let overrides = core
+        .set_override(
+            Some("work"),
+            Some("api"),
+            "Engineer",
+            threadlane_core::tools::Tier::Local,
+            Some(threadlane_core::model::Cell::Ask),
+        )
+        .await
+        .expect("set");
+    state.overrides_set("work", "api", "Engineer", overrides);
+    let may = state.may_do("work", "api", "Engineer").expect("bound");
+    let local = &may.statements[2];
+    assert_eq!(local.cell, "Asks you");
+    assert!(
+        local
+            .choices
+            .iter()
+            .any(|c| c.selected && c.label == "Asks you")
+    );
+    assert_eq!(
+        local.choices.last().map(|c| (c.cell, c.label.as_str())),
+        Some((None, "As its mode sets it"))
+    );
+
+    // Its standing rules only, in words, and Revoke asks first.
+    assert_eq!(may.rules_title, "Standing rules (1)");
+    let rules = may.rules.expect("listed");
+    assert_eq!(rules[0].allows, "Open draft pull requests in app");
+    assert_eq!(rules[0].from, "Granted from D-0009 · used 6 times");
+    assert_eq!(rules[0].confirm, None);
+    state.ask_revoke("work", rules[0].id);
+    let may = state.may_do("work", "api", "Engineer").expect("bound");
+    assert_eq!(
+        may.rules.expect("listed")[0].confirm.as_deref(),
+        Some(
+            "Revoke \"Open draft pull requests in app\" for Engineer? Its next matching call asks you again."
+        )
+    );
+    let revoked = core.revoke_rule(Some("work"), "1").await.expect("revoked");
+    state.rule_revoked("work", &revoked);
+    let may = state.may_do("work", "api", "Engineer").expect("bound");
+    assert_eq!(may.rules, Ok(Vec::new()), "a revoked rule leaves the list");
+    assert_eq!(
+        state
+            .may_do("work", "api", "Lead")
+            .expect("bound")
+            .rules_title,
+        "Standing rules (1)"
+    );
+
+    // "At once" goes through the hub and shows at once.
+    let set = core
+        .set_max_parallel(Some("work"), Some("api"), "Engineer", 2)
+        .await
+        .expect("set");
+    state.mode_set("work", "api", set);
+    assert_eq!(state.agent_rows("work", "api")[1].at_once.label, "2");
+}
+
+#[tokio::test]
+async fn always_allow_is_worded_from_the_decision_and_used_only_when_ticked_to_approve() {
+    let mut offered = decision(1, 1_000);
+    offered.offers_standing_rule = true;
+    offered.task_id = Some(TaskId(7));
+    offered.arguments = json!({ "repository": "app", "title": "Fix it" });
+    let work = FakeHub::new("Work", vec![offered, decision(2, 2_000)]);
+    *work.tasks.lock().expect("lock") = vec![task(7, TaskStatus::WaitingOnYou, None)];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    let first = state.queue()[0].clone();
+    assert_eq!(
+        state.always_offer(&first),
+        Some((
+            "Always allow Engineer to open draft pull requests in app, in api".to_owned(),
+            false
+        ))
+    );
+    assert_eq!(
+        state.always_offer(&state.queue()[1]),
+        None,
+        "offers no rule"
+    );
+    assert!(
+        !state.answers_always("work", "D-0001", "approve"),
+        "not ticked"
+    );
+    state.toggle_always("work", DecisionId(1));
+    assert_eq!(
+        state.always_offer(&first).map(|(_, ticked)| ticked),
+        Some(true)
+    );
+    assert!(state.answers_always("work", "D-0001", "Approve"));
+    assert!(
+        !state.answers_always("work", "D-0001", "decline"),
+        "only to approve"
+    );
+    assert!(!state.answers_always("work", "D-0002", "approve"));
+
+    let answer = core
+        .answer_always(Some("work"), "D-0001", "approve", None)
+        .await
+        .expect("answered");
+    state.answered(&answer);
+    assert_eq!(*work.always.lock().expect("lock"), [DecisionId(1)]);
+    assert!(!state.answers_always("work", "D-0001", "approve"));
+}
+
+#[tokio::test]
+async fn a_queued_card_says_why_it_waits_from_the_hub_or_from_what_the_app_knows() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut after = task(4, TaskStatus::Queued, None);
+    after.task.depends_on = vec![TaskId(3)];
+    let mut other = task(5, TaskStatus::Running, None);
+    other.agent = "Reviewer".to_owned();
+    *work.tasks.lock().expect("lock") = vec![
+        task(1, TaskStatus::Running, None),
+        task(
+            2,
+            TaskStatus::Queued,
+            Some("its agent already runs its limit of 1 tasks at once in this project"),
+        ),
+        task(3, TaskStatus::Queued, None),
+        after,
+        other,
+    ];
+    *work.bindings.lock().expect("lock") = vec![binding("Engineer", Mode::OnRequest)];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let queued: Vec<(TaskId, String)> = state
+        .board("work", "api", &when())
+        .into_iter()
+        .find(|column| column.title == "Queued")
+        .expect("queued")
+        .cards
+        .into_iter()
+        .map(|card| (card.id, card.meta))
+        .collect();
+    assert_eq!(
+        queued,
+        [
+            (
+                TaskId(2),
+                "Engineer · its agent already runs its limit of 1 tasks at once in this \
+                 project: T-0001 holds it"
+                    .to_owned()
+            ),
+            (
+                TaskId(3),
+                "Engineer · Engineer runs at most 1 at once here: T-0001 holds it".to_owned()
+            ),
+            (TaskId(4), "Engineer · waits for T-0003".to_owned()),
+        ]
+    );
+
+    // With no limit and every machine full, the machines are why.
+    *work.bindings.lock().expect("lock") = vec![BindingSummary {
+        max_parallel: 0,
+        ..binding("Engineer", Mode::OnRequest)
+    }];
+    *work.machines.lock().expect("lock") = vec![Machine {
+        load: 1,
+        ..machine(1, MachineStatus::Online)
+    }];
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    let summary = task(3, TaskStatus::Queued, None);
+    assert_eq!(
+        state.queued_reason("work", "api", &summary).as_deref(),
+        Some("every machine is busy: machine-1 runs 1 of 1")
+    );
+    *work.machines.lock().expect("lock") = vec![machine(1, MachineStatus::Online)];
+    state.apply(refresh(&core).await);
+    assert_eq!(state.queued_reason("work", "api", &summary), None);
+
+    // A paused project says so.
+    state.project_paused(
+        "work",
+        ProjectSummary {
+            id: ProjectId(1),
+            name: "api".to_owned(),
+            is_general: false,
+            paused: true,
+            mode_ceiling: None,
+        },
+    );
+    assert_eq!(
+        state.queued_reason("work", "api", &summary).as_deref(),
+        Some("the project is paused")
+    );
+}
+
+#[tokio::test]
+async fn home_lists_tasks_that_failed_or_are_stuck_and_the_sidebar_counts_them() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut cancelled = task(2, TaskStatus::Cancelled, None);
+    cancelled.task.depends_on = vec![TaskId(1)];
+    let mut chained = task(3, TaskStatus::Cancelled, None);
+    chained.task.depends_on = vec![TaskId(2)];
+    let mut by_you = task(5, TaskStatus::Cancelled, None);
+    by_you.task.depends_on = vec![TaskId(6)];
+    *work.tasks.lock().expect("lock") = vec![
+        task(1, TaskStatus::Failed, Some("the tests do not build")),
+        cancelled,
+        chained,
+        task(
+            4,
+            TaskStatus::Sleeping,
+            Some("ended a run without finishing; nothing is set to wake it"),
+        ),
+        by_you,
+        task(6, TaskStatus::Cancelled, None),
+        task(
+            7,
+            TaskStatus::Sleeping,
+            Some("waiting for a follow-up at 09:00"),
+        ),
+        task(8, TaskStatus::Queued, None),
+    ];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    let rows: Vec<(TaskId, String)> = state
+        .needs_attention()
+        .into_iter()
+        .map(|row| (row.task, row.why))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                TaskId(1),
+                "api · Engineer · failed: the tests do not build".to_owned()
+            ),
+            (
+                TaskId(2),
+                "api · Engineer · cancelled because T-0001, which it depended on, failed"
+                    .to_owned()
+            ),
+            (
+                TaskId(3),
+                "api · Engineer · cancelled because T-0001, which it depended on, failed"
+                    .to_owned()
+            ),
+            (
+                TaskId(4),
+                "api · Engineer · ended a run without finishing; nothing is set to wake it"
+                    .to_owned()
+            ),
+        ]
+    );
+    assert_eq!(state.attention_in("work", "api"), 4);
+    assert_eq!(state.attention_in("work", "General"), 0);
+    assert!(needs_you("Stuck: no run can continue it"));
+    assert!(!needs_you("waiting for T-0002 to be done"));
+    state.set_filter(Some("home"));
+    assert!(state.needs_attention().is_empty());
+}
+
+#[tokio::test]
+async fn the_space_ceiling_is_set_from_settings_after_saying_what_it_permits() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let selected = |state: &AppState| {
+        state
+            .space_ceiling_choices("work")
+            .into_iter()
+            .find(|choice| choice.selected)
+            .map(|choice| choice.mode)
+    };
+    assert_eq!(selected(&state), Some(Mode::Assisted));
+
+    state.ask_space_ceiling("work", Mode::Autonomous);
+    let (mode, text) = state.space_ceiling_confirm("work").expect("asked");
+    assert_eq!(mode, Mode::Autonomous);
+    assert!(
+        text.starts_with("Set the ceiling of work to Autonomous?"),
+        "{text}"
+    );
+    assert!(text.contains("start work on their own"), "{text}");
+    assert_eq!(state.space_ceiling_confirm("home"), None);
+    state.keep_space_ceiling();
+    assert_eq!(state.space_ceiling_confirm("work"), None);
+
+    state.ask_space_ceiling("work", Mode::Autonomous);
+    let set = core
+        .set_space_ceiling(Some("work"), Mode::Autonomous)
+        .await
+        .expect("set");
+    state.space_ceiling_set("work", set);
+    assert_eq!(state.space_ceiling_confirm("work"), None);
+    assert_eq!(selected(&state), Some(Mode::Autonomous));
+    assert!(
+        state.ceiling_card("work", "api").choices[3]
+            .locked
+            .is_none(),
+        "the project may now go to Autonomous"
     );
 }

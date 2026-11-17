@@ -111,9 +111,8 @@ impl AppState {
                                 ),
                                 None => summary.machine.clone().unwrap_or_default(),
                             },
-                            (TaskStatus::Queued, None) => task
-                                .waiting_reason
-                                .clone()
+                            (TaskStatus::Queued, None) => self
+                                .queued_reason(space, project, summary)
                                 .unwrap_or_else(|| "waiting for a machine".to_owned()),
                             // Claim a follow-up only when one is listed.
                             (TaskStatus::Sleeping, None) => task

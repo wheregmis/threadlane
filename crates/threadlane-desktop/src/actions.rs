@@ -6,9 +6,10 @@
 use std::sync::Arc;
 
 use gpui_kit::*;
-use threadlane_core::ids::TaskId;
-use threadlane_core::model::Agent;
-use threadlane_desktop::{Activity, add_repository, copy_agent, describe};
+use threadlane_core::ids::{StandingRuleId, TaskId};
+use threadlane_core::model::{Agent, Cell, Mode};
+use threadlane_core::tools::Tier;
+use threadlane_desktop::{Activity, add_repository, at_once, copy_agent, describe, mode_label};
 
 use crate::Desktop;
 
@@ -246,6 +247,171 @@ impl Desktop {
         if let Err(why) = self.state.set_notifications(decisions, on) {
             self.state.report(Activity::Failed(why));
         }
+        cx.notify();
+    }
+}
+
+impl Desktop {
+    /// Sets the ceiling of `project` in `space`.
+    pub(crate) fn set_ceiling(
+        &mut self,
+        space: String,
+        project: String,
+        mode: Mode,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let set = core
+                    .read()
+                    .await
+                    .set_ceiling(Some(&space), Some(&project), mode)
+                    .await;
+                (space, project, set)
+            },
+            move |this, (space, project, set), _| match set {
+                Ok(ceiling) => {
+                    this.state.ceiling_set(&space, &project, mode);
+                    this.state.report(Activity::Done(format!(
+                        "The ceiling of {space} / {project} is now {}.",
+                        mode_label(ceiling)
+                    )));
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Sets, or with `None` clears, the cell of `tier` for `agent` in
+    /// `project` of `space`.
+    pub(crate) fn set_override(
+        &mut self,
+        space: String,
+        project: String,
+        agent: String,
+        tier: Tier,
+        cell: Option<Cell>,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let set = core
+                    .read()
+                    .await
+                    .set_override(Some(&space), Some(&project), &agent, tier, cell)
+                    .await;
+                (space, project, agent, set)
+            },
+            |this, (space, project, agent, set), _| match set {
+                Ok(overrides) => {
+                    this.state
+                        .overrides_set(&space, &project, &agent, overrides);
+                    this.state.report(Activity::Done(format!(
+                        "Changed what {agent} may do in {space} / {project}."
+                    )));
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Sets how many of `agent`'s tasks may run at once in `project`.
+    pub(crate) fn set_max_parallel(
+        &mut self,
+        space: String,
+        project: String,
+        agent: String,
+        max_parallel: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let set = core
+                    .read()
+                    .await
+                    .set_max_parallel(Some(&space), Some(&project), &agent, max_parallel)
+                    .await;
+                (space, project, set)
+            },
+            |this, (space, project, set), _| match set {
+                Ok(binding) => {
+                    this.state.report(Activity::Done(format!(
+                        "{} may run {} at once in {space} / {project}.",
+                        binding.agent,
+                        at_once(binding.max_parallel).label.to_lowercase()
+                    )));
+                    this.state.mode_set(&space, &project, binding);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Revokes standing rule `rule` of `space` once you confirmed.
+    pub(crate) fn revoke_rule(
+        &mut self,
+        space: String,
+        rule: StandingRuleId,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let revoked = core
+                    .read()
+                    .await
+                    .revoke_rule(Some(&space), &rule.to_string())
+                    .await;
+                (space, revoked)
+            },
+            |this, (space, revoked), _| match revoked {
+                Ok(revoked) => {
+                    this.state.rule_revoked(&space, &revoked);
+                    this.state.report(Activity::Done(format!(
+                        "Revoked rule {} of {}; its next matching call asks you again.",
+                        revoked.rule.id, revoked.agent
+                    )));
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Sets the ceiling of `space` itself once you confirmed.
+    pub(crate) fn set_space_ceiling(&mut self, space: String, mode: Mode, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let set = core
+                    .read()
+                    .await
+                    .set_space_ceiling(Some(&space), mode)
+                    .await;
+                (space, set)
+            },
+            |this, (space, set), _| match set {
+                Ok(ceiling) => {
+                    this.state.space_ceiling_set(&space, ceiling);
+                    this.state.report(Activity::Done(format!(
+                        "The ceiling of {space} is now {}.",
+                        mode_label(ceiling)
+                    )));
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
         cx.notify();
     }
 }

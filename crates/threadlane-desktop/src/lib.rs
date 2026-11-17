@@ -15,23 +15,26 @@ use threadlane_client::{
 };
 use threadlane_core::admission::AdmittedKey;
 use threadlane_core::client::{
-    BindingSummary, ConversationEntry, HubInfo, ProjectSummary, RecordedEvent, TaskDetail,
-    TaskSummary,
+    BindingSummary, ConversationEntry, HubInfo, ProjectSummary, RecordedEvent, StandingRuleSummary,
+    TaskDetail, TaskSummary,
 };
 use threadlane_core::ids::{DecisionId, EventId, ProjectId, TaskId};
 use threadlane_core::model::{Account, Agent, Decision, Machine, MachineStatus, Mode, OutboxKind};
 use threadlane_core::time::Timestamp;
 use tokio::sync::{RwLock, mpsc};
 
+mod attention;
 mod clock;
 mod control;
 mod conversation;
 mod machines;
 mod memory;
+mod permissions;
 mod routines;
 mod settings;
 mod tasks;
 
+pub use attention::{AttentionRow, needs_you};
 pub use clock::{When, duration};
 pub use control::{
     AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository, copy_agent,
@@ -42,6 +45,10 @@ pub use machines::{MachineRow, machine_row};
 pub use memory::{
     LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, change_memory, editable,
     load_memory,
+};
+pub use permissions::{
+    AgentRow, AtOnce, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement,
+    allows, applied, at_once, cell_label, matrix, mode_label,
 };
 pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
@@ -115,6 +122,8 @@ pub enum Part {
     Memory,
     /// A project's routines and follow-ups.
     Routines,
+    /// A project's standing rules.
+    Rules,
 }
 
 /// How a part last answered; a part not in the map has not answered yet.
@@ -201,6 +210,8 @@ pub struct Space {
     /// How many events it recorded and did not act on; `None` while its
     /// hub has not said, or cannot (one from before it could).
     pub recorded: Option<u64>,
+    /// The tasks of all its projects, for what needs attention on Home.
+    pub tasks: Vec<TaskSummary>,
 }
 
 impl Space {
@@ -218,6 +229,7 @@ impl Space {
             info: None,
             reached_by: String::new(),
             recorded: None,
+            tasks: Vec::new(),
         }
     }
 
@@ -590,6 +602,7 @@ pub struct Refresh {
     machines: Vec<SpaceListing<SpaceMachines>>,
     recent: Vec<SpaceListing<Vec<SpaceFeedItem>>>,
     recorded: Vec<SpaceListing<u64>>,
+    tasks: Vec<(String, Result<Vec<TaskSummary>, ClientError>)>,
 }
 
 /// Asks every paired hub about itself, its projects, agents, admitted
@@ -600,10 +613,17 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
     let mut projects = Vec::new();
     let mut agents = Vec::new();
     let mut clients = Vec::new();
+    let mut tasks = Vec::new();
     for status in statuses.iter().filter(|status| status.is_reachable()) {
         let name = status.name.as_str();
-        let listed = core.projects(Some(name)).await;
-        projects.push((name.to_owned(), listed.map(|listed| listed.projects)));
+        let listed = core
+            .projects(Some(name))
+            .await
+            .map(|listed| listed.projects);
+        if let Ok(listed) = &listed {
+            tasks.push((name.to_owned(), all_tasks(core, name, listed).await));
+        }
+        projects.push((name.to_owned(), listed));
         agents.push((name.to_owned(), core.agents(Some(name)).await));
         clients.push((name.to_owned(), core.clients(Some(name)).await));
     }
@@ -618,7 +638,28 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
         machines: core.machines(None).await.unwrap_or_default(),
         recent: core.recent(None, RECENT).await.unwrap_or_default(),
         recorded: core.recorded_count(None).await.unwrap_or_default(),
+        tasks,
     }
+}
+
+/// The tasks of every project in `projects` of `space`, each once; the
+/// first refusal if one project's could not be listed.
+// shortcut: one Tasks request per project every refresh; a hub-side listing
+// of what needs attention would be cheaper once spaces hold many tasks.
+async fn all_tasks(
+    core: &ClientCore,
+    space: &str,
+    projects: &[ProjectSummary],
+) -> Result<Vec<TaskSummary>, ClientError> {
+    let mut all: Vec<TaskSummary> = Vec::new();
+    for project in projects {
+        for summary in core.tasks(Some(space), Some(&project.name)).await? {
+            if !all.iter().any(|known| known.task.id == summary.task.id) {
+                all.push(summary);
+            }
+        }
+    }
+    Ok(all)
 }
 
 /// What the project screen loaded for one project. Made by
@@ -633,6 +674,7 @@ pub struct ProjectLoad {
     history: Result<Vec<ConversationEntry>, ClientError>,
     lead: Result<Option<Timestamp>, ClientError>,
     recorded: Result<(Vec<RecordedEvent>, u64), ClientError>,
+    rules: Result<Vec<StandingRuleSummary>, ClientError>,
 }
 
 /// Asks a project's hub for its tasks, repositories, bindings, the newest
@@ -651,6 +693,7 @@ pub async fn load_project(core: &ClientCore, space: &str, project: &str) -> Proj
         recorded: core
             .recorded(in_space, named, control::RECORDED_SHOWN)
             .await,
+        rules: core.standing_rules(in_space, named).await,
     }
 }
 
@@ -759,6 +802,8 @@ pub struct ProjectView {
     /// why its hub could not say. Kept out of `answers`: a hub from before
     /// it could say must not make the app ask again every few seconds.
     recorded: Option<Result<(Vec<RecordedEvent>, u64), String>>,
+    /// Its standing rules, revoked ones included.
+    pub rules: Vec<StandingRuleSummary>,
 }
 
 /// A message you sent, as the conversation shows it.
@@ -831,6 +876,15 @@ pub struct AppState {
     notifications: Notifications,
     /// Where this app keeps its files.
     client_dir: Option<PathBuf>,
+    /// The agent row expanded on a project's Agents tab: space, project,
+    /// agent.
+    open_agent: Option<(String, String, String)>,
+    /// The standing rule you asked to revoke, until you confirm or keep it.
+    revoking: Option<InSpace<threadlane_core::ids::StandingRuleId>>,
+    /// The decisions whose "Always allow" is ticked.
+    always: HashSet<InSpace<DecisionId>>,
+    /// The ceiling you asked to set a space to, until you confirm or keep it.
+    space_ceiling_asked: Option<InSpace<Mode>>,
 }
 
 impl AppState {
@@ -1153,7 +1207,21 @@ impl AppState {
         }
         self.codes.remove(name);
         self.recorded_open.retain(|(space, _)| space != name);
+        self.always.retain(|(space, _)| space != name);
+        if self
+            .open_agent
+            .as_ref()
+            .is_some_and(|(space, ..)| space == name)
+        {
+            self.open_agent = None;
+        }
         let here = |at: Option<&String>| at.is_some_and(|space| space == name);
+        if here(self.revoking.as_ref().map(|(space, _)| space)) {
+            self.revoking = None;
+        }
+        if here(self.space_ceiling_asked.as_ref().map(|(space, _)| space)) {
+            self.space_ceiling_asked = None;
+        }
         if here(self.agent_form.space.as_ref()) {
             self.agent_form = AgentForm::default();
         }
@@ -1185,6 +1253,7 @@ impl AppState {
             machines,
             recent,
             recorded,
+            tasks,
         } = refresh;
         let mut spaces = Vec::with_capacity(statuses.len());
         for status in statuses {
@@ -1247,6 +1316,13 @@ impl AppState {
                     spaces[at].machines = machines;
                     spaces[at].accounts = accounts;
                 }
+            }
+        }
+        for (name, listed) in tasks {
+            if let Some(at) = find(&mut spaces, &name)
+                && let Some(listed) = spaces[at].take(Part::Tasks, listed)
+            {
+                spaces[at].tasks = listed;
             }
         }
         for SpaceListing { space, listed } in recorded {
@@ -1312,6 +1388,7 @@ impl AppState {
             history,
             lead,
             recorded,
+            rules,
         } = load;
         let view = self
             .projects
@@ -1322,6 +1399,7 @@ impl AppState {
         view.bindings = take(&mut view.answers, Part::Bindings, bindings);
         view.lead = take(&mut view.answers, Part::Lead, lead);
         view.recorded = Some(recorded.map_err(|error| describe(&error)));
+        view.rules = take(&mut view.answers, Part::Rules, rules);
         let listed = history.is_ok();
         let entries = take(&mut view.answers, Part::Conversation, history);
         if listed {
@@ -1620,6 +1698,8 @@ impl AppState {
     /// Takes an answer its hub accepted: the decision no longer waits, even
     /// when an earlier answer was the one that counted.
     pub fn answered(&mut self, answer: &SpaceAnswer) {
+        self.always
+            .remove(&(answer.space.clone(), answer.decision.id));
         self.queue.retain(|queued| {
             queued.space != answer.space || queued.decision.id != answer.decision.id
         });

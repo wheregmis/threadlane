@@ -74,9 +74,16 @@ fn main() -> ExitCode {
         runtime.spawn(pump(Arc::clone(&core), stream, shown.clone()));
     }
     let tokio = runtime.handle().clone();
-    let start = std::env::var("THREADLANE_DESKTOP_OPEN")
-        .ok()
-        .and_then(|open| Screen::named(&open));
+    let open = std::env::var("THREADLANE_DESKTOP_OPEN").ok();
+    let start = open.as_deref().and_then(Screen::named);
+    // `<space>/<project>/agents/<agent>` also expands that agent's row.
+    if let Some([space, project, "agents", agent]) = open
+        .as_deref()
+        .map(|open| open.split('/').collect::<Vec<_>>())
+        .as_deref()
+    {
+        state.toggle_agent(space, project, agent);
+    }
 
     application().with_assets(assets::Assets).run(move |cx| {
         cx.set_app_identity("dev.threadlane.desktop", "Threadlane");
@@ -198,7 +205,8 @@ enum Screen {
 
 impl Screen {
     /// The screen `THREADLANE_DESKTOP_OPEN` names: `home`, `agents`,
-    /// `machines`, `<space>/<project>[/tasks|conversation|agents|memory]`, or
+    /// `machines`, `<space>/<project>[/tasks|conversation|agents|memory]`
+    /// (`agents/<agent>` expands that agent's row), or
     /// `<space>/T-0001`. For looking at a screen without clicking to it.
     fn named(open: &str) -> Option<Self> {
         let parts: Vec<&str> = open.split('/').collect();
@@ -218,7 +226,7 @@ impl Screen {
                 space: (*space).to_owned(),
                 project: (*project).to_owned(),
                 tab: match rest {
-                    [name] => Tab::named(name).unwrap_or(Tab::Tasks),
+                    [name, ..] => Tab::named(name).unwrap_or(Tab::Tasks),
                     _ => Tab::Tasks,
                 },
             },
@@ -609,16 +617,21 @@ impl Desktop {
 
     fn answer(&mut self, space: String, id: String, option: String, cx: &mut Context<Self>) {
         let note = self.note.read(cx).value().trim().to_owned();
+        let always = self.state.answers_always(&space, &id, &option);
         let core = Arc::clone(&self.core);
         self.state
             .report(Activity::Working(format!("Answering {space} {id}…")));
         self.run(
             async move {
                 let note = (!note.is_empty()).then_some(note);
-                core.read()
-                    .await
-                    .answer(Some(&space), &id, &option, note.as_deref())
-                    .await
+                let core = core.read().await;
+                if always {
+                    core.answer_always(Some(&space), &id, &option, note.as_deref())
+                        .await
+                } else {
+                    core.answer(Some(&space), &id, &option, note.as_deref())
+                        .await
+                }
             },
             |this, answered, cx| match answered {
                 Ok(answer) => {

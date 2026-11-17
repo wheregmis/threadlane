@@ -40,6 +40,8 @@ fn lead(mode: Mode) -> BindingSummary {
         role: LEAD_ROLE.to_owned(),
         mode,
         is_lead: true,
+        max_parallel: 1,
+        overrides: Default::default(),
     }
 }
 
@@ -254,6 +256,8 @@ async fn set_mode_changes_a_binding_or_creates_one() {
         role: "reviewer".into(),
         mode,
         is_lead: false,
+        max_parallel: 1,
+        overrides: Default::default(),
     };
 
     // Not bound yet: a non-lead binding with the mode, stored as given.
@@ -398,4 +402,113 @@ async fn repositories_are_registered_per_project_and_a_remote_only_once_in_the_s
         panic!("listed");
     };
     assert_eq!(repositories, vec![docs]);
+}
+
+#[tokio::test]
+async fn set_max_parallel_changes_how_many_of_an_agents_tasks_run_at_once() {
+    let hub = TestHub::start().await;
+    let set = |agent: &str, max_parallel| OrgRequest::SetMaxParallel {
+        project: None,
+        agent: agent.to_owned(),
+        max_parallel,
+    };
+    assert_eq!(
+        org(&hub, set(LEAD_NAME, 3)).await,
+        Ok(OrgReply::Binding {
+            binding: BindingSummary {
+                max_parallel: 3,
+                ..lead(Mode::OnRequest)
+            }
+        })
+    );
+    let general = hub.general().await;
+    let stored = hub.db.lead_binding(general.id).await.unwrap().unwrap();
+    assert_eq!(stored.max_parallel, 3);
+    // 0 is no limit, and the bindings list says what is stored.
+    org(&hub, set(LEAD_NAME, 0)).await.unwrap();
+    assert_eq!(
+        org(&hub, OrgRequest::Bindings { project: None }).await,
+        Ok(OrgReply::Bindings {
+            bindings: vec![BindingSummary {
+                max_parallel: 0,
+                ..lead(Mode::OnRequest)
+            }]
+        })
+    );
+
+    org(
+        &hub,
+        OrgRequest::CreateAgent {
+            name: "Reviewer".into(),
+            role: "reviewer".into(),
+            instructions: String::new(),
+            backends: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    for request in [
+        set("Reviewer", 2),
+        set("Nobody", 2),
+        OrgRequest::SetMaxParallel {
+            project: Some("Nowhere".into()),
+            agent: LEAD_NAME.into(),
+            max_parallel: 2,
+        },
+    ] {
+        let missing = org(&hub, request).await;
+        assert!(matches!(missing, Err(ApiError::NotFound(_))), "{missing:?}");
+    }
+}
+
+#[tokio::test]
+async fn set_space_ceiling_raises_and_lowers_what_every_project_allows() {
+    let hub = TestHub::start().await;
+    let general = hub.general().await;
+    let set_ceiling = |mode| OrgRequest::SetCeiling {
+        project: None,
+        mode,
+    };
+    // The default space ceiling refuses a project above On request.
+    let refused = org(&hub, set_ceiling(Mode::Assisted)).await;
+    assert!(matches!(refused, Err(ApiError::Invalid(_))), "{refused:?}");
+
+    assert_eq!(
+        org(
+            &hub,
+            OrgRequest::SetSpaceCeiling {
+                mode: Mode::Autonomous
+            }
+        )
+        .await,
+        Ok(OrgReply::SpaceCeiling {
+            ceiling: Mode::Autonomous
+        })
+    );
+    assert_eq!(hub.api.info().await.unwrap().mode_ceiling, Mode::Autonomous);
+    org(&hub, set_ceiling(Mode::Assisted)).await.unwrap();
+    assert_eq!(
+        hub.api.projects().await.unwrap()[0].mode_ceiling,
+        Some(Mode::Assisted),
+        "the project's own ceiling is listed"
+    );
+    org(&hub, set_mode(None, LEAD_NAME, Mode::Assisted))
+        .await
+        .unwrap();
+
+    // Lowering the space's caps the project's without refusing it.
+    org(
+        &hub,
+        OrgRequest::SetSpaceCeiling {
+            mode: Mode::OnRequest,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        hub.db.effective_ceiling(general.id).await.unwrap(),
+        Mode::OnRequest
+    );
+    let refused = org(&hub, set_mode(None, LEAD_NAME, Mode::Assisted)).await;
+    assert!(matches!(refused, Err(ApiError::Invalid(_))), "{refused:?}");
 }
