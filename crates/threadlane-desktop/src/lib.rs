@@ -24,11 +24,16 @@ use tokio::sync::{RwLock, mpsc};
 mod clock;
 mod conversation;
 mod machines;
+mod memory;
 mod tasks;
 
 pub use clock::{When, duration};
 pub use conversation::Line;
 pub use machines::{MachineRow, machine_row};
+pub use memory::{
+    LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, change_memory, editable,
+    load_memory,
+};
 pub use tasks::{BoardCard, Column, Moment, chips, status_label, timeline};
 
 /// How many of the newest delivered items Home asks each hub for.
@@ -91,6 +96,8 @@ pub enum Part {
     Conversation,
     /// Whether a project's lead is working.
     Lead,
+    /// The memory a project's lead can see.
+    Memory,
 }
 
 /// How a part last answered; a part not in the map has not answered yet.
@@ -268,6 +275,93 @@ fn excerpt_of(text: &str) -> (String, bool) {
         shown = format!("{}…", shown.trim_end());
     }
     (shown, cut)
+}
+
+/// How many characters of an argument a decision card shows.
+const ARGUMENT_CHARS: usize = 160;
+
+/// The arguments a decision card names first, and how it labels them; the
+/// rest follow by name.
+const ARGUMENTS: [(&str, &str); 9] = [
+    ("repository", "Repository"),
+    ("title", "Title"),
+    ("path", "Path"),
+    ("from", "From"),
+    ("to", "To"),
+    ("content", "Content"),
+    ("old_text", "Replace"),
+    ("new_text", "With"),
+    ("body", "Body"),
+];
+
+/// The first line of a decision's context, which says why it is asked.
+#[must_use]
+pub fn context_line(decision: &Decision) -> Option<&str> {
+    decision
+        .context
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
+/// The tool's arguments as a decision card shows them, one `Label: value`
+/// per line, each value on one line and cut short: for `open_pull_request`
+/// the repository and title, for a memory change the path and an excerpt.
+#[must_use]
+pub fn arguments(decision: &Decision) -> Vec<String> {
+    let Some(object) = decision.arguments.as_object() else {
+        return Vec::new();
+    };
+    let shown = |value: &Json| -> Option<String> {
+        let text = match value {
+            Json::String(text) => text.clone(),
+            Json::Number(_) | Json::Bool(_) => value.to_string(),
+            _ => return None,
+        };
+        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        Some(match line.char_indices().nth(ARGUMENT_CHARS) {
+            Some((at, _)) => format!("{}…", line[..at].trim_end()),
+            None => line,
+        })
+    };
+    let known = ARGUMENTS
+        .iter()
+        .filter_map(|(name, label)| Some(format!("{label}: {}", shown(object.get(*name)?)?)));
+    let mut rest: Vec<(&String, &Json)> = object
+        .iter()
+        .filter(|(name, _)| !ARGUMENTS.iter().any(|(known, _)| known == name))
+        .collect();
+    rest.sort_by(|a, b| a.0.cmp(b.0));
+    let rest = rest.into_iter().filter_map(|(name, value)| {
+        let mut label = name.replace('_', " ");
+        if let Some(first) = label.get(..1) {
+            label = format!("{}{}", first.to_uppercase(), &label[1..]);
+        }
+        Some(format!("{label}: {}", shown(value)?))
+    });
+    known.chain(rest).collect()
+}
+
+/// The last action you took and where it stands, which the status area
+/// shows on every screen until the next one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Activity {
+    /// Under way: `Sending to work / api…`.
+    Working(String),
+    /// Done: `Sent to the lead of work / api.`.
+    Done(String),
+    /// Failed, with the hub's reason.
+    Failed(String),
+}
+
+impl Activity {
+    /// What the status area says.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Working(text) | Self::Done(text) | Self::Failed(text) => text,
+        }
+    }
 }
 
 /// A decision waiting on you, labeled with its space.
@@ -612,6 +706,14 @@ pub struct AppState {
     /// Where the Home composer sends: space and project.
     target: Option<InSpace<String>>,
     codes: HashMap<String, IssuedCode>,
+    /// Each project's memory, for the Memory tab.
+    memory: HashMap<InSpace<String>, memory::MemoryView>,
+    /// The last action and where it stands.
+    activity: Option<Activity>,
+    /// The space you asked to unpair, until you confirm or cancel.
+    unpairing: Option<String>,
+    /// Spaces unpaired since the app started: their feed is no longer shown.
+    forgotten: HashSet<String>,
 }
 
 impl AppState {
@@ -838,6 +940,66 @@ impl AppState {
     /// Takes a join code its hub issued.
     pub fn issued(&mut self, code: IssuedCode) {
         self.codes.insert(code.space.clone(), code);
+    }
+
+    /// The last action and where it stands, if any.
+    #[must_use]
+    pub fn activity(&self) -> Option<&Activity> {
+        self.activity.as_ref()
+    }
+
+    /// Records the last action: it stays shown, on every screen, until the
+    /// next one.
+    pub fn report(&mut self, activity: Activity) {
+        self.activity = Some(activity);
+    }
+
+    /// Takes a space this app was just paired with: the sidebar lists it at
+    /// once, and the next refresh fills it in.
+    pub fn space_added(&mut self, name: &str) {
+        self.forgotten.remove(name);
+        if self.space(name).is_none() {
+            self.spaces.push(Space::new(name));
+        }
+    }
+
+    /// Asks to unpair `space`, which waits for [`AppState::space_removed`]
+    /// or [`AppState::cancel_unpair`].
+    pub fn ask_unpair(&mut self, space: &str) {
+        self.unpairing = Some(space.to_owned());
+    }
+
+    /// The space waiting for you to confirm that it should be unpaired.
+    #[must_use]
+    pub fn unpairing(&self) -> Option<&str> {
+        self.unpairing.as_deref()
+    }
+
+    /// Keeps the space you asked to unpair.
+    pub fn cancel_unpair(&mut self) {
+        self.unpairing = None;
+    }
+
+    /// Forgets a space this app was unpaired from: it leaves the sidebar,
+    /// Home and the composer at once, and its feed is no longer shown.
+    pub fn space_removed(&mut self, name: &str) {
+        self.unpairing = None;
+        self.forgotten.insert(name.to_owned());
+        self.spaces.retain(|space| space.name != name);
+        self.queue.retain(|queued| queued.space != name);
+        self.delivered.retain(|(space, _), _| space != name);
+        self.said.retain(|(space, _), _| space != name);
+        self.loaded.retain(|(space, _), _| space != name);
+        self.projects.retain(|(space, _), _| space != name);
+        self.tasks.retain(|(space, _), _| space != name);
+        self.memory.retain(|(space, _), _| space != name);
+        self.codes.remove(name);
+        if self.filter.as_deref() == Some(name) {
+            self.filter = None;
+        }
+        if self.target.as_ref().is_some_and(|(space, _)| space == name) {
+            self.target = None;
+        }
     }
 
     /// Takes what a refresh learned. A hub that could not be reached, or
@@ -1139,12 +1301,14 @@ impl AppState {
     /// failed.
     #[must_use]
     pub fn retry_soon(&self) -> bool {
+        let failed = |answers: &BTreeMap<Part, Answer>| {
+            answers
+                .values()
+                .any(|answer| matches!(answer, Answer::Failed(_)))
+        };
         self.spaces.iter().any(Space::stale)
-            || self.projects.values().any(|view| {
-                view.answers
-                    .values()
-                    .any(|answer| matches!(answer, Answer::Failed(_)))
-            })
+            || self.projects.values().any(|view| failed(&view.answers))
+            || self.memory.values().any(|view| failed(view.answers()))
     }
 
     /// `(online, all)` machines of every space, or `None` while one of them
@@ -1237,6 +1401,30 @@ impl AppState {
         self.target = Some((space.to_owned(), project.to_owned()));
     }
 
+    /// Takes a message to a task its hub accepted, so the task's timeline
+    /// shows it before the next load does.
+    pub fn sent_to_task(
+        &mut self,
+        space: &str,
+        task: TaskId,
+        text: &str,
+        event: EventId,
+        at: Timestamp,
+    ) {
+        if let Some(detail) = self.tasks.get_mut(&(space.to_owned(), task)) {
+            let known = detail.messages.iter().any(|entry| {
+                matches!(entry, ConversationEntry::You { event_id, .. } if *event_id == event)
+            });
+            if !known {
+                detail.messages.push(ConversationEntry::You {
+                    event_id: event,
+                    text: text.to_owned(),
+                    at,
+                });
+            }
+        }
+    }
+
     /// Takes an answer its hub accepted: the decision no longer waits, even
     /// when an earlier answer was the one that counted.
     pub fn answered(&mut self, answer: &SpaceAnswer) {
@@ -1260,7 +1448,9 @@ impl AppState {
     /// time. An ordinary message, or an item already taken (a feed replayed
     /// after a reconnect), raises none, and a repeat is not shown again.
     pub fn receive(&mut self, item: SpaceFeedItem) -> Option<Alert> {
-        if !self.notified.insert((item.space.clone(), item.item.seq)) {
+        if self.forgotten.contains(&item.space)
+            || !self.notified.insert((item.space.clone(), item.item.seq))
+        {
             return None;
         }
         let alert = match item.kind() {
