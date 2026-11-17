@@ -1003,8 +1003,9 @@ fn mode_control(id: String, choices: &[ModeChoice]) -> ButtonGroup {
                 .selected(choice.selected);
             match &choice.locked {
                 None => button.label(choice.label),
+                // A stored mode above the ceiling stays shown as selected.
                 Some(why) => button
-                    .disabled(true)
+                    .disabled(!choice.selected)
                     .tooltip(why.clone())
                     .accessibility_label(format!("{}, locked: {why}", choice.label))
                     .child(div().line_through().child(choice.label)),
@@ -1025,12 +1026,17 @@ fn locked_note(choices: &[ModeChoice], muted: Hsla) -> Option<Div> {
     let why = locked.first()?.locked.clone()?;
     let names: Vec<&str> = locked.iter().map(|choice| choice.label).collect();
     let verb = if names.len() == 1 { "is" } else { "are" };
-    Some(
-        div()
-            .text_xs()
-            .text_color(muted)
-            .child(format!("{} {verb} locked: {why}.", names.join(" and "))),
-    )
+    Some(div().text_xs().text_color(muted).child(
+        match locked.iter().find(|choice| choice.selected) {
+            Some(set) => format!(
+                "Set to {}, which is above the ceiling, so it acts at the ceiling. {} {verb} \
+                     locked: {why}.",
+                set.label,
+                names.join(" and ")
+            ),
+            None => format!("{} {verb} locked: {why}.", names.join(" and ")),
+        },
+    ))
 }
 
 /// How the mode control names `mode`.
