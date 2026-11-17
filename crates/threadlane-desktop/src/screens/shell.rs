@@ -1,5 +1,6 @@
 //! The shell's sidebar (wireframe "Home", left): Home with what needs you,
-//! each paired space with its reachability and projects, Agents, Machines.
+//! each paired space with its reachability and projects, Agents, Routines,
+//! Machines, Settings.
 //! Every row is a GPUI Kit button, so assistive technology names it and
 //! can press it.
 
@@ -95,6 +96,12 @@ impl Desktop {
                 machines,
                 self.screen == Screen::Machines,
                 cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx)),
+            ))
+            .child(row(
+                "go-settings",
+                "Settings".to_owned(),
+                self.screen == Screen::Settings,
+                cx.listener(|this, _, _, cx| this.go(Screen::Settings, cx)),
             ))
     }
 }

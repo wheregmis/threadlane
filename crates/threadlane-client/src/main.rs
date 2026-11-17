@@ -432,7 +432,9 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         Command::Project {
             command: ProjectCommand::Resume { space, name },
         } => {
-            let project = core.set_paused(space.as_deref(), Some(&name), false).await?;
+            let project = core
+                .set_paused(space.as_deref(), Some(&name), false)
+                .await?;
             println!("resumed project {}", project.name);
         }
         Command::Task {

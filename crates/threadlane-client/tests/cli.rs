@@ -1142,7 +1142,11 @@ async fn the_cli_pauses_and_resumes_projects_and_cancels_tasks() {
     .await;
     let output = threadlane(client_dir, &["task", "cancel", "3x"]).await;
     assert!(!output.status.success(), "a task id is checked");
-    assert!(stderr(&output).contains("not a task id"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not a task id"),
+        "{}",
+        stderr(&output)
+    );
     assert_eq!(
         *hub.fake.0.org.lock().expect("lock"),
         vec![

@@ -15,6 +15,7 @@ mod machines;
 mod new_project;
 mod project;
 mod routines;
+mod settings;
 mod shell;
 mod task;
 

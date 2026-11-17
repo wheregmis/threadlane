@@ -1,5 +1,6 @@
 //! A task (wireframe 5): who took it, on which machine, what happened, the
-//! decision it waits on, the tasks around it, and a composer to its lane.
+//! decision it waits on, the tasks around it, a composer to its lane, and
+//! Cancel. Tasks have no paused state in the hub, so there is no Pause.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
@@ -7,7 +8,7 @@ use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::TaskId;
-use threadlane_desktop::{When, changes, chips, status_label, timeline, usage};
+use threadlane_desktop::{TaskControl, When, changes, chips, status_label, timeline, usage};
 
 use super::{gap_line, heading, link, section};
 use crate::{Desktop, Screen, Tab};
@@ -134,6 +135,49 @@ impl Desktop {
                 .children(usage(detail, when)),
         );
 
+        let control = match self.state.task_control(space, task) {
+            TaskControl::Ended => None,
+            TaskControl::Cancel => {
+                let in_space = space.to_owned();
+                Some(
+                    h_flex().child(
+                        Button::new("task-cancel")
+                            .small()
+                            .ghost()
+                            .label("Cancel")
+                            .accessibility_label(format!("Cancel {task}"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.ask_cancel_task(&in_space, task);
+                                cx.notify();
+                            })),
+                    ),
+                )
+            }
+            TaskControl::Confirm(text) => {
+                let in_space = space.to_owned();
+                Some(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(div().text_sm().child(text))
+                        .child(
+                            Button::new("task-cancel-confirm")
+                                .small()
+                                .danger()
+                                .label(format!("Cancel {task}"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.cancel_task(in_space.clone(), task, cx);
+                                })),
+                        )
+                        .child(Button::new("task-keep").small().label("Keep it").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.keep_task();
+                                cx.notify();
+                            }),
+                        )),
+                )
+            }
+        };
         v_flex()
             .id("task")
             .flex_1()
@@ -167,6 +211,7 @@ impl Desktop {
                     .clone()
                     .map(|why| div().text_sm().text_color(muted).child(why)),
             )
+            .children(control)
             .child(
                 h_flex()
                     .items_start()

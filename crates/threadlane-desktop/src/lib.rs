@@ -34,8 +34,8 @@ mod tasks;
 
 pub use clock::{When, duration};
 pub use control::{
-    AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository,
-    copy_agent, same_remote,
+    AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository, copy_agent,
+    same_remote,
 };
 pub use conversation::Line;
 pub use machines::{MachineRow, machine_row};

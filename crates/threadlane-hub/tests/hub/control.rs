@@ -170,7 +170,11 @@ async fn cancelling_a_task_cancels_what_waits_on_it_and_tells_the_lead_once() {
     let again = task(&hub, TaskRequest::Cancel { task: first.id })
         .await
         .unwrap();
-    assert_eq!(again.status, TaskStatus::Cancelled, "a second cancel is a no-op");
+    assert_eq!(
+        again.status,
+        TaskStatus::Cancelled,
+        "a second cancel is a no-op"
+    );
     let Ok(OverviewReply::Task { task: detail }) = hub
         .api
         .overview(OverviewRequest::Task { task: second.id })

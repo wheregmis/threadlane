@@ -1,12 +1,16 @@
-//! The agents of each space (wireframe 6): the definitions as cards, and
-//! the modes grid, one row per project and one cell per agent. A cell
-//! changes that agent's mode in that project.
+//! The agents of each space (wireframe 6): the definitions as cards, with
+//! "+ New agent" and "Copy an agent to <space>…", and the modes grid, one
+//! row per project and one cell per agent. A cell changes that agent's mode
+//! in that project, binding it there from "—".
 
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::*;
-use threadlane_desktop::Part;
+use threadlane_desktop::{BACKENDS, Part};
 
 use super::project::{MODES, mode_name};
 use super::{gap_line, heading, section};
@@ -129,9 +133,56 @@ impl Desktop {
                 table = table.child(line);
             }
 
-            let mut part = v_flex()
-                .gap_2()
-                .child(section(format!("Definitions in {}", space.name)));
+            let mut actions = h_flex().gap_2().flex_wrap().child(
+                Button::new(SharedString::from(format!("new-agent-{}", space.name)))
+                    .small()
+                    .primary()
+                    .label("+ New agent")
+                    .accessibility_label(format!("New agent in {}", space.name))
+                    .on_click({
+                        let space = space.name.clone();
+                        cx.listener(move |this, _, _, cx| {
+                            this.state.agent_form_mut().space = Some(space.clone());
+                            cx.notify();
+                        })
+                    }),
+            );
+            for (to, agents) in self.state.copy_targets(&space.name) {
+                let label = format!("Copy an agent to {to}…");
+                let view = view.clone();
+                let button = Button::new(SharedString::from(format!(
+                    "copy-agents-{}-{to}",
+                    space.name
+                )))
+                .small()
+                .label(label.clone())
+                .accessibility_label(label)
+                .disabled(agents.is_empty())
+                .dropdown_menu(move |mut menu, _, _| {
+                    for agent in &agents {
+                        let (agent, to, view) = (agent.clone(), to.clone(), view.clone());
+                        menu = menu.item(PopupMenuItem::new(agent.name.clone()).on_click(
+                            move |_, _, cx| {
+                                let _gone = view.update(cx, |this, cx| {
+                                    this.copy_agent(agent.clone(), to.clone(), cx);
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                });
+                actions = actions.child(button);
+            }
+            let mut part = v_flex().gap_2().child(
+                h_flex()
+                    .justify_between()
+                    .gap_2()
+                    .child(section(format!("Definitions in {}", space.name)))
+                    .child(actions),
+            );
+            if self.state.agent_form().space.as_deref() == Some(space.name.as_str()) {
+                part = part.child(self.agent_form(&space.name, cx));
+            }
             if let Some(gap) = space.gap(Part::Agents) {
                 part = part.child(gap_line(&gap, "the agents", cx));
             }
@@ -144,5 +195,72 @@ impl Desktop {
             screen = screen.child(part.child(table));
         }
         screen.into_any_element()
+    }
+}
+
+impl Desktop {
+    /// The "+ New agent" form: name, role, instructions, and the backends
+    /// in order of preference.
+    fn agent_form(&self, space: &str, cx: &mut Context<Self>) -> Div {
+        let picked = self.state.agent_form().backends;
+        let backends = ButtonGroup::new("agent-backends")
+            .outline()
+            .compact()
+            .children(BACKENDS.iter().enumerate().map(|(index, (label, _))| {
+                Button::new(SharedString::from(format!("agent-backends-{index}")))
+                    .label(*label)
+                    .selected(picked == index)
+            }))
+            .on_click(cx.listener(|this, clicked: &Vec<usize>, _, cx| {
+                if let Some(index) = clicked.first() {
+                    this.state.agent_form_mut().backends = *index;
+                    cx.notify();
+                }
+            }));
+        let space = space.to_owned();
+        v_flex()
+            .gap_2()
+            .p_3()
+            .max_w(px(560.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(cx.theme().radius)
+            .child(section(format!("New agent in {space}")))
+            .child(Input::new(&self.agent_name))
+            .child(Input::new(&self.agent_role))
+            .child(Input::new(&self.agent_instructions))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Backends, in order of preference"),
+            )
+            .child(backends)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("It is bound to no project yet: pick its mode in a — cell below."),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("agent-create")
+                            .primary()
+                            .label("Create agent")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.create_agent(space.clone(), cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("agent-close")
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.agent_form_mut().space = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 }

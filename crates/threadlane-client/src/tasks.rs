@@ -69,7 +69,11 @@ impl ClientCore {
         self.one_task(space, TaskRequest::Cancel { task: id }).await
     }
 
-    async fn one_task(&self, space: Option<&str>, request: TaskRequest) -> Result<Task, ClientError> {
+    async fn one_task(
+        &self,
+        space: Option<&str>,
+        request: TaskRequest,
+    ) -> Result<Task, ClientError> {
         let (space, api) = self.target(space)?;
         match api.tasks(request).await.map_err(|e| api_error(&space, e))? {
             TaskReply::Task { task } => Ok(task),

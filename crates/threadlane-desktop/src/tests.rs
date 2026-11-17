@@ -16,10 +16,10 @@ use threadlane_core::ids::{
     AgentId, LaneId, MachineId, OutboxId, RepositoryId, RunId, SessionId, TimerId,
 };
 use threadlane_core::model::{
-    BackendKind, DecisionKind, DecisionOption, DecisionStatus, EventKind, MachineTrust,
-    MemoryFile, Mode, Repository,
-    OutboxMessage, OutboxStatus, Recurrence, Rule, Run, RunOutcome, RunStatus, Task, TaskOrigin,
-    TaskStatus, Timer, TimerCategory, TimerCreator, TimerStatus, Urgency, Weekday,
+    BackendKind, DecisionKind, DecisionOption, DecisionStatus, EventKind, MachineTrust, MemoryFile,
+    Mode, OutboxMessage, OutboxStatus, Recurrence, Repository, Rule, Run, RunOutcome, RunStatus,
+    Task, TaskOrigin, TaskStatus, Timer, TimerCategory, TimerCreator, TimerStatus, Urgency,
+    Weekday,
 };
 use threadlane_core::time::Timestamp;
 
@@ -2144,7 +2144,10 @@ async fn a_new_agent_is_listed_with_unbound_cells_that_bind_it() {
         .await
         .expect("bound");
     state.mode_set("work", "api", bound);
-    assert_eq!(state.modes("work").rows[0].modes, Ok(vec![Some(Mode::OnRequest)]));
+    assert_eq!(
+        state.modes("work").rows[0].modes,
+        Ok(vec![Some(Mode::OnRequest)])
+    );
 }
 
 #[tokio::test]
@@ -2168,14 +2171,22 @@ async fn copying_an_agent_offers_what_the_other_space_lacks_and_copies_it_whole(
     let targets = state.copy_targets("work");
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].0, "home");
-    let offered: Vec<&str> = targets[0].1.iter().map(|agent| agent.name.as_str()).collect();
+    let offered: Vec<&str> = targets[0]
+        .1
+        .iter()
+        .map(|agent| agent.name.as_str())
+        .collect();
     assert_eq!(offered, ["Reviewer"], "Writer is there already");
 
     let copied = copy_agent(&core, &targets[0].1[0], "home")
         .await
         .expect("copied");
     assert_eq!(
-        (copied.role.as_str(), copied.instructions.as_str(), copied.backends.as_slice()),
+        (
+            copied.role.as_str(),
+            copied.instructions.as_str(),
+            copied.backends.as_slice()
+        ),
         ("role", "Be Reviewer.", [BackendKind::Codex].as_slice())
     );
     state.agent_created("home", copied);
@@ -2374,7 +2385,10 @@ async fn events_nobody_asked_for_are_a_collapsed_section_and_a_count_on_home() {
     assert!(!state.status_line().contains("recorded"));
 
     work.recorded.lock().expect("lock").extend([
-        recorded_event(2, "\nGitHub: review requested on acme/api, pull request #4\n\nBody"),
+        recorded_event(
+            2,
+            "\nGitHub: review requested on acme/api, pull request #4\n\nBody",
+        ),
         recorded_event(1, "Routine 3 fired."),
     ]);
     state.apply(refresh(&core).await);
@@ -2464,7 +2478,11 @@ async fn settings_show_what_each_hub_reports_and_how_it_is_reached() {
     assert_eq!(row.ceiling, Some(Mode::Assisted));
     assert_eq!(row.schema_version, Some(1));
     assert_eq!(row.host.as_deref(), Some("studio"));
-    assert!(row.reached_by.starts_with("Unix socket"), "{}", row.reached_by);
+    assert!(
+        row.reached_by.starts_with("Unix socket"),
+        "{}",
+        row.reached_by
+    );
 
     // Away, it keeps what it last reported.
     work.down.store(true, Ordering::SeqCst);

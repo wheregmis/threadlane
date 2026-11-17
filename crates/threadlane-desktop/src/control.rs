@@ -292,7 +292,11 @@ impl AppState {
             .projects
             .entry((space.to_owned(), project.to_owned()))
             .or_default();
-        if !view.repositories.iter().any(|known| known.id == repository.id) {
+        if !view
+            .repositories
+            .iter()
+            .any(|known| known.id == repository.id)
+        {
             view.repositories.push(repository);
         }
     }
@@ -426,7 +430,9 @@ impl AppState {
         let waiting = detail
             .related
             .iter()
-            .filter(|other| other.task.depends_on.contains(&task) && !other.task.status.is_terminal())
+            .filter(|other| {
+                other.task.depends_on.contains(&task) && !other.task.status.is_terminal()
+            })
             .count();
         let also = match waiting {
             0 => String::new(),
@@ -472,7 +478,12 @@ impl AppState {
             .spaces
             .iter_mut()
             .find(|known| known.name == space)
-            .and_then(|known| known.projects.iter_mut().find(|other| other.id == project.id))
+            .and_then(|known| {
+                known
+                    .projects
+                    .iter_mut()
+                    .find(|other| other.id == project.id)
+            })
         {
             *known = project;
         }

@@ -1,5 +1,6 @@
 //! A project (wireframes 2, 3, 4): its tasks by status, the conversation
-//! with its lead, the mode of each agent bound in it, and its memory.
+//! with its lead, the mode of each agent bound in it, and its memory; on
+//! its header "Pause project" and "+ New task", which skips the lead.
 
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::{Input, Textarea};
@@ -48,11 +49,7 @@ impl Desktop {
                 );
             }))
             .children(Tab::ALL.map(Tab::label));
-        let paused = self
-            .state
-            .space(space)
-            .and_then(|known| known.projects.iter().find(|p| p.name == project))
-            .is_some_and(|summary| summary.paused);
+        let paused = self.state.is_paused(space, project);
         let lead = self.state.lead_line(space, project, when);
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
@@ -61,6 +58,36 @@ impl Desktop {
             Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Memory => self.memory_tab(space, project, when, cx),
         };
+        let (pause_space, pause_project) = (space.to_owned(), project.to_owned());
+        let (task_space, task_project) = (space.to_owned(), project.to_owned());
+        let form_open = self.state.task_form(space, project).is_some();
+        let actions = h_flex()
+            .gap_2()
+            .child(
+                Button::new("pause-project")
+                    .small()
+                    .label(if paused {
+                        "Resume project"
+                    } else {
+                        "Pause project"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_paused(pause_space.clone(), pause_project.clone(), !paused, cx);
+                    })),
+            )
+            .child(
+                Button::new("new-task")
+                    .small()
+                    .primary()
+                    .label("+ New task")
+                    .accessibility_label("New task, skipping the lead")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state
+                            .open_task_form(&task_space, &task_project, !form_open);
+                        cx.notify();
+                    })),
+            );
+        let form = form_open.then(|| self.task_form(space, project, cx));
         v_flex()
             .flex_1()
             .min_h_0()
@@ -85,8 +112,11 @@ impl Desktop {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(line)
-                    })),
+                    }))
+                    .child(div().flex_1())
+                    .child(actions),
             )
+            .children(form)
             .child(bar)
             .child(body)
             .into_any_element()
@@ -213,6 +243,7 @@ impl Desktop {
                     ),
             );
         }
+        side = side.child(self.repository_form(space, project, cx));
         side = side.child(section("Agents here"));
         if let Some(gap) = self.state.project_gap(space, project, Part::Bindings) {
             side = side.child(gap_line(&gap, "the agents", cx));
@@ -308,6 +339,7 @@ impl Desktop {
                     .child("Nothing here yet. Give the lead a goal below."),
             );
         }
+        let recorded = self.state.recorded(space, project, when);
         for line in conversation {
             let said = |who: &str, time: String, text: String| {
                 v_flex()
@@ -347,6 +379,9 @@ impl Desktop {
                     }
                 }
             };
+        }
+        if let Some(recorded) = recorded {
+            lines = lines.child(self.recorded_section(space, project, recorded, cx));
         }
 
         let mut side = v_flex().w(px(220.)).flex_none().gap_2();
@@ -698,4 +733,237 @@ pub(super) fn mode_name(mode: Mode) -> &'static str {
         .iter()
         .find(|(known, _)| *known == mode)
         .map_or("?", |(_, label)| label)
+}
+
+impl Desktop {
+    /// The "+ New task" form (wireframe 2, note 3): title, goal, the agent
+    /// that does it, its repositories, and the tasks it waits for.
+    fn task_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> Div {
+        let muted = cx.theme().muted_foreground;
+        let Some(form) = self.state.task_form(space, project) else {
+            return div();
+        };
+        let label = |text: &'static str| div().w(px(100.)).text_sm().text_color(muted).child(text);
+        let agents = self.state.task_agents(space, project);
+        let agent_row = if agents.is_empty() {
+            div()
+                .text_sm()
+                .text_color(muted)
+                .child("No agent here is on. Turn one on in the Agents tab.")
+        } else {
+            let mut row = h_flex().gap_1().flex_wrap();
+            for agent in agents {
+                let picked = form.agent.as_deref() == Some(agent.as_str());
+                let chosen = agent.clone();
+                row = row.child(
+                    Button::new(SharedString::from(format!("task-agent-{agent}")))
+                        .small()
+                        .label(agent)
+                        .selected(picked)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.task_form_mut().agent = Some(chosen.clone());
+                            cx.notify();
+                        })),
+                );
+            }
+            row
+        };
+        let mut repositories = h_flex().gap_1().flex_wrap();
+        let names = self.state.task_repositories(space, project);
+        if names.is_empty() {
+            repositories = repositories.child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("None registered; it works without one."),
+            );
+        }
+        for name in names {
+            let picked = form.repositories.contains(&name);
+            let toggled = name.clone();
+            repositories = repositories.child(
+                Button::new(SharedString::from(format!("task-repository-{name}")))
+                    .small()
+                    .label(name)
+                    .selected(picked)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.task_form_mut().toggle_repository(&toggled);
+                        cx.notify();
+                    })),
+            );
+        }
+        let mut waits = h_flex().gap_1().flex_wrap();
+        let open = self.state.task_dependencies(space, project);
+        if open.is_empty() {
+            waits = waits.child(div().text_sm().text_color(muted).child("No open tasks."));
+        }
+        for (id, name) in open {
+            let picked = form.depends_on.contains(&id);
+            waits = waits.child(
+                Button::new(SharedString::from(format!("task-waits-{id}")))
+                    .small()
+                    .label(name)
+                    .selected(picked)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.task_form_mut().toggle_dependency(id);
+                        cx.notify();
+                    })),
+            );
+        }
+        let (in_space, named) = (space.to_owned(), project.to_owned());
+        let (close_space, close_project) = (space.to_owned(), project.to_owned());
+        v_flex()
+            .gap_2()
+            .p_3()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(cx.theme().radius)
+            .child(section("New task"))
+            .child(Input::new(&self.task_title))
+            .child(Input::new(&self.task_goal))
+            .child(h_flex().gap_2().child(label("Agent")).child(agent_row))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(label("Repositories"))
+                    .child(repositories),
+            )
+            .child(h_flex().gap_2().child(label("Waits for")).child(waits))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("It skips the lead and is yours: work you requested."),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("task-create")
+                            .primary()
+                            .label("Create task")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.create_task(in_space.clone(), named.clone(), cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("task-close")
+                            .label("Cancel")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state
+                                    .open_task_form(&close_space, &close_project, false);
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
+    /// "+ Add repository", or the form it opens: name, remote, default
+    /// branch.
+    fn repository_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
+        let (in_space, named) = (space.to_owned(), project.to_owned());
+        if !self.state.repository_form_open(space, project) {
+            return Button::new("add-repository")
+                .small()
+                .ghost()
+                .label("+ Add repository")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.open_repository_form(&in_space, &named, true);
+                    cx.notify();
+                }))
+                .into_any_element();
+        }
+        let (close_space, close_project) = (space.to_owned(), project.to_owned());
+        v_flex()
+            .gap_2()
+            .child(Input::new(&self.repository_name))
+            .child(Input::new(&self.repository_remote))
+            .child(Input::new(&self.repository_branch))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "Every other paired space is checked first: a repository belongs to one.",
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("repository-add")
+                            .small()
+                            .primary()
+                            .label("Add")
+                            .accessibility_label("Add repository")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.add_repository(in_space.clone(), named.clone(), cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("repository-close")
+                            .small()
+                            .label("Cancel")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.open_repository_form(
+                                    &close_space,
+                                    &close_project,
+                                    false,
+                                );
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// "Recorded, not acted on (N)", collapsed until clicked: what arrived
+    /// that no one asked for, so no run started.
+    fn recorded_section(
+        &self,
+        space: &str,
+        project: &str,
+        recorded: threadlane_desktop::Recorded,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let muted = cx.theme().muted_foreground;
+        let (in_space, named) = (space.to_owned(), project.to_owned());
+        let mark = if recorded.open { "▾" } else { "▸" };
+        let mut part = v_flex().gap_1().pt_2().child(
+            link("recorded-toggle", format!("{mark} {}", recorded.title)).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.state.toggle_recorded(&in_space, &named);
+                    cx.notify();
+                },
+            )),
+        );
+        if recorded.open {
+            part = part.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("These arrived, but no one asked for the work, so no run started."),
+            );
+            for row in recorded.rows {
+                part = part.child(
+                    h_flex()
+                        .gap_2()
+                        .items_start()
+                        .text_sm()
+                        .child(
+                            div()
+                                .w(px(110.))
+                                .flex_none()
+                                .text_color(muted)
+                                .child(format!("{} · {}", row.time, row.source)),
+                        )
+                        .child(div().min_w_0().child(row.text)),
+                );
+            }
+            if let Some(more) = recorded.more {
+                part = part.child(div().text_xs().text_color(muted).child(more));
+            }
+        }
+        part
+    }
 }
