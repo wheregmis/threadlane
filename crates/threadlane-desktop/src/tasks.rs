@@ -34,6 +34,8 @@ pub struct BoardCard {
     pub meta: String,
     /// The decision waiting on you in it, which the card offers to answer.
     pub decision: Option<DecisionId>,
+    /// That decision's options, which answer it from the card.
+    pub options: Vec<String>,
 }
 
 /// The columns in board order, and whether each is shown when empty.
@@ -92,7 +94,13 @@ impl AppState {
                     })
                     .map(|summary| {
                         let task = &summary.task;
-                        let decision = self.open_for(space, task.id).map(|q| q.decision.id);
+                        let open = self.open_for(space, task.id).map(|q| &q.decision);
+                        let decision = open.map(|decision| decision.id);
+                        let options = open
+                            .map(|decision| {
+                                decision.options.iter().map(|o| o.label.clone()).collect()
+                            })
+                            .unwrap_or_default();
                         let detail = match (task.status, decision) {
                             (_, Some(id)) => format!("{id} open"),
                             (TaskStatus::Running, None) => match summary.running_since {
@@ -125,6 +133,7 @@ impl AppState {
                                 format!("{} · {detail}", summary.agent)
                             },
                             decision,
+                            options,
                         }
                     })
                     .collect();

@@ -278,6 +278,9 @@ pub enum OverviewRequest {
     Recent { limit: u32 },
     /// The machines that joined the space, and its model accounts.
     Machines,
+    /// Whether a project's lead is working: when the run in progress on its
+    /// lead lane started. `None` as the project means the General project.
+    Lead { project: Option<String> },
 }
 
 /// The answer to an [`OverviewRequest`].
@@ -300,6 +303,10 @@ pub enum OverviewReply {
     Machines {
         machines: Vec<Machine>,
         accounts: Vec<Account>,
+    },
+    /// When the lead's run in progress started; `None` while it is idle.
+    Lead {
+        running_since: Option<Timestamp>,
     },
 }
 

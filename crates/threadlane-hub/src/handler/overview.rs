@@ -269,6 +269,17 @@ pub(super) async fn handle(
             machines: db.machines().await.map_err(api_error)?,
             accounts: db.accounts().await.map_err(api_error)?,
         }),
+        OverviewRequest::Lead { project } => {
+            let project = api.project_named(project.as_deref()).await?;
+            let running_since = db
+                .lane_runs(project.lead_lane_id)
+                .await
+                .map_err(api_error)?
+                .into_iter()
+                .rfind(|run| run.status == RunStatus::Active)
+                .map(|run| run.started_at);
+            Ok(OverviewReply::Lead { running_since })
+        }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }
 }

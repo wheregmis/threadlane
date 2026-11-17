@@ -1513,11 +1513,13 @@ The smallest app that replaces the command line for daily use. The remaining scr
 
 ### Milestone 5: Memory and context
 
-- Memory store with scoping, versioning, generated indexes, size budgets.
-- Memory tools; what each run is given (section 8.5).
-- Task progress files; the final progress turn.
-- Protected instructions: a change outside a run you triggered becomes a decision.
-- Session rotation.
+**Status:** done on the scripted backend; design in `docs/milestone-5.md`. Not yet checked: any of it on the real `claude` or `codex`. Rotation when a task resumes on another machine waits for milestone 6. No final turn is taken after a failed run, which differs from section 4.5.
+
+- [x] Memory store with scoping, versioning, generated indexes, size budgets.
+- [x] Memory tools; what each run is given (section 8.5).
+- [x] Task progress files; the final progress turn.
+- [x] Protected instructions: a change outside a run you triggered becomes a decision.
+- [x] Session rotation.
 
 **Exit:** A project instruction given in one session changes behavior in a later one in the same project and has no effect in another project. A space instruction applies in every project of the hub. A task continues from its progress file after its native session is deleted. Appended instructions are byte-identical across runs when memory has not changed. Invariant 12.
 

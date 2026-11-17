@@ -1089,6 +1089,27 @@ impl ClientCore {
         }
     }
 
+    /// When the run in progress on a project's lead lane started, or `None`
+    /// while the lead is idle. `space: None` means the only paired hub;
+    /// `project: None` means the General project.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn lead(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Option<Timestamp>, ClientError> {
+        let request = OverviewRequest::Lead {
+            project: project.map(str::to_owned),
+        };
+        match self.overview(space, request).await? {
+            (_, OverviewReply::Lead { running_since }) => Ok(running_since),
+            (space, _) => Err(wrong_reply(&space, "lead")),
+        }
+    }
+
     async fn overview(
         &self,
         space: Option<&str>,

@@ -3,17 +3,18 @@
 
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::model::Mode;
-use threadlane_desktop::{Line, When};
+use threadlane_desktop::{Line, Part, When};
 
-use super::{heading, section};
+use super::{gap_line, heading, link, section};
 use crate::{Desktop, Screen, Tab};
 
 /// The four positions of the mode control (Plan.md §2.3).
-const MODES: [(Mode, &str); 4] = [
+pub(super) const MODES: [(Mode, &str); 4] = [
     (Mode::Off, "Off"),
     (Mode::OnRequest, "On request"),
     (Mode::Assisted, "Assisted"),
@@ -54,6 +55,7 @@ impl Desktop {
             .space(space)
             .and_then(|known| known.projects.iter().find(|p| p.name == project))
             .is_some_and(|summary| summary.paused);
+        let lead = self.state.lead_line(space, project, when);
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
             Tab::Conversation => self.conversation_tab(space, project, when, cx),
@@ -62,18 +64,28 @@ impl Desktop {
         v_flex()
             .flex_1()
             .min_h_0()
+            .min_w_0()
             .gap_2()
             .child(
-                h_flex().gap_2().child(heading(project.to_owned())).child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(if paused {
-                            format!("{space} · paused")
-                        } else {
-                            space.to_owned()
-                        }),
-                ),
+                h_flex()
+                    .gap_2()
+                    .child(heading(project.to_owned()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if paused {
+                                format!("{space} · paused")
+                            } else {
+                                space.to_owned()
+                            }),
+                    )
+                    .children(lead.map(|line| {
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(line)
+                    })),
             )
             .child(bar)
             .child(body)
@@ -89,6 +101,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let view = cx.entity().downgrade();
         let columns = self
             .state
             .board(space, project, when)
@@ -100,33 +113,57 @@ impl Desktop {
                         space: space.to_owned(),
                         task: card.id,
                     };
-                    let answer = card.decision.map(|_| {
-                        let screen = screen.clone();
+                    let answer = card.decision.map(|decision| {
+                        let (space, id, view) =
+                            (space.to_owned(), decision.to_string(), view.clone());
+                        let options = card.options.clone();
                         Button::new(SharedString::from(format!("answer-task-{}", card.id)))
                             .small()
                             .primary()
                             .label("Answer")
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
-                            )
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for option in &options {
+                                    let (space, id, option, view) =
+                                        (space.clone(), id.clone(), option.clone(), view.clone());
+                                    menu = menu.item(PopupMenuItem::new(option.clone()).on_click(
+                                        move |_, _, cx| {
+                                            let _gone = view.update(cx, |this, cx| {
+                                                this.answer(
+                                                    space.clone(),
+                                                    id.clone(),
+                                                    option.clone(),
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ));
+                                }
+                                menu
+                            })
                     });
                     v_flex()
-                        .id(SharedString::from(format!("card-{}", card.id)))
                         .gap_1()
                         .p_2()
+                        .min_w_0()
                         .bg(cx.theme().background)
                         .border_1()
                         .border_color(cx.theme().border)
                         .rounded(cx.theme().radius)
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
-                        .child(div().text_sm().child(format!("{} {}", card.id, card.title)))
+                        .child(
+                            link(
+                                format!("card-{}", card.id),
+                                format!("{} {}", card.id, card.title),
+                            )
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                            ),
+                        )
                         .child(div().text_xs().text_color(muted).child(card.meta))
                         .children(answer)
                 });
                 v_flex()
-                    .w(px(170.))
-                    .flex_none()
+                    .flex_1()
+                    .min_w(px(120.))
                     .gap_2()
                     .p_2()
                     .bg(cx.theme().muted)
@@ -134,22 +171,33 @@ impl Desktop {
                     .child(div().text_xs().text_color(muted).child(title))
                     .children(cards)
             });
-        let board = h_flex()
-            .id("board")
-            .flex_1()
-            .min_w_0()
-            .items_start()
-            .gap_2()
-            .overflow_x_scroll()
-            .children(columns);
+        let board = match self.state.project_gap(space, project, Part::Tasks) {
+            Some(gap) => div()
+                .flex_1()
+                .min_w_0()
+                .child(gap_line(&gap, "the tasks", cx))
+                .into_any_element(),
+            None => h_flex()
+                .id("board")
+                .flex_1()
+                .min_w_0()
+                .items_start()
+                .gap_2()
+                .overflow_x_scroll()
+                .children(columns)
+                .into_any_element(),
+        };
 
         let view = self.state.project(space, project);
-        let mut side = v_flex().w(px(250.)).flex_none().gap_2();
+        let mut side = v_flex().w(px(220.)).flex_none().gap_2();
         let repositories = view
             .map(|view| view.repositories.as_slice())
             .unwrap_or_default();
         side = side.child(section(format!("Repositories ({})", repositories.len())));
-        if repositories.is_empty() {
+        let gap = self.state.project_gap(space, project, Part::Repositories);
+        if let Some(gap) = &gap {
+            side = side.child(gap_line(gap, "the repositories", cx));
+        } else if repositories.is_empty() {
             side = side.child(div().text_sm().text_color(muted).child("None yet."));
         }
         for repository in repositories {
@@ -166,6 +214,9 @@ impl Desktop {
             );
         }
         side = side.child(section("Agents here"));
+        if let Some(gap) = self.state.project_gap(space, project, Part::Bindings) {
+            side = side.child(gap_line(&gap, "the agents", cx));
+        }
         for binding in view
             .map(|view| view.bindings.as_slice())
             .unwrap_or_default()
@@ -179,6 +230,13 @@ impl Desktop {
             );
         }
         side = side.child(section("Machines"));
+        if let Some(gap) = self
+            .state
+            .space(space)
+            .and_then(|known| known.gap(Part::Machines))
+        {
+            side = side.child(gap_line(&gap, "the machines", cx));
+        }
         for machine in self
             .state
             .space(space)
@@ -197,7 +255,9 @@ impl Desktop {
 
         h_flex()
             .flex_1()
+            .w_full()
             .min_h_0()
+            .min_w_0()
             .items_start()
             .gap_4()
             .child(board)
@@ -232,8 +292,16 @@ impl Desktop {
                     })),
             );
         }
+        if let Some(gap) = self.state.project_gap(space, project, Part::Conversation) {
+            lines = lines.child(gap_line(&gap, "the conversation", cx));
+        }
         let conversation = self.state.conversation(space, project, when);
-        if conversation.is_empty() {
+        if conversation.is_empty()
+            && self
+                .state
+                .project_gap(space, project, Part::Conversation)
+                .is_none()
+        {
             lines = lines.child(
                 div()
                     .text_color(muted)
@@ -281,14 +349,24 @@ impl Desktop {
             };
         }
 
-        let mut side = v_flex().w(px(250.)).flex_none().gap_2();
+        let mut side = v_flex().w(px(220.)).flex_none().gap_2();
         side = side.child(section("From this conversation"));
+        // The hub does not record which message made a task, so the tasks
+        // are listed here rather than under the message.
+        if let Some(gap) = self.state.project_gap(space, project, Part::Tasks) {
+            side = side.child(gap_line(&gap, "the tasks", cx));
+        }
         let tasks = self
             .state
             .project(space, project)
             .map(|view| view.tasks.as_slice())
             .unwrap_or_default();
-        if tasks.is_empty() {
+        if tasks.is_empty()
+            && self
+                .state
+                .project_gap(space, project, Part::Tasks)
+                .is_none()
+        {
             side = side.child(div().text_sm().text_color(muted).child("No tasks yet."));
         }
         for summary in tasks {
@@ -296,23 +374,16 @@ impl Desktop {
                 space: space.to_owned(),
                 task: summary.task.id,
             };
+            let status = threadlane_desktop::status_label(
+                summary.task.status,
+                summary.task.waiting_reason.as_deref(),
+            );
             side = side.child(
-                h_flex()
-                    .id(SharedString::from(format!("from-{}", summary.task.id)))
-                    .justify_between()
-                    .gap_2()
-                    .text_sm()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
-                    .child(format!("{} {}", summary.task.id, summary.task.title))
-                    .child(
-                        div()
-                            .text_color(muted)
-                            .child(threadlane_desktop::status_label(
-                                summary.task.status,
-                                summary.task.waiting_reason.as_deref(),
-                            )),
-                    ),
+                link(
+                    format!("from-{}", summary.task.id),
+                    format!("{} {} · {status}", summary.task.id, summary.task.title),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
             );
         }
         side = side.child(section("Open decisions"));
@@ -381,7 +452,10 @@ impl Desktop {
             .map(|view| view.bindings.as_slice())
             .unwrap_or_default();
         let mut rows = v_flex().gap_3().child(section("Agents in this project"));
-        if bindings.is_empty() {
+        let gap = self.state.project_gap(space, project, Part::Bindings);
+        if let Some(gap) = &gap {
+            rows = rows.child(gap_line(gap, "the agents", cx));
+        } else if bindings.is_empty() {
             rows = rows.child(div().text_color(muted).child("No agent is bound here yet."));
         }
         for binding in bindings {
@@ -428,7 +502,8 @@ impl Desktop {
     }
 }
 
-fn mode_name(mode: Mode) -> &'static str {
+/// How the mode control names `mode`.
+pub(super) fn mode_name(mode: Mode) -> &'static str {
     MODES
         .iter()
         .find(|(known, _)| *known == mode)

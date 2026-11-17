@@ -5,16 +5,42 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_desktop::Queued;
+use threadlane_desktop::{Gap, Queued};
 
 use crate::Desktop;
 
 mod agents;
 mod home;
 mod machines;
+mod new_project;
 mod project;
 mod shell;
 mod task;
+
+/// What a part shows instead of its contents: that it is loading, or the
+/// hub's error.
+fn gap_line(gap: &Gap, what: &str, cx: &App) -> Div {
+    match gap {
+        Gap::Loading => div()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!("Loading {what}…")),
+        Gap::Failed(why) => div()
+            .text_sm()
+            .text_color(cx.theme().danger)
+            .child(format!("Could not load {what}: {why}")),
+    }
+}
+
+/// A row that opens something: a full-width text button named by its
+/// label, whose text may wrap.
+fn link(id: impl Into<SharedString>, label: String) -> Button {
+    Button::new(id.into())
+        .text()
+        .w_full()
+        .accessibility_label(label.clone())
+        .child(div().w_full().whitespace_normal().child(label))
+}
 
 /// A screen's title.
 fn heading(text: impl Into<SharedString>) -> Div {

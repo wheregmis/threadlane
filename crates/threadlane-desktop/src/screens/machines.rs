@@ -5,9 +5,9 @@
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_desktop::{When, machine_row};
+use threadlane_desktop::{Part, Reach, When, machine_row};
 
-use super::{heading, section};
+use super::{gap_line, heading, section};
 use crate::Desktop;
 
 impl Desktop {
@@ -24,9 +24,10 @@ impl Desktop {
             screen = screen.child(div().text_color(muted).child("No hub is paired."));
         }
         for space in self.state.spaces() {
-            let reach = match &space.unreachable {
-                None => "reachable".to_owned(),
-                Some(why) => format!("out of reach: {why}"),
+            let reach = match &space.reach {
+                Reach::Unknown => "asking…".to_owned(),
+                Reach::Reachable => "reachable".to_owned(),
+                Reach::Unreachable(why) => format!("out of reach: {why}"),
             };
             let mut part = v_flex()
                 .gap_2()
@@ -40,11 +41,14 @@ impl Desktop {
                         .child(section(space.name.clone()))
                         .child(div().text_sm().text_color(muted).child(reach)),
                 )
-                .child(div().text_sm().text_color(muted).child(format!(
-                    "{} machines joined · {} running",
-                    space.machines.len(),
-                    space.running.len()
-                )));
+                .child(match space.gap(Part::Machines) {
+                    Some(gap) => gap_line(&gap, "the machines", cx),
+                    None => div().text_sm().text_color(muted).child(format!(
+                        "{} machines joined · {} running",
+                        space.machines.len(),
+                        space.running.len()
+                    )),
+                });
 
             for machine in &space.machines {
                 let row = machine_row(machine, when);
@@ -93,7 +97,9 @@ impl Desktop {
             }
 
             part = part.child(section("Paired apps"));
-            if space.clients.is_empty() {
+            if let Some(gap) = space.gap(Part::Clients) {
+                part = part.child(gap_line(&gap, "the paired apps", cx));
+            } else if space.clients.is_empty() {
                 part = part.child(
                     div()
                         .text_sm()

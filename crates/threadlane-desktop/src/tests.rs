@@ -13,19 +13,24 @@ use threadlane_core::client::{
 };
 use threadlane_core::ids::{AgentId, LaneId, MachineId, OutboxId, RunId, SessionId};
 use threadlane_core::model::{
-    BackendKind, DecisionKind, DecisionOption, DecisionStatus, Mode, OutboxMessage, OutboxStatus,
-    Run, RunOutcome, RunStatus, Task, TaskOrigin, TaskStatus, Urgency,
+    BackendKind, DecisionKind, DecisionOption, DecisionStatus, MachineTrust, Mode, OutboxMessage,
+    OutboxStatus, Run, RunOutcome, RunStatus, Task, TaskOrigin, TaskStatus, Urgency,
 };
 use threadlane_core::time::Timestamp;
 
 use super::*;
 
-/// A hub with one project, `api`, and what it was given. While `down`, it
-/// answers nothing.
+/// A hub with the projects `api` and General, and what it was given.
+/// While `down`, it answers nothing; while `old`, it answers like a hub
+/// from before the Overview capability.
 #[derive(Debug, Default)]
 struct FakeHub {
     space: String,
     down: AtomicBool,
+    old: AtomicBool,
+    created: Mutex<Vec<ProjectSummary>>,
+    machines: Mutex<Vec<Machine>>,
+    lead: Mutex<Option<Timestamp>>,
     decisions: Mutex<Vec<Decision>>,
     tasks: Mutex<Vec<TaskSummary>>,
     history: Mutex<Vec<ConversationEntry>>,
@@ -64,7 +69,8 @@ impl HubApi for FakeHub {
 
     async fn projects(&self) -> Result<Vec<ProjectSummary>, ApiError> {
         self.up()?;
-        Ok(vec![
+        let created = self.created.lock().expect("lock").clone();
+        Ok([
             ProjectSummary {
                 id: ProjectId(1),
                 name: "api".to_owned(),
@@ -77,7 +83,10 @@ impl HubApi for FakeHub {
                 is_general: true,
                 paused: false,
             },
-        ])
+        ]
+        .into_iter()
+        .chain(created)
+        .collect())
     }
 
     async fn send_message(&self, _message: &UserMessage) -> Result<Accepted, ApiError> {
@@ -95,9 +104,33 @@ impl HubApi for FakeHub {
             OrgRequest::Bindings { .. } => Ok(OrgReply::Bindings {
                 bindings: bindings.clone(),
             }),
+            OrgRequest::SetMode { agent, mode, .. }
+                if !bindings.iter().any(|b| b.agent == agent) =>
+            {
+                let binding = BindingSummary {
+                    agent,
+                    role: "reviewer".to_owned(),
+                    mode,
+                    is_lead: false,
+                };
+                bindings.push(binding.clone());
+                Ok(OrgReply::Binding { binding })
+            }
             OrgRequest::Repositories { .. } => Ok(OrgReply::Repositories {
                 repositories: Vec::new(),
             }),
+            OrgRequest::Agents => Ok(OrgReply::Agents { agents: Vec::new() }),
+            OrgRequest::CreateProject { name, .. } => {
+                let mut created = self.created.lock().expect("lock");
+                let project = ProjectSummary {
+                    id: ProjectId(3 + i64::try_from(created.len()).expect("few")),
+                    name,
+                    is_general: false,
+                    paused: false,
+                };
+                created.push(project.clone());
+                Ok(OrgReply::Project { project })
+            }
             OrgRequest::SetMode { agent, mode, .. } => {
                 let binding = bindings
                     .iter_mut()
@@ -135,12 +168,21 @@ impl HubApi for FakeHub {
         }
     }
 
-    async fn pairing(&self, _request: PairingRequest) -> Result<PairingReply, ApiError> {
-        Err(ApiError::Invalid("unsupported".to_owned()))
+    async fn pairing(&self, request: PairingRequest) -> Result<PairingReply, ApiError> {
+        self.up()?;
+        match request {
+            PairingRequest::Clients => Ok(PairingReply::Clients {
+                clients: Vec::new(),
+            }),
+            other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
+        }
     }
 
     async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
         self.up()?;
+        if self.old.load(Ordering::SeqCst) {
+            return Err(ApiError::Invalid("unknown variant `overview`".to_owned()));
+        }
         let tasks = self.tasks.lock().expect("lock").clone();
         match request {
             OverviewRequest::Tasks { .. } => Ok(OverviewReply::Tasks { tasks }),
@@ -156,6 +198,29 @@ impl HubApi for FakeHub {
             OverviewRequest::Recent { .. } => Ok(OverviewReply::Recent {
                 items: self.recent.lock().expect("lock").clone(),
             }),
+            OverviewRequest::Machines => Ok(OverviewReply::Machines {
+                machines: self.machines.lock().expect("lock").clone(),
+                accounts: Vec::new(),
+            }),
+            OverviewRequest::Lead { .. } => Ok(OverviewReply::Lead {
+                running_since: *self.lead.lock().expect("lock"),
+            }),
+            OverviewRequest::Task { task } => {
+                let summary = tasks
+                    .into_iter()
+                    .find(|summary| summary.task.id == task)
+                    .ok_or_else(|| ApiError::NotFound(format!("task {task}")))?;
+                Ok(OverviewReply::Task {
+                    task: Box::new(TaskDetail {
+                        summary,
+                        branch: format!("threadlane/{task}"),
+                        repositories: Vec::new(),
+                        runs: Vec::new(),
+                        decisions: Vec::new(),
+                        related: Vec::new(),
+                    }),
+                })
+            }
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -312,7 +377,7 @@ async fn decisions_from_two_hubs_merge_oldest_first() {
     );
     let names: Vec<&str> = state.spaces().iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["work", "home"]);
-    assert!(state.spaces().iter().all(|s| s.unreachable.is_none()));
+    assert!(state.spaces().iter().all(|s| s.reach == Reach::Reachable));
     assert_eq!(state.project_name("home", ProjectId(1)), Some("api"));
 }
 
@@ -333,10 +398,15 @@ async fn an_unreachable_hub_does_not_hide_the_others() {
     state.apply(refresh(&core).await);
 
     let work_space = &state.spaces()[0];
-    assert!(work_space.unreachable.is_some(), "work is shown as away");
+    assert!(
+        matches!(work_space.reach, Reach::Unreachable(_)),
+        "work is shown as away"
+    );
     assert_eq!(work_space.projects.len(), 2, "its last projects are kept");
     assert_eq!(work_space.running.len(), 1, "and what it last ran");
-    assert!(state.spaces()[1].unreachable.is_none());
+    assert_eq!(state.spaces()[1].reach, Reach::Reachable);
+    assert_eq!(work_space.gap(Part::Running), None, "away is not an error");
+    assert!(state.retry_soon(), "and is asked again soon");
     assert_eq!(
         queue(&state),
         [
@@ -811,4 +881,350 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
             "00:31 Done: Refunds are idempotent.",
         ]
     );
+}
+
+fn machine(id: i64, status: MachineStatus) -> Machine {
+    Machine {
+        id: MachineId(id),
+        name: format!("machine-{id}"),
+        endpoint_id: String::new(),
+        is_hub: id == 1,
+        trust: MachineTrust::Trusted,
+        status,
+        last_seen: None,
+        capabilities: json!({}),
+        backends: json!({}),
+        gh_login: false,
+        max_parallel: 1,
+        load: 0,
+    }
+}
+
+#[test]
+fn paired_hubs_show_before_the_first_refresh_as_not_yet_known() {
+    let state = AppState::paired(["work", "home"]);
+
+    let names: Vec<&str> = state.spaces().iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["work", "home"], "no \"No hub is paired\"");
+    assert!(state.spaces().iter().all(|s| s.reach == Reach::Unknown));
+    assert_eq!(state.spaces()[0].gap(Part::Projects), Some(Gap::Loading));
+    assert_eq!(
+        state.gaps(Part::Running),
+        [("work", Gap::Loading), ("home", Gap::Loading)],
+        "not \"Nothing is running\""
+    );
+    assert_eq!(state.machine_count(), None, "not 0 / 0");
+    assert_eq!(
+        state.status_line(),
+        "0 spaces reachable · 0 running · 0 need you"
+    );
+    assert!(state.retry_soon());
+    assert!(AppState::paired([]).spaces().is_empty());
+}
+
+#[tokio::test]
+async fn a_hub_that_refuses_a_part_shows_its_error_there_and_the_rest_loads() {
+    let work = FakeHub::new("Work", vec![decision(1, 1_000)]);
+    work.machines
+        .lock()
+        .expect("lock")
+        .push(machine(1, MachineStatus::Online));
+    work.tasks
+        .lock()
+        .expect("lock")
+        .push(task(1, TaskStatus::Running, None));
+    work.old.store(true, Ordering::SeqCst);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let space = &state.spaces()[0];
+    assert_eq!(space.reach, Reach::Reachable);
+    let refused = "hub work refused the request: invalid request: unknown variant `overview`";
+    for part in [Part::Running, Part::Machines, Part::Recent] {
+        assert_eq!(
+            space.gap(part),
+            Some(Gap::Failed(refused.to_owned())),
+            "{part:?}"
+        );
+    }
+    assert_eq!(state.machine_count(), None, "no count rather than 0 / 0");
+    assert_eq!(space.gap(Part::Projects), None, "what did load shows");
+    assert_eq!(space.projects.len(), 2);
+    assert_eq!(queue(&state), [pair("work", "D-0001")]);
+    assert_eq!(
+        state.project_gap("work", "api", Part::Tasks),
+        Some(Gap::Failed(refused.to_owned()))
+    );
+    assert_eq!(state.project_gap("work", "api", Part::Bindings), None);
+    assert!(state.retry_soon(), "asked again at the next tick");
+
+    // The hub learns the request; the next refresh fills the gaps.
+    work.old.store(false, Ordering::SeqCst);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    let space = &state.spaces()[0];
+    assert_eq!(space.gap(Part::Machines), None);
+    assert_eq!(state.machine_count(), Some((1, 1)));
+    assert_eq!(state.running().len(), 1);
+    assert_eq!(state.project_gap("work", "api", Part::Tasks), None);
+    assert!(!state.retry_soon());
+    assert_eq!(
+        state.status_line(),
+        "1 space reachable · 1 running · 1 need you · 1 of 1 machines online"
+    );
+
+    // Refused again: the old count is not shown as if it were current.
+    work.old.store(true, Ordering::SeqCst);
+    state.apply(refresh(&core).await);
+    assert_eq!(state.machine_count(), None);
+    assert!(state.spaces()[0].machines.is_empty());
+    assert!(state.running().is_empty());
+}
+
+#[tokio::test]
+async fn a_task_that_cannot_be_loaded_says_why_instead_of_loading_forever() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.tasks
+        .lock()
+        .expect("lock")
+        .push(task(4, TaskStatus::Done, None));
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    assert_eq!(state.task_gap("work", TaskId(4)), Some(Gap::Loading));
+
+    state.apply_task(load_task(&core, "work", TaskId(4)).await);
+    assert_eq!(state.task_gap("work", TaskId(4)), None);
+    assert!(state.task("work", TaskId(4)).is_some());
+
+    state.apply_task(load_task(&core, "work", TaskId(9)).await);
+    assert_eq!(
+        state.task_gap("work", TaskId(9)),
+        Some(Gap::Failed(
+            "hub work refused the request: not found: task T-0009".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn a_long_result_shows_its_first_lines_until_you_ask_for_all_of_it() {
+    let mut state = AppState::default();
+    let long = "Line one\nLine two\nLine three\nLine four";
+    state.receive(item(
+        "work",
+        1,
+        OutboxKind::Message,
+        json!({ "text": long }),
+    ));
+    state.receive(item(
+        "work",
+        2,
+        OutboxKind::Message,
+        json!({ "text": "Short." }),
+    ));
+    let wide = "word ".repeat(100);
+    state.receive(item(
+        "home",
+        1,
+        OutboxKind::Message,
+        json!({ "text": wide }),
+    ));
+    let excerpt = |state: &AppState, space: &str, seq| {
+        let item = state
+            .delivered
+            .get(&(space.to_owned(), seq))
+            .expect("delivered");
+        state.excerpt(item)
+    };
+
+    assert_eq!(
+        excerpt(&state, "work", 1),
+        Excerpt {
+            text: "Line one\nLine two\nLine three…".to_owned(),
+            toggle: Some("Show"),
+        }
+    );
+    assert_eq!(excerpt(&state, "work", 2).toggle, None, "fits");
+    let shown = excerpt(&state, "home", 1);
+    assert_eq!(shown.text.chars().count(), 240, "one long line is cut too");
+    assert_eq!(shown.toggle, Some("Show"));
+
+    state.toggle_result("work", 1);
+    assert_eq!(
+        excerpt(&state, "work", 1),
+        Excerpt {
+            text: long.to_owned(),
+            toggle: Some("Hide"),
+        }
+    );
+    assert_eq!(
+        excerpt(&state, "home", 1).toggle,
+        Some("Show"),
+        "per result"
+    );
+    state.toggle_result("work", 1);
+    assert_eq!(excerpt(&state, "work", 1).toggle, Some("Show"));
+}
+
+#[tokio::test]
+async fn a_card_waiting_on_you_offers_the_decision_s_options() {
+    let mut asked = decision(1, 1_000);
+    asked.task_id = Some(TaskId(7));
+    let work = FakeHub::new("Work", vec![asked]);
+    work.tasks
+        .lock()
+        .expect("lock")
+        .push(task(7, TaskStatus::WaitingOnYou, None));
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let card = state
+        .board("work", "api", &when())
+        .into_iter()
+        .flat_map(|column| column.cards)
+        .find(|card| card.id == TaskId(7))
+        .expect("card");
+    assert_eq!(card.decision, Some(DecisionId(1)));
+    assert_eq!(card.options, ["approve", "decline"]);
+
+    let answer = core
+        .answer(Some("work"), "D-0001", &card.options[0], None)
+        .await
+        .expect("answer");
+    state.answered(&answer);
+    let card = state
+        .board("work", "api", &when())
+        .into_iter()
+        .flat_map(|column| column.cards)
+        .find(|card| card.id == TaskId(7))
+        .expect("card");
+    assert_eq!((card.decision, card.options.len()), (None, 0));
+}
+
+#[tokio::test]
+async fn the_modes_grid_has_a_row_per_project_and_a_cell_per_agent() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.bindings.lock().expect("lock") = vec![BindingSummary {
+        agent: "Engineer".to_owned(),
+        role: "engineer".to_owned(),
+        mode: Mode::Assisted,
+        is_lead: false,
+    }];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    // The fake lists no agents; the grid's columns come from the space.
+    state.spaces[0].agents = ["Engineer", "Reviewer"]
+        .iter()
+        .map(|name| Agent {
+            id: AgentId(1),
+            name: (*name).to_owned(),
+            role: String::new(),
+            instructions: String::new(),
+            backends: Vec::new(),
+            models: json!({}),
+            tools: json!({}),
+            requirements: json!({}),
+        })
+        .collect();
+    let grid = state.modes("work");
+    assert_eq!(grid.agents, ["Engineer", "Reviewer"]);
+    assert!(
+        grid.rows.iter().all(|row| row.modes == Err(Gap::Loading)),
+        "until the bindings answer"
+    );
+
+    let projects = vec![
+        ("work".to_owned(), "api".to_owned()),
+        ("work".to_owned(), "General".to_owned()),
+    ];
+    state.apply_modes(load_modes(&core, projects).await);
+    let binding = core
+        .set_mode(Some("work"), Some("api"), "Reviewer", Mode::OnRequest)
+        .await
+        .expect("set mode");
+    state.mode_set("work", "api", binding);
+
+    let rows: Vec<_> = state
+        .modes("work")
+        .rows
+        .into_iter()
+        .map(|row| (row.project, row.modes))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "api".to_owned(),
+                Ok(vec![Some(Mode::Assisted), Some(Mode::OnRequest)])
+            ),
+            // The fake shares one binding list across projects.
+            ("General".to_owned(), Ok(vec![Some(Mode::Assisted), None])),
+        ]
+    );
+    assert_eq!(state.modes("home"), ModesGrid::default());
+}
+
+#[tokio::test]
+async fn the_conversation_header_says_since_when_the_lead_is_working() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert_eq!(state.lead_line("work", "api", &when()), None, "idle");
+
+    *work.lead.lock().expect("lock") = Some(Timestamp::from_millis(9 * 60_000));
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert_eq!(
+        state.lead_line("work", "api", &when()).as_deref(),
+        Some("Lead is working · started 00:09")
+    );
+
+    work.old.store(true, Ordering::SeqCst);
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert_eq!(
+        state.lead_line("work", "api", &when()).as_deref(),
+        Some(
+            "Whether the lead is working: hub work refused the request: invalid request: \
+             unknown variant `overview`"
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_new_project_shows_in_its_space_at_once() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    let created = core
+        .create_project(Some("work"), "Payments", "")
+        .await
+        .expect("create");
+    state.project_created("work", created.clone());
+    state.project_created("work", created);
+    state.project_created(
+        "home",
+        ProjectSummary {
+            id: ProjectId(9),
+            name: "Elsewhere".to_owned(),
+            is_general: false,
+            paused: false,
+        },
+    );
+
+    let names: Vec<_> = state.spaces()[0]
+        .projects
+        .iter()
+        .map(|project| project.name.as_str())
+        .collect();
+    assert_eq!(names, ["api", "General", "Payments"], "once");
+    assert!(state.targets().contains(&("work", "Payments")));
+    state.apply(refresh(&core).await);
+    assert_eq!(state.spaces()[0].projects.len(), 3, "the hub agrees");
 }
