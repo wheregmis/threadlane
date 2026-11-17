@@ -77,6 +77,31 @@ pub struct FeedItem {
     pub message: OutboxMessage,
     pub project_name: Option<String>,
     pub delivered_at: Timestamp,
+    /// Original results grouped into this digest, in delivery order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub digest: Vec<DigestResult>,
+}
+
+/// A result delivered as part of a digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DigestResult {
+    /// Stable identity of the original outbox message.
+    pub id: crate::ids::OutboxId,
+    /// The project that sent it, if it came from a project.
+    pub project: Option<String>,
+    /// The original result text.
+    pub text: String,
+}
+
+/// The results whose delivery is currently held by pacing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldResults {
+    /// Number of original results held, including those grouped into a digest.
+    pub count: u64,
+    /// The next scheduled release.
+    pub next: Timestamp,
+    /// The latest scheduled release currently recorded.
+    pub latest: Timestamp,
 }
 
 /// An agent's binding to a project as a client lists it.
@@ -387,6 +412,9 @@ pub struct TaskDetail {
     /// The original proposer of accepted work, including its subtasks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_by: Option<String>,
+    /// Whether the task lane needs a new message or a resume before it can run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped: bool,
 }
 
 /// One entry of the conversation with a project's lead.
@@ -406,6 +434,15 @@ pub enum ConversationEntry {
     },
     /// A delivered message, decision card, or notice, as the feed has it.
     Delivered { item: FeedItem },
+    /// Delivery of an outbox message from this project failed permanently.
+    DeliveryFailure {
+        /// The event recorded by the dispatcher.
+        event_id: EventId,
+        /// What delivery failed and why.
+        text: String,
+        /// When it failed.
+        at: Timestamp,
+    },
 }
 
 /// The Overview capability (Plan.md §11.2 "Tasks", "Machines"): what the
@@ -445,6 +482,8 @@ pub enum OverviewRequest {
     RecordedCount,
     /// Runs on a project's lead lane, oldest first. `None` means General.
     LeadRuns { project: Option<String> },
+    /// Results held by delivery pacing in this space.
+    HeldResults,
 }
 
 /// An event that arrived but started no run, because no one asked for the
@@ -484,6 +523,9 @@ pub enum OverviewReply {
     /// When the lead's run in progress started; `None` while it is idle.
     Lead {
         running_since: Option<Timestamp>,
+        /// Whether a new message or a resume is needed before another run.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stopped: bool,
     },
     /// Events recorded and not acted on, newest first, and how many the
     /// project has in all.
@@ -499,6 +541,11 @@ pub enum OverviewReply {
     LeadRuns {
         /// Records and message markers from the lead lane.
         runs: Vec<LeadRun>,
+    },
+    /// The current pacing backlog, if any.
+    HeldResults {
+        /// Results whose next eligible time is in the future.
+        held: Option<HeldResults>,
     },
 }
 

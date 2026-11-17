@@ -44,17 +44,36 @@ impl Desktop {
             );
         }
 
-        let banners = state
+        let banners: Vec<_> = state
             .spaces()
             .iter()
             .filter(|space| state.filter().is_none_or(|only| only == space.name))
             .filter_map(|space| {
                 let text = state.blocked(&space.name)?;
                 Some(
-                    Alert::warning(SharedString::from(format!("blocked-{}", space.name)), text)
-                        .title(format!("System · {} is blocked", space.name)),
+                    v_flex()
+                        .gap_1()
+                        .items_start()
+                        .child(
+                            Alert::warning(
+                                SharedString::from(format!("blocked-{}", space.name)),
+                                text,
+                            )
+                            .title(format!("System · {} is blocked", space.name)),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("accounts-{}", space.name)))
+                                .small()
+                                .ghost()
+                                .tab_stop(true)
+                                .label("Model accounts")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx)),
+                                ),
+                        ),
                 )
-            });
+            })
+            .collect();
 
         let mut needs = v_flex().gap_2().child(section(format!(
             "Needs you ({})",
@@ -165,18 +184,24 @@ impl Desktop {
             recent = recent.child(div().text_color(muted).child("Nothing yet."));
         }
         for item in results {
-            let excerpt = state.excerpt(item);
+            let digest = state
+                .digest(item)
+                .map(|digest| self.digest_entry(&item.space, digest, cx));
+            let excerpt = digest.is_none().then(|| state.excerpt(item));
             let (space, seq) = (item.space.clone(), item.item.seq);
-            let toggle = excerpt.toggle.map(|label| {
-                Button::new(SharedString::from(format!("result-{space}-{seq}")))
-                    .link()
-                    .small()
-                    .label(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.toggle_result(&space, seq);
-                        cx.notify();
-                    }))
-            });
+            let toggle = excerpt
+                .as_ref()
+                .and_then(|excerpt| excerpt.toggle)
+                .map(|label| {
+                    Button::new(SharedString::from(format!("result-{space}-{seq}")))
+                        .link()
+                        .small()
+                        .label(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.toggle_result(&space, seq);
+                            cx.notify();
+                        }))
+                });
             recent = recent.child(
                 h_flex()
                     .items_start()
@@ -201,7 +226,8 @@ impl Desktop {
                             .flex_1()
                             .min_w_0()
                             .items_start()
-                            .child(div().text_sm().child(excerpt.text))
+                            .children(digest)
+                            .children(excerpt.map(|excerpt| div().text_sm().child(excerpt.text)))
                             .children(toggle),
                     ),
             );
@@ -216,6 +242,12 @@ impl Desktop {
             .child(heading("Home"))
             .child(chips)
             .child(div().text_sm().text_color(muted).child(state.status_line()))
+            .children(
+                state
+                    .held_lines(when)
+                    .into_iter()
+                    .map(|line| div().text_sm().text_color(muted).child(line)),
+            )
             .children(banners)
             .child(needs)
             .children(attention)
@@ -239,8 +271,11 @@ impl Desktop {
             .into_iter()
             .map(|(space, project)| (space.to_owned(), project.to_owned()))
             .collect();
+        let accessibility = format!("Choose a project · {label}");
         let picker = Button::new("target")
             .label(label)
+            .tab_stop(true)
+            .accessibility_label(accessibility)
             .dropdown_menu(move |mut menu, _, _| {
                 for (space, project) in &targets {
                     let (space, project, view) = (space.clone(), project.clone(), view.clone());

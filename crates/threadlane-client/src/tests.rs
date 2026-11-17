@@ -94,11 +94,14 @@ impl HubApi for FakeHub {
         })
     }
 
-    /// Answers every request with its delivered items as the recent ones.
-    async fn overview(&self, _request: OverviewRequest) -> Result<OverviewReply, ApiError> {
-        Ok(OverviewReply::Recent {
-            items: self.items.lock().expect("lock").clone(),
-        })
+    /// Reports its delivered items and an empty pacing backlog.
+    async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
+        match request {
+            OverviewRequest::HeldResults => Ok(OverviewReply::HeldResults { held: None }),
+            _ => Ok(OverviewReply::Recent {
+                items: self.items.lock().expect("lock").clone(),
+            }),
+        }
     }
 
     /// Answers every request with no files.
@@ -158,6 +161,7 @@ impl HubApi for DownHub {
 
 fn item(seq: i64, kind: OutboxKind, project: Option<&str>, text: &str) -> FeedItem {
     FeedItem {
+        digest: Vec::new(),
         seq,
         message: OutboxMessage {
             id: OutboxId(seq),

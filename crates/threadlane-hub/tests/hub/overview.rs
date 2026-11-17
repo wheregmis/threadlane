@@ -3,12 +3,17 @@
 
 use std::time::Duration;
 
-use threadlane_core::client::{ApiError, ConversationEntry, OverviewReply, OverviewRequest};
-use threadlane_core::ids::TaskId;
-use threadlane_core::model::{
-    LaneKind, Mode, NewAgent, NewBinding, NewTask, RunOutcome, RunStatus, TaskOrigin, TaskStatus,
+use serde_json::json;
+use threadlane_core::client::{
+    ApiError, ConversationEntry, HeldResults, LaneTarget, OrgRequest, OverviewReply,
+    OverviewRequest,
 };
-use threadlane_core::store::{MachineStore, OrgStore, TaskStore};
+use threadlane_core::ids::{LaneId, ProjectId, TaskId};
+use threadlane_core::model::{
+    LaneKind, Mode, NewAgent, NewBinding, NewOutboxMessage, NewProject, NewTask, OutboxKind,
+    OutboxMessage, RunOutcome, RunStatus, TaskOrigin, TaskStatus, Urgency,
+};
+use threadlane_core::store::{MachineStore, OrgStore, OutboxStore, TaskStore};
 use threadlane_core::time::Clock;
 
 use crate::common::{RATIONALE, Reply, TestHub, begin, play};
@@ -113,6 +118,20 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
     assert_eq!(task.runs[0].run.status, RunStatus::Active);
     assert_eq!(task.runs[0].machine, machine);
     assert!(task.decisions.is_empty());
+    assert!(!task.stopped);
+    hub.api
+        .org(OrgRequest::Stop {
+            target: LaneTarget::Task { task: fix.id },
+            client_request_id: "stop-fix".to_owned(),
+        })
+        .await
+        .unwrap();
+    let OverviewReply::Task { task: stopped } =
+        overview(&hub, OverviewRequest::Task { task: fix.id }).await
+    else {
+        panic!("task");
+    };
+    assert!(stopped.stopped);
     assert_eq!(
         task.related.iter().map(|t| t.task.id).collect::<Vec<_>>(),
         [docs.id],
@@ -226,7 +245,8 @@ async fn lead_says_since_when_the_lead_is_working() {
     assert_eq!(
         lead(None).await.unwrap(),
         OverviewReply::Lead {
-            running_since: None
+            running_since: None,
+            stopped: false,
         },
         "idle"
     );
@@ -237,10 +257,27 @@ async fn lead_says_since_when_the_lead_is_working() {
     assert_eq!(
         lead(None).await.unwrap(),
         OverviewReply::Lead {
-            running_since: Some(hub.clock.now())
+            running_since: Some(hub.clock.now()),
+            stopped: false,
         },
         "working"
     );
+    hub.api
+        .org(OrgRequest::Stop {
+            target: LaneTarget::Lead { project: None },
+            client_request_id: "stop-lead".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        lead(None).await.unwrap(),
+        OverviewReply::Lead { stopped: true, .. }
+    ));
+    hub.send("m-2", "Resume the lead").await;
+    assert!(matches!(
+        lead(None).await.unwrap(),
+        OverviewReply::Lead { stopped: false, .. }
+    ));
     assert!(matches!(
         lead(Some("missing")).await,
         Err(ApiError::NotFound(_))
@@ -350,4 +387,223 @@ async fn done_task_summaries_report_when_the_hub_recorded_the_result() {
     assert_eq!(tasks[0].task.id, task.id);
     assert_ne!(tasks[0].task.created_at, hub.clock.now());
     assert_eq!(tasks[0].completed_at, Some(hub.clock.now()));
+}
+
+async fn outbox(
+    hub: &TestHub,
+    channel: &str,
+    origin: Option<(ProjectId, LaneId)>,
+    body: serde_json::Value,
+) -> OutboxMessage {
+    hub.db
+        .enqueue(&NewOutboxMessage {
+            project_id: origin.map(|(project, _)| project),
+            lane_id: origin.map(|(_, lane)| lane),
+            session_id: None,
+            run_id: None,
+            tool_call_id: None,
+            kind: OutboxKind::Message,
+            decision_id: None,
+            channel: channel.to_owned(),
+            body,
+            urgency: Urgency::Low,
+            not_before: None,
+            created_at: hub.clock.now(),
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn stage_b_held_results_count_originals_and_ignore_retries_and_other_channels() {
+    let hub = TestHub::start().await;
+    let now = hub.clock.now();
+    let next = now + Duration::from_secs(60);
+    let latest = now + Duration::from_secs(120);
+    assert_eq!(
+        overview(&hub, OverviewRequest::HeldResults).await,
+        OverviewReply::HeldResults { held: None }
+    );
+
+    let a = outbox(&hub, "client", None, json!({"text":"First"})).await;
+    let b = outbox(&hub, "client", None, json!({"text":"Second"})).await;
+    let mut draft = NewOutboxMessage {
+        project_id: None,
+        lane_id: None,
+        session_id: None,
+        run_id: None,
+        tool_call_id: None,
+        kind: OutboxKind::Message,
+        decision_id: None,
+        channel: "client".to_owned(),
+        body: json!({"text":"Digest","digest":[a.id,b.id]}),
+        urgency: Urgency::Normal,
+        not_before: None,
+        created_at: now,
+    };
+    let digest = hub.db.queue_digest(&draft, &[a.id, b.id]).await.unwrap();
+    hub.db.hold_delivery(digest.id, next, "rate").await.unwrap();
+    draft.body = json!({"text":"Third"});
+    let third = hub.db.enqueue(&draft).await.unwrap();
+    hub.db
+        .hold_delivery(third.id, latest, "quiet")
+        .await
+        .unwrap();
+    let retry = outbox(&hub, "client", None, json!({"text":"Retry"})).await;
+    hub.db
+        .delivery_failed(&retry, "Temporary error", now, Some(next))
+        .await
+        .unwrap();
+    let external = outbox(&hub, "other", None, json!({"text":"Outside channel"})).await;
+    hub.db
+        .hold_delivery(external.id, next, "quiet")
+        .await
+        .unwrap();
+    assert_eq!(
+        overview(&hub, OverviewRequest::HeldResults).await,
+        OverviewReply::HeldResults {
+            held: Some(HeldResults {
+                count: 3,
+                next,
+                latest
+            })
+        }
+    );
+
+    hub.clock.advance(Duration::from_secs(60));
+    assert_eq!(
+        overview(&hub, OverviewRequest::HeldResults).await,
+        OverviewReply::HeldResults {
+            held: Some(HeldResults {
+                count: 1,
+                next: latest,
+                latest
+            })
+        }
+    );
+}
+
+#[tokio::test]
+async fn stage_b_conversations_share_the_digest_and_route_a_dead_delivery_to_its_origin() {
+    let hub = TestHub::start().await;
+    let general = hub.general().await;
+    let api = hub
+        .db
+        .create_project(&NewProject {
+            name: "API".to_owned(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    hub.db
+        .create_project(&NewProject {
+            name: "Other".to_owned(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    let first = outbox(
+        &hub,
+        "client",
+        Some((general.id, general.lead_lane_id)),
+        json!({"text":"First"}),
+    )
+    .await;
+    let second = outbox(
+        &hub,
+        "client",
+        Some((api.id, api.lead_lane_id)),
+        json!({"text":"Second"}),
+    )
+    .await;
+    let digest = hub
+        .db
+        .queue_digest(
+            &NewOutboxMessage {
+                project_id: None,
+                lane_id: None,
+                session_id: None,
+                run_id: None,
+                tool_call_id: None,
+                kind: OutboxKind::Message,
+                decision_id: None,
+                channel: "client".to_owned(),
+                body: json!({"text":"Digest", "digest":[first.id, second.id]}),
+                urgency: Urgency::Normal,
+                not_before: None,
+                created_at: hub.clock.now(),
+            },
+            &[first.id, second.id],
+        )
+        .await
+        .unwrap();
+    hub.db
+        .mark_sent(digest.id, None, hub.clock.now())
+        .await
+        .unwrap();
+    hub.clock.advance(Duration::from_secs(60));
+    let dead = outbox(
+        &hub,
+        "client",
+        Some((api.id, api.lead_lane_id)),
+        json!({"text":"Undeliverable"}),
+    )
+    .await;
+    hub.db
+        .delivery_failed(&dead, "Adapter rejected the result", hub.clock.now(), None)
+        .await
+        .unwrap();
+
+    let feed = hub.feed().await;
+    assert_eq!(feed.len(), 1);
+    assert_eq!(
+        feed[0]
+            .digest
+            .iter()
+            .map(|result| (result.project.as_deref(), result.text.as_str()))
+            .collect::<Vec<_>>(),
+        [(Some("General"), "First"), (Some("API"), "Second")]
+    );
+    assert_eq!(
+        overview(&hub, OverviewRequest::Recent { limit: 10 }).await,
+        OverviewReply::Recent {
+            items: feed.clone()
+        }
+    );
+    let history = |project: Option<&str>, before| {
+        let request = OverviewRequest::Conversation {
+            project: project.map(str::to_owned),
+            before,
+            limit: 10,
+        };
+        overview(&hub, request)
+    };
+    let delivered = ConversationEntry::Delivered {
+        item: feed[0].clone(),
+    };
+    assert_eq!(
+        history(None, None).await,
+        OverviewReply::Conversation {
+            entries: vec![delivered.clone()]
+        }
+    );
+    assert_eq!(
+        history(Some("Other"), None).await,
+        OverviewReply::Conversation {
+            entries: Vec::new()
+        }
+    );
+    assert_eq!(
+        history(Some("API"), Some(hub.clock.now())).await,
+        OverviewReply::Conversation {
+            entries: vec![delivered.clone()]
+        }
+    );
+    let OverviewReply::Conversation { entries } = history(Some("API"), None).await else {
+        panic!("conversation");
+    };
+    assert!(
+        matches!(&entries[..], [item, ConversationEntry::DeliveryFailure { text, .. }]
+        if *item == delivered && text.ends_with("Adapter rejected the result"))
+    );
 }

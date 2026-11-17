@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use gpui_kit::*;
+use threadlane_core::client::LaneTarget;
 use threadlane_core::ids::{StandingRuleId, TaskId};
 use threadlane_core::model::{Agent, Cell, Mode};
 use threadlane_core::tools::Tier;
@@ -14,6 +15,59 @@ use threadlane_desktop::{Activity, add_repository, at_once, copy_agent, describe
 use crate::Desktop;
 
 impl Desktop {
+    /// Requests a lane stop, then reloads the screen with the hub's lane status.
+    pub(crate) fn stop_lane(&mut self, space: String, target: LaneTarget, cx: &mut Context<Self>) {
+        if !self.state.begin_stop(&space, &target) {
+            return;
+        }
+        self.state
+            .report(Activity::Working("Requesting a stop…".to_owned()));
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let result = core.read().await.stop(Some(&space), target.clone()).await;
+                (space, target, result)
+            },
+            |this, (space, target, result), cx| {
+                this.state.finish_stop(&space, &target, result);
+                this.load_screen(cx);
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Saves the draft entered in the focused space's pacing controls.
+    pub(crate) fn save_pacing(&mut self, space: String, cx: &mut Context<Self>) {
+        let values = self
+            .pacing_inputs
+            .each_ref()
+            .map(|input| input.read(cx).value());
+        let Some(pacing) = self
+            .state
+            .submit_pacing(&space, values.each_ref().map(|value| value.as_ref()))
+        else {
+            cx.notify();
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let result = core.read().await.set_pacing(Some(&space), pacing).await;
+                (space, result)
+            },
+            |this, (space, result), cx| {
+                let saved = result.is_ok();
+                this.state.finish_pacing(&space, result);
+                if saved {
+                    this.refresh(cx);
+                }
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
     /// Creates the agent the "+ New agent" form describes in `space`.
     pub(crate) fn create_agent(&mut self, space: String, cx: &mut Context<Self>) {
         let name = self.agent_name.read(cx).value().trim().to_owned();

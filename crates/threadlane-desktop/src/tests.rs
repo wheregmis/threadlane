@@ -35,9 +35,13 @@ struct FakeHub {
     old: AtomicBool,
     /// Answers like a hub from before it could list recorded events.
     no_recorded: AtomicBool,
+    projects_fail: AtomicBool,
     created: Mutex<Vec<ProjectSummary>>,
     machines: Mutex<Vec<Machine>>,
     lead: Mutex<Option<Timestamp>>,
+    stopped: Mutex<Vec<LaneTarget>>,
+    pacing: Mutex<Pacing>,
+    held: Mutex<Option<HeldResults>>,
     lead_runs: Mutex<Vec<LeadRun>>,
     task_runs: Mutex<Vec<RunSummary>>,
     now: AtomicI64,
@@ -98,6 +102,11 @@ impl HubApi for FakeHub {
 
     async fn projects(&self) -> Result<Vec<ProjectSummary>, ApiError> {
         self.up()?;
+        if self.projects_fail.load(Ordering::SeqCst) {
+            return Err(ApiError::Internal(
+                "project list temporarily unavailable".to_owned(),
+            ));
+        }
         let created = self.created.lock().expect("lock").clone();
         Ok([
             ProjectSummary {
@@ -120,8 +129,23 @@ impl HubApi for FakeHub {
         .collect())
     }
 
-    async fn send_message(&self, _message: &UserMessage) -> Result<Accepted, ApiError> {
-        Err(ApiError::Invalid("unsupported".to_owned()))
+    async fn send_message(&self, message: &UserMessage) -> Result<Accepted, ApiError> {
+        self.up()?;
+        let target = message.task.map_or_else(
+            || LaneTarget::Lead {
+                project: message.project.clone(),
+            },
+            |task| LaneTarget::Task { task },
+        );
+        self.stopped
+            .lock()
+            .unwrap()
+            .retain(|stopped| *stopped != target);
+        Ok(Accepted {
+            event_id: EventId(99),
+            project_id: project_id(message.project.as_deref()),
+            duplicate: false,
+        })
     }
 
     async fn feed(&self, _after: i64, _wait: Duration) -> Result<Vec<FeedItem>, ApiError> {
@@ -132,6 +156,17 @@ impl HubApi for FakeHub {
         self.up()?;
         let mut bindings = self.bindings.lock().expect("lock");
         match request {
+            OrgRequest::Pacing => Ok(OrgReply::Pacing {
+                pacing: self.pacing.lock().unwrap().clone(),
+            }),
+            OrgRequest::SetPacing { pacing } => {
+                *self.pacing.lock().unwrap() = pacing.clone();
+                Ok(OrgReply::Pacing { pacing })
+            }
+            OrgRequest::Stop { target, .. } => {
+                self.stopped.lock().unwrap().push(target);
+                Ok(OrgReply::LaneUpdated)
+            }
             OrgRequest::Bindings { .. } => Ok(OrgReply::Bindings {
                 bindings: bindings.clone(),
             }),
@@ -388,8 +423,16 @@ impl HubApi for FakeHub {
                 machines: self.machines.lock().expect("lock").clone(),
                 accounts: Vec::new(),
             }),
-            OverviewRequest::Lead { .. } => Ok(OverviewReply::Lead {
+            OverviewRequest::Lead { project } => Ok(OverviewReply::Lead {
                 running_since: *self.lead.lock().expect("lock"),
+                stopped: self
+                    .stopped
+                    .lock()
+                    .unwrap()
+                    .contains(&LaneTarget::Lead { project }),
+            }),
+            OverviewRequest::HeldResults => Ok(OverviewReply::HeldResults {
+                held: *self.held.lock().unwrap(),
             }),
             OverviewRequest::LeadRuns { .. } => Ok(OverviewReply::LeadRuns {
                 runs: self.lead_runs.lock().expect("lock").clone(),
@@ -431,6 +474,11 @@ impl HubApi for FakeHub {
                         related: Vec::new(),
                         messages: Vec::new(),
                         proposed_by: None,
+                        stopped: self
+                            .stopped
+                            .lock()
+                            .unwrap()
+                            .contains(&LaneTarget::Task { task }),
                     }),
                 })
             }
@@ -654,6 +702,7 @@ fn decision(id: i64, created_at: i64) -> Decision {
 
 fn feed_item(seq: i64, kind: OutboxKind, body: Json, at: i64) -> FeedItem {
     FeedItem {
+        digest: Vec::new(),
         seq,
         message: OutboxMessage {
             id: OutboxId(seq),
@@ -912,6 +961,9 @@ fn said(lines: &[Line]) -> Vec<String> {
             Line::Notice { text, .. } => format!("notice: {text}"),
             Line::Decision { card, pending, .. } => format!("{}: pending {pending}", card.id),
             Line::Quiet { text, .. } => text.clone(),
+            Line::Stopped { .. } => "lead stopped".to_owned(),
+            Line::DeliveryFailure { text, .. } => format!("failed: {text}"),
+            Line::Digest { digest, .. } => digest.toggle.clone(),
         })
         .collect()
 }
@@ -1247,6 +1299,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
         ],
         decisions: vec![asked],
         proposed_by: None,
+        stopped: false,
         related: Vec::new(),
         messages: vec![ConversationEntry::You {
             event_id: EventId(9),
@@ -2179,6 +2232,7 @@ fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
         related: Vec::new(),
         messages: Vec::new(),
         proposed_by: None,
+        stopped: false,
     };
     let [runs, tokens] = usage(&detail, &when());
     assert_eq!(runs, "2 runs · 7 min", "the running one counts until now");
@@ -3460,4 +3514,333 @@ async fn the_done_column_shows_the_five_most_recent_completions() {
         [1, 2, 3, 4, 5],
     );
     assert_eq!(done.cards[0].meta, "Engineer · 00:07");
+}
+
+#[tokio::test]
+async fn stage_b_stops_running_lanes_and_sending_a_message_resumes_them() {
+    let work = FakeHub::new("Work", Vec::new());
+    let at = Timestamp::from_millis(60_000);
+    *work.lead.lock().unwrap() = Some(at);
+    work.tasks
+        .lock()
+        .unwrap()
+        .push(task(7, TaskStatus::Running, None));
+    let stopped_run = Run {
+        id: RunId(1),
+        lane_id: LaneId(1),
+        session_id: SessionId(1),
+        machine_id: MachineId(1),
+        lease_epoch: 1,
+        agent_id: None,
+        backend: None,
+        status: RunStatus::Stopped,
+        outcome: None,
+        rationale: None,
+        error: None,
+        started_at: at,
+        ended_at: Some(at),
+    };
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    let id = TaskId(7);
+    state.apply_project(load_project(&core, "work", "api").await);
+    state.apply_task(load_task(&core, "work", id).await);
+    let lead = state.lead_stop("work", "api").unwrap();
+    let task_target = state.task_stop("work", id).unwrap();
+    assert_eq!(task_target, LaneTarget::Task { task: id });
+    for target in [lead, task_target] {
+        assert!(state.begin_stop("work", &target));
+        assert!(!state.begin_stop("work", &target));
+        let result = core.stop(Some("work"), target.clone()).await;
+        assert!(result.is_ok());
+        state.finish_stop("work", &target, result);
+    }
+    assert!(state.lead_stop("work", "api").is_none());
+    assert!(state.task_stop("work", id).is_none());
+    assert!(
+        state
+            .lead_line("work", "api", &when())
+            .unwrap()
+            .starts_with("Stopping")
+    );
+
+    *work.lead.lock().unwrap() = None;
+    work.tasks.lock().unwrap()[0].task.status = TaskStatus::Queued;
+    work.lead_runs.lock().unwrap().push(LeadRun {
+        run: stopped_run.clone(),
+        sent_message: true,
+    });
+    work.task_runs.lock().unwrap().push(RunSummary {
+        run: Run {
+            lane_id: LaneId(17),
+            ..stopped_run
+        },
+        machine: "hub".to_owned(),
+    });
+    state.apply_project(load_project(&core, "work", "api").await);
+    state.apply_task(load_task(&core, "work", id).await);
+    assert_eq!(
+        state.lead_line("work", "api", &when()).as_deref(),
+        Some("Lead stopped. Send a message to resume.")
+    );
+    assert!(
+        state
+            .conversation("work", "api", &when())
+            .iter()
+            .any(|line| matches!(line, Line::Stopped { .. }))
+    );
+    let detail = state.task("work", id).unwrap();
+    assert!(chips(detail, &when()).contains(&"Stopped".to_owned()));
+    assert!(
+        timeline(detail, &when())
+            .iter()
+            .any(|moment| moment.text.contains("stopped by you"))
+    );
+    assert_eq!(
+        state.task_hint("work", id),
+        "Send a message to resume this task."
+    );
+
+    let message = core
+        .send(Some("work"), Some("api"), "Continue")
+        .await
+        .unwrap();
+    state.sent("work", "api", "Continue", message.accepted.event_id, at);
+    let message = core
+        .send_to_task(Some("work"), "T-0007", "Continue")
+        .await
+        .unwrap();
+    state.sent_to_task("work", id, "Continue", message.accepted.event_id, at);
+    state.apply_project(load_project(&core, "work", "api").await);
+    state.apply_task(load_task(&core, "work", id).await);
+    assert_eq!(state.lead_line("work", "api", &when()), None);
+    assert!(!state.task("work", id).unwrap().stopped);
+    assert!(work.stopped.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stage_b_pacing_edits_and_held_results_are_scoped_to_each_space() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    let next = Timestamp::from_millis(8 * 60 * 60_000);
+    *work.held.lock().unwrap() = Some(HeldResults {
+        count: 3,
+        next,
+        latest: next,
+    });
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.held_lines(&when()),
+        ["work · 3 results held until 08:00"]
+    );
+    state.set_filter(Some("home"));
+    assert!(state.held_lines(&when()).is_empty());
+
+    let pacing = core.pacing(Some("work")).await;
+    state.apply_pacing("work".to_owned(), pacing);
+    assert_eq!(
+        state.edit_pacing("work").unwrap(),
+        ["Off", "Off", "", "Off"]
+    );
+    assert!(
+        state
+            .submit_pacing("work", ["0", "Off", "", "Off"])
+            .is_none()
+    );
+    assert!(
+        state
+            .submit_pacing("work", ["5", "22:00–08:00", "", "10"])
+            .is_none()
+    );
+    let draft = state
+        .submit_pacing("work", ["5", "22:00–08:00", "America/Toronto", "10"])
+        .unwrap();
+    let saved = core.set_pacing(Some("work"), draft.clone()).await;
+    state.finish_pacing("work", saved);
+    assert_eq!(state.pacing_editor("work"), None);
+    assert_eq!(
+        state.pacing_values("work").unwrap(),
+        ["5", "22:00–08:00", "America/Toronto", "10"]
+    );
+    assert_eq!(core.pacing(Some("work")).await.unwrap(), draft);
+    assert_eq!(core.pacing(Some("home")).await.unwrap(), Pacing::default());
+    assert_eq!(
+        parse_pacing(["Off", "Off", "America/Toronto", ""]).unwrap(),
+        Pacing::default()
+    );
+}
+
+#[tokio::test]
+async fn stage_b_digest_is_one_entry_on_home_and_in_each_project_conversation() {
+    use threadlane_core::client::DigestResult;
+    let work = FakeHub::new("Work", Vec::new());
+    let mut item = feed_item(1, OutboxKind::Message, json!({"text": "Digest"}), 2_000);
+    item.project_name = None;
+    item.digest = vec![
+        DigestResult {
+            id: OutboxId(1),
+            project: Some("api".to_owned()),
+            text: "Fixed the API".to_owned(),
+        },
+        DigestResult {
+            id: OutboxId(2),
+            project: Some("General".to_owned()),
+            text: "Reported back".to_owned(),
+        },
+    ];
+    *work.recent.lock().unwrap() = vec![item.clone()];
+    *work.history.lock().unwrap() = vec![ConversationEntry::Delivered { item }];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert_eq!(
+        state.recent().len(),
+        1,
+        "history and Home share one feed position"
+    );
+    assert!(state.digest(state.recent()[0]).unwrap().results.is_empty());
+    assert!(state.conversation("work", "other", &when()).is_empty());
+    state.toggle_result("work", 1);
+    let home = state.digest(state.recent()[0]).unwrap();
+    assert_eq!(
+        home.results
+            .iter()
+            .map(|result| result.project.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("api"), Some("General")]
+    );
+    for project in ["api", "General"] {
+        let lines = state.conversation("work", project, &when());
+        assert!(
+            matches!(&lines[..], [Line::Day(_), Line::Digest { digest, .. }] if *digest == home)
+        );
+    }
+}
+
+#[tokio::test]
+async fn stage_b_a_dead_delivery_is_shown_once_in_its_own_conversation() {
+    let work = FakeHub::new("Work", Vec::new());
+    let text = "Delivery of message 3 to client failed: adapter unavailable";
+    *work.history.lock().unwrap() = vec![ConversationEntry::DeliveryFailure {
+        event_id: EventId(4),
+        text: text.to_owned(),
+        at: Timestamp::from_millis(3_000),
+    }];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    for _ in 0..2 {
+        state.apply_project(load_project(&core, "work", "api").await);
+    }
+    assert!(matches!(&state.conversation("work", "api", &when())[..],
+        [Line::Day(_), Line::DeliveryFailure { text: shown, .. }] if shown == text));
+    assert!(state.conversation("work", "General", &when()).is_empty());
+    assert!(state.conversation("home", "api", &when()).is_empty());
+    assert!(state.recent().is_empty());
+}
+
+#[tokio::test]
+async fn stage_b_composer_lists_every_project_and_restores_each_space_after_restart() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    home.created.lock().unwrap().push(ProjectSummary {
+        id: ProjectId(3),
+        name: "garden".to_owned(),
+        is_general: false,
+        paused: false,
+        mode_ceiling: None,
+    });
+    let (dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.set_client_dir(dir.path().to_owned());
+    state.apply(refresh(&core).await);
+    state.set_filter(Some("home"));
+    assert_eq!(state.target(), Some(("home", "General")));
+    assert_eq!(
+        state.targets(),
+        [
+            ("work", "api"),
+            ("work", "General"),
+            ("home", "api"),
+            ("home", "General"),
+            ("home", "garden")
+        ]
+    );
+    state.set_target("home", "garden");
+    state.set_target("work", "api");
+    state.set_notifications(true, false).unwrap();
+    state.set_filter(Some("home"));
+    assert_eq!(state.target(), Some(("home", "garden")));
+    home.projects_fail.store(true, Ordering::SeqCst);
+    state.apply(refresh(&core).await);
+    assert!(state.targets().contains(&("home", "garden")));
+    assert!(matches!(
+        state.space("home").unwrap().gap(Part::Projects),
+        Some(Gap::Failed(_))
+    ));
+    home.projects_fail.store(false, Ordering::SeqCst);
+
+    let mut state = AppState::default();
+    state.set_client_dir(dir.path().to_owned());
+    state.apply(refresh(&core).await);
+    assert!(
+        !state.notifications().decisions,
+        "writing one setting preserves the other"
+    );
+    assert_eq!(state.target(), Some(("work", "api")));
+    state.set_filter(Some("home"));
+    assert_eq!(state.target(), Some(("home", "garden")));
+}
+
+#[tokio::test]
+async fn stage_b_lead_mode_obeys_the_ceiling_and_agent_placement_uses_backend_probes() {
+    use threadlane_core::backend::{Probe, encode_backends};
+
+    let work = FakeHub::new("Work", Vec::new());
+    work.bindings.lock().unwrap().push(BindingSummary {
+        agent: "Lead".to_owned(),
+        role: "lead".to_owned(),
+        mode: Mode::Autonomous,
+        is_lead: true,
+        max_parallel: 1,
+        overrides: Default::default(),
+    });
+    let mut local = machine(1, MachineStatus::Online);
+    local.backends = encode_backends(&[(
+        BackendKind::Claude,
+        Probe {
+            installed: true,
+            version: None,
+            logged_in: true,
+            account_label: None,
+        },
+    )]);
+    work.machines.lock().unwrap().push(local);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert_eq!(state.lead_mode("work", "api"), Some(Mode::Assisted));
+
+    let mut agent = Agent {
+        id: AgentId(1),
+        name: "Lead".to_owned(),
+        role: "lead".to_owned(),
+        instructions: String::new(),
+        backends: vec![BackendKind::Claude],
+        models: json!({}),
+        tools: json!({}),
+        requirements: json!({}),
+    };
+    assert_eq!(
+        state.agent_runs_on("work", &agent).as_deref(),
+        Some("Runs on machine-1")
+    );
+    agent.backends = vec![BackendKind::Codex];
+    assert_eq!(
+        state.agent_runs_on("work", &agent).as_deref(),
+        Some("No online machine has a usable backend.")
+    );
 }

@@ -1580,12 +1580,14 @@ The two ways work can start or continue without a message from you.
 
 ### Milestone 10: The full client and outbox maturity
 
-- The remaining screens in section 11.1: project, project agents, task, agents, spaces and machines, routines, memory, settings.
-- Registering a repository checks the other paired spaces; copying an agent between spaces (section 11.3).
-- Delivery retries and `delivery_failure` events.
-- Pacing per space: rate limits, quiet hours, digests.
-- Fold-in of your messages at turn boundaries; interrupt on stop.
-- More sources (job results) and channels.
+**Status:** done on the scripted backend and fakes, except the last item; design in `docs/milestone-10.md`. Not yet checked: pacing, digests, stop and fold-in on the real hub, and most of the app's newer screens on screen. Still missing from the wireframes, each needing something from the hub: a checkpoint card on a task (deferred with the second machine), "Show steps" on a task, task chips under the lead message that created them, a visible grouping of messages read together, urgency ordering of decisions, and narrowing a project's machines.
+
+- [x] The remaining screens in section 11.1: project, project agents, task, agents, spaces and machines, routines, memory, settings.
+- [x] Registering a repository checks the other paired spaces; copying an agent between spaces (section 11.3).
+- [x] Delivery retries and `delivery_failure` events.
+- [x] Pacing per space: rate limits, quiet hours, digests.
+- [x] Fold-in of your messages at turn boundaries; interrupt on stop. Fold-in on Claude only; Codex has no way to take input mid-run.
+- [ ] More sources (job results) and channels: left out until one is wanted.
 
 **Exit:** Everything in the wireframes can be done in the app. A mode changed in the app applies to that agent's next run. The app refuses a repository another paired space already has. A burst of low-urgency results arrives as one digest. Nothing non-urgent from a space arrives in its quiet hours. A stop message halts a run within one turn.
 

@@ -316,7 +316,12 @@ impl OutboxStore for HubDb {
             &conn,
             &format!(
                 "SELECT {OUTBOX_FIELDS} FROM outbox
-                 WHERE status = 'sent' AND channel = ?1 AND (?2 IS NULL OR project_id = ?2)
+                 WHERE status = 'sent' AND channel = ?1 AND (
+                     ?2 IS NULL OR project_id = ?2 OR EXISTS (
+                         SELECT 1 FROM outbox original
+                         WHERE original.digest_id = outbox.id AND original.project_id = ?2
+                     )
+                 )
                    AND sent_at < ?3
                  ORDER BY sent_at DESC, delivery_seq DESC LIMIT ?4"
             ),
@@ -333,6 +338,52 @@ impl OutboxStore for HubDb {
 }
 
 impl HubDb {
+    /// Lists the suppressed originals that make up a digest, oldest first.
+    pub async fn digest_originals(&self, digest: OutboxId) -> StoreResult<Vec<OutboxMessage>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {OUTBOX_FIELDS} FROM outbox
+                      WHERE digest_id = ?1 AND status = 'suppressed' ORDER BY id"
+            ),
+            params![digest.get()],
+            decode_message,
+        )
+        .await
+    }
+
+    /// Counts the original results held by pacing on a channel and reports their release times.
+    pub async fn held_results(
+        &self,
+        channel: &str,
+        now: Timestamp,
+    ) -> StoreResult<Option<threadlane_core::client::HeldResults>> {
+        let conn = self.db.reader()?;
+        query_one(
+            &conn,
+            "SELECT COALESCE(SUM(MAX(1, (SELECT COUNT(*) FROM outbox original
+                     WHERE original.digest_id = outbox.id))), 0),
+                    MIN(not_before), MAX(not_before)
+             FROM outbox
+             WHERE status = 'pending' AND pacing_hold IS NOT NULL
+               AND channel = ?1 AND not_before > ?2",
+            params![channel, now.as_millis()],
+            |row| {
+                let c = Cols(row);
+                let count = c.u32(0)?;
+                Ok(c.opt_ts(1)?.zip(c.opt_ts(2)?).map(|(next, latest)| {
+                    threadlane_core::client::HeldResults {
+                        count: u64::from(count),
+                        next,
+                        latest,
+                    }
+                }))
+            },
+        )
+        .await
+    }
+
     /// Reads the space's delivery pacing.
     pub async fn pacing(&self) -> StoreResult<Pacing> {
         let conn = self.db.reader()?;

@@ -260,6 +260,7 @@ struct Desktop {
     tokio: tokio::runtime::Handle,
     screen: Screen,
     composer: Entity<InputState>,
+    pacing_inputs: [Entity<InputState>; 4],
     /// The task screen's composer (wireframe 5).
     task_composer: Entity<InputState>,
     /// The Memory tab's editor.
@@ -353,6 +354,8 @@ impl Desktop {
         let mut field = |placeholder: &'static str, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
         };
+        let pacing_inputs =
+            threadlane_desktop::PACING_FIELDS.map(|setting| field(setting.placeholder, cx));
         let agent_name = field("Name", cx);
         let agent_role = field("Role, for example reviewer", cx);
         let agent_instructions = field("Instructions (optional)", cx);
@@ -438,6 +441,7 @@ impl Desktop {
             tokio,
             screen: start.unwrap_or(Screen::Home),
             composer,
+            pacing_inputs,
             task_composer,
             memory_editor,
             space_name,
@@ -571,7 +575,32 @@ impl Desktop {
                     cx,
                 );
             }
-            Screen::Home | Screen::Machines | Screen::NewProject { .. } | Screen::Settings => {}
+            Screen::Settings => {
+                let spaces: Vec<_> = self
+                    .state
+                    .spaces()
+                    .iter()
+                    .map(|space| space.name.clone())
+                    .collect();
+                self.run(
+                    async move {
+                        let core = core.read().await;
+                        let mut settings = Vec::new();
+                        for space in spaces {
+                            let pacing = core.pacing(Some(&space)).await;
+                            settings.push((space, pacing));
+                        }
+                        settings
+                    },
+                    |this, settings, _| {
+                        for (space, pacing) in settings {
+                            this.state.apply_pacing(space, pacing);
+                        }
+                    },
+                    cx,
+                );
+            }
+            Screen::Home | Screen::Machines | Screen::NewProject { .. } => {}
         }
     }
 
@@ -594,7 +623,7 @@ impl Desktop {
         let for_open_project = matches!(
             &self.screen,
             Screen::Project { space, project, .. }
-                if *space == item.space && item.item.project_name.as_deref() == Some(project)
+                if threadlane_desktop::belongs_in_conversation(&item, space, project)
         );
         if let Some(alert) = self.state.receive(item) {
             let decision = matches!(alert, threadlane_desktop::Alert::Decision { .. });
@@ -722,7 +751,7 @@ impl Desktop {
                     .await;
                 (space, project, text, sent)
             },
-            |this, (space, project, text, sent), _| match sent {
+            |this, (space, project, text, sent), cx| match sent {
                 Ok(sent) => {
                     let at = SystemClock.now();
                     this.state
@@ -730,6 +759,7 @@ impl Desktop {
                     this.state.report(Activity::Done(format!(
                         "Sent to the lead of {space} / {project}."
                     )));
+                    this.load_screen(cx);
                 }
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },

@@ -1130,11 +1130,32 @@ impl ClientCore {
         space: Option<&str>,
         project: Option<&str>,
     ) -> Result<Option<Timestamp>, ClientError> {
+        self.lead_status(space, project)
+            .await
+            .map(|(since, _)| since)
+    }
+
+    /// Reads when the lead started its current run and whether its lane is stopped.
+    ///
+    /// # Errors
+    ///
+    /// No such hub or project, several hubs and none named, or the hub's error.
+    pub async fn lead_status(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<(Option<Timestamp>, bool), ClientError> {
         let request = OverviewRequest::Lead {
             project: project.map(str::to_owned),
         };
         match self.overview(space, request).await? {
-            (_, OverviewReply::Lead { running_since }) => Ok(running_since),
+            (
+                _,
+                OverviewReply::Lead {
+                    running_since,
+                    stopped,
+                },
+            ) => Ok((running_since, stopped)),
             (space, _) => Err(wrong_reply(&space, "lead")),
         }
     }
@@ -1748,6 +1769,27 @@ pub use tasks::NewTaskSpec;
 mod tests;
 
 impl ClientCore {
+    /// Reads the current pacing backlog from each selected hub.
+    ///
+    /// # Errors
+    ///
+    /// No hub paired, or the named hub does not exist.
+    pub async fn held_results(
+        &self,
+        space: Option<&str>,
+    ) -> Result<Vec<SpaceListing<Option<threadlane_core::client::HeldResults>>>, ClientError> {
+        self.overview_each(
+            space,
+            &OverviewRequest::HeldResults,
+            "held results",
+            |_, reply| match reply {
+                OverviewReply::HeldResults { held } => Some(held),
+                _ => None,
+            },
+        )
+        .await
+    }
+
     /// Reads the space's delivery pacing settings.
     pub async fn pacing(
         &self,

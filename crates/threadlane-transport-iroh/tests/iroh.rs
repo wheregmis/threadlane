@@ -147,6 +147,7 @@ impl HubApi for FakeHub {
 
     async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
         match request {
+            OverviewRequest::HeldResults => Ok(OverviewReply::HeldResults { held: None }),
             OverviewRequest::Machines => Ok(OverviewReply::Machines {
                 machines: Vec::new(),
                 accounts: Vec::new(),
@@ -173,6 +174,7 @@ impl HubApi for FakeHub {
 
 fn item(seq: i64) -> FeedItem {
     FeedItem {
+        digest: Vec::new(),
         seq,
         message: OutboxMessage {
             id: OutboxId(seq),
