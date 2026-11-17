@@ -87,6 +87,10 @@ impl HubLink for StaleBefore {
         self.inner.pending(lease).await
     }
 
+    async fn left_unwoken(&self, lease: &Lease) -> Result<bool, LinkError> {
+        self.inner.left_unwoken(lease).await
+    }
+
     async fn begin_run(&self, lease: &Lease) -> Result<Begin, LinkError> {
         self.inner.begin_run(lease).await
     }

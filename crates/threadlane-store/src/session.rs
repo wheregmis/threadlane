@@ -381,7 +381,7 @@ impl SessionStore for HubDb {
             params![ended_at.as_millis(), run.session_id.get()],
         )
         .await?;
-        task::on_run_committed(conn, lease.lane_id, ended_at).await?;
+        task::on_run_committed(conn, lease.lane_id, run_id, ended_at).await?;
         tx.commit().await
     }
 

@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{free_backends, usable_backends};
-use threadlane_core::ids::{DecisionId, LaneId, MachineId, ProjectId, TaskId};
+use threadlane_core::ids::{DecisionId, LaneId, MachineId, ProjectId, RunId, TaskId};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
@@ -30,6 +30,10 @@ pub const BLOCKED_REASON: &str = "blocked: every model account it can use is at 
 /// that is not logged in to `gh` (Plan.md §5.4 item 5).
 pub const NO_GH_REASON: &str =
     "this machine is not logged in to gh, so it cannot reach the task's repositories";
+
+/// The `waiting_reason` of a task whose run ended without `finish_task` and
+/// left nothing to wake it: no decision, timer or event.
+pub const UNWOKEN_REASON: &str = "ended without finishing and nothing is set to wake it";
 
 const TASK_FIELDS: &str = "id, project_id, lane_id, agent_id, title, goal, repositories,
     parent_task_id, origin, status, priority, created_by_call, last_machine_id, waiting_reason,
@@ -133,6 +137,51 @@ async fn pending_decision(conn: &Connection, lane_id: LaneId) -> StoreResult<Opt
         "SELECT id FROM decisions WHERE lane_id = ?1 AND status = 'pending' ORDER BY id LIMIT 1",
         params![lane_id.get()],
         |row| Cols(row).id(0),
+    )
+    .await
+}
+
+/// Whether the lane has an active timer of its own, which will wake it.
+async fn active_timer(conn: &Connection, lane_id: LaneId) -> StoreResult<bool> {
+    let count = query_one(
+        conn,
+        "SELECT COUNT(*) FROM timers WHERE lane_id = ?1 AND status = 'active'",
+        params![lane_id.get()],
+        |row| Cols(row).i64(0),
+    )
+    .await?;
+    Ok(count > 0)
+}
+
+/// Whether a branch of the lane's task was pushed for it, so that GitHub's
+/// events on it reach the lane. shortcut: counted even on a hub without a
+/// GitHub source; ask the hub's settings when one can run without it.
+async fn published(conn: &Connection, lane_id: LaneId) -> StoreResult<bool> {
+    let outcomes: Vec<Json> = query_all(
+        conn,
+        "SELECT outcome FROM decisions WHERE lane_id = ?1 AND outcome IS NOT NULL",
+        params![lane_id.get()],
+        |row| Cols(row).json(0),
+    )
+    .await?;
+    Ok(outcomes
+        .iter()
+        .any(|outcome| outcome["performed"] == true && outcome["branch"].is_string()))
+}
+
+/// Whether anything will wake the lane's sleeping task: an active timer
+/// of its own, or a published branch GitHub reports on.
+async fn will_wake(conn: &Connection, lane_id: LaneId) -> StoreResult<bool> {
+    Ok(active_timer(conn, lane_id).await? || published(conn, lane_id).await?)
+}
+
+/// The number of events pending in the lane.
+async fn pending_events(conn: &Connection, lane_id: LaneId) -> StoreResult<i64> {
+    query_one(
+        conn,
+        "SELECT COUNT(*) FROM events WHERE lane_id = ?1 AND status = 'pending'",
+        params![lane_id.get()],
+        |row| Cols(row).i64(0),
     )
     .await
 }
@@ -244,13 +293,6 @@ async fn end_task(
         params![task.lane_id.get()],
     )
     .await?;
-    let lead_lane_id: LaneId = query_one(
-        conn,
-        "SELECT id FROM lanes WHERE project_id = ?1 AND kind = ?2",
-        params![task.project_id.get(), LaneKind::Lead.as_str()],
-        |row| Cols(row).id(0),
-    )
-    .await?;
     let mut payload = json!({
         "task_id": task.id,
         "task": task.id.to_string(),
@@ -266,13 +308,43 @@ async fn end_task(
         };
         payload[key] = json!(why);
     }
+    tell_lead(
+        conn,
+        task,
+        format!("result:{}", task.id.get()),
+        payload,
+        now,
+    )
+    .await?;
+    if matches!(status, TaskStatus::Failed | TaskStatus::Cancelled) {
+        cancel_dependents(conn, task, status, now).await?;
+    }
+    Ok(())
+}
+
+/// Inserts a `task_result` event about `task` in its project's lead lane,
+/// once per `source_event_id`.
+async fn tell_lead(
+    conn: &Connection,
+    task: &Task,
+    source_event_id: String,
+    payload: Json,
+    now: Timestamp,
+) -> StoreResult<()> {
+    let lead_lane_id: LaneId = query_one(
+        conn,
+        "SELECT id FROM lanes WHERE project_id = ?1 AND kind = ?2",
+        params![task.project_id.get(), LaneKind::Lead.as_str()],
+        |row| Cols(row).id(0),
+    )
+    .await?;
     insert_event_in(
         conn,
         &NewEvent {
             project_id: task.project_id,
             lane_id: lead_lane_id,
             source: TASK_SOURCE.to_owned(),
-            source_event_id: format!("result:{}", task.id.get()),
+            source_event_id,
             kind: EventKind::TaskResult,
             payload,
             trust: Trust::System,
@@ -284,9 +356,6 @@ async fn end_task(
         },
     )
     .await?;
-    if matches!(status, TaskStatus::Failed | TaskStatus::Cancelled) {
-        cancel_dependents(conn, task, status, now).await?;
-    }
     Ok(())
 }
 
@@ -358,12 +427,16 @@ pub(crate) async fn on_run_started(
 /// [`SessionStore::commit_run`]: a running task with a pending decision
 /// waits on you; one that recorded its result is done, with the branch and
 /// pull request performed for it; otherwise it sleeps until an event
-/// arrives, or is queued again if one already has.
+/// arrives, or is queued again if one already has. A task left sleeping
+/// with nothing to wake it, neither a timer of its own nor a published
+/// branch, carries [`UNWOKEN_REASON`], and its lead lane is told once per
+/// run `run_id`.
 ///
 /// [`SessionStore::commit_run`]: threadlane_core::store::SessionStore::commit_run
 pub(crate) async fn on_run_committed(
     conn: &Connection,
     lane_id: LaneId,
+    run_id: RunId,
     now: Timestamp,
 ) -> StoreResult<()> {
     let Some(task) = task_of_lane(conn, lane_id).await? else {
@@ -383,19 +456,46 @@ pub(crate) async fn on_run_committed(
         let task = Task { result, ..task };
         return end_task(conn, &task, TaskStatus::Done, None, now).await;
     }
-    let pending = query_one(
+    if pending_events(conn, lane_id).await? > 0 {
+        return transition(conn, &task, TaskStatus::Queued).await;
+    }
+    transition(conn, &task, TaskStatus::Sleeping).await?;
+    if will_wake(conn, lane_id).await? {
+        return Ok(());
+    }
+    exec(
         conn,
-        "SELECT COUNT(*) FROM events WHERE lane_id = ?1 AND status = 'pending'",
-        params![lane_id.get()],
-        |row| Cols(row).i64(0),
+        "UPDATE tasks SET waiting_reason = ?1 WHERE id = ?2",
+        params![UNWOKEN_REASON, task.id.get()],
     )
     .await?;
-    let next = if pending > 0 {
-        TaskStatus::Queued
-    } else {
-        TaskStatus::Sleeping
+    let payload = json!({
+        "task_id": task.id,
+        "task": task.id.to_string(),
+        "title": task.title,
+        "status": TaskStatus::Sleeping,
+        "reason": UNWOKEN_REASON,
+    });
+    tell_lead(
+        conn,
+        &task,
+        format!("unwoken:{}", run_id.get()),
+        payload,
+        now,
+    )
+    .await
+}
+
+/// [`TaskStore::left_unwoken`] on one connection.
+async fn left_unwoken(conn: &Connection, lane_id: LaneId) -> StoreResult<bool> {
+    let Some(task) = task_of_lane(conn, lane_id).await? else {
+        return Ok(false);
     };
-    transition(conn, &task, next).await
+    Ok(task.status == TaskStatus::Running
+        && task.result.is_none()
+        && pending_decision(conn, lane_id).await?.is_none()
+        && pending_events(conn, lane_id).await? == 0
+        && !will_wake(conn, lane_id).await?)
 }
 
 /// [`SessionStore::fail_run`]: a running task is queued again, or fails when
@@ -451,7 +551,7 @@ pub(crate) async fn on_lane_reclaimed(conn: &Connection, lane_id: LaneId) -> Sto
 pub(crate) async fn on_event_inserted(conn: &Connection, lane_id: LaneId) -> StoreResult<()> {
     exec(
         conn,
-        "UPDATE tasks SET status = ?1 WHERE lane_id = ?2 AND status = ?3",
+        "UPDATE tasks SET status = ?1, waiting_reason = NULL WHERE lane_id = ?2 AND status = ?3",
         params![
             TaskStatus::Queued.as_str(),
             lane_id.get(),
@@ -740,6 +840,11 @@ impl TaskStore for HubDb {
         let created = existing_task(conn, id).await?;
         tx.commit().await?;
         Ok(created)
+    }
+
+    async fn left_unwoken(&self, lane_id: LaneId) -> StoreResult<bool> {
+        let conn = self.db.reader()?;
+        left_unwoken(&conn, lane_id).await
     }
 
     async fn task(&self, id: TaskId) -> StoreResult<Option<Task>> {

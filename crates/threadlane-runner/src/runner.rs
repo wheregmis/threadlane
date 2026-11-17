@@ -403,7 +403,7 @@ impl Inner {
 
     /// Mirrors the run's events until it ends, then completes or fails it.
     /// `started` is the backend and the request that started the run, for
-    /// the final progress turn.
+    /// the extra turn.
     async fn follow(
         &self,
         lane: &LaneState,
@@ -419,12 +419,20 @@ impl Inner {
         {
             Ended::Terminal(BackendEvent::Finished { final_text, .. }) => {
                 // A run waiting on you ends now; it is resumed with the answer.
-                if assignment.lane_kind == LaneKind::Task
-                    && !lane.deferred()
-                    && !lane.progress_written()
-                {
-                    self.progress_turn(lane, assignment, started, &mut mirror, deadline)
-                        .await?;
+                if assignment.lane_kind == LaneKind::Task && !lane.deferred() {
+                    let progress = !lane.progress_written();
+                    let quiet = self.left_unwoken(lane, assignment.run_id).await?;
+                    // At most one extra turn: both asks share it.
+                    let prompt = match (progress, quiet) {
+                        (true, true) => Some(format!("{PROGRESS_PROMPT}\n\n{QUIET_END_PROMPT}")),
+                        (true, false) => Some(PROGRESS_PROMPT.to_owned()),
+                        (false, true) => Some(QUIET_END_PROMPT.to_owned()),
+                        (false, false) => None,
+                    };
+                    if let Some(prompt) = prompt {
+                        self.extra_turn(lane, assignment, started, prompt, &mut mirror, deadline)
+                            .await?;
+                    }
                 }
                 return self.commit(lane, assignment, final_text.as_deref()).await;
             }
@@ -468,16 +476,19 @@ impl Inner {
         self.fail(lane, assignment.run_id, failure).await
     }
 
-    /// The final progress turn (docs/milestone-5.md §1 decision 7): resumes
-    /// the session once with [`PROGRESS_PROMPT`], mirroring the turn into the
-    /// same journal under the run's own deadline. However the turn ends, the
-    /// run then ends as it would have; only a stop, a kill or a lost lease
-    /// ends it otherwise.
-    async fn progress_turn(
+    /// The one extra turn of a task run that ends without its progress file
+    /// written (docs/milestone-5.md §1 decision 7, [`PROGRESS_PROMPT`]) or
+    /// with nothing to wake the task ([`QUIET_END_PROMPT`]): resumes the
+    /// session once with `prompt`, mirroring the turn into the same journal
+    /// under the run's own deadline. However the turn ends, the run then
+    /// ends as it would have; only a stop, a kill or a lost lease ends it
+    /// otherwise.
+    async fn extra_turn(
         &self,
         lane: &LaneState,
         assignment: &RunAssignment,
         (backend, started): (&dyn AgentBackend, &RunRequest),
+        prompt: String,
         mirror: &mut Mirror,
         deadline: Timestamp,
     ) -> Result<(), LaneExit> {
@@ -485,14 +496,14 @@ impl Inner {
             &assignment.native_session;
         let id = mirror.native_session().unwrap_or(assigned).to_owned();
         let request = RunRequest {
-            prompt: PROGRESS_PROMPT.to_owned(),
+            prompt,
             session: NativeSession::Resume { id },
             ..started.clone()
         };
         let mut run = match backend.run(request).await {
             Ok(run) => run,
             Err(error) => {
-                warn!(run = %assignment.run_id, %error, "could not start the final progress turn");
+                warn!(run = %assignment.run_id, %error, "could not start the extra turn");
                 return Ok(());
             }
         };
@@ -570,6 +581,19 @@ impl Inner {
             }
             if lane.deferred() && matches!(event, BackendEvent::ToolUse { .. }) {
                 return Ok(Ended::Deferred);
+            }
+        }
+    }
+
+    /// Whether the hub says the task would be left with nothing to wake it.
+    /// A hub that cannot answer costs only the extra turn.
+    async fn left_unwoken(&self, lane: &LaneState, run_id: RunId) -> Result<bool, LaneExit> {
+        match self.link.left_unwoken(&lane.lease()).await {
+            Ok(unwoken) => Ok(unwoken),
+            Err(error @ (LinkError::Killed(_) | LinkError::StaleLease { .. })) => Err(error.into()),
+            Err(error) => {
+                warn!(run = %run_id, %error, "could not ask whether the task has anything to wake it");
+                Ok(false)
             }
         }
     }
@@ -1032,6 +1056,16 @@ pub const PROGRESS_PROMPT: &str = "Before this run ends: you did not update your
 progress file in it. Write project/tasks/<your task id>.md now with memory_create or \
 memory_edit: what is done, what is left, and what the next session on this task must know. \
 Then end your turn.";
+
+/// What the extra turn asks of a task's agent when its run is about to end
+/// with nothing set to wake the task again ([`HubLink::left_unwoken`]).
+/// When the progress file is also missing, it follows [`PROGRESS_PROMPT`]
+/// in the same turn.
+pub const QUIET_END_PROMPT: &str = "Before this run ends: you ended your turn without \
+finish_task, and nothing is set to wake this task again. Anything you started in the background \
+stops when the run ends, and nothing will tell you about it. Do one of these now: call \
+finish_task if the task is done; call set_follow_up with what you are waiting for if you need to \
+wait; or say in your final text what blocks you. Then end your turn.";
 
 /// The rationale of a run stopped for going on after it asked you.
 const STOPPED_WAITING: &str =

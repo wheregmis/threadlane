@@ -18,5 +18,5 @@ mod workspace;
 pub use crate::config::RunnerConfig;
 pub use crate::error::RunnerError;
 pub use crate::forge::GitForge;
-pub use crate::runner::{PROGRESS_PROMPT, Runner};
+pub use crate::runner::{PROGRESS_PROMPT, QUIET_END_PROMPT, Runner};
 pub use crate::workspace::GitWorkspaces;

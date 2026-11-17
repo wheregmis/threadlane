@@ -5,7 +5,9 @@ use std::time::Duration;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::NativeSession;
 use threadlane_core::link::{Begin, HubLink, RunAssignment};
-use threadlane_core::model::{EventKind, Lease, Mode, NewAgent, NewBinding, NewProject, Trust};
+use threadlane_core::model::{
+    EventKind, LaneKind, Lease, Mode, NewAgent, NewBinding, NewProject, Trust,
+};
 use threadlane_core::store::{OrgStore, SessionStore, TaskStore};
 use threadlane_hub::{CREATE_TASK, LEAD_INSTRUCTIONS, LEAD_RULES, MEMORY_CREATE, TASK_RULES};
 
@@ -32,6 +34,13 @@ async fn call_all(link: &dyn HubLink, lease: &Lease, run: &RunAssignment, calls:
 /// A `memory_create` call.
 fn write(path: &str, content: &str) -> (&'static str, Json) {
     (MEMORY_CREATE, json!({ "path": path, "content": content }))
+}
+
+/// Runs the lead on the notice of a task run that left nothing to wake the
+/// task, so the next run is the task's again.
+async fn consume_notice(link: &dyn HubLink) {
+    let lead = run_with(link, &[]).await;
+    assert_eq!(lead.lane_kind, LaneKind::Lead, "{}", lead.prompt);
 }
 
 fn fresh(run: &RunAssignment) -> bool {
@@ -295,6 +304,7 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
     // and no progress file yet. It leaves one.
     let progress = "# Page\nHalf done: the layout is in.\n\nNext: the footer.";
     let first = run_with(&*hub.link, &[write("project/tasks/T-0001.md", progress)]).await;
+    consume_notice(&*hub.link).await;
     assert!(fresh(&first));
     let task = hub.db.task(first.task_id.unwrap()).await.unwrap().unwrap();
     let appended = &first.appended_instructions;
@@ -315,6 +325,7 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
     };
     hub.insert(wake("w-1")).await;
     let resumed = run_with(&*hub.link, &[]).await;
+    consume_notice(&*hub.link).await;
     assert!(!fresh(&resumed));
     assert!(!resumed.prompt.contains("Half done"), "{}", resumed.prompt);
     assert_eq!(resumed.appended_instructions, first.appended_instructions);
@@ -323,6 +334,7 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
     hub.db.close_session(resumed.session_id).await.unwrap();
     hub.insert(wake("w-2")).await;
     let restarted = run_with(&*hub.link, &[]).await;
+    consume_notice(&*hub.link).await;
     assert!(fresh(&restarted));
     let prompt = &restarted.prompt;
     let shown = prompt

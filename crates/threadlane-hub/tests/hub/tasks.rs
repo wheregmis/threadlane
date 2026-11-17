@@ -454,8 +454,24 @@ async fn a_task_run_that_does_not_finish_sleeps_and_one_that_fails_is_queued_aga
 
     let (lease, run) = begin(&*hub.link).await;
     finish_run(&hub, &lease, &run).await;
-    assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Sleeping);
-    assert!(task_results(&hub).await.is_empty());
+    let sleeping = task(&hub, "T-0001").await;
+    assert_eq!(sleeping.status, TaskStatus::Sleeping);
+    // Nothing is set to wake it: it says so, and the lead is told once.
+    assert_eq!(
+        sleeping.waiting_reason.as_deref(),
+        Some(threadlane_store::UNWOKEN_REASON)
+    );
+    let notices = task_results(&hub).await;
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].payload["status"], "sleeping");
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(
+        run.lane_kind,
+        LaneKind::Lead,
+        "the lead is shown the notice"
+    );
+    assert_eq!(run.events, vec![notices[0].id]);
+    finish_run(&hub, &lease, &run).await;
 
     let lane_id = task(&hub, "T-0001").await.lane_id;
     hub.insert(|event| {

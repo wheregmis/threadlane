@@ -1973,3 +1973,48 @@ fn copying_says_so_and_with_no_hub_the_app_explains_pairing() {
     state.space_removed("work");
     assert!(state.first_run(), "unpairing the last one shows it again");
 }
+
+#[tokio::test]
+async fn a_sleeping_card_claims_a_follow_up_only_when_one_is_listed() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().expect("lock") = vec![
+        task(
+            6,
+            TaskStatus::Sleeping,
+            Some("ended without finishing and nothing is set to wake it"),
+        ),
+        task(7, TaskStatus::Sleeping, None),
+        task(8, TaskStatus::Sleeping, None),
+        task(9, TaskStatus::Sleeping, None),
+    ];
+    // Task 7's lane has an active follow-up at 09:00; task 9's is paused.
+    let mut due = timer(1, ProjectId(1), None, TimerCreator::Agent);
+    due.lane_id = LaneId(17);
+    let mut paused = timer(2, ProjectId(1), None, TimerCreator::Agent);
+    paused.lane_id = LaneId(19);
+    paused.status = TimerStatus::Paused;
+    work.timers.lock().expect("lock").extend([due, paused]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_project(load_project(&core, "work", "api").await);
+    state.apply_routines(load_routines(&core, vec![("work".to_owned(), "api".to_owned())]).await);
+
+    let sleeping: Vec<String> = state
+        .board("work", "api", &when())
+        .into_iter()
+        .find(|column| column.title == "Sleeping")
+        .expect("a Sleeping column")
+        .cards
+        .into_iter()
+        .map(|card| card.meta)
+        .collect();
+    assert_eq!(
+        sleeping,
+        [
+            "Engineer · ended without finishing and nothing is set to wake it",
+            "Engineer · sleeping until its follow-up at 09:00",
+            "Engineer · sleeping",
+            "Engineer · sleeping",
+        ]
+    );
+}

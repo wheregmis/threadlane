@@ -300,6 +300,12 @@ pub trait TaskStore: Send + Sync {
     /// project. `lease` is the creating run's, `None` when no run creates it.
     async fn create_task(&self, lease: Option<&Lease>, task: &NewTask) -> StoreResult<Task>;
     async fn task(&self, id: TaskId) -> StoreResult<Option<Task>>;
+    /// Whether the lane's running task would be left with nothing to wake
+    /// it if its run ended now: no result recorded with `finish_task`, no
+    /// pending decision, no pending event, no active timer of its own and no
+    /// published branch that GitHub's events reach.
+    /// `false` for a lead lane.
+    async fn left_unwoken(&self, lane_id: LaneId) -> StoreResult<bool>;
     async fn tasks(&self, project_id: ProjectId) -> StoreResult<Vec<Task>>;
     /// Changes what a task that has not ended is about. `None` keeps a field.
     async fn update_task(
