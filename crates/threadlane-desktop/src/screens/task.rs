@@ -7,7 +7,7 @@ use gpui_kit::*;
 use threadlane_core::ids::TaskId;
 use threadlane_desktop::{When, chips, status_label, timeline};
 
-use super::{heading, section};
+use super::{gap_line, heading, link, section};
 use crate::{Desktop, Screen, Tab};
 
 impl Desktop {
@@ -20,9 +20,14 @@ impl Desktop {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let Some(detail) = self.state.task(space, task) else {
-            return div()
-                .text_color(muted)
-                .child(format!("Loading {space} {task}…"))
+            let gap = self
+                .state
+                .task_gap(space, task)
+                .unwrap_or(threadlane_desktop::Gap::Loading);
+            return v_flex()
+                .gap_3()
+                .child(heading(format!("{space} {task}")))
+                .child(gap_line(&gap, "this task", cx))
                 .into_any_element();
         };
         let summary = &detail.summary;
@@ -76,11 +81,13 @@ impl Desktop {
             };
             related = related.child(
                 v_flex()
-                    .id(SharedString::from(format!("related-{}", other.task.id)))
-                    .text_sm()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
-                    .child(format!("{} {}", other.task.id, other.task.title))
+                    .child(
+                        link(
+                            format!("related-{}", other.task.id),
+                            format!("{} {}", other.task.id, other.task.title),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+                    )
                     .child(div().text_xs().text_color(muted).child(format!(
                         "{} · {relation}",
                         status_label(other.task.status, other.task.waiting_reason.as_deref())
@@ -95,14 +102,11 @@ impl Desktop {
             .overflow_y_scroll()
             .gap_3()
             .child(
-                h_flex()
-                    .id("task-project")
-                    .gap_2()
-                    .text_sm()
-                    .text_color(muted)
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(project.clone(), cx)))
-                    .child(format!("{space} / {} / {task}", summary.project)),
+                link(
+                    "task-project",
+                    format!("{space} / {} / {task}", summary.project),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.go(project.clone(), cx))),
             )
             .child(heading(format!("{task} {}", summary.task.title)))
             .child(

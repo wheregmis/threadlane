@@ -1,28 +1,49 @@
 //! The shell's sidebar (wireframe "Home", left): Home with what needs you,
 //! each paired space with its reachability and projects, Agents, Machines.
+//! Every row is a GPUI Kit button, so assistive technology names it and
+//! can press it.
 
-use gpui_kit::component::sidebar::{
-    Sidebar, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
-};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{ActiveTheme as _, Selectable as _, v_flex};
 use gpui_kit::*;
+use threadlane_desktop::{Part, Reach};
 
+use super::{gap_line, section};
 use crate::{Desktop, Screen, Tab};
 
 impl Desktop {
     pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let needs_you = self.state.queue().len();
-        let home = SidebarMenuItem::new(count("Home", needs_you))
-            .active(self.screen == Screen::Home)
-            .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Home, cx)));
-        let mut groups = vec![SidebarGroup::new("Overview").child(SidebarMenu::new().child(home))];
+        let mut bar = v_flex()
+            .id("sidebar")
+            .w(px(220.))
+            .flex_none()
+            .h_full()
+            .overflow_y_scroll()
+            .gap_1()
+            .p_2()
+            .bg(cx.theme().sidebar)
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            .child(section("Threadlane"))
+            .child(row(
+                "go-home",
+                count("Home", needs_you),
+                self.screen == Screen::Home,
+                cx.listener(|this, _, _, cx| this.go(Screen::Home, cx)),
+            ));
 
         for space in self.state.spaces() {
-            let reach = if space.unreachable.is_none() {
-                "● reachable"
-            } else {
-                "○ out of reach"
+            let reach = match space.reach {
+                Reach::Unknown => "◌ asking…",
+                Reach::Reachable => "● reachable",
+                Reach::Unreachable(_) => "○ out of reach",
             };
-            let items = space.projects.iter().map(|project| {
+            bar = bar.child(section(format!("{} {reach}", space.name)).pt_3());
+            if let Some(gap) = space.gap(Part::Projects) {
+                bar = bar.child(gap_line(&gap, "projects", cx));
+            }
+            for project in &space.projects {
                 let screen = Screen::Project {
                     space: space.name.clone(),
                     project: project.name.clone(),
@@ -34,40 +55,59 @@ impl Desktop {
                         if *open == space.name && *name == project.name
                 );
                 let open = self.state.open_in(&space.name, project.id);
-                SidebarMenuItem::new(count(&project.name, open))
-                    .active(active)
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
-            });
-            groups.push(
-                SidebarGroup::new(format!("{} {reach}", space.name))
-                    .child(SidebarMenu::new().children(items)),
-            );
+                bar = bar.child(row(
+                    format!("go-{}-{}", space.name, project.name),
+                    count(&project.name, open),
+                    active,
+                    cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                ));
+            }
+            let screen = Screen::NewProject {
+                space: space.name.clone(),
+            };
+            bar = bar.child(row(
+                format!("new-project-{}", space.name),
+                "+ New project".to_owned(),
+                self.screen == screen,
+                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+            ));
         }
 
-        let (online, machines) = self.state.spaces().iter().fold((0, 0), |(on, all), space| {
-            (on + space.online(), all + space.machines.len())
-        });
-        groups.push(
-            SidebarGroup::new("Team").child(
-                SidebarMenu::new()
-                    .child(
-                        SidebarMenuItem::new("Agents")
-                            .active(self.screen == Screen::Agents)
-                            .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Agents, cx))),
-                    )
-                    .child(
-                        SidebarMenuItem::new(format!("Machines  {online} / {machines}"))
-                            .active(self.screen == Screen::Machines)
-                            .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx))),
-                    ),
-            ),
-        );
-
-        Sidebar::new("sidebar")
-            .w(px(220.))
-            .header(SidebarHeader::new().child("Threadlane"))
-            .children(groups)
+        let machines = match self.state.machine_count() {
+            Some((online, all)) => format!("Machines  {online} / {all}"),
+            None => "Machines".to_owned(),
+        };
+        bar.child(section("Team").pt_3())
+            .child(row(
+                "go-agents",
+                "Agents".to_owned(),
+                self.screen == Screen::Agents,
+                cx.listener(|this, _, _, cx| this.go(Screen::Agents, cx)),
+            ))
+            .child(row(
+                "go-machines",
+                machines,
+                self.screen == Screen::Machines,
+                cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx)),
+            ))
     }
+}
+
+/// One sidebar row: a full-width ghost button named by its label.
+fn row(
+    id: impl Into<SharedString>,
+    label: String,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Button {
+    Button::new(id.into())
+        .ghost()
+        .w_full()
+        .selected(active)
+        .accessibility_label(label.clone())
+        // A child rather than a label, which the button would center.
+        .child(div().w_full().child(label))
+        .on_click(on_click)
 }
 
 /// `Payments API  1`, or just the label when nothing waits.

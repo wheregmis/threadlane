@@ -20,7 +20,8 @@ use threadlane_core::ids::TaskId;
 use threadlane_core::model::Mode;
 use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
-    AppState, When, decision_of_tag, load_earlier, load_project, pump, refresh,
+    AppState, When, decision_of_tag, describe, load_earlier, load_modes, load_project, load_task,
+    pump, refresh,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{RwLock, mpsc};
@@ -30,6 +31,9 @@ mod screens;
 /// How often the app asks every hub again, so reachability, what runs, and
 /// the open screen stay current.
 const REFRESH_EVERY: Duration = Duration::from_secs(30);
+
+/// How soon the app asks again while a hub is away or refused a part.
+const RETRY_EVERY: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
     let runtime = match Runtime::new() {
@@ -46,6 +50,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The paired hubs are known without asking them: the first frame lists them.
+    let state = AppState::paired(core.hubs().iter().map(|hub| hub.name.as_str()));
     let (shown, feed) = mpsc::unbounded_channel();
     // With no hub paired there is no feed; Home says so.
     let stream = {
@@ -79,7 +85,7 @@ fn main() -> ExitCode {
             ..Default::default()
         };
         let opened = open_window(options, cx, |window, cx| {
-            cx.new(|cx| Desktop::new(core, tokio, feed, start, window, cx))
+            cx.new(|cx| Desktop::new(state, core, tokio, feed, start, window, cx))
         });
         match opened {
             Ok((_window, view)) => {
@@ -127,17 +133,6 @@ fn local_offset_minutes() -> i64 {
     sign * (hours * 60 + minutes)
 }
 
-/// An error with its causes: `hub work refused the request: not found: task T-0001`.
-fn describe(error: &dyn std::error::Error) -> String {
-    let mut text = error.to_string();
-    let mut cause = error.source();
-    while let Some(next) = cause {
-        text = format!("{text}: {next}");
-        cause = next.source();
-    }
-    text
-}
-
 /// Which screen the window shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Screen {
@@ -155,6 +150,10 @@ enum Screen {
     },
     /// The agents of every space.
     Agents,
+    /// A form for a new project in one space.
+    NewProject {
+        space: String,
+    },
     /// The spaces and their machines.
     Machines,
 }
@@ -205,10 +204,15 @@ struct Desktop {
     screen: Screen,
     composer: Entity<InputState>,
     note: Entity<InputState>,
+    /// The new project form's name and description.
+    project_name: Entity<InputState>,
+    project_description: Entity<InputState>,
     /// The outcome of the last action, or why it failed.
     status: Option<SharedString>,
     /// Empty the note at the next render, which has the window it needs.
     clear_note: bool,
+    /// Empty the new project form at the next render.
+    clear_project_form: bool,
     offset_minutes: i64,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -216,6 +220,7 @@ struct Desktop {
 
 impl Desktop {
     fn new(
+        state: AppState,
         core: Arc<RwLock<ClientCore>>,
         tokio: tokio::runtime::Handle,
         mut feed: mpsc::UnboundedReceiver<SpaceFeedItem>,
@@ -226,6 +231,9 @@ impl Desktop {
         let composer =
             cx.new(|cx| InputState::new(window, cx).placeholder("Tell your team what you need…"));
         let note = cx.new(|cx| InputState::new(window, cx).placeholder("Note (optional)"));
+        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
+        let project_description =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Description (optional)"));
         let subscriptions = vec![cx.subscribe_in(
             &composer,
             window,
@@ -247,18 +255,31 @@ impl Desktop {
                 if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
                     return;
                 }
-                cx.background_executor().timer(REFRESH_EVERY).await;
+                // By then the refresh has answered: ask again soon if it left gaps.
+                cx.background_executor().timer(RETRY_EVERY).await;
+                match this.update(cx, |this, _| this.state.retry_soon()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        cx.background_executor()
+                            .timer(REFRESH_EVERY.saturating_sub(RETRY_EVERY))
+                            .await;
+                    }
+                    Err(_) => return,
+                }
             }
         });
         Self {
-            state: AppState::default(),
+            state,
             core,
             tokio,
             screen: start.unwrap_or(Screen::Home),
             composer,
             note,
+            project_name,
+            project_description,
             status: None,
             clear_note: false,
+            clear_project_form: false,
             offset_minutes: local_offset_minutes(),
             _tasks: vec![follow, refresh_loop],
             _subscriptions: subscriptions,
@@ -312,25 +333,33 @@ impl Desktop {
                 cx,
             ),
             Screen::Task { space, task } => self.run(
-                async move {
-                    let loaded = core
-                        .read()
-                        .await
-                        .task(Some(&space), &task.to_string())
-                        .await;
-                    (space, loaded)
-                },
-                |this, (space, loaded), _| match loaded {
-                    Ok(detail) => this.state.apply_task(&space, detail),
-                    Err(error) => this.status = Some(describe(&error).into()),
-                },
+                async move { load_task(&*core.read().await, &space, task).await },
+                |this, loaded, _| this.state.apply_task(loaded),
                 cx,
             ),
-            Screen::Home | Screen::Agents | Screen::Machines => {}
+            Screen::Agents => {
+                let projects = self
+                    .state
+                    .targets()
+                    .into_iter()
+                    .map(|(space, project)| (space.to_owned(), project.to_owned()))
+                    .collect();
+                self.run(
+                    async move { load_modes(&*core.read().await, projects).await },
+                    |this, loaded, _| this.state.apply_modes(loaded),
+                    cx,
+                );
+            }
+            Screen::Home | Screen::Machines | Screen::NewProject { .. } => {}
         }
     }
 
     fn receive(&mut self, item: SpaceFeedItem, cx: &mut Context<Self>) {
+        // An item from a hub that was away or refused a part: it is back.
+        let back = self
+            .state
+            .space(&item.space)
+            .is_some_and(threadlane_desktop::Space::stale);
         let for_open_project = matches!(
             &self.screen,
             Screen::Project { space, project, .. }
@@ -352,9 +381,12 @@ impl Desktop {
                     .collect(),
             });
             // The card carries no creation time or context: ask its hub.
-            if decision {
+            if decision && !back {
                 self.refresh(cx);
             }
+        }
+        if back {
+            self.refresh(cx);
         }
         // What the lead says often comes with tasks it made or finished.
         if for_open_project {
@@ -476,6 +508,44 @@ impl Desktop {
         );
     }
 
+    /// Creates the project the new project form describes, then opens it.
+    fn create_project(&mut self, space: String, cx: &mut Context<Self>) {
+        let name = self.project_name.read(cx).value().trim().to_owned();
+        let description = self.project_description.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            self.status = Some("Give the project a name.".into());
+            cx.notify();
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        self.status = Some(format!("Creating {name} in {space}…").into());
+        self.run(
+            async move {
+                let created = core
+                    .read()
+                    .await
+                    .create_project(Some(&space), &name, &description)
+                    .await;
+                (space, created)
+            },
+            |this, (space, created), cx| match created {
+                Ok(project) => {
+                    let screen = Screen::Project {
+                        space: space.clone(),
+                        project: project.name.clone(),
+                        tab: Tab::Conversation,
+                    };
+                    this.state.project_created(&space, project);
+                    this.clear_project_form = true;
+                    this.go(screen, cx);
+                }
+                Err(error) => this.status = Some(describe(&error).into()),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
     fn earlier(
         &mut self,
         space: String,
@@ -510,6 +580,11 @@ impl Render for Desktop {
             self.note
                 .update(cx, |note, cx| note.set_value("", window, cx));
         }
+        if std::mem::take(&mut self.clear_project_form) {
+            for field in [&self.project_name, &self.project_description] {
+                field.update(cx, |field, cx| field.set_value("", window, cx));
+            }
+        }
         let muted = cx.theme().muted_foreground;
         let when = self.when();
         let body = match self.screen.clone() {
@@ -521,6 +596,7 @@ impl Render for Desktop {
             } => self.project(&space, &project, tab, &when, cx),
             Screen::Task { space, task } => self.task(&space, task, &when, cx),
             Screen::Agents => self.agents(cx),
+            Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),
         };
         h_flex()

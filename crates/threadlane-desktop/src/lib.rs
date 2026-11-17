@@ -17,7 +17,7 @@ use threadlane_core::client::{
     BindingSummary, ConversationEntry, ProjectSummary, TaskDetail, TaskSummary,
 };
 use threadlane_core::ids::{DecisionId, EventId, ProjectId, TaskId};
-use threadlane_core::model::{Account, Agent, Decision, Machine, MachineStatus, OutboxKind};
+use threadlane_core::model::{Account, Agent, Decision, Machine, MachineStatus, Mode, OutboxKind};
 use threadlane_core::time::Timestamp;
 use tokio::sync::{RwLock, mpsc};
 
@@ -44,15 +44,120 @@ const RECENT_SHOWN: usize = 8;
 /// or `:resumed` (`threadlane-store`, Plan.md §5.3).
 const ACCOUNT_NOTICE: &str = "system:account:";
 
-/// One paired hub as the app shows it. Everything but `unreachable` is its
-/// last report, kept while the hub is away (Plan.md §11.3).
+/// How many characters of a result Home shows before its "Show" toggle.
+const EXCERPT_CHARS: usize = 240;
+
+/// How many lines of a result Home shows before its "Show" toggle.
+const EXCERPT_LINES: usize = 3;
+
+/// An error with its causes, as the app shows it: `hub work refused the
+/// request: not found: task T-0001`.
+#[must_use]
+pub fn describe(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        text = format!("{text}: {next}");
+        cause = next.source();
+    }
+    text
+}
+
+/// One part of what the app asks a hub, which can fail on its own while
+/// the other parts load (Plan.md §11.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Part {
+    /// A space's projects.
+    Projects,
+    /// A space's agents.
+    Agents,
+    /// The client keys a space admitted.
+    Clients,
+    /// The decisions waiting on you in a space.
+    Decisions,
+    /// A space's running tasks.
+    Running,
+    /// A space's machines and model accounts.
+    Machines,
+    /// A space's newest delivered items.
+    Recent,
+    /// A project's tasks.
+    Tasks,
+    /// A project's repositories.
+    Repositories,
+    /// The agents bound in a project.
+    Bindings,
+    /// A project's conversation history.
+    Conversation,
+    /// Whether a project's lead is working.
+    Lead,
+}
+
+/// How a part last answered; a part not in the map has not answered yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Answer {
+    Answered,
+    Failed(String),
+}
+
+/// What a screen shows in place of a part it has nothing current for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gap {
+    /// The hub has not answered yet.
+    Loading,
+    /// Why it could not be listed: the hub's message.
+    Failed(String),
+}
+
+/// The gap of `part` in `answers`, `Loading` if it never answered.
+fn gap_in(answers: &BTreeMap<Part, Answer>, part: Part) -> Option<Gap> {
+    match answers.get(&part) {
+        None => Some(Gap::Loading),
+        Some(Answer::Answered) => None,
+        Some(Answer::Failed(why)) => Some(Gap::Failed(why.clone())),
+    }
+}
+
+/// Records how `part` answered and returns what to show for it: the new
+/// listing, or nothing current (`T::default()`) when the hub refused, so a
+/// stale listing is never shown as current.
+fn take<T: Default>(
+    answers: &mut BTreeMap<Part, Answer>,
+    part: Part,
+    listed: Result<T, ClientError>,
+) -> T {
+    match listed {
+        Ok(listed) => {
+            answers.insert(part, Answer::Answered);
+            listed
+        }
+        Err(error) => {
+            answers.insert(part, Answer::Failed(describe(&error)));
+            T::default()
+        }
+    }
+}
+
+/// Whether a paired hub answered the last refresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// Not asked yet: the app just started.
+    Unknown,
+    /// It answered.
+    Reachable,
+    /// Why it could not be reached.
+    Unreachable(String),
+}
+
+/// One paired hub as the app shows it. While the hub is away it keeps its
+/// last report (Plan.md §11.3); a part the hub refused shows its error.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Space {
     /// The name the hub was paired under.
     pub name: String,
-    /// Why the hub could not be reached at the last refresh; `None` when it
-    /// answered.
-    pub unreachable: Option<String>,
+    /// Whether the hub answered the last refresh.
+    pub reach: Reach,
+    answers: BTreeMap<Part, Answer>,
     /// Its projects.
     pub projects: Vec<ProjectSummary>,
     /// Its running tasks, oldest first.
@@ -71,7 +176,8 @@ impl Space {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_owned(),
-            unreachable: None,
+            reach: Reach::Unknown,
+            answers: BTreeMap::new(),
             projects: Vec::new(),
             running: Vec::new(),
             machines: Vec::new(),
@@ -89,6 +195,79 @@ impl Space {
             .filter(|machine| machine.status == MachineStatus::Online)
             .count()
     }
+
+    /// What to show in place of `part`, if anything: `Loading` before the
+    /// hub first answered for it, or why it could not. A hub out of reach
+    /// keeps what it last reported, so only a part it never listed is a gap.
+    #[must_use]
+    pub fn gap(&self, part: Part) -> Option<Gap> {
+        match (gap_in(&self.answers, part), &self.reach) {
+            (Some(Gap::Loading), Reach::Unreachable(why)) => Some(Gap::Failed(why.clone())),
+            (gap, _) => gap,
+        }
+    }
+
+    /// Whether anything shown of it may be out of date: it is not known to
+    /// be reachable, or a part failed. Such a space is asked again soon.
+    #[must_use]
+    pub fn stale(&self) -> bool {
+        self.reach != Reach::Reachable
+            || self
+                .answers
+                .values()
+                .any(|answer| matches!(answer, Answer::Failed(_)))
+    }
+
+    /// Takes one part of a refresh. Out of reach, the last report stays.
+    fn take<T: Default>(&mut self, part: Part, listed: Result<T, ClientError>) -> Option<T> {
+        if listed.is_err() && matches!(self.reach, Reach::Unreachable(_)) {
+            return None;
+        }
+        Some(take(&mut self.answers, part, listed))
+    }
+}
+
+/// `(online, all)` machines of `spaces`, or `None` when one of them has no
+/// current count: out of reach, not answered yet, or refused.
+fn machine_count<'a>(spaces: impl Iterator<Item = &'a Space>) -> Option<(usize, usize)> {
+    let mut count = (0, 0);
+    for space in spaces {
+        if space.reach != Reach::Reachable || space.gap(Part::Machines).is_some() {
+            return None;
+        }
+        count = (count.0 + space.online(), count.1 + space.machines.len());
+    }
+    Some(count)
+}
+
+/// The start of a long result, as Home shows it until you ask for all of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Excerpt {
+    /// The text shown.
+    pub text: String,
+    /// The toggle's label: `Show` when text is hidden, `Hide` once shown,
+    /// `None` when the whole result fits.
+    pub toggle: Option<&'static str>,
+}
+
+/// The first [`EXCERPT_LINES`] lines of `text`, at most [`EXCERPT_CHARS`]
+/// characters, and whether that cut anything.
+fn excerpt_of(text: &str) -> (String, bool) {
+    let mut lines = text.trim().lines();
+    let mut shown: String = lines
+        .by_ref()
+        .take(EXCERPT_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut cut = lines.next().is_some();
+    if let Some((at, _)) = shown.char_indices().nth(EXCERPT_CHARS) {
+        shown.truncate(at);
+        cut = true;
+    }
+    if cut {
+        shown = format!("{}…", shown.trim_end());
+    }
+    (shown, cut)
 }
 
 /// A decision waiting on you, labeled with its space.
@@ -270,10 +449,11 @@ pub struct ProjectLoad {
     repositories: Result<Vec<threadlane_core::model::Repository>, ClientError>,
     bindings: Result<Vec<BindingSummary>, ClientError>,
     history: Result<Vec<ConversationEntry>, ClientError>,
+    lead: Result<Option<Timestamp>, ClientError>,
 }
 
-/// Asks a project's hub for its tasks, repositories, bindings, and the
-/// newest page of its conversation.
+/// Asks a project's hub for its tasks, repositories, bindings, the newest
+/// page of its conversation, and whether its lead is working.
 pub async fn load_project(core: &ClientCore, space: &str, project: &str) -> ProjectLoad {
     let (in_space, named) = (Some(space), Some(project));
     ProjectLoad {
@@ -283,7 +463,68 @@ pub async fn load_project(core: &ClientCore, space: &str, project: &str) -> Proj
         repositories: core.repositories(in_space, named).await,
         bindings: core.bindings(in_space, named).await,
         history: core.conversation(in_space, named, None, PAGE).await,
+        lead: core.lead(in_space, named).await,
     }
+}
+
+/// The bindings of one project, for the modes grid. Made by
+/// [`load_modes`], applied with [`AppState::apply_modes`].
+#[derive(Debug)]
+pub struct BindingsLoad {
+    space: String,
+    project: String,
+    bindings: Result<Vec<BindingSummary>, ClientError>,
+}
+
+/// Asks for the bindings of each `(space, project)`.
+pub async fn load_modes(core: &ClientCore, projects: Vec<(String, String)>) -> Vec<BindingsLoad> {
+    let mut loads = Vec::with_capacity(projects.len());
+    for (space, project) in projects {
+        let bindings = core.bindings(Some(&space), Some(&project)).await;
+        loads.push(BindingsLoad {
+            space,
+            project,
+            bindings,
+        });
+    }
+    loads
+}
+
+/// One task in full, or why its hub could not show it. Made by
+/// [`load_task`], applied with [`AppState::apply_task`].
+#[derive(Debug)]
+pub struct TaskLoad {
+    space: String,
+    task: TaskId,
+    detail: Result<TaskDetail, ClientError>,
+}
+
+/// Asks the hub of `space` for task `task` in full.
+pub async fn load_task(core: &ClientCore, space: &str, task: TaskId) -> TaskLoad {
+    TaskLoad {
+        space: space.to_owned(),
+        task,
+        detail: core.task(Some(space), &task.to_string()).await,
+    }
+}
+
+/// The modes grid of one space (wireframe 6 "Modes by project").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModesGrid {
+    /// The space's agents: the grid's columns.
+    pub agents: Vec<String>,
+    /// One row per project.
+    pub rows: Vec<ModesRow>,
+}
+
+/// One project's row of the modes grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModesRow {
+    /// The project's name.
+    pub project: String,
+    /// Each agent's mode here, in the grid's column order, `None` where it
+    /// is not bound; or what to show instead while they are not known.
+    pub modes: Result<Vec<Option<Mode>>, Gap>,
 }
 
 /// An earlier page of a conversation. Made by [`load_earlier`], applied
@@ -324,6 +565,9 @@ pub struct ProjectView {
     pub repositories: Vec<threadlane_core::model::Repository>,
     /// The agents bound in it, with their modes.
     pub bindings: Vec<BindingSummary>,
+    /// When the run its lead is working on started; `None` while idle.
+    pub lead: Option<Timestamp>,
+    answers: BTreeMap<Part, Answer>,
 }
 
 /// A message you sent, as the conversation shows it.
@@ -359,6 +603,10 @@ pub struct AppState {
     loaded: HashMap<InSpace<String>, Loaded>,
     projects: HashMap<InSpace<String>, ProjectView>,
     tasks: HashMap<InSpace<TaskId>, TaskDetail>,
+    /// Why a task could not be shown, by space and id.
+    task_failures: HashMap<InSpace<TaskId>, String>,
+    /// The Home results shown in full, by space and feed position.
+    expanded: HashSet<InSpace<i64>>,
     /// The space Home shows; `None` for all.
     filter: Option<String>,
     /// Where the Home composer sends: space and project.
@@ -367,6 +615,16 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The state before the first refresh: the hubs paired under `names`,
+    /// known from the client's own files, their reachability not yet known.
+    #[must_use]
+    pub fn paired<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            spaces: names.into_iter().map(Space::new).collect(),
+            ..Self::default()
+        }
+    }
+
     /// The paired hubs, in the order they were paired.
     #[must_use]
     pub fn spaces(&self) -> &[Space] {
@@ -500,7 +758,8 @@ impl AppState {
     }
 
     /// Home's status line: `2 spaces reachable · 3 running · 2 need you · 2
-    /// of 2 machines online`, for the spaces it shows.
+    /// of 2 machines online`, for the spaces it shows. Machines are left
+    /// out while a space has no current count.
     #[must_use]
     pub fn status_line(&self) -> String {
         let shown: Vec<&Space> = self
@@ -508,13 +767,16 @@ impl AppState {
             .iter()
             .filter(|space| self.shown(&space.name))
             .collect();
-        let reachable = shown.iter().filter(|s| s.unreachable.is_none()).count();
-        let machines: usize = shown.iter().map(|space| space.machines.len()).sum();
-        let online: usize = shown.iter().map(|space| space.online()).sum();
+        let reachable = shown
+            .iter()
+            .filter(|space| space.reach == Reach::Reachable)
+            .count();
         let spaces = if reachable == 1 { "space" } else { "spaces" };
+        let machines = machine_count(shown.into_iter()).map_or_else(String::new, |(on, all)| {
+            format!(" · {on} of {all} machines online")
+        });
         format!(
-            "{reachable} {spaces} reachable · {} running · {} need you · {online} of {machines} \
-             machines online",
+            "{reachable} {spaces} reachable · {} running · {} need you{machines}",
             self.running().len(),
             self.needs_you().count(),
         )
@@ -597,43 +859,69 @@ impl AppState {
                 .space(&status.name)
                 .cloned()
                 .unwrap_or_else(|| Space::new(&status.name));
-            space.unreachable = status.info.err().map(|error| error.to_string());
+            space.reach = match status.info {
+                Ok(_) => Reach::Reachable,
+                Err(error) => Reach::Unreachable(error.to_string()),
+            };
             spaces.push(space);
         }
         let find = |spaces: &mut Vec<Space>, name: &str| -> Option<usize> {
             spaces.iter().position(|space| space.name == name)
         };
         for (name, listed) in projects {
-            if let (Some(at), Ok(listed)) = (find(&mut spaces, &name), listed) {
+            if let Some(at) = find(&mut spaces, &name)
+                && let Some(listed) = spaces[at].take(Part::Projects, listed)
+            {
                 spaces[at].projects = listed;
             }
         }
         for (name, listed) in agents {
-            if let (Some(at), Ok(listed)) = (find(&mut spaces, &name), listed) {
+            if let Some(at) = find(&mut spaces, &name)
+                && let Some(listed) = spaces[at].take(Part::Agents, listed)
+            {
                 spaces[at].agents = listed;
             }
         }
         for (name, listed) in clients {
-            if let (Some(at), Ok(listed)) = (find(&mut spaces, &name), listed) {
+            if let Some(at) = find(&mut spaces, &name)
+                && let Some(listed) = spaces[at].take(Part::Clients, listed)
+            {
                 spaces[at].clients = listed;
             }
         }
         for SpaceListing { space, listed } in running {
-            if let (Some(at), Ok(listed)) = (find(&mut spaces, &space), listed) {
+            if let Some(at) = find(&mut spaces, &space)
+                && let Some(listed) = spaces[at].take(Part::Running, listed)
+            {
                 spaces[at].running = listed;
             }
         }
         for SpaceListing { space, listed } in machines {
-            if let (Some(at), Ok(listed)) = (find(&mut spaces, &space), listed) {
-                spaces[at].machines = listed.machines;
-                spaces[at].accounts = listed.accounts;
+            if let Some(at) = find(&mut spaces, &space) {
+                let listed = listed.map(|listed| (listed.machines, listed.accounts));
+                if let Some((machines, accounts)) = spaces[at].take(Part::Machines, listed) {
+                    spaces[at].machines = machines;
+                    spaces[at].accounts = accounts;
+                }
+            }
+        }
+        let mut items = Vec::new();
+        for SpaceListing { space, listed } in recent {
+            if let Some(at) = find(&mut spaces, &space) {
+                items.extend(spaces[at].take(Part::Recent, listed).unwrap_or_default());
+            }
+        }
+        let mut pending = Vec::new();
+        for SpaceDecisions { space, decisions } in decisions {
+            if let Some(at) = find(&mut spaces, &space)
+                && let Some(listed) = spaces[at].take(Part::Decisions, decisions)
+            {
+                pending.push((space, listed));
             }
         }
         self.spaces = spaces;
-        for listing in recent {
-            for item in listing.listed.into_iter().flatten() {
-                self.deliver(item);
-            }
+        for item in items {
+            self.deliver(item);
         }
 
         let paired: HashSet<&str> = self
@@ -643,14 +931,11 @@ impl AppState {
             .collect();
         self.queue
             .retain(|queued| paired.contains(queued.space.as_str()));
-        for listed in decisions {
-            let Ok(pending) = listed.decisions else {
-                continue;
-            };
-            self.queue.retain(|queued| queued.space != listed.space);
+        for (space, pending) in pending {
+            self.queue.retain(|queued| queued.space != space);
             self.queue
                 .extend(pending.into_iter().map(|decision| Queued {
-                    space: listed.space.clone(),
+                    space: space.clone(),
                     decision,
                 }));
         }
@@ -663,8 +948,9 @@ impl AppState {
         });
     }
 
-    /// Takes what the project screen loaded. What could not be listed keeps
-    /// what was last loaded.
+    /// Takes what the project screen loaded. A part that could not be
+    /// listed shows the hub's error instead; the conversation keeps what
+    /// was delivered.
     pub fn apply_project(&mut self, load: ProjectLoad) {
         let ProjectLoad {
             space,
@@ -673,22 +959,55 @@ impl AppState {
             repositories,
             bindings,
             history,
+            lead,
         } = load;
         let view = self
             .projects
             .entry((space.clone(), project.clone()))
             .or_default();
-        if let Ok(tasks) = tasks {
-            view.tasks = tasks;
-        }
-        if let Ok(repositories) = repositories {
-            view.repositories = repositories;
-        }
-        if let Ok(bindings) = bindings {
-            view.bindings = bindings;
-        }
-        if let Ok(entries) = history {
+        view.tasks = take(&mut view.answers, Part::Tasks, tasks);
+        view.repositories = take(&mut view.answers, Part::Repositories, repositories);
+        view.bindings = take(&mut view.answers, Part::Bindings, bindings);
+        view.lead = take(&mut view.answers, Part::Lead, lead);
+        let listed = history.is_ok();
+        let entries = take(&mut view.answers, Part::Conversation, history);
+        if listed {
             self.take_history(&space, &project, entries, true);
+        }
+    }
+
+    /// Takes the bindings of each project, for the modes grid.
+    pub fn apply_modes(&mut self, loads: Vec<BindingsLoad>) {
+        for BindingsLoad {
+            space,
+            project,
+            bindings,
+        } in loads
+        {
+            let view = self.projects.entry((space, project)).or_default();
+            view.bindings = take(&mut view.answers, Part::Bindings, bindings);
+        }
+    }
+
+    /// What to show in place of `part` of `project` in `space`, if anything.
+    #[must_use]
+    pub fn project_gap(&self, space: &str, project: &str, part: Part) -> Option<Gap> {
+        self.project(space, project)
+            .map_or(Some(Gap::Loading), |view| gap_in(&view.answers, part))
+    }
+
+    /// The conversation header's line about the lead: `Lead is working ·
+    /// started 09:20` while it runs, why that is not known if the hub could
+    /// not say, `None` while it is idle.
+    #[must_use]
+    pub fn lead_line(&self, space: &str, project: &str, when: &When) -> Option<String> {
+        match self.project_gap(space, project, Part::Lead) {
+            Some(Gap::Failed(why)) => Some(format!("Whether the lead is working: {why}")),
+            Some(Gap::Loading) => None,
+            None => {
+                let since = self.project(space, project)?.lead?;
+                Some(format!("Lead is working · started {}", when.time(since)))
+            }
         }
     }
 
@@ -753,10 +1072,140 @@ impl AppState {
         loaded.more.then_some(loaded.oldest).flatten()
     }
 
-    /// Takes task `task` of `space` in full.
-    pub fn apply_task(&mut self, space: &str, task: TaskDetail) {
-        self.tasks
-            .insert((space.to_owned(), task.summary.task.id), task);
+    /// Takes a task in full, or why its hub could not show it.
+    pub fn apply_task(&mut self, load: TaskLoad) {
+        let key = (load.space, load.task);
+        match load.detail {
+            Ok(detail) => {
+                self.task_failures.remove(&key);
+                self.tasks.insert(key, detail);
+            }
+            Err(error) => {
+                self.tasks.remove(&key);
+                self.task_failures.insert(key, describe(&error));
+            }
+        }
+    }
+
+    /// What to show in place of task `task` of `space`, if anything.
+    #[must_use]
+    pub fn task_gap(&self, space: &str, task: TaskId) -> Option<Gap> {
+        let key = (space.to_owned(), task);
+        if let Some(why) = self.task_failures.get(&key) {
+            return Some(Gap::Failed(why.clone()));
+        }
+        (!self.tasks.contains_key(&key)).then_some(Gap::Loading)
+    }
+
+    /// Takes a project its hub created: the sidebar and the composer list
+    /// it at once.
+    pub fn project_created(&mut self, space: &str, project: ProjectSummary) {
+        if let Some(known) = self.spaces.iter_mut().find(|known| known.name == space)
+            && !known.projects.iter().any(|other| other.id == project.id)
+        {
+            known.projects.push(project);
+        }
+    }
+
+    /// The start of a Home result, and its toggle.
+    #[must_use]
+    pub fn excerpt(&self, item: &SpaceFeedItem) -> Excerpt {
+        let text = item.text();
+        let (start, cut) = excerpt_of(&text);
+        let open = self.expanded.contains(&(item.space.clone(), item.item.seq));
+        match (cut, open) {
+            (false, _) => Excerpt { text, toggle: None },
+            (true, true) => Excerpt {
+                text,
+                toggle: Some("Hide"),
+            },
+            (true, false) => Excerpt {
+                text: start,
+                toggle: Some("Show"),
+            },
+        }
+    }
+
+    /// Shows all of a Home result, or only its start again.
+    pub fn toggle_result(&mut self, space: &str, seq: i64) {
+        let key = (space.to_owned(), seq);
+        if !self.expanded.remove(&key) {
+            self.expanded.insert(key);
+        }
+    }
+
+    /// Whether anything shown may be out of date, so the next refresh
+    /// should come soon: a hub not known to be reachable, or a part that
+    /// failed.
+    #[must_use]
+    pub fn retry_soon(&self) -> bool {
+        self.spaces.iter().any(Space::stale)
+            || self.projects.values().any(|view| {
+                view.answers
+                    .values()
+                    .any(|answer| matches!(answer, Answer::Failed(_)))
+            })
+    }
+
+    /// `(online, all)` machines of every space, or `None` while one of them
+    /// has no current count.
+    #[must_use]
+    pub fn machine_count(&self) -> Option<(usize, usize)> {
+        machine_count(self.spaces.iter())
+    }
+
+    /// For each space Home shows that has nothing current for `part`: its
+    /// name and what to show instead.
+    #[must_use]
+    pub fn gaps(&self, part: Part) -> Vec<(&str, Gap)> {
+        self.spaces
+            .iter()
+            .filter(|space| self.shown(&space.name))
+            .filter_map(|space| Some((space.name.as_str(), space.gap(part)?)))
+            .collect()
+    }
+
+    /// The modes grid of `space` (wireframe 6): its agents, and one row per
+    /// project with each agent's mode there.
+    #[must_use]
+    pub fn modes(&self, space: &str) -> ModesGrid {
+        let Some(known) = self.space(space) else {
+            return ModesGrid::default();
+        };
+        let agents: Vec<String> = known
+            .agents
+            .iter()
+            .map(|agent| agent.name.clone())
+            .collect();
+        let rows = known
+            .projects
+            .iter()
+            .map(|project| {
+                let modes = match self.project_gap(space, &project.name, Part::Bindings) {
+                    Some(gap) => Err(gap),
+                    None => {
+                        let bindings = self
+                            .project(space, &project.name)
+                            .map(|view| view.bindings.as_slice())
+                            .unwrap_or_default();
+                        Ok(agents
+                            .iter()
+                            .map(|agent| {
+                                bindings
+                                    .iter()
+                                    .find(|binding| binding.agent == *agent)
+                                    .map(|binding| binding.mode)
+                            })
+                            .collect())
+                    }
+                };
+                ModesRow {
+                    project: project.name.clone(),
+                    modes,
+                }
+            })
+            .collect();
+        ModesGrid { agents, rows }
     }
 
     /// Takes a mode its hub set: the project's binding shows it at once.

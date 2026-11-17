@@ -215,6 +215,39 @@ async fn the_conversation_merges_your_messages_and_the_lead_s_in_time_order() {
 }
 
 #[tokio::test]
+async fn lead_says_since_when_the_lead_is_working() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let lead = |project: Option<&str>| {
+        let api = hub.api.clone();
+        let project = project.map(str::to_owned);
+        async move { api.overview(OverviewRequest::Lead { project }).await }
+    };
+    assert_eq!(
+        lead(None).await.unwrap(),
+        OverviewReply::Lead {
+            running_since: None
+        },
+        "idle"
+    );
+
+    hub.send("m-1", "Fix the refunds").await;
+    let (_lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.lane_kind, LaneKind::Lead);
+    assert_eq!(
+        lead(None).await.unwrap(),
+        OverviewReply::Lead {
+            running_since: Some(hub.clock.now())
+        },
+        "working"
+    );
+    assert!(matches!(
+        lead(Some("missing")).await,
+        Err(ApiError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
 async fn machines_lists_every_machine_and_account() {
     let hub = TestHub::start().await;
     hub.hello().await;

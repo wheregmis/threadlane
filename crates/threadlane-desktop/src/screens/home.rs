@@ -5,11 +5,11 @@ use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_desktop::When;
+use threadlane_desktop::{Part, When};
 
-use super::{heading, section};
+use super::{gap_line, heading, section};
 use crate::{Desktop, Screen};
 
 impl Desktop {
@@ -55,13 +55,19 @@ impl Desktop {
             "Needs you ({})",
             state.needs_you().count()
         )));
+        let gaps = state.gaps(Part::Decisions);
+        for (space, gap) in &gaps {
+            needs = needs.child(gap_line(gap, &format!("the decisions of {space}"), cx));
+        }
         if state.spaces().is_empty() {
             needs = needs.child(div().text_color(muted).child(
                 "No hub is paired. Pair one with `threadlane hub add <name> <data-dir>` or \
                  `threadlane hub join <name> <code>`, then reopen the app.",
             ));
         } else if state.needs_you().count() == 0 {
-            needs = needs.child(div().text_color(muted).child("Nothing waits on you."));
+            if gaps.is_empty() {
+                needs = needs.child(div().text_color(muted).child("Nothing waits on you."));
+            }
         } else {
             needs = needs.child(self.note_field());
         }
@@ -73,9 +79,13 @@ impl Desktop {
         let mut table = v_flex()
             .gap_1()
             .child(section(format!("Running now ({})", running.len())));
-        if running.is_empty() {
+        let gaps = state.gaps(Part::Running);
+        for (space, gap) in &gaps {
+            table = table.child(gap_line(gap, &format!("what runs in {space}"), cx));
+        }
+        if running.is_empty() && gaps.is_empty() {
             table = table.child(div().text_color(muted).child("Nothing is running."));
-        } else {
+        } else if !running.is_empty() {
             table = table.child(
                 row(["Task", "Project", "Agent", "Machine", "Running"])
                     .text_xs()
@@ -88,31 +98,51 @@ impl Desktop {
                 space: space.to_owned(),
                 task: task.id,
             };
+            let cells = [
+                format!("{} {}", task.id, task.title),
+                summary.project.clone(),
+                summary.agent.clone(),
+                summary.machine.clone().unwrap_or_default(),
+                summary
+                    .running_since
+                    .map(|since| when.since(since))
+                    .unwrap_or_default(),
+            ];
             table = table.child(
-                row([
-                    format!("{} {}", task.id, task.title),
-                    summary.project.clone(),
-                    summary.agent.clone(),
-                    summary.machine.clone().unwrap_or_default(),
-                    summary
-                        .running_since
-                        .map(|since| when.since(since))
-                        .unwrap_or_default(),
-                ])
-                .id(SharedString::from(format!("running-{space}-{}", task.id)))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+                Button::new(SharedString::from(format!("running-{space}-{}", task.id)))
+                    .text()
+                    .w_full()
+                    .accessibility_label(format!("Open {} {}", task.id, task.title))
+                    .child(row(cells))
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
             );
         }
 
         let mut recent = v_flex().gap_1().child(section("Recent results"));
         let results = state.recent();
-        if results.is_empty() {
+        let gaps = state.gaps(Part::Recent);
+        for (space, gap) in &gaps {
+            recent = recent.child(gap_line(gap, &format!("the results of {space}"), cx));
+        }
+        if results.is_empty() && gaps.is_empty() {
             recent = recent.child(div().text_color(muted).child("Nothing yet."));
         }
         for item in results {
+            let excerpt = state.excerpt(item);
+            let (space, seq) = (item.space.clone(), item.item.seq);
+            let toggle = excerpt.toggle.map(|label| {
+                Button::new(SharedString::from(format!("result-{space}-{seq}")))
+                    .link()
+                    .small()
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.toggle_result(&space, seq);
+                        cx.notify();
+                    }))
+            });
             recent = recent.child(
                 h_flex()
+                    .items_start()
                     .gap_2()
                     .child(
                         div()
@@ -129,7 +159,14 @@ impl Desktop {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(item.label().replace('/', " / ")),
                     )
-                    .child(div().text_sm().min_w_0().child(item.text())),
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_start()
+                            .child(div().text_sm().child(excerpt.text))
+                            .children(toggle),
+                    ),
             );
         }
 
