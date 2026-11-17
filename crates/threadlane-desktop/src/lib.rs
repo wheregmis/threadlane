@@ -25,6 +25,7 @@ mod clock;
 mod conversation;
 mod machines;
 mod memory;
+mod routines;
 mod tasks;
 
 pub use clock::{When, duration};
@@ -34,7 +35,12 @@ pub use memory::{
     LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, change_memory, editable,
     load_memory,
 };
-pub use tasks::{BoardCard, Column, Moment, chips, status_label, timeline};
+pub use routines::{
+    Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
+};
+pub use tasks::{
+    BoardCard, Changes, Column, Moment, changes, chips, status_label, timeline, usage,
+};
 
 /// How many of the newest delivered items Home asks each hub for.
 const RECENT: u32 = 50;
@@ -98,6 +104,8 @@ pub enum Part {
     Lead,
     /// The memory a project's lead can see.
     Memory,
+    /// A project's routines and follow-ups.
+    Routines,
 }
 
 /// How a part last answered; a part not in the map has not answered yet.
@@ -361,6 +369,65 @@ impl Activity {
         match self {
             Self::Working(text) | Self::Done(text) | Self::Failed(text) => text,
         }
+    }
+}
+
+/// The tabs of the project screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    /// The board.
+    Tasks,
+    /// The conversation with the lead.
+    Conversation,
+    /// The mode of each agent bound here.
+    Agents,
+    /// Its routines and follow-ups.
+    Routines,
+    /// The memory its runs can see.
+    Memory,
+}
+
+impl Tab {
+    /// Every tab, in the order the tab bar shows them (the wireframe's).
+    pub const ALL: [Self; 5] = [
+        Self::Tasks,
+        Self::Conversation,
+        Self::Agents,
+        Self::Routines,
+        Self::Memory,
+    ];
+
+    /// Its label on the tab bar.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tasks => "Tasks",
+            Self::Conversation => "Conversation",
+            Self::Agents => "Agents",
+            Self::Routines => "Routines",
+            Self::Memory => "Memory",
+        }
+    }
+
+    /// Its place on the tab bar, which selects it there: always found
+    /// from [`Tab::ALL`], so a tab added anywhere keeps the two in step.
+    #[must_use]
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    /// The tab at `index` on the tab bar.
+    #[must_use]
+    pub fn at(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
+    /// The tab named `name` in lower case, as `THREADLANE_DESKTOP_OPEN` says.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|tab| tab.label().eq_ignore_ascii_case(name))
     }
 }
 
@@ -714,6 +781,12 @@ pub struct AppState {
     unpairing: Option<String>,
     /// Spaces unpaired since the app started: their feed is no longer shown.
     forgotten: HashSet<String>,
+    /// Each project's routines and follow-ups.
+    routines: HashMap<InSpace<String>, routines::RoutinesView>,
+    /// The timer you asked to cancel, until you confirm or keep it.
+    cancelling: Option<InSpace<threadlane_core::ids::TimerId>>,
+    /// The picks of the "+ New routine" form.
+    routine_form: RoutineForm,
 }
 
 impl AppState {
@@ -967,6 +1040,19 @@ impl AppState {
         self.activity = Some(activity);
     }
 
+    /// Records that `text` (an id, a branch, a link) was put on the
+    /// clipboard: the status area says so.
+    pub fn copied(&mut self, text: &str) {
+        self.activity = Some(Activity::Done(format!("Copied {text}")));
+    }
+
+    /// Whether no hub is paired, so the app shows how to pair one instead
+    /// of an empty Home.
+    #[must_use]
+    pub fn first_run(&self) -> bool {
+        self.spaces.is_empty()
+    }
+
     /// Takes a space this app was just paired with: the sidebar lists it at
     /// once, and the next refresh fills it in.
     pub fn space_added(&mut self, name: &str) {
@@ -1006,6 +1092,14 @@ impl AppState {
         self.projects.retain(|(space, _), _| space != name);
         self.tasks.retain(|(space, _), _| space != name);
         self.memory.retain(|(space, _), _| space != name);
+        self.routines.retain(|(space, _), _| space != name);
+        if self
+            .cancelling
+            .as_ref()
+            .is_some_and(|(space, _)| space == name)
+        {
+            self.cancelling = None;
+        }
         self.codes.remove(name);
         if self.filter.as_deref() == Some(name) {
             self.filter = None;
@@ -1322,6 +1416,7 @@ impl AppState {
         self.spaces.iter().any(Space::stale)
             || self.projects.values().any(|view| failed(&view.answers))
             || self.memory.values().any(|view| failed(view.answers()))
+            || self.routines.values().any(|view| failed(view.answers()))
     }
 
     /// `(online, all)` machines of every space, or `None` while one of them

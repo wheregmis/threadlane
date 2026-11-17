@@ -9,12 +9,13 @@ use threadlane_client::ClientDirs;
 use threadlane_core::client::{
     Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
     MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
-    PairingRequest, RunSummary, UserMessage,
+    PairingRequest, RunSummary, TimerReply, TimerRequest, UserMessage,
 };
-use threadlane_core::ids::{AgentId, LaneId, MachineId, OutboxId, RunId, SessionId};
+use threadlane_core::ids::{AgentId, LaneId, MachineId, OutboxId, RunId, SessionId, TimerId};
 use threadlane_core::model::{
     BackendKind, DecisionKind, DecisionOption, DecisionStatus, MachineTrust, MemoryFile, Mode,
-    OutboxMessage, OutboxStatus, Run, RunOutcome, RunStatus, Task, TaskOrigin, TaskStatus, Urgency,
+    OutboxMessage, OutboxStatus, Recurrence, Rule, Run, RunOutcome, RunStatus, Task, TaskOrigin,
+    TaskStatus, Timer, TimerCategory, TimerCreator, TimerStatus, Urgency, Weekday,
 };
 use threadlane_core::time::Timestamp;
 
@@ -37,6 +38,7 @@ struct FakeHub {
     recent: Mutex<Vec<FeedItem>>,
     bindings: Mutex<Vec<BindingSummary>>,
     memory: Mutex<Vec<MemoryFile>>,
+    timers: Mutex<Vec<Timer>>,
 }
 
 impl FakeHub {
@@ -278,6 +280,86 @@ impl HubApi for FakeHub {
             MemoryRequest::Delete { path, .. } => Ok(change(path, String::new(), true)),
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
+    }
+
+    /// Timers like a hub's: a routine you create is yours and requested
+    /// work; an ended timer is no longer listed.
+    async fn timers(&self, request: TimerRequest) -> Result<TimerReply, ApiError> {
+        self.up()?;
+        let mut timers = self.timers.lock().expect("lock");
+        let mut set = |id: TimerId, status: TimerStatus| {
+            let timer = timers
+                .iter_mut()
+                .find(|timer| timer.id == id)
+                .ok_or_else(|| ApiError::NotFound(format!("timer {id}")))?;
+            timer.status = status;
+            Ok(TimerReply::Timer {
+                timer: timer.clone(),
+            })
+        };
+        match request {
+            TimerRequest::Pause { timer } => set(timer, TimerStatus::Paused),
+            TimerRequest::Resume { timer } => set(timer, TimerStatus::Active),
+            TimerRequest::Cancel { timer } => set(timer, TimerStatus::Cancelled),
+            TimerRequest::List { project } => Ok(TimerReply::Timers {
+                timers: timers
+                    .iter()
+                    .filter(|timer| timer.project_id == project_id(project.as_deref()))
+                    .filter(|timer| {
+                        matches!(timer.status, TimerStatus::Active | TimerStatus::Paused)
+                    })
+                    .cloned()
+                    .collect(),
+            }),
+            TimerRequest::CreateRoutine {
+                project,
+                instruction,
+                recurrence,
+                ..
+            } => {
+                let id = i64::try_from(timers.len()).expect("few") + 1;
+                let mut created = timer(
+                    id,
+                    project_id(project.as_deref()),
+                    Some(recurrence),
+                    TimerCreator::User,
+                );
+                created.instruction = instruction;
+                timers.push(created.clone());
+                Ok(TimerReply::Timer { timer: created })
+            }
+            other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
+        }
+    }
+}
+
+/// The project id a fake hub gives `project`: api is 1, General 2.
+fn project_id(project: Option<&str>) -> ProjectId {
+    ProjectId(if project == Some("api") { 1 } else { 2 })
+}
+
+/// A timer of project `project` like a hub's, due at 09:00 on day one.
+fn timer(id: i64, project: ProjectId, recurrence: Option<Recurrence>, by: TimerCreator) -> Timer {
+    Timer {
+        id: TimerId(id),
+        project_id: project,
+        lane_id: LaneId(1),
+        agent_id: None,
+        task_ref: None,
+        category: if recurrence.is_some() {
+            TimerCategory::Schedule
+        } else {
+            TimerCategory::FollowUp
+        },
+        due_at: Timestamp::from_millis(9 * 3_600_000),
+        recurrence,
+        instruction: format!("Check {id}"),
+        status: TimerStatus::Active,
+        created_by: by,
+        created_by_call: None,
+        last_fired_at: None,
+        fire_count: 0,
+        requested: by == TimerCreator::User,
     }
 }
 
@@ -1579,4 +1661,315 @@ async fn your_message_to_a_task_shows_in_its_timeline_once() {
         moments.contains(&"You wrote: Add tests first.".to_owned()),
         "{moments:?}"
     );
+}
+
+fn daily(hour: u8) -> Recurrence {
+    Recurrence {
+        rule: Rule::Daily { hour, minute: 0 },
+        zone: "Europe/Berlin".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn routines_list_and_pause_resume_and_cancel_only_once_confirmed() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut follow_up = timer(1, ProjectId(1), None, TimerCreator::Agent);
+    follow_up.fire_count = 2;
+    follow_up.last_fired_at = Some(Timestamp::from_millis(8 * 3_600_000));
+    work.timers.lock().expect("lock").push(follow_up);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    let api = || vec![("work".to_owned(), "api".to_owned())];
+    assert_eq!(state.routines_gap("work", "api"), Some(Gap::Loading));
+
+    let created = core
+        .add_routine(Some("work"), Some("api"), "Triage new issues", daily(9))
+        .await
+        .expect("created");
+    state.apply_routines(load_routines(&core, api()).await);
+
+    assert_eq!(state.routines_gap("work", "api"), None);
+    let rows = state.routine_rows("work", "api", &when());
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        (rows[0].cadence.as_str(), rows[0].zone.as_deref()),
+        ("follow-up", None)
+    );
+    assert_eq!(rows[0].by, "Set by an agent");
+    assert_eq!(rows[0].fired, "Fired 2 times · last 08:00");
+    assert_eq!(rows[1].instruction, "Triage new issues");
+    assert_eq!(
+        (rows[1].cadence.as_str(), rows[1].zone.as_deref()),
+        ("daily at 09:00", Some("Europe/Berlin"))
+    );
+    assert_eq!(rows[1].next, "Next 09:00", "local time");
+    assert_eq!(rows[1].by, "Set by you · work you requested");
+    assert_eq!(rows[1].fired, "Not fired yet");
+    assert_eq!(rows[1].status, "Active");
+
+    let number = created.id.to_string();
+    let paused = core
+        .pause_timer(Some("work"), &number)
+        .await
+        .expect("paused");
+    state.timer_changed("work", "api", paused);
+    let row = &state.routine_rows("work", "api", &when())[1];
+    assert!(row.paused);
+    assert_eq!((row.status, row.next.as_str()), ("Paused", "Paused"));
+    let resumed = core
+        .resume_timer(Some("work"), &number)
+        .await
+        .expect("resumed");
+    state.timer_changed("work", "api", resumed);
+    assert!(!state.routine_rows("work", "api", &when())[1].paused);
+
+    state.ask_cancel_timer("work", created.id);
+    let confirming: Vec<bool> = state
+        .routine_rows("work", "api", &when())
+        .iter()
+        .map(|row| row.confirming)
+        .collect();
+    assert_eq!(confirming, [false, true], "only the one asked about");
+    state.keep_timer();
+    assert!(
+        state
+            .routine_rows("work", "api", &when())
+            .iter()
+            .all(|row| !row.confirming)
+    );
+    state.ask_cancel_timer("work", created.id);
+    let cancelled = core
+        .cancel_timer(Some("work"), &number)
+        .await
+        .expect("cancelled");
+    state.timer_changed("work", "api", cancelled);
+    let rows = state.routine_rows("work", "api", &when());
+    assert_eq!(rows.len(), 1, "a cancelled routine leaves the list");
+    assert!(!rows[0].confirming);
+    state.apply_routines(load_routines(&core, api()).await);
+    assert_eq!(
+        state.routine_rows("work", "api", &when()).len(),
+        1,
+        "the hub agrees"
+    );
+}
+
+#[tokio::test]
+async fn the_routines_screen_groups_by_space_and_project_and_shows_a_refusal() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.timers.lock().expect("lock").extend([timer(
+        1,
+        ProjectId(2),
+        Some(daily(8)),
+        TimerCreator::User,
+    )]);
+    let home = FakeHub::new("Home", Vec::new());
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let all = |state: &AppState| -> Vec<(String, String)> {
+        state
+            .targets()
+            .into_iter()
+            .map(|(space, project)| (space.to_owned(), project.to_owned()))
+            .collect()
+    };
+    state.apply_routines(load_routines(&core, all(&state)).await);
+
+    let groups = state.routine_groups(&when());
+    let shown: Vec<(&str, &str, usize)> = groups
+        .iter()
+        .map(|group| {
+            let rows = group.rows.as_ref().map_or(0, Vec::len);
+            (group.space.as_str(), group.project.as_str(), rows)
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [("work", "General", 1)],
+        "projects with none are left out"
+    );
+
+    home.old.store(true, Ordering::SeqCst);
+    home.down.store(true, Ordering::SeqCst);
+    state.apply_routines(load_routines(&core, all(&state)).await);
+    let groups = state.routine_groups(&when());
+    assert_eq!(
+        groups.len(),
+        3,
+        "home's projects say why they are not listed"
+    );
+    assert!(matches!(groups[1].rows, Err(Gap::Failed(_))), "{groups:?}");
+    assert!(state.retry_soon());
+}
+
+#[test]
+fn the_new_routine_form_makes_each_cadence_and_says_what_is_wrong() {
+    let text = |every, at, day| RoutineText {
+        every,
+        at,
+        day,
+        zone: "Europe/Berlin",
+    };
+    let mut form = RoutineForm {
+        hours: true,
+        ..RoutineForm::default()
+    };
+    assert_eq!(
+        form.recurrence(text("2", "", "")).map(|r| r.rule),
+        Ok(Rule::Interval { minutes: 120 })
+    );
+    form.hours = false;
+    assert_eq!(
+        form.recurrence(text("90", "", "")).map(|r| r.rule),
+        Ok(Rule::Interval { minutes: 90 })
+    );
+    form.cadence = Cadence::Daily;
+    assert_eq!(
+        form.recurrence(text("", "08:30", "")),
+        Ok(Recurrence {
+            rule: Rule::Daily {
+                hour: 8,
+                minute: 30
+            },
+            zone: "Europe/Berlin".to_owned()
+        })
+    );
+    assert!(form.recurrence(text("", "25:00", "")).is_err());
+    assert!(form.recurrence(text("", "soon", "")).is_err());
+    form.cadence = Cadence::Weekdays;
+    form.toggle_day(Weekday::Fri);
+    form.toggle_day(Weekday::Wed);
+    assert_eq!(
+        form.recurrence(text("", "07:00", "")).map(|r| r.rule),
+        Ok(Rule::Weekdays {
+            days: vec![Weekday::Mon, Weekday::Wed, Weekday::Fri],
+            hour: 7,
+            minute: 0
+        }),
+        "days in week order"
+    );
+    for day in [Weekday::Mon, Weekday::Wed, Weekday::Fri] {
+        form.toggle_day(day);
+    }
+    assert!(form.recurrence(text("", "07:00", "")).is_err(), "no day");
+    form.cadence = Cadence::Monthly;
+    assert_eq!(
+        form.recurrence(text("", "06:15", "31")).map(|r| r.rule),
+        Ok(Rule::Monthly {
+            day: 31,
+            hour: 6,
+            minute: 15
+        })
+    );
+    assert!(form.recurrence(text("", "06:15", "32")).is_err());
+    let no_zone = RoutineText {
+        zone: " ",
+        ..text("", "06:15", "1")
+    };
+    assert!(form.recurrence(no_zone).is_err(), "a zone is needed");
+}
+
+#[test]
+fn every_tab_is_selected_where_it_is_shown() {
+    let labels = Tab::ALL.map(Tab::label);
+    for tab in Tab::ALL {
+        assert_eq!(Tab::at(tab.index()), Some(tab), "{tab:?}");
+        assert_eq!(labels[tab.index()], tab.label(), "{tab:?}");
+        assert_eq!(Tab::named(&tab.label().to_lowercase()), Some(tab));
+    }
+    assert_eq!(
+        labels,
+        ["Tasks", "Conversation", "Agents", "Routines", "Memory"],
+        "the wireframe's order"
+    );
+}
+
+#[test]
+fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
+    let run = |id, started: i64, ended: Option<i64>| RunSummary {
+        run: Run {
+            id: RunId(id),
+            lane_id: LaneId(17),
+            session_id: SessionId(1),
+            machine_id: MachineId(2),
+            lease_epoch: 1,
+            agent_id: Some(AgentId(2)),
+            backend: Some(BackendKind::Claude),
+            status: if ended.is_some() {
+                RunStatus::Committed
+            } else {
+                RunStatus::Active
+            },
+            outcome: None,
+            rationale: None,
+            error: None,
+            started_at: Timestamp::from_millis(started),
+            ended_at: ended.map(Timestamp::from_millis),
+        },
+        machine: "linux-box".to_owned(),
+    };
+    let mut detail = TaskDetail {
+        summary: task(7, TaskStatus::Running, None),
+        branch: "threadlane/T-0007".to_owned(),
+        repositories: Vec::new(),
+        runs: vec![run(1, 0, Some(5 * 60_000)), run(2, 10 * 60_000, None)],
+        decisions: Vec::new(),
+        related: Vec::new(),
+        messages: Vec::new(),
+    };
+    let [runs, tokens] = usage(&detail, &when());
+    assert_eq!(runs, "2 runs · 7 min", "the running one counts until now");
+    assert!(tokens.contains("not reported"), "{tokens}");
+
+    let published = |detail: &TaskDetail| {
+        let changes = changes(detail);
+        assert_eq!(changes.branch, "threadlane/T-0007");
+        (changes.state, changes.pull_request)
+    };
+    assert_eq!(published(&detail), ("Not pushed".to_owned(), None));
+    let mut push = decision(4, 1_000);
+    push.tool = "publish_branch".to_owned();
+    detail.decisions.push(push.clone());
+    assert_eq!(published(&detail).0, "Waiting on you to push (D-0004)");
+    push.status = DecisionStatus::Answered;
+    push.answer = Some(json!({ "option": 1 }));
+    detail.decisions = vec![push.clone()];
+    assert_eq!(published(&detail).0, "Not pushed: you declined D-0004");
+    push.answer = Some(json!({ "option": 0 }));
+    push.outcome = Some(json!({ "performed": false, "error": "no gh login" }));
+    detail.decisions = vec![push.clone()];
+    assert_eq!(published(&detail).0, "Not pushed: no gh login");
+    let mut pull = decision(5, 2_000);
+    pull.status = DecisionStatus::Answered;
+    pull.answer = Some(json!({ "option": 0 }));
+    pull.outcome = Some(json!({
+        "performed": true,
+        "branch": "threadlane/T-0007",
+        "pull_request": "https://github.com/me/api/pull/3",
+    }));
+    detail.decisions.push(pull);
+    assert_eq!(
+        published(&detail),
+        (
+            "Pushed · pull request opened".to_owned(),
+            Some("https://github.com/me/api/pull/3".to_owned())
+        )
+    );
+    // The hub also records what was published in the task's result.
+    detail.decisions.clear();
+    detail.summary.task.result = Some(json!({ "summary": "done", "branch": "threadlane/T-0007" }));
+    assert_eq!(published(&detail), ("Pushed".to_owned(), None));
+}
+
+#[test]
+fn copying_says_so_and_with_no_hub_the_app_explains_pairing() {
+    let mut state = AppState::default();
+    assert!(state.first_run(), "no hub paired");
+    state.copied("D-0012");
+    assert_eq!(state.activity().map(Activity::text), Some("Copied D-0012"));
+    state.space_added("work");
+    assert!(!state.first_run());
+    state.space_removed("work");
+    assert!(state.first_run(), "unpairing the last one shows it again");
 }

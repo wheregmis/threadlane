@@ -3,7 +3,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_desktop::{Gap, Queued};
 
@@ -14,6 +14,7 @@ mod home;
 mod machines;
 mod new_project;
 mod project;
+mod routines;
 mod shell;
 mod task;
 
@@ -59,6 +60,21 @@ fn section(text: impl Into<SharedString>) -> Div {
 }
 
 impl Desktop {
+    /// An id, branch or link that copies itself when clicked.
+    fn copyable(
+        &self,
+        id: impl Into<SharedString>,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        Button::new(id.into())
+            .ghost()
+            .xsmall()
+            .label(text.clone())
+            .accessibility_label(format!("Copy {text}"))
+            .on_click(cx.listener(move |this, _, _, cx| this.copy(text.clone(), cx)))
+    }
+
     /// A decision waiting on you: where it comes from, its question, why it
     /// is asked, the call's arguments, and one button per option, the recommended one marked
     /// (Plan.md §9.4). A click answers with that option and the note.
@@ -81,6 +97,7 @@ impl Desktop {
         let recommended = decision
             .recommended
             .and_then(|index| usize::try_from(index).ok());
+        let copy_id = self.copyable(format!("copy-{}-{id}", queued.space), id.clone(), cx);
         let options = decision.options.iter().enumerate().map(|(index, option)| {
             let (space, id, label) = (queued.space.clone(), id.clone(), option.label.clone());
             let button = Button::new(SharedString::from(format!("answer-{space}-{id}-{index}")));
@@ -99,10 +116,14 @@ impl Desktop {
             .border_1()
             .border_color(cx.theme().border)
             .rounded(cx.theme().radius)
-            .child(div().text_sm().text_color(muted).child(format!(
-                "{id} · {} / {project}{task}{proposal}",
-                queued.space
-            )))
+            .child(
+                h_flex().gap_1().child(copy_id).child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(format!("· {} / {project}{task}{proposal}", queued.space)),
+                ),
+            )
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)

@@ -20,12 +20,13 @@ use threadlane_core::ids::TaskId;
 use threadlane_core::model::Mode;
 use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
-    Activity, AppState, When, change_memory, decision_of_tag, describe, load_earlier, load_memory,
-    load_modes, load_project, load_task, pump, refresh,
+    Activity, AppState, RoutineText, Tab, When, change_memory, decision_of_tag, describe,
+    load_earlier, load_memory, load_modes, load_project, load_routines, load_task, pump, refresh,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{RwLock, mpsc};
 
+mod menus;
 mod screens;
 
 /// How often the app asks every hub again, so reachability, what runs, and
@@ -96,6 +97,10 @@ fn main() -> ExitCode {
         match opened {
             Ok((_window, view)) => {
                 let view = view.downgrade();
+                let reload = view.clone();
+                menus::install(cx, move |cx| {
+                    let _gone = reload.update(cx, |this, cx| this.refresh(cx));
+                });
                 cx.on_system_notification_response(move |response, cx| {
                     let Some((space, id)) = decision_of_tag(&response.tag) else {
                         return;
@@ -139,6 +144,19 @@ fn local_offset_minutes() -> i64 {
     sign * (hours * 60 + minutes)
 }
 
+/// This computer's time zone name, as `threadlane routine add` finds it:
+/// `TZ`, else where `/etc/localtime` points.
+fn local_zone() -> Option<String> {
+    if let Ok(zone) = std::env::var("TZ")
+        && !zone.trim().is_empty()
+    {
+        return Some(zone.trim().trim_start_matches(':').to_owned());
+    }
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let (_, zone) = target.to_str()?.split_once("zoneinfo/")?;
+    Some(zone.to_owned())
+}
+
 /// Which screen the window shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Screen {
@@ -162,6 +180,8 @@ enum Screen {
     },
     /// The spaces and their machines.
     Machines,
+    /// The routines of every space, by space and project.
+    Routines,
 }
 
 impl Screen {
@@ -174,6 +194,7 @@ impl Screen {
             ["home"] => Self::Home,
             ["agents"] => Self::Agents,
             ["machines"] => Self::Machines,
+            ["routines"] => Self::Routines,
             [space, task] if TaskId::parse(task).is_some() && task.starts_with(['T', 't']) => {
                 Self::Task {
                     space: (*space).to_owned(),
@@ -184,9 +205,7 @@ impl Screen {
                 space: (*space).to_owned(),
                 project: (*project).to_owned(),
                 tab: match rest {
-                    ["conversation"] => Tab::Conversation,
-                    ["agents"] => Tab::Agents,
-                    ["memory"] => Tab::Memory,
+                    [name] => Tab::named(name).unwrap_or(Tab::Tasks),
                     _ => Tab::Tasks,
                 },
             },
@@ -195,13 +214,12 @@ impl Screen {
     }
 }
 
-/// The tabs of the project screen.
+/// What a click asks of a routine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Tasks,
-    Conversation,
-    Agents,
-    Memory,
+enum TimerChange {
+    Pause,
+    Resume,
+    Cancel,
 }
 
 /// The feed as the window takes it: what the pumps hand over, and the
@@ -239,6 +257,20 @@ struct Desktop {
     clear_note: bool,
     /// Empty the new project form at the next render.
     clear_project_form: bool,
+    /// The "+ New routine" form's instruction, N, time, day of the month
+    /// and zone.
+    routine_instruction: Entity<InputState>,
+    routine_every: Entity<InputState>,
+    routine_at: Entity<InputState>,
+    routine_day: Entity<InputState>,
+    routine_zone: Entity<InputState>,
+    /// Empty the "+ New routine" instruction at the next render.
+    clear_routine: bool,
+    /// The first-run screen's hub data directory.
+    hub_dir: Entity<InputState>,
+    /// Whether the window was full screen at the last render, which the
+    /// View menu's label follows.
+    full_screen: bool,
     offset_minutes: i64,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -269,6 +301,21 @@ impl Desktop {
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
         let project_description =
             cx.new(|cx| InputState::new(window, cx).placeholder("Description (optional)"));
+        let routine_instruction = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("What should the lead do each time?")
+        });
+        let routine_every = cx.new(|cx| InputState::new(window, cx).default_value("60"));
+        let routine_at = cx.new(|cx| InputState::new(window, cx).default_value("09:00"));
+        let routine_day = cx.new(|cx| InputState::new(window, cx).default_value("1"));
+        let zone = local_zone().unwrap_or_default();
+        let routine_zone = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Time zone, for example Europe/Berlin")
+                .default_value(zone)
+        });
+        let hub_dir = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("The hub's data directory, ~/threadlane/work")
+        });
         let subscriptions = vec![
             cx.subscribe_in(
                 &composer,
@@ -332,6 +379,14 @@ impl Desktop {
             project_description,
             clear_note: false,
             clear_project_form: false,
+            routine_instruction,
+            routine_every,
+            routine_at,
+            routine_day,
+            routine_zone,
+            clear_routine: false,
+            hub_dir,
+            full_screen: false,
             offset_minutes: local_offset_minutes(),
             _tasks: vec![follow, refresh_loop],
             _subscriptions: subscriptions,
@@ -383,7 +438,23 @@ impl Desktop {
     fn load_screen(&mut self, cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
         match self.screen.clone() {
-            Screen::Project { space, project, .. } => {
+            Screen::Routines => {
+                let projects = self
+                    .state
+                    .targets()
+                    .into_iter()
+                    .map(|(space, project)| (space.to_owned(), project.to_owned()))
+                    .collect();
+                self.load_routines(projects, cx);
+            }
+            Screen::Project {
+                space,
+                project,
+                tab,
+            } => {
+                if tab == Tab::Routines {
+                    self.load_routines(vec![(space.clone(), project.clone())], cx);
+                }
                 // The Conversation tab's card and the Memory tab need the memory.
                 let selected = self
                     .state
@@ -424,6 +495,16 @@ impl Desktop {
             }
             Screen::Home | Screen::Machines | Screen::NewProject { .. } => {}
         }
+    }
+
+    /// Asks for the routines of each `(space, project)`.
+    fn load_routines(&mut self, projects: Vec<(String, String)>, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move { load_routines(&*core.read().await, projects).await },
+            |this, loaded, _| this.state.apply_routines(loaded),
+            cx,
+        );
     }
 
     fn receive(&mut self, item: SpaceFeedItem, cx: &mut Context<Self>) {
@@ -801,6 +882,163 @@ impl Desktop {
         cx.notify();
     }
 
+    /// Pairs this app with the hub whose data directory the first-run
+    /// screen names, as `threadlane hub add <name> <dir>` does; its feed
+    /// follows.
+    fn pair_directory(&mut self, cx: &mut Context<Self>) {
+        let name = self.space_name.read(cx).value().trim().to_owned();
+        let dir = self.hub_dir.read(cx).value().trim().to_owned();
+        if name.is_empty() || dir.is_empty() {
+            self.state.report(Activity::Failed(
+                "Give the space a name and the hub's data directory.".to_owned(),
+            ));
+            cx.notify();
+            return;
+        }
+        // `~` is the shell's; expand it here as the shell would have.
+        let dir = match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
+            _ => std::path::PathBuf::from(dir),
+        };
+        let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
+        self.state
+            .report(Activity::Working(format!("Pairing {name}…")));
+        self.run(
+            async move {
+                let paired = {
+                    let mut client = core.write().await;
+                    client
+                        .pair(&name, dir)
+                        .and_then(|()| client.follow(Some(&name)))
+                };
+                let paired = paired.map(|stream| {
+                    tokio::spawn(pump(Arc::clone(&core), stream, shown));
+                });
+                (name, paired)
+            },
+            |this, (name, paired), cx| match paired {
+                Ok(()) => {
+                    this.state.space_added(&name);
+                    this.state.report(Activity::Done(format!("Paired {name}.")));
+                    this.clear_join = true;
+                    this.refresh(cx);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Puts `text` on the clipboard; the status area says so.
+    fn copy(&mut self, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        self.state.copied(&text);
+        cx.notify();
+    }
+
+    /// Creates the routine the "+ New routine" form describes in `project`
+    /// of `space`, as yours.
+    fn add_routine(&mut self, space: String, project: String, cx: &mut Context<Self>) {
+        let instruction = self.routine_instruction.read(cx).value().trim().to_owned();
+        let (every, at, day, zone) = (
+            self.routine_every.read(cx).value(),
+            self.routine_at.read(cx).value(),
+            self.routine_day.read(cx).value(),
+            self.routine_zone.read(cx).value(),
+        );
+        let recurrence = self.state.routine_form().recurrence(RoutineText {
+            every: &every,
+            at: &at,
+            day: &day,
+            zone: &zone,
+        });
+        let recurrence = match (instruction.is_empty(), recurrence) {
+            (true, _) => Err("Say what the routine should do.".to_owned()),
+            (false, recurrence) => recurrence,
+        };
+        let recurrence = match recurrence {
+            Ok(recurrence) => recurrence,
+            Err(why) => {
+                self.state.report(Activity::Failed(why));
+                cx.notify();
+                return;
+            }
+        };
+        let core = Arc::clone(&self.core);
+        self.state.report(Activity::Working(format!(
+            "Adding a routine to {space} / {project}…"
+        )));
+        self.run(
+            async move {
+                let added = core
+                    .read()
+                    .await
+                    .add_routine(Some(&space), Some(&project), &instruction, recurrence)
+                    .await;
+                (space, project, added)
+            },
+            |this, (space, project, added), _| match added {
+                Ok(timer) => {
+                    this.state.report(Activity::Done(format!(
+                        "Added routine {} to {space} / {project}.",
+                        timer.id
+                    )));
+                    this.state.timer_changed(&space, &project, timer);
+                    this.state.routine_form_mut().open = false;
+                    this.clear_routine = true;
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Pauses, resumes or cancels timer `id` of `project` in `space`.
+    fn change_timer(
+        &mut self,
+        space: String,
+        project: String,
+        id: threadlane_core::ids::TimerId,
+        change: TimerChange,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        let (doing, done) = match change {
+            TimerChange::Pause => ("Pausing", "Paused"),
+            TimerChange::Resume => ("Resuming", "Resumed"),
+            TimerChange::Cancel => ("Cancelling", "Cancelled"),
+        };
+        self.state.report(Activity::Working(format!(
+            "{doing} routine {id} in {space} / {project}…"
+        )));
+        self.run(
+            async move {
+                let core = core.read().await;
+                let (in_space, number) = (Some(space.as_str()), id.to_string());
+                let changed = match change {
+                    TimerChange::Pause => core.pause_timer(in_space, &number).await,
+                    TimerChange::Resume => core.resume_timer(in_space, &number).await,
+                    TimerChange::Cancel => core.cancel_timer(in_space, &number).await,
+                };
+                (space, project, changed)
+            },
+            move |this, (space, project, changed), _| match changed {
+                Ok(timer) => {
+                    this.state.report(Activity::Done(format!(
+                        "{done} routine {} in {space} / {project}.",
+                        timer.id
+                    )));
+                    this.state.timer_changed(&space, &project, timer);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
     /// Unpairs this app from a space once you confirmed, as `threadlane hub
     /// remove` does: the hub keeps its data and this app forgets its key.
     fn unpair_space(&mut self, name: String, cx: &mut Context<Self>) {
@@ -843,9 +1081,17 @@ impl Render for Desktop {
                 .update(cx, |editor, cx| editor.set_value(text, window, cx));
         }
         if std::mem::take(&mut self.clear_join) {
-            for field in [&self.space_name, &self.join_code] {
+            for field in [&self.space_name, &self.join_code, &self.hub_dir] {
                 field.update(cx, |field, cx| field.set_value("", window, cx));
             }
+        }
+        if std::mem::take(&mut self.clear_routine) {
+            self.routine_instruction
+                .update(cx, |field, cx| field.set_value("", window, cx));
+        }
+        if window.is_fullscreen() != self.full_screen {
+            self.full_screen = window.is_fullscreen();
+            menus::set(self.full_screen, cx);
         }
         if std::mem::take(&mut self.clear_project_form) {
             for field in [&self.project_name, &self.project_description] {
@@ -864,6 +1110,13 @@ impl Render for Desktop {
             Screen::Agents => self.agents(cx),
             Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),
+            Screen::Routines => self.routines_screen(&when, cx),
+        };
+        // With no hub paired, every screen but Machines explains pairing.
+        let body = if self.state.first_run() && self.screen != Screen::Machines {
+            self.first_run(cx)
+        } else {
+            body
         };
         h_flex()
             .size_full()

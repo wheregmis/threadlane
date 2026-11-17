@@ -179,6 +179,97 @@ fn origin(origin: TaskOrigin) -> &'static str {
     }
 }
 
+/// The tools whose approved call pushes the task's branch.
+const PUBLISHING: [&str; 2] = ["publish_branch", "open_pull_request"];
+
+/// The task screen's "Usage" card: how many runs, how long they took, and
+/// what the hub says of tokens and cost.
+#[must_use]
+pub fn usage(detail: &TaskDetail, when: &When) -> [String; 2] {
+    let took = detail
+        .runs
+        .iter()
+        .map(|run| {
+            let ended = run.run.ended_at.unwrap_or(when.now);
+            ended.saturating_since(run.run.started_at)
+        })
+        .sum();
+    let runs = match detail.runs.len() {
+        1 => "1 run".to_owned(),
+        count => format!("{count} runs"),
+    };
+    [
+        format!("{runs} · {}", duration(took)),
+        // shortcut: the hub keeps no usage per run yet (Plan.md §14.1 "Run
+        // record"); show it here once the run summary carries it.
+        "Tokens and cost: not reported by the hub yet".to_owned(),
+    ]
+}
+
+/// The task screen's "Changes" card: its branch and whether it is published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Changes {
+    /// The branch it works on.
+    pub branch: String,
+    /// `Pushed`, `Not pushed`, `Waiting on you to push (D-0012)`, ...
+    pub state: String,
+    /// The pull request opened for it, if any.
+    pub pull_request: Option<String>,
+}
+
+/// Its branch and publish state, from its result and the outcomes of the
+/// decisions to push it.
+#[must_use]
+pub fn changes(detail: &TaskDetail) -> Changes {
+    let result = detail.summary.task.result.as_ref();
+    let text = |json: Option<&Json>, field: &str| {
+        json.and_then(|json| json.get(field))
+            .and_then(Json::as_str)
+            .map(str::to_owned)
+    };
+    let mut pushed = text(result, "branch").is_some();
+    let mut pull_request = text(result, "pull_request");
+    let mut last = None;
+    for decision in detail
+        .decisions
+        .iter()
+        .filter(|decision| PUBLISHING.contains(&decision.tool.as_str()))
+    {
+        let outcome = decision.outcome.as_ref();
+        let performed = outcome.and_then(|outcome| outcome.get("performed"));
+        last = Some(match (decision.status, performed) {
+            (_, Some(Json::Bool(true))) => {
+                pushed = true;
+                pull_request = text(outcome, "pull_request").or(pull_request);
+                "Pushed".to_owned()
+            }
+            (_, Some(_)) => format!(
+                "Not pushed: {}",
+                text(outcome, "error").unwrap_or_else(|| "the push failed".to_owned())
+            ),
+            (DecisionStatus::Pending, _) => format!("Waiting on you to push ({})", decision.id),
+            (DecisionStatus::Answered, _) if !decision.approved() => {
+                format!("Not pushed: you declined {}", decision.id)
+            }
+            (DecisionStatus::Answered, _) => "Pushing…".to_owned(),
+            (DecisionStatus::Expired | DecisionStatus::Cancelled, _) => {
+                format!("Not pushed: {} was not answered", decision.id)
+            }
+        });
+    }
+    let state = match (&pull_request, pushed, last) {
+        (Some(_), _, _) => "Pushed · pull request opened".to_owned(),
+        (None, true, _) => "Pushed".to_owned(),
+        (None, false, Some(last)) => last,
+        (None, false, None) => "Not pushed".to_owned(),
+    };
+    Changes {
+        branch: detail.branch.clone(),
+        state,
+        pull_request,
+    }
+}
+
 /// One entry of a task's timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Moment {
