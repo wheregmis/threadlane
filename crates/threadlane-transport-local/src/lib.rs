@@ -18,7 +18,7 @@ use threadlane_core::client::{
     HubApi, HubInfo, MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply,
     OverviewRequest, PairingReply, PairingRequest, ProjectSummary, UserMessage, dispatch,
 };
-use threadlane_core::client::{TimerReply, TimerRequest};
+use threadlane_core::client::{TaskReply, TaskRequest, TimerReply, TimerRequest};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
@@ -219,6 +219,15 @@ impl HubApi for LocalClient {
         {
             ClientResponse::Timers { reply } => Ok(reply),
             other => Err(unexpected(other, "timers")),
+        }
+    }
+    async fn tasks(&self, request: TaskRequest) -> Result<TaskReply, ApiError> {
+        match self
+            .call(&ClientRequest::Tasks { request }, REQUEST_TIMEOUT)
+            .await?
+        {
+            ClientResponse::Tasks { reply } => Ok(reply),
+            other => Err(unexpected(other, "tasks")),
         }
     }
 }

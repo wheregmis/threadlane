@@ -11,7 +11,7 @@ use threadlane_core::client::{
     MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
     PairingRequest, ProjectSummary, UserMessage,
 };
-use threadlane_core::client::{TimerReply, TimerRequest};
+use threadlane_core::client::{TaskReply, TaskRequest, TimerReply, TimerRequest};
 use threadlane_core::ids::ProjectId;
 use threadlane_core::model::{
     Agent, Answered, Binding, DecisionAnswer, DecisionStatus, EventKind, Inserted, Mode, NewAgent,
@@ -30,6 +30,7 @@ use crate::tools::CLIENT_CHANNEL;
 
 mod memory;
 mod overview;
+mod tasks;
 
 /// Source name of messages from the client.
 pub const CLIENT_SOURCE: &str = "client";
@@ -359,12 +360,20 @@ impl HubApi for ClientApi {
                 name,
                 role,
                 instructions,
+                backends,
             } => {
                 let name = required("agent name", &name)?;
                 let role = required("agent role", &role)?;
+                let mut preferred = Vec::with_capacity(backends.len());
+                for backend in backends {
+                    if !preferred.contains(&backend) {
+                        preferred.push(backend);
+                    }
+                }
                 let agent = db
                     .create_agent(&NewAgent {
                         instructions,
+                        backends: preferred,
                         ..NewAgent::named(name, role)
                     })
                     .await
@@ -415,6 +424,19 @@ impl HubApi for ClientApi {
                         mode: binding.mode,
                         is_lead: binding.is_lead,
                     },
+                })
+            }
+            OrgRequest::SetPaused { project, paused } => {
+                let project = self.project_named(project.as_deref()).await?;
+                db.set_project_paused(project.id, paused)
+                    .await
+                    .map_err(api_error)?;
+                if !paused {
+                    // Its lanes may be granted again.
+                    self.core.inner.wake.wake(WakeTarget::Runners);
+                }
+                Ok(OrgReply::Project {
+                    project: summary(Project { paused, ..project }),
                 })
             }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
@@ -505,6 +527,10 @@ impl HubApi for ClientApi {
 
     async fn timers(&self, request: TimerRequest) -> Result<TimerReply, ApiError> {
         crate::timers::handle(&self.core, request).await
+    }
+
+    async fn tasks(&self, request: TaskRequest) -> Result<TaskReply, ApiError> {
+        tasks::handle(self, request).await
     }
 }
 

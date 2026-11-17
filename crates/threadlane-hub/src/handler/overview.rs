@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use threadlane_core::client::{
-    ApiError, ConversationEntry, FeedItem, OverviewReply, OverviewRequest, RunSummary, TaskDetail,
-    TaskSummary,
+    ApiError, ConversationEntry, FeedItem, OverviewReply, OverviewRequest, RecordedEvent,
+    RunSummary, TaskDetail, TaskSummary,
 };
 use threadlane_core::ids::{AgentId, MachineId, ProjectId};
 use threadlane_core::model::{Event, OutboxMessage, RunStatus, Task, TaskStatus};
@@ -17,6 +17,8 @@ use threadlane_core::workspace::task_branch;
 use threadlane_store::HubDb;
 
 use super::{ClientApi, FEED_PAGE};
+use crate::begin_run::SKIP_REASON;
+use crate::context::event_text;
 use crate::error::api_error;
 use crate::tools::CLIENT_CHANNEL;
 
@@ -290,6 +292,33 @@ pub(super) async fn handle(
                 .rfind(|run| run.status == RunStatus::Active)
                 .map(|run| run.started_at);
             Ok(OverviewReply::Lead { running_since })
+        }
+        OverviewRequest::Recorded { project, limit } => {
+            let project = api.project_named(project.as_deref()).await?;
+            let (events, total) = db
+                .skipped_events(Some(project.id), SKIP_REASON, limit.min(FEED_PAGE))
+                .await
+                .map_err(api_error)?;
+            Ok(OverviewReply::Recorded {
+                events: events
+                    .into_iter()
+                    .map(|event| RecordedEvent {
+                        text: event_text(&event),
+                        id: event.id,
+                        source: event.source,
+                        kind: event.kind,
+                        received_at: event.received_at,
+                    })
+                    .collect(),
+                total,
+            })
+        }
+        OverviewRequest::RecordedCount => {
+            let (_, total) = db
+                .skipped_events(None, SKIP_REASON, 0)
+                .await
+                .map_err(api_error)?;
+            Ok(OverviewReply::RecordedCount { total })
         }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }

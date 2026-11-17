@@ -6,7 +6,7 @@ use std::sync::Arc;
 use threadlane_core::client::{ApiError, BindingSummary, OrgReply, OrgRequest, UserMessage};
 use threadlane_core::ids::RunId;
 use threadlane_core::link::Begin;
-use threadlane_core::model::{EventStatus, Mode, NewProject};
+use threadlane_core::model::{BackendKind, EventStatus, Mode, NewProject};
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::store::{InboxStore, OrgStore, SessionStore};
 use threadlane_hub::{LEAD_NAME, LEAD_ROLE, OFF_REASON};
@@ -205,6 +205,7 @@ async fn agents_are_listed_and_created_with_unique_names_and_a_role() {
         name: name.to_owned(),
         role: role.to_owned(),
         instructions: "Review every change.".to_owned(),
+        backends: vec![BackendKind::Codex, BackendKind::Claude, BackendKind::Codex],
     };
     let reply = org(&hub, create(" Reviewer ", "reviewer")).await.unwrap();
     let OrgReply::Agent { agent } = reply else {
@@ -213,6 +214,11 @@ async fn agents_are_listed_and_created_with_unique_names_and_a_role() {
     assert_eq!(agent.name, "Reviewer");
     assert_eq!(agent.role, "reviewer");
     assert_eq!(agent.instructions, "Review every change.");
+    assert_eq!(
+        agent.backends,
+        [BackendKind::Codex, BackendKind::Claude],
+        "in order of preference, each once"
+    );
 
     for (name, role) in [("", "reviewer"), ("Tester", " "), (LEAD_NAME, "lead")] {
         let refused = org(&hub, create(name, role)).await;
@@ -234,6 +240,7 @@ async fn set_mode_changes_a_binding_or_creates_one() {
             name: "Reviewer".into(),
             role: "reviewer".into(),
             instructions: String::new(),
+            backends: Vec::new(),
         },
     )
     .await

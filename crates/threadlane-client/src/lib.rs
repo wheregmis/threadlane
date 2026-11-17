@@ -30,7 +30,9 @@ use threadlane_core::client::{
     UserMessage,
 };
 use threadlane_core::ids::{DecisionId, TaskId};
-use threadlane_core::model::{Account, Agent, Decision, Machine, Mode, OutboxKind, Repository};
+use threadlane_core::model::{
+    Account, Agent, BackendKind, Decision, Machine, Mode, OutboxKind, Repository,
+};
 use threadlane_core::time::Timestamp;
 use threadlane_transport_iroh::{EndpointAddr, EndpointId, IrohClient, JoinCode, TransportAddr};
 use threadlane_transport_local::{LocalClient, SOCKET_FILE};
@@ -772,7 +774,8 @@ impl ClientCore {
         }
     }
 
-    /// Creates an agent in one space. `None` means the only paired hub.
+    /// Creates an agent in one space, with the backends it may use in order
+    /// of preference (empty for either). `None` means the only paired hub.
     ///
     /// # Errors
     ///
@@ -783,11 +786,13 @@ impl ClientCore {
         name: &str,
         role: &str,
         instructions: &str,
+        backends: &[BackendKind],
     ) -> Result<Agent, ClientError> {
         let request = OrgRequest::CreateAgent {
             name: name.to_owned(),
             role: role.to_owned(),
             instructions: instructions.to_owned(),
+            backends: backends.to_vec(),
         };
         match self.org(space, request).await? {
             (_, OrgReply::Agent { agent }) => Ok(agent),
@@ -1691,7 +1696,10 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), ClientError> {
     result.map_err(failed)
 }
 
+mod tasks;
 mod timers;
+
+pub use tasks::NewTaskSpec;
 
 #[cfg(test)]
 mod tests;

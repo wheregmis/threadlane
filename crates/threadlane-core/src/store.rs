@@ -166,6 +166,15 @@ pub trait InboxStore: Send + Sync {
         before: Option<Timestamp>,
         limit: u32,
     ) -> StoreResult<Vec<Event>>;
+    /// Events skipped with `reason`, in one project or in the whole space
+    /// when `None`: the newest `limit`, newest first, and how many there
+    /// are in all.
+    async fn skipped_events(
+        &self,
+        project_id: Option<ProjectId>,
+        reason: &str,
+        limit: u32,
+    ) -> StoreResult<(Vec<Event>, u64)>;
 }
 
 /// Sessions, runs, and calls to the system's tools (Plan.md §4).

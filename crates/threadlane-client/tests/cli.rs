@@ -15,13 +15,14 @@ use threadlane_core::client::{
     MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
     PairingRequest, ProjectSummary, UserMessage,
 };
-use threadlane_core::client::{TimerReply, TimerRequest};
+use threadlane_core::client::{TaskReply, TaskRequest, TimerReply, TimerRequest};
 use threadlane_core::ids::TimerId;
 use threadlane_core::ids::{
     AgentId, DecisionId, EventId, LaneId, OutboxId, ProjectId, RepositoryId,
 };
 use threadlane_core::model::{
-    Agent, Decision, DecisionKind, DecisionOption, DecisionStatus, Repository,
+    Agent, BackendKind, Decision, DecisionKind, DecisionOption, DecisionStatus, Repository, Task,
+    TaskOrigin, TaskStatus,
 };
 use threadlane_core::model::{Mode, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
 use threadlane_core::model::{
@@ -196,6 +197,7 @@ impl HubApi for FakeHub {
                 name,
                 role,
                 instructions,
+                ..
             } => OrgReply::Agent {
                 agent: agent(&name, &role, &instructions),
             },
@@ -224,6 +226,14 @@ impl HubApi for FakeHub {
                     role: "reviewer".to_owned(),
                     mode,
                     is_lead: false,
+                },
+            },
+            OrgRequest::SetPaused { project, paused } => OrgReply::Project {
+                project: ProjectSummary {
+                    id: ProjectId(2),
+                    name: project.unwrap_or_else(|| "General".to_owned()),
+                    is_general: false,
+                    paused,
                 },
             },
             other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
@@ -313,6 +323,33 @@ impl HubApi for FakeHub {
             }
             other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         })
+    }
+
+    async fn tasks(&self, request: TaskRequest) -> Result<TaskReply, ApiError> {
+        match request {
+            TaskRequest::Cancel { task } => Ok(TaskReply::Task {
+                task: Task {
+                    id: task,
+                    project_id: ProjectId(1),
+                    lane_id: LaneId(5),
+                    agent_id: AgentId(1),
+                    title: "Review".to_owned(),
+                    goal: String::new(),
+                    repositories: Vec::new(),
+                    parent_task_id: None,
+                    depends_on: Vec::new(),
+                    origin: TaskOrigin::User,
+                    status: TaskStatus::Cancelled,
+                    priority: 0,
+                    created_by_call: None,
+                    last_machine_id: None,
+                    waiting_reason: None,
+                    result: None,
+                    created_at: Timestamp::from_millis(1_000),
+                },
+            }),
+            other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
+        }
     }
 }
 
@@ -628,7 +665,15 @@ async fn the_cli_manages_projects_agents_and_modes() {
     .await;
     expect_success(
         client_dir,
-        &["agent", "add", "Reviewer", "--role", "reviewer"],
+        &[
+            "agent",
+            "add",
+            "Reviewer",
+            "--role",
+            "reviewer",
+            "--backend",
+            "codex,claude",
+        ],
         "created agent Reviewer (reviewer)\n",
     )
     .await;
@@ -664,6 +709,7 @@ async fn the_cli_manages_projects_agents_and_modes() {
                 name: "Reviewer".to_owned(),
                 role: "reviewer".to_owned(),
                 instructions: String::new(),
+                backends: vec![BackendKind::Codex, BackendKind::Claude],
             },
             OrgRequest::Agents,
             OrgRequest::Bindings {
@@ -1062,4 +1108,53 @@ fn created(
         },
         client_request_id,
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_pauses_and_resumes_projects_and_cancels_tasks() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().expect("tempdir");
+    let client_dir = client.path();
+    let socket = hub.socket().display().to_string();
+    expect_success(
+        client_dir,
+        &["hub", "add", "work", &socket],
+        &format!("paired work: {socket}\n"),
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["project", "pause", "api"],
+        "paused project api\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["project", "resume", "api", "-s", "work"],
+        "resumed project api\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["task", "cancel", "T-0003"],
+        "T-0003 is cancelled\n",
+    )
+    .await;
+    let output = threadlane(client_dir, &["task", "cancel", "3x"]).await;
+    assert!(!output.status.success(), "a task id is checked");
+    assert!(stderr(&output).contains("not a task id"), "{}", stderr(&output));
+    assert_eq!(
+        *hub.fake.0.org.lock().expect("lock"),
+        vec![
+            OrgRequest::SetPaused {
+                project: Some("api".to_owned()),
+                paused: true,
+            },
+            OrgRequest::SetPaused {
+                project: Some("api".to_owned()),
+                paused: false,
+            },
+        ]
+    );
+    hub.stop().await;
 }

@@ -5,6 +5,7 @@
 //! [`ClientCore`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value as Json;
@@ -14,7 +15,8 @@ use threadlane_client::{
 };
 use threadlane_core::admission::AdmittedKey;
 use threadlane_core::client::{
-    BindingSummary, ConversationEntry, ProjectSummary, TaskDetail, TaskSummary,
+    BindingSummary, ConversationEntry, HubInfo, ProjectSummary, RecordedEvent, TaskDetail,
+    TaskSummary,
 };
 use threadlane_core::ids::{DecisionId, EventId, ProjectId, TaskId};
 use threadlane_core::model::{Account, Agent, Decision, Machine, MachineStatus, Mode, OutboxKind};
@@ -22,13 +24,19 @@ use threadlane_core::time::Timestamp;
 use tokio::sync::{RwLock, mpsc};
 
 mod clock;
+mod control;
 mod conversation;
 mod machines;
 mod memory;
 mod routines;
+mod settings;
 mod tasks;
 
 pub use clock::{When, duration};
+pub use control::{
+    AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository,
+    copy_agent, same_remote,
+};
 pub use conversation::Line;
 pub use machines::{MachineRow, machine_row};
 pub use memory::{
@@ -38,6 +46,7 @@ pub use memory::{
 pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
 };
+pub use settings::{Notifications, SETTINGS_FILE, SpaceRow};
 pub use tasks::{
     BoardCard, Changes, Column, Moment, changes, chips, status_label, timeline, usage,
 };
@@ -185,6 +194,13 @@ pub struct Space {
     pub clients: Vec<AdmittedKey>,
     /// Its agents.
     pub agents: Vec<Agent>,
+    /// What its hub last said about itself.
+    pub info: Option<HubInfo>,
+    /// How this app reaches it: `Unix socket …` or `Network, hub key …`.
+    pub reached_by: String,
+    /// How many events it recorded and did not act on; `None` while its
+    /// hub has not said, or cannot (one from before it could).
+    pub recorded: Option<u64>,
 }
 
 impl Space {
@@ -199,6 +215,9 @@ impl Space {
             accounts: Vec::new(),
             clients: Vec::new(),
             agents: Vec::new(),
+            info: None,
+            reached_by: String::new(),
+            recorded: None,
         }
     }
 
@@ -570,6 +589,7 @@ pub struct Refresh {
     running: Vec<SpaceListing<Vec<TaskSummary>>>,
     machines: Vec<SpaceListing<SpaceMachines>>,
     recent: Vec<SpaceListing<Vec<SpaceFeedItem>>>,
+    recorded: Vec<SpaceListing<u64>>,
 }
 
 /// Asks every paired hub about itself, its projects, agents, admitted
@@ -597,6 +617,7 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
         running: core.running(None).await.unwrap_or_default(),
         machines: core.machines(None).await.unwrap_or_default(),
         recent: core.recent(None, RECENT).await.unwrap_or_default(),
+        recorded: core.recorded_count(None).await.unwrap_or_default(),
     }
 }
 
@@ -611,10 +632,12 @@ pub struct ProjectLoad {
     bindings: Result<Vec<BindingSummary>, ClientError>,
     history: Result<Vec<ConversationEntry>, ClientError>,
     lead: Result<Option<Timestamp>, ClientError>,
+    recorded: Result<(Vec<RecordedEvent>, u64), ClientError>,
 }
 
 /// Asks a project's hub for its tasks, repositories, bindings, the newest
-/// page of its conversation, and whether its lead is working.
+/// page of its conversation, whether its lead is working, and the events
+/// it recorded and did not act on.
 pub async fn load_project(core: &ClientCore, space: &str, project: &str) -> ProjectLoad {
     let (in_space, named) = (Some(space), Some(project));
     ProjectLoad {
@@ -625,6 +648,9 @@ pub async fn load_project(core: &ClientCore, space: &str, project: &str) -> Proj
         bindings: core.bindings(in_space, named).await,
         history: core.conversation(in_space, named, None, PAGE).await,
         lead: core.lead(in_space, named).await,
+        recorded: core
+            .recorded(in_space, named, control::RECORDED_SHOWN)
+            .await,
     }
 }
 
@@ -729,6 +755,10 @@ pub struct ProjectView {
     /// When the run its lead is working on started; `None` while idle.
     pub lead: Option<Timestamp>,
     answers: BTreeMap<Part, Answer>,
+    /// The events it recorded and did not act on, and how many in all, or
+    /// why its hub could not say. Kept out of `answers`: a hub from before
+    /// it could say must not make the app ask again every few seconds.
+    recorded: Option<Result<(Vec<RecordedEvent>, u64), String>>,
 }
 
 /// A message you sent, as the conversation shows it.
@@ -787,6 +817,20 @@ pub struct AppState {
     cancelling: Option<InSpace<threadlane_core::ids::TimerId>>,
     /// The picks of the "+ New routine" form.
     routine_form: RoutineForm,
+    /// The picks of the "+ New agent" form.
+    agent_form: AgentForm,
+    /// The picks of the "+ New task" form.
+    task_form: TaskForm,
+    /// The project whose "+ Add repository" form is open.
+    repository_form: Option<InSpace<String>>,
+    /// The task you asked to cancel, until you confirm or keep it.
+    cancelling_task: Option<InSpace<TaskId>>,
+    /// The projects whose recorded section is expanded.
+    recorded_open: HashSet<InSpace<String>>,
+    /// Which system notifications the app raises.
+    notifications: Notifications,
+    /// Where this app keeps its files.
+    client_dir: Option<PathBuf>,
 }
 
 impl AppState {
@@ -946,8 +990,9 @@ impl AppState {
     }
 
     /// Home's status line: `2 spaces reachable · 3 running · 2 need you · 2
-    /// of 2 machines online`, for the spaces it shows. Machines are left
-    /// out while a space has no current count.
+    /// of 2 machines online · 4 recorded, not acted on`, for the spaces it
+    /// shows. Machines are left out while a space has no current count, and
+    /// the recorded events while there are none.
     #[must_use]
     pub fn status_line(&self) -> String {
         let shown: Vec<&Space> = self
@@ -960,11 +1005,17 @@ impl AppState {
             .filter(|space| space.reach == Reach::Reachable)
             .count();
         let spaces = if reachable == 1 { "space" } else { "spaces" };
+        let recorded: u64 = shown.iter().filter_map(|space| space.recorded).sum();
+        let recorded = if recorded == 0 {
+            String::new()
+        } else {
+            format!(" · {recorded} recorded, not acted on")
+        };
         let machines = machine_count(shown.into_iter()).map_or_else(String::new, |(on, all)| {
             format!(" · {on} of {all} machines online")
         });
         format!(
-            "{reachable} {spaces} reachable · {} running · {} need you{machines}",
+            "{reachable} {spaces} reachable · {} running · {} need you{machines}{recorded}",
             self.running().len(),
             self.needs_you().count(),
         )
@@ -1101,6 +1152,18 @@ impl AppState {
             self.cancelling = None;
         }
         self.codes.remove(name);
+        self.recorded_open.retain(|(space, _)| space != name);
+        let here = |at: Option<&String>| at.is_some_and(|space| space == name);
+        if here(self.agent_form.space.as_ref()) {
+            self.agent_form = AgentForm::default();
+        }
+        if here(self.repository_form.as_ref().map(|(space, _)| space)) {
+            self.repository_form = None;
+        }
+        if here(self.cancelling_task.as_ref().map(|(space, _)| space)) {
+            self.cancelling_task = None;
+        }
+        self.task_form = TaskForm::default();
         if self.filter.as_deref() == Some(name) {
             self.filter = None;
         }
@@ -1121,6 +1184,7 @@ impl AppState {
             running,
             machines,
             recent,
+            recorded,
         } = refresh;
         let mut spaces = Vec::with_capacity(statuses.len());
         for status in statuses {
@@ -1128,8 +1192,19 @@ impl AppState {
                 .space(&status.name)
                 .cloned()
                 .unwrap_or_else(|| Space::new(&status.name));
+            space.reached_by = match &status.reach {
+                threadlane_client::Reach::Socket { socket } => {
+                    format!("Unix socket {}", socket.display())
+                }
+                threadlane_client::Reach::Iroh { hub, .. } => {
+                    format!("Network, hub key {}", hub.fmt_short())
+                }
+            };
             space.reach = match status.info {
-                Ok(_) => Reach::Reachable,
+                Ok(info) => {
+                    space.info = Some(info);
+                    Reach::Reachable
+                }
                 Err(error) => Reach::Unreachable(error.to_string()),
             };
             spaces.push(space);
@@ -1172,6 +1247,13 @@ impl AppState {
                     spaces[at].machines = machines;
                     spaces[at].accounts = accounts;
                 }
+            }
+        }
+        for SpaceListing { space, listed } in recorded {
+            if let Some(at) = find(&mut spaces, &space)
+                && spaces[at].reach == Reach::Reachable
+            {
+                spaces[at].recorded = listed.ok();
             }
         }
         let mut items = Vec::new();
@@ -1229,6 +1311,7 @@ impl AppState {
             bindings,
             history,
             lead,
+            recorded,
         } = load;
         let view = self
             .projects
@@ -1238,6 +1321,7 @@ impl AppState {
         view.repositories = take(&mut view.answers, Part::Repositories, repositories);
         view.bindings = take(&mut view.answers, Part::Bindings, bindings);
         view.lead = take(&mut view.answers, Part::Lead, lead);
+        view.recorded = Some(recorded.map_err(|error| describe(&error)));
         let listed = history.is_ok();
         let entries = take(&mut view.answers, Part::Conversation, history);
         if listed {

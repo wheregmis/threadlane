@@ -13,7 +13,7 @@ use threadlane_core::admission::{AdmittedKey, KeyRole};
 use threadlane_core::client::{
     Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
     MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
-    PairingRequest, ProjectSummary, UserMessage,
+    PairingRequest, ProjectSummary, TaskReply, TaskRequest, UserMessage,
 };
 use threadlane_core::ids::{EventId, OutboxId, ProjectId, TaskId};
 use threadlane_core::model::{Mode, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
@@ -160,6 +160,12 @@ impl HubApi for FakeHub {
             _ => Err(ApiError::NotFound(
                 "there is no file at project/a.md".to_owned(),
             )),
+        }
+    }
+    async fn tasks(&self, request: TaskRequest) -> Result<TaskReply, ApiError> {
+        match request {
+            TaskRequest::Cancel { task } => Err(ApiError::NotFound(format!("task {task}"))),
+            _ => Err(ApiError::Invalid("unsupported".to_owned())),
         }
     }
 }
@@ -381,6 +387,14 @@ async fn every_request_kind_round_trips() {
     assert_eq!(
         client.memory(MemoryRequest::List { project: None }).await,
         Ok(MemoryReply::Files { files: Vec::new() })
+    );
+    assert_eq!(
+        client
+            .tasks(TaskRequest::Cancel { task: TaskId(9) })
+            .await
+            .map(|_| ()),
+        Err(ApiError::NotFound("task T-0009".to_owned())),
+        "a task request crosses with its error"
     );
     assert_eq!(
         client

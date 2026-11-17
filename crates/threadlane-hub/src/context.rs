@@ -174,11 +174,7 @@ fn render_event(event: &Event, out: &mut String) {
         format_time(event.received_at),
         event.trust
     );
-    let content = match event.kind {
-        EventKind::TimerFired => timer_text(&event.payload),
-        EventKind::OutsideEvent if event.source == GITHUB_SOURCE => github_text(&event.payload),
-        _ => payload_text(&event.payload),
-    };
+    let content = event_text(event);
     if event.trust == Trust::External {
         let marker = data_marker(&content);
         out.push_str(
@@ -191,6 +187,15 @@ fn render_event(event: &Event, out: &mut String) {
     } else {
         out.push_str(content.trim_end());
         out.push('\n');
+    }
+}
+
+/// What an event says, as a run reads it.
+pub(crate) fn event_text(event: &Event) -> String {
+    match event.kind {
+        EventKind::TimerFired => timer_text(&event.payload),
+        EventKind::OutsideEvent if event.source == GITHUB_SOURCE => github_text(&event.payload),
+        _ => payload_text(&event.payload),
     }
 }
 
