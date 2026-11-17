@@ -1,0 +1,15 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+Last-Modified: Tue, 17 Nov 2026 08:58:12 GMT
+Link: <https://api.github.com/notifications?per_page=50&page=2>; rel="next", <https://api.github.com/notifications?per_page=50&page=2>; rel="last"
+X-Poll-Interval: 60
+
+[
+  {
+    "id": "12000000101",
+    "reason": "mention",
+    "updated_at": "2026-11-17T08:58:12Z",
+    "subject": { "title": "Page one", "url": null, "type": "Issue" },
+    "repository": { "full_name": "acme/widgets" }
+  }
+]

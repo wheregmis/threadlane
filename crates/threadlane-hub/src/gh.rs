@@ -1,7 +1,7 @@
 //! [`GhSource`]: the GitHub source through `gh api` (Plan.md §6.6,
 //! docs/milestone-8.md §1 decision 6).
 //!
-//! Every call is `gh api --method GET <path>`: the method is stated, never
+//! Every call is `gh api --method GET --include <path>`: the method is stated, never
 //! left to `gh`, which switches to POST when given fields, and no field,
 //! input or other method is ever passed. So the source never marks a
 //! notification read (`PATCH`/`PUT notifications...`) and never writes. The
@@ -13,16 +13,16 @@
 //! The calls:
 //!
 //! - the feed: `gh api --method GET --include [-H "If-Modified-Since: <cursor>"]
-//!   -H "Accept: application/vnd.github+json" notifications?per_page=50`. With
-//!   `--include` the answer starts with the status line and headers:
+//!   -H "Accept: application/vnd.github+json" notifications?per_page=50`.
 //!   `304` is "not modified", `Last-Modified` the next cursor,
 //!   `X-Poll-Interval` the interval asked for;
 //! - a branch's check runs: `repos/<owner>/<name>/commits/<branch>/check-runs?per_page=100`;
 //! - a pull request's reviews: `repos/<owner>/<name>/pulls/<n>/reviews?per_page=100`;
 //! - its comments: `repos/<owner>/<name>/issues/<n>/comments?per_page=100[&since=<time>]`.
 //!
-//! shortcut: only the first page of each answer is read (50 notifications,
-//! 100 of the rest); follow the `Link` header if a pass ever needs more.
+//! With `--include` each answer starts with the status line and headers. A
+//! `Link` header's `rel="next"` is followed, as another such GET of the path
+//! it names, for at most [`MAX_PAGES`] pages per call.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -39,6 +39,8 @@ use tokio::process::Command;
 const GH_TIMEOUT: Duration = Duration::from_secs(60);
 /// What every call accepts.
 const ACCEPT: &str = "Accept: application/vnd.github+json";
+/// The most pages one call reads.
+const MAX_PAGES: usize = 10;
 
 /// [`GithubSource`] through `gh api`.
 #[derive(Debug, Clone)]
@@ -60,12 +62,12 @@ impl GhSource {
         Self { gh: program.into() }
     }
 
-    /// Runs `gh api --method GET <extra> <path>`, kept from prompting.
-    /// Returns whether it succeeded, and its standard output.
+    /// Runs `gh api --method GET --include <extra> <path>`, kept from
+    /// prompting. Returns whether it succeeded, and its standard output.
     async fn get(&self, extra: &[String], path: &str) -> Result<(bool, String), GithubError> {
         let mut command = Command::new(&self.gh);
         command
-            .args(["api", "--method", "GET"])
+            .args(["api", "--method", "GET", "--include"])
             .args(extra)
             .args(["-H", ACCEPT, path])
             .env("GH_PROMPT_DISABLED", "1")
@@ -90,31 +92,68 @@ impl GhSource {
         ))
     }
 
-    /// A JSON answer of a call that must succeed.
-    async fn get_json(&self, path: &str) -> Result<Json, GithubError> {
-        match self.get(&[], path).await? {
-            (true, body) => serde_json::from_str(&body)
-                .map_err(|error| GithubError(format!("gh api {path} answered: {error}"))),
-            (false, _) => Err(GithubError(format!("gh api {path} failed"))),
+    /// The pages of `path`, following `rel="next"` up to [`MAX_PAGES`];
+    /// `extra` goes with the first call only. A page that failed and is not
+    /// a 304 fails the call.
+    async fn get_pages(&self, extra: &[String], path: &str) -> Result<Vec<Answer>, GithubError> {
+        let mut pages = Vec::new();
+        let mut next = Some(path.to_owned());
+        while let Some(path) = next.take() {
+            let extra = if pages.is_empty() { extra } else { &[] };
+            let (ok, output) = self.get(extra, &path).await?;
+            let page = match parse_answer(&output) {
+                Ok(page) if ok || page.status == 304 => page,
+                Ok(_) => return Err(GithubError(format!("gh api {path} failed"))),
+                Err(error) if ok => return Err(error),
+                Err(_) => return Err(GithubError(format!("gh api {path} failed"))),
+            };
+            next = page.next.clone().filter(|_| pages.len() + 1 < MAX_PAGES);
+            pages.push(page);
         }
+        Ok(pages)
+    }
+
+    /// The items of every JSON page of a call that must succeed.
+    async fn get_items(
+        &self,
+        path: &str,
+        target: &PullTarget,
+        parse: fn(&Json, &PullTarget) -> Vec<GithubItem>,
+    ) -> Result<Vec<GithubItem>, GithubError> {
+        let mut items = Vec::new();
+        for page in self.get_pages(&[], path).await? {
+            if !(200..=299).contains(&page.status) {
+                return Err(GithubError(format!(
+                    "gh api {path} answered {}",
+                    page.status
+                )));
+            }
+            let body: Json = serde_json::from_str(&page.body)
+                .map_err(|error| GithubError(format!("gh api {path} answered: {error}")))?;
+            items.extend(parse(&body, target));
+        }
+        Ok(items)
     }
 }
 
 #[async_trait]
 impl GithubSource for GhSource {
     async fn notifications(&self, cursor: Option<&str>) -> Result<Feed, GithubError> {
-        let mut extra = vec!["--include".to_owned()];
+        let mut extra = Vec::new();
         if let Some(cursor) = cursor.filter(|cursor| !cursor.chars().any(char::is_control)) {
             extra.extend(["-H".to_owned(), format!("If-Modified-Since: {cursor}")]);
         }
-        let (ok, output) = self.get(&extra, "notifications?per_page=50").await?;
-        // gh exits non-zero on a 304, which is the answer "not modified".
-        match parse_feed(&output) {
-            Ok(feed) if ok || feed.not_modified => Ok(feed),
-            Ok(_) => Err(GithubError("gh api notifications failed".to_owned())),
-            Err(error) if ok => Err(error),
-            Err(_) => Err(GithubError("gh api notifications failed".to_owned())),
+        // gh exits non-zero on a 304, which is the answer "not modified";
+        // the first page gives the cursor and the interval.
+        let mut pages = self
+            .get_pages(&extra, "notifications?per_page=50")
+            .await?
+            .into_iter();
+        let mut feed = pages.next().map(feed_of).transpose()?.unwrap_or_default();
+        for page in pages {
+            feed.items.extend(feed_of(page)?.items);
         }
+        Ok(feed)
     }
 
     async fn pull_request(
@@ -128,34 +167,35 @@ impl GithubSource for GhSource {
                 "{repository:?} is not a repository name"
             )));
         }
-        let mut items = parse_check_runs(
-            &self
-                .get_json(&format!(
-                    "repos/{repository}/commits/{}/check-runs?per_page=100",
-                    encode(&target.branch)
-                ))
-                .await?,
-            target,
-        );
-        if let Some(number) = target.number {
-            items.extend(parse_reviews(
-                &self
-                    .get_json(&format!(
-                        "repos/{repository}/pulls/{number}/reviews?per_page=100"
-                    ))
-                    .await?,
+        let branch = encode(&target.branch);
+        let mut items = self
+            .get_items(
+                &format!("repos/{repository}/commits/{branch}/check-runs?per_page=100"),
                 target,
-            ));
+                parse_check_runs,
+            )
+            .await?;
+        if let Some(number) = target.number {
+            items.extend(
+                self.get_items(
+                    &format!("repos/{repository}/pulls/{number}/reviews?per_page=100"),
+                    target,
+                    parse_reviews,
+                )
+                .await?,
+            );
             let since_query =
                 since.map_or_else(String::new, |since| format!("&since={}", encode(since)));
-            items.extend(parse_comments(
-                &self
-                    .get_json(&format!(
+            items.extend(
+                self.get_items(
+                    &format!(
                         "repos/{repository}/issues/{number}/comments?per_page=100{since_query}"
-                    ))
-                    .await?,
-                target,
-            ));
+                    ),
+                    target,
+                    parse_comments,
+                )
+                .await?,
+            );
         }
         items.retain(|item| since.is_none_or(|since| item.at.as_str() >= since));
         items.sort_by(|a, b| a.at.cmp(&b.at));
@@ -207,35 +247,80 @@ fn id(value: &Json) -> Option<String> {
     }
 }
 
-/// The feed's answer as `gh api --include` prints it: the status line, the
+/// One answer as `gh api --include` prints it: the status line, the
 /// headers, a blank line, the body.
-pub(crate) fn parse_feed(output: &str) -> Result<Feed, GithubError> {
+#[derive(Debug, Default)]
+struct Answer {
+    status: u16,
+    cursor: Option<String>,
+    poll_interval: Option<Duration>,
+    /// The path of the `rel="next"` page.
+    next: Option<String>,
+    body: String,
+}
+
+fn parse_answer(output: &str) -> Result<Answer, GithubError> {
     let output = output.replace("\r\n", "\n");
     let (head, body) = output.split_once("\n\n").unwrap_or((output.as_str(), ""));
     let mut lines = head.lines();
-    let status: u16 = lines
+    let status = lines
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse().ok())
-        .ok_or_else(|| GithubError("the feed's answer has no status line".to_owned()))?;
-    let mut feed = Feed::default();
+        .ok_or_else(|| GithubError("the answer has no status line".to_owned()))?;
+    let mut answer = Answer {
+        status,
+        body: body.to_owned(),
+        ..Answer::default()
+    };
     for (name, value) in lines.filter_map(|line| line.split_once(':')) {
         let value = value.trim();
         match name.trim().to_ascii_lowercase().as_str() {
-            "last-modified" if !value.is_empty() => feed.cursor = Some(value.to_owned()),
+            "last-modified" if !value.is_empty() => answer.cursor = Some(value.to_owned()),
             "x-poll-interval" => {
-                feed.poll_interval = value.parse().ok().map(Duration::from_secs);
+                answer.poll_interval = value.parse().ok().map(Duration::from_secs);
             }
+            "link" => answer.next = next_link(value),
             _ => {}
         }
     }
-    match status {
+    Ok(answer)
+}
+
+/// The path, on the same host, of a `Link` header's `rel="next"`:
+/// `<https://api.github.com/notifications?page=2>; rel="next"` gives
+/// `notifications?page=2`.
+fn next_link(link: &str) -> Option<String> {
+    link.split(',').find_map(|part| {
+        let (url, params) = part.split_once(';')?;
+        if !params
+            .split(';')
+            .any(|param| param.trim() == r#"rel="next""#)
+        {
+            return None;
+        }
+        let url = url.trim().strip_prefix('<')?.strip_suffix('>')?;
+        let (_host, path) = url.strip_prefix("https://")?.split_once('/')?;
+        let safe = !path.is_empty()
+            && !path.starts_with(['/', '-'])
+            && !path.chars().any(|c| c.is_control() || c.is_whitespace());
+        safe.then(|| path.to_owned())
+    })
+}
+
+fn feed_of(answer: Answer) -> Result<Feed, GithubError> {
+    let mut feed = Feed {
+        cursor: answer.cursor,
+        poll_interval: answer.poll_interval,
+        ..Feed::default()
+    };
+    match answer.status {
         304 => {
             feed.not_modified = true;
             Ok(feed)
         }
         200..=299 => {
-            let body: Json = serde_json::from_str(body)
+            let body: Json = serde_json::from_str(&answer.body)
                 .map_err(|error| GithubError(format!("the feed answered: {error}")))?;
             feed.items = body
                 .as_array()
@@ -383,6 +468,19 @@ mod tests {
     const CHECK_RUNS: &str = include_str!("../tests/fixtures/github/check-runs.json");
     const REVIEWS: &str = include_str!("../tests/fixtures/github/reviews.json");
     const COMMENTS: &str = include_str!("../tests/fixtures/github/comments.json");
+    const PAGE_1: &str = include_str!("../tests/fixtures/github/notifications-page1.http");
+    const PAGE_2: &str = include_str!("../tests/fixtures/github/notifications-page2.http");
+    const ENDLESS: &str = include_str!("../tests/fixtures/github/comments-endless.http");
+
+    /// The feed's answer as `gh api --include` prints it.
+    fn parse_feed(output: &str) -> Result<Feed, GithubError> {
+        feed_of(parse_answer(output)?)
+    }
+
+    /// A JSON fixture as `gh api --include` prints it.
+    fn ok(body: &str) -> String {
+        format!("HTTP/2.0 200 OK\nContent-Type: application/json\n\n{body}")
+    }
 
     fn target() -> PullTarget {
         PullTarget {
@@ -494,37 +592,133 @@ mod tests {
         assert_eq!(encode("2026-11-17T08:00:00Z"), "2026-11-17T08%3A00%3A00Z");
     }
 
-    /// A fake `gh` that logs its arguments and answers from the fixtures,
-    /// failing as `gh` does on a 304 when `exit1` exists.
+    /// A fake `gh` that logs its arguments and prints the file of the first
+    /// `(shell pattern, file, content)` route its path matches, failing as
+    /// `gh` does on a 304 when `exit1` exists.
     #[cfg(unix)]
-    fn fake_gh(dir: &std::path::Path, feed: &str) -> PathBuf {
+    fn fake_gh_with(dir: &std::path::Path, routes: &[(&str, &str, String)]) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
-        let script = r#"#!/bin/sh
+        let mut script = r#"#!/bin/sh
 dir=$(dirname "$0")
 printf '%s\n' "$*" >> "$dir/calls.log"
 for arg in "$@"; do last="$arg"; done
 case "$last" in
-  notifications*) cat "$dir/notifications.http" ;;
-  *check-runs*) cat "$dir/check-runs.json" ;;
-  */reviews*) cat "$dir/reviews.json" ;;
-  */comments*) cat "$dir/comments.json" ;;
-  *) exit 2 ;;
-esac
-if [ -f "$dir/exit1" ]; then exit 1; fi
-"#;
-        for (name, content) in [
-            ("notifications.http", feed),
-            ("check-runs.json", CHECK_RUNS),
-            ("reviews.json", REVIEWS),
-            ("comments.json", COMMENTS),
-        ] {
-            std::fs::write(dir.join(name), content).unwrap();
+"#
+        .to_owned();
+        for (pattern, file, content) in routes {
+            script.push_str(&format!("  {pattern}) cat \"$dir/{file}\" ;;\n"));
+            std::fs::write(dir.join(file), content).unwrap();
         }
+        script.push_str("  *) exit 2 ;;\nesac\nif [ -f \"$dir/exit1\" ]; then exit 1; fi\n");
         let program = dir.join("gh");
         std::fs::write(&program, script).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         program
+    }
+
+    /// The fake `gh` of the plain fixtures, with `feed` as the feed.
+    #[cfg(unix)]
+    fn fake_gh(dir: &std::path::Path, feed: &str) -> PathBuf {
+        fake_gh_with(
+            dir,
+            &[
+                ("notifications*", "notifications.http", feed.to_owned()),
+                ("*check-runs*", "check-runs.http", ok(CHECK_RUNS)),
+                ("*/reviews*", "reviews.http", ok(REVIEWS)),
+                ("*/comments*", "comments.http", ok(COMMENTS)),
+            ],
+        )
+    }
+
+    fn calls(dir: &std::path::Path) -> Vec<String> {
+        let log = std::fs::read_to_string(dir.join("calls.log")).unwrap();
+        log.lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn only_a_next_link_on_the_same_host_is_followed() {
+        assert_eq!(
+            next_link(
+                r#"<https://api.github.com/x?page=1>; rel="prev", <https://api.github.com/x?page=3>; rel="next""#
+            )
+            .as_deref(),
+            Some("x?page=3")
+        );
+        assert_eq!(parse_answer(PAGE_2).unwrap().next, None, "the last page");
+        for bad in [
+            r#"<https://api.github.com/x?page=2>; rel="last""#,
+            r#"<http://api.github.com/x?page=2>; rel="next""#,
+            r#"<https://api.github.com/--method=POST>; rel="next""#,
+            r#"<https://api.github.com//x>; rel="next""#,
+            r#"<https://api.github.com/x y>; rel="next""#,
+            r#"https://api.github.com/x; rel="next""#,
+        ] {
+            assert_eq!(next_link(bad), None, "{bad}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_feed_follows_next_to_its_last_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                ("*page=2*", "page2.http", PAGE_2.to_owned()),
+                ("notifications*", "page1.http", PAGE_1.to_owned()),
+            ],
+        ));
+        let feed = source
+            .notifications(Some("Tue, 17 Nov 2026 08:00:00 GMT"))
+            .await
+            .unwrap();
+        let titles: Vec<_> = feed.items.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(titles, ["Page one", "Page two"]);
+        assert_eq!(
+            feed.cursor.as_deref(),
+            Some("Tue, 17 Nov 2026 08:58:12 GMT")
+        );
+        assert_eq!(
+            calls(dir.path()),
+            [
+                "api --method GET --include -H If-Modified-Since: Tue, 17 Nov 2026 08:00:00 GMT \
+                 -H Accept: application/vnd.github+json notifications?per_page=50",
+                "api --method GET --include -H Accept: application/vnd.github+json \
+                 notifications?per_page=50&page=2",
+            ],
+            "the cursor goes with the first page only, and page 2 links nowhere next"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_call_reads_at_most_ten_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                ("*check-runs*", "check-runs.http", ok(CHECK_RUNS)),
+                ("*/reviews*", "reviews.http", ok(REVIEWS)),
+                ("*/comments*", "comments.http", ENDLESS.to_owned()),
+            ],
+        ));
+        let items = source.pull_request(&target(), None).await.unwrap();
+        let comments = items
+            .iter()
+            .filter(|item| item.kind == GithubKind::Comment)
+            .count();
+        assert_eq!(comments, MAX_PAGES);
+        let calls = calls(dir.path());
+        assert_eq!(calls.len(), 2 + MAX_PAGES);
+        assert!(
+            calls[3..].iter().all(|call| call
+                .ends_with("repositories/1296269/issues/42/comments?per_page=100&page=2")),
+            "{calls:?}"
+        );
+        for call in &calls {
+            assert!(call.starts_with("api --method GET --include "), "{call}");
+        }
     }
 
     #[cfg(unix)]
@@ -554,15 +748,14 @@ if [ -f "$dir/exit1" ]; then exit 1; fi
         assert!(feed.not_modified, "gh fails on a 304, which is an answer");
         assert!(source.pull_request(&target(), None).await.is_err());
 
-        let log = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
-        let calls: Vec<&str> = log.lines().collect();
+        let calls = calls(dir.path());
         assert_eq!(
             calls[..4],
             [
                 "api --method GET --include -H Accept: application/vnd.github+json notifications?per_page=50",
-                "api --method GET -H Accept: application/vnd.github+json repos/acme/widgets/commits/threadlane%2FT-0001/check-runs?per_page=100",
-                "api --method GET -H Accept: application/vnd.github+json repos/acme/widgets/pulls/42/reviews?per_page=100",
-                "api --method GET -H Accept: application/vnd.github+json repos/acme/widgets/issues/42/comments?per_page=100&since=2026-11-17T08%3A30%3A00Z",
+                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/commits/threadlane%2FT-0001/check-runs?per_page=100",
+                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/pulls/42/reviews?per_page=100",
+                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/issues/42/comments?per_page=100&since=2026-11-17T08%3A30%3A00Z",
             ]
         );
         assert_eq!(
