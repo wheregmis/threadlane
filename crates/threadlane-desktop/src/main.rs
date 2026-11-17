@@ -127,6 +127,17 @@ fn local_offset_minutes() -> i64 {
     sign * (hours * 60 + minutes)
 }
 
+/// An error with its causes: `hub work refused the request: not found: task T-0001`.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        text = format!("{text}: {next}");
+        cause = next.source();
+    }
+    text
+}
+
 /// Which screen the window shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Screen {
@@ -311,7 +322,7 @@ impl Desktop {
                 },
                 |this, (space, loaded), _| match loaded {
                     Ok(detail) => this.state.apply_task(&space, detail),
-                    Err(error) => this.status = Some(error.to_string().into()),
+                    Err(error) => this.status = Some(describe(&error).into()),
                 },
                 cx,
             ),
@@ -382,7 +393,7 @@ impl Desktop {
                     this.clear_note = true;
                     this.load_screen(cx);
                 }
-                Err(error) => this.status = Some(error.to_string().into()),
+                Err(error) => this.status = Some(describe(&error).into()),
             },
             cx,
         );
@@ -428,7 +439,7 @@ impl Desktop {
                         .sent(&space, &project, &text, sent.accepted.event_id, at);
                     this.status = Some(format!("Sent to the lead of {space} / {project}.").into());
                 }
-                Err(error) => this.status = Some(error.to_string().into()),
+                Err(error) => this.status = Some(describe(&error).into()),
             },
             cx,
         );
@@ -459,7 +470,7 @@ impl Desktop {
                         Some(format!("{} is now {} here.", binding.agent, binding.mode).into());
                     this.state.mode_set(&space, &project, binding);
                 }
-                Err(error) => this.status = Some(error.to_string().into()),
+                Err(error) => this.status = Some(describe(&error).into()),
             },
             cx,
         );
@@ -486,7 +497,7 @@ impl Desktop {
             async move { core.read().await.pair_code(Some(&space)).await },
             |this, issued, _| match issued {
                 Ok(code) => this.state.issued(code),
-                Err(error) => this.status = Some(error.to_string().into()),
+                Err(error) => this.status = Some(describe(&error).into()),
             },
             cx,
         );

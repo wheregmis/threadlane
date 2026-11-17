@@ -325,6 +325,7 @@ impl Desktop {
                     && self.state.project_name(space, queued.decision.project_id) == Some(project)
             })
             .collect();
+        let any_open = !open.is_empty();
         if open.is_empty() {
             side = side.child(div().text_sm().text_color(muted).child("None."));
         }
@@ -357,7 +358,7 @@ impl Desktop {
                     .min_w_0()
                     .gap_2()
                     .child(lines)
-                    .child(self.note_field())
+                    .children(any_open.then(|| self.note_field()))
                     .child(
                         h_flex()
                             .gap_2()

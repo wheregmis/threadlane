@@ -14,8 +14,7 @@ impl Desktop {
         let home = SidebarMenuItem::new(count("Home", needs_you))
             .active(self.screen == Screen::Home)
             .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Home, cx)));
-        let mut groups =
-            vec![SidebarGroup::new("Threadlane").child(SidebarMenu::new().child(home))];
+        let mut groups = vec![SidebarGroup::new("Overview").child(SidebarMenu::new().child(home))];
 
         for space in self.state.spaces() {
             let reach = if space.unreachable.is_none() {

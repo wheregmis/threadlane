@@ -61,7 +61,7 @@ impl Desktop {
                                 .child(div().text_sm().text_color(muted).child(row.state)),
                         )
                         .child(div().text_sm().child(format!(
-                            "Installed and logged in: {} · {}",
+                            "Tools: {} · {}",
                             row.backends.join(" · "),
                             row.gh
                         )))
