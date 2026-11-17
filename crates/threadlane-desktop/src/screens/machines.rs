@@ -212,18 +212,91 @@ impl Desktop {
                             .text_color(muted)
                             .child("Pair this app with another hub using its join code."),
                     )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().w(px(180.)).child(Input::new(&self.space_name)))
-                            .child(div().flex_1().child(Input::new(&self.join_code)))
-                            .child(
-                                Button::new("pair-space")
-                                    .primary()
-                                    .label("Pair")
-                                    .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
-                            ),
-                    ),
+                    .child(self.join_form(cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The name and join code of a space to pair, and Pair.
+    fn join_form(&self, cx: &mut Context<Self>) -> Div {
+        h_flex()
+            .gap_2()
+            .child(div().w(px(180.)).child(Input::new(&self.space_name)))
+            .child(div().flex_1().child(Input::new(&self.join_code)))
+            .child(
+                Button::new("pair-space")
+                    .primary()
+                    .label("Pair")
+                    .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
+            )
+    }
+
+    /// What the app shows while no hub is paired: how to start one and
+    /// pair with it, by its data directory or a join code.
+    pub(crate) fn first_run(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let step = |title: &'static str, text: &'static str| {
+            v_flex()
+                .gap_1()
+                .child(section(title))
+                .child(div().text_sm().text_color(muted).child(text))
+        };
+        v_flex()
+            .id("first-run")
+            .flex_1()
+            .min_h_0()
+            .max_w(px(720.))
+            .overflow_y_scroll()
+            .gap_5()
+            .child(heading("Pair this app with a hub"))
+            .child(div().text_color(muted).child(
+                "A hub keeps one space's projects, agents and memory. This app shows every \
+                 hub it is paired with.",
+            ))
+            .child(
+                step(
+                    "1. Start a hub",
+                    "On the computer that will run the work, start one with its own data \
+                     directory. It keeps running in the terminal.",
+                )
+                .child(
+                    div()
+                        .p_2()
+                        .text_sm()
+                        .bg(cx.theme().muted)
+                        .rounded(cx.theme().radius)
+                        .child("threadlane-hub --data-dir ~/threadlane/work run"),
+                ),
+            )
+            .child(
+                step(
+                    "2. Pair with it",
+                    "Name the space, then give the hub's data directory if it runs on this \
+                     computer, or a join code from `threadlane pair-code` on a computer already paired.",
+                )
+                .child(div().w(px(240.)).child(Input::new(&self.space_name)))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(&self.hub_dir)))
+                        .child(
+                            Button::new("pair-directory")
+                                .primary()
+                                .label("Pair by directory")
+                                .on_click(cx.listener(|this, _, _, cx| this.pair_directory(cx))),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(&self.join_code)))
+                        .child(
+                            Button::new("pair-code")
+                                .primary()
+                                .label("Pair by join code")
+                                .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
+                        ),
+                ),
             )
             .into_any_element()
     }

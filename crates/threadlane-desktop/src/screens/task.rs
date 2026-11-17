@@ -4,10 +4,10 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::TaskId;
-use threadlane_desktop::{When, chips, status_label, timeline};
+use threadlane_desktop::{When, changes, chips, status_label, timeline, usage};
 
 use super::{gap_line, heading, link, section};
 use crate::{Desktop, Screen, Tab};
@@ -63,10 +63,37 @@ impl Desktop {
                 .child(self.decision(queued, cx))
         });
 
+        let change = changes(detail);
+        let mut published = v_flex()
+            .gap_1()
+            .p_2()
+            .text_sm()
+            .bg(cx.theme().muted)
+            .rounded(cx.theme().radius)
+            .child(self.copyable("copy-branch", change.branch, cx))
+            .child(change.state);
+        if let Some(url) = change.pull_request {
+            let open = url.clone();
+            published = published.child(
+                h_flex()
+                    .gap_1()
+                    .min_w_0()
+                    .child(self.copyable("copy-pull-request", url, cx))
+                    .child(
+                        Button::new("open-pull-request")
+                            .xsmall()
+                            .label("Open")
+                            .accessibility_label("Open the pull request in your browser")
+                            .on_click(move |_, _, cx| cx.open_url(&open)),
+                    ),
+            );
+        }
         let mut related = v_flex()
             .w(px(250.))
             .flex_none()
             .gap_2()
+            .child(section("Changes"))
+            .child(published)
             .child(section("Related"));
         if detail.related.is_empty() {
             related = related.child(div().text_sm().text_color(muted).child("None."));
@@ -97,6 +124,16 @@ impl Desktop {
             );
         }
 
+        related = related.child(section("Usage")).child(
+            v_flex()
+                .gap_1()
+                .p_2()
+                .text_sm()
+                .bg(cx.theme().muted)
+                .rounded(cx.theme().radius)
+                .children(usage(detail, when)),
+        );
+
         v_flex()
             .id("task")
             .flex_1()
@@ -110,7 +147,12 @@ impl Desktop {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.go(project.clone(), cx))),
             )
-            .child(heading(format!("{task} {}", summary.task.title)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(self.copyable("copy-task", task.to_string(), cx))
+                    .child(heading(summary.task.title.clone())),
+            )
             .child(
                 h_flex().gap_2().flex_wrap().children(
                     chips(detail)

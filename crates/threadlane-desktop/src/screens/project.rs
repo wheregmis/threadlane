@@ -30,14 +30,14 @@ impl Desktop {
         when: &When,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tabs = [Tab::Tasks, Tab::Conversation, Tab::Agents, Tab::Memory];
-        let selected = tabs.iter().position(|known| *known == tab).unwrap_or(0);
         let (in_space, named) = (space.to_owned(), project.to_owned());
-        let bar = TabBar::new("project-tabs")
+        // Keyed by the tab shown, so the bar's sliding indicator starts fresh
+        // under it instead of carrying a half-finished slide from another tab.
+        let bar = TabBar::new(SharedString::from(format!("project-tabs-{}", tab.label())))
             .underline()
-            .selected_index(selected)
+            .selected_index(tab.index())
             .on_click(cx.listener(move |this, index: &usize, _, cx| {
-                let tab = tabs.get(*index).copied().unwrap_or(Tab::Tasks);
+                let tab = Tab::at(*index).unwrap_or(Tab::Tasks);
                 this.go(
                     Screen::Project {
                         space: in_space.clone(),
@@ -47,10 +47,7 @@ impl Desktop {
                     cx,
                 );
             }))
-            .child("Tasks")
-            .child("Conversation")
-            .child("Agents")
-            .child("Memory");
+            .children(Tab::ALL.map(Tab::label));
         let paused = self
             .state
             .space(space)
@@ -61,6 +58,7 @@ impl Desktop {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
             Tab::Conversation => self.conversation_tab(space, project, when, cx),
             Tab::Agents => self.agents_tab(space, project, cx),
+            Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Memory => self.memory_tab(space, project, when, cx),
         };
         v_flex()

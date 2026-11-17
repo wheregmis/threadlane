@@ -85,6 +85,12 @@ impl Desktop {
                 cx.listener(|this, _, _, cx| this.go(Screen::Agents, cx)),
             ))
             .child(row(
+                "go-routines",
+                "Routines".to_owned(),
+                self.screen == Screen::Routines,
+                cx.listener(|this, _, _, cx| this.go(Screen::Routines, cx)),
+            ))
+            .child(row(
                 "go-machines",
                 machines,
                 self.screen == Screen::Machines,
