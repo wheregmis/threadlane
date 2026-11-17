@@ -44,3 +44,12 @@ Goal: two independent tasks, one documentation, one code with tests.
 Result of run 2: both tasks' work is in v2. T-0003 took one run. T-0004 took four: two cut short by the two engine bugs above, one woken by hand before the fix, and one after it that finished.
 
 Still open: finding 2 (a lead's final text is not delivered, only `send_message`).
+
+## Run 3, 2026-11-17: smoke test after the driver change
+
+Milestone 10 stage A changed the Claude driver to feed prompts through streaming input. One small message to the General lead on the rebuilt hub: answered in one run.
+
+| # | Finding | State |
+|---|---|---|
+| 12 | The driver's streaming input works on the real `claude` (start of a lead session, a reply through `send_message`). Fold-in during a run and a stop were not exercised. | checked |
+| 13 | Asked which projects exist, the General lead said it can see only General. It has no view of the space's other projects. | open; the planned space lead (`Plan.md`, "Before the prerelease") addresses it |
