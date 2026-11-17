@@ -22,10 +22,6 @@ use crate::stream::StreamParser;
 /// How much of stderr is kept for error messages.
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
 
-/// How long claude may take to exit after its `result` line (it may still
-/// run hooks and finish writing the session) before it is killed.
-const EXIT_AFTER_RESULT: Duration = Duration::from_secs(10);
-
 /// How long claude may take to exit after closing stdout.
 const EXIT_AFTER_EOF: Duration = Duration::from_secs(10);
 
@@ -273,6 +269,12 @@ pub(crate) struct ClaudeRun {
     line: Vec<u8>,
     retried: bool,
     done: bool,
+    /// The terminal event of the latest `result` line, held until stdout
+    /// closes. One process can run several turns, each ending in a `result`
+    /// (a resumed session first answers a leftover background-task
+    /// notification), and the stream ends on the last one, so the run ends
+    /// on the last `result` seen, never on the first.
+    held: Option<BackendEvent>,
     server: Option<McpServer>,
     /// Holds the MCP config file; removed when the run is dropped.
     _config_dir: Option<TempDir>,
@@ -312,6 +314,7 @@ impl ClaudeRun {
             line: Vec::new(),
             retried: false,
             done: false,
+            held: None,
             server,
             _config_dir: config_dir,
         })
@@ -328,19 +331,21 @@ impl ClaudeRun {
 
     async fn take_line(&mut self) {
         let bytes = mem::take(&mut self.line);
-        let events = self.parser.line(&String::from_utf8_lossy(&bytes));
+        let mut events = self.parser.line(&String::from_utf8_lossy(&bytes));
+        if self.parser.ended_by_result() {
+            // Another turn may follow; the last result ends the run at EOF.
+            self.held = events.pop();
+            self.parser.next_turn();
+        }
         self.pending.extend(events);
         if !self.parser.ended() {
             return;
         }
         self.done = true;
-        let by_result = self.parser.ended_by_result();
-        if let Some(process) = self.process.as_mut() {
-            if by_result {
-                process.exit_within(EXIT_AFTER_RESULT).await;
-            } else if let Err(error) = process.kill().await {
-                tracing::warn!(%error, "could not kill claude");
-            }
+        if let Some(process) = self.process.as_mut()
+            && let Err(error) = process.kill().await
+        {
+            tracing::warn!(%error, "could not kill claude");
         }
     }
 
@@ -351,6 +356,10 @@ impl ClaudeRun {
             return;
         };
         let status = process.exit_within(EXIT_AFTER_EOF).await;
+        if let Some(result) = self.held.take() {
+            self.end_with(result);
+            return;
+        }
         process.drain_stderr().await;
         let stderr = process.stderr_text(secret.as_deref());
 

@@ -233,6 +233,56 @@ async fn recorded_lines_become_events() {
     );
 }
 
+/// A resumed session first answers a leftover background-task notification
+/// in a turn of its own, with its own `result`, before it takes our prompt:
+/// the run ends on the last `result`, not on the first.
+#[tokio::test]
+async fn a_notification_turn_before_the_prompt_does_not_end_the_run() {
+    let notification = [
+        init("connected"),
+        json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "No response requested."}]}}).to_string(),
+        success("No response requested."),
+    ];
+    let prompt = [
+        json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "cargo test"}}]}}).to_string(),
+        json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}}).to_string(),
+        success("Tests pass."),
+    ];
+    // The pause is the real turn's model call: no output for a while.
+    let fake = Fake::new(&format!(
+        "{}\nsleep 1\n{}",
+        prints(&notification),
+        prints(&prompt)
+    ));
+    let mut run = fake
+        .backend()
+        .run(fake.request(NativeSession::Resume {
+            id: SESSION.to_owned(),
+        }))
+        .await
+        .expect("run starts");
+    assert_eq!(
+        collect(run.as_mut()).await,
+        vec![
+            started(),
+            BackendEvent::Text {
+                text: "No response requested.".to_owned()
+            },
+            BackendEvent::ToolUse {
+                call_id: Some("toolu_1".to_owned()),
+                name: "Bash".to_owned(),
+                input: json!({"command": "cargo test"}),
+            },
+            BackendEvent::ToolResult {
+                call_id: Some("toolu_1".to_owned()),
+                output: json!("ok"),
+                is_error: false,
+            },
+            finished("Tests pass."),
+        ]
+    );
+}
+
 fn recorder() -> Fake {
     Fake::new(&format!(
         r#"{RECORD_ARGV}

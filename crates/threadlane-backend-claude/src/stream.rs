@@ -18,7 +18,8 @@ const USAGE_FIELDS: [&str; 4] = ["usage", "total_cost_usd", "num_turns", "modelU
 
 /// Turns stdout lines into events, keeping what later lines depend on.
 ///
-/// Produces at most one terminal event; every line after it is ignored.
+/// Produces at most one terminal event until [`Self::next_turn`]; every
+/// line after it is ignored.
 #[derive(Debug)]
 pub(crate) struct StreamParser {
     expects_tools: bool,
@@ -54,10 +55,16 @@ impl StreamParser {
         self.ended
     }
 
-    /// Whether the terminal event came from a `result` line, after which the
-    /// process exits on its own.
+    /// Whether the terminal event came from a `result` line, which ends a
+    /// turn; the process may go on to another before it exits.
     pub(crate) fn ended_by_result(&self) -> bool {
         self.ended_by_result
+    }
+
+    /// Reads on after a `result` line, for a turn that follows it.
+    pub(crate) fn next_turn(&mut self) {
+        self.ended = false;
+        self.ended_by_result = false;
     }
 
     /// The events one stdout line produces, in order.
