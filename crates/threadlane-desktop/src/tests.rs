@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use threadlane_client::ClientDirs;
 use threadlane_core::client::{
     Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, OrgReply,
-    OrgRequest, PairingReply, PairingRequest, UserMessage,
+    OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest, UserMessage,
 };
 use threadlane_core::ids::{LaneId, OutboxId};
 use threadlane_core::model::{
@@ -102,6 +102,9 @@ impl HubApi for FakeHub {
     }
 
     async fn pairing(&self, _request: PairingRequest) -> Result<PairingReply, ApiError> {
+        Err(ApiError::Invalid("unsupported".to_owned()))
+    }
+    async fn overview(&self, _request: OverviewRequest) -> Result<OverviewReply, ApiError> {
         Err(ApiError::Invalid("unsupported".to_owned()))
     }
 }

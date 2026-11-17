@@ -12,6 +12,7 @@ mod feed;
 mod fencing;
 mod handler;
 mod org;
+mod overview;
 mod placement;
 mod run_loop;
 mod sessions;

@@ -11,7 +11,8 @@ use serde_json::json;
 use tempfile::TempDir;
 use threadlane_core::client::{
     Accepted, ApiError, ClientResponse, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
-    OrgReply, OrgRequest, PairingReply, PairingRequest, ProjectSummary, UserMessage,
+    OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest,
+    ProjectSummary, UserMessage,
 };
 use threadlane_core::ids::{EventId, OutboxId, ProjectId};
 use threadlane_core::model::{Mode, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
@@ -146,6 +147,16 @@ impl HubApi for FakeHub {
         match request {
             PairingRequest::Clients => Ok(PairingReply::Clients {
                 clients: Vec::new(),
+            }),
+            _ => Err(ApiError::Invalid("unsupported".to_owned())),
+        }
+    }
+
+    async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
+        match request {
+            OverviewRequest::Machines => Ok(OverviewReply::Machines {
+                machines: Vec::new(),
+                accounts: Vec::new(),
             }),
             _ => Err(ApiError::Invalid("unsupported".to_owned())),
         }
@@ -347,6 +358,13 @@ async fn every_request_kind_round_trips() {
     assert_eq!(
         client.pairing(PairingRequest::IssueJoinCode).await,
         Err(ApiError::Invalid("unsupported".to_owned()))
+    );
+    assert_eq!(
+        client.overview(OverviewRequest::Machines).await,
+        Ok(OverviewReply::Machines {
+            machines: Vec::new(),
+            accounts: Vec::new()
+        })
     );
 
     assert_eq!(

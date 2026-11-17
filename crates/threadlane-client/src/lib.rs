@@ -24,11 +24,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use threadlane_core::admission::AdmittedKey;
 use threadlane_core::client::{
-    Accepted, ApiError, BindingSummary, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
-    OrgReply, OrgRequest, PairingReply, PairingRequest, ProjectSummary, UserMessage,
+    Accepted, ApiError, BindingSummary, ConversationEntry, DecisionReply, DecisionRequest,
+    FeedItem, HubApi, HubInfo, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
+    PairingRequest, ProjectSummary, TaskDetail, TaskSummary, UserMessage,
 };
-use threadlane_core::ids::DecisionId;
-use threadlane_core::model::{Agent, Decision, Mode, OutboxKind, Repository};
+use threadlane_core::ids::{DecisionId, TaskId};
+use threadlane_core::model::{Account, Agent, Decision, Machine, Mode, OutboxKind, Repository};
 use threadlane_core::time::Timestamp;
 use threadlane_transport_iroh::{EndpointAddr, EndpointId, IrohClient, JoinCode, TransportAddr};
 use threadlane_transport_local::{LocalClient, SOCKET_FILE};
@@ -202,6 +203,25 @@ pub struct SpaceAnswer {
     pub decision: Decision,
     /// `false` if it had been answered before and this answer was ignored.
     pub recorded: bool,
+}
+
+/// What one space listed, or why its hub could not (Plan.md §11.3: each
+/// space is asked on its own, and one that is away hides nothing else).
+#[derive(Debug)]
+pub struct SpaceListing<T> {
+    /// The space it belongs to.
+    pub space: String,
+    /// What the hub listed, or why it could not.
+    pub listed: Result<T, ClientError>,
+}
+
+/// The machines that joined one space, and its model accounts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpaceMachines {
+    /// Every machine membership, revoked ones included.
+    pub machines: Vec<Machine>,
+    /// The model accounts its machines run on.
+    pub accounts: Vec<Account>,
 }
 
 /// The projects of one space.
@@ -826,16 +846,7 @@ impl ClientCore {
     ///
     /// No such hub, or no hub paired.
     pub async fn decisions(&self, space: Option<&str>) -> Result<Vec<SpaceDecisions>, ClientError> {
-        let hubs: Vec<&PairedHub> = match space {
-            Some(name) => vec![
-                self.hubs
-                    .iter()
-                    .find(|hub| hub.name == name)
-                    .ok_or_else(|| self.unknown(name))?,
-            ],
-            None if self.hubs.is_empty() => return Err(ClientError::NoHubs),
-            None => self.hubs.iter().collect(),
-        };
+        let hubs = self.selected(space)?;
         let mut listed = Vec::with_capacity(hubs.len());
         for hub in hubs {
             let decisions = match self.api_for(hub) {
@@ -890,6 +901,205 @@ impl ClientCore {
             Ok(_) => Err(wrong_reply(&space, "answer")),
             Err(error) => Err(api_error(&space, error)),
         }
+    }
+
+    /// The named hub, or every paired hub when `None`.
+    fn selected(&self, space: Option<&str>) -> Result<Vec<&PairedHub>, ClientError> {
+        match space {
+            Some(name) => Ok(vec![
+                self.hubs
+                    .iter()
+                    .find(|hub| hub.name == name)
+                    .ok_or_else(|| self.unknown(name))?,
+            ]),
+            None if self.hubs.is_empty() => Err(ClientError::NoHubs),
+            None => Ok(self.hubs.iter().collect()),
+        }
+    }
+
+    /// Asks the named hub, or every paired hub when `None`, the same
+    /// overview request, and keeps what `take` makes of each answer. A hub
+    /// that cannot answer is reported in its place; the others are
+    /// unaffected.
+    async fn overview_each<T>(
+        &self,
+        space: Option<&str>,
+        request: &OverviewRequest,
+        what: &str,
+        take: impl Fn(&str, OverviewReply) -> Option<T>,
+    ) -> Result<Vec<SpaceListing<T>>, ClientError> {
+        let hubs = self.selected(space)?;
+        let mut listed = Vec::with_capacity(hubs.len());
+        for hub in hubs {
+            let answer = match self.api_for(hub) {
+                Ok(api) => match api.overview(request.clone()).await {
+                    Ok(reply) => take(&hub.name, reply).ok_or_else(|| wrong_reply(&hub.name, what)),
+                    Err(error) => Err(api_error(&hub.name, error)),
+                },
+                Err(error) => Err(error),
+            };
+            listed.push(SpaceListing {
+                space: hub.name.clone(),
+                listed: answer,
+            });
+        }
+        Ok(listed)
+    }
+
+    /// The running tasks of `space`, or of every paired hub when `None`,
+    /// oldest first.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, or no hub paired.
+    pub async fn running(
+        &self,
+        space: Option<&str>,
+    ) -> Result<Vec<SpaceListing<Vec<TaskSummary>>>, ClientError> {
+        self.overview_each(
+            space,
+            &OverviewRequest::Running,
+            "running",
+            |_, reply| match reply {
+                OverviewReply::Tasks { tasks } => Some(tasks),
+                _ => None,
+            },
+        )
+        .await
+    }
+
+    /// The newest `limit` delivered items of `space`, or of every paired hub
+    /// when `None`, oldest first and labeled with their space.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, or no hub paired.
+    pub async fn recent(
+        &self,
+        space: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SpaceListing<Vec<SpaceFeedItem>>>, ClientError> {
+        let request = OverviewRequest::Recent { limit };
+        self.overview_each(space, &request, "recent", |space, reply| match reply {
+            OverviewReply::Recent { items } => Some(
+                items
+                    .into_iter()
+                    .map(|item| SpaceFeedItem {
+                        space: space.to_owned(),
+                        item,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .await
+    }
+
+    /// The machines and accounts of `space`, or of every paired hub when
+    /// `None`.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, or no hub paired.
+    pub async fn machines(
+        &self,
+        space: Option<&str>,
+    ) -> Result<Vec<SpaceListing<SpaceMachines>>, ClientError> {
+        self.overview_each(
+            space,
+            &OverviewRequest::Machines,
+            "machines",
+            |_, reply| match reply {
+                OverviewReply::Machines { machines, accounts } => {
+                    Some(SpaceMachines { machines, accounts })
+                }
+                _ => None,
+            },
+        )
+        .await
+    }
+
+    /// The tasks of a project, oldest first. `space: None` means the only
+    /// paired hub; `project: None` means the General project.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn tasks(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Vec<TaskSummary>, ClientError> {
+        let request = OverviewRequest::Tasks {
+            project: project.map(str::to_owned),
+        };
+        match self.overview(space, request).await? {
+            (_, OverviewReply::Tasks { tasks }) => Ok(tasks),
+            (space, _) => Err(wrong_reply(&space, "tasks")),
+        }
+    }
+
+    /// Task `task` (`T-0142`) of one space in full. `None` means the only
+    /// paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, an id that is not a
+    /// task's, or the hub's error.
+    pub async fn task(&self, space: Option<&str>, task: &str) -> Result<TaskDetail, ClientError> {
+        let (name, _api) = self.target(space)?;
+        let id = TaskId::parse(task).ok_or_else(|| {
+            api_error(
+                &name,
+                ApiError::Invalid(format!("{task:?} is not a task id like T-0142")),
+            )
+        })?;
+        match self
+            .overview(space, OverviewRequest::Task { task: id })
+            .await?
+        {
+            (_, OverviewReply::Task { task }) => Ok(*task),
+            (space, _) => Err(wrong_reply(&space, "task")),
+        }
+    }
+
+    /// The newest `limit` entries of the conversation with a project's lead
+    /// before `before` (the newest of all when `None`), oldest first.
+    /// `space: None` means the only paired hub; `project: None` means the
+    /// General project.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn conversation(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+        before: Option<Timestamp>,
+        limit: u32,
+    ) -> Result<Vec<ConversationEntry>, ClientError> {
+        let request = OverviewRequest::Conversation {
+            project: project.map(str::to_owned),
+            before,
+            limit,
+        };
+        match self.overview(space, request).await? {
+            (_, OverviewReply::Conversation { entries }) => Ok(entries),
+            (space, _) => Err(wrong_reply(&space, "conversation")),
+        }
+    }
+
+    async fn overview(
+        &self,
+        space: Option<&str>,
+        request: OverviewRequest,
+    ) -> Result<(String, OverviewReply), ClientError> {
+        let (space, api) = self.target(space)?;
+        let reply = api
+            .overview(request)
+            .await
+            .map_err(|e| api_error(&space, e))?;
+        Ok((space, reply))
     }
 
     async fn org(
