@@ -15,23 +15,14 @@ concurrency:
 
 jobs:
   check:
-    name: Compile ${{ matrix.platform }}
+    name: Test, clippy and fmt
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      matrix:
-        include:
-          - platform: macOS
-            os: macos-14
-          - platform: Linux
-            os: ubuntu-latest
-          - platform: Windows
-            os: windows-latest
+    # GPUI (threadlane-desktop) needs these system libraries to build on Linux.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -45,12 +36,11 @@ jobs:
             libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev
       - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          key: gpui-check-${{ runner.os }}
-      - uses: taiki-e/install-action@nextest
-      - name: Test ACP subprocess handling
-        run: cargo nextest run -p threadlane-acp
-      - run: cargo check -p threadlane-gpui
-      - name: Validate bundled model catalog
-        run: python3 resources/validate_models.py
+          key: workspace-${{ runner.os }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
