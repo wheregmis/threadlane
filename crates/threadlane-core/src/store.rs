@@ -18,8 +18,8 @@ use crate::ids::{
 };
 use crate::model::{
     Account, Agent, Answered, BackendKind, Binding, Decision, DecisionAnswer, Event, FailedRun,
-    Inserted, JournalEntry, Lane, Lease, Machine, MachineReport, MachineStatus, MemoryFile,
-    MemoryWrite, Mode, NewAgent, NewBinding, NewDecision, NewEvent, NewMachine, NewOutboxMessage,
+    Inserted, JournalEntry, Lane, Lease, Machine, MachineReport, MachineStatus, MemoryAuthor,
+    MemoryFile, Mode, NewAgent, NewBinding, NewDecision, NewEvent, NewMachine, NewOutboxMessage,
     NewProject, NewRepository, NewTask, NewTimer, OutboxMessage, Project, Repository, RetryPolicy,
     Run, RunOutcome, Session, SpaceSettings, StartRun, Task, TaskStatus, Timer, ToolCallBegin,
     ToolCallKey,
@@ -336,17 +336,38 @@ pub trait MachineStore: Send + Sync {
     ) -> StoreResult<Account>;
 }
 
-/// Versioned memory files (Plan.md §8). Scope rules are applied by callers in
-/// a later milestone; the store keeps every version.
+/// Versioned memory files (Plan.md §8.3). Scope is the caller's: the hub
+/// maps every path an agent names to a stored one first (invariant 12).
+///
+/// Every change is atomic and versioned with its run, under the run's lease.
+/// It is checked against the rules of [`crate::memory::check`], and rewrites
+/// the [`crate::memory::index_for`] index of every file it touches in the
+/// same transaction. A change repeated with the same
+/// [`MemoryAuthor::call_key`] writes nothing and returns what the first one
+/// wrote. A refused change is [`StoreError::Invalid`] with a message for the
+/// agent; a missing file is [`StoreError::NotFound`].
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     /// The current version of a file, unless it is absent or deleted.
     async fn read(&self, path: &str) -> StoreResult<Option<MemoryFile>>;
-    /// Writes a new version and returns it.
-    async fn write(&self, write: &MemoryWrite) -> StoreResult<MemoryFile>;
-    /// Records a deletion as a new version.
-    async fn delete(&self, path: &str, run: Option<RunId>, now: Timestamp) -> StoreResult<()>;
-    /// Current, non-deleted files whose path starts with `prefix`.
+    /// Creates a file, or replaces its content, and returns the new version.
+    async fn write(&self, by: &MemoryAuthor, path: &str, content: &str) -> StoreResult<MemoryFile>;
+    /// Replaces the one occurrence of `old` in a file with `new`. Refused
+    /// when `old` is empty, absent, or occurs more than once.
+    async fn edit(
+        &self,
+        by: &MemoryAuthor,
+        path: &str,
+        old: &str,
+        new: &str,
+    ) -> StoreResult<MemoryFile>;
+    /// Records a deletion as a new version, and returns it.
+    async fn delete(&self, by: &MemoryAuthor, path: &str) -> StoreResult<MemoryFile>;
+    /// Moves a file to a path where none is: a deletion at `from` and a new
+    /// version at `to`, so each path keeps its history. Returns the version
+    /// at `to`.
+    async fn rename(&self, by: &MemoryAuthor, from: &str, to: &str) -> StoreResult<MemoryFile>;
+    /// Current, non-deleted files whose path starts with `prefix`, by path.
     async fn list(&self, prefix: &str) -> StoreResult<Vec<MemoryFile>>;
     /// Every version of a file, oldest first.
     async fn history(&self, path: &str) -> StoreResult<Vec<MemoryFile>>;

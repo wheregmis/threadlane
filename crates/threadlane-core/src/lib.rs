@@ -11,6 +11,7 @@ pub mod client;
 pub mod forge;
 pub mod ids;
 pub mod link;
+pub mod memory;
 pub mod model;
 pub mod runtime;
 pub mod store;

@@ -99,6 +99,9 @@ pub(crate) async fn proposal(
     tool: &str,
     arguments: &Json,
 ) -> Result<Proposal, ToolError> {
+    if crate::memory::is_change(tool) {
+        return crate::memory::proposal(lane.project_id, lane.kind, tool, arguments);
+    }
     if tool != PUBLISH_BRANCH && tool != OPEN_PULL_REQUEST {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),

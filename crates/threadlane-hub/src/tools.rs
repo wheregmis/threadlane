@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use threadlane_core::forge::{OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::ids::{AgentId, RepositoryId, TaskId};
 use threadlane_core::model::{
-    LaneKind, Mode, NewOutboxMessage, NewTask, OutboxKind, Run, Task, TaskOrigin, TaskStatus,
-    Urgency,
+    LaneKind, MemoryAuthor, Mode, NewOutboxMessage, NewTask, OutboxKind, Run, Task, TaskOrigin,
+    TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{OrgStore, OutboxStore, SessionStore, TaskStore};
@@ -436,6 +436,29 @@ impl HubTools {
         Ok(json!({ "tasks": listed }))
     }
 
+    /// A memory call, written as the run and keyed on the call.
+    async fn memory(
+        &self,
+        context: &ToolContext,
+        tool: &str,
+        arguments: &Json,
+    ) -> Result<Json, ToolError> {
+        let run = self.run(context).await?;
+        let by = MemoryAuthor {
+            lease: context.lease,
+            run_id: run.id,
+            call_key: effect_key(context, &run, tool, arguments),
+            at: self.clock.now(),
+        };
+        // A task lane is the one lane kind that works a task.
+        let kind = if context.task_id.is_some() {
+            LaneKind::Task
+        } else {
+            LaneKind::Lead
+        };
+        crate::memory::execute(&self.db, &by, context.project_id, kind, tool, arguments).await
+    }
+
     async fn finish_task(
         &self,
         context: &ToolContext,
@@ -684,6 +707,7 @@ impl ToolRegistry for HubTools {
         let mut definitions = vec![Self::send_message_definition()];
         definitions.extend(task_definitions());
         definitions.extend(crate::publish::definitions());
+        definitions.extend(crate::memory::definitions());
         definitions
     }
 
@@ -706,6 +730,7 @@ impl ToolRegistry for HubTools {
             CANCEL_TASK => self.cancel_task(context, &arguments).await,
             LIST_TASKS => self.list_tasks(context, &arguments).await,
             FINISH_TASK => self.finish_task(context, &arguments).await,
+            name if crate::memory::is_memory(name) => self.memory(context, name, &arguments).await,
             // The gate asks before these, and the runner performs them.
             PUBLISH_BRANCH | OPEN_PULL_REQUEST => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
@@ -861,24 +886,44 @@ mod tests {
                     .into_iter()
                     .map(|tool| tool.name),
             );
+            names.extend(
+                crate::memory::definitions()
+                    .into_iter()
+                    .map(|tool| tool.name),
+            );
             names
                 .into_iter()
                 .filter(|name| offered_in(name, kind))
                 .collect()
         };
+        let memory = [
+            crate::memory::MEMORY_VIEW,
+            crate::memory::MEMORY_CREATE,
+            crate::memory::MEMORY_EDIT,
+            crate::memory::MEMORY_DELETE,
+            crate::memory::MEMORY_RENAME,
+        ];
         assert_eq!(
             offered(LaneKind::Lead),
             [
-                SEND_MESSAGE,
-                CREATE_TASK,
-                UPDATE_TASK,
-                CANCEL_TASK,
-                LIST_TASKS
+                &[
+                    SEND_MESSAGE,
+                    CREATE_TASK,
+                    UPDATE_TASK,
+                    CANCEL_TASK,
+                    LIST_TASKS
+                ][..],
+                &memory
             ]
+            .concat()
         );
         assert_eq!(
             offered(LaneKind::Task),
-            [CREATE_TASK, FINISH_TASK, PUBLISH_BRANCH, OPEN_PULL_REQUEST]
+            [
+                &[CREATE_TASK, FINISH_TASK, PUBLISH_BRANCH, OPEN_PULL_REQUEST][..],
+                &memory
+            ]
+            .concat()
         );
         assert!(
             offered_in("read_notes", LaneKind::Task) && offered_in("read_notes", LaneKind::Lead)

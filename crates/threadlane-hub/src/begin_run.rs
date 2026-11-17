@@ -13,13 +13,14 @@ use threadlane_core::model::{
 };
 use threadlane_core::runtime::steps::begin_run as step;
 use threadlane_core::store::{
-    DecisionStore, InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore, TaskStore,
+    DecisionStore, InboxStore, MachineStore, MemoryStore, OrgStore, OutboxStore, SessionStore,
+    TaskStore,
 };
 use threadlane_core::time::Timestamp;
 use uuid::Uuid;
 
 use crate::accounts::cooling;
-use crate::context::{PromptParts, appended_instructions, render_prompt};
+use crate::context::{PromptParts, appended_instructions, loaded_memory, render_prompt};
 use crate::error::link_error;
 use crate::link::LocalLink;
 use crate::tools::offered_in;
@@ -136,6 +137,19 @@ impl LocalLink {
         } else {
             Vec::new()
         };
+        // A fresh task session starts from the task's progress file.
+        let progress = match &task {
+            Some(task) if plan.new_native_id.is_some() => db
+                .read(&format!(
+                    "projects/{}/tasks/{}.md",
+                    project.id.get(),
+                    task.id
+                ))
+                .await
+                .map_err(link_error)?
+                .map(|file| file.content),
+            _ => None,
+        };
         let decisions = db.pending_decisions(lane.id).await.map_err(link_error)?;
         // The answers among the events: the approved calls, which the
         // runner performs before the session resumes (Plan.md §9.4).
@@ -153,11 +167,20 @@ impl LocalLink {
         let prompt = render_prompt(&PromptParts {
             project: &project,
             task: task.as_ref(),
+            progress: progress.as_deref(),
             recent: &recent,
             decisions: &decisions,
             events: &events,
         });
-        let appended_instructions = appended_instructions(&agent, lane.kind);
+        let mut memory = Vec::new();
+        for (heading, path) in loaded_memory(project.id, lane.kind) {
+            let content = db.read(&path).await.map_err(link_error)?;
+            memory.push((
+                heading,
+                content.map(|file| file.content).unwrap_or_default(),
+            ));
+        }
+        let appended_instructions = appended_instructions(&agent, lane.kind, &memory);
         let repositories = self.task_repositories(task.as_ref()).await?;
         inner.hook.reach(step::AFTER_ASSEMBLE_CONTEXT)?;
 

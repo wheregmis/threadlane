@@ -84,8 +84,9 @@ pub enum Perform {
         arguments: Json,
         retry: bool,
     },
-    /// Nothing to perform: the recorded outcome of an earlier attempt, or why
-    /// the call is refused. Give it to the session.
+    /// Nothing to perform: the recorded outcome of an earlier attempt, of a
+    /// call the hub performed itself (a memory change, which has no effect
+    /// on the machine), or why the call is refused. Give it to the session.
     Recorded { outcome: Json },
 }
 

@@ -10,7 +10,8 @@ use threadlane_core::store::OutboxStore;
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError, ToolRegistry};
 use threadlane_hub::{
-    CANCEL_TASK, CREATE_TASK, CombinedTools, LIST_TASKS, SEND_MESSAGE, UPDATE_TASK,
+    CANCEL_TASK, CREATE_TASK, CombinedTools, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT,
+    MEMORY_RENAME, MEMORY_VIEW, SEND_MESSAGE, UPDATE_TASK,
 };
 use threadlane_testkit::fakes::FakeTools;
 
@@ -193,6 +194,11 @@ async fn tools_above_tier_one_are_blocked() {
             UPDATE_TASK,
             CANCEL_TASK,
             LIST_TASKS,
+            MEMORY_VIEW,
+            MEMORY_CREATE,
+            MEMORY_EDIT,
+            MEMORY_DELETE,
+            MEMORY_RENAME,
             "read_notes",
             "merge_pull_request"
         ]

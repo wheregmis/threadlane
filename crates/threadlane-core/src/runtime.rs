@@ -184,13 +184,15 @@ pub mod steps {
     }
 
     /// Performing a stored call you approved, Plan.md §9.4: the hub records
-    /// the intent and the outcome, the runner makes the effect in between.
+    /// the intent and the outcome, and the runner makes the effect in
+    /// between, or the hub itself for a memory change.
     pub mod perform {
         use super::Step;
 
         /// The hub recorded that the call is about to be performed.
         pub const AFTER_BEGIN: Step = Step("perform.after_begin");
-        /// The runner made the effect through the forge.
+        /// The runner made the effect through the forge, or the hub wrote
+        /// the memory change.
         pub const AFTER_EFFECT: Step = Step("perform.after_effect");
         /// The hub recorded the outcome.
         pub const AFTER_FINISH: Step = Step("perform.after_finish");

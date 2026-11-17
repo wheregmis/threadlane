@@ -972,6 +972,10 @@ fn describe(decision: DecisionId, outcome: &Json) -> String {
             text("error")
         );
     }
+    // A memory change, which the hub performs, says what it did.
+    if let Some(summary) = outcome.get("summary").and_then(Json::as_str) {
+        return format!("\nOutcome of {decision}: the system performed it for you. {summary}\n");
+    }
     let mut told = format!(
         "\nOutcome of {decision}: the system performed it for you. Branch {} of {} is pushed.",
         text("branch"),

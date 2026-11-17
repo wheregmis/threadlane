@@ -13,8 +13,9 @@ use threadlane_core::store::{InboxStore, OrgStore, OutboxStore, TaskStore};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::ToolError;
 use threadlane_hub::{
-    CANCEL_TASK, CREATE_TASK, ENDED_REASON, FINISH_TASK, LIST_TASKS, OFF_REASON, OPEN_PULL_REQUEST,
-    PUBLISH_BRANCH, SEND_MESSAGE, SKIP_REASON, TASK_RULES, UPDATE_TASK,
+    CANCEL_TASK, CREATE_TASK, ENDED_REASON, FINISH_TASK, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE,
+    MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW, OFF_REASON, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    SEND_MESSAGE, SKIP_REASON, TASK_RULES, UPDATE_TASK,
 };
 
 use crate::common::{PAST_LEASE, TestHub, begin, usable_report};
@@ -259,7 +260,12 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             CREATE_TASK,
             UPDATE_TASK,
             CANCEL_TASK,
-            LIST_TASKS
+            LIST_TASKS,
+            MEMORY_VIEW,
+            MEMORY_CREATE,
+            MEMORY_EDIT,
+            MEMORY_DELETE,
+            MEMORY_RENAME,
         ]
     );
     assert!(
@@ -292,7 +298,17 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
     assert_eq!(run.lane_kind, LaneKind::Task);
     assert_eq!(
         names(&run),
-        [CREATE_TASK, FINISH_TASK, PUBLISH_BRANCH, OPEN_PULL_REQUEST]
+        [
+            CREATE_TASK,
+            FINISH_TASK,
+            PUBLISH_BRANCH,
+            OPEN_PULL_REQUEST,
+            MEMORY_VIEW,
+            MEMORY_CREATE,
+            MEMORY_EDIT,
+            MEMORY_DELETE,
+            MEMORY_RENAME,
+        ]
     );
     assert!(
         !run.remove_builtin_tools,

@@ -5,7 +5,8 @@ use serde_json::{Value as Json, json};
 use threadlane_core::ids::{DecisionId, RunId};
 use threadlane_core::link::{LinkError, Perform};
 use threadlane_core::model::{
-    DecisionKind, Lane, Lease, Mode, NewDecision, Run, RunStatus, ToolCallBegin, ToolCallKey, Trust,
+    Decision, DecisionKind, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run, RunStatus,
+    ToolCallBegin, ToolCallKey, Trust,
 };
 use threadlane_core::runtime::steps::{perform, tool_call as step};
 use threadlane_core::runtime::{WakeTarget, Waker};
@@ -14,6 +15,7 @@ use threadlane_core::tools::{GateRequest, ToolContext, ToolDefinition, ToolError
 
 use crate::error::{link_error, link_to_tool, tool_error};
 use crate::link::LocalLink;
+use crate::memory;
 use crate::publish::{approval_options, proposal};
 use crate::tools::{derived_call_key, offered_in};
 
@@ -133,12 +135,11 @@ impl LocalLink {
             .find(|binding| Some(binding.agent_id) == run.agent_id)
             .map_or(Mode::Off, |binding| binding.mode)
             .stricter(ceiling);
-        let tainted = db
-            .run_events(run.id)
-            .await
-            .map_err(tool_error)?
-            .iter()
-            .any(|event| event.trust == Trust::External);
+        let events = db.run_events(run.id).await.map_err(tool_error)?;
+        let tainted = events.iter().any(|event| event.trust == Trust::External);
+        // A run you triggered: every event in its batch is from you
+        // (docs/milestone-5.md §1 decision 6).
+        let yours = !events.is_empty() && events.iter().all(|event| event.trust == Trust::User);
         let request = GateRequest {
             project_id,
             agent_id: run.agent_id,
@@ -149,7 +150,8 @@ impl LocalLink {
             tainted,
         };
         match inner.policy.decide(&request).await {
-            Verdict::Allow => Ok(false),
+            // Instructions change only when you asked, or you approve.
+            Verdict::Allow => Ok(!yours && memory::protected(&definition.name, arguments)),
             Verdict::Block { reason } => Err(ToolError::Blocked(reason)),
             Verdict::Ask => Ok(true),
         }
@@ -245,11 +247,61 @@ impl LocalLink {
             ToolCallBegin::OutcomeUnknown => true,
         };
         inner.hook.reach(perform::AFTER_BEGIN)?;
+        if memory::is_change(&decision.tool) {
+            return self.perform_memory(lease, run_id, &decision).await;
+        }
         Ok(Perform::Call {
             tool: decision.tool,
             arguments: decision.arguments,
             retry,
         })
+    }
+
+    /// Performs an approved memory change in the hub, which is where memory
+    /// is: the same record and step boundaries as a call the runner
+    /// performs, with the effect between them. The change is keyed on the
+    /// decision, so performing it again after an interruption writes
+    /// nothing more (invariant 5). The runner is given the outcome.
+    async fn perform_memory(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        decision: &Decision,
+    ) -> Result<Perform, LinkError> {
+        let inner = &self.core.inner;
+        let lane = self.check_lease(lease).await?;
+        let by = MemoryAuthor {
+            lease: *lease,
+            run_id,
+            call_key: format!("perform:{}", decision.id),
+            at: inner.clock.now(),
+        };
+        let outcome = match memory::execute(
+            &inner.db,
+            &by,
+            lane.project_id,
+            lane.kind,
+            &decision.tool,
+            &decision.arguments,
+        )
+        .await
+        {
+            Ok(result) => json!({
+                "performed": true,
+                "summary": memory::performed(&decision.tool, &decision.arguments),
+                "result": result,
+            }),
+            Err(ToolError::LeaseLost) => {
+                return Err(LinkError::StaleLease {
+                    lane_id: lease.lane_id,
+                });
+            }
+            Err(error) => json!({ "performed": false, "error": error.to_string() }),
+        };
+        inner.hook.reach(perform::AFTER_EFFECT)?;
+        self.finish_perform(lease, run_id, decision.id, &outcome)
+            .await?;
+        Ok(Perform::Recorded { outcome })
     }
 
     /// [`threadlane_core::link::HubLink::finish_perform`].

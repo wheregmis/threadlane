@@ -17,6 +17,7 @@ mod failures;
 mod fencing;
 mod live;
 mod loops;
+mod memory;
 mod milestone;
 mod publish;
 mod tasks;

@@ -8,7 +8,8 @@ use threadlane_core::model::{
 use threadlane_core::store::{InboxStore, SessionStore};
 use threadlane_core::time::Clock;
 use threadlane_hub::{
-    CANCEL_TASK, CREATE_TASK, LIST_TASKS, SEND_MESSAGE, SKIP_REASON, UPDATE_TASK,
+    CANCEL_TASK, CREATE_TASK, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME,
+    MEMORY_VIEW, SEND_MESSAGE, SKIP_REASON, UPDATE_TASK,
 };
 
 use crate::common::{RATIONALE, Reply, TestHub, begin, play};
@@ -40,7 +41,12 @@ async fn a_message_produces_one_sent_reply_in_the_feed() {
             CREATE_TASK,
             UPDATE_TASK,
             CANCEL_TASK,
-            LIST_TASKS
+            LIST_TASKS,
+            MEMORY_VIEW,
+            MEMORY_CREATE,
+            MEMORY_EDIT,
+            MEMORY_DELETE,
+            MEMORY_RENAME,
         ]
     );
     assert_eq!(assignment.max_turns, Some(40));

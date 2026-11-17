@@ -11,6 +11,7 @@ mod failures;
 mod feed;
 mod fencing;
 mod handler;
+mod memory;
 mod org;
 mod placement;
 mod run_loop;

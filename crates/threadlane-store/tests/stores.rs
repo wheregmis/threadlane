@@ -1442,38 +1442,301 @@ async fn machines_report_and_accounts_cool_down() {
     assert_eq!(hub.accounts().await.unwrap()[0].cooldown_until, Some(T0));
 }
 
-#[tokio::test]
-async fn memory_writes_are_versioned() {
-    let hub = hub().await;
-    let path = "projects/1/notes/build.md";
-    let write = |content: &str| MemoryWrite {
-        path: path.into(),
-        content: content.into(),
-        written_by_run: None,
-        written_at: T0,
+/// A run in General's lead lane, and an author for its memory writes.
+async fn memory_author(hub: &HubDb) -> (MemoryAuthor, Run) {
+    let general = hub.general_project().await.unwrap();
+    let a = machine(hub, "a").await;
+    hub.insert_event(&message(&general, "m-1")).await.unwrap();
+    let (lease, run) = run_pending(hub, general.lead_lane_id, a, T0).await;
+    let by = MemoryAuthor {
+        lease,
+        run_id: run.id,
+        call_key: "call-1".into(),
+        at: T0,
     };
-    assert_eq!(hub.write(&write("v1")).await.unwrap().version, 1);
-    assert_eq!(hub.write(&write("v2")).await.unwrap().version, 2);
-    assert_eq!(hub.read(path).await.unwrap().unwrap().content, "v2");
-    hub.write(&MemoryWrite {
-        path: "projects/2/notes/other.md".into(),
-        ..write("x")
-    })
-    .await
-    .unwrap();
+    (by, run)
+}
+
+/// `by` keyed on another call.
+fn keyed(by: &MemoryAuthor, call: &str) -> MemoryAuthor {
+    MemoryAuthor {
+        call_key: call.into(),
+        ..by.clone()
+    }
+}
+
+#[tokio::test]
+async fn memory_writes_are_versioned_with_their_run_and_written_once_per_call() {
+    let hub = hub().await;
+    let (by, run) = memory_author(&hub).await;
+    let path = "projects/1/repos/app.md";
+    assert_eq!(hub.write(&by, path, "v1").await.unwrap().version, 1);
+    // The same call again writes nothing more.
+    assert_eq!(hub.write(&by, path, "v1").await.unwrap().version, 1);
+    assert_eq!(
+        hub.write(&keyed(&by, "c2"), path, "v2")
+            .await
+            .unwrap()
+            .version,
+        2
+    );
+    let edited = hub.edit(&keyed(&by, "c3"), path, "v2", "v3").await.unwrap();
+    assert_eq!((edited.version, edited.content.as_str()), (3, "v3"));
+    assert_eq!(
+        hub.edit(&keyed(&by, "c3"), path, "v2", "v3").await.unwrap(),
+        edited,
+        "a repeated edit returns what it wrote, although the text is gone"
+    );
+    for (old, why) in [("v9", "does not occur"), ("", "does not occur")] {
+        let refused = hub.edit(&keyed(&by, "c4"), path, old, "x").await;
+        assert!(
+            matches!(&refused, Err(StoreError::Invalid(message)) if message.contains(why)),
+            "{refused:?}"
+        );
+    }
+    hub.write(&keyed(&by, "c5"), path, "a a").await.unwrap();
+    assert!(matches!(
+        hub.edit(&keyed(&by, "c6"), path, "a", "b").await,
+        Err(StoreError::Invalid(message)) if message.contains("2 times")
+    ));
+    hub.write(&keyed(&by, "c7"), "projects/2/repos/other.md", "x")
+        .await
+        .unwrap();
     assert_eq!(hub.list("projects/1/").await.unwrap().len(), 1);
 
-    hub.delete(path, None, T0).await.unwrap();
+    let deleted = hub.delete(&keyed(&by, "c8"), path).await.unwrap();
+    assert!(deleted.deleted);
     assert_eq!(hub.read(path).await.unwrap(), None);
+    assert_eq!(hub.delete(&keyed(&by, "c8"), path).await.unwrap(), deleted);
+    assert!(matches!(
+        hub.delete(&keyed(&by, "c9"), path).await,
+        Err(StoreError::NotFound { .. })
+    ));
     let history: Vec<_> = hub
         .history(path)
         .await
         .unwrap()
         .into_iter()
-        .map(|f| (f.version, f.deleted))
+        .map(|f| (f.version, f.deleted, f.written_by_run))
         .collect();
-    assert_eq!(history, vec![(1, false), (2, false), (3, true)]);
+    let run = Some(run.id);
+    assert_eq!(
+        history,
+        vec![
+            (1, false, run),
+            (2, false, run),
+            (3, false, run),
+            (4, false, run),
+            (5, true, run)
+        ]
+    );
     assert!(hub.read("../escape").await.is_err());
+
+    // A write under a lease since granted to someone else changes nothing.
+    hub.release_lease(&by.lease).await.unwrap();
+    assert!(matches!(
+        hub.write(&keyed(&by, "c10"), path, "late").await,
+        Err(StoreError::StaleLease { .. })
+    ));
+    assert_eq!(hub.read(path).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_rename_is_a_deletion_and_a_write_and_keeps_both_histories() {
+    let hub = hub().await;
+    let (by, _) = memory_author(&hub).await;
+    let (from, to) = ("projects/1/repos/old.md", "projects/1/repos/new.md");
+    hub.write(&keyed(&by, "c1"), from, "one").await.unwrap();
+    hub.write(&keyed(&by, "c2"), from, "two").await.unwrap();
+    hub.write(&keyed(&by, "c3"), to, "earlier").await.unwrap();
+    assert!(matches!(
+        hub.rename(&keyed(&by, "c4"), from, to).await,
+        Err(StoreError::Invalid(message)) if message.contains("already exists")
+    ));
+    hub.delete(&keyed(&by, "c5"), to).await.unwrap();
+    let moved = hub.rename(&keyed(&by, "c6"), from, to).await.unwrap();
+    assert_eq!((moved.version, moved.content.as_str()), (3, "two"));
+    assert_eq!(
+        hub.rename(&keyed(&by, "c6"), from, to).await.unwrap(),
+        moved
+    );
+    assert_eq!(hub.read(from).await.unwrap(), None);
+    assert_eq!(hub.read(to).await.unwrap().unwrap().content, "two");
+    let versions = |history: Vec<MemoryFile>| -> Vec<(String, bool)> {
+        history
+            .into_iter()
+            .map(|f| (f.content, f.deleted))
+            .collect()
+    };
+    assert_eq!(
+        versions(hub.history(from).await.unwrap()),
+        [
+            ("one".into(), false),
+            ("two".into(), false),
+            (String::new(), true)
+        ]
+    );
+    assert_eq!(
+        versions(hub.history(to).await.unwrap()),
+        [
+            ("earlier".into(), false),
+            (String::new(), true),
+            ("two".into(), false)
+        ]
+    );
+    assert!(matches!(
+        hub.rename(&keyed(&by, "c7"), from, "projects/1/repos/x.md")
+            .await,
+        Err(StoreError::NotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn preloaded_files_keep_their_budgets_and_indexes_are_not_written_directly() {
+    let hub = hub().await;
+    let (by, _) = memory_author(&hub).await;
+    let refused = |result: StoreResult<MemoryFile>, why: &str| match result {
+        Err(StoreError::Invalid(message)) => assert!(message.contains(why), "{message}"),
+        other => panic!("expected a refusal saying {why:?}, got {other:?}"),
+    };
+    let over = "x".repeat(threadlane_core::memory::INSTRUCTIONS_BUDGET + 1);
+    for path in ["space/instructions.md", "projects/1/instructions.md"] {
+        refused(hub.write(&by, path, &over).await, "trim it");
+    }
+    refused(
+        hub.write(
+            &by,
+            "projects/1/tasks/T-0001.md",
+            &format!("# T-0001\nLeft.\n{over}"),
+        )
+        .await,
+        "Trim it",
+    );
+    refused(
+        hub.write(&by, "projects/1/notes/a.md", "no description")
+            .await,
+        "title line",
+    );
+    let long_title = format!("# {}\nAbout it.", "t".repeat(300));
+    refused(
+        hub.write(&by, "space/notes/a.md", &long_title).await,
+        "shorten",
+    );
+    refused(
+        hub.write(&by, "space/notes/INDEX.md", "# Mine\nForged.")
+            .await,
+        "written by the system",
+    );
+
+    // An edit that would take a file over its budget is refused too.
+    let path = "space/instructions.md";
+    hub.write(&by, path, "Be brief.").await.unwrap();
+    refused(
+        hub.edit(&keyed(&by, "c2"), path, "brief", &over).await,
+        "trim it",
+    );
+    // Moving a note to where no index lists it needs no title; moving a
+    // file into notes does.
+    hub.write(&keyed(&by, "c3"), "space/notes/b.md", "# B\nAbout b.")
+        .await
+        .unwrap();
+    refused(
+        hub.rename(
+            &keyed(&by, "c4"),
+            "space/instructions.md",
+            "space/notes/c.md",
+        )
+        .await,
+        "title line",
+    );
+    refused(
+        hub.rename(
+            &keyed(&by, "c5"),
+            "space/notes/INDEX.md",
+            "space/notes/i.md",
+        )
+        .await,
+        "written by the system",
+    );
+    assert_eq!(hub.read(path).await.unwrap().unwrap().content, "Be brief.");
+}
+
+#[tokio::test]
+async fn indexes_are_rewritten_with_every_change_and_their_bytes_depend_only_on_the_files() {
+    let notes = [
+        (
+            "space/notes/style.md",
+            "# Style\nShort sentences.\n\nMore detail.",
+        ),
+        ("space/notes/about.md", "# About you\nYou work on payments."),
+    ];
+    let index = "space/notes/INDEX.md";
+    let expected = "- [About you](about.md): You work on payments.\n\
+                    - [Style](style.md): Short sentences.\n";
+    let mut bytes = Vec::new();
+    for order in [[0, 1], [1, 0]] {
+        let hub = hub().await;
+        let (by, run) = memory_author(&hub).await;
+        for (n, &i) in order.iter().enumerate() {
+            let (path, content) = notes[i];
+            hub.write(&keyed(&by, &format!("c{n}")), path, content)
+                .await
+                .unwrap();
+        }
+        let written = hub.read(index).await.unwrap().unwrap();
+        assert_eq!(written.written_by_run, Some(run.id));
+        bytes.push(written.content);
+    }
+    assert_eq!(bytes[0], expected);
+    assert_eq!(bytes[1], expected, "the same files give the same bytes");
+
+    let hub = hub().await;
+    let (by, _) = memory_author(&hub).await;
+    for (n, (path, content)) in notes.iter().enumerate() {
+        hub.write(&keyed(&by, &format!("c{n}")), path, content)
+            .await
+            .unwrap();
+    }
+    let versions = || async { hub.history(index).await.unwrap().len() };
+    assert_eq!(versions().await, 2);
+    // A change that leaves the title and description alone leaves the index.
+    hub.edit(&keyed(&by, "e1"), notes[0].0, "More detail.", "Less.")
+        .await
+        .unwrap();
+    assert_eq!(versions().await, 2);
+    hub.rename(&keyed(&by, "r1"), notes[0].0, "space/notes/writing.md")
+        .await
+        .unwrap();
+    assert_eq!(
+        hub.read(index).await.unwrap().unwrap().content,
+        "- [About you](about.md): You work on payments.\n\
+         - [Style](writing.md): Short sentences.\n"
+    );
+    // A progress file has its own index, in its project's tasks directory.
+    hub.write(
+        &keyed(&by, "p1"),
+        "projects/1/tasks/T-0001.md",
+        "# T-0001: the page\nThe form is done; tests are left.",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        hub.read("projects/1/tasks/INDEX.md")
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "- [T-0001: the page](T-0001.md): The form is done; tests are left.\n"
+    );
+    // The last note gone, its index goes too.
+    hub.delete(&keyed(&by, "d1"), "space/notes/about.md")
+        .await
+        .unwrap();
+    hub.delete(&keyed(&by, "d2"), "space/notes/writing.md")
+        .await
+        .unwrap();
+    assert_eq!(hub.read(index).await.unwrap(), None);
+    assert!(hub.history(index).await.unwrap().last().unwrap().deleted);
 }
 
 #[tokio::test]

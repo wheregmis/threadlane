@@ -982,19 +982,24 @@ pub struct MemoryFile {
     pub content: String,
     /// Increments on every write, starting at 1.
     pub version: i64,
-    /// The run that wrote this version, if a run did.
+    /// The run that wrote this version. Every write carries one; only rows
+    /// from before milestone 5 can lack it.
     pub written_by_run: Option<RunId>,
     pub deleted: bool,
     pub written_at: Timestamp,
 }
 
-/// Input for [`crate::store::MemoryStore::write`].
+/// Who changes memory, for every write of [`crate::store::MemoryStore`]
+/// (Plan.md §8.3 "every write is versioned with the run that made it").
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryWrite {
-    pub path: String,
-    pub content: String,
-    pub written_by_run: Option<RunId>,
-    pub written_at: Timestamp,
+pub struct MemoryAuthor {
+    /// The writing run's lease; a stale one writes nothing (invariant 10).
+    pub lease: Lease,
+    pub run_id: RunId,
+    /// What the change is keyed on: a change repeated with the same key
+    /// writes nothing more and returns what the first wrote (invariant 5).
+    pub call_key: String,
+    pub at: Timestamp,
 }
 
 #[cfg(test)]

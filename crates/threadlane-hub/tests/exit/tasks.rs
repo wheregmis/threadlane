@@ -8,7 +8,10 @@ use std::time::Duration;
 use serde_json::json;
 use threadlane_core::model::{EventKind, RunStatus, TaskStatus};
 use threadlane_core::store::{InboxStore, SessionStore};
-use threadlane_hub::{CREATE_TASK, FINISH_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH, SEND_MESSAGE};
+use threadlane_hub::{
+    CREATE_TASK, FINISH_TASK, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME,
+    MEMORY_VIEW, OPEN_PULL_REQUEST, PUBLISH_BRANCH, SEND_MESSAGE,
+};
 use threadlane_testkit::git::git;
 use threadlane_testkit::{CrashPlan, Script};
 
@@ -155,7 +158,17 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
         if run.tools.iter().any(|tool| tool == FINISH_TASK) {
             assert_eq!(
                 run.tools,
-                [CREATE_TASK, FINISH_TASK, PUBLISH_BRANCH, OPEN_PULL_REQUEST]
+                [
+                    CREATE_TASK,
+                    FINISH_TASK,
+                    PUBLISH_BRANCH,
+                    OPEN_PULL_REQUEST,
+                    MEMORY_VIEW,
+                    MEMORY_CREATE,
+                    MEMORY_EDIT,
+                    MEMORY_DELETE,
+                    MEMORY_RENAME,
+                ]
             );
             assert!(
                 !run.remove_builtin_tools,
