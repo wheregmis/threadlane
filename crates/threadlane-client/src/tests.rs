@@ -238,7 +238,7 @@ async fn a_message_to_a_task_names_the_task_and_no_project() {
         .send_to_task(None, "D-0007", "no")
         .await
         .expect_err("not a task");
-    assert!(error.to_string().contains("not a task id"), "{error}");
+    assert!(format!("{error:?}").contains("not a task id"), "{error:?}");
     let messages = hub.sent.lock().expect("lock").clone();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].task, Some(TaskId(7)));
