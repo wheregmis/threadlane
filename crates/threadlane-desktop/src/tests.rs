@@ -9,13 +9,17 @@ use threadlane_client::ClientDirs;
 use threadlane_core::client::{
     Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
     MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
-    PairingRequest, RunSummary, TimerReply, TimerRequest, UserMessage,
+    PairingRequest, RecordedEvent, RunSummary, TaskReply, TaskRequest, TimerReply, TimerRequest,
+    UserMessage,
 };
-use threadlane_core::ids::{AgentId, LaneId, MachineId, OutboxId, RunId, SessionId, TimerId};
+use threadlane_core::ids::{
+    AgentId, LaneId, MachineId, OutboxId, RepositoryId, RunId, SessionId, TimerId,
+};
 use threadlane_core::model::{
-    BackendKind, DecisionKind, DecisionOption, DecisionStatus, MachineTrust, MemoryFile, Mode,
-    OutboxMessage, OutboxStatus, Recurrence, Rule, Run, RunOutcome, RunStatus, Task, TaskOrigin,
-    TaskStatus, Timer, TimerCategory, TimerCreator, TimerStatus, Urgency, Weekday,
+    BackendKind, DecisionKind, DecisionOption, DecisionStatus, EventKind, MachineTrust, MemoryFile,
+    Mode, OutboxMessage, OutboxStatus, Recurrence, Repository, Rule, Run, RunOutcome, RunStatus,
+    Task, TaskOrigin, TaskStatus, Timer, TimerCategory, TimerCreator, TimerStatus, Urgency,
+    Weekday,
 };
 use threadlane_core::time::Timestamp;
 
@@ -29,6 +33,8 @@ struct FakeHub {
     space: String,
     down: AtomicBool,
     old: AtomicBool,
+    /// Answers like a hub from before it could list recorded events.
+    no_recorded: AtomicBool,
     created: Mutex<Vec<ProjectSummary>>,
     machines: Mutex<Vec<Machine>>,
     lead: Mutex<Option<Timestamp>>,
@@ -39,6 +45,9 @@ struct FakeHub {
     bindings: Mutex<Vec<BindingSummary>>,
     memory: Mutex<Vec<MemoryFile>>,
     timers: Mutex<Vec<Timer>>,
+    agents: Mutex<Vec<Agent>>,
+    repositories: Mutex<Vec<Repository>>,
+    recorded: Mutex<Vec<RecordedEvent>>,
 }
 
 impl FakeHub {
@@ -119,10 +128,72 @@ impl HubApi for FakeHub {
                 bindings.push(binding.clone());
                 Ok(OrgReply::Binding { binding })
             }
-            OrgRequest::Repositories { .. } => Ok(OrgReply::Repositories {
-                repositories: Vec::new(),
+            OrgRequest::Repositories { project } => Ok(OrgReply::Repositories {
+                repositories: self
+                    .repositories
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .filter(|repository| repository.project_id == project_id(project.as_deref()))
+                    .cloned()
+                    .collect(),
             }),
-            OrgRequest::Agents => Ok(OrgReply::Agents { agents: Vec::new() }),
+            OrgRequest::Agents => Ok(OrgReply::Agents {
+                agents: self.agents.lock().expect("lock").clone(),
+            }),
+            OrgRequest::CreateAgent {
+                name,
+                role,
+                instructions,
+                backends,
+                ..
+            } => {
+                let mut agents = self.agents.lock().expect("lock");
+                if agents.iter().any(|agent| agent.name == name) {
+                    return Err(ApiError::Invalid(format!(
+                        "an agent named {name:?} already exists"
+                    )));
+                }
+                let agent = Agent {
+                    id: AgentId(i64::try_from(agents.len()).expect("few") + 1),
+                    name,
+                    role,
+                    instructions,
+                    backends,
+                    models: json!({}),
+                    tools: json!({}),
+                    requirements: json!({}),
+                };
+                agents.push(agent.clone());
+                Ok(OrgReply::Agent { agent })
+            }
+            OrgRequest::AddRepository {
+                project,
+                name,
+                remote_url,
+                default_branch,
+                ..
+            } => {
+                let mut repositories = self.repositories.lock().expect("lock");
+                let repository = Repository {
+                    id: RepositoryId(i64::try_from(repositories.len()).expect("few") + 1),
+                    project_id: project_id(project.as_deref()),
+                    name,
+                    remote_url,
+                    default_branch: default_branch.unwrap_or_else(|| "main".to_owned()),
+                    protected_branches: Vec::new(),
+                };
+                repositories.push(repository.clone());
+                Ok(OrgReply::Repository { repository })
+            }
+            OrgRequest::SetPaused { project, paused } => Ok(OrgReply::Project {
+                project: ProjectSummary {
+                    id: project_id(project.as_deref()),
+                    name: project.unwrap_or_else(|| "General".to_owned()),
+                    is_general: false,
+                    paused,
+                },
+            }),
             OrgRequest::CreateProject { name, .. } => {
                 let mut created = self.created.lock().expect("lock");
                 let project = ProjectSummary {
@@ -187,6 +258,14 @@ impl HubApi for FakeHub {
             return Err(ApiError::Invalid("unknown variant `overview`".to_owned()));
         }
         let tasks = self.tasks.lock().expect("lock").clone();
+        if self.no_recorded.load(Ordering::SeqCst)
+            && matches!(
+                request,
+                OverviewRequest::Recorded { .. } | OverviewRequest::RecordedCount
+            )
+        {
+            return Err(ApiError::Invalid("unknown variant `recorded`".to_owned()));
+        }
         match request {
             OverviewRequest::Tasks { .. } => Ok(OverviewReply::Tasks { tasks }),
             OverviewRequest::Running => Ok(OverviewReply::Tasks {
@@ -207,6 +286,20 @@ impl HubApi for FakeHub {
             }),
             OverviewRequest::Lead { .. } => Ok(OverviewReply::Lead {
                 running_since: *self.lead.lock().expect("lock"),
+            }),
+            OverviewRequest::Recorded { limit, .. } => {
+                let recorded = self.recorded.lock().expect("lock");
+                Ok(OverviewReply::Recorded {
+                    events: recorded
+                        .iter()
+                        .take(usize::try_from(limit).expect("small"))
+                        .cloned()
+                        .collect(),
+                    total: u64::try_from(recorded.len()).expect("few"),
+                })
+            }
+            OverviewRequest::RecordedCount => Ok(OverviewReply::RecordedCount {
+                total: u64::try_from(self.recorded.lock().expect("lock").len()).expect("few"),
             }),
             OverviewRequest::Task { task } => {
                 let summary = tasks
@@ -327,6 +420,43 @@ impl HubApi for FakeHub {
                 created.instruction = instruction;
                 timers.push(created.clone());
                 Ok(TimerReply::Timer { timer: created })
+            }
+            other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
+        }
+    }
+    /// Tasks like a hub's: yours and queued; a cancel ends one.
+    async fn tasks(&self, request: TaskRequest) -> Result<TaskReply, ApiError> {
+        self.up()?;
+        let mut tasks = self.tasks.lock().expect("lock");
+        match request {
+            TaskRequest::Create {
+                title,
+                goal,
+                agent,
+                depends_on,
+                ..
+            } => {
+                let mut created = task(
+                    i64::try_from(tasks.len()).expect("few") + 1,
+                    TaskStatus::Queued,
+                    None,
+                );
+                created.task.title = title;
+                created.task.goal = goal;
+                created.task.depends_on = depends_on;
+                created.agent = agent;
+                tasks.push(created.clone());
+                Ok(TaskReply::Task { task: created.task })
+            }
+            TaskRequest::Cancel { task: id } => {
+                let summary = tasks
+                    .iter_mut()
+                    .find(|summary| summary.task.id == id)
+                    .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+                summary.task.status = TaskStatus::Cancelled;
+                Ok(TaskReply::Task {
+                    task: summary.task.clone(),
+                })
             }
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
@@ -1972,4 +2102,390 @@ fn copying_says_so_and_with_no_hub_the_app_explains_pairing() {
     assert!(!state.first_run());
     state.space_removed("work");
     assert!(state.first_run(), "unpairing the last one shows it again");
+}
+
+fn binding(agent: &str, mode: Mode) -> BindingSummary {
+    BindingSummary {
+        agent: agent.to_owned(),
+        role: "engineer".to_owned(),
+        mode,
+        is_lead: agent == "Lead",
+    }
+}
+
+#[tokio::test]
+async fn a_new_agent_is_listed_with_unbound_cells_that_bind_it() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_modes(load_modes(&core, vec![("work".into(), "api".into())]).await);
+
+    state.agent_form_mut().space = Some("work".to_owned());
+    state.agent_form_mut().backends = 2;
+    assert_eq!(
+        state.agent_form().backends(),
+        [BackendKind::Codex, BackendKind::Claude]
+    );
+    let backends = state.agent_form().backends();
+    let agent = core
+        .create_agent(Some("work"), "Reviewer", "reviewer", "Review.", &backends)
+        .await
+        .expect("created");
+    state.agent_created("work", agent);
+    assert_eq!(state.agent_form().space, None, "the form closes");
+    assert_eq!(work.agents.lock().expect("lock")[0].backends, backends);
+
+    let grid = state.modes("work");
+    assert_eq!(grid.agents, ["Reviewer"]);
+    assert_eq!(grid.rows[0].modes, Ok(vec![None]), "a — cell");
+    let bound = core
+        .set_mode(Some("work"), Some("api"), "Reviewer", Mode::OnRequest)
+        .await
+        .expect("bound");
+    state.mode_set("work", "api", bound);
+    assert_eq!(
+        state.modes("work").rows[0].modes,
+        Ok(vec![Some(Mode::OnRequest)])
+    );
+}
+
+#[tokio::test]
+async fn copying_an_agent_offers_what_the_other_space_lacks_and_copies_it_whole() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    for (name, hub) in [("Reviewer", &work), ("Writer", &work), ("Writer", &home)] {
+        hub.org(OrgRequest::CreateAgent {
+            name: name.to_owned(),
+            role: "role".to_owned(),
+            instructions: format!("Be {name}."),
+            backends: vec![BackendKind::Codex],
+        })
+        .await
+        .expect("created");
+    }
+    let mut state = AppState::paired(["work", "home"]);
+    state.apply(refresh(&core).await);
+
+    let targets = state.copy_targets("work");
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].0, "home");
+    let offered: Vec<&str> = targets[0]
+        .1
+        .iter()
+        .map(|agent| agent.name.as_str())
+        .collect();
+    assert_eq!(offered, ["Reviewer"], "Writer is there already");
+
+    let copied = copy_agent(&core, &targets[0].1[0], "home")
+        .await
+        .expect("copied");
+    assert_eq!(
+        (
+            copied.role.as_str(),
+            copied.instructions.as_str(),
+            copied.backends.as_slice()
+        ),
+        ("role", "Be Reviewer.", [BackendKind::Codex].as_slice())
+    );
+    state.agent_created("home", copied);
+    assert!(state.copy_targets("work")[0].1.is_empty());
+    assert!(copy_agent(&core, &targets[0].1[0], "home").await.is_err());
+}
+
+#[tokio::test]
+async fn a_remote_another_space_has_is_refused_naming_that_space() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    home.org(OrgRequest::AddRepository {
+        project: Some("api".to_owned()),
+        name: "widgets".to_owned(),
+        remote_url: "https://github.com/Acme/Widgets.git".to_owned(),
+        default_branch: None,
+    })
+    .await
+    .expect("added");
+    home.org(OrgRequest::AddRepository {
+        project: None,
+        name: "notes".to_owned(),
+        remote_url: "/srv/git/notes".to_owned(),
+        default_branch: None,
+    })
+    .await
+    .expect("added");
+
+    let refused = add_repository(&core, "work", "api", "w", "git@github.com:acme/widgets", "")
+        .await
+        .expect_err("refused");
+    assert!(
+        refused.contains("already registered in home")
+            && refused.contains("repository widgets of project api"),
+        "{refused}"
+    );
+    let refused = add_repository(&core, "work", "api", "n", "/srv/git/notes", "")
+        .await
+        .expect_err("same text");
+    assert!(refused.contains("in home"), "{refused}");
+    assert!(
+        add_repository(&core, "work", "api", "", "x", "")
+            .await
+            .is_err()
+    );
+
+    // The same space is the hub's to check; another path is new.
+    let mut state = AppState::paired(["work", "home"]);
+    state.open_repository_form("work", "api", true);
+    assert!(state.repository_form_open("work", "api"));
+    let added = add_repository(&core, "work", "api", "site", "/srv/git/site", "trunk")
+        .await
+        .expect("added");
+    assert_eq!(added.default_branch, "trunk");
+    state.repository_added("work", "api", added);
+    assert!(!state.repository_form_open("work", "api"));
+    assert_eq!(state.task_repositories("work", "api"), ["site"]);
+
+    home.down.store(true, Ordering::SeqCst);
+    let unchecked = add_repository(&core, "work", "api", "web", "/srv/git/web", "")
+        .await
+        .expect_err("not checked");
+    assert!(unchecked.contains("Could not check home"), "{unchecked}");
+}
+
+#[tokio::test]
+async fn a_new_task_goes_to_an_agent_that_is_on_and_waits_for_open_tasks() {
+    let work = FakeHub::new("Work", Vec::new());
+    {
+        let mut tasks = work.tasks.lock().expect("lock");
+        tasks.push(task(1, TaskStatus::Running, None));
+        tasks.push(task(2, TaskStatus::Done, None));
+    }
+    work.bindings.lock().expect("lock").extend([
+        binding("Lead", Mode::OnRequest),
+        binding("Engineer", Mode::Assisted),
+        binding("Idle", Mode::Off),
+    ]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    assert_eq!(state.task_agents("work", "api"), ["Lead", "Engineer"]);
+    let open: Vec<TaskId> = state
+        .task_dependencies("work", "api")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(open, [TaskId(1)], "a done task is not offered");
+    assert!(state.task_spec("work", "api", "T", "G").is_err(), "closed");
+
+    state.open_task_form("work", "api", true);
+    assert_eq!(state.task_form("work", "api").expect("open").agent, None);
+    assert!(state.task_form("work", "General").is_none());
+    assert_eq!(
+        state.task_spec("work", "api", "Fix it", "Make it pass"),
+        Err("Choose the agent that does it.".to_owned())
+    );
+    state.task_form_mut().agent = Some("Engineer".to_owned());
+    state.task_form_mut().toggle_dependency(TaskId(1));
+    assert_eq!(
+        state.task_spec("work", "api", "  ", "Make it pass"),
+        Err("Give the task a title and a goal.".to_owned())
+    );
+    let spec = state
+        .task_spec("work", "api", " Fix it ", "Make it pass")
+        .expect("complete");
+    assert_eq!(spec.title, "Fix it");
+    assert_eq!(spec.depends_on, [TaskId(1)]);
+    assert_eq!(spec.project.as_deref(), Some("api"));
+    let created = core.create_task(Some("work"), spec).await.expect("created");
+    state.task_created("work", "api");
+    assert!(state.task_form("work", "api").is_none());
+    state.apply_project(load_project(&core, "work", "api").await);
+    let titles: Vec<String> = state
+        .project("work", "api")
+        .expect("loaded")
+        .tasks
+        .iter()
+        .map(|summary| summary.task.title.clone())
+        .collect();
+    assert!(titles.contains(&created.title), "{titles:?}");
+}
+
+#[tokio::test]
+async fn cancelling_a_task_asks_first_then_shows_it_ended() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.tasks
+        .lock()
+        .expect("lock")
+        .push(task(1, TaskStatus::Running, None));
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+
+    assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Cancel);
+    state.ask_cancel_task("work", TaskId(1));
+    let TaskControl::Confirm(text) = state.task_control("work", TaskId(1)) else {
+        panic!("asks first");
+    };
+    assert!(text.starts_with("Cancel T-0001 for good?"), "{text}");
+    state.keep_task();
+    assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Cancel);
+
+    state.ask_cancel_task("work", TaskId(1));
+    let cancelled = core
+        .cancel_task(Some("work"), "T-0001")
+        .await
+        .expect("cancelled");
+    state.task_cancelled("work", cancelled);
+    assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Ended);
+}
+
+#[tokio::test]
+async fn pausing_a_project_shows_it_paused_until_resumed() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    assert!(!state.is_paused("work", "api"));
+    let paused = core
+        .set_paused(Some("work"), Some("api"), true)
+        .await
+        .expect("paused");
+    state.project_paused("work", paused);
+    assert!(state.is_paused("work", "api"));
+    let resumed = core
+        .set_paused(Some("work"), Some("api"), false)
+        .await
+        .expect("resumed");
+    state.project_paused("work", resumed);
+    assert!(!state.is_paused("work", "api"));
+}
+
+fn recorded_event(id: i64, text: &str) -> RecordedEvent {
+    RecordedEvent {
+        id: EventId(id),
+        source: "github".to_owned(),
+        kind: EventKind::OutsideEvent,
+        text: text.to_owned(),
+        received_at: Timestamp::from_millis(5 * 60_000),
+    }
+}
+
+#[tokio::test]
+async fn events_nobody_asked_for_are_a_collapsed_section_and_a_count_on_home() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert_eq!(state.recorded("work", "api", &when()), None, "nothing yet");
+    assert!(!state.status_line().contains("recorded"));
+
+    work.recorded.lock().expect("lock").extend([
+        recorded_event(
+            2,
+            "\nGitHub: review requested on acme/api, pull request #4\n\nBody",
+        ),
+        recorded_event(1, "Routine 3 fired."),
+    ]);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert!(
+        state.status_line().ends_with(" · 2 recorded, not acted on"),
+        "{}",
+        state.status_line()
+    );
+    let section = state.recorded("work", "api", &when()).expect("shown");
+    assert_eq!(section.title, "Recorded, not acted on (2)");
+    assert!(!section.open, "collapsed");
+    assert_eq!(
+        section.rows[0],
+        RecordedRow {
+            source: "github".to_owned(),
+            text: "GitHub: review requested on acme/api, pull request #4".to_owned(),
+            time: "00:05".to_owned(),
+        }
+    );
+    assert_eq!(section.more, None);
+    state.toggle_recorded("work", "api");
+    assert!(state.recorded("work", "api", &when()).expect("shown").open);
+
+    // A hub from before it could say hides the section and the count, and
+    // is not asked again every few seconds for them.
+    work.no_recorded.store(true, Ordering::SeqCst);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert_eq!(state.recorded("work", "api", &when()), None);
+    assert!(!state.status_line().contains("recorded"));
+    assert!(!state.retry_soon());
+}
+
+#[test]
+fn notification_settings_are_kept_in_the_client_directory_and_applied() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut state = AppState::paired(["work"]);
+    state.set_client_dir(dir.path().to_owned());
+    assert_eq!(state.notifications(), Notifications::default());
+    let decision = Alert::Decision {
+        space: "work".to_owned(),
+        label: "work/api".to_owned(),
+        card: Card {
+            id: "D-0001".to_owned(),
+            question: "Merge?".to_owned(),
+            options: Vec::new(),
+        },
+    };
+    let notice = Alert::Notice {
+        label: "work".to_owned(),
+        text: "Blocked".to_owned(),
+        seq: 1,
+    };
+    assert!(state.notifies(&decision) && state.notifies(&notice));
+
+    state.set_notifications(false, false).expect("saved");
+    assert!(state.notifies(&decision));
+    assert!(!state.notifies(&notice));
+    let mut again = AppState::paired(["work"]);
+    again.set_client_dir(dir.path().to_owned());
+    assert_eq!(
+        again.notifications(),
+        Notifications {
+            decisions: true,
+            notices: false
+        }
+    );
+    assert_eq!(again.client_dir(), Some(dir.path()));
+}
+
+#[tokio::test]
+async fn settings_show_what_each_hub_reports_and_how_it_is_reached() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.machines.lock().expect("lock").push(Machine {
+        is_hub: true,
+        name: "studio".to_owned(),
+        ..machine(9, MachineStatus::Online)
+    });
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    assert_eq!(state.settings_rows()[0].space, None, "not asked yet");
+    state.apply(refresh(&core).await);
+    let row = &state.settings_rows()[0];
+    assert_eq!(row.paired_as, "work");
+    assert_eq!(row.space.as_deref(), Some("Work"));
+    assert_eq!(row.ceiling, Some(Mode::Assisted));
+    assert_eq!(row.schema_version, Some(1));
+    assert_eq!(row.host.as_deref(), Some("studio"));
+    assert!(
+        row.reached_by.starts_with("Unix socket"),
+        "{}",
+        row.reached_by
+    );
+
+    // Away, it keeps what it last reported.
+    work.down.store(true, Ordering::SeqCst);
+    state.apply(refresh(&core).await);
+    assert_eq!(state.settings_rows()[0].space.as_deref(), Some("Work"));
 }

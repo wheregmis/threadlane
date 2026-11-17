@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::json;
 use tempfile::TempDir;
+use threadlane_core::client::{TaskReply, TaskRequest};
 use threadlane_core::ids::{EventId, OutboxId, ProjectId};
 use threadlane_core::model::{Mode, OutboxMessage, OutboxStatus, Urgency};
 use threadlane_core::time::Timestamp;
@@ -103,6 +104,10 @@ impl HubApi for FakeHub {
     async fn memory(&self, _request: MemoryRequest) -> Result<MemoryReply, ApiError> {
         Ok(MemoryReply::Files { files: Vec::new() })
     }
+    /// Refuses every request.
+    async fn tasks(&self, request: TaskRequest) -> Result<TaskReply, ApiError> {
+        Err(ApiError::Invalid(format!("unsupported {request:?}")))
+    }
 }
 
 #[derive(Debug)]
@@ -143,6 +148,9 @@ impl HubApi for DownHub {
     }
 
     async fn memory(&self, _request: MemoryRequest) -> Result<MemoryReply, ApiError> {
+        Err(ApiError::Unreachable("connection refused".to_owned()))
+    }
+    async fn tasks(&self, _request: TaskRequest) -> Result<TaskReply, ApiError> {
         Err(ApiError::Unreachable("connection refused".to_owned()))
     }
 }

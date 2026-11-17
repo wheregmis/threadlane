@@ -4,7 +4,7 @@
 //! implements it; a transport carries it to clients as [`ClientRequest`] and
 //! [`ClientResponse`]. Later milestones add capabilities; so far: who am I
 //! talking to, send a message, follow the feed, the organization, decisions,
-//! pairing, the overview the app's screens show, and memory.
+//! pairing, the overview the app's screens show, memory, timers, and tasks.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::admission::AdmittedKey;
 use crate::ids::{DecisionId, EventId, ProjectId, StandingRuleId, TaskId, TimerId};
 use crate::model::{
-    Account, Agent, Cell, Decision, Machine, MemoryFile, Mode, OutboxMessage, Recurrence,
-    Repository, Run, StandingRule, Task, Timer,
+    Account, Agent, BackendKind, Cell, Decision, EventKind, Machine, MemoryFile, Mode,
+    OutboxMessage, Recurrence, Repository, Run, StandingRule, Task, Timer,
 };
 use crate::time::Timestamp;
 use crate::tools::Tier;
@@ -111,6 +111,10 @@ pub enum OrgRequest {
         name: String,
         role: String,
         instructions: String,
+        /// The backends it may use, in order of preference; empty means
+        /// either.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        backends: Vec<BackendKind>,
     },
     /// The bindings of a project. `None` means the General project.
     Bindings { project: Option<String> },
@@ -120,6 +124,13 @@ pub enum OrgRequest {
         project: Option<String>,
         agent: String,
         mode: Mode,
+    },
+    /// Pauses a project, or resumes it with `paused: false`: a paused
+    /// project's lanes are not granted. `None` means the General project.
+    /// Answered with the project as it now stands.
+    SetPaused {
+        project: Option<String>,
+        paused: bool,
     },
     /// Sets a project's own ceiling, which must be no higher than the
     /// space's. Bindings above it keep their stored mode and act at the
@@ -366,6 +377,25 @@ pub enum OverviewRequest {
     /// Whether a project's lead is working: when the run in progress on its
     /// lead lane started. `None` as the project means the General project.
     Lead { project: Option<String> },
+    /// The newest `limit` events of a project that were recorded and acted
+    /// on by nobody, because no one asked for the work (Plan.md §2.3),
+    /// newest first. `None` means the General project.
+    Recorded { project: Option<String>, limit: u32 },
+    /// How many such events the whole space has.
+    RecordedCount,
+}
+
+/// An event that arrived but started no run, because no one asked for the
+/// work: for example a GitHub review request that belongs to no task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedEvent {
+    pub id: EventId,
+    /// Which adapter produced it, for example `github` or `timer`.
+    pub source: String,
+    pub kind: EventKind,
+    /// What it says, as a run would have read it.
+    pub text: String,
+    pub received_at: Timestamp,
 }
 
 /// The answer to an [`OverviewRequest`].
@@ -392,6 +422,16 @@ pub enum OverviewReply {
     /// When the lead's run in progress started; `None` while it is idle.
     Lead {
         running_since: Option<Timestamp>,
+    },
+    /// Events recorded and not acted on, newest first, and how many the
+    /// project has in all.
+    Recorded {
+        events: Vec<RecordedEvent>,
+        total: u64,
+    },
+    /// How many events the space recorded and did not act on.
+    RecordedCount {
+        total: u64,
     },
 }
 
@@ -488,6 +528,8 @@ pub trait HubApi: Send + Sync + fmt::Debug {
     }
     /// Reads a project's memory, and makes your own changes to it.
     async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError>;
+    /// Creates a task of yours directly, or cancels a task.
+    async fn tasks(&self, request: TaskRequest) -> Result<TaskReply, ApiError>;
 }
 
 /// [`HubApi`] as it crosses a transport.
@@ -505,6 +547,7 @@ pub enum ClientRequest {
     Overview { request: OverviewRequest },
     Timers { request: TimerRequest },
     Memory { request: MemoryRequest },
+    Tasks { request: TaskRequest },
 }
 
 /// The answer to a [`ClientRequest`].
@@ -527,6 +570,7 @@ pub enum ClientResponse {
     Memory { reply: MemoryReply },
     Error { error: ApiError },
     Timers { reply: TimerReply },
+    Tasks { reply: TaskReply },
 }
 
 /// Answers one request from an API. Shared by every transport's server side.
@@ -569,6 +613,10 @@ pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientRespons
             .memory(request)
             .await
             .map(|reply| ClientResponse::Memory { reply }),
+        ClientRequest::Tasks { request } => api
+            .tasks(request)
+            .await
+            .map(|reply| ClientResponse::Tasks { reply }),
     };
     result.unwrap_or_else(|error| ClientResponse::Error { error })
 }
@@ -612,4 +660,41 @@ pub enum TimerReply {
     Timer {
         timer: Timer,
     },
+}
+
+/// The Tasks capability (Plan.md §5.2): work you start or stop yourself,
+/// without asking the lead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TaskRequest {
+    /// Creates a queued task of yours in a project, skipping the lead: work
+    /// you requested. `agent` must be bound in the project and not Off;
+    /// `repositories` are names registered in it and `depends_on` its tasks
+    /// that have not ended. `None` means the General project. Creating with
+    /// the same `client_request_id` twice is a successful no-op.
+    Create {
+        project: Option<String>,
+        title: String,
+        goal: String,
+        agent: String,
+        #[serde(default)]
+        repositories: Vec<String>,
+        #[serde(default)]
+        depends_on: Vec<TaskId>,
+        client_request_id: String,
+    },
+    /// Cancels a task that has not ended, and the tasks that wait on it;
+    /// the lead hears of it once. Cancelling a cancelled task changes
+    /// nothing.
+    Cancel { task: TaskId },
+}
+
+/// The answer to a [`TaskRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TaskReply {
+    /// The task as it now stands.
+    Task { task: Task },
 }

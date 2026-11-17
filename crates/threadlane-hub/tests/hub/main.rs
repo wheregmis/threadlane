@@ -4,6 +4,7 @@
 mod common;
 
 mod context;
+mod control;
 mod crash;
 mod cycle;
 mod decisions;

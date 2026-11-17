@@ -357,6 +357,7 @@ mod tests {
                 name: "Reviewer".into(),
                 role: "reviewer".into(),
                 instructions: String::new(),
+                backends: Vec::new(),
             })
             .await
             .unwrap();

@@ -26,6 +26,7 @@ use threadlane_desktop::{
 use tokio::runtime::Runtime;
 use tokio::sync::{RwLock, mpsc};
 
+mod actions;
 mod menus;
 mod screens;
 
@@ -44,7 +45,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let core = match ClientDirs::from_env().and_then(ClientCore::load) {
+    let dirs = match ClientDirs::from_env() {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            eprintln!("threadlane-desktop: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let client_dir = dirs.root.clone();
+    let core = match ClientCore::load(dirs) {
         Ok(core) => core,
         Err(error) => {
             eprintln!("threadlane-desktop: {error}");
@@ -52,7 +61,8 @@ fn main() -> ExitCode {
         }
     };
     // The paired hubs are known without asking them: the first frame lists them.
-    let state = AppState::paired(core.hubs().iter().map(|hub| hub.name.as_str()));
+    let mut state = AppState::paired(core.hubs().iter().map(|hub| hub.name.as_str()));
+    state.set_client_dir(client_dir);
     let (shown, feed) = mpsc::unbounded_channel();
     // With no hub paired there is no feed; Home says so.
     let stream = {
@@ -182,6 +192,8 @@ enum Screen {
     Machines,
     /// The routines of every space, by space and project.
     Routines,
+    /// What each hub reports about itself, and this app's own settings.
+    Settings,
 }
 
 impl Screen {
@@ -195,6 +207,7 @@ impl Screen {
             ["agents"] => Self::Agents,
             ["machines"] => Self::Machines,
             ["routines"] => Self::Routines,
+            ["settings"] => Self::Settings,
             [space, task] if TaskId::parse(task).is_some() && task.starts_with(['T', 't']) => {
                 Self::Task {
                     space: (*space).to_owned(),
@@ -268,6 +281,19 @@ struct Desktop {
     clear_routine: bool,
     /// The first-run screen's hub data directory.
     hub_dir: Entity<InputState>,
+    /// The "+ New agent" form's name, role and instructions.
+    agent_name: Entity<InputState>,
+    agent_role: Entity<InputState>,
+    agent_instructions: Entity<InputState>,
+    /// The "+ Add repository" form's name, remote and default branch.
+    repository_name: Entity<InputState>,
+    repository_remote: Entity<InputState>,
+    repository_branch: Entity<InputState>,
+    /// The "+ New task" form's title and goal.
+    task_title: Entity<InputState>,
+    task_goal: Entity<InputState>,
+    /// Empty these fields at the next render, which has the window it needs.
+    clear_fields: Vec<Entity<InputState>>,
     /// Whether the window was full screen at the last render, which the
     /// View menu's label follows.
     full_screen: bool,
@@ -316,6 +342,17 @@ impl Desktop {
         let hub_dir = cx.new(|cx| {
             InputState::new(window, cx).placeholder("The hub's data directory, ~/threadlane/work")
         });
+        let mut field = |placeholder: &'static str, cx: &mut Context<Self>| {
+            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+        };
+        let agent_name = field("Name", cx);
+        let agent_role = field("Role, for example reviewer", cx);
+        let agent_instructions = field("Instructions (optional)", cx);
+        let repository_name = field("Name in the project", cx);
+        let repository_remote = field("Remote, git@github.com:you/repo.git", cx);
+        let repository_branch = field("Default branch (main)", cx);
+        let task_title = field("Title", cx);
+        let task_goal = field("Goal: what done looks like", cx);
         let subscriptions = vec![
             cx.subscribe_in(
                 &composer,
@@ -386,6 +423,15 @@ impl Desktop {
             routine_zone,
             clear_routine: false,
             hub_dir,
+            agent_name,
+            agent_role,
+            agent_instructions,
+            repository_name,
+            repository_remote,
+            repository_branch,
+            task_title,
+            task_goal,
+            clear_fields: Vec::new(),
             full_screen: false,
             offset_minutes: local_offset_minutes(),
             _tasks: vec![follow, refresh_loop],
@@ -493,7 +539,7 @@ impl Desktop {
                     cx,
                 );
             }
-            Screen::Home | Screen::Machines | Screen::NewProject { .. } => {}
+            Screen::Home | Screen::Machines | Screen::NewProject { .. } | Screen::Settings => {}
         }
     }
 
@@ -520,19 +566,9 @@ impl Desktop {
         );
         if let Some(alert) = self.state.receive(item) {
             let decision = matches!(alert, threadlane_desktop::Alert::Decision { .. });
-            cx.show_system_notification(SystemNotification {
-                tag: alert.tag().into(),
-                title: alert.title().into(),
-                body: alert.body().into(),
-                actions: alert
-                    .options()
-                    .iter()
-                    .map(|label| SystemNotificationAction {
-                        id: label.clone().into(),
-                        label: label.clone().into(),
-                    })
-                    .collect(),
-            });
+            if self.state.notifies(&alert) {
+                self.notify(&alert, cx);
+            }
             // The card carries no creation time or context: ask its hub.
             if decision && !back {
                 self.refresh(cx);
@@ -546,6 +582,23 @@ impl Desktop {
             self.load_screen(cx);
         }
         cx.notify();
+    }
+
+    /// Raises the system notification for `alert`.
+    fn notify(&self, alert: &threadlane_desktop::Alert, cx: &mut Context<Self>) {
+        cx.show_system_notification(SystemNotification {
+            tag: alert.tag().into(),
+            title: alert.title().into(),
+            body: alert.body().into(),
+            actions: alert
+                .options()
+                .iter()
+                .map(|label| SystemNotificationAction {
+                    id: label.clone().into(),
+                    label: label.clone().into(),
+                })
+                .collect(),
+        });
     }
 
     fn go(&mut self, screen: Screen, cx: &mut Context<Self>) {
@@ -1085,6 +1138,9 @@ impl Render for Desktop {
                 field.update(cx, |field, cx| field.set_value("", window, cx));
             }
         }
+        for field in std::mem::take(&mut self.clear_fields) {
+            field.update(cx, |field, cx| field.set_value("", window, cx));
+        }
         if std::mem::take(&mut self.clear_routine) {
             self.routine_instruction
                 .update(cx, |field, cx| field.set_value("", window, cx));
@@ -1111,6 +1167,7 @@ impl Render for Desktop {
             Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),
             Screen::Routines => self.routines_screen(&when, cx),
+            Screen::Settings => self.settings(cx),
         };
         // With no hub paired, every screen but Machines explains pairing.
         let body = if self.state.first_run() && self.screen != Screen::Machines {

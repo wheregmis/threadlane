@@ -9,7 +9,7 @@ use std::time::Duration;
 use clap::{ArgGroup, Parser, Subcommand};
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
 use threadlane_core::client::ApiError;
-use threadlane_core::model::{Mode, OutboxKind};
+use threadlane_core::model::{BackendKind, Mode, OutboxKind};
 use threadlane_core::model::{Recurrence, Rule, Timer, TimerCreator, TimerStatus, Weekday};
 use threadlane_core::time::{Clock as _, SystemClock};
 
@@ -180,6 +180,11 @@ enum Command {
         #[command(subcommand)]
         command: RoutineCommand,
     },
+    /// Cancel tasks.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
     /// Set the highest mode any agent may have in a project.
     Ceiling {
         /// The space (paired hub name); may be left out if only one is paired.
@@ -208,6 +213,18 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum TaskCommand {
+    /// Cancel a task, and the tasks that wait on it; the lead hears of it.
+    Cancel {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The task, for example T-0001.
+        task: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum RuleCommand {
     /// Revoke a standing rule; calls it allowed ask again.
     Revoke {
@@ -231,6 +248,22 @@ enum ProjectCommand {
         /// What the project is about.
         #[arg(long, default_value = "")]
         description: String,
+    },
+    /// Pause a project: none of its work starts until it is resumed.
+    Pause {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project's name.
+        name: String,
+    },
+    /// Resume a paused project.
+    Resume {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project's name.
+        name: String,
     },
 }
 
@@ -269,6 +302,10 @@ enum AgentCommand {
         /// Its instructions.
         #[arg(long, default_value = "")]
         instructions: String,
+        /// The backends it may use, in order of preference, for example
+        /// claude,codex; either if left out.
+        #[arg(long = "backend", value_delimiter = ',')]
+        backends: Vec<BackendKind>,
     },
 }
 
@@ -427,6 +464,26 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 .await?;
             println!("created project {}", project.name);
         }
+        Command::Project {
+            command: ProjectCommand::Pause { space, name },
+        } => {
+            let project = core.set_paused(space.as_deref(), Some(&name), true).await?;
+            println!("paused project {}", project.name);
+        }
+        Command::Project {
+            command: ProjectCommand::Resume { space, name },
+        } => {
+            let project = core
+                .set_paused(space.as_deref(), Some(&name), false)
+                .await?;
+            println!("resumed project {}", project.name);
+        }
+        Command::Task {
+            command: TaskCommand::Cancel { space, task },
+        } => {
+            let task = core.cancel_task(space.as_deref(), &task).await?;
+            println!("{} is {}", task.id, task.status);
+        }
         Command::Repo {
             command:
                 RepoCommand::Add {
@@ -474,10 +531,11 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     name,
                     role,
                     instructions,
+                    backends,
                 },
         } => {
             let agent = core
-                .create_agent(space.as_deref(), &name, &role, &instructions)
+                .create_agent(space.as_deref(), &name, &role, &instructions, &backends)
                 .await?;
             println!("created agent {} ({})", agent.name, agent.role);
         }

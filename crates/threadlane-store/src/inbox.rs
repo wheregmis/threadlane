@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
-use threadlane_core::ids::{EventId, LaneId, MachineId};
+use threadlane_core::ids::{EventId, LaneId, MachineId, ProjectId};
 use threadlane_core::model::{
     Event, EventKind, EventStatus, Inserted, Lane, LaneKind, Lease, NewEvent, RunStatus,
 };
@@ -444,5 +444,39 @@ impl InboxStore for HubDb {
             decode_event,
         )
         .await
+    }
+
+    async fn skipped_events(
+        &self,
+        project_id: Option<ProjectId>,
+        reason: &str,
+        limit: u32,
+    ) -> StoreResult<(Vec<Event>, u64)> {
+        let conn = self.db.reader()?;
+        let project = opt_raw(project_id, ProjectId::get);
+        let filter = "status = ?1 AND status_reason = ?2 AND (?3 IS NULL OR project_id = ?3)";
+        let events = query_all(
+            &conn,
+            &format!(
+                "SELECT {EVENT_FIELDS} FROM events WHERE {filter}
+                 ORDER BY received_at DESC, id DESC LIMIT ?4"
+            ),
+            params![
+                EventStatus::Skipped.as_str(),
+                reason,
+                project.clone(),
+                i64::from(limit)
+            ],
+            decode_event,
+        )
+        .await?;
+        let total = query_one(
+            &conn,
+            &format!("SELECT COUNT(*) FROM events WHERE {filter}"),
+            params![EventStatus::Skipped.as_str(), reason, project],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        Ok((events, u64::try_from(total).unwrap_or(0)))
     }
 }
