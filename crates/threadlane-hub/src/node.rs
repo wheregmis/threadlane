@@ -20,6 +20,7 @@ use tokio::sync::watch;
 use crate::DirLock;
 use crate::config::{DataDir, HubConfig};
 use crate::core::HubCore;
+use crate::gh::GhSource;
 
 /// An opened hub: its configuration, lock, and stores.
 #[derive(Debug)]
@@ -93,6 +94,7 @@ impl Hub {
             self.config.settings(),
         )
         .await
+        .map(|core| core.with_github(Arc::new(GhSource::with_gh(&self.config.github.gh))))
         .context("starting the hub's roles")
     }
 
@@ -255,7 +257,7 @@ async fn start_embedded_runner(
         core.link(machine),
         backends,
         Arc::new(GitWorkspaces::new(data_dir.workspaces())),
-        Arc::new(GitForge::default()),
+        Arc::new(GitForge::with_gh(&config.github.gh)),
         clock,
         Arc::new(NoHooks),
         runner_config,
@@ -278,13 +280,14 @@ mod tests {
 
     use super::*;
 
-    /// A configuration whose `claude` is `program` and whose `codex` does not
-    /// exist, so no test runs the real ones, and whose iroh endpoint stays on
-    /// loopback with no discovery.
+    /// A configuration whose `claude` is `program` and whose `codex` and
+    /// `gh` do not exist, so no test runs the real ones, and whose iroh
+    /// endpoint stays on loopback with no discovery.
     fn config_with_claude(program: &Path) -> HubConfig {
         let codex = program.with_file_name("no-codex-here");
         HubConfig::parse(&format!(
             "[iroh]\nbind = \"127.0.0.1:0\"\nlocal_discovery = false\n\
+             [github]\ngh = \"/nonexistent/gh\"\n\
              [runner]\ndebounce_secs = 0\n[backends.claude]\nprogram = {:?}\n[backends.codex]\nprogram = {:?}",
             program.display().to_string(),
             codex.display().to_string()

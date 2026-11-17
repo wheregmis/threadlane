@@ -32,8 +32,8 @@ use threadlane_hub::{
 };
 use threadlane_runner::{GitWorkspaces, PROGRESS_PROMPT, Runner, RunnerConfig, RunnerError};
 use threadlane_store::{Bootstrap, HubDb};
-use threadlane_testkit::fakes::FakeForge;
-use threadlane_testkit::git::bare_repository;
+use threadlane_testkit::fakes::{FakeForge, FakeGithub};
+use threadlane_testkit::git::{bare_repository, git};
 use threadlane_testkit::{CrashPlan, FakeClock, Script, ScriptedBackend};
 use tokio::task::JoinHandle;
 
@@ -244,6 +244,8 @@ pub struct World {
     pub forge: FakeForge,
     /// A second backend on the machine, if the scenario has one.
     pub codex: Option<ScriptedBackend>,
+    /// GitHub, if the scenario's hub polls it.
+    pub github: Option<FakeGithub>,
 }
 
 impl World {
@@ -279,6 +281,7 @@ impl World {
             runner_config,
             forge: FakeForge::default(),
             codex: None,
+            github: None,
         }
     }
 
@@ -286,6 +289,43 @@ impl World {
     pub fn with_codex(mut self) -> Self {
         self.codex = Some(scripted(BackendKind::Codex, &self.clock));
         self
+    }
+
+    /// Gives the hub a fake GitHub to poll.
+    pub fn with_github(mut self) -> Self {
+        self.github = Some(FakeGithub::default());
+        self
+    }
+
+    /// Registers `name` in General under the GitHub remote `remote`, with
+    /// the machine's clone of it already made from a local bare repository,
+    /// so that working in it never reaches the network.
+    pub async fn add_github_repository(&self, name: &str, remote: &str) -> Repository {
+        let bare = bare_repository(&self.lanes.path().join("remotes"), name);
+        let repository = self
+            .db
+            .create_repository(&NewRepository {
+                project_id: self.db.general_project().await.unwrap().id,
+                name: name.to_owned(),
+                remote_url: remote.to_owned(),
+                default_branch: "main".to_owned(),
+                protected_branches: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let clones = self.workspaces().join("clones");
+        std::fs::create_dir_all(&clones).unwrap();
+        git(
+            &clones,
+            &[
+                "clone",
+                "--no-checkout",
+                "--quiet",
+                bare.to_str().unwrap(),
+                &repository.id.to_string(),
+            ],
+        );
+        repository
     }
 
     /// Where the machine keeps its clones and task worktrees.
@@ -320,6 +360,10 @@ impl World {
         )
         .await
         .unwrap();
+        let core = match &self.github {
+            Some(github) => core.with_github(Arc::new(github.clone())),
+            None => core,
+        };
         let machine = core.local_machine().await.unwrap();
         let sim = Sim {
             world: self.clone(),

@@ -9,6 +9,7 @@ pub mod admission;
 pub mod backend;
 pub mod client;
 pub mod forge;
+pub mod github;
 pub mod ids;
 pub mod link;
 pub mod memory;

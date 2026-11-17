@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 
 use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
+use threadlane_core::github::{GITHUB_SOURCE, GithubItem};
 use threadlane_core::ids::ProjectId;
 use threadlane_core::model::{
     Agent, Decision, Event, EventKind, LaneKind, OutboxMessage, Project, Task, Trust,
@@ -175,6 +176,7 @@ fn render_event(event: &Event, out: &mut String) {
     );
     let content = match event.kind {
         EventKind::TimerFired => timer_text(&event.payload),
+        EventKind::OutsideEvent if event.source == GITHUB_SOURCE => github_text(&event.payload),
         _ => payload_text(&event.payload),
     };
     if event.trust == Trust::External {
@@ -231,6 +233,32 @@ fn timer_text(payload: &Json) -> String {
         payload["timer_id"],
         payload["instruction"].as_str().unwrap_or_default()
     )
+}
+
+/// A GitHub item as a run reads it: what it is, on which repository and
+/// pull request, by whom, then its content (docs/milestone-8.md §3). All of
+/// it came from GitHub, so all of it goes inside the data markers.
+fn github_text(payload: &Json) -> String {
+    let Ok(item) = serde_json::from_value::<GithubItem>(payload.clone()) else {
+        return payload_text(payload);
+    };
+    let mut text = format!("GitHub: {} on {}", item.kind.describe(), item.repository);
+    if let Some(number) = item.pull_request {
+        let _ = write!(text, ", pull request #{number}");
+    } else if let Some(branch) = &item.branch {
+        let _ = write!(text, ", branch {branch}");
+    }
+    if let Some(author) = &item.author {
+        let _ = write!(text, ", by {author}");
+    }
+    let _ = write!(text, ", at {}.\n{}", item.at, item.title);
+    if let Some(url) = &item.url {
+        let _ = write!(text, "\n{url}");
+    }
+    if !item.body.trim().is_empty() {
+        let _ = write!(text, "\n\n{}", item.body.trim_end());
+    }
+    text
 }
 
 fn body_text(body: &Json) -> String {
@@ -305,6 +333,46 @@ mod tests {
             text,
             "Routine 4 fired. Set by the user; due at 2026-01-01T09:00:00Z. Its instruction:\n\
              Summarize the open pull requests."
+        );
+    }
+
+    #[test]
+    fn a_github_event_says_what_it_is_where_and_by_whom() {
+        let text = github_text(&serde_json::json!({
+            "id": "review:80",
+            "kind": "review",
+            "repository": "acme/widgets",
+            "pull_request": 42,
+            "branch": "threadlane/T-0001",
+            "author": "octocat",
+            "title": "changes requested",
+            "body": "Please keep the old setting working too.",
+            "url": "https://github.com/acme/widgets/pull/42#pullrequestreview-80",
+            "at": "2026-11-17T08:45:00Z",
+        }));
+        assert_eq!(
+            text,
+            "GitHub: a review on acme/widgets, pull request #42, by octocat, at \
+             2026-11-17T08:45:00Z.\nchanges requested\n\
+             https://github.com/acme/widgets/pull/42#pullrequestreview-80\n\n\
+             Please keep the old setting working too."
+        );
+        let request = github_text(&serde_json::json!({
+            "id": "notification:1:2026-11-17T08:58:12Z",
+            "kind": "review_request",
+            "repository": "acme/widgets",
+            "pull_request": 42,
+            "branch": null,
+            "author": null,
+            "title": "Add the settings page",
+            "body": "",
+            "url": null,
+            "at": "2026-11-17T08:58:12Z",
+        }));
+        assert_eq!(
+            request,
+            "GitHub: a review request on acme/widgets, pull request #42, at \
+             2026-11-17T08:58:12Z.\nAdd the settings page"
         );
     }
 

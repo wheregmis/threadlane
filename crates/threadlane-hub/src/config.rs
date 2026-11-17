@@ -283,6 +283,21 @@ impl Default for IrohConfig {
     }
 }
 
+/// The `[github]` table: how the hub reaches GitHub (Plan.md §6.6).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubConfig {
+    /// The `gh` executable the GitHub poller and the embedded runner's
+    /// forge run: a path, or a name looked up on `PATH`.
+    pub gh: PathBuf,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self { gh: "gh".into() }
+    }
+}
+
 /// Everything in `hub.toml`. Every table is optional.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -294,6 +309,7 @@ pub struct HubConfig {
     pub runner: RunnerTable,
     pub backends: BackendsConfig,
     pub iroh: IrohConfig,
+    pub github: GithubConfig,
 }
 
 impl HubConfig {
@@ -372,6 +388,10 @@ impl HubConfig {
         anyhow::ensure!(
             runner.debounce_secs < timing.lease_ttl_secs,
             "runner.debounce_secs must be shorter than the lease"
+        );
+        anyhow::ensure!(
+            !self.github.gh.as_os_str().is_empty(),
+            "github.gh must not be empty"
         );
         let claude = &self.backends.claude;
         let codex = &self.backends.codex;

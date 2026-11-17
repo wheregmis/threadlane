@@ -1,0 +1,7 @@
+HTTP/2.0 304 Not Modified
+Cache-Control: private, max-age=60, s-maxage=60
+Date: Tue, 17 Nov 2026 09:01:00 GMT
+Last-Modified: Tue, 17 Nov 2026 08:58:12 GMT
+X-Github-Api-Version-Selected: 2022-11-28
+X-Poll-Interval: 120
+

@@ -1558,9 +1558,11 @@ What happens when something goes away (sections 5.8 and 5.9).
 
 The two ways work can start or continue without a message from you.
 
-- Timer store, scheduler, recurrence with time zones.
-- Timer tools with guardrails; `requested` set from the creator.
-- GitHub source through the hub computer's `gh` login (section 6.6): the notifications feed, and the pull requests and branches of active tasks.
+**Status:** done on the scripted backend and a fake GitHub; design in `docs/milestone-8.md`. Not yet checked: a routine or follow-up on the real `claude`, and the GitHub source against the real `gh` (its parsers are tested on hand-written fixtures). Known gaps: a comment on a task's pull request can arrive twice, inline review comments are not read, only the first page of each answer is read.
+
+- [x] Timer store, scheduler, recurrence with time zones.
+- [x] Timer tools with guardrails; `requested` set from the creator.
+- [x] GitHub source through the hub computer's `gh` login (section 6.6): the notifications feed, and the pull requests and branches of active tasks.
 
 **Exit:** An agent sets a follow-up and wakes on time. A routine you created fires at the right local time across a daylight-saving change. A scheduler crash fires nothing twice. Downtime across several occurrences fires once. A check result on a task's pull request wakes that task within about a minute. A review request that belongs to no task is recorded and not acted on. After the hub has been asleep for an hour, everything from that hour arrives exactly once and your GitHub inbox is unchanged. Invariants 4, 19.
 
@@ -1594,6 +1596,13 @@ The two ways work can start or continue without a message from you.
 - Load test: many lanes, several machines, random kills.
 
 **Exit:** Dreaming measurably reduces stale and duplicate memory on a seeded corpus. All invariants hold under load with random process and machine kills. A guest machine cannot read memory or receive unassigned tasks.
+
+### Before the prerelease: one place to talk
+
+Agreed on 2026-11-17, to be built after milestones 8 to 11 and before the second machine.
+
+- **Home as one merged timeline** of every conversation in every paired space, and a merged view per space of its projects. A change in the app only: each message still goes to one project's lead, and no hub learns of another.
+- **A space lead.** The General project's lead becomes the lead of its space: you talk to it, it hands goals to the leads of the space's projects and reports back. It stays inside one space. There is no lead above all spaces, because it would have to read across hubs (section 2.1).
 
 ### Milestone 12: Away from home
 

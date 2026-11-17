@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use threadlane_core::adapters::ChannelAdapter;
 use threadlane_core::client::HubApi;
+use threadlane_core::github::GithubSource;
 use threadlane_core::ids::{LaneId, MachineId};
 use threadlane_core::link::HubLink;
 use threadlane_core::runtime::{StepHook, WakeTarget, Waker};
@@ -37,6 +38,8 @@ pub(crate) struct Inner {
     /// How clients reach this hub over iroh, for join codes; `None` while
     /// the hub does not serve iroh.
     pub(crate) iroh: Option<EndpointAddr>,
+    /// Where the GitHub poller reads; `None` runs no poller.
+    pub(crate) github: Option<Arc<dyn GithubSource>>,
 }
 
 /// The hub of one space: handler, placement, begin-run, tool gateway,
@@ -82,6 +85,7 @@ impl HubCore {
                 policy: Arc::new(TierPolicy::default()),
                 channels: vec![Arc::new(ClientChannel)],
                 iroh: None,
+                github: None,
             }),
         })
     }
@@ -110,6 +114,13 @@ impl HubCore {
     #[must_use]
     pub fn with_iroh(self, addr: EndpointAddr) -> Self {
         self.map_inner(|inner| inner.iroh = Some(addr))
+    }
+
+    /// The same hub, polling GitHub through `source` while its machine
+    /// reports `gh` logged in (Plan.md §6.6).
+    #[must_use]
+    pub fn with_github(self, source: Arc<dyn GithubSource>) -> Self {
+        self.map_inner(|inner| inner.github = Some(source))
     }
 
     fn map_inner(self, change: impl FnOnce(&mut Inner)) -> Self {
@@ -198,10 +209,12 @@ impl HubCore {
         Ok(expired)
     }
 
-    /// Runs the sweep loop, the dispatcher loop, and the scheduler until
-    /// `shutdown` completes. The first two run every `poll`, the dispatcher
-    /// also on every dispatcher wake hint; the scheduler every `scheduler`. Store errors are logged and retried on the next
-    /// pass.
+    /// Runs the sweep loop, the dispatcher loop, the scheduler, and, with a
+    /// GitHub source, the GitHub poller until `shutdown` completes. The
+    /// first two run every `poll`, the dispatcher also on every dispatcher
+    /// wake hint; the scheduler every `scheduler`; the poller at the
+    /// interval GitHub asks for. Store errors are logged and retried on the
+    /// next pass.
     ///
     /// # Errors
     ///
@@ -212,6 +225,7 @@ impl HubCore {
             result = self.sweep_loop() => result,
             result = self.dispatch_loop() => result,
             result = self.schedule_loop() => result,
+            result = self.github_loop() => result,
         }
     }
 

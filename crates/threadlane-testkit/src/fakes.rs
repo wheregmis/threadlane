@@ -12,6 +12,7 @@ use threadlane_core::adapters::{
     SourceBatch, SourceError, SourceEvent, Workspace, WorkspaceError, WorkspaceSpec,
 };
 use threadlane_core::forge::{Forge, ForgeError};
+use threadlane_core::github::{Feed, GithubError, GithubItem, GithubSource, PullTarget};
 use threadlane_core::model::OutboxMessage;
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::tools::{
@@ -476,5 +477,113 @@ impl Forge for FakeForge {
             .iter()
             .find(|(head, _)| head == branch)
             .map(|(_, url)| url.clone()))
+    }
+}
+
+/// One call a [`FakeGithub`] was asked to make. Each is a read: the
+/// interface has no other kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubCall {
+    Notifications {
+        cursor: Option<String>,
+    },
+    PullRequest {
+        target: PullTarget,
+        since: Option<String>,
+    },
+}
+
+#[derive(Debug, Default)]
+struct GithubState {
+    calls: Vec<GithubCall>,
+    notifications: Vec<GithubItem>,
+    /// Bumped by every notification, so the feed knows what changed.
+    version: u64,
+    /// Items on a task's work, by `(repository, branch)`.
+    work: Vec<(String, String, GithubItem)>,
+    poll_interval: Option<std::time::Duration>,
+}
+
+/// A [`GithubSource`] that touches no network. It records every call, keeps
+/// every notification unread, as GitHub does when nothing marks it read,
+/// and answers "not modified" when nothing was added since the cursor.
+/// Clones share their state.
+#[derive(Debug, Clone, Default)]
+pub struct FakeGithub {
+    state: Arc<Mutex<GithubState>>,
+}
+
+impl FakeGithub {
+    /// Adds a notification to the feed.
+    pub fn notify(&self, item: GithubItem) {
+        let mut state = lock(&self.state);
+        state.notifications.push(item);
+        state.version += 1;
+    }
+
+    /// Adds an item on the work of `branch` in `repository`.
+    pub fn add_to(&self, repository: &str, branch: &str, item: GithubItem) {
+        lock(&self.state)
+            .work
+            .push((repository.to_owned(), branch.to_owned(), item));
+    }
+
+    /// What the feed answers as the interval it asks for.
+    pub fn set_poll_interval(&self, interval: Option<std::time::Duration>) {
+        lock(&self.state).poll_interval = interval;
+    }
+
+    /// Every call, in order.
+    #[must_use]
+    pub fn calls(&self) -> Vec<GithubCall> {
+        lock(&self.state).calls.clone()
+    }
+}
+
+#[async_trait]
+impl GithubSource for FakeGithub {
+    async fn notifications(&self, cursor: Option<&str>) -> Result<Feed, GithubError> {
+        let mut state = lock(&self.state);
+        state.calls.push(GithubCall::Notifications {
+            cursor: cursor.map(str::to_owned),
+        });
+        let version = state.version.to_string();
+        if cursor == Some(version.as_str()) {
+            return Ok(Feed {
+                not_modified: true,
+                poll_interval: state.poll_interval,
+                ..Feed::default()
+            });
+        }
+        Ok(Feed {
+            not_modified: false,
+            items: state.notifications.clone(),
+            cursor: Some(version),
+            poll_interval: state.poll_interval,
+        })
+    }
+
+    async fn pull_request(
+        &self,
+        target: &PullTarget,
+        since: Option<&str>,
+    ) -> Result<Vec<GithubItem>, GithubError> {
+        let mut state = lock(&self.state);
+        state.calls.push(GithubCall::PullRequest {
+            target: target.clone(),
+            since: since.map(str::to_owned),
+        });
+        let mut items: Vec<GithubItem> = state
+            .work
+            .iter()
+            .filter(|(repository, branch, item)| {
+                *repository == target.repository
+                    && *branch == target.branch
+                    && since.is_none_or(|since| item.at.as_str() >= since)
+            })
+            .map(|(_, _, item)| item.clone())
+            .collect();
+        items.sort_by(|a, b| a.at.cmp(&b.at));
+        Ok(items)
     }
 }

@@ -17,6 +17,8 @@ mod dispatcher;
 mod error;
 mod finish;
 mod gateway;
+mod gh;
+mod github;
 mod handler;
 mod link;
 mod memory;
@@ -45,6 +47,8 @@ pub use crate::defaults::{
 };
 pub use crate::dispatcher::ClientChannel;
 pub use crate::error::HubError;
+pub use crate::gh::GhSource;
+pub use crate::github::GithubPass;
 pub use crate::handler::CLIENT_SOURCE;
 pub use crate::memory::{MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW};
 pub use crate::node::Hub;

@@ -266,10 +266,12 @@ async fn a_revoked_client_is_disconnected_at_once_and_cannot_come_back() {
     hub.stop().await;
 }
 
-/// A configuration on loopback with no discovery and no real `claude`.
+/// A configuration on loopback with no discovery, no real `claude` and no
+/// real `gh`.
 fn config(dir: &std::path::Path) -> HubConfig {
     HubConfig::parse(&format!(
         "[iroh]\nbind = \"127.0.0.1:0\"\nlocal_discovery = false\n\
+         [github]\ngh = \"/nonexistent/gh\"\n\
          [backends.claude]\nprogram = {:?}",
         dir.join("no-claude-here").display().to_string()
     ))

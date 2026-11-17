@@ -1,0 +1,59 @@
+{
+  "total_count": 3,
+  "check_runs": [
+    {
+      "id": 31000000001,
+      "head_sha": "ce587453ced02b1526dfb4cb910479d431683101",
+      "node_id": "CR_kwDOABCD",
+      "external_id": "",
+      "url": "https://api.github.com/repos/acme/widgets/check-runs/31000000001",
+      "html_url": "https://github.com/acme/widgets/actions/runs/900/job/31000000001",
+      "details_url": "https://github.com/acme/widgets/actions/runs/900/job/31000000001",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-11-17T08:25:00Z",
+      "completed_at": "2026-11-17T08:30:40Z",
+      "output": {
+        "title": "2 tests failed",
+        "summary": "settings::saves_the_form and settings::shows_errors failed.",
+        "text": null,
+        "annotations_count": 2,
+        "annotations_url": "https://api.github.com/repos/acme/widgets/check-runs/31000000001/annotations"
+      },
+      "name": "test",
+      "check_suite": { "id": 5000 },
+      "app": { "id": 15368, "slug": "github-actions", "name": "GitHub Actions" },
+      "pull_requests": [
+        { "url": "https://api.github.com/repos/acme/widgets/pulls/42", "id": 1934, "number": 42,
+          "head": { "ref": "threadlane/T-0001", "sha": "ce587453ced02b1526dfb4cb910479d431683101" },
+          "base": { "ref": "main", "sha": "7638417db6d59f3c431d3e1f261cc637155684cd" } }
+      ]
+    },
+    {
+      "id": 31000000002,
+      "head_sha": "ce587453ced02b1526dfb4cb910479d431683101",
+      "html_url": "https://github.com/acme/widgets/actions/runs/900/job/31000000002",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-17T08:25:00Z",
+      "completed_at": "2026-11-17T08:27:10Z",
+      "output": { "title": null, "summary": null, "text": null, "annotations_count": 0 },
+      "name": "lint",
+      "app": { "id": 15368, "slug": "github-actions", "name": "GitHub Actions" },
+      "pull_requests": []
+    },
+    {
+      "id": 31000000003,
+      "head_sha": "ce587453ced02b1526dfb4cb910479d431683101",
+      "html_url": "https://github.com/acme/widgets/actions/runs/900/job/31000000003",
+      "status": "in_progress",
+      "conclusion": null,
+      "started_at": "2026-11-17T08:25:00Z",
+      "completed_at": null,
+      "output": { "title": null, "summary": null, "text": null, "annotations_count": 0 },
+      "name": "build (macos)",
+      "app": { "id": 15368, "slug": "github-actions", "name": "GitHub Actions" },
+      "pull_requests": []
+    }
+  ]
+}

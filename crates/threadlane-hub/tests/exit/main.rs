@@ -16,6 +16,7 @@ mod crash;
 mod cycle;
 mod failures;
 mod fencing;
+mod github;
 mod live;
 mod loops;
 mod memory;

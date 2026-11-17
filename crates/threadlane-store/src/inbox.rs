@@ -391,6 +391,36 @@ impl InboxStore for HubDb {
         Ok(expired)
     }
 
+    async fn source_cursor(&self, source: &str) -> StoreResult<Option<String>> {
+        let conn = self.db.reader()?;
+        let cursor = query_opt(
+            &conn,
+            "SELECT cursor FROM source_cursors WHERE source = ?1",
+            params![source],
+            |row| Cols(row).opt_text(0),
+        )
+        .await?;
+        Ok(cursor.flatten())
+    }
+
+    async fn set_source_cursor(
+        &self,
+        source: &str,
+        cursor: &str,
+        now: Timestamp,
+    ) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        exec(
+            tx.conn(),
+            "INSERT INTO source_cursors (source, cursor, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (source) DO UPDATE SET cursor = excluded.cursor,
+                 updated_at = excluded.updated_at",
+            params![source, cursor, now.as_millis()],
+        )
+        .await?;
+        tx.commit().await
+    }
+
     async fn user_messages(
         &self,
         lane_id: LaneId,

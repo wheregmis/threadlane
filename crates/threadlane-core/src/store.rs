@@ -147,6 +147,16 @@ pub trait InboxStore: Send + Sync {
     /// Releases every lease that expired at or before `now`. Their claimed
     /// events return to pending and their active runs are abandoned.
     async fn expire_leases(&self, now: Timestamp) -> StoreResult<Vec<LaneId>>;
+    /// The cursor a pulling source keeps under `source` (Plan.md §6.6), if
+    /// it has saved one.
+    async fn source_cursor(&self, source: &str) -> StoreResult<Option<String>>;
+    /// Saves a pulling source's cursor, replacing the one before.
+    async fn set_source_cursor(
+        &self,
+        source: &str,
+        cursor: &str,
+        now: Timestamp,
+    ) -> StoreResult<()>;
     /// Your messages in a lane, in any status, received before `before`
     /// (all of them when `None`), newest first, at most `limit`. The
     /// client's conversation history (Plan.md §11.1).

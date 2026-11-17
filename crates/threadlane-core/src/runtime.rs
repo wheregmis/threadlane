@@ -213,6 +213,24 @@ pub mod steps {
         pub const ALL: &[Step] = &[AFTER_SCAN, AFTER_FIRE, AFTER_WAKE];
     }
 
+    /// GitHub poller pass, Plan.md §6.6: the feed, then each task's work,
+    /// each fetched, its items inserted one by one, and its cursor saved.
+    pub mod github {
+        use super::Step;
+
+        /// One answer was fetched from GitHub.
+        pub const AFTER_FETCH: Step = Step("github.after_fetch");
+        /// One item was inserted, or found to be a duplicate.
+        pub const AFTER_INSERT: Step = Step("github.after_insert");
+        /// The cursor of one answer was saved.
+        pub const AFTER_CURSOR: Step = Step("github.after_cursor");
+        /// The lanes that got events were woken.
+        pub const AFTER_WAKE: Step = Step("github.after_wake");
+
+        /// Every poller boundary, in pass order.
+        pub const ALL: &[Step] = &[AFTER_FETCH, AFTER_INSERT, AFTER_CURSOR, AFTER_WAKE];
+    }
+
     /// Dispatcher pass, Plan.md §10.2.
     pub mod dispatcher {
         use super::Step;

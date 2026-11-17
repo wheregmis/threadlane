@@ -10,6 +10,7 @@ mod decisions;
 mod failures;
 mod feed;
 mod fencing;
+mod github;
 mod handler;
 mod memory;
 mod org;
