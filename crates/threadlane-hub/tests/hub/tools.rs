@@ -9,11 +9,11 @@ use threadlane_core::model::RunOutcome;
 use threadlane_core::store::OutboxStore;
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError, ToolRegistry};
+use threadlane_hub::{ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
 use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, CombinedTools, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT,
     MEMORY_RENAME, MEMORY_VIEW, SEND_MESSAGE, UPDATE_TASK,
 };
-use threadlane_hub::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
 use threadlane_testkit::fakes::FakeTools;
 
 use crate::common::{PAST_LEASE, TestHub, begin};
@@ -172,13 +172,17 @@ fn tool(name: &str, tier: Tier) -> ToolDefinition {
 }
 
 #[tokio::test]
-async fn tools_above_tier_one_are_blocked() {
+async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
     let base = TestHub::start().await;
     let fake = FakeTools::new();
     fake.register(tool("read_notes", Tier::Read), Ok(json!({ "notes": [] })));
     fake.register(
         tool("merge_pull_request", Tier::SharedReversible),
         Ok(json!({ "number": 7 })),
+    );
+    fake.register(
+        tool("delete_repository", Tier::Forbidden),
+        Ok(json!({ "deleted": true })),
     );
     let tools = CombinedTools::new(vec![base.core.tools(), Arc::new(fake.clone())]);
     let core = base.core.clone().with_tools(Arc::new(tools));
@@ -204,10 +208,25 @@ async fn tools_above_tier_one_are_blocked() {
             CREATE_SCHEDULE,
             LIST_TIMERS,
             CANCEL_TIMER,
+            ASK_USER,
             "read_notes",
-            "merge_pull_request"
+            "merge_pull_request",
+            "delete_repository"
         ]
     );
+
+    // The lead is On request: a shared, reversible call asks.
+    let asked = hub
+        .link
+        .call_tool(
+            &lease,
+            run.run_id,
+            Some("toolu_0"),
+            "merge_pull_request",
+            &json!({ "repository": "app" }),
+        )
+        .await;
+    assert_eq!(asked, Err(ToolError::WaitingOnYou));
 
     let blocked = hub
         .link
@@ -215,12 +234,15 @@ async fn tools_above_tier_one_are_blocked() {
             &lease,
             run.run_id,
             Some("toolu_1"),
-            "merge_pull_request",
+            "delete_repository",
             &json!({}),
         )
         .await;
     assert!(matches!(blocked, Err(ToolError::Blocked(_))), "{blocked:?}");
-    assert!(fake.calls().is_empty(), "a blocked call is never executed");
+    assert!(
+        fake.calls().is_empty(),
+        "neither an asked nor a blocked call is executed"
+    );
 
     let allowed = hub
         .link

@@ -41,6 +41,9 @@ pub struct HubSettings {
     /// The model a backend runs when neither the agent nor its binding names
     /// one. A backend missing here runs its own default model.
     pub default_models: HashMap<BackendKind, String>,
+    /// How long a decision waits on you before it expires as declined with
+    /// "no response" (docs/milestone-9.md decision 8).
+    pub decision_expiry: Duration,
 }
 
 impl Default for HubSettings {
@@ -60,6 +63,7 @@ impl Default for HubSettings {
             usage_limit_fallback: Duration::from_secs(5 * 60),
             scheduler: Duration::from_secs(10),
             default_models: HashMap::new(),
+            decision_expiry: Duration::from_secs(24 * 60 * 60),
         }
     }
 }

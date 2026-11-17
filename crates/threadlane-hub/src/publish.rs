@@ -53,7 +53,9 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: schema,
-        tier: Tier::SharedHardToUndo,
+        // Shared and reversible (Plan.md §2.3): a branch can be deleted and a
+        // draft closed.
+        tier: Tier::SharedReversible,
         safe_to_repeat: false,
     };
     vec![
@@ -102,8 +104,15 @@ pub(crate) async fn proposal(
     if crate::memory::is_change(tool) {
         return crate::memory::proposal(lane.project_id, lane.task_id, tool, arguments);
     }
-    if crate::timers::asks(tool) {
+    if tool == crate::timers::CREATE_SCHEDULE {
         return crate::timers::proposal(db, lane, arguments).await;
+    }
+    if tool == crate::tools::ASK_USER {
+        let (question, _) = crate::tools::question(arguments)?;
+        return Ok(Proposal {
+            question,
+            context: String::new(),
+        });
     }
     if tool != PUBLISH_BRANCH && tool != OPEN_PULL_REQUEST {
         return Ok(Proposal {

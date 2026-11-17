@@ -2,13 +2,15 @@
 
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
-use threadlane_core::ids::{DecisionId, LaneId};
+use threadlane_core::ids::{DecisionId, LaneId, ProjectId, StandingRuleId};
 use threadlane_core::model::{
-    Answered, Decision, DecisionAnswer, DecisionStatus, EventKind, Inserted, Lease, NewDecision,
-    NewEvent, NewOutboxMessage, OutboxKind, ToolCallBegin, Trust, Urgency,
+    Answered, Decision, DecisionAnswer, DecisionKind, DecisionStatus, EventKind, Inserted, Lease,
+    NewDecision, NewEvent, NewOutboxMessage, NewStandingRule, NewTimer, OutboxKind, StandingRule,
+    TimerCategory, TimerCreator, ToolCallBegin, Trust, Urgency,
 };
 use threadlane_core::store::{DecisionStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
+use threadlane_core::tools::Tier;
 use turso::{Connection, Row};
 
 use crate::HubDb;
@@ -17,9 +19,13 @@ use crate::inbox::{check_lease, insert_event_in};
 use crate::outbox::enqueue_in;
 use crate::row::{Cols, json_text, opt_raw, opt_ts, params};
 use crate::session::NOTICE_CHANNEL;
+use crate::timer::insert_timer_in;
 
 /// Source name of `decision_answer` events.
 pub const DECISION_SOURCE: &str = "decision";
+
+/// The note of a decision that expired (docs/milestone-9.md decision 8).
+pub const NO_RESPONSE: &str = "no response";
 
 const DECISION_FIELDS: &str = "id, project_id, lane_id, task_id, session_id, run_id,
     tool_call_id, tool, arguments, arguments_hash, kind, question, context, options,
@@ -90,53 +96,46 @@ fn card(decision: &Decision) -> Json {
     })
 }
 
-/// Records an answer to a pending decision and inserts its event into the
-/// decision's lane, inside the caller's transaction.
-async fn answer_in(
+/// The `created_by_call` of the system timer that expires decision `id`.
+fn expiry_call(id: DecisionId) -> String {
+    format!("decision:{}", id.get())
+}
+
+/// The decision a system timer's `created_by_call` expires, if it is one.
+pub(crate) fn expiring_decision(call: &str) -> Option<DecisionId> {
+    call.strip_prefix("decision:")?.parse().ok().map(DecisionId)
+}
+
+/// Closes a pending decision with `status` and `answer`, cancels its expiry
+/// timer, and inserts the event that resumes its lane, inside the caller's
+/// transaction. `text` is what the agent is told.
+async fn close_in(
     conn: &Connection,
     decision: &Decision,
-    answer: &DecisionAnswer,
+    status: DecisionStatus,
+    answer: &Json,
+    text: String,
+    trust: Trust,
+    at: Timestamp,
 ) -> StoreResult<Inserted> {
     let id = decision.id;
-    let option = decision
-        .options
-        .get(answer.option as usize)
-        .ok_or_else(|| {
-            StoreError::Invalid(format!(
-                "option {} is out of range for decision {id}",
-                answer.option
-            ))
-        })?;
     exec(
         conn,
         "UPDATE decisions SET status = ?1, answer = ?2, answered_at = ?3 WHERE id = ?4",
         params![
-            DecisionStatus::Answered.as_str(),
+            status.as_str(),
             json_text(answer)?,
-            answer.answered_at.as_millis(),
-            id.get(),
+            at.as_millis(),
+            id.get()
         ],
     )
     .await?;
-    let mut text = if option.approves() {
-        format!(
-            "You approved {id} ({}). The system performs the call before this run starts; \
-             its outcome follows.",
-            decision.tool
-        )
-    } else {
-        format!(
-            "You declined {id} ({}): {:?}. It was not performed.",
-            decision.tool, option.label
-        )
-    };
-    if let Some(note) = answer
-        .note
-        .as_deref()
-        .filter(|note| !note.trim().is_empty())
-    {
-        text.push_str(&format!(" Note from the user: {note}"));
-    }
+    exec(
+        conn,
+        "UPDATE timers SET status = 'cancelled' WHERE created_by_call = ?1 AND status = 'active'",
+        params![expiry_call(id).as_str()],
+    )
+    .await?;
     Box::pin(insert_event_in(
         conn,
         &NewEvent {
@@ -148,18 +147,136 @@ async fn answer_in(
             payload: json!({
                 "text": text,
                 "decision_id": id,
-                "option": answer.option,
-                "note": answer.note,
-                "standing_rule": answer.standing_rule,
+                "option": answer.get("option"),
+                "note": answer.get("note"),
+                "standing_rule": answer.get("standing_rule").cloned().unwrap_or(Json::Bool(false)),
             }),
-            trust: Trust::User,
+            trust,
+            // It continues the run that asked.
             requested: true,
             session_ref: decision.session_id,
             decision_ref: Some(id),
             reply_to_ref: None,
-            received_at: answer.answered_at,
+            received_at: at,
         },
     ))
+    .await
+}
+
+/// Records an answer to a pending decision and inserts its event into the
+/// decision's lane, inside the caller's transaction. `rule` is the standing
+/// rule that answered it, if no person did.
+async fn answer_in(
+    conn: &Connection,
+    decision: &Decision,
+    answer: &DecisionAnswer,
+    rule: Option<StandingRuleId>,
+) -> StoreResult<Inserted> {
+    let id = decision.id;
+    let option = decision
+        .options
+        .get(answer.option as usize)
+        .ok_or_else(|| {
+            StoreError::Invalid(format!(
+                "option {} is out of range for decision {id}",
+                answer.option
+            ))
+        })?;
+    let mut text = match rule {
+        Some(rule) => format!(
+            "Standing rule {rule} allowed {id} ({}). The system performs the call before this \
+             run starts; its outcome follows.",
+            decision.tool
+        ),
+        None if decision.kind == DecisionKind::Input => format!(
+            "You answered {id} ({:?}): {:?}.",
+            decision.question, option.label
+        ),
+        None if option.approves() => format!(
+            "You approved {id} ({}). The system performs the call before this run starts; \
+             its outcome follows.",
+            decision.tool
+        ),
+        None => format!(
+            "You declined {id} ({}): {:?}. It was not performed.",
+            decision.tool, option.label
+        ),
+    };
+    if let Some(note) = answer
+        .note
+        .as_deref()
+        .filter(|note| !note.trim().is_empty())
+    {
+        text.push_str(&format!(" Note from the user: {note}"));
+    }
+    close_in(
+        conn,
+        decision,
+        DecisionStatus::Answered,
+        &serde_json::to_value(answer).map_err(|error| StoreError::Invalid(error.to_string()))?,
+        text,
+        Trust::User,
+        answer.answered_at,
+    )
+    .await
+}
+
+/// Expires decision `id` as declined with "no response", once: a decision
+/// no longer pending keeps what it has, and its answer event is returned.
+pub(crate) async fn expire_in(
+    conn: &Connection,
+    id: DecisionId,
+    now: Timestamp,
+) -> StoreResult<Inserted> {
+    let decision = decision_in(conn, id)
+        .await?
+        .ok_or_else(|| StoreError::not_found("decision", id))?;
+    if decision.status != DecisionStatus::Pending {
+        return query_opt(
+            conn,
+            "SELECT id FROM events WHERE source = ?1 AND source_event_id = ?2",
+            params![DECISION_SOURCE, format!("answer:{}", id.get())],
+            |row| Cols(row).id(0),
+        )
+        .await?
+        .map(Inserted::Duplicate)
+        .ok_or_else(|| StoreError::Conflict(format!("decision {id} is {}", decision.status)));
+    }
+    let decline = decision
+        .options
+        .iter()
+        .position(|option| !option.approves())
+        .filter(|_| decision.kind != DecisionKind::Input);
+    let (answer, text) = match decline {
+        Some(option) => (
+            json!({
+                "option": option,
+                "note": NO_RESPONSE,
+                "standing_rule": false,
+                "answered_at": now,
+            }),
+            format!(
+                "{id} ({}) expired with no response, so it is declined. It was not performed.",
+                decision.tool
+            ),
+        ),
+        None => (
+            json!({ "note": NO_RESPONSE, "answered_at": now }),
+            format!(
+                "{id} ({:?}) expired with no response: the user did not answer.",
+                decision.question
+            ),
+        ),
+    };
+    close_in(
+        conn,
+        &decision,
+        DecisionStatus::Expired,
+        &answer,
+        text,
+        Trust::System,
+        now,
+    )
     .await
 }
 
@@ -185,6 +302,23 @@ pub(crate) async fn decline_pending_in(
     now: Timestamp,
 ) -> StoreResult<()> {
     for decision in pending_in(conn, lane_id).await? {
+        // A question has no decline: the message is the answer.
+        if decision.kind == DecisionKind::Input {
+            close_in(
+                conn,
+                &decision,
+                DecisionStatus::Answered,
+                &json!({ "note": note, "answered_at": now }),
+                format!(
+                    "You replied to {} ({:?}) instead of choosing an option: {note}",
+                    decision.id, decision.question
+                ),
+                Trust::User,
+                now,
+            )
+            .await?;
+            continue;
+        }
         let Some(option) = decision
             .options
             .iter()
@@ -201,6 +335,7 @@ pub(crate) async fn decline_pending_in(
                 standing_rule: false,
                 answered_at: now,
             },
+            None,
         )
         .await?;
     }
@@ -216,6 +351,103 @@ async fn fenced(conn: &Connection, lease: &Lease, id: DecisionId) -> StoreResult
         .ok_or_else(|| StoreError::not_found("decision", id))
 }
 
+const RULE_FIELDS: &str = "id, project_id, agent_id, tool, pattern, tier, created_from_decision, created_at, revoked_at, uses";
+
+fn decode_rule(row: &Row) -> StoreResult<StandingRule> {
+    let c = Cols(row);
+    let tier = c.i64(5)?;
+    Ok(StandingRule {
+        id: c.id(0)?,
+        project_id: c.id(1)?,
+        agent_id: c.id(2)?,
+        tool: c.text(3)?,
+        pattern: c.json(4)?,
+        tier: Tier::from_number(tier)
+            .ok_or_else(|| StoreError::Invalid(format!("unknown tier {tier}")))?,
+        created_from_decision: c.opt_id(6)?,
+        created_at: c.ts(7)?,
+        revoked_at: c.opt_ts(8)?,
+        uses: c.u32(9)?,
+    })
+}
+
+/// Inserts a decision inside the caller's transaction, under `lease` if a
+/// run asks. A repeated `(run_id, tool_call_id)` returns the original and
+/// `false`.
+async fn insert_decision_in(
+    conn: &Connection,
+    lease: Option<&Lease>,
+    decision: &NewDecision,
+) -> StoreResult<(Decision, bool)> {
+    if decision.options.is_empty() {
+        return Err(StoreError::Invalid(
+            "a decision needs at least one option".into(),
+        ));
+    }
+    if let Some(recommended) = decision.recommended
+        && recommended as usize >= decision.options.len()
+    {
+        return Err(StoreError::Invalid(format!(
+            "recommended option {recommended} is out of range"
+        )));
+    }
+    if let Some(lease) = lease {
+        check_lease(conn, lease).await?;
+        if lease.lane_id != decision.lane_id {
+            return Err(StoreError::Invalid(format!(
+                "a run in lane {} cannot ask in lane {}",
+                lease.lane_id, decision.lane_id
+            )));
+        }
+    }
+    if let (Some(run_id), Some(call)) = (decision.run_id, decision.tool_call_id.as_deref())
+        && let Some(existing) = query_opt(
+            conn,
+            &format!(
+                "SELECT {DECISION_FIELDS} FROM decisions WHERE run_id = ?1 AND tool_call_id = ?2"
+            ),
+            params![run_id.get(), call],
+            decode_decision,
+        )
+        .await?
+    {
+        return Ok((existing, false));
+    }
+    let created = query_one(
+        conn,
+        &format!(
+            "INSERT INTO decisions (project_id, lane_id, task_id, session_id, run_id,
+                 tool_call_id, tool, arguments, arguments_hash, kind, question, context,
+                 options, recommended, offers_standing_rule, status, expires_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                 'pending', ?16, ?17)
+             RETURNING {DECISION_FIELDS}"
+        ),
+        params![
+            decision.project_id.get(),
+            decision.lane_id.get(),
+            opt_raw(decision.task_id, |id| id.get()),
+            opt_raw(decision.session_id, |id| id.get()),
+            opt_raw(decision.run_id, |id| id.get()),
+            decision.tool_call_id.as_deref(),
+            decision.tool.as_str(),
+            json_text(&decision.arguments)?,
+            decision.arguments_hash.as_str(),
+            decision.kind.as_str(),
+            decision.question.as_str(),
+            decision.context.as_str(),
+            json_text(&decision.options)?,
+            decision.recommended.map(i64::from),
+            decision.offers_standing_rule,
+            opt_ts(decision.expires_at),
+            decision.created_at.as_millis(),
+        ],
+        decode_decision,
+    )
+    .await?;
+    Ok((created, true))
+}
+
 #[async_trait]
 impl DecisionStore for HubDb {
     async fn open_decision(
@@ -223,74 +455,12 @@ impl DecisionStore for HubDb {
         lease: Option<&Lease>,
         decision: &NewDecision,
     ) -> StoreResult<Decision> {
-        if decision.options.is_empty() {
-            return Err(StoreError::Invalid(
-                "a decision needs at least one option".into(),
-            ));
-        }
-        if let Some(recommended) = decision.recommended
-            && recommended as usize >= decision.options.len()
-        {
-            return Err(StoreError::Invalid(format!(
-                "recommended option {recommended} is out of range"
-            )));
-        }
         let tx = self.db.begin().await?;
         let conn = tx.conn();
-        if let Some(lease) = lease {
-            check_lease(conn, lease).await?;
-            if lease.lane_id != decision.lane_id {
-                return Err(StoreError::Invalid(format!(
-                    "a run in lane {} cannot ask in lane {}",
-                    lease.lane_id, decision.lane_id
-                )));
-            }
+        let (created, new) = insert_decision_in(conn, lease, decision).await?;
+        if !new {
+            return Ok(created);
         }
-        if let (Some(run_id), Some(call)) = (decision.run_id, decision.tool_call_id.as_deref())
-            && let Some(existing) = query_opt(
-                conn,
-                &format!(
-                    "SELECT {DECISION_FIELDS} FROM decisions WHERE run_id = ?1 AND tool_call_id = ?2"
-                ),
-                params![run_id.get(), call],
-                decode_decision,
-            )
-            .await?
-        {
-            return Ok(existing);
-        }
-        let created = query_one(
-            conn,
-            &format!(
-                "INSERT INTO decisions (project_id, lane_id, task_id, session_id, run_id,
-                     tool_call_id, tool, arguments, arguments_hash, kind, question, context,
-                     options, recommended, offers_standing_rule, status, expires_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     'pending', ?16, ?17)
-                 RETURNING {DECISION_FIELDS}"
-            ),
-            params![
-                decision.project_id.get(),
-                decision.lane_id.get(),
-                opt_raw(decision.task_id, |id| id.get()),
-                opt_raw(decision.session_id, |id| id.get()),
-                opt_raw(decision.run_id, |id| id.get()),
-                decision.tool_call_id.as_deref(),
-                decision.tool.as_str(),
-                json_text(&decision.arguments)?,
-                decision.arguments_hash.as_str(),
-                decision.kind.as_str(),
-                decision.question.as_str(),
-                decision.context.as_str(),
-                json_text(&decision.options)?,
-                decision.recommended.map(i64::from),
-                decision.offers_standing_rule,
-                opt_ts(decision.expires_at),
-                decision.created_at.as_millis(),
-            ],
-            decode_decision,
-        )
-        .await?;
         // Decisions bypass pacing (Plan.md §10.2); the key makes the card
         // one per decision.
         enqueue_in(
@@ -311,6 +481,25 @@ impl DecisionStore for HubDb {
             },
         )
         .await?;
+        if let Some(due_at) = created.expires_at {
+            insert_timer_in(
+                conn,
+                &NewTimer {
+                    project_id: created.project_id,
+                    lane_id: created.lane_id,
+                    agent_id: None,
+                    task_ref: created.task_id,
+                    category: TimerCategory::FollowUp,
+                    due_at,
+                    recurrence: None,
+                    instruction: format!("expire {}", created.id),
+                    created_by: TimerCreator::System,
+                    created_by_call: Some(expiry_call(created.id)),
+                    requested: false,
+                },
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(created)
     }
@@ -350,6 +539,15 @@ impl DecisionStore for HubDb {
     }
 
     async fn answer(&self, id: DecisionId, answer: &DecisionAnswer) -> StoreResult<Answered> {
+        self.answer_with_rule(id, answer, None).await
+    }
+
+    async fn answer_with_rule(
+        &self,
+        id: DecisionId,
+        answer: &DecisionAnswer,
+        rule: Option<&NewStandingRule>,
+    ) -> StoreResult<Answered> {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
         let decision = decision_in(conn, id)
@@ -358,7 +556,25 @@ impl DecisionStore for HubDb {
         if decision.status != DecisionStatus::Pending {
             return Ok(Answered::Ignored);
         }
-        let inserted = answer_in(conn, &decision, answer).await?;
+        let inserted = answer_in(conn, &decision, answer, None).await?;
+        if let Some(rule) = rule {
+            exec(
+                conn,
+                "INSERT INTO standing_rules (project_id, agent_id, tool, pattern, tier,
+                     created_from_decision, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    rule.project_id.get(),
+                    rule.agent_id.get(),
+                    rule.tool.as_str(),
+                    json_text(&rule.pattern)?,
+                    rule.tier.number(),
+                    id.get(),
+                    rule.created_at.as_millis(),
+                ],
+            )
+            .await?;
+        }
         tx.commit().await?;
         match inserted {
             Inserted::New(event) | Inserted::Duplicate(event) => Ok(Answered::Recorded(event)),
@@ -413,5 +629,89 @@ impl DecisionStore for HubDb {
         )
         .await?;
         tx.commit().await
+    }
+
+    async fn allow_by_rule(
+        &self,
+        lease: &Lease,
+        decision: &NewDecision,
+        rule: StandingRuleId,
+    ) -> StoreResult<Decision> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let (created, new) = insert_decision_in(conn, Some(lease), decision).await?;
+        if !new {
+            return Ok(created);
+        }
+        let used = exec(
+            conn,
+            "UPDATE standing_rules SET uses = uses + 1 WHERE id = ?1 AND revoked_at IS NULL",
+            params![rule.get()],
+        )
+        .await?;
+        if used == 0 {
+            return Err(StoreError::Conflict(format!(
+                "standing rule {rule} is revoked or does not exist"
+            )));
+        }
+        answer_in(
+            conn,
+            &created,
+            &DecisionAnswer {
+                option: 0,
+                note: None,
+                standing_rule: false,
+                answered_at: created.created_at,
+            },
+            Some(rule),
+        )
+        .await?;
+        let answered = decision_in(conn, created.id)
+            .await?
+            .ok_or_else(|| StoreError::not_found("decision", created.id))?;
+        tx.commit().await?;
+        Ok(answered)
+    }
+
+    async fn standing_rules(
+        &self,
+        project_id: Option<ProjectId>,
+    ) -> StoreResult<Vec<StandingRule>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {RULE_FIELDS} FROM standing_rules
+                 WHERE ?1 IS NULL OR project_id = ?1 ORDER BY id"
+            ),
+            params![opt_raw(project_id, |id| id.get())],
+            decode_rule,
+        )
+        .await
+    }
+
+    async fn revoke_standing_rule(
+        &self,
+        id: StandingRuleId,
+        now: Timestamp,
+    ) -> StoreResult<StandingRule> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        exec(
+            conn,
+            "UPDATE standing_rules SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
+            params![now.as_millis(), id.get()],
+        )
+        .await?;
+        let rule = query_opt(
+            conn,
+            &format!("SELECT {RULE_FIELDS} FROM standing_rules WHERE id = ?1"),
+            params![id.get()],
+            decode_rule,
+        )
+        .await?
+        .ok_or_else(|| StoreError::not_found("standing rule", id))?;
+        tx.commit().await?;
+        Ok(rule)
     }
 }

@@ -1,5 +1,4 @@
-//! The system's tools and the milestone-1 permission policy (Plan.md §4.6,
-//! §9.1, docs/milestone-1.md §9).
+//! The system's tools (Plan.md §4.6, §5.1, docs/milestone-1.md §9).
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -10,16 +9,13 @@ use sha2::{Digest, Sha256};
 use threadlane_core::forge::{OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::ids::{AgentId, RepositoryId, TaskId};
 use threadlane_core::model::{
-    LaneKind, MemoryAuthor, Mode, NewOutboxMessage, NewTask, OutboxKind, Run, Task, TaskOrigin,
-    TaskStatus, Urgency,
+    DecisionOption, LaneKind, MemoryAuthor, NewOutboxMessage, NewTask, OutboxKind, Run, Task,
+    TaskOrigin, TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{OrgStore, OutboxStore, SessionStore, StoreError, TaskStore};
 use threadlane_core::time::Clock;
-use threadlane_core::tools::{
-    GateRequest, PermissionPolicy, Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry,
-    Verdict,
-};
+use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry};
 use threadlane_store::HubDb;
 
 use crate::error::tool_error;
@@ -40,6 +36,14 @@ pub const CANCEL_TASK: &str = "cancel_task";
 pub const LIST_TASKS: &str = "list_tasks";
 /// A task agent reports its task done, with a result.
 pub const FINISH_TASK: &str = "finish_task";
+/// Asks you a question with options; your answer resumes the session
+/// (Plan.md §9.4, kind `input`).
+pub const ASK_USER: &str = "ask_user";
+
+/// The most options a question may offer.
+const MAX_OPTIONS: usize = 6;
+/// The longest option label accepted.
+const MAX_LABEL: usize = 80;
 
 /// Whether runs in a lane of `kind` are offered `tool`, and may call it
 /// (Plan.md §5.1). A tool this hub does not know is offered in both kinds.
@@ -576,6 +580,78 @@ fn task_ref(value: &Json) -> Result<TaskId, ToolError> {
         .ok_or_else(|| ToolError::InvalidArguments(format!("{value} is not a task id")))
 }
 
+/// The question of an `ask_user` call and its options, each answering with
+/// its label. Labels are one line, distinct in any case, since you answer by
+/// label.
+pub(crate) fn question(arguments: &Json) -> Result<(String, Vec<DecisionOption>), ToolError> {
+    let object = fields(arguments, &["question", "options"])?;
+    let question = text_field(object, "question")?.ok_or_else(|| missing("question"))?;
+    let labels: Vec<&str> = match object.get("options") {
+        Some(Json::Array(items)) => items.iter().filter_map(Json::as_str).collect(),
+        _ => Vec::new(),
+    };
+    let well_formed = labels.iter().all(|label| {
+        let label = label.trim();
+        !label.is_empty()
+            && label.chars().count() <= MAX_LABEL
+            && !label.chars().any(char::is_control)
+    });
+    let distinct = labels.iter().enumerate().all(|(index, label)| {
+        labels[..index]
+            .iter()
+            .all(|earlier| !earlier.trim().eq_ignore_ascii_case(label.trim()))
+    });
+    let count = object
+        .get("options")
+        .and_then(Json::as_array)
+        .map_or(0, Vec::len);
+    if count != labels.len()
+        || !(2..=MAX_OPTIONS).contains(&labels.len())
+        || !well_formed
+        || !distinct
+    {
+        return Err(ToolError::InvalidArguments(format!(
+            "options must be 2 to {MAX_OPTIONS} distinct one-line labels, at most {MAX_LABEL} \
+             characters each"
+        )));
+    }
+    let options = labels
+        .into_iter()
+        .map(|label| DecisionOption {
+            label: label.trim().to_owned(),
+            effect: json!({ "answer": label.trim() }),
+        })
+        .collect();
+    Ok((question.trim().to_owned(), options))
+}
+
+fn ask_user_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: ASK_USER.to_owned(),
+        description: "Ask the user a question with a few options, when you cannot go on \
+                      without their choice. The call returns at once with \"waiting on you\", \
+                      and you must then end your turn; you are resumed with their answer."
+            .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "question": { "type": "string", "description": "One plain question." },
+                "options": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 2,
+                    "maxItems": MAX_OPTIONS,
+                    "description": "The answers to choose from, each a short label."
+                }
+            },
+            "required": ["question", "options"],
+            "additionalProperties": false
+        }),
+        tier: Tier::Read,
+        safe_to_repeat: false,
+    }
+}
+
 /// The definitions of the task tools, in the order they are offered.
 fn task_definitions() -> Vec<ToolDefinition> {
     let task_id = json!({
@@ -716,6 +792,7 @@ impl ToolRegistry for HubTools {
         definitions.extend(crate::publish::definitions());
         definitions.extend(crate::memory::definitions());
         definitions.extend(crate::timers::definitions());
+        definitions.push(ask_user_definition());
         definitions
     }
 
@@ -756,6 +833,10 @@ impl ToolRegistry for HubTools {
             // The gate asks before these, and the runner performs them.
             PUBLISH_BRANCH | OPEN_PULL_REQUEST => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
+            ))),
+            // The gate always asks: the answer is the outcome.
+            ASK_USER => Err(ToolError::Blocked(format!(
+                "{name} is answered by the user, through a decision"
             ))),
             other => Err(ToolError::UnknownTool(other.to_owned())),
         }
@@ -811,51 +892,6 @@ impl ToolRegistry for CombinedTools {
         match self.owner(name) {
             Some(registry) => registry.execute(context, name, arguments).await,
             None => Err(ToolError::UnknownTool(name.to_owned())),
-        }
-    }
-}
-
-/// The gate's rule until milestone 9 (docs/milestone-3.md §1 items 2 and 3):
-/// a binding that is Off may do nothing, forbidden tools are blocked, tier 3
-/// always asks, and the other tiers are allowed up to a tier and blocked
-/// above it. It ships allowing tier 0 and 1 ([`TierPolicy::default`]); the
-/// mode matrix and standing rules replace it in milestone 9.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TierPolicy {
-    highest_allowed: Tier,
-}
-
-impl TierPolicy {
-    /// A policy that allows every tier up to and including `highest_allowed`.
-    #[must_use]
-    pub fn allowing_up_to(highest_allowed: Tier) -> Self {
-        Self { highest_allowed }
-    }
-}
-
-impl Default for TierPolicy {
-    fn default() -> Self {
-        Self::allowing_up_to(Tier::Local)
-    }
-}
-
-#[async_trait]
-impl PermissionPolicy for TierPolicy {
-    async fn decide(&self, request: &GateRequest) -> Verdict {
-        if request.binding_mode == Mode::Off {
-            return Verdict::Block {
-                reason: "the agent is off in this project".to_owned(),
-            };
-        }
-        match request.tier {
-            Tier::SharedHardToUndo => Verdict::Ask,
-            tier if tier <= self.highest_allowed && tier != Tier::Forbidden => Verdict::Allow,
-            tier => Verdict::Block {
-                reason: format!(
-                    "{} is a {tier:?} tool, and this hub does not allow those yet",
-                    request.tool
-                ),
-            },
         }
     }
 }
@@ -918,6 +954,7 @@ mod tests {
                     .into_iter()
                     .map(|tool| tool.name),
             );
+            names.push(ASK_USER.to_owned());
             names
                 .into_iter()
                 .filter(|name| offered_in(name, kind))
@@ -933,6 +970,7 @@ mod tests {
             crate::timers::CREATE_SCHEDULE,
             crate::timers::LIST_TIMERS,
             crate::timers::CANCEL_TIMER,
+            ASK_USER,
         ];
         assert_eq!(
             offered(LaneKind::Lead),
@@ -962,6 +1000,27 @@ mod tests {
     }
 
     #[test]
+    fn a_question_needs_two_to_six_distinct_one_line_options() {
+        let (asked, options) =
+            question(&json!({ "question": " Which? ", "options": ["Blue", " green "] })).unwrap();
+        assert_eq!(asked, "Which?");
+        let labels: Vec<&str> = options.iter().map(|option| option.label.as_str()).collect();
+        assert_eq!(labels, ["Blue", "green"]);
+        assert!(options.iter().all(|option| !option.approves()));
+        for bad in [
+            json!({ "question": "Which?", "options": ["only"] }),
+            json!({ "question": "Which?", "options": ["a", "A"] }),
+            json!({ "question": "Which?", "options": ["a", "two\nlines"] }),
+            json!({ "question": "Which?", "options": ["a", 2] }),
+            json!({ "question": "Which?", "options": ["1", "2", "3", "4", "5", "6", "7"] }),
+            json!({ "question": " ", "options": ["a", "b"] }),
+            json!({ "options": ["a", "b"] }),
+        ] {
+            assert!(question(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn send_message_arguments_are_checked() {
         assert_eq!(
             parse_send_message(&json!({"text": "hi"})).unwrap(),
@@ -985,56 +1044,6 @@ mod tests {
                 ),
                 "{bad} is rejected"
             );
-        }
-    }
-
-    #[tokio::test]
-    async fn the_policy_allows_tiers_zero_and_one_asks_for_tier_three_and_blocks_the_rest() {
-        let request = |tier, binding_mode| GateRequest {
-            project_id: threadlane_core::ids::ProjectId(1),
-            agent_id: None,
-            tool: "t".into(),
-            tier,
-            arguments: json!({}),
-            binding_mode,
-            tainted: false,
-        };
-        let policy = TierPolicy::default();
-        let on = Mode::OnRequest;
-        assert_eq!(
-            policy.decide(&request(Tier::Read, on)).await,
-            Verdict::Allow
-        );
-        assert_eq!(
-            policy.decide(&request(Tier::Local, on)).await,
-            Verdict::Allow
-        );
-        for tier in [Tier::SharedReversible, Tier::Forbidden] {
-            assert!(matches!(
-                policy.decide(&request(tier, on)).await,
-                Verdict::Block { .. }
-            ));
-        }
-        // Tier 3 asks whatever the mode and whatever the policy allows.
-        let generous = TierPolicy::allowing_up_to(Tier::Forbidden);
-        for mode in [Mode::OnRequest, Mode::Assisted, Mode::Autonomous] {
-            for policy in [policy, generous] {
-                assert_eq!(
-                    policy.decide(&request(Tier::SharedHardToUndo, mode)).await,
-                    Verdict::Ask
-                );
-            }
-        }
-        assert!(matches!(
-            generous.decide(&request(Tier::Forbidden, on)).await,
-            Verdict::Block { .. }
-        ));
-        // An Off binding may do nothing, not even read.
-        for tier in [Tier::Read, Tier::SharedHardToUndo] {
-            assert!(matches!(
-                generous.decide(&request(tier, Mode::Off)).await,
-                Verdict::Block { .. }
-            ));
         }
     }
 }

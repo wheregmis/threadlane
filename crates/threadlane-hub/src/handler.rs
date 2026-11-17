@@ -9,23 +9,26 @@ use serde_json::json;
 use threadlane_core::client::{
     Accepted, ApiError, BindingSummary, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
     MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
-    PairingRequest, ProjectSummary, UserMessage,
+    PairingRequest, ProjectSummary, StandingRuleSummary, UserMessage,
 };
 use threadlane_core::client::{TimerReply, TimerRequest};
-use threadlane_core::ids::ProjectId;
+use threadlane_core::ids::{DecisionId, ProjectId};
 use threadlane_core::model::{
-    Agent, Answered, Binding, DecisionAnswer, DecisionStatus, EventKind, Inserted, Mode, NewAgent,
-    NewBinding, NewEvent, NewProject, NewRepository, Project, Trust,
+    Agent, Answered, Binding, Decision, DecisionAnswer, DecisionOption, DecisionStatus, EventKind,
+    Inserted, Mode, NewAgent, NewBinding, NewEvent, NewProject, NewRepository, NewStandingRule,
+    Project, StandingRule, Trust,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{
-    DecisionStore, InboxStore, OrgStore, OutboxStore, StoreError, TaskStore,
+    DecisionStore, InboxStore, OrgStore, OutboxStore, SessionStore, StoreError, TaskStore,
 };
+use threadlane_core::time::Timestamp;
 use threadlane_core::workspace::{valid_branch_name, valid_repository_name};
 
 use crate::core::HubCore;
 use crate::defaults::ensure_defaults;
 use crate::error::api_error;
+use crate::gate;
 use crate::tools::CLIENT_CHANNEL;
 
 mod memory;
@@ -108,6 +111,144 @@ impl ClientApi {
             role: agent.role,
             mode: binding.mode,
             is_lead: binding.is_lead,
+        })
+    }
+
+    /// Answers a decision by option label; with `always`, also creates the
+    /// standing rule it offers, in the same transaction.
+    async fn answer(
+        &self,
+        decision: DecisionId,
+        option: &str,
+        note: Option<String>,
+        always: bool,
+    ) -> Result<DecisionReply, ApiError> {
+        let inner = &self.core.inner;
+        let db = &inner.db;
+        let current = db
+            .decision(decision)
+            .await
+            .map_err(api_error)?
+            .ok_or_else(|| ApiError::NotFound(format!("decision {decision}")))?;
+        // Answering is idempotent: the first answer stands.
+        if current.status != DecisionStatus::Pending {
+            return Ok(DecisionReply::Answered {
+                decision: Box::new(current),
+                recorded: false,
+            });
+        }
+        let wanted = option.trim();
+        let index = current
+            .options
+            .iter()
+            .position(|option| option.label.eq_ignore_ascii_case(wanted))
+            .ok_or_else(|| {
+                let labels: Vec<&str> = current
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect();
+                ApiError::Invalid(format!(
+                    "{decision} has no option {wanted:?}; answer with {}",
+                    labels.join(" or ")
+                ))
+            })?;
+        let now = inner.clock.now();
+        let rule = if always {
+            Some(self.rule_from(&current, index, now).await?)
+        } else {
+            None
+        };
+        let answered = db
+            .answer_with_rule(
+                decision,
+                &DecisionAnswer {
+                    option: u32::try_from(index).unwrap_or(u32::MAX),
+                    note: note.filter(|note| !note.trim().is_empty()),
+                    standing_rule: always,
+                    answered_at: now,
+                },
+                rule.as_ref(),
+            )
+            .await
+            .map_err(api_error)?;
+        let recorded = matches!(answered, Answered::Recorded(_));
+        if recorded {
+            inner.wake.wake(WakeTarget::Lane(current.lane_id));
+        }
+        let decision = db
+            .decision(decision)
+            .await
+            .map_err(api_error)?
+            .ok_or_else(|| ApiError::NotFound(format!("decision {decision}")))?;
+        Ok(DecisionReply::Answered {
+            decision: Box::new(decision),
+            recorded,
+        })
+    }
+
+    /// The standing rule "always" makes from `decision` answered with
+    /// option `index`: the asking run's agent, the project, the tool, and
+    /// the target fields of the arguments.
+    async fn rule_from(
+        &self,
+        decision: &Decision,
+        index: usize,
+        now: Timestamp,
+    ) -> Result<NewStandingRule, ApiError> {
+        let inner = &self.core.inner;
+        if !decision.offers_standing_rule {
+            return Err(ApiError::Invalid(format!(
+                "{} offers no standing rule; answer it without always",
+                decision.id
+            )));
+        }
+        if !decision
+            .options
+            .get(index)
+            .is_some_and(DecisionOption::approves)
+        {
+            return Err(ApiError::Invalid(
+                "always applies only to an option that approves".to_owned(),
+            ));
+        }
+        let agent_id = match decision.run_id {
+            Some(run) => inner.db.run(run).await.map_err(api_error)?,
+            None => None,
+        }
+        .and_then(|run| run.agent_id)
+        .ok_or_else(|| ApiError::Invalid(format!("{} was asked by no agent", decision.id)))?;
+        let tier = inner
+            .tools
+            .definition(&decision.tool)
+            .ok_or_else(|| ApiError::Internal(format!("no tool {}", decision.tool)))?
+            .tier;
+        Ok(NewStandingRule {
+            project_id: decision.project_id,
+            agent_id,
+            tool: decision.tool.clone(),
+            pattern: gate::rule_pattern(&decision.arguments),
+            tier,
+            created_at: now,
+        })
+    }
+
+    async fn rule_summary(&self, rule: StandingRule) -> Result<StandingRuleSummary, ApiError> {
+        let db = &self.core.inner.db;
+        let project = db
+            .project(rule.project_id)
+            .await
+            .map_err(api_error)?
+            .map_or_else(|| rule.project_id.to_string(), |project| project.name);
+        let agent = db
+            .agent(rule.agent_id)
+            .await
+            .map_err(api_error)?
+            .map_or_else(|| rule.agent_id.to_string(), |agent| agent.name);
+        Ok(StandingRuleSummary {
+            rule,
+            project,
+            agent,
         })
     }
 
@@ -392,8 +533,13 @@ impl HubApi for ClientApi {
                     .map_err(api_error)?
                     .into_iter()
                     .find(|binding| binding.agent_id == agent.id);
-                // Until milestone 9 a mode above On request is stored as given
-                // and behaves as On request.
+                let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
+                if mode > ceiling {
+                    return Err(ApiError::Invalid(format!(
+                        "{mode} is above the ceiling of project {:?}, {ceiling}",
+                        project.name
+                    )));
+                }
                 let binding = match existing {
                     Some(binding) => db.set_binding_mode(binding.id, mode).await,
                     None => {
@@ -417,6 +563,70 @@ impl HubApi for ClientApi {
                     },
                 })
             }
+            OrgRequest::SetCeiling { project, mode } => {
+                let project = self.project_named(project.as_deref()).await?;
+                let space = db.space().await.map_err(api_error)?.mode_ceiling;
+                if mode > space {
+                    return Err(ApiError::Invalid(format!(
+                        "{mode} is above the space's ceiling, {space}"
+                    )));
+                }
+                db.set_project_ceiling(project.id, Some(mode))
+                    .await
+                    .map_err(api_error)?;
+                Ok(OrgReply::Ceiling {
+                    ceiling: db.effective_ceiling(project.id).await.map_err(api_error)?,
+                    project: project.name,
+                })
+            }
+            OrgRequest::SetOverride {
+                project,
+                agent,
+                tier,
+                cell,
+            } => {
+                let project = self.project_named(project.as_deref()).await?;
+                let agent = self.agent_named(&agent).await?;
+                let binding = db
+                    .bindings(project.id)
+                    .await
+                    .map_err(api_error)?
+                    .into_iter()
+                    .find(|binding| binding.agent_id == agent.id)
+                    .ok_or_else(|| {
+                        ApiError::NotFound(format!(
+                            "a binding of {:?} in project {:?}",
+                            agent.name, project.name
+                        ))
+                    })?;
+                let mut overrides = gate::overrides(&binding.overrides);
+                match cell {
+                    Some(cell) => {
+                        let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
+                        let loosest = gate::loosest_override(tier, ceiling);
+                        if cell < loosest {
+                            return Err(ApiError::Invalid(format!(
+                                "{cell} is looser than project {:?}'s ceiling, {ceiling}, \
+                                 allows for {tier:?} tools: at most {loosest}",
+                                project.name
+                            )));
+                        }
+                        overrides.insert(tier, cell);
+                    }
+                    None => {
+                        overrides.remove(&tier);
+                    }
+                }
+                let stored = serde_json::to_value(&overrides)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?;
+                db.set_binding_overrides(binding.id, &stored)
+                    .await
+                    .map_err(api_error)?;
+                Ok(OrgReply::Overrides {
+                    agent: agent.name,
+                    overrides,
+                })
+            }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
     }
@@ -432,59 +642,35 @@ impl HubApi for ClientApi {
                 decision,
                 option,
                 note,
-            } => {
-                let current = db
-                    .decision(decision)
-                    .await
-                    .map_err(api_error)?
-                    .ok_or_else(|| ApiError::NotFound(format!("decision {decision}")))?;
-                // Answering is idempotent: the first answer stands.
-                if current.status != DecisionStatus::Pending {
-                    return Ok(DecisionReply::Answered {
-                        decision: Box::new(current),
-                        recorded: false,
-                    });
+            } => self.answer(decision, &option, note, false).await,
+            DecisionRequest::AnswerAlways {
+                decision,
+                option,
+                note,
+            } => self.answer(decision, &option, note, true).await,
+            DecisionRequest::StandingRules { project } => {
+                let project = match project {
+                    Some(name) => Some(self.project_named(Some(&name)).await?.id),
+                    None => None,
+                };
+                let mut rules = Vec::new();
+                for rule in db.standing_rules(project).await.map_err(api_error)? {
+                    rules.push(self.rule_summary(rule).await?);
                 }
-                let wanted = option.trim();
-                let index = current
-                    .options
-                    .iter()
-                    .position(|option| option.label.eq_ignore_ascii_case(wanted))
-                    .ok_or_else(|| {
-                        let labels: Vec<&str> = current
-                            .options
-                            .iter()
-                            .map(|option| option.label.as_str())
-                            .collect();
-                        ApiError::Invalid(format!(
-                            "{decision} has no option {wanted:?}; answer with {}",
-                            labels.join(" or ")
-                        ))
+                Ok(DecisionReply::StandingRules { rules })
+            }
+            DecisionRequest::RevokeRule { rule } => {
+                let rule = db
+                    .revoke_standing_rule(rule, inner.clock.now())
+                    .await
+                    .map_err(|error| match error {
+                        StoreError::NotFound { .. } => {
+                            ApiError::NotFound(format!("standing rule {rule}"))
+                        }
+                        other => api_error(other),
                     })?;
-                let answered = db
-                    .answer(
-                        decision,
-                        &DecisionAnswer {
-                            option: u32::try_from(index).unwrap_or(u32::MAX),
-                            note: note.filter(|note| !note.trim().is_empty()),
-                            standing_rule: false,
-                            answered_at: inner.clock.now(),
-                        },
-                    )
-                    .await
-                    .map_err(api_error)?;
-                let recorded = matches!(answered, Answered::Recorded(_));
-                if recorded {
-                    inner.wake.wake(WakeTarget::Lane(current.lane_id));
-                }
-                let decision = db
-                    .decision(decision)
-                    .await
-                    .map_err(api_error)?
-                    .ok_or_else(|| ApiError::NotFound(format!("decision {decision}")))?;
-                Ok(DecisionReply::Answered {
-                    decision: Box::new(decision),
-                    recorded,
+                Ok(DecisionReply::StandingRule {
+                    rule: self.rule_summary(rule).await?,
                 })
             }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),

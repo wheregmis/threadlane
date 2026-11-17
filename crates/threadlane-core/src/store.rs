@@ -14,15 +14,15 @@ use serde_json::Value as Json;
 
 use crate::ids::{
     AgentId, BindingId, DecisionId, EventId, LaneId, MachineId, OutboxId, ProjectId, RunId,
-    SessionId, TaskId, TimerId,
+    SessionId, StandingRuleId, TaskId, TimerId,
 };
 use crate::model::{
     Account, Agent, Answered, BackendKind, Binding, Decision, DecisionAnswer, Event, FailedRun,
     Inserted, JournalEntry, Lane, Lease, Machine, MachineReport, MachineStatus, MemoryAuthor,
     MemoryFile, Mode, NewAgent, NewBinding, NewDecision, NewEvent, NewMachine, NewOutboxMessage,
-    NewProject, NewRepository, NewTask, NewTimer, OutboxMessage, Project, Repository, RetryPolicy,
-    Run, RunOutcome, Session, SpaceSettings, StartRun, Task, TaskStatus, Timer, ToolCallBegin,
-    ToolCallKey,
+    NewProject, NewRepository, NewStandingRule, NewTask, NewTimer, OutboxMessage, Project,
+    Repository, RetryPolicy, Run, RunOutcome, Session, SpaceSettings, StandingRule, StartRun, Task,
+    TaskStatus, Timer, ToolCallBegin, ToolCallKey,
 };
 use crate::time::Timestamp;
 
@@ -101,6 +101,12 @@ pub trait OrgStore: Send + Sync {
     async fn set_binding_mode(&self, id: BindingId, mode: Mode) -> StoreResult<Binding>;
     async fn bindings(&self, project_id: ProjectId) -> StoreResult<Vec<Binding>>;
     async fn lead_binding(&self, project_id: ProjectId) -> StoreResult<Option<Binding>>;
+    /// Sets or clears a project's own ceiling, which the space's ceiling
+    /// still caps (Plan.md §2.3 "Project ceiling").
+    async fn set_project_ceiling(&self, id: ProjectId, ceiling: Option<Mode>) -> StoreResult<()>;
+    /// Replaces a binding's overrides: a JSON object from a tier to the cell
+    /// it is set to (Plan.md §2.3 "Overrides").
+    async fn set_binding_overrides(&self, id: BindingId, overrides: &Json) -> StoreResult<Binding>;
 }
 
 /// Lanes, leases, and events (Plan.md §6).
@@ -257,7 +263,9 @@ pub trait TimerStore: Send + Sync {
     async fn due_timers(&self, now: Timestamp) -> StoreResult<Vec<Timer>>;
     /// Fires one occurrence in one transaction: a follow-up is marked done, a
     /// schedule moves to `next_due_at`, and a `timer_fired` event is inserted.
-    /// Firing the same occurrence twice inserts nothing the second time.
+    /// Firing the same occurrence twice inserts nothing the second time. A
+    /// decision's expiry timer instead expires its decision, if still
+    /// pending, as declined with "no response", and inserts its answer event.
     async fn fire(
         &self,
         id: TimerId,
@@ -267,7 +275,8 @@ pub trait TimerStore: Send + Sync {
     ) -> StoreResult<Inserted>;
     async fn cancel_timer(&self, id: TimerId) -> StoreResult<()>;
     /// A project's timers that have not ended, active or paused, oldest
-    /// first. Their number is what the cap on live timers counts.
+    /// first, but not the system's own (a decision's expiry). Their number
+    /// is what the cap on live timers counts.
     async fn project_timers(&self, project_id: ProjectId) -> StoreResult<Vec<Timer>>;
     /// Pauses an active timer; pausing a paused one changes nothing. A timer
     /// that has ended is a [`StoreError::Conflict`].
@@ -431,7 +440,9 @@ pub trait DecisionStore: Send + Sync {
     /// Opens a decision and queues its card on the client channel, in one
     /// transaction (Plan.md §10.1, `kind` `decision`). A repeated
     /// `(run_id, tool_call_id)` returns the original and queues nothing.
-    /// `lease` is the asking run's, `None` when no run asks.
+    /// `lease` is the asking run's, `None` when no run asks. A decision with
+    /// `expires_at` gets a system timer, in the same transaction, that
+    /// expires it then ([`TimerStore::fire`]).
     async fn open_decision(
         &self,
         lease: Option<&Lease>,
@@ -464,6 +475,35 @@ pub trait DecisionStore: Send + Sync {
         id: DecisionId,
         outcome: &Json,
     ) -> StoreResult<()>;
+    /// [`DecisionStore::answer`], and with `rule`, in the same transaction,
+    /// the standing rule your "always" made, created from the decision. A
+    /// second answer is ignored and creates no rule.
+    async fn answer_with_rule(
+        &self,
+        id: DecisionId,
+        answer: &DecisionAnswer,
+        rule: Option<&NewStandingRule>,
+    ) -> StoreResult<Answered>;
+    /// Records a call that standing rule `rule` allowed as a decision the rule
+    /// answered with its first option, counts the use, and inserts the answer
+    /// event, in one transaction and with no card. A repeated
+    /// `(run_id, tool_call_id)` returns the original and counts nothing.
+    async fn allow_by_rule(
+        &self,
+        lease: &Lease,
+        decision: &NewDecision,
+        rule: StandingRuleId,
+    ) -> StoreResult<Decision>;
+    /// The standing rules of a project, or of every project when `None`,
+    /// revoked ones included, oldest first.
+    async fn standing_rules(&self, project_id: Option<ProjectId>)
+    -> StoreResult<Vec<StandingRule>>;
+    /// Revokes a standing rule; revoking it again changes nothing.
+    async fn revoke_standing_rule(
+        &self,
+        id: StandingRuleId,
+        now: Timestamp,
+    ) -> StoreResult<StandingRule>;
 }
 
 /// Outgoing messages (Plan.md §10).

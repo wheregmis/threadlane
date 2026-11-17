@@ -9,10 +9,10 @@ use std::path::Path;
 
 use async_trait::async_trait;
 
-/// The tool that pushes the task's branch (tier 3, task lanes only).
+/// The tool that pushes the task's branch (tier 2, task lanes only).
 pub const PUBLISH_BRANCH: &str = "publish_branch";
 /// The tool that opens a draft pull request from the task's branch,
-/// publishing the branch in the same call (tier 3, task lanes only).
+/// publishing the branch in the same call (tier 2, task lanes only).
 pub const OPEN_PULL_REQUEST: &str = "open_pull_request";
 
 /// Why a forge operation failed.

@@ -16,6 +16,7 @@ mod defaults;
 mod dispatcher;
 mod error;
 mod finish;
+mod gate;
 mod gateway;
 mod gh;
 mod github;
@@ -47,6 +48,7 @@ pub use crate::defaults::{
 };
 pub use crate::dispatcher::ClientChannel;
 pub use crate::error::HubError;
+pub use crate::gate::{GateInput, Overrides, gate, rule_pattern};
 pub use crate::gh::GhSource;
 pub use crate::github::GithubPass;
 pub use crate::handler::CLIENT_SOURCE;
@@ -55,9 +57,10 @@ pub use crate::node::Hub;
 pub use crate::pairing::JOIN_CODE_TTL;
 pub use crate::settings::HubSettings;
 pub use crate::timers::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
+pub use crate::tools::ASK_USER;
 pub use crate::tools::{
     CANCEL_TASK, CLIENT_CHANNEL, CREATE_TASK, CombinedTools, FINISH_TASK, HubTools, LIST_TASKS,
-    SEND_MESSAGE, TierPolicy, UPDATE_TASK, derived_call_key, offered_in,
+    SEND_MESSAGE, UPDATE_TASK, derived_call_key, offered_in,
 };
 pub use threadlane_core::forge::{OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 

@@ -420,9 +420,10 @@ async fn an_agents_routine_asks_first_and_is_created_once_when_you_approve() {
     };
     assert_eq!(outcome["performed"], json!(true), "{outcome}");
     // 2026-01-01 is a Thursday; the next Monday 09:00 in Berlin is 08:00Z.
+    // Timer 1 is the decision's expiry.
     assert_eq!(
         outcome["summary"],
-        json!("Routine 1 is created; it is next due at 2026-01-05T08:00:00Z.")
+        json!("Routine 2 is created; it is next due at 2026-01-05T08:00:00Z.")
     );
     assert_eq!(
         hub.link

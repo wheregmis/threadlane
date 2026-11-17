@@ -15,11 +15,13 @@ use threadlane_core::client::{
     MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
     PairingRequest, ProjectSummary, UserMessage,
 };
-use threadlane_core::client::{TimerReply, TimerRequest};
+use threadlane_core::client::{StandingRuleSummary, TimerReply, TimerRequest};
+use threadlane_core::ids::StandingRuleId;
 use threadlane_core::ids::TimerId;
 use threadlane_core::ids::{
     AgentId, DecisionId, EventId, LaneId, OutboxId, ProjectId, RepositoryId,
 };
+use threadlane_core::model::StandingRule;
 use threadlane_core::model::{
     Agent, Decision, DecisionKind, DecisionOption, DecisionStatus, Repository,
 };
@@ -28,6 +30,7 @@ use threadlane_core::model::{
     Recurrence, Rule, Timer, TimerCategory, TimerCreator, TimerStatus, Weekday,
 };
 use threadlane_core::time::Timestamp;
+use threadlane_core::tools::Tier;
 use threadlane_transport_local::{SOCKET_FILE, serve};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -226,6 +229,15 @@ impl HubApi for FakeHub {
                     is_lead: false,
                 },
             },
+            OrgRequest::SetCeiling { mode, .. } if mode > Mode::Assisted => {
+                return Err(ApiError::Invalid(format!(
+                    "{mode} is above the space's ceiling, assisted"
+                )));
+            }
+            OrgRequest::SetCeiling { project, mode } => OrgReply::Ceiling {
+                project: project.unwrap_or_else(|| "General".to_owned()),
+                ceiling: mode,
+            },
             other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         })
     }
@@ -260,6 +272,35 @@ impl HubApi for FakeHub {
                     recorded,
                 })
             }
+            DecisionRequest::AnswerAlways {
+                decision: id,
+                option,
+                note,
+            } if id == decision.id && decision.status == DecisionStatus::Pending => {
+                let index = decision
+                    .options
+                    .iter()
+                    .position(|known| known.label == option)
+                    .ok_or_else(|| ApiError::Invalid(format!("no option {option}")))?;
+                decision.status = DecisionStatus::Answered;
+                decision.answer = Some(json!({ "option": index, "note": note, "always": true }));
+                Ok(DecisionReply::Answered {
+                    decision: Box::new(decision.clone()),
+                    recorded: true,
+                })
+            }
+            DecisionRequest::StandingRules { project } => Ok(DecisionReply::StandingRules {
+                rules: if project.as_deref() == Some("api") {
+                    Vec::new()
+                } else {
+                    vec![standing_rule(false)]
+                },
+            }),
+            DecisionRequest::RevokeRule {
+                rule: StandingRuleId(1),
+            } => Ok(DecisionReply::StandingRule {
+                rule: standing_rule(true),
+            }),
             other => Err(ApiError::NotFound(format!("{other:?}"))),
         }
     }
@@ -313,6 +354,26 @@ impl HubApi for FakeHub {
             }
             other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         })
+    }
+}
+
+/// Rule 1: the reviewer may open draft pull requests in `app`.
+fn standing_rule(revoked: bool) -> StandingRuleSummary {
+    StandingRuleSummary {
+        rule: StandingRule {
+            id: StandingRuleId(1),
+            project_id: ProjectId(1),
+            agent_id: AgentId(2),
+            tool: "open_pull_request".to_owned(),
+            pattern: json!({ "repository": "app" }),
+            tier: Tier::SharedReversible,
+            created_from_decision: Some(DecisionId(7)),
+            created_at: Timestamp::from_millis(1_000),
+            revoked_at: revoked.then(|| Timestamp::from_millis(2_000)),
+            uses: 3,
+        },
+        project: "General".to_owned(),
+        agent: "Reviewer".to_owned(),
     }
 }
 
@@ -774,6 +835,61 @@ async fn the_cli_lists_and_answers_decisions() {
         !output.status.success(),
         "an id that is not a decision's is refused"
     );
+    hub.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_sets_a_ceiling_answers_always_and_lists_and_revokes_rules() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().expect("tempdir");
+    let client_dir = client.path();
+    let socket = hub.socket().display().to_string();
+    expect_success(
+        client_dir,
+        &["hub", "add", "work", &socket],
+        &format!("paired work: {socket}\n"),
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["ceiling", "on_request", "-p", "api"],
+        "the ceiling is now on_request\n",
+    )
+    .await;
+    assert_eq!(
+        hub.fake.0.org.lock().expect("lock").last(),
+        Some(&OrgRequest::SetCeiling {
+            project: Some("api".to_owned()),
+            mode: Mode::OnRequest,
+        })
+    );
+    let output = threadlane(client_dir, &["ceiling", "autonomous"]).await;
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("above the space's ceiling"),
+        "{}",
+        stderr(&output)
+    );
+    expect_success(
+        client_dir,
+        &["answer", "D-0007", "approve", "--always"],
+        "[work] D-0007 answered: approve\n",
+    )
+    .await;
+    assert_eq!(
+        hub.fake.0.decision.lock().expect("lock").answer,
+        Some(json!({ "option": 0, "note": null, "always": true }))
+    );
+    expect_success(
+        client_dir,
+        &["rules"],
+        "1 General/Reviewer: open_pull_request {\"repository\":\"app\"}, used 3 times\n",
+    )
+    .await;
+    expect_success(client_dir, &["rules", "-p", "api"], "no standing rules\n").await;
+    expect_success(client_dir, &["rule", "revoke", "1"], "revoked rule 1\n").await;
+    let output = threadlane(client_dir, &["rule", "revoke", "one"]).await;
+    assert!(!output.status.success(), "not a rule number");
     hub.stop().await;
 }
 

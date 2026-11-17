@@ -21,6 +21,7 @@ mod live;
 mod loops;
 mod memory;
 mod milestone;
+mod permissions;
 mod publish;
 mod tasks;
 mod timers;

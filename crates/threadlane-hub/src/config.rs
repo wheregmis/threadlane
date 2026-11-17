@@ -102,6 +102,9 @@ pub struct TimingConfig {
     /// How long an account cools down after a usage limit that gave no
     /// reset time (Plan.md §5.3).
     pub usage_limit_fallback_secs: u64,
+    /// How long a decision waits on you before it expires as declined with
+    /// "no response" (docs/milestone-9.md decision 8).
+    pub decision_expiry_secs: u64,
 }
 
 impl Default for TimingConfig {
@@ -116,6 +119,7 @@ impl Default for TimingConfig {
             retry_backoff_base_secs: 10,
             retry_backoff_max_secs: 10 * 60,
             usage_limit_fallback_secs: 5 * 60,
+            decision_expiry_secs: 24 * 60 * 60,
         }
     }
 }
@@ -366,6 +370,10 @@ impl HubConfig {
             timing.session_max_age_secs > 0,
             "timing.session_max_age_secs must be positive"
         );
+        anyhow::ensure!(
+            timing.decision_expiry_secs > 0,
+            "timing.decision_expiry_secs must be positive"
+        );
         let runs = &self.runs;
         anyhow::ensure!(runs.max_attempts > 0, "runs.max_attempts must be positive");
         anyhow::ensure!(
@@ -455,6 +463,7 @@ impl HubConfig {
             recent_messages: runs.recent_messages,
             usage_limit_fallback: Duration::from_secs(timing.usage_limit_fallback_secs),
             scheduler: Duration::from_secs(timing.scheduler_secs),
+            decision_expiry: Duration::from_secs(timing.decision_expiry_secs),
             default_models: [
                 (BackendKind::Claude, &self.backends.claude.model),
                 (BackendKind::Codex, &self.backends.codex.model),

@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
-use crate::ids::{AgentId, ProjectId, RunId, TaskId};
-use crate::model::{Lease, Mode};
+use crate::ids::{AgentId, ProjectId, RunId, StandingRuleId, TaskId};
+use crate::model::Lease;
 use crate::runtime::Killed;
 
 /// How much an action can affect others (Plan.md §2.3).
@@ -24,6 +24,34 @@ pub enum Tier {
     SharedHardToUndo,
     /// Never allowed.
     Forbidden,
+}
+
+impl Tier {
+    /// The number a standing rule stores its tier as: 0 to 3, and 4 for
+    /// forbidden.
+    #[must_use]
+    pub const fn number(self) -> i64 {
+        match self {
+            Self::Read => 0,
+            Self::Local => 1,
+            Self::SharedReversible => 2,
+            Self::SharedHardToUndo => 3,
+            Self::Forbidden => 4,
+        }
+    }
+
+    /// The tier stored as `number`, if it is one.
+    #[must_use]
+    pub const fn from_number(number: i64) -> Option<Self> {
+        Some(match number {
+            0 => Self::Read,
+            1 => Self::Local,
+            2 => Self::SharedReversible,
+            3 => Self::SharedHardToUndo,
+            4 => Self::Forbidden,
+            _ => return None,
+        })
+    }
 }
 
 /// A tool as the agent sees it, plus what the system needs to know about it.
@@ -107,33 +135,20 @@ pub trait ToolRegistry: Send + Sync + fmt::Debug {
     ) -> Result<Json, ToolError>;
 }
 
-/// A tool call presented to the gate (Plan.md §9.1).
-#[derive(Debug, Clone, PartialEq)]
-pub struct GateRequest {
-    pub project_id: ProjectId,
-    pub agent_id: Option<AgentId>,
-    pub tool: String,
-    pub tier: Tier,
-    pub arguments: Json,
-    /// The lower of the binding's mode and the project ceiling.
-    pub binding_mode: Mode,
-    /// Whether the run was triggered by external content.
-    pub tainted: bool,
-}
-
-/// The gate's answer.
+/// The gate's answer to one tool call (Plan.md §9.1, docs/milestone-9.md
+/// decision 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    Allow,
-    Block {
-        reason: String,
-    },
-    /// Pause the call as a decision.
-    Ask,
-}
-
-/// Tool call in; allow, block, or ask out.
-#[async_trait]
-pub trait PermissionPolicy: Send + Sync + fmt::Debug {
-    async fn decide(&self, request: &GateRequest) -> Verdict;
+    /// Proceed. `rule` is the standing rule that allowed a call the matrix
+    /// would have asked about: such a call is recorded as a decision the
+    /// rule answered, and performed as an approved one is.
+    Allow { rule: Option<StandingRuleId> },
+    /// Classifier review. Until the classifier exists (milestone 9 stage C)
+    /// the hub asks instead; `offers_rule` is as for [`Verdict::Ask`].
+    Review { offers_rule: bool },
+    /// Pause the call as a decision. `offers_rule` says whether answering it
+    /// "always" could create a standing rule that would apply here.
+    Ask { offers_rule: bool },
+    /// Refuse; the reason goes back to the agent as a tool error.
+    Block { reason: String },
 }

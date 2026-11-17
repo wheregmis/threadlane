@@ -15,10 +15,7 @@ use threadlane_core::forge::{Forge, ForgeError};
 use threadlane_core::github::{Feed, GithubError, GithubItem, GithubSource, PullTarget};
 use threadlane_core::model::OutboxMessage;
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::tools::{
-    GateRequest, PermissionPolicy, ToolContext, ToolDefinition, ToolEndpoint, ToolError,
-    ToolRegistry, Verdict,
-};
+use threadlane_core::tools::{ToolContext, ToolDefinition, ToolEndpoint, ToolError, ToolRegistry};
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().expect("fake lock poisoned")
@@ -103,48 +100,6 @@ impl ChannelAdapter for RecordingChannel {
         Ok(Delivered {
             channel_message_id: Some(format!("{}-{}", self.name, delivered.len())),
         })
-    }
-}
-
-/// A [`PermissionPolicy`] that returns a verdict per tool, or a default.
-#[derive(Debug, Clone)]
-pub struct FixedPolicy {
-    default: Verdict,
-    per_tool: Arc<Mutex<HashMap<String, Verdict>>>,
-    requests: Arc<Mutex<Vec<GateRequest>>>,
-}
-
-impl FixedPolicy {
-    /// A policy that answers `default` for every tool not set otherwise.
-    #[must_use]
-    pub fn new(default: Verdict) -> Self {
-        Self {
-            default,
-            per_tool: Arc::default(),
-            requests: Arc::default(),
-        }
-    }
-
-    /// Uses `verdict` for every call to `tool`.
-    pub fn set(&self, tool: impl Into<String>, verdict: Verdict) {
-        lock(&self.per_tool).insert(tool.into(), verdict);
-    }
-
-    /// Every request the gate saw.
-    #[must_use]
-    pub fn requests(&self) -> Vec<GateRequest> {
-        lock(&self.requests).clone()
-    }
-}
-
-#[async_trait]
-impl PermissionPolicy for FixedPolicy {
-    async fn decide(&self, request: &GateRequest) -> Verdict {
-        lock(&self.requests).push(request.clone());
-        lock(&self.per_tool)
-            .get(&request.tool)
-            .cloned()
-            .unwrap_or_else(|| self.default.clone())
     }
 }
 

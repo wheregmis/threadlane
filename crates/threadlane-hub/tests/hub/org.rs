@@ -228,6 +228,10 @@ async fn agents_are_listed_and_created_with_unique_names_and_a_role() {
 #[tokio::test]
 async fn set_mode_changes_a_binding_or_creates_one() {
     let hub = TestHub::start().await;
+    // Autonomous needs a space that allows it.
+    let mut space = hub.db.space().await.unwrap();
+    space.mode_ceiling = Mode::Autonomous;
+    hub.db.update_space(&space).await.unwrap();
     org(
         &hub,
         OrgRequest::CreateAgent {

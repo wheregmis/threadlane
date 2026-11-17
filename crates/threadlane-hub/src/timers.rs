@@ -49,12 +49,6 @@ pub(crate) fn is_timer(tool: &str) -> bool {
     )
 }
 
-/// Whether the gate asks you before `tool` (decision 4). Milestone 9 lifts
-/// the ask in Autonomous mode.
-pub(crate) fn asks(tool: &str) -> bool {
-    tool == CREATE_SCHEDULE
-}
-
 /// Whether the run counts as work you requested, as begin-run decides it:
 /// its task came from you, or an event it consumes was requested.
 async fn run_requested(db: &HubDb, run: RunId, task: Option<TaskId>) -> Result<bool, StoreError> {

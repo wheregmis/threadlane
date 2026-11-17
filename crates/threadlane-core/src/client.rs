@@ -6,6 +6,7 @@
 //! talking to, send a message, follow the feed, the organization, decisions,
 //! pairing, the overview the app's screens show, and memory.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -13,12 +14,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::admission::AdmittedKey;
-use crate::ids::{DecisionId, EventId, ProjectId, TaskId, TimerId};
+use crate::ids::{DecisionId, EventId, ProjectId, StandingRuleId, TaskId, TimerId};
 use crate::model::{
-    Account, Agent, Decision, Machine, MemoryFile, Mode, OutboxMessage, Recurrence, Repository,
-    Run, Task, Timer,
+    Account, Agent, Cell, Decision, Machine, MemoryFile, Mode, OutboxMessage, Recurrence,
+    Repository, Run, StandingRule, Task, Timer,
 };
 use crate::time::Timestamp;
+use crate::tools::Tier;
 
 /// What a hub says about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +121,20 @@ pub enum OrgRequest {
         agent: String,
         mode: Mode,
     },
+    /// Sets a project's own ceiling, which must be no higher than the
+    /// space's. Bindings above it keep their stored mode and act at the
+    /// ceiling. `None` means the General project.
+    SetCeiling { project: Option<String>, mode: Mode },
+    /// Sets the cell of one tier of the mode matrix for an agent's binding,
+    /// or clears it with `None`. Stricter than its mode is always accepted;
+    /// looser only up to what the project ceiling's column allows (Plan.md
+    /// §2.3 "Overrides"). `None` as the project means the General project.
+    SetOverride {
+        project: Option<String>,
+        agent: String,
+        tier: Tier,
+        cell: Option<Cell>,
+    },
 }
 
 /// The answer to an [`OrgRequest`].
@@ -130,13 +146,38 @@ pub enum OrgRequest {
     reason = "only with serde_json's preserve_order, which GPUI turns on in the workspace build"
 )]
 pub enum OrgReply {
-    Project { project: ProjectSummary },
-    Repository { repository: Repository },
-    Repositories { repositories: Vec<Repository> },
-    Agents { agents: Vec<Agent> },
-    Agent { agent: Agent },
-    Bindings { bindings: Vec<BindingSummary> },
-    Binding { binding: BindingSummary },
+    Project {
+        project: ProjectSummary,
+    },
+    Repository {
+        repository: Repository,
+    },
+    Repositories {
+        repositories: Vec<Repository>,
+    },
+    Agents {
+        agents: Vec<Agent>,
+    },
+    Agent {
+        agent: Agent,
+    },
+    Bindings {
+        bindings: Vec<BindingSummary>,
+    },
+    Binding {
+        binding: BindingSummary,
+    },
+    /// A project's ceiling after [`OrgRequest::SetCeiling`]: the stricter of
+    /// its own and the space's.
+    Ceiling {
+        project: String,
+        ceiling: Mode,
+    },
+    /// A binding's overrides after [`OrgRequest::SetOverride`].
+    Overrides {
+        agent: String,
+        overrides: BTreeMap<Tier, Cell>,
+    },
 }
 
 /// The Decisions capability (Plan.md §9.4, §11.2): what waits on you, and
@@ -155,6 +196,30 @@ pub enum DecisionRequest {
         option: String,
         note: Option<String>,
     },
+    /// Answers as [`DecisionRequest::Answer`] does with an option that
+    /// approves, and creates a standing rule from the decision in the same
+    /// transaction: "always allow this here". Refused for a decision that
+    /// offers no rule, or an option that does not approve.
+    AnswerAlways {
+        decision: DecisionId,
+        option: String,
+        note: Option<String>,
+    },
+    /// The standing rules of a project, revoked ones included, oldest
+    /// first. `None` means every project.
+    StandingRules { project: Option<String> },
+    /// Revokes a standing rule; the next matching call asks again.
+    RevokeRule { rule: StandingRuleId },
+}
+
+/// A standing rule as a client lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StandingRuleSummary {
+    pub rule: StandingRule,
+    /// Its project's name.
+    pub project: String,
+    /// Its agent's name.
+    pub agent: String,
 }
 
 /// The answer to a [`DecisionRequest`].
@@ -170,6 +235,13 @@ pub enum DecisionReply {
     Answered {
         decision: Box<Decision>,
         recorded: bool,
+    },
+    StandingRules {
+        rules: Vec<StandingRuleSummary>,
+    },
+    /// The rule as it now stands.
+    StandingRule {
+        rule: StandingRuleSummary,
     },
 }
 

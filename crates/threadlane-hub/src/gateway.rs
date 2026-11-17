@@ -2,23 +2,24 @@
 //! §9.1, docs/milestone-1.md §9 "Tool gateway").
 
 use serde_json::{Value as Json, json};
-use threadlane_core::ids::{DecisionId, RunId};
+use threadlane_core::ids::{DecisionId, ProjectId, RunId, StandingRuleId};
 use threadlane_core::link::{LinkError, Perform};
 use threadlane_core::model::{
     Decision, DecisionKind, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run, RunStatus,
-    ToolCallBegin, ToolCallKey, Trust,
+    StandingRule, ToolCallBegin, ToolCallKey, Trust,
 };
 use threadlane_core::runtime::steps::{perform, tool_call as step};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{DecisionStore, OrgStore, SessionStore};
-use threadlane_core::tools::{GateRequest, ToolContext, ToolDefinition, ToolError, Verdict};
+use threadlane_core::tools::{ToolContext, ToolDefinition, ToolError, Verdict};
 
 use crate::error::{link_error, link_to_tool, tool_error};
+use crate::gate::{self, GateInput};
 use crate::link::LocalLink;
 use crate::memory;
 use crate::publish::{approval_options, proposal};
 use crate::timers;
-use crate::tools::{derived_call_key, offered_in};
+use crate::tools::{ASK_USER, derived_call_key, offered_in, question};
 
 /// Key of the envelope a failed call's error is recorded in, so a repeated
 /// call returns the same error instead of "outcome unknown".
@@ -60,9 +61,18 @@ impl LocalLink {
                 lane.kind
             )));
         }
-        let ask = self
+        let verdict = self
             .gate(&run, lane.project_id, &definition, arguments)
             .await?;
+        let action = match verdict {
+            Verdict::Allow { rule: None } => Action::Execute,
+            Verdict::Allow { rule: Some(rule) } => Action::ByRule(rule),
+            // Review is asked until the classifier exists (stage C).
+            Verdict::Review { offers_rule } | Verdict::Ask { offers_rule } => {
+                Action::Ask { offers_rule }
+            }
+            Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
+        };
 
         let key = ToolCallKey {
             run_id,
@@ -94,10 +104,24 @@ impl LocalLink {
             task_id: lane.task_id,
             call_id: call_id.map(str::to_owned),
         };
-        let outcome = if ask {
-            self.ask(lease, &run, &lane, &key, tool, arguments).await
-        } else {
-            inner.tools.execute(&context, tool, arguments.clone()).await
+        let outcome = match action {
+            Action::Execute => inner.tools.execute(&context, tool, arguments.clone()).await,
+            Action::Ask { offers_rule } => {
+                self.ask(
+                    lease,
+                    &run,
+                    &lane,
+                    &key,
+                    tool,
+                    arguments,
+                    Asked::You { offers_rule },
+                )
+                .await
+            }
+            Action::ByRule(rule) => {
+                self.ask(lease, &run, &lane, &key, tool, arguments, Asked::Rule(rule))
+                    .await
+            }
         };
         let record = match &outcome {
             Ok(result) => result.clone(),
@@ -116,52 +140,69 @@ impl LocalLink {
         outcome
     }
 
-    /// Whether the call may proceed (`false`) or must ask you (`true`).
+    /// Gathers what governs the call and asks the gate (Plan.md §9.1).
     async fn gate(
         &self,
         run: &Run,
-        project_id: threadlane_core::ids::ProjectId,
+        project_id: ProjectId,
         definition: &ToolDefinition,
         arguments: &Json,
-    ) -> Result<bool, ToolError> {
-        let inner = &self.core.inner;
-        let db = &inner.db;
-        let ceiling = db.effective_ceiling(project_id).await.map_err(tool_error)?;
+    ) -> Result<Verdict, ToolError> {
+        let db = &self.core.inner.db;
+        let space = db.space().await.map_err(tool_error)?;
+        let project = db
+            .project(project_id)
+            .await
+            .map_err(tool_error)?
+            .ok_or_else(|| ToolError::Failed(format!("project {project_id} not found")))?;
         // No binding for the run's agent means the agent may do nothing.
-        let binding_mode = db
+        let binding = db
             .bindings(project_id)
             .await
             .map_err(tool_error)?
             .into_iter()
-            .find(|binding| Some(binding.agent_id) == run.agent_id)
-            .map_or(Mode::Off, |binding| binding.mode)
-            .stricter(ceiling);
+            .find(|binding| Some(binding.agent_id) == run.agent_id);
+        let overrides = binding
+            .as_ref()
+            .map(|binding| gate::overrides(&binding.overrides))
+            .unwrap_or_default();
+        let rules: Vec<StandingRule> = match run.agent_id {
+            Some(agent) => db
+                .standing_rules(Some(project_id))
+                .await
+                .map_err(tool_error)?
+                .into_iter()
+                .filter(|rule| rule.agent_id == agent)
+                .collect(),
+            None => Vec::new(),
+        };
         let events = db.run_events(run.id).await.map_err(tool_error)?;
+        // Any external content in the run's batch taints it: it reaches the
+        // agent whatever else triggered the run (Plan.md §9.1 step 2).
         let tainted = events.iter().any(|event| event.trust == Trust::External);
         // A run you triggered: every event in its batch is from you
         // (docs/milestone-5.md §1 decision 6).
-        let yours = !events.is_empty() && events.iter().all(|event| event.trust == Trust::User);
-        let request = GateRequest {
-            project_id,
-            agent_id: run.agent_id,
-            tool: definition.name.clone(),
+        let requested = !events.is_empty() && events.iter().all(|event| event.trust == Trust::User);
+        Ok(gate::gate(&GateInput {
+            tool: &definition.name,
             tier: definition.tier,
-            arguments: arguments.clone(),
-            binding_mode,
+            arguments,
+            mode: binding.map_or(Mode::Off, |binding| binding.mode),
+            space_ceiling: space.mode_ceiling,
+            project_ceiling: project.mode_ceiling,
+            overrides: &overrides,
+            rules: &rules,
             tainted,
-        };
-        match inner.policy.decide(&request).await {
-            // Instructions change only when you asked, or you approve.
-            // An agent's routine asks first (docs/milestone-8.md §1 decision 4).
-            Verdict::Allow => Ok(timers::asks(&definition.name)
-                || (!yours && memory::protected(&definition.name, arguments))),
-            Verdict::Block { reason } => Err(ToolError::Blocked(reason)),
-            Verdict::Ask => Ok(true),
-        }
+            requested,
+        }))
     }
 
     /// Pauses the call as a decision, with its card, and tells the agent to
-    /// end its turn (Plan.md §9.4). The run then ends `deferred`.
+    /// end its turn (Plan.md §9.4). The run then ends `deferred`. A call a
+    /// standing rule allowed is recorded the same way, already answered by
+    /// the rule and with no card, so the run that follows performs it as an
+    /// approved one; its run ends at once too.
+    #[allow(clippy::too_many_arguments, reason = "the call and its context")]
     async fn ask(
         &self,
         lease: &Lease,
@@ -170,35 +211,45 @@ impl LocalLink {
         key: &ToolCallKey,
         tool: &str,
         arguments: &Json,
+        asked: Asked,
     ) -> Result<Json, ToolError> {
         let inner = &self.core.inner;
-        let asked = proposal(&inner.db, lane, tool, arguments).await?;
-        inner
-            .db
-            .open_decision(
-                Some(lease),
-                &NewDecision {
-                    project_id: lane.project_id,
-                    lane_id: lane.id,
-                    task_id: lane.task_id,
-                    session_id: Some(run.session_id),
-                    run_id: Some(run.id),
-                    tool_call_id: Some(key.key.clone()),
-                    tool: tool.to_owned(),
-                    arguments: arguments.clone(),
-                    arguments_hash: derived_call_key(tool, arguments),
-                    kind: DecisionKind::Approval,
-                    question: asked.question,
-                    context: asked.context,
-                    options: approval_options(),
-                    recommended: Some(0),
-                    offers_standing_rule: false,
-                    expires_at: None,
-                    created_at: inner.clock.now(),
-                },
-            )
-            .await
-            .map_err(tool_error)?;
+        // Checks the call, so a refused one is refused before any ask
+        // (invariant 19).
+        let proposal = proposal(&inner.db, lane, tool, arguments).await?;
+        let (kind, options, recommended) = if tool == ASK_USER {
+            (DecisionKind::Input, question(arguments)?.1, None)
+        } else {
+            (DecisionKind::Approval, approval_options(), Some(0))
+        };
+        let now = inner.clock.now();
+        let decision = NewDecision {
+            project_id: lane.project_id,
+            lane_id: lane.id,
+            task_id: lane.task_id,
+            session_id: Some(run.session_id),
+            run_id: Some(run.id),
+            tool_call_id: Some(key.key.clone()),
+            tool: tool.to_owned(),
+            arguments: arguments.clone(),
+            arguments_hash: derived_call_key(tool, arguments),
+            kind,
+            question: proposal.question,
+            context: proposal.context,
+            options,
+            recommended,
+            offers_standing_rule: matches!(asked, Asked::You { offers_rule: true }),
+            expires_at: match asked {
+                Asked::You { .. } => Some(now + inner.settings.decision_expiry),
+                Asked::Rule(_) => None,
+            },
+            created_at: now,
+        };
+        match asked {
+            Asked::You { .. } => inner.db.open_decision(Some(lease), &decision).await,
+            Asked::Rule(rule) => inner.db.allow_by_rule(lease, &decision, rule).await,
+        }
+        .map_err(tool_error)?;
         inner.wake.wake(WakeTarget::Dispatcher);
         Err(ToolError::WaitingOnYou)
     }
@@ -253,7 +304,7 @@ impl LocalLink {
         if memory::is_change(&decision.tool) {
             return self.perform_memory(lease, run_id, &decision).await;
         }
-        if timers::asks(&decision.tool) {
+        if decision.tool == timers::CREATE_SCHEDULE {
             return self.perform_schedule(lease, run_id, &decision).await;
         }
         Ok(Perform::Call {
@@ -365,6 +416,20 @@ impl LocalLink {
         inner.hook.reach(perform::AFTER_FINISH)?;
         Ok(())
     }
+}
+
+/// What the gateway does with a call the gate let through.
+enum Action {
+    Execute,
+    Ask { offers_rule: bool },
+    ByRule(StandingRuleId),
+}
+
+/// Who answers a paused call.
+#[derive(Clone, Copy)]
+enum Asked {
+    You { offers_rule: bool },
+    Rule(StandingRuleId),
 }
 
 /// The record of a call that failed in a way that is safe to answer the same

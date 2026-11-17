@@ -125,6 +125,10 @@ enum Command {
         /// A note for the agent, for example why you decline.
         #[arg(long)]
         note: Option<String>,
+        /// Also allow calls like this one from now on: a standing rule for
+        /// this agent, project, tool, and target.
+        #[arg(long)]
+        always: bool,
         /// The decision, for example D-0012.
         decision: String,
         /// The option, for example approve or decline.
@@ -175,6 +179,43 @@ enum Command {
     Routine {
         #[command(subcommand)]
         command: RoutineCommand,
+    },
+    /// Set the highest mode any agent may have in a project.
+    Ceiling {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project; the General project if left out.
+        #[arg(short, long)]
+        project: Option<String>,
+        /// off, on_request, assisted, or autonomous; at most the space's.
+        mode: Mode,
+    },
+    /// List the standing rules of a project, or of every project.
+    Rules {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// Only this project.
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+    /// Revoke standing rules.
+    Rule {
+        #[command(subcommand)]
+        command: RuleCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RuleCommand {
+    /// Revoke a standing rule; calls it allowed ask again.
+    Revoke {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// Its number, as `threadlane rules` lists it.
+        rule: String,
     },
 }
 
@@ -507,12 +548,17 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         Command::Answer {
             space,
             note,
+            always,
             decision,
             option,
         } => {
-            let answered = core
-                .answer(space.as_deref(), &decision, &option, note.as_deref())
-                .await?;
+            let answered = if always {
+                core.answer_always(space.as_deref(), &decision, &option, note.as_deref())
+                    .await?
+            } else {
+                core.answer(space.as_deref(), &decision, &option, note.as_deref())
+                    .await?
+            };
             let chosen = answered
                 .decision
                 .chosen()
@@ -569,6 +615,42 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
             }
         }
         Command::Routine { command } => routine(&core, command).await?,
+        Command::Ceiling {
+            space,
+            project,
+            mode,
+        } => {
+            let ceiling = core
+                .set_ceiling(space.as_deref(), project.as_deref(), mode)
+                .await?;
+            println!("the ceiling is now {ceiling}");
+        }
+        Command::Rules { space, project } => {
+            let rules = core
+                .standing_rules(space.as_deref(), project.as_deref())
+                .await?;
+            if rules.is_empty() {
+                println!("no standing rules");
+            }
+            for listed in rules {
+                let rule = &listed.rule;
+                let revoked = if rule.revoked_at.is_some() {
+                    " (revoked)"
+                } else {
+                    ""
+                };
+                println!(
+                    "{} {}/{}: {} {}, used {} times{revoked}",
+                    rule.id, listed.project, listed.agent, rule.tool, rule.pattern, rule.uses
+                );
+            }
+        }
+        Command::Rule {
+            command: RuleCommand::Revoke { space, rule },
+        } => {
+            let revoked = core.revoke_rule(space.as_deref(), &rule).await?;
+            println!("revoked rule {}", revoked.rule.id);
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

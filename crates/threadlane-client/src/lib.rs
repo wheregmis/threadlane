@@ -882,6 +882,19 @@ impl ClientCore {
         option: &str,
         note: Option<&str>,
     ) -> Result<SpaceAnswer, ClientError> {
+        self.answer_as(space, decision, option, note, false).await
+    }
+
+    /// [`ClientCore::answer`], and with `always` also "always allow this
+    /// here" ([`DecisionRequest::AnswerAlways`]).
+    pub(crate) async fn answer_as(
+        &self,
+        space: Option<&str>,
+        decision: &str,
+        option: &str,
+        note: Option<&str>,
+        always: bool,
+    ) -> Result<SpaceAnswer, ClientError> {
         let (space, api) = self.target(space)?;
         let id = DecisionId::parse(decision).ok_or_else(|| {
             api_error(
@@ -889,10 +902,19 @@ impl ClientCore {
                 ApiError::Invalid(format!("{decision:?} is not a decision id like D-0012")),
             )
         })?;
-        let request = DecisionRequest::Answer {
-            decision: id,
-            option: option.to_owned(),
-            note: note.map(str::to_owned),
+        let (option, note) = (option.to_owned(), note.map(str::to_owned));
+        let request = if always {
+            DecisionRequest::AnswerAlways {
+                decision: id,
+                option,
+                note,
+            }
+        } else {
+            DecisionRequest::Answer {
+                decision: id,
+                option,
+                note,
+            }
         };
         match api.decisions(request).await {
             Ok(DecisionReply::Answered { decision, recorded }) => Ok(SpaceAnswer {
@@ -1692,6 +1714,8 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), ClientError> {
 }
 
 mod timers;
+
+mod permissions;
 
 #[cfg(test)]
 mod tests;

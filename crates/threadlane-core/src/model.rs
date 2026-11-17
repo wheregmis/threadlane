@@ -10,9 +10,11 @@ use serde_json::Value as Json;
 
 use crate::ids::{
     AccountId, AgentId, BindingId, CheckpointId, DecisionId, EventId, LaneId, MachineId,
-    MemoryFileId, OutboxId, ProjectId, RepositoryId, RunId, SessionId, TaskId, TimerId,
+    MemoryFileId, OutboxId, ProjectId, RepositoryId, RunId, SessionId, StandingRuleId, TaskId,
+    TimerId,
 };
 use crate::time::Timestamp;
+use crate::tools::Tier;
 
 /// A stored string did not name any variant of the expected enumeration.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1041,6 +1043,51 @@ pub struct DecisionAnswer {
     /// "Always allow this here".
     pub standing_rule: bool,
     pub answered_at: Timestamp,
+}
+
+str_enum! {
+    /// One cell of the mode matrix (Plan.md §2.3), and what a binding's
+    /// override sets a tier's cell to.
+    ///
+    /// Ordered from least to most strict, so `max` gives the stricter cell.
+    #[derive(PartialOrd, Ord)]
+    pub enum Cell {
+        Allow => "allow",
+        Review => "review",
+        Ask => "ask",
+        Block => "block",
+    }
+}
+
+/// "Always allow this here" (Plan.md §2.3 "Standing rules"): one agent, one
+/// project, one tool, and the target fields of its arguments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StandingRule {
+    pub id: StandingRuleId,
+    pub project_id: ProjectId,
+    pub agent_id: AgentId,
+    pub tool: String,
+    /// The arguments' target fields, matched exactly; every other field,
+    /// such as a title or a body, is ignored (docs/milestone-9.md decision 4).
+    pub pattern: Json,
+    /// The tool's tier when the rule was made.
+    pub tier: Tier,
+    pub created_from_decision: Option<DecisionId>,
+    pub created_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
+    /// How many calls it has allowed.
+    pub uses: u32,
+}
+
+/// Input for [`crate::store::DecisionStore::answer_with_rule`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewStandingRule {
+    pub project_id: ProjectId,
+    pub agent_id: AgentId,
+    pub tool: String,
+    pub pattern: Json,
+    pub tier: Tier,
+    pub created_at: Timestamp,
 }
 
 /// Result of answering a decision. Answering is idempotent (Plan.md §9.4).

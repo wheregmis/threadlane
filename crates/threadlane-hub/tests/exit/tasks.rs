@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::json;
 use threadlane_core::model::{EventKind, RunStatus, TaskStatus};
 use threadlane_core::store::{InboxStore, SessionStore};
-use threadlane_hub::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
+use threadlane_hub::{ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
 use threadlane_hub::{
     CREATE_TASK, FINISH_TASK, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME,
     MEMORY_VIEW, OPEN_PULL_REQUEST, PUBLISH_BRANCH, SEND_MESSAGE,
@@ -173,6 +173,7 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
                     CREATE_SCHEDULE,
                     LIST_TIMERS,
                     CANCEL_TIMER,
+                    ASK_USER,
                 ]
             );
             assert!(

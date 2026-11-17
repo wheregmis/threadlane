@@ -11,7 +11,7 @@ use threadlane_core::link::HubLink;
 use threadlane_core::runtime::{StepHook, WakeTarget, Waker};
 use threadlane_core::store::{InboxStore, MachineStore};
 use threadlane_core::time::Clock;
-use threadlane_core::tools::{PermissionPolicy, ToolRegistry};
+use threadlane_core::tools::ToolRegistry;
 use threadlane_store::HubDb;
 use threadlane_transport_iroh::{EndpointAddr, Gate};
 
@@ -22,7 +22,7 @@ use crate::handler::ClientApi;
 use crate::link::LocalLink;
 use crate::pairing::HubGate;
 use crate::settings::HubSettings;
-use crate::tools::{HubTools, TierPolicy};
+use crate::tools::HubTools;
 use crate::wake::WakeHub;
 
 #[derive(Debug, Clone)]
@@ -33,7 +33,6 @@ pub(crate) struct Inner {
     pub(crate) settings: HubSettings,
     pub(crate) wake: Arc<WakeHub>,
     pub(crate) tools: Arc<dyn ToolRegistry>,
-    pub(crate) policy: Arc<dyn PermissionPolicy>,
     pub(crate) channels: Vec<Arc<dyn ChannelAdapter>>,
     /// How clients reach this hub over iroh, for join codes; `None` while
     /// the hub does not serve iroh.
@@ -54,8 +53,7 @@ pub struct HubCore {
 }
 
 impl HubCore {
-    /// Builds the hub with the built-in tools, the milestone-1 permission
-    /// policy, and the `client` channel, after making sure the defaults
+    /// Builds the hub with the built-in tools and the `client` channel, after making sure the defaults
     /// exist (a lead agent, lead bindings, the hub's machine row).
     ///
     /// # Errors
@@ -82,7 +80,6 @@ impl HubCore {
                 settings,
                 wake,
                 tools,
-                policy: Arc::new(TierPolicy::default()),
                 channels: vec![Arc::new(ClientChannel)],
                 iroh: None,
                 github: None,
@@ -96,12 +93,6 @@ impl HubCore {
     #[must_use]
     pub fn with_tools(self, tools: Arc<dyn ToolRegistry>) -> Self {
         self.map_inner(|inner| inner.tools = tools)
-    }
-
-    /// The same hub with another permission policy.
-    #[must_use]
-    pub fn with_policy(self, policy: Arc<dyn PermissionPolicy>) -> Self {
-        self.map_inner(|inner| inner.policy = policy)
     }
 
     /// The same hub with another set of channel adapters.

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use threadlane_core::ids::{ProjectId, TimerId};
 use threadlane_core::model::{
-    EventKind, Inserted, NewEvent, NewTimer, Timer, TimerCategory, TimerStatus, Trust,
+    EventKind, Inserted, NewEvent, NewTimer, Timer, TimerCategory, TimerCreator, TimerStatus, Trust,
 };
 use threadlane_core::store::{StoreError, StoreResult, TimerStore};
 use threadlane_core::time::Timestamp;
@@ -12,6 +12,7 @@ use turso::{Connection, Row};
 
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
+use crate::decision::{expire_in, expiring_decision};
 use crate::inbox::insert_event_in;
 use crate::row::{Cols, json_text, opt_raw, params};
 
@@ -98,49 +99,55 @@ async fn set_status(
     Ok(changed)
 }
 
-#[async_trait]
-impl TimerStore for HubDb {
-    async fn create_timer(&self, timer: &NewTimer) -> StoreResult<Timer> {
-        if timer.category == TimerCategory::Schedule && timer.recurrence.is_none() {
-            return Err(StoreError::Invalid("a schedule needs a recurrence".into()));
-        }
-        let tx = self.db.begin().await?;
-        if let Some(call) = &timer.created_by_call {
-            let existing = query_opt(
-                tx.conn(),
-                &format!("SELECT {TIMER_FIELDS} FROM timers WHERE created_by_call = ?1"),
-                params![call.as_str()],
-                decode_timer,
-            )
-            .await?;
-            if let Some(existing) = existing {
-                return Ok(existing);
-            }
-        }
-        let created = query_one(
-            tx.conn(),
-            &format!(
-                "INSERT INTO timers (project_id, lane_id, agent_id, task_ref, category, due_at,
-                     recurrence, instruction, status, created_by, created_by_call, requested)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11)
-                 RETURNING {TIMER_FIELDS}"
-            ),
-            params![
-                timer.project_id.get(),
-                timer.lane_id.get(),
-                opt_raw(timer.agent_id, |id| id.get()),
-                opt_raw(timer.task_ref, |id| id.get()),
-                timer.category.as_str(),
-                timer.due_at.as_millis(),
-                timer.recurrence.as_ref().map(json_text).transpose()?,
-                timer.instruction.as_str(),
-                timer.created_by.as_str(),
-                timer.created_by_call.as_deref(),
-                timer.requested,
-            ],
+/// Creates a timer inside the caller's transaction; a repeated
+/// `created_by_call` returns the original.
+pub(crate) async fn insert_timer_in(conn: &Connection, timer: &NewTimer) -> StoreResult<Timer> {
+    if timer.category == TimerCategory::Schedule && timer.recurrence.is_none() {
+        return Err(StoreError::Invalid("a schedule needs a recurrence".into()));
+    }
+    if let Some(call) = &timer.created_by_call {
+        let existing = query_opt(
+            conn,
+            &format!("SELECT {TIMER_FIELDS} FROM timers WHERE created_by_call = ?1"),
+            params![call.as_str()],
             decode_timer,
         )
         .await?;
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
+    }
+    query_one(
+        conn,
+        &format!(
+            "INSERT INTO timers (project_id, lane_id, agent_id, task_ref, category, due_at,
+                 recurrence, instruction, status, created_by, created_by_call, requested)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11)
+             RETURNING {TIMER_FIELDS}"
+        ),
+        params![
+            timer.project_id.get(),
+            timer.lane_id.get(),
+            opt_raw(timer.agent_id, |id| id.get()),
+            opt_raw(timer.task_ref, |id| id.get()),
+            timer.category.as_str(),
+            timer.due_at.as_millis(),
+            timer.recurrence.as_ref().map(json_text).transpose()?,
+            timer.instruction.as_str(),
+            timer.created_by.as_str(),
+            timer.created_by_call.as_deref(),
+            timer.requested,
+        ],
+        decode_timer,
+    )
+    .await
+}
+
+#[async_trait]
+impl TimerStore for HubDb {
+    async fn create_timer(&self, timer: &NewTimer) -> StoreResult<Timer> {
+        let tx = self.db.begin().await?;
+        let created = insert_timer_in(tx.conn(), timer).await?;
         tx.commit().await?;
         Ok(created)
     }
@@ -192,6 +199,26 @@ impl TimerStore for HubDb {
                 "timer {id} is {} and due at {}, not at {occurrence}",
                 timer.status, timer.due_at
             )));
+        }
+        // A decision's expiry fires no event of its own: it records the
+        // decision declined, with its answer event (docs/milestone-9.md
+        // decision 8).
+        if let Some(decision) = timer
+            .created_by_call
+            .as_deref()
+            .and_then(expiring_decision)
+            .filter(|_| timer.created_by == TimerCreator::System)
+        {
+            exec(
+                conn,
+                "UPDATE timers SET status = 'done', last_fired_at = ?1, fire_count = fire_count + 1
+                 WHERE id = ?2",
+                params![now.as_millis(), id.get()],
+            )
+            .await?;
+            let inserted = expire_in(conn, decision, now).await?;
+            tx.commit().await?;
+            return Ok(inserted);
         }
         match timer.category {
             TimerCategory::FollowUp => {
@@ -270,7 +297,8 @@ impl TimerStore for HubDb {
             &conn,
             &format!(
                 "SELECT {TIMER_FIELDS} FROM timers
-                 WHERE project_id = ?1 AND status IN ('active', 'paused') ORDER BY id"
+                 WHERE project_id = ?1 AND status IN ('active', 'paused')
+                     AND created_by != 'system' ORDER BY id"
             ),
             params![project_id.get()],
             decode_timer,

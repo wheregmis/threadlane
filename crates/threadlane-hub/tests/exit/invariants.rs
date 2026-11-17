@@ -26,16 +26,25 @@ pub async fn assert_invariants(sim: &Sim, scenario: &str) {
 }
 
 /// Every decision that was asked has exactly one card in the outbox
-/// (Plan.md §10.1), however often a crash interrupted asking.
+/// (Plan.md §10.1), however often a crash interrupted asking. One a
+/// standing rule answered was never asked, and has none.
 pub async fn assert_one_card_per_decision(sim: &Sim, scenario: &str) {
     let outbox = sim.outbox().await;
+    let events = sim.events().await;
     for decision in sim.decisions().await {
+        let by_rule = events.iter().any(|event| {
+            event.decision_ref == Some(decision.id)
+                && event.payload["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("Standing rule"))
+        });
         let cards = outbox
             .iter()
             .filter(|row| row.kind == OutboxKind::Decision && row.decision_id == Some(decision.id))
             .count();
         assert_eq!(
-            cards, 1,
+            cards,
+            usize::from(!by_rule),
             "{scenario}: decision {} has {cards} cards",
             decision.id
         );

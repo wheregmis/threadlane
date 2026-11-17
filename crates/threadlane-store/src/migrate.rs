@@ -11,6 +11,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_decision_outcome.sql"),
     include_str!("../migrations/0003_memory_call.sql"),
     include_str!("../migrations/0004_timer_requested.sql"),
+    include_str!("../migrations/0005_standing_rule_uses.sql"),
 ];
 
 /// The schema version this build expects.

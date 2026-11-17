@@ -1,6 +1,7 @@
 //! [`OrgStore`] on the hub database.
 
 use async_trait::async_trait;
+use serde_json::Value as Json;
 use threadlane_core::ids::{AgentId, BindingId, LaneId, ProjectId};
 use threadlane_core::model::{
     Agent, Binding, LaneKind, Mode, NewAgent, NewBinding, NewProject, NewRepository, Project,
@@ -390,5 +391,39 @@ impl OrgStore for HubDb {
             decode_binding,
         )
         .await
+    }
+
+    async fn set_project_ceiling(&self, id: ProjectId, ceiling: Option<Mode>) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        let changed = exec(
+            tx.conn(),
+            "UPDATE projects SET mode_ceiling = ?2 WHERE id = ?1",
+            params![id.get(), ceiling.map(Mode::as_str)],
+        )
+        .await?;
+        if changed == 0 {
+            return Err(StoreError::not_found("project", id));
+        }
+        tx.commit().await
+    }
+
+    async fn set_binding_overrides(&self, id: BindingId, overrides: &Json) -> StoreResult<Binding> {
+        let tx = self.db.begin().await?;
+        exec(
+            tx.conn(),
+            "UPDATE bindings SET overrides = ?2 WHERE id = ?1",
+            params![id.get(), json_text(overrides)?],
+        )
+        .await?;
+        let updated = query_opt(
+            tx.conn(),
+            &format!("SELECT {BINDING_COLUMNS} WHERE id = ?1"),
+            params![id.get()],
+            decode_binding,
+        )
+        .await?
+        .ok_or_else(|| StoreError::not_found("binding", id))?;
+        tx.commit().await?;
+        Ok(updated)
     }
 }
