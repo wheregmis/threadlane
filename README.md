@@ -70,9 +70,15 @@ model = "haiku"       # when the agent names no model; unset means Claude's defa
 program = "codex"     # path or name on PATH
 # home = "/Users/me/.codex-work"         # CODEX_HOME, a separate Codex login
 # model = "..."       # unset means Codex's default
+
+[timing]
+session_max_age_secs = 86400   # a session older than this is closed and a fresh one started
+
+[github]
+gh = "gh"             # the gh the GitHub source and the runner run; path or name on PATH
 ```
 
-`[log]`, `[timing]`, and `[runs]` are described in
+`[log]`, the rest of `[timing]`, and `[runs]` are described in
 `crates/threadlane-hub/src/config.rs`.
 
 ## Talk to it
@@ -124,6 +130,24 @@ An agent set to `off` never runs in that project, and `send` to a project
 whose lead is off is refused. Until milestone 9 every mode above `off` acts as
 `on_request`.
 
+Routines wake a project's lead with an instruction on a cadence, as work you
+asked for; follow-ups are one-time wakes an agent sets for itself:
+
+```sh
+threadlane routines -p web                               # routines and follow-ups not ended
+threadlane routine add -p web --every 2h "Check the open pull requests."
+threadlane routine add -p web --daily 09:00 "Summarize yesterday."
+threadlane routine add -p web --weekdays mon,wed,fri --at 17:30 --zone Europe/Berlin "Plan tomorrow."
+threadlane routine pause 3                               # its number, as routines lists it
+threadlane routine resume 3                              # at its next occurrence
+threadlane routine cancel 3                              # for good
+```
+
+`add` takes exactly one cadence: `--every` (minutes, or with a unit, such as
+`90m` or `2h`), `--daily HH:MM`, or `--weekdays` with `--at HH:MM`. Times are
+local to `--zone`, this computer's time zone by default. `pause` and `cancel`
+work on follow-ups too.
+
 Repositories a project's tasks work in:
 
 ```sh
@@ -157,6 +181,15 @@ hub's runner performs exactly the call you approved, once, with your own
 `git` and `gh` logins, and the agent carries on with the outcome; the branch
 and pull request are recorded in the task's result. A decline reaches the
 agent with your note.
+
+Where the hub's machine has `gh` logged in, the hub reads GitHub through `gh
+api`, with GET only: your notifications, and for each active task's branch
+and pull request its check runs, reviews, and comments. It never writes and
+never marks a notification read. An item about a task's branch or pull
+request goes to that task's lane, as work you asked for; anything else about
+a registered repository goes to its project's lead, recorded but starting no
+run while the lead is `on_request`; items about other repositories are
+dropped.
 
 When every model account the space can use has reached its usage limit, tasks
 wait as blocked instead of failing, the feed gets one notice saying when work
