@@ -7,7 +7,10 @@
 use std::sync::Arc;
 
 use serde_json::{Value as Json, json};
-use threadlane_core::client::{DecisionReply, DecisionRequest};
+use threadlane_core::client::{
+    ApiError, ConversationEntry, DecisionReply, DecisionRequest, OverviewReply, OverviewRequest,
+    UserMessage,
+};
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::link::{Begin, Perform, RunAssignment};
 use threadlane_core::model::{
@@ -400,23 +403,39 @@ async fn an_answer_is_stored_once_and_arrives_in_the_lane_as_requested_work() {
 async fn a_message_from_you_in_a_task_lane_declines_its_open_decision() {
     let hub = asked().await;
     let waiting = task(&hub).await;
-    hub.db
-        .insert_event(&threadlane_core::model::NewEvent {
-            project_id: waiting.project_id,
-            lane_id: waiting.lane_id,
-            source: "client".to_owned(),
-            source_event_id: "m-2".to_owned(),
-            kind: EventKind::UserMessage,
-            payload: json!({ "text": "Not yet, add tests first." }),
-            trust: Trust::User,
-            requested: true,
-            session_ref: None,
-            decision_ref: None,
-            reply_to_ref: None,
-            received_at: hub.clock.now(),
+    // Sent to the task, not the lead (wireframe 5, note 5).
+    let accepted = hub
+        .api
+        .send_message(&UserMessage {
+            project: Some("ignored for a task".to_owned()),
+            text: "Not yet, add tests first.".to_owned(),
+            client_message_id: "m-2".to_owned(),
+            task: Some(waiting.id),
         })
         .await
         .unwrap();
+    assert_eq!(accepted.project_id, waiting.project_id);
+    let event = hub.db.event(accepted.event_id).await.unwrap().unwrap();
+    assert_eq!(
+        (event.lane_id, event.kind, event.trust),
+        (waiting.lane_id, EventKind::UserMessage, Trust::User)
+    );
+    match hub
+        .api
+        .overview(OverviewRequest::Task { task: waiting.id })
+        .await
+        .unwrap()
+    {
+        OverviewReply::Task { task } => assert_eq!(
+            task.messages,
+            [ConversationEntry::You {
+                event_id: accepted.event_id,
+                text: "Not yet, add tests first.".to_owned(),
+                at: event.received_at,
+            }]
+        ),
+        other => panic!("not a task: {other:?}"),
+    }
     let declined = decision(&hub, 1).await;
     assert_eq!(declined.status, DecisionStatus::Answered);
     assert!(!declined.approved());
@@ -443,6 +462,30 @@ async fn a_message_from_you_in_a_task_lane_declines_its_open_decision() {
     // Declining is information, not failure.
     let events = hub.db.run_events(run.run_id).await.unwrap();
     assert!(events.iter().all(|event| event.attempts == 0));
+}
+
+#[tokio::test]
+async fn a_message_to_a_task_that_is_unknown_or_has_ended_is_refused() {
+    let hub = asked().await;
+    let message = |task: i64| UserMessage {
+        project: None,
+        text: "hello".to_owned(),
+        client_message_id: format!("m-{task}"),
+        task: Some(TaskId(task)),
+    };
+    assert!(matches!(
+        hub.api.send_message(&message(9)).await,
+        Err(ApiError::NotFound(_))
+    ));
+    hub.db
+        .cancel_task(None, TaskId(1), hub.clock.now())
+        .await
+        .unwrap();
+    let refused = hub.api.send_message(&message(1)).await;
+    assert!(
+        matches!(&refused, Err(ApiError::Invalid(why)) if why.contains("has ended")),
+        "{refused:?}"
+    );
 }
 
 #[tokio::test]

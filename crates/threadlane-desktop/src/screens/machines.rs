@@ -1,8 +1,10 @@
 //! Spaces and machines (wireframe 7): which spaces this app is paired with,
 //! which machines help in each and what each can run, the client keys each
-//! hub admitted, and a join code for another one.
+//! hub admitted, a join code for another app, unpairing this app, and
+//! pairing it with another space.
 
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_desktop::{Part, Reach, When, machine_row};
@@ -149,8 +151,80 @@ impl Desktop {
                         ))),
                 );
             }
+            let name = space.name.clone();
+            part = if self.state.unpairing() == Some(space.name.as_str()) {
+                let cancel = Button::new(SharedString::from(format!("unpair-cancel-{name}")))
+                    .label("Keep it")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.cancel_unpair();
+                        cx.notify();
+                    }));
+                part.child(
+                    v_flex()
+                        .gap_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .child(div().text_sm().child(format!(
+                            "Unpair this app from {name}? It forgets the hub and its key here;                              the hub keeps its projects and memory. Pairing again needs a new                              join code."
+                        )))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "unpair-confirm-{name}"
+                                    )))
+                                    .danger()
+                                    .label(format!("Unpair {name}"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.unpair_space(name.clone(), cx);
+                                    })),
+                                )
+                                .child(cancel),
+                        ),
+                )
+            } else {
+                part.child(
+                    Button::new(SharedString::from(format!("unpair-{name}")))
+                        .ghost()
+                        .label("Unpair this app")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.ask_unpair(&name);
+                            cx.notify();
+                        })),
+                )
+            };
             screen = screen.child(part);
         }
-        screen.into_any_element()
+        screen
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(cx.theme().radius)
+                    .child(section("+ Add space"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("Pair this app with another hub using its join code."),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().w(px(180.)).child(Input::new(&self.space_name)))
+                            .child(div().flex_1().child(Input::new(&self.join_code)))
+                            .child(
+                                Button::new("pair-space")
+                                    .primary()
+                                    .label("Pair")
+                                    .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 }

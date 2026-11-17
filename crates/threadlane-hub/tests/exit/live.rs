@@ -87,6 +87,7 @@ async fn the_hub_binary_answers_a_message_through_claude() {
             project: None,
             text: PROMPT.to_owned(),
             client_message_id: uuid::Uuid::new_v4().to_string(),
+            task: None,
         })
         .await
         .unwrap_or_else(|error| fail(&log, &format!("send failed: {error}")));

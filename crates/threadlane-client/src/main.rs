@@ -88,7 +88,8 @@ enum Command {
         /// off, on_request, assisted, or autonomous.
         mode: Mode,
     },
-    /// Send a message to a project's lead and wait for the reply.
+    /// Send a message to a project's lead, or to a task, and wait for the
+    /// reply.
     Send {
         /// The space (paired hub name); may be left out if only one is paired.
         #[arg(short, long)]
@@ -96,6 +97,10 @@ enum Command {
         /// The project; the General project if left out.
         #[arg(short, long)]
         project: Option<String>,
+        /// A task (T-0001) to send to instead of the lead. While a decision
+        /// is open in it, the message declines it with this as the note.
+        #[arg(long, value_name = "TASK", conflicts_with = "project")]
+        task: Option<String>,
         /// Return after the acknowledgement instead of waiting for a reply.
         #[arg(long)]
         no_wait: bool,
@@ -458,6 +463,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         Command::Send {
             space,
             project,
+            task,
             no_wait,
             timeout,
             text,
@@ -471,12 +477,17 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 }
                 core.commit_feed()?;
             }
-            let sent = core
-                .send(space, project.as_deref(), &text.join(" "))
-                .await?;
-            let label = match &sent.project {
-                Some(project) => format!("{}/{project}", sent.space),
-                None => sent.space.clone(),
+            let sent = match &task {
+                Some(task) => core.send_to_task(space, task, &text.join(" ")).await?,
+                None => {
+                    core.send(space, project.as_deref(), &text.join(" "))
+                        .await?
+                }
+            };
+            let label = match (&task, &sent.project) {
+                (Some(task), _) => format!("{}/{task}", sent.space),
+                (None, Some(project)) => format!("{}/{project}", sent.space),
+                (None, None) => sent.space.clone(),
             };
             let duplicate = if sent.accepted.duplicate {
                 " (already accepted before)"

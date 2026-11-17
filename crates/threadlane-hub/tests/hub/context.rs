@@ -243,6 +243,7 @@ async fn project_instructions_stay_in_their_project_and_space_instructions_reach
             project: Some("Alpha".into()),
             text: "Hello Alpha".into(),
             client_message_id: "a-1".into(),
+            task: None,
         })
         .await
         .unwrap();

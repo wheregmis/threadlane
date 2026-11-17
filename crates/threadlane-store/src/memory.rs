@@ -1,17 +1,48 @@
 //! [`MemoryStore`] on the hub database (Plan.md §8.3). Every write is
-//! versioned with its run and keyed on its call, and the indexes it changes
-//! are rewritten in the same transaction.
+//! versioned with its run and keyed on its call, or as yours with neither,
+//! and the indexes it changes are rewritten in the same transaction.
 
 use async_trait::async_trait;
+use threadlane_core::ids::RunId;
 use threadlane_core::memory::{INDEX_FILE, check, index_for, not_an_index, render_index};
 use threadlane_core::model::{MemoryAuthor, MemoryFile};
 use threadlane_core::store::{MemoryStore, StoreError, StoreResult};
-use turso::{Connection, Row};
+use threadlane_core::time::Timestamp;
+use turso::{Connection, Row, Value};
 
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
 use crate::inbox::check_lease;
-use crate::row::{Cols, params};
+use crate::row::{Cols, opt_raw, params};
+
+/// Who a version is written by: a run and its call, or you, with neither.
+#[derive(Debug, Clone, Copy)]
+struct Stamp<'a> {
+    run: Option<RunId>,
+    call: Option<&'a str>,
+    at: Timestamp,
+}
+
+impl<'a> From<&'a MemoryAuthor> for Stamp<'a> {
+    fn from(by: &'a MemoryAuthor) -> Self {
+        Self {
+            run: Some(by.run_id),
+            call: Some(&by.call_key),
+            at: by.at,
+        }
+    }
+}
+
+impl Stamp<'_> {
+    /// You, at `at`.
+    fn owner(at: Timestamp) -> Self {
+        Self {
+            run: None,
+            call: None,
+            at,
+        }
+    }
+}
 
 const VERSION_FIELDS: &str =
     "v.id, v.path, v.content, v.version, v.written_by_run, v.deleted, v.written_at";
@@ -112,7 +143,7 @@ async fn replayed_in(
 
 async fn write_version(
     conn: &Connection,
-    by: &MemoryAuthor,
+    by: Stamp<'_>,
     path: &str,
     content: &str,
     deleted: bool,
@@ -125,7 +156,10 @@ async fn write_version(
     )
     .await?;
     let version = current.unwrap_or(0) + 1;
-    let run = by.run_id.get();
+    let run = opt_raw(by.run, RunId::get);
+    let call = by
+        .call
+        .map_or(Value::Null, |call| Value::Text(call.to_owned()));
     let at = by.at.as_millis();
     exec(
         conn,
@@ -134,7 +168,7 @@ async fn write_version(
          ON CONFLICT (path) DO UPDATE SET version = excluded.version, content = excluded.content,
              deleted = excluded.deleted, written_by_run = excluded.written_by_run,
              written_at = excluded.written_at",
-        params![path, version, content, deleted, run, at],
+        params![path, version, content, deleted, run.clone(), at],
     )
     .await?;
     let id: i64 = query_one(
@@ -142,15 +176,7 @@ async fn write_version(
         "INSERT INTO memory_versions
              (path, version, content, deleted, written_by_run, written_at, written_by_call)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
-        params![
-            path,
-            version,
-            content,
-            deleted,
-            run,
-            at,
-            by.call_key.as_str()
-        ],
+        params![path, version, content, deleted, run, at, call],
         |row| Cols(row).i64(0),
     )
     .await?;
@@ -159,7 +185,7 @@ async fn write_version(
         path: path.to_owned(),
         content: content.to_owned(),
         version,
-        written_by_run: Some(by.run_id),
+        written_by_run: by.run,
         deleted,
         written_at: by.at,
     })
@@ -168,7 +194,7 @@ async fn write_version(
 /// Rewrites the index that lists each of `paths`, from the files it lists
 /// as they now are: a new version only when its bytes change, a deletion
 /// when it lists nothing.
-async fn reindex_in(conn: &Connection, by: &MemoryAuthor, paths: &[&str]) -> StoreResult<()> {
+async fn reindex_in(conn: &Connection, by: Stamp<'_>, paths: &[&str]) -> StoreResult<()> {
     let mut indexes: Vec<String> = paths.iter().filter_map(|path| index_for(path)).collect();
     indexes.dedup();
     for index in indexes {
@@ -210,8 +236,8 @@ impl MemoryStore for HubDb {
         if let Some(file) = replayed_in(conn, by, path).await? {
             return Ok(file);
         }
-        let file = write_version(conn, by, path, content, false).await?;
-        reindex_in(conn, by, &[path]).await?;
+        let file = write_version(conn, by.into(), path, content, false).await?;
+        reindex_in(conn, by.into(), &[path]).await?;
         tx.commit().await?;
         Ok(file)
     }
@@ -248,8 +274,8 @@ impl MemoryStore for HubDb {
         }
         let content = current.content.replacen(old, new, 1);
         checked(path, &content)?;
-        let file = write_version(conn, by, path, &content, false).await?;
-        reindex_in(conn, by, &[path]).await?;
+        let file = write_version(conn, by.into(), path, &content, false).await?;
+        reindex_in(conn, by.into(), &[path]).await?;
         tx.commit().await?;
         Ok(file)
     }
@@ -263,8 +289,8 @@ impl MemoryStore for HubDb {
             return Ok(file);
         }
         existing_in(conn, path).await?;
-        let file = write_version(conn, by, path, "", true).await?;
-        reindex_in(conn, by, &[path]).await?;
+        let file = write_version(conn, by.into(), path, "", true).await?;
+        reindex_in(conn, by.into(), &[path]).await?;
         tx.commit().await?;
         Ok(file)
     }
@@ -289,9 +315,37 @@ impl MemoryStore for HubDb {
                 "{to} already exists; delete it first or pick another name"
             )));
         }
-        write_version(conn, by, from, "", true).await?;
-        let file = write_version(conn, by, to, &current.content, false).await?;
-        reindex_in(conn, by, &[from, to]).await?;
+        write_version(conn, by.into(), from, "", true).await?;
+        let file = write_version(conn, by.into(), to, &current.content, false).await?;
+        reindex_in(conn, by.into(), &[from, to]).await?;
+        tx.commit().await?;
+        Ok(file)
+    }
+
+    async fn write_by_owner(
+        &self,
+        path: &str,
+        content: &str,
+        at: Timestamp,
+    ) -> StoreResult<MemoryFile> {
+        checked(path, content)?;
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let by = Stamp::owner(at);
+        let file = write_version(conn, by, path, content, false).await?;
+        reindex_in(conn, by, &[path]).await?;
+        tx.commit().await?;
+        Ok(file)
+    }
+
+    async fn delete_by_owner(&self, path: &str, at: Timestamp) -> StoreResult<MemoryFile> {
+        unindexed(path)?;
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let by = Stamp::owner(at);
+        existing_in(conn, path).await?;
+        let file = write_version(conn, by, path, "", true).await?;
+        reindex_in(conn, by, &[path]).await?;
         tx.commit().await?;
         Ok(file)
     }

@@ -18,6 +18,7 @@ fn message(project: Option<&str>, id: &str) -> UserMessage {
         project: project.map(str::to_owned),
         text: "are you there?".to_owned(),
         client_message_id: id.to_owned(),
+        task: None,
     }
 }
 

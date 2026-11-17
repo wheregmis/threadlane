@@ -15,8 +15,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use threadlane_core::client::{
     Accepted, ApiError, ClientRequest, ClientResponse, DecisionReply, DecisionRequest, FeedItem,
-    HubApi, HubInfo, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
-    PairingRequest, ProjectSummary, UserMessage, dispatch,
+    HubApi, HubInfo, MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply,
+    OverviewRequest, PairingReply, PairingRequest, ProjectSummary, UserMessage, dispatch,
 };
 use threadlane_core::client::{TimerReply, TimerRequest};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -199,6 +199,16 @@ impl HubApi for LocalClient {
         {
             ClientResponse::Overview { reply } => Ok(reply),
             other => Err(unexpected(other, "overview")),
+        }
+    }
+
+    async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError> {
+        match self
+            .call(&ClientRequest::Memory { request }, REQUEST_TIMEOUT)
+            .await?
+        {
+            ClientResponse::Memory { reply } => Ok(reply),
+            other => Err(unexpected(other, "memory")),
         }
     }
 

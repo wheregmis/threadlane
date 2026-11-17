@@ -100,6 +100,7 @@ impl TestHub {
                 project: None,
                 text: text.to_owned(),
                 client_message_id: id.to_owned(),
+                task: None,
             })
             .await
             .unwrap()

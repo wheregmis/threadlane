@@ -137,6 +137,7 @@ async fn heartbeats_renew_leases_and_omit_lost_ones() {
             project: Some("Alpha".into()),
             text: "alpha work".into(),
             client_message_id: "a-1".into(),
+            task: None,
         })
         .await
         .unwrap();

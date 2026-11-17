@@ -115,6 +115,7 @@ async fn bad_messages_are_refused() {
         project: project.map(str::to_owned),
         text: text.to_owned(),
         client_message_id: id.to_owned(),
+        task: None,
     };
     assert!(matches!(
         hub.api
@@ -151,6 +152,7 @@ async fn a_named_project_routes_to_its_own_lead_lane() {
             project: Some("Alpha".into()),
             text: "Ship it".into(),
             client_message_id: "a-1".into(),
+            task: None,
         })
         .await
         .unwrap();

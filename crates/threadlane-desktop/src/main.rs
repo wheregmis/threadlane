@@ -12,7 +12,7 @@ use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
@@ -20,8 +20,8 @@ use threadlane_core::ids::TaskId;
 use threadlane_core::model::Mode;
 use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
-    AppState, When, decision_of_tag, describe, load_earlier, load_modes, load_project, load_task,
-    pump, refresh,
+    Activity, AppState, When, change_memory, decision_of_tag, describe, load_earlier, load_memory,
+    load_modes, load_project, load_task, pump, refresh,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{RwLock, mpsc};
@@ -60,7 +60,7 @@ fn main() -> ExitCode {
     };
     let core = Arc::new(RwLock::new(core));
     if let Some(stream) = stream {
-        runtime.spawn(pump(Arc::clone(&core), stream, shown));
+        runtime.spawn(pump(Arc::clone(&core), stream, shown.clone()));
     }
     let tokio = runtime.handle().clone();
     let start = std::env::var("THREADLANE_DESKTOP_OPEN")
@@ -85,7 +85,13 @@ fn main() -> ExitCode {
             ..Default::default()
         };
         let opened = open_window(options, cx, |window, cx| {
-            cx.new(|cx| Desktop::new(state, core, tokio, feed, start, window, cx))
+            cx.new(|cx| {
+                let feed = Feed {
+                    shown,
+                    received: feed,
+                };
+                Desktop::new(state, core, tokio, feed, start, window, cx)
+            })
         });
         match opened {
             Ok((_window, view)) => {
@@ -160,7 +166,7 @@ enum Screen {
 
 impl Screen {
     /// The screen `THREADLANE_DESKTOP_OPEN` names: `home`, `agents`,
-    /// `machines`, `<space>/<project>[/tasks|conversation|agents]`, or
+    /// `machines`, `<space>/<project>[/tasks|conversation|agents|memory]`, or
     /// `<space>/T-0001`. For looking at a screen without clicking to it.
     fn named(open: &str) -> Option<Self> {
         let parts: Vec<&str> = open.split('/').collect();
@@ -180,6 +186,7 @@ impl Screen {
                 tab: match rest {
                     ["conversation"] => Tab::Conversation,
                     ["agents"] => Tab::Agents,
+                    ["memory"] => Tab::Memory,
                     _ => Tab::Tasks,
                 },
             },
@@ -194,6 +201,14 @@ enum Tab {
     Tasks,
     Conversation,
     Agents,
+    Memory,
+}
+
+/// The feed as the window takes it: what the pumps hand over, and the
+/// sender a newly paired space's pump hands its items to.
+struct Feed {
+    shown: mpsc::UnboundedSender<SpaceFeedItem>,
+    received: mpsc::UnboundedReceiver<SpaceFeedItem>,
 }
 
 /// The window's one view: the shell and its screens over [`AppState`].
@@ -203,12 +218,23 @@ struct Desktop {
     tokio: tokio::runtime::Handle,
     screen: Screen,
     composer: Entity<InputState>,
+    /// The task screen's composer (wireframe 5).
+    task_composer: Entity<InputState>,
     note: Entity<InputState>,
+    /// The Memory tab's editor.
+    memory_editor: Entity<TextareaState>,
+    /// The "+ Add space" form's name and join code.
+    space_name: Entity<InputState>,
+    join_code: Entity<InputState>,
+    /// Where a newly paired space's feed goes.
+    shown: mpsc::UnboundedSender<SpaceFeedItem>,
+    /// Text to put in the memory editor at the next render.
+    fill_editor: Option<String>,
+    /// Empty the "+ Add space" form at the next render.
+    clear_join: bool,
     /// The new project form's name and description.
     project_name: Entity<InputState>,
     project_description: Entity<InputState>,
-    /// The outcome of the last action, or why it failed.
-    status: Option<SharedString>,
     /// Empty the note at the next render, which has the window it needs.
     clear_note: bool,
     /// Empty the new project form at the next render.
@@ -223,7 +249,7 @@ impl Desktop {
         state: AppState,
         core: Arc<RwLock<ClientCore>>,
         tokio: tokio::runtime::Handle,
-        mut feed: mpsc::UnboundedReceiver<SpaceFeedItem>,
+        feed: Feed,
         start: Option<Screen>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -231,18 +257,38 @@ impl Desktop {
         let composer =
             cx.new(|cx| InputState::new(window, cx).placeholder("Tell your team what you need…"));
         let note = cx.new(|cx| InputState::new(window, cx).placeholder("Note (optional)"));
+        let task_composer =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Add to this task…"));
+        let memory_editor = cx.new(|cx| TextareaState::new(window, cx).rows(16));
+        let space_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name for the space"));
+        let join_code = cx.new(|cx| InputState::new(window, cx).placeholder("Join code"));
+        let Feed {
+            shown,
+            received: mut feed,
+        } = feed;
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
         let project_description =
             cx.new(|cx| InputState::new(window, cx).placeholder("Description (optional)"));
-        let subscriptions = vec![cx.subscribe_in(
-            &composer,
-            window,
-            |this, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.send(window, cx);
-                }
-            },
-        )];
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &composer,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.send(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &task_composer,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.send_to_task(window, cx);
+                    }
+                },
+            ),
+        ];
         let follow = cx.spawn(async move |this, cx| {
             while let Some(item) = feed.recv().await {
                 if this.update(cx, |this, cx| this.receive(item, cx)).is_err() {
@@ -274,10 +320,16 @@ impl Desktop {
             tokio,
             screen: start.unwrap_or(Screen::Home),
             composer,
+            task_composer,
             note,
+            memory_editor,
+            space_name,
+            join_code,
+            shown,
+            fill_editor: None,
+            clear_join: false,
             project_name,
             project_description,
-            status: None,
             clear_note: false,
             clear_project_form: false,
             offset_minutes: local_offset_minutes(),
@@ -331,11 +383,27 @@ impl Desktop {
     fn load_screen(&mut self, cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
         match self.screen.clone() {
-            Screen::Project { space, project, .. } => self.run(
-                async move { load_project(&*core.read().await, &space, &project).await },
-                |this, loaded, _| this.state.apply_project(loaded),
-                cx,
-            ),
+            Screen::Project { space, project, .. } => {
+                // The Conversation tab's card and the Memory tab need the memory.
+                let selected = self
+                    .state
+                    .memory_selected(&space, &project)
+                    .map(str::to_owned);
+                let (in_space, named) = (space.clone(), project.clone());
+                let for_memory = Arc::clone(&core);
+                self.run(
+                    async move { load_project(&*core.read().await, &space, &project).await },
+                    |this, loaded, _| this.state.apply_project(loaded),
+                    cx,
+                );
+                self.run(
+                    async move {
+                        load_memory(&*for_memory.read().await, &in_space, &named, selected).await
+                    },
+                    |this, loaded, _| this.state.apply_memory(loaded),
+                    cx,
+                );
+            }
             Screen::Task { space, task } => self.run(
                 async move { load_task(&*core.read().await, &space, task).await },
                 |this, loaded, _| this.state.apply_task(loaded),
@@ -401,7 +469,6 @@ impl Desktop {
 
     fn go(&mut self, screen: Screen, cx: &mut Context<Self>) {
         self.screen = screen;
-        self.status = None;
         self.load_screen(cx);
         cx.notify();
     }
@@ -409,7 +476,8 @@ impl Desktop {
     fn answer(&mut self, space: String, id: String, option: String, cx: &mut Context<Self>) {
         let note = self.note.read(cx).value().trim().to_owned();
         let core = Arc::clone(&self.core);
-        self.status = Some(format!("Answering {space} {id}…").into());
+        self.state
+            .report(Activity::Working(format!("Answering {space} {id}…")));
         self.run(
             async move {
                 let note = (!note.is_empty()).then_some(note);
@@ -425,11 +493,18 @@ impl Desktop {
                         "{}/{}",
                         answer.space, answer.decision.id
                     ));
-                    this.status = Some(format!("Answered {}.", answer.decision.id).into());
+                    let chosen = answer
+                        .decision
+                        .chosen()
+                        .map_or_else(String::new, |option| format!(": {}", option.label));
+                    this.state.report(Activity::Done(format!(
+                        "Answered {} / {}{chosen}.",
+                        answer.space, answer.decision.id
+                    )));
                     this.clear_note = true;
                     this.load_screen(cx);
                 }
-                Err(error) => this.status = Some(describe(&error).into()),
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
         );
@@ -447,7 +522,9 @@ impl Desktop {
                 .map(|(space, project)| (space.to_owned(), project.to_owned())),
         };
         let Some((space, project)) = target else {
-            self.status = Some("No project to send to: pair a hub first.".into());
+            self.state.report(Activity::Failed(
+                "No project to send to: pair a hub first.".to_owned(),
+            ));
             cx.notify();
             return;
         };
@@ -458,7 +535,9 @@ impl Desktop {
         self.composer
             .update(cx, |composer, cx| composer.set_value("", window, cx));
         let core = Arc::clone(&self.core);
-        self.status = Some("Sending…".into());
+        self.state.report(Activity::Working(format!(
+            "Sending to the lead of {space} / {project}…"
+        )));
         self.run(
             async move {
                 let sent = core
@@ -473,9 +552,11 @@ impl Desktop {
                     let at = SystemClock.now();
                     this.state
                         .sent(&space, &project, &text, sent.accepted.event_id, at);
-                    this.status = Some(format!("Sent to the lead of {space} / {project}.").into());
+                    this.state.report(Activity::Done(format!(
+                        "Sent to the lead of {space} / {project}."
+                    )));
                 }
-                Err(error) => this.status = Some(describe(&error).into()),
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
         );
@@ -502,11 +583,13 @@ impl Desktop {
             },
             |this, (space, project, set), _| match set {
                 Ok(binding) => {
-                    this.status =
-                        Some(format!("{} is now {} here.", binding.agent, binding.mode).into());
+                    this.state.report(Activity::Done(format!(
+                        "{} is now {} in {space} / {project}.",
+                        binding.agent, binding.mode
+                    )));
                     this.state.mode_set(&space, &project, binding);
                 }
-                Err(error) => this.status = Some(describe(&error).into()),
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
         );
@@ -517,12 +600,14 @@ impl Desktop {
         let name = self.project_name.read(cx).value().trim().to_owned();
         let description = self.project_description.read(cx).value().trim().to_owned();
         if name.is_empty() {
-            self.status = Some("Give the project a name.".into());
+            self.state
+                .report(Activity::Failed("Give the project a name.".to_owned()));
             cx.notify();
             return;
         }
         let core = Arc::clone(&self.core);
-        self.status = Some(format!("Creating {name} in {space}…").into());
+        self.state
+            .report(Activity::Working(format!("Creating {name} in {space}…")));
         self.run(
             async move {
                 let created = core
@@ -543,7 +628,7 @@ impl Desktop {
                     this.clear_project_form = true;
                     this.go(screen, cx);
                 }
-                Err(error) => this.status = Some(describe(&error).into()),
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
         );
@@ -571,7 +656,176 @@ impl Desktop {
             async move { core.read().await.pair_code(Some(&space)).await },
             |this, issued, _| match issued {
                 Ok(code) => this.state.issued(code),
-                Err(error) => this.status = Some(describe(&error).into()),
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+    }
+}
+
+impl Desktop {
+    /// Sends the task composer's text to the open task's lane (wireframe 5,
+    /// note 5): while a decision is open there, it declines it with the
+    /// text as the note.
+    fn send_to_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Screen::Task { space, task } = self.screen.clone() else {
+            return;
+        };
+        let text = self.task_composer.read(cx).value().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        self.task_composer
+            .update(cx, |composer, cx| composer.set_value("", window, cx));
+        let core = Arc::clone(&self.core);
+        self.state
+            .report(Activity::Working(format!("Sending to {space} / {task}…")));
+        self.run(
+            async move {
+                let sent = core
+                    .read()
+                    .await
+                    .send_to_task(Some(&space), &task.to_string(), &text)
+                    .await;
+                (space, task, text, sent)
+            },
+            |this, (space, task, text, sent), cx| match sent {
+                Ok(sent) => {
+                    let at = SystemClock.now();
+                    this.state
+                        .sent_to_task(&space, task, &text, sent.accepted.event_id, at);
+                    this.state
+                        .report(Activity::Done(format!("Sent to {space} / {task}.")));
+                    // A decision it declined, and the task's new state.
+                    this.refresh(cx);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Shows a memory file on the right, with its versions.
+    fn select_memory(&mut self, space: &str, project: &str, path: &str, cx: &mut Context<Self>) {
+        self.state.select_memory(space, project, path);
+        self.load_screen(cx);
+        cx.notify();
+    }
+
+    /// Opens the selected memory file for editing, or closes it.
+    fn edit_memory(&mut self, space: &str, project: &str, open: bool, cx: &mut Context<Self>) {
+        self.fill_editor = self.state.edit_memory(space, project, open);
+        cx.notify();
+    }
+
+    /// Saves the editor's text as the selected file, or deletes the file
+    /// with `save` false, as you.
+    fn change_memory(
+        &mut self,
+        space: String,
+        project: String,
+        save: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self
+            .state
+            .memory_selected(&space, &project)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let content = save.then(|| self.memory_editor.read(cx).value().to_string());
+        let core = Arc::clone(&self.core);
+        let verb = if save { "Saving" } else { "Deleting" };
+        self.state.report(Activity::Working(format!(
+            "{verb} {path} in {space} / {project}…"
+        )));
+        self.run(
+            async move {
+                change_memory(&*core.read().await, &space, &project, &path, content).await
+            },
+            |this, changed, cx| {
+                let report = match this.state.apply_change(changed) {
+                    Ok(done) => Activity::Done(done),
+                    Err(why) => Activity::Failed(why),
+                };
+                this.state.report(report);
+                this.load_screen(cx);
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Pairs this app with the hub of the join code under the name given,
+    /// as `threadlane hub join <name> <code>` does; its feed follows.
+    fn join_space(&mut self, cx: &mut Context<Self>) {
+        let name = self.space_name.read(cx).value().trim().to_owned();
+        let code = self.join_code.read(cx).value().trim().to_owned();
+        if name.is_empty() || code.is_empty() {
+            self.state.report(Activity::Failed(
+                "Give the space a name and paste its join code.".to_owned(),
+            ));
+            cx.notify();
+            return;
+        }
+        let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
+        self.state
+            .report(Activity::Working(format!("Pairing {name}…")));
+        self.run(
+            async move {
+                let joined = {
+                    let mut client = core.write().await;
+                    client
+                        .join(&name, &code)
+                        .await
+                        .and_then(|()| client.follow(Some(&name)))
+                };
+                let joined = joined.map(|stream| {
+                    tokio::spawn(pump(Arc::clone(&core), stream, shown));
+                });
+                (name, joined)
+            },
+            |this, (name, joined), cx| match joined {
+                Ok(()) => {
+                    this.state.space_added(&name);
+                    this.state.report(Activity::Done(format!("Paired {name}.")));
+                    this.clear_join = true;
+                    this.refresh(cx);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Unpairs this app from a space once you confirmed, as `threadlane hub
+    /// remove` does: the hub keeps its data and this app forgets its key.
+    fn unpair_space(&mut self, name: String, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let unpaired = core.write().await.unpair(&name);
+                (name, unpaired)
+            },
+            |this, (name, unpaired), cx| match unpaired {
+                Ok(()) => {
+                    this.state.space_removed(&name);
+                    this.state
+                        .report(Activity::Done(format!("Unpaired {name}.")));
+                    let gone = match &this.screen {
+                        Screen::Project { space, .. }
+                        | Screen::Task { space, .. }
+                        | Screen::NewProject { space } => *space == name,
+                        _ => false,
+                    };
+                    if gone {
+                        this.go(Screen::Machines, cx);
+                    }
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
         );
@@ -584,12 +838,20 @@ impl Render for Desktop {
             self.note
                 .update(cx, |note, cx| note.set_value("", window, cx));
         }
+        if let Some(text) = self.fill_editor.take() {
+            self.memory_editor
+                .update(cx, |editor, cx| editor.set_value(text, window, cx));
+        }
+        if std::mem::take(&mut self.clear_join) {
+            for field in [&self.space_name, &self.join_code] {
+                field.update(cx, |field, cx| field.set_value("", window, cx));
+            }
+        }
         if std::mem::take(&mut self.clear_project_form) {
             for field in [&self.project_name, &self.project_description] {
                 field.update(cx, |field, cx| field.set_value("", window, cx));
             }
         }
-        let muted = cx.theme().muted_foreground;
         let when = self.when();
         let body = match self.screen.clone() {
             Screen::Home => self.home(&when, cx),
@@ -616,11 +878,7 @@ impl Render for Desktop {
                     .p_4()
                     .gap_3()
                     .child(body)
-                    .children(
-                        self.status
-                            .clone()
-                            .map(|status| div().text_sm().text_color(muted).child(status)),
-                    ),
+                    .children(self.activity(cx)),
             )
     }
 }

@@ -12,8 +12,8 @@ use serde_json::json;
 use tempfile::TempDir;
 use threadlane_core::client::{
     Accepted, ApiError, BindingSummary, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
-    OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest,
-    ProjectSummary, UserMessage,
+    MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
+    PairingRequest, ProjectSummary, UserMessage,
 };
 use threadlane_core::client::{TimerReply, TimerRequest};
 use threadlane_core::ids::TimerId;
@@ -81,7 +81,7 @@ impl Shared {
     }
 }
 
-/// Answers every message, except to the project `silent`, with a notice and
+/// Answers every message, except to the project `silent` or to a task, with a notice and
 /// then a reply, a little later, through its feed.
 #[derive(Debug, Clone)]
 struct FakeHub(Arc<Shared>);
@@ -132,7 +132,7 @@ impl HubApi for FakeHub {
             sent.push(message.clone());
             sent.len()
         };
-        if message.project.as_deref() != Some("silent") {
+        if message.project.as_deref() != Some("silent") && message.task.is_none() {
             let shared = Arc::clone(&self.0);
             let project = message
                 .project
@@ -269,6 +269,10 @@ impl HubApi for FakeHub {
     }
 
     async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
+        Err(ApiError::Invalid(format!("unsupported {request:?}")))
+    }
+
+    async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError> {
         Err(ApiError::Invalid(format!("unsupported {request:?}")))
     }
 
@@ -543,6 +547,19 @@ async fn the_cli_against_a_running_hub() {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].text, "hello there");
         assert_eq!(sent[0].project.as_deref(), Some("silent"));
+        assert_eq!(sent[0].task, None);
+    }
+    expect_success(
+        client_dir,
+        &["send", "--no-wait", "--task", "T-0003", "add", "tests"],
+        "[work/T-0003] accepted as event 2\n",
+    )
+    .await;
+    {
+        let mut sent = hub.fake.0.sent.lock().expect("lock");
+        assert_eq!(sent[1].task, Some(threadlane_core::ids::TaskId(3)));
+        assert_eq!(sent[1].text, "add tests");
+        sent.pop();
     }
 
     hub.fake

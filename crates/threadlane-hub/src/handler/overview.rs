@@ -8,7 +8,7 @@ use threadlane_core::client::{
     TaskSummary,
 };
 use threadlane_core::ids::{AgentId, MachineId, ProjectId};
-use threadlane_core::model::{OutboxMessage, RunStatus, Task, TaskStatus};
+use threadlane_core::model::{Event, OutboxMessage, RunStatus, Task, TaskStatus};
 use threadlane_core::store::{
     DecisionStore, InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore, TaskStore,
 };
@@ -130,6 +130,21 @@ fn feed_item(
     })
 }
 
+/// Your message as the conversation and the task screen show it.
+fn you(event: Event) -> ConversationEntry {
+    let text = event
+        .payload
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    ConversationEntry::You {
+        event_id: event.id,
+        text,
+        at: event.received_at,
+    }
+}
+
 /// Answers an [`OverviewRequest`].
 pub(super) async fn handle(
     api: &ClientApi,
@@ -198,6 +213,14 @@ pub(super) async fn handle(
                 })
                 .collect();
             let related = summaries(db, &names, related).await?;
+            let mut messages: Vec<ConversationEntry> = db
+                .user_messages(task.lane_id, None, FEED_PAGE)
+                .await
+                .map_err(api_error)?
+                .into_iter()
+                .map(you)
+                .collect();
+            messages.reverse();
             Ok(OverviewReply::Task {
                 task: Box::new(TaskDetail {
                     branch: task_branch(task.id),
@@ -205,6 +228,7 @@ pub(super) async fn handle(
                     runs,
                     decisions,
                     related,
+                    messages,
                     summary: summary(db, &names, task).await?,
                 }),
             })
@@ -222,20 +246,7 @@ pub(super) async fn handle(
                 .await
                 .map_err(api_error)?
                 .into_iter()
-                .map(|event| {
-                    let text = event
-                        .payload
-                        .get("text")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned();
-                    let entry = ConversationEntry::You {
-                        event_id: event.id,
-                        text,
-                        at: event.received_at,
-                    };
-                    (event.received_at, entry)
-                })
+                .map(|event| (event.received_at, you(event)))
                 .collect();
             for message in db
                 .sent_before(CLIENT_CHANNEL, Some(project.id), before, limit)

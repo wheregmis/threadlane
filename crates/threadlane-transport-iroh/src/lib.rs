@@ -31,8 +31,8 @@ use iroh_mdns_address_lookup::MdnsAddressLookup;
 use serde::{Deserialize, Serialize};
 use threadlane_core::client::{
     Accepted, ApiError, ClientRequest, ClientResponse, DecisionReply, DecisionRequest, FeedItem,
-    HubApi, HubInfo, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
-    PairingRequest, ProjectSummary, UserMessage, dispatch,
+    HubApi, HubInfo, MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply,
+    OverviewRequest, PairingReply, PairingRequest, ProjectSummary, UserMessage, dispatch,
 };
 use threadlane_core::client::{TimerReply, TimerRequest};
 use threadlane_transport_local::{MAX_FEED_WAIT, cap_wait, encode, unexpected};
@@ -805,6 +805,16 @@ impl HubApi for IrohClient {
         {
             ClientResponse::Overview { reply } => Ok(reply),
             other => Err(unexpected(other, "overview")),
+        }
+    }
+
+    async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError> {
+        match self
+            .call(&ClientRequest::Memory { request }, REQUEST_TIMEOUT)
+            .await?
+        {
+            ClientResponse::Memory { reply } => Ok(reply),
+            other => Err(unexpected(other, "memory")),
         }
     }
 

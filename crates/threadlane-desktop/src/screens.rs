@@ -59,8 +59,8 @@ fn section(text: impl Into<SharedString>) -> Div {
 }
 
 impl Desktop {
-    /// A decision waiting on you: where it comes from, its question and
-    /// context, and one button per option, the recommended one marked
+    /// A decision waiting on you: where it comes from, its question, why it
+    /// is asked, the call's arguments, and one button per option, the recommended one marked
     /// (Plan.md §9.4). A click answers with that option and the note.
     fn decision(&self, queued: &Queued, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
@@ -108,12 +108,15 @@ impl Desktop {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(decision.question.clone()),
             )
-            .children((!decision.context.is_empty()).then(|| {
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(decision.context.clone())
-            }))
+            .children(
+                threadlane_desktop::context_line(decision)
+                    .map(|line| div().text_sm().text_color(muted).child(line.to_owned())),
+            )
+            .children(
+                threadlane_desktop::arguments(decision)
+                    .into_iter()
+                    .map(|line| div().text_sm().child(line)),
+            )
             .child(h_flex().gap_2().flex_wrap().children(options))
     }
 

@@ -7,14 +7,14 @@ use serde_json::json;
 use tempfile::TempDir;
 use threadlane_client::ClientDirs;
 use threadlane_core::client::{
-    Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, OrgReply,
-    OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest, RunSummary,
-    UserMessage,
+    Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
+    MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
+    PairingRequest, RunSummary, UserMessage,
 };
 use threadlane_core::ids::{AgentId, LaneId, MachineId, OutboxId, RunId, SessionId};
 use threadlane_core::model::{
-    BackendKind, DecisionKind, DecisionOption, DecisionStatus, MachineTrust, Mode, OutboxMessage,
-    OutboxStatus, Run, RunOutcome, RunStatus, Task, TaskOrigin, TaskStatus, Urgency,
+    BackendKind, DecisionKind, DecisionOption, DecisionStatus, MachineTrust, MemoryFile, Mode,
+    OutboxMessage, OutboxStatus, Run, RunOutcome, RunStatus, Task, TaskOrigin, TaskStatus, Urgency,
 };
 use threadlane_core::time::Timestamp;
 
@@ -36,6 +36,7 @@ struct FakeHub {
     history: Mutex<Vec<ConversationEntry>>,
     recent: Mutex<Vec<FeedItem>>,
     bindings: Mutex<Vec<BindingSummary>>,
+    memory: Mutex<Vec<MemoryFile>>,
 }
 
 impl FakeHub {
@@ -218,11 +219,77 @@ impl HubApi for FakeHub {
                         runs: Vec::new(),
                         decisions: Vec::new(),
                         related: Vec::new(),
+                        messages: Vec::new(),
                     }),
                 })
             }
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
+    }
+
+    /// Memory like a hub's: every write a new version by you, refused
+    /// when over budget, at an index, or outside the project.
+    async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError> {
+        self.up()?;
+        let mut files = self.memory.lock().expect("lock");
+        let current = |files: &[MemoryFile], path: &str| {
+            files
+                .iter()
+                .rfind(|file| file.path == path)
+                .filter(|file| !file.deleted)
+                .cloned()
+        };
+        let mut change = |path: String, content: String, deleted: bool| {
+            let version = files.iter().filter(|file| file.path == path).count() + 1;
+            let file = memory_file(&path, &content, i64::try_from(version).expect("few"), None);
+            let file = MemoryFile { deleted, ..file };
+            files.push(file.clone());
+            MemoryReply::File { file }
+        };
+        match request {
+            MemoryRequest::List { .. } => {
+                let mut paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+                paths.sort();
+                paths.dedup();
+                Ok(MemoryReply::Files {
+                    files: paths
+                        .iter()
+                        .filter_map(|path| current(&files, path))
+                        .collect(),
+                })
+            }
+            MemoryRequest::History { path, .. } => Ok(MemoryReply::History {
+                versions: files
+                    .iter()
+                    .filter(|file| file.path == path)
+                    .cloned()
+                    .collect(),
+            }),
+            MemoryRequest::Write { path, content, .. } if content.len() > 20 => {
+                Err(ApiError::Invalid(format!(
+                    "{path} would be {} bytes, over its budget of 20",
+                    content.len()
+                )))
+            }
+            MemoryRequest::Write { path, .. } if path.ends_with("INDEX.md") => Err(
+                ApiError::Invalid("INDEX.md files are written by the system".to_owned()),
+            ),
+            MemoryRequest::Write { path, content, .. } => Ok(change(path, content, false)),
+            MemoryRequest::Delete { path, .. } => Ok(change(path, String::new(), true)),
+            other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
+        }
+    }
+}
+
+fn memory_file(path: &str, content: &str, version: i64, run: Option<i64>) -> MemoryFile {
+    MemoryFile {
+        id: threadlane_core::ids::MemoryFileId(version),
+        path: path.to_owned(),
+        content: content.to_owned(),
+        version,
+        written_by_run: run.map(RunId),
+        deleted: false,
+        written_at: Timestamp::from_millis(version * 60_000),
     }
 }
 
@@ -847,6 +914,11 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
         ],
         decisions: vec![asked],
         related: Vec::new(),
+        messages: vec![ConversationEntry::You {
+            event_id: EventId(9),
+            text: "Use the ledger.".to_owned(),
+            at: Timestamp::from_millis(350_000),
+        }],
     };
     let when = When {
         now: Timestamp::from_millis(3_600_000),
@@ -877,6 +949,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
             "00:02 Engineer on linux-box with claude: worked for 29 min, stopped to ask you",
             "00:03 Asked D-0003: Question 3?",
             "00:05 You answered D-0003: approve with the note \"draft\"",
+            "00:05 You wrote: Use the ledger.",
             "00:06 Engineer on linux-box with claude: worked for 1 min, reported back",
             "00:31 Done: Refunds are idempotent.",
         ]
@@ -1227,4 +1300,283 @@ async fn a_new_project_shows_in_its_space_at_once() {
     assert!(state.targets().contains(&("work", "Payments")));
     state.apply(refresh(&core).await);
     assert_eq!(state.spaces()[0].projects.len(), 3, "the hub agrees");
+}
+
+#[tokio::test]
+async fn the_memory_tab_groups_the_files_the_lead_sees_and_you_change_them_as_yourself() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.memory.lock().expect("lock") = vec![
+        memory_file(
+            "project/tasks/T-0001.md",
+            "# T-0001\nHalf done.",
+            1,
+            Some(4),
+        ),
+        memory_file("project/notes/INDEX.md", "- [Build](build.md)", 1, Some(3)),
+        memory_file("project/notes/build.md", "# Build\nRun make.", 1, Some(3)),
+        memory_file("space/notes/style.md", "# Style\nShort.", 1, Some(2)),
+        memory_file("space/instructions.md", "Be kind.", 1, None),
+        memory_file("project/repos/app.md", "no title", 1, Some(3)),
+    ];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    assert_eq!(state.memory_gap("work", "api"), Some(Gap::Loading));
+    assert_eq!(state.lead_knows("work", "api"), None);
+
+    state.apply_memory(load_memory(&core, "work", "api", None).await);
+    let groups: Vec<(&str, Vec<(String, String)>)> = state
+        .memory_groups("work", "api")
+        .into_iter()
+        .map(|group| {
+            let files = group
+                .files
+                .into_iter()
+                .map(|row| (row.path, row.title))
+                .collect();
+            (group.title, files)
+        })
+        .collect();
+    let row = |path: &str, title: &str| (path.to_owned(), title.to_owned());
+    assert_eq!(
+        groups,
+        [
+            (
+                "Space instructions",
+                vec![row("space/instructions.md", "Be kind.")]
+            ),
+            ("Space notes", vec![row("space/notes/style.md", "Style")]),
+            (
+                "Project instructions",
+                vec![row("project/instructions.md", "Not written yet")]
+            ),
+            (
+                "Project notes",
+                vec![
+                    row("project/notes/INDEX.md", "INDEX.md"),
+                    row("project/notes/build.md", "Build")
+                ]
+            ),
+            (
+                "Repository notes",
+                vec![row("project/repos/app.md", "no title")]
+            ),
+            (
+                "Task progress files",
+                vec![row("project/tasks/T-0001.md", "T-0001")]
+            ),
+        ]
+    );
+    let knows = state.lead_knows("work", "api").expect("listed");
+    assert_eq!(
+        knows.lines(),
+        [
+            "No instructions for this project".to_owned(),
+            "2 notes · 1 task progress file".to_owned()
+        ]
+    );
+
+    // An index is shown, never edited.
+    state.select_memory("work", "api", "project/notes/INDEX.md");
+    assert_eq!(state.edit_memory("work", "api", true), None);
+    assert!(!state.memory_editing("work", "api"));
+    assert!(!editable("project/notes/INDEX.md"));
+
+    // Instructions are yours to write, even before they exist; a write over
+    // budget shows the refusal.
+    let path = "project/instructions.md";
+    state.select_memory("work", "api", path);
+    assert!(state.memory_can_edit("work", "api"));
+    assert_eq!(state.edit_memory("work", "api", true).as_deref(), Some(""));
+    let saved = state
+        .apply_change(change_memory(&core, "work", "api", path, Some("Ship it.".to_owned())).await);
+    assert_eq!(
+        saved.as_deref(),
+        Ok("Saved project/instructions.md as version 1.")
+    );
+    assert!(state.memory_groups("work", "api")[2].files[0].selected);
+    assert_eq!(
+        state.edit_memory("work", "api", true).as_deref(),
+        Some("Ship it.")
+    );
+    assert!(state.memory_editing("work", "api"));
+    let refused =
+        state.apply_change(change_memory(&core, "work", "api", path, Some("x".repeat(30))).await);
+    assert!(refused.is_err());
+    assert!(state.memory_editing("work", "api"), "still open to fix");
+    assert!(
+        state
+            .memory_refused("work", "api")
+            .is_some_and(|why| why.contains("over its budget")),
+        "{:?}",
+        state.memory_refused("work", "api")
+    );
+    state
+        .apply_change(
+            change_memory(&core, "work", "api", path, Some("Ship today.".to_owned())).await,
+        )
+        .expect("saved");
+    assert!(!state.memory_editing("work", "api"));
+    assert_eq!(state.memory_refused("work", "api"), None);
+    assert_eq!(
+        state
+            .memory_file("work", "api")
+            .map(|file| file.content.as_str()),
+        Some("Ship today.")
+    );
+    assert_eq!(
+        state.lead_knows("work", "api").expect("listed").lines()[0],
+        "Instructions for this project"
+    );
+
+    // Versions, newest first, by you or by a run.
+    state.select_memory("work", "api", "project/notes/build.md");
+    state.apply_memory(
+        load_memory(
+            &core,
+            "work",
+            "api",
+            Some("project/notes/build.md".to_owned()),
+        )
+        .await,
+    );
+    state
+        .apply_change(change_memory(&core, "work", "api", "project/notes/build.md", None).await)
+        .expect("deleted");
+    assert_eq!(
+        state.memory_versions("work", "api", &when()),
+        ["v2 · 00:02 · deleted by you", "v1 · 00:01 · by run 3"]
+    );
+    assert_eq!(state.memory_file("work", "api"), None);
+
+    work.down.store(true, Ordering::SeqCst);
+    state.apply_memory(load_memory(&core, "work", "api", None).await);
+    assert!(matches!(
+        state.memory_gap("work", "api"),
+        Some(Gap::Failed(_))
+    ));
+    assert!(state.retry_soon());
+}
+
+#[test]
+fn a_decision_card_shows_why_it_is_asked_and_the_calls_arguments() {
+    let mut pull = decision(1, 0);
+    pull.context = "\nThe branch is pushed.\nMore detail.".to_owned();
+    pull.arguments = json!({
+        "body": "Adds   the\npage.",
+        "title": "Add the page",
+        "repository": "app",
+        "draft": true,
+    });
+    assert_eq!(context_line(&pull), Some("The branch is pushed."));
+    assert_eq!(
+        arguments(&pull),
+        [
+            "Repository: app",
+            "Title: Add the page",
+            "Body: Adds the page.",
+            "Draft: true"
+        ]
+    );
+
+    let mut memory = decision(2, 0);
+    memory.tool = "memory_create".to_owned();
+    memory.arguments = json!({
+        "path": "project/instructions.md",
+        "content": "word ".repeat(100),
+    });
+    let shown = arguments(&memory);
+    assert_eq!(shown[0], "Path: project/instructions.md");
+    assert!(shown[1].starts_with("Content: word word"));
+    assert!(
+        shown[1].ends_with('…') && shown[1].chars().count() < 180,
+        "{}",
+        shown[1]
+    );
+    assert_eq!(context_line(&decision(3, 0)), None);
+    memory.arguments = json!("not an object");
+    assert!(arguments(&memory).is_empty());
+}
+
+#[tokio::test]
+async fn a_space_added_or_unpaired_shows_at_once_and_the_last_action_stays() {
+    let work = FakeHub::new("Work", vec![decision(1, 0)]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.report(Activity::Working("Pairing home…".to_owned()));
+
+    state.space_added("home");
+    state.space_added("home");
+    let names: Vec<&str> = state.spaces().iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["work", "home"]);
+    assert_eq!(state.space("home").map(|s| &s.reach), Some(&Reach::Unknown));
+    state.report(Activity::Done("Paired home.".to_owned()));
+    assert_eq!(state.activity().map(Activity::text), Some("Paired home."));
+
+    state.ask_unpair("work");
+    assert_eq!(state.unpairing(), Some("work"));
+    state.cancel_unpair();
+    assert_eq!(state.unpairing(), None);
+    state.ask_unpair("work");
+    state.set_filter(Some("work"));
+    state.space_removed("work");
+    assert_eq!(state.unpairing(), None);
+    assert!(state.space("work").is_none());
+    assert!(state.queue().is_empty());
+    assert_eq!(state.filter(), None);
+    assert_eq!(
+        state.receive(item(
+            "work",
+            1,
+            OutboxKind::SystemNotice,
+            json!({ "text": "hi" })
+        )),
+        None,
+        "an unpaired space's feed is not shown"
+    );
+    assert!(state.recent().is_empty());
+    assert!(
+        state
+            .receive(item(
+                "home",
+                1,
+                OutboxKind::SystemNotice,
+                json!({ "text": "hi" })
+            ))
+            .is_some()
+    );
+    assert_eq!(state.activity().map(Activity::text), Some("Paired home."));
+}
+
+#[tokio::test]
+async fn your_message_to_a_task_shows_in_its_timeline_once() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.tasks
+        .lock()
+        .expect("lock")
+        .push(task(1, TaskStatus::WaitingOnYou, None));
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    let at = Timestamp::from_millis(5 * 60_000);
+    state.sent_to_task("work", TaskId(1), "Add tests first.", EventId(4), at);
+    state.sent_to_task("work", TaskId(1), "Add tests first.", EventId(4), at);
+    state.sent_to_task("work", TaskId(2), "Elsewhere.", EventId(5), at);
+    let detail = state.task("work", TaskId(1)).expect("loaded");
+    assert_eq!(
+        detail.messages,
+        [ConversationEntry::You {
+            event_id: EventId(4),
+            text: "Add tests first.".to_owned(),
+            at
+        }]
+    );
+    let moments: Vec<String> = timeline(detail, &when())
+        .into_iter()
+        .map(|moment| moment.text)
+        .collect();
+    assert!(
+        moments.contains(&"You wrote: Add tests first.".to_owned()),
+        "{moments:?}"
+    );
 }

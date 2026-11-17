@@ -98,6 +98,11 @@ impl HubApi for FakeHub {
             items: self.items.lock().expect("lock").clone(),
         })
     }
+
+    /// Answers every request with no files.
+    async fn memory(&self, _request: MemoryRequest) -> Result<MemoryReply, ApiError> {
+        Ok(MemoryReply::Files { files: Vec::new() })
+    }
 }
 
 #[derive(Debug)]
@@ -134,6 +139,10 @@ impl HubApi for DownHub {
     }
 
     async fn overview(&self, _request: OverviewRequest) -> Result<OverviewReply, ApiError> {
+        Err(ApiError::Unreachable("connection refused".to_owned()))
+    }
+
+    async fn memory(&self, _request: MemoryRequest) -> Result<MemoryReply, ApiError> {
         Err(ApiError::Unreachable("connection refused".to_owned()))
     }
 }
@@ -212,6 +221,35 @@ async fn a_single_paired_hub_is_the_default() {
     assert_eq!(messages[0].text, "hello");
     assert_eq!(messages[1].project.as_deref(), Some("api"));
     assert_eq!(messages[0].client_message_id, sent.client_message_id);
+}
+
+#[tokio::test]
+async fn a_message_to_a_task_names_the_task_and_no_project() {
+    let (_dir, dirs) = client_dir();
+    let hub = FakeHub::new("Work");
+    let core = paired(&dirs, &hub);
+
+    let sent = core
+        .send_to_task(None, "T-0007", "add tests first")
+        .await
+        .expect("send");
+    assert_eq!((sent.space.as_str(), sent.project), ("work", None));
+    let error = core
+        .send_to_task(None, "D-0007", "no")
+        .await
+        .expect_err("not a task");
+    assert!(format!("{error:?}").contains("not a task id"), "{error:?}");
+    let messages = hub.sent.lock().expect("lock").clone();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].task, Some(TaskId(7)));
+    assert_eq!(messages[0].project, None);
+    assert_eq!(messages[0].client_message_id, sent.client_message_id);
+
+    let files = core
+        .memory(None, MemoryRequest::List { project: None })
+        .await
+        .expect("memory");
+    assert_eq!(files, MemoryReply::Files { files: Vec::new() });
 }
 
 #[tokio::test]

@@ -1,6 +1,8 @@
 //! A task (wireframe 5): who took it, on which machine, what happened, the
-//! decision it waits on, and the tasks around it.
+//! decision it waits on, the tasks around it, and a composer to its lane.
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
@@ -136,6 +138,27 @@ impl Desktop {
                             .children(open),
                     )
                     .child(related),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().flex_1().child(Input::new(&self.task_composer)))
+                            .child(Button::new("send-task").primary().label("Send").on_click(
+                                cx.listener(|this, _, window, cx| this.send_to_task(window, cx)),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(self.state.task_hint(space, task)),
+                    ),
             )
             .into_any_element()
     }

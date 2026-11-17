@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use threadlane_core::client::{
     Accepted, ApiError, BindingSummary, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
-    OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest,
-    ProjectSummary, UserMessage,
+    MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
+    PairingRequest, ProjectSummary, UserMessage,
 };
 use threadlane_core::client::{TimerReply, TimerRequest};
 use threadlane_core::ids::ProjectId;
@@ -18,7 +18,9 @@ use threadlane_core::model::{
     NewBinding, NewEvent, NewProject, NewRepository, Project, Trust,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{DecisionStore, InboxStore, OrgStore, OutboxStore, StoreError};
+use threadlane_core::store::{
+    DecisionStore, InboxStore, OrgStore, OutboxStore, StoreError, TaskStore,
+};
 use threadlane_core::workspace::{valid_branch_name, valid_repository_name};
 
 use crate::core::HubCore;
@@ -26,6 +28,7 @@ use crate::defaults::ensure_defaults;
 use crate::error::api_error;
 use crate::tools::CLIENT_CHANNEL;
 
+mod memory;
 mod overview;
 
 /// Source name of messages from the client.
@@ -73,6 +76,22 @@ impl ClientApi {
             .into_iter()
             .find(|agent| agent.name == name)
             .ok_or_else(|| ApiError::NotFound(format!("agent {name:?}")))
+    }
+
+    /// Refuses a message to a lead that is Off: it never runs (invariant
+    /// 14), so the client would wait for a reply that cannot come.
+    async fn lead_is_on(&self, project: &Project) -> Result<(), ApiError> {
+        let db = &self.core.inner.db;
+        if let Some(lead) = db.lead_binding(project.id).await.map_err(api_error)? {
+            let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
+            if lead.mode.stricter(ceiling) == Mode::Off {
+                return Err(ApiError::Invalid(format!(
+                    "the lead of project {:?} is off",
+                    project.name
+                )));
+            }
+        }
+        Ok(())
     }
 
     async fn binding_summary(&self, binding: Binding) -> Result<BindingSummary, ApiError> {
@@ -153,28 +172,36 @@ impl HubApi for ClientApi {
         if message.client_message_id.trim().is_empty() {
             return Err(ApiError::Invalid("the client message id is empty".into()));
         }
-        let project = self.project_named(message.project.as_deref()).await?;
         let inner = &self.core.inner;
-        // An Off lead never runs (invariant 14): refuse rather than leave the
-        // client waiting for a reply that cannot come.
-        if let Some(lead) = inner.db.lead_binding(project.id).await.map_err(api_error)? {
-            let ceiling = inner
-                .db
-                .effective_ceiling(project.id)
-                .await
-                .map_err(api_error)?;
-            if lead.mode.stricter(ceiling) == Mode::Off {
-                return Err(ApiError::Invalid(format!(
-                    "the lead of project {:?} is off",
-                    project.name
-                )));
+        // A message to a task goes to its lane; one there declines the
+        // decision open in it (Plan.md §9.4, `DecisionStore`).
+        let (project_id, lane_id) = match message.task {
+            Some(task) => {
+                let task = inner
+                    .db
+                    .task(task)
+                    .await
+                    .map_err(api_error)?
+                    .ok_or_else(|| ApiError::NotFound(format!("task {task}")))?;
+                if task.status.is_terminal() {
+                    return Err(ApiError::Invalid(format!(
+                        "task {} has ended ({}); tell the lead instead",
+                        task.id, task.status
+                    )));
+                }
+                (task.project_id, task.lane_id)
             }
-        }
+            None => {
+                let project = self.project_named(message.project.as_deref()).await?;
+                self.lead_is_on(&project).await?;
+                (project.id, project.lead_lane_id)
+            }
+        };
         let inserted = inner
             .db
             .insert_event(&NewEvent {
-                project_id: project.id,
-                lane_id: project.lead_lane_id,
+                project_id,
+                lane_id,
                 source: CLIENT_SOURCE.to_owned(),
                 source_event_id: message.client_message_id.clone(),
                 kind: EventKind::UserMessage,
@@ -190,10 +217,10 @@ impl HubApi for ClientApi {
             .map_err(api_error)?;
         match inserted {
             Inserted::New(event_id) => {
-                inner.wake.wake(WakeTarget::Lane(project.lead_lane_id));
+                inner.wake.wake(WakeTarget::Lane(lane_id));
                 Ok(Accepted {
                     event_id,
-                    project_id: project.id,
+                    project_id,
                     duplicate: false,
                 })
             }
@@ -204,7 +231,7 @@ impl HubApi for ClientApi {
                     .event(event_id)
                     .await
                     .map_err(api_error)?
-                    .map_or(project.id, |event| event.project_id);
+                    .map_or(project_id, |event| event.project_id);
                 Ok(Accepted {
                     event_id,
                     project_id,
@@ -470,6 +497,10 @@ impl HubApi for ClientApi {
 
     async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
         overview::handle(self, request).await
+    }
+
+    async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError> {
+        memory::handle(self, request).await
     }
 
     async fn timers(&self, request: TimerRequest) -> Result<TimerReply, ApiError> {
