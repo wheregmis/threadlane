@@ -3,8 +3,10 @@
 //!
 //! A timer fires into the lane that set it. Its events count as work you
 //! requested as its creator's did (decision 3): your routine always; an
-//! agent's timer when the run that set it was requested. An agent's routine
-//! asks you first (decision 4); the hub creates it once you approve, keyed
+//! agent's follow-up when the run that set it was requested; an agent's
+//! routine never (Plan.md §7.3), so its events follow the initiative rule.
+//! An agent's routine asks you first below Autonomous (decision 4,
+//! docs/milestone-9.md stage B); the hub creates it once you approve, keyed
 //! on the decision ([`crate::gateway`]). The guardrails of decision 5 bind
 //! agents; your own routines are only checked for sense.
 
@@ -13,7 +15,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value as Json, json};
 use threadlane_core::client::{ApiError, TimerReply, TimerRequest};
-use threadlane_core::ids::{ProjectId, RunId, TaskId, TimerId};
+use threadlane_core::ids::{AgentId, LaneId, ProjectId, RunId, TaskId, TimerId};
 use threadlane_core::model::{
     Decision, Inserted, Lane, MAX_LIVE_TIMERS, MIN_FOLLOW_UP_DELAY, MIN_SCHEDULE_INTERVAL,
     NewTimer, Recurrence, Run, Timer, TimerCategory, TimerCreator, TimerStatus,
@@ -51,7 +53,11 @@ pub(crate) fn is_timer(tool: &str) -> bool {
 
 /// Whether the run counts as work you requested, as begin-run decides it:
 /// its task came from you, or an event it consumes was requested.
-async fn run_requested(db: &HubDb, run: RunId, task: Option<TaskId>) -> Result<bool, StoreError> {
+pub(crate) async fn run_requested(
+    db: &HubDb,
+    run: RunId,
+    task: Option<TaskId>,
+) -> Result<bool, StoreError> {
     if let Some(task) = task
         && db
             .task(task)
@@ -233,9 +239,20 @@ pub(crate) async fn execute(
                 .ok_or_else(|| ToolError::Failed(format!("timer {id} not found")))?;
             Ok(timer_json(&timer))
         }
-        CREATE_SCHEDULE => Err(ToolError::Blocked(format!(
-            "{tool} is performed only once the user approves it"
-        ))),
+        // The gate let it through without asking: Autonomous.
+        CREATE_SCHEDULE => {
+            routine(
+                db,
+                now,
+                context.project_id,
+                context.lease.lane_id,
+                context.task_id,
+                context.agent_id,
+                arguments,
+                key,
+            )
+            .await
+        }
         other => Err(ToolError::UnknownTool(other.to_owned())),
     }
 }
@@ -264,40 +281,59 @@ pub(crate) async fn proposal(
 
 /// Creates the routine of an approved `create_schedule` in the decision's
 /// lane, keyed on the decision so performing it again creates nothing more
-/// (invariant 5). Its events are requested if the run that asked was.
+/// (invariant 5).
 pub(crate) async fn perform_schedule(
     db: &HubDb,
     now: Timestamp,
     lane: &Lane,
     decision: &Decision,
 ) -> Result<Json, ToolError> {
-    let (instruction, recurrence) = schedule(&decision.arguments)?;
-    let key = format!("perform:{}", decision.id);
-    within_cap(db, lane.project_id, &key).await?;
     let asked = match decision.run_id {
         Some(id) => db.run(id).await.map_err(tool_error)?,
         None => None,
     };
-    let requested = match &asked {
-        Some(run) => run_requested(db, run.id, lane.task_id)
-            .await
-            .map_err(tool_error)?,
-        None => false,
-    };
+    routine(
+        db,
+        now,
+        lane.project_id,
+        lane.id,
+        lane.task_id,
+        asked.and_then(|run| run.agent_id),
+        &decision.arguments,
+        format!("perform:{}", decision.id),
+    )
+    .await
+}
+
+/// Creates an agent's routine in `lane_id`, keyed on `key`. Its events are
+/// never requested work (Plan.md §7.3).
+#[allow(clippy::too_many_arguments, reason = "the routine and where it goes")]
+async fn routine(
+    db: &HubDb,
+    now: Timestamp,
+    project_id: ProjectId,
+    lane_id: LaneId,
+    task_ref: Option<TaskId>,
+    agent_id: Option<AgentId>,
+    arguments: &Json,
+    key: String,
+) -> Result<Json, ToolError> {
+    let (instruction, recurrence) = schedule(arguments)?;
+    within_cap(db, project_id, &key).await?;
     let due_at = next_occurrence(&recurrence, now, now).map_err(ToolError::InvalidArguments)?;
     let timer = db
         .create_timer(&NewTimer {
-            project_id: lane.project_id,
-            lane_id: lane.id,
-            agent_id: asked.and_then(|run| run.agent_id),
-            task_ref: lane.task_id,
+            project_id,
+            lane_id,
+            agent_id,
+            task_ref,
             category: TimerCategory::Schedule,
             due_at,
             recurrence: Some(recurrence),
             instruction,
             created_by: TimerCreator::Agent,
             created_by_call: Some(key),
-            requested,
+            requested: false,
         })
         .await
         .map_err(tool_error)?;
@@ -344,8 +380,8 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
             "Create a routine that wakes you in this lane on a cadence, in a time zone: \
              rule interval (every minutes, at least 15), daily (hour, minute), weekdays \
              (days such as [\"mon\", \"fri\"], hour, minute) or monthly (day, hour, minute). \
-             The user is asked first: the call returns \"waiting on you\", and you must then \
-             end your turn.",
+             The user may be asked first: if the call returns \"waiting on you\", you must \
+             then end your turn.",
             Tier::Local,
             json!({
                 "type": "object",

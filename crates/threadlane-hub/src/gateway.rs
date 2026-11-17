@@ -1,8 +1,10 @@
 //! The tool gateway: gate, at-most-once record, execution (Plan.md §4.6,
 //! §9.1, docs/milestone-1.md §9 "Tool gateway").
 
+use std::sync::Arc;
+
 use serde_json::{Value as Json, json};
-use threadlane_core::ids::{DecisionId, ProjectId, RunId, StandingRuleId};
+use threadlane_core::ids::{DecisionId, RunId, StandingRuleId};
 use threadlane_core::link::{LinkError, Perform};
 use threadlane_core::model::{
     Decision, DecisionKind, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run, RunStatus,
@@ -17,9 +19,9 @@ use crate::error::{link_error, link_to_tool, tool_error};
 use crate::gate::{self, GateInput};
 use crate::link::LocalLink;
 use crate::memory;
-use crate::publish::{approval_options, proposal};
+use crate::publish::approval_options;
 use crate::timers;
-use crate::tools::{ASK_USER, derived_call_key, offered_in, question};
+use crate::tools::{ASK_USER, CREATE_TASK, HubTools, derived_call_key, offered_in, question};
 
 /// Key of the envelope a failed call's error is recorded in, so a repeated
 /// call returns the same error instead of "outcome unknown".
@@ -61,16 +63,15 @@ impl LocalLink {
                 lane.kind
             )));
         }
-        let verdict = self
-            .gate(&run, lane.project_id, &definition, arguments)
-            .await?;
+        let (verdict, new_work) = self.gate(&run, &lane, &definition, arguments).await?;
         let action = match verdict {
             Verdict::Allow { rule: None } => Action::Execute,
             Verdict::Allow { rule: Some(rule) } => Action::ByRule(rule),
             // Review is asked until the classifier exists (stage C).
-            Verdict::Review { offers_rule } | Verdict::Ask { offers_rule } => {
-                Action::Ask { offers_rule }
-            }
+            Verdict::Review { offers_rule } | Verdict::Ask { offers_rule } => Action::Ask {
+                offers_rule,
+                proposal: new_work,
+            },
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
         };
 
@@ -106,7 +107,10 @@ impl LocalLink {
         };
         let outcome = match action {
             Action::Execute => inner.tools.execute(&context, tool, arguments.clone()).await,
-            Action::Ask { offers_rule } => {
+            Action::Ask {
+                offers_rule,
+                proposal,
+            } => {
                 self.ask(
                     lease,
                     &run,
@@ -114,7 +118,10 @@ impl LocalLink {
                     &key,
                     tool,
                     arguments,
-                    Asked::You { offers_rule },
+                    Asked::You {
+                        offers_rule,
+                        proposal,
+                    },
                 )
                 .await
             }
@@ -141,14 +148,17 @@ impl LocalLink {
     }
 
     /// Gathers what governs the call and asks the gate (Plan.md §9.1).
+    /// Also says whether the call starts work you did not request, which
+    /// makes asking about it a proposal.
     async fn gate(
         &self,
         run: &Run,
-        project_id: ProjectId,
+        lane: &Lane,
         definition: &ToolDefinition,
         arguments: &Json,
-    ) -> Result<Verdict, ToolError> {
+    ) -> Result<(Verdict, bool), ToolError> {
         let db = &self.core.inner.db;
+        let project_id = lane.project_id;
         let space = db.space().await.map_err(tool_error)?;
         let project = db
             .project(project_id)
@@ -156,11 +166,9 @@ impl LocalLink {
             .map_err(tool_error)?
             .ok_or_else(|| ToolError::Failed(format!("project {project_id} not found")))?;
         // No binding for the run's agent means the agent may do nothing.
-        let binding = db
-            .bindings(project_id)
-            .await
-            .map_err(tool_error)?
-            .into_iter()
+        let bindings = db.bindings(project_id).await.map_err(tool_error)?;
+        let binding = bindings
+            .iter()
             .find(|binding| Some(binding.agent_id) == run.agent_id);
         let overrides = binding
             .as_ref()
@@ -183,18 +191,47 @@ impl LocalLink {
         // A run you triggered: every event in its batch is from you
         // (docs/milestone-5.md §1 decision 6).
         let requested = !events.is_empty() && events.iter().all(|event| event.trust == Trust::User);
-        Ok(gate::gate(&GateInput {
+        let mode = binding.map_or(Mode::Off, |binding| binding.mode);
+        let new_work = if definition.name == CREATE_TASK
+            && !timers::run_requested(db, run.id, lane.task_id)
+                .await
+                .map_err(tool_error)?
+        {
+            // The assignee's mode; a name not bound here is refused before
+            // any ask or effect, so the lead's own stands in for it.
+            let assignee = match arguments.get("agent").and_then(Json::as_str) {
+                Some(name) => db
+                    .agents()
+                    .await
+                    .map_err(tool_error)?
+                    .into_iter()
+                    .find(|agent| agent.name == name)
+                    .map(|agent| agent.id),
+                None => run.agent_id,
+            };
+            Some(
+                bindings
+                    .iter()
+                    .find(|binding| Some(binding.agent_id) == assignee)
+                    .map_or(mode, |binding| binding.mode),
+            )
+        } else {
+            None
+        };
+        let verdict = gate::gate(&GateInput {
             tool: &definition.name,
             tier: definition.tier,
             arguments,
-            mode: binding.map_or(Mode::Off, |binding| binding.mode),
+            mode,
             space_ceiling: space.mode_ceiling,
             project_ceiling: project.mode_ceiling,
             overrides: &overrides,
             rules: &rules,
             tainted,
             requested,
-        }))
+            new_work,
+        });
+        Ok((verdict, new_work.is_some()))
     }
 
     /// Pauses the call as a decision, with its card, and tells the agent to
@@ -216,9 +253,11 @@ impl LocalLink {
         let inner = &self.core.inner;
         // Checks the call, so a refused one is refused before any ask
         // (invariant 19).
-        let proposal = proposal(&inner.db, lane, tool, arguments).await?;
+        let proposal = crate::publish::proposal(&inner.db, lane, tool, arguments).await?;
         let (kind, options, recommended) = if tool == ASK_USER {
             (DecisionKind::Input, question(arguments)?.1, None)
+        } else if matches!(asked, Asked::You { proposal: true, .. }) {
+            (DecisionKind::Proposal, crate::proposal::options(), Some(0))
         } else {
             (DecisionKind::Approval, approval_options(), Some(0))
         };
@@ -238,7 +277,13 @@ impl LocalLink {
             context: proposal.context,
             options,
             recommended,
-            offers_standing_rule: matches!(asked, Asked::You { offers_rule: true }),
+            offers_standing_rule: matches!(
+                asked,
+                Asked::You {
+                    offers_rule: true,
+                    ..
+                }
+            ),
             expires_at: match asked {
                 Asked::You { .. } => Some(now + inner.settings.decision_expiry),
                 Asked::Rule(_) => None,
@@ -306,6 +351,9 @@ impl LocalLink {
         }
         if decision.tool == timers::CREATE_SCHEDULE {
             return self.perform_schedule(lease, run_id, &decision).await;
+        }
+        if decision.tool == CREATE_TASK {
+            return self.perform_task(lease, run_id, &decision).await;
         }
         Ok(Perform::Call {
             tool: decision.tool,
@@ -397,6 +445,56 @@ impl LocalLink {
         Ok(Perform::Recorded { outcome })
     }
 
+    /// Creates the task of an accepted proposal in the hub, which is where
+    /// tasks are, with the same record and step boundaries as
+    /// [`Self::perform_memory`]. The task is keyed on the decision, so
+    /// performing it again after an interruption creates nothing more
+    /// (invariant 5), and it is work you requested from then on.
+    async fn perform_task(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        decision: &Decision,
+    ) -> Result<Perform, LinkError> {
+        let inner = &self.core.inner;
+        let lane = self.check_lease(lease).await?;
+        let run = self.active_run(lease, run_id).await?;
+        let tools = HubTools::new(
+            inner.db.clone(),
+            Arc::clone(&inner.clock),
+            Arc::clone(&inner.wake) as Arc<dyn Waker>,
+        );
+        let context = ToolContext {
+            lease: *lease,
+            run_id,
+            project_id: lane.project_id,
+            agent_id: run.agent_id,
+            task_id: lane.task_id,
+            call_id: None,
+        };
+        let outcome = match tools.create_accepted_task(&context, decision).await {
+            Ok(task) => json!({
+                "performed": true,
+                "summary": format!(
+                    "Task {} is created: {}.",
+                    task["task_id"].as_str().unwrap_or_default(),
+                    task["title"].as_str().unwrap_or_default()
+                ),
+                "result": task,
+            }),
+            Err(ToolError::LeaseLost) => {
+                return Err(LinkError::StaleLease {
+                    lane_id: lease.lane_id,
+                });
+            }
+            Err(error) => json!({ "performed": false, "error": error.to_string() }),
+        };
+        inner.hook.reach(perform::AFTER_EFFECT)?;
+        self.finish_perform(lease, run_id, decision.id, &outcome)
+            .await?;
+        Ok(Perform::Recorded { outcome })
+    }
+
     /// [`threadlane_core::link::HubLink::finish_perform`].
     pub(crate) async fn finish_perform(
         &self,
@@ -421,14 +519,15 @@ impl LocalLink {
 /// What the gateway does with a call the gate let through.
 enum Action {
     Execute,
-    Ask { offers_rule: bool },
+    Ask { offers_rule: bool, proposal: bool },
     ByRule(StandingRuleId),
 }
 
-/// Who answers a paused call.
+/// Who answers a paused call; `proposal` when it starts work you did not
+/// request.
 #[derive(Clone, Copy)]
 enum Asked {
-    You { offers_rule: bool },
+    You { offers_rule: bool, proposal: bool },
     Rule(StandingRuleId),
 }
 

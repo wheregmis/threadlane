@@ -752,6 +752,8 @@ async fn an_agent_s_own_limit_holds_its_tasks_back() {
 
 #[tokio::test]
 async fn a_task_nobody_asked_for_does_not_start_and_an_agent_set_to_off_never_runs() {
+    // The engineer is On request; in Assisted or Autonomous such a task
+    // starts (`initiative`).
     let hub = TestHub::start().await;
     hub.hello().await;
     let agent = engineer(&hub, 0).await;

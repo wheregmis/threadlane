@@ -13,6 +13,7 @@ mod feed;
 mod fencing;
 mod github;
 mod handler;
+mod initiative;
 mod memory;
 mod org;
 mod overview;

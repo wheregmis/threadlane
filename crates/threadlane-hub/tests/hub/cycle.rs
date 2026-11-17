@@ -147,6 +147,8 @@ async fn three_messages_before_the_claim_become_one_run() {
 
 #[tokio::test]
 async fn events_nobody_asked_for_are_skipped_without_a_run() {
+    // Under On request, the lead's default mode; Assisted and Autonomous
+    // run on them (`initiative`).
     let hub = TestHub::start().await;
     hub.hello().await;
     let mut ids = Vec::new();

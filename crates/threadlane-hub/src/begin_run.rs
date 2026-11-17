@@ -23,10 +23,13 @@ use uuid::Uuid;
 use crate::accounts::cooling;
 use crate::context::{PromptParts, appended_instructions, loaded_memory, render_prompt};
 use crate::error::link_error;
+use crate::gate::may_start_unrequested;
 use crate::link::LocalLink;
 use crate::tools::offered_in;
 
-/// Why events were skipped by the initiative check (Plan.md §4.3 step 3).
+/// Why events were skipped by the initiative check (Plan.md §4.3 step 3):
+/// they are not requested work, and the lane's agent works On request.
+/// Kept word for word, since the recorded events are found by it.
 pub const SKIP_REASON: &str = "not requested, and the lead works on request only";
 
 /// Why events were skipped because the lane's agent is Off in its project
@@ -61,19 +64,23 @@ impl LocalLink {
 
         // 2. Initiative. A task that has ended does no more work. An agent
         // that is effectively Off, or not bound in the project at all, never
-        // starts (invariant 14); above Off, until milestone 9 every binding
-        // acts as On request, and a task you asked for is requested work
-        // whatever arrives in its lane (docs/milestone-3.md §1 item 2).
+        // starts (invariant 14). Work you did not request starts only in
+        // Assisted and Autonomous (Plan.md §2.3); a task you asked for is
+        // requested work whatever arrives in its lane (docs/milestone-3.md
+        // §1 item 2).
         let (agent, binding, task) = self.lane_agent(&lane).await?;
-        let off = match &binding {
+        let (off, may_start) = match &binding {
             Some(binding) => {
                 let ceiling = db
                     .effective_ceiling(lane.project_id)
                     .await
                     .map_err(link_error)?;
-                binding.mode.stricter(ceiling) == Mode::Off
+                (
+                    binding.mode.stricter(ceiling) == Mode::Off,
+                    may_start_unrequested(binding.mode, ceiling),
+                )
             }
-            None => true,
+            None => (true, false),
         };
         let requested = task.as_ref().is_some_and(|task| task.origin.is_requested())
             || pending.iter().any(|event| event.requested);
@@ -81,7 +88,7 @@ impl LocalLink {
             Some(ENDED_REASON)
         } else if off {
             Some(OFF_REASON)
-        } else if !requested {
+        } else if !requested && !may_start {
             Some(SKIP_REASON)
         } else {
             None

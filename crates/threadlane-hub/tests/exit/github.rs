@@ -141,6 +141,8 @@ async fn a_check_result_on_a_tasks_pull_request_wakes_that_task_within_about_a_m
 
 #[tokio::test]
 async fn a_review_request_that_belongs_to_no_task_is_recorded_and_not_acted_on() {
+    // Under On request, the lead's default mode; `initiative` has the
+    // other modes.
     let world = World::new().await.with_github();
     world.add_github_repository("app", REMOTE).await;
     world.backend.set_default(reply_script());

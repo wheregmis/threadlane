@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 use threadlane_core::forge::{OPEN_PULL_REQUEST, PUBLISH_BRANCH};
-use threadlane_core::ids::{AgentId, RepositoryId, TaskId};
+use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::model::{
-    DecisionOption, LaneKind, MemoryAuthor, NewOutboxMessage, NewTask, OutboxKind, Run, Task,
-    TaskOrigin, TaskStatus, Urgency,
+    Decision, DecisionOption, LaneKind, MemoryAuthor, NewOutboxMessage, NewTask, OutboxKind, Run,
+    Task, TaskOrigin, TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{OrgStore, OutboxStore, SessionStore, StoreError, TaskStore};
@@ -206,62 +206,47 @@ impl HubTools {
             .ok_or_else(|| ToolError::InvalidArguments(format!("no task {id} in this project")))
     }
 
-    /// The agent bound in the run's project with this name.
-    async fn bound_agent(&self, context: &ToolContext, name: &str) -> Result<AgentId, ToolError> {
-        let bound: Vec<AgentId> = self
-            .db
-            .bindings(context.project_id)
-            .await
-            .map_err(tool_error)?
-            .iter()
-            .map(|binding| binding.agent_id)
-            .collect();
-        let agents = self.db.agents().await.map_err(tool_error)?;
-        let mut names = Vec::new();
-        for agent in agents.iter().filter(|agent| bound.contains(&agent.id)) {
-            if agent.name == name {
-                return Ok(agent.id);
-            }
-            names.push(agent.name.as_str());
-        }
-        Err(ToolError::InvalidArguments(format!(
-            "no agent {name:?} in this project; it has {}",
-            names.join(", ")
-        )))
-    }
-
     async fn create_task(
         &self,
         context: &ToolContext,
         arguments: &Json,
     ) -> Result<Json, ToolError> {
-        let object = fields(
-            arguments,
-            &[
-                "title",
-                "goal",
-                "agent",
-                "depends_on",
-                "priority",
-                "repositories",
-            ],
-        )?;
-        let title = text_field(object, "title")?.ok_or_else(|| missing("title"))?;
-        let goal = text_field(object, "goal")?.ok_or_else(|| missing("goal"))?;
-        let priority = priority_field(object)?.unwrap_or(0);
+        self.create_task_as(context, arguments, None).await
+    }
+
+    /// Creates the task of `decision`, an accepted proposal, in the lane of
+    /// the run that performs it. It is work you requested, and keyed on the
+    /// decision in the session that proposed it.
+    pub(crate) async fn create_accepted_task(
+        &self,
+        context: &ToolContext,
+        decision: &Decision,
+    ) -> Result<Json, ToolError> {
+        self.create_task_as(context, &decision.arguments, Some(decision))
+            .await
+    }
+
+    async fn create_task_as(
+        &self,
+        context: &ToolContext,
+        arguments: &Json,
+        accepted: Option<&Decision>,
+    ) -> Result<Json, ToolError> {
+        let call = TaskCall::parse(arguments)?;
+        let (object, title, goal, priority) = (call.object, call.title, call.goal, call.priority);
         let depends_on = match object.get("depends_on") {
             None | Some(Json::Null) => Vec::new(),
             Some(Json::Array(items)) => items.iter().map(task_ref).collect::<Result<_, _>>()?,
             Some(_) => return Err(invalid("depends_on must be a list of task ids")),
         };
         let run = self.run(context).await?;
-        let agent_id = match text_field(object, "agent")? {
-            Some(name) => self.bound_agent(context, name).await?,
+        let agent_id = match call.agent {
+            Some(name) => bound_agent(&self.db, context.project_id, name).await?,
             None => run
                 .agent_id
                 .ok_or_else(|| ToolError::Failed(format!("run {} has no agent", run.id)))?,
         };
-        let named = self.repositories(context, object).await?;
+        let named = named_repositories(&self.db, context.project_id, object).await?;
         // A subtask inherits its parent's origin, and its repositories if it
         // names none; a lead's task comes from you if the run works on
         // something you asked for.
@@ -295,6 +280,19 @@ impl HubTools {
                 )
             }
         };
+        // shortcut: an accepted proposal is marked User, the origin of work
+        // you requested; give it its own origin once the app shows one.
+        let (origin, created_by_call) = match accepted {
+            Some(decision) => (
+                TaskOrigin::User,
+                format!(
+                    "s{}:perform:{}",
+                    decision.session_id.unwrap_or(run.session_id),
+                    decision.id
+                ),
+            ),
+            None => (origin, effect_key(context, &run, CREATE_TASK, arguments)),
+        };
         let task = self
             .db
             .create_task(
@@ -310,7 +308,7 @@ impl HubTools {
                     origin,
                     status: TaskStatus::Queued,
                     priority,
-                    created_by_call: Some(effect_key(context, &run, CREATE_TASK, arguments)),
+                    created_by_call: Some(created_by_call),
                     created_at: self.clock.now(),
                 },
             )
@@ -318,56 +316,6 @@ impl HubTools {
             .map_err(tool_error)?;
         self.waker.wake(WakeTarget::Lane(task.lane_id));
         Ok(task_json(&task))
-    }
-
-    /// The repositories a `create_task` call names, by their registered
-    /// names; `None` if it names none. A name not registered in the run's
-    /// project is refused (invariant 19).
-    async fn repositories(
-        &self,
-        context: &ToolContext,
-        object: &Map<String, Json>,
-    ) -> Result<Option<Vec<RepositoryId>>, ToolError> {
-        let names: Vec<&str> = match object.get("repositories") {
-            None | Some(Json::Null) => return Ok(None),
-            Some(Json::Array(items)) => items
-                .iter()
-                .map(|item| {
-                    item.as_str()
-                        .ok_or_else(|| invalid("repositories must be a list of repository names"))
-                })
-                .collect::<Result<_, _>>()?,
-            Some(_) => return Err(invalid("repositories must be a list of repository names")),
-        };
-        let registered = self
-            .db
-            .repositories(context.project_id)
-            .await
-            .map_err(tool_error)?;
-        let mut ids = Vec::with_capacity(names.len());
-        for name in names {
-            let repository = registered
-                .iter()
-                .find(|repository| repository.name == name.trim())
-                .ok_or_else(|| {
-                    let known: Vec<&str> = registered
-                        .iter()
-                        .map(|repository| repository.name.as_str())
-                        .collect();
-                    ToolError::InvalidArguments(format!(
-                        "no repository {name:?} in this project; it has {}",
-                        if known.is_empty() {
-                            "none".to_owned()
-                        } else {
-                            known.join(", ")
-                        }
-                    ))
-                })?;
-            if !ids.contains(&repository.id) {
-                ids.push(repository.id);
-            }
-        }
-        Ok(Some(ids))
     }
 
     async fn update_task(
@@ -498,6 +446,112 @@ fn effect_key(context: &ToolContext, run: &Run, tool: &str, arguments: &Json) ->
         Some(call_id) => format!("s{}:{call_id}", run.session_id),
         None => format!("r{}:{}", run.id, derived_call_key(tool, arguments)),
     }
+}
+
+/// The fields of a `create_task` call, checked.
+pub(crate) struct TaskCall<'a> {
+    pub object: &'a Map<String, Json>,
+    pub title: &'a str,
+    pub goal: &'a str,
+    pub agent: Option<&'a str>,
+    pub priority: i64,
+}
+
+impl<'a> TaskCall<'a> {
+    /// Checks the fields every `create_task` call must have right.
+    pub(crate) fn parse(arguments: &'a Json) -> Result<Self, ToolError> {
+        let object = fields(
+            arguments,
+            &[
+                "title",
+                "goal",
+                "agent",
+                "depends_on",
+                "priority",
+                "repositories",
+            ],
+        )?;
+        Ok(Self {
+            title: text_field(object, "title")?.ok_or_else(|| missing("title"))?,
+            goal: text_field(object, "goal")?.ok_or_else(|| missing("goal"))?,
+            agent: text_field(object, "agent")?,
+            priority: priority_field(object)?.unwrap_or(0),
+            object,
+        })
+    }
+}
+
+/// The agent bound in `project` with this name.
+pub(crate) async fn bound_agent(
+    db: &HubDb,
+    project: ProjectId,
+    name: &str,
+) -> Result<AgentId, ToolError> {
+    let bound: Vec<AgentId> = db
+        .bindings(project)
+        .await
+        .map_err(tool_error)?
+        .iter()
+        .map(|binding| binding.agent_id)
+        .collect();
+    let agents = db.agents().await.map_err(tool_error)?;
+    let mut names = Vec::new();
+    for agent in agents.iter().filter(|agent| bound.contains(&agent.id)) {
+        if agent.name == name {
+            return Ok(agent.id);
+        }
+        names.push(agent.name.as_str());
+    }
+    Err(ToolError::InvalidArguments(format!(
+        "no agent {name:?} in this project; it has {}",
+        names.join(", ")
+    )))
+}
+
+/// The repositories a `create_task` call names, by their registered
+/// names; `None` if it names none. A name not registered in `project` is
+/// refused (invariant 19).
+pub(crate) async fn named_repositories(
+    db: &HubDb,
+    project: ProjectId,
+    object: &Map<String, Json>,
+) -> Result<Option<Vec<RepositoryId>>, ToolError> {
+    let names: Vec<&str> = match object.get("repositories") {
+        None | Some(Json::Null) => return Ok(None),
+        Some(Json::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .ok_or_else(|| invalid("repositories must be a list of repository names"))
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(invalid("repositories must be a list of repository names")),
+    };
+    let registered = db.repositories(project).await.map_err(tool_error)?;
+    let mut ids = Vec::with_capacity(names.len());
+    for name in names {
+        let repository = registered
+            .iter()
+            .find(|repository| repository.name == name.trim())
+            .ok_or_else(|| {
+                let known: Vec<&str> = registered
+                    .iter()
+                    .map(|repository| repository.name.as_str())
+                    .collect();
+                ToolError::InvalidArguments(format!(
+                    "no repository {name:?} in this project; it has {}",
+                    if known.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        known.join(", ")
+                    }
+                ))
+            })?;
+        if !ids.contains(&repository.id) {
+            ids.push(repository.id);
+        }
+    }
+    Ok(Some(ids))
 }
 
 /// A task as the agent sees it, with ids in their short form.
@@ -670,7 +724,9 @@ fn task_definitions() -> Vec<ToolDefinition> {
             CREATE_TASK,
             "Create a task for an agent of this project to work on in its own lane. \
              Independent tasks run in parallel; give a task the ids of the tasks it must \
-             wait for in depends_on. From inside a task, this creates a subtask.",
+             wait for in depends_on. From inside a task, this creates a subtask. For work the \
+             user did not ask for, they may be asked first: if the call returns \"waiting on \
+             you\", end your turn.",
             Tier::Local,
             json!({
                 "type": "object",

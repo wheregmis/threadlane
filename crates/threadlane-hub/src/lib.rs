@@ -26,6 +26,7 @@ mod memory;
 mod node;
 mod pairing;
 mod placement;
+mod proposal;
 mod publish;
 mod recurrence;
 mod settings;

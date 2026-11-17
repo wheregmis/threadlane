@@ -438,7 +438,10 @@ async fn an_agents_routine_asks_first_and_is_created_once_when_you_approve() {
     let routine = &timers[0];
     assert_eq!(routine.category, TimerCategory::Schedule);
     assert_eq!(routine.created_by, TimerCreator::Agent);
-    assert!(routine.requested, "the run that asked was one you started");
+    assert!(
+        !routine.requested,
+        "an agent's routine is never requested work, even asked for in a run you started"
+    );
     assert_eq!(routine.lane_id, hub.general().await.lead_lane_id);
     Running {
         link: &*hub.link,
@@ -578,7 +581,8 @@ async fn requested_comes_from_the_creator() {
     hub.link.complete(&lease, run.id, None).await.unwrap();
     hub.link.release(&lease).await.unwrap();
 
-    // When it fires, its event is not requested, and the lead does not act.
+    // When it fires, its event is not requested, and the lead, On request,
+    // does not act.
     hub.clock.advance(Duration::from_secs(60));
     hub.core.schedule_once().await.unwrap();
     let fired = timer_events(&hub).await;

@@ -237,6 +237,8 @@ async fn a_paused_project_is_not_granted_until_resumed() {
 
 #[tokio::test]
 async fn events_nobody_asked_for_are_listed_as_recorded_and_counted() {
+    // Under On request, the lead's default mode; `initiative` checks the
+    // list in each mode.
     let hub = TestHub::start().await;
     hub.hello().await;
     let unasked = hub

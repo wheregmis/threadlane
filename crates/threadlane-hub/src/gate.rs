@@ -35,6 +35,11 @@ pub struct GateInput<'a> {
     pub tainted: bool,
     /// You triggered the run: every event it consumes is from you.
     pub requested: bool,
+    /// Set for `create_task` in a run that is not work you requested (its
+    /// task is not, and no event it consumes is): the assignee's binding
+    /// mode in the project. The call starts new work, so the initiative row
+    /// decides it, at the stricter of the two agents' modes (Plan.md §2.3).
+    pub new_work: Option<Mode>,
 }
 
 /// What the matrix has a row for.
@@ -43,9 +48,12 @@ enum Row {
     /// An ordinary tool, by its tier.
     Tier(Tier),
     /// A change to what agents are told: a protected memory file you did
-    /// not ask for (docs/milestone-5.md), or an agent's routine
-    /// (docs/milestone-8.md decision 4). Asks in every mode.
-    Instructions { rule: bool },
+    /// not ask for (docs/milestone-5.md). Asks in every mode.
+    Instructions,
+    /// Starting work you did not request: a task from unrequested work (a
+    /// proposal), or an agent's routine, whose events are never requested
+    /// (Plan.md §7.3). Asks below Autonomous.
+    Initiative,
 }
 
 /// The cell of `row` in the column of `mode` (Plan.md §2.3, the matrix).
@@ -55,8 +63,21 @@ fn cell(row: Row, mode: Mode) -> Cell {
         (Row::Tier(Tier::Read | Tier::Local), _) => Cell::Allow,
         (Row::Tier(Tier::SharedReversible), Mode::OnRequest) => Cell::Ask,
         (Row::Tier(Tier::SharedReversible), _) => Cell::Review,
-        (Row::Tier(Tier::SharedHardToUndo) | Row::Instructions { .. }, _) => Cell::Ask,
+        (Row::Initiative, Mode::Autonomous) => Cell::Allow,
+        (Row::Tier(Tier::SharedHardToUndo) | Row::Instructions | Row::Initiative, _) => Cell::Ask,
     }
+}
+
+/// Whether a lane may start a run on events that are not work you requested
+/// (Plan.md §2.3, the initiative row), for an agent of `mode` in a project
+/// under `ceiling`: On request records them and starts nothing; Assisted
+/// and Autonomous start. Off starts nothing at all, and is decided first.
+// shortcut: not stepped down for taint, and neither is a proposal in the
+// gate: until screening (stage C) can find external content clean, every
+// external event taints its run, and those are the events this row is for.
+#[must_use]
+pub fn may_start_unrequested(mode: Mode, ceiling: Mode) -> bool {
+    mode.stricter(ceiling) >= Mode::Assisted
 }
 
 /// The pattern a standing rule made from this call stores: its target
@@ -136,25 +157,35 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
     if input.tool == ASK_USER {
         return Verdict::Ask { offers_rule: false };
     }
-    let row = if input.tool == crate::timers::CREATE_SCHEDULE {
-        Row::Instructions { rule: false }
+    let row = if input.tool == crate::timers::CREATE_SCHEDULE || input.new_work.is_some() {
+        Row::Initiative
     } else if !input.requested && crate::memory::protected(input.tool, input.arguments) {
-        Row::Instructions { rule: true }
+        Row::Instructions
     } else {
         Row::Tier(input.tier)
     };
-    let mut verdict = cell(row, mode);
+    // Two agents, stricter wins; the lead's mode is not stepped down here
+    // (see `may_start_unrequested`).
+    let row_mode = input.new_work.map_or(mode, |assignee| {
+        input
+            .mode
+            .stricter(ceiling)
+            .stricter(assignee.stricter(ceiling))
+    });
+    let mut verdict = cell(row, row_mode);
     if let Some(&set) = input.overrides.get(&input.tier) {
-        verdict = if set >= verdict {
-            set
-        } else {
-            set.max(cell(row, cap))
+        verdict = match row {
+            _ if set >= verdict => set,
+            // An override loosens only a tier's own cell.
+            Row::Tier(_) => set.max(cell(row, cap)),
+            _ => verdict,
         };
     }
     let pattern = rule_pattern(input.arguments);
     let ruled = match row {
-        Row::Tier(Tier::SharedReversible | Tier::SharedHardToUndo)
-        | Row::Instructions { rule: true } => pattern.as_object().is_some_and(|p| !p.is_empty()),
+        Row::Tier(Tier::SharedReversible | Tier::SharedHardToUndo) | Row::Instructions => {
+            pattern.as_object().is_some_and(|p| !p.is_empty())
+        }
         _ => false,
     };
     if ruled && matches!(verdict, Cell::Ask | Cell::Review) {
@@ -195,6 +226,7 @@ mod tests {
     use super::*;
     use crate::memory::MEMORY_EDIT;
     use crate::timers::CREATE_SCHEDULE;
+    use crate::tools::CREATE_TASK;
 
     const ON: Mode = Mode::OnRequest;
     const AS: Mode = Mode::Assisted;
@@ -249,6 +281,8 @@ mod tests {
         rule: Option<&'static str>,
         tainted: bool,
         requested: bool,
+        /// The assignee's mode, for a task from unrequested work.
+        new_work: Option<Mode>,
         expect: V,
     }
 
@@ -264,6 +298,7 @@ mod tests {
             rule: None,
             tainted: false,
             requested: true,
+            new_work: None,
             expect,
         }
     }
@@ -278,6 +313,12 @@ mod tests {
     fn the_gate_follows_the_matrix_with_ceilings_overrides_rules_and_taint() {
         use V::{Allow, Ask, AskOffer, Block, Review, Rule};
         let tainted = |c: Case| Case { tainted: true, ..c };
+        let proposal = |c: Case, assignee: Mode| Case {
+            tool: CREATE_TASK,
+            requested: false,
+            new_work: Some(assignee),
+            ..c
+        };
         let ruled = |c: Case| Case {
             tool: "open_pull_request",
             rule: Some("app"),
@@ -413,13 +454,65 @@ mod tests {
                 tool: ASK_USER,
                 ..case("ask_user asks", T0, AU, Ask)
             },
+            // The initiative row: an agent's routine, and a task from work
+            // you did not request, at the stricter of the two agents' modes.
             Case {
                 tool: CREATE_SCHEDULE,
                 ..case("an agent's routine asks", T1, ON, Ask)
             },
             Case {
                 tool: CREATE_SCHEDULE,
-                ..case("an agent's routine asks in autonomous", T1, AU, Ask)
+                ..case("an agent's routine asks in assisted", T1, AS, Ask)
+            },
+            Case {
+                tool: CREATE_SCHEDULE,
+                ..case("an agent's routine is allowed in autonomous", T1, AU, Allow)
+            },
+            tainted(Case {
+                tool: CREATE_SCHEDULE,
+                ..case("a tainted autonomous routine asks", T1, AU, Ask)
+            }),
+            Case {
+                tool: CREATE_SCHEDULE,
+                overrides: &[(T1, Cell::Ask)],
+                ..case("an override makes a routine ask", T1, AU, Ask)
+            },
+            Case {
+                tool: CREATE_SCHEDULE,
+                project: Some(AS),
+                ..case("a ceiling makes a routine ask", T1, AU, Ask)
+            },
+            proposal(case("a proposal in assisted", T1, AS, Ask), AS),
+            proposal(case("a task in autonomous", T1, AU, Allow), AU),
+            proposal(case("an on request assignee is asked for", T1, AU, Ask), ON),
+            proposal(case("an assisted assignee is asked for", T1, AU, Ask), AS),
+            proposal(
+                case("an autonomous assignee under assisted", T1, AS, Ask),
+                AU,
+            ),
+            proposal(case("an off assignee blocks", T1, AU, Block), Mode::Off),
+            tainted(proposal(
+                case("taint does not step a task down", T1, AU, Allow),
+                AU,
+            )),
+            Case {
+                project: Some(AS),
+                ..proposal(case("a ceiling caps both agents", T1, AU, Ask), AU)
+            },
+            Case {
+                overrides: &[(T1, Cell::Allow)],
+                ..proposal(
+                    case("an override cannot loosen a proposal", T1, AS, Ask),
+                    AS,
+                )
+            },
+            Case {
+                overrides: &[(T1, Cell::Ask)],
+                ..proposal(case("an override makes a task ask", T1, AU, Ask), AU)
+            },
+            Case {
+                tool: CREATE_TASK,
+                ..case("a task from work you requested", T1, ON, Allow)
             },
             Case {
                 tool: MEMORY_EDIT,
@@ -474,12 +567,32 @@ mod tests {
                 rules: &rules,
                 tainted: row.tainted,
                 requested: row.requested,
+                new_work: row.new_work,
             });
             if short(&got) != row.expect {
                 failures.push(format!("{}: {got:?}, expected {:?}", row.what, row.expect));
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn work_you_did_not_request_starts_in_assisted_and_autonomous_only() {
+        for (mode, ceiling, starts) in [
+            (Mode::Off, AU, false),
+            (ON, AU, false),
+            (AS, AU, true),
+            (AU, AU, true),
+            (AU, AS, true),
+            (AU, ON, false),
+            (AS, Mode::Off, false),
+        ] {
+            assert_eq!(
+                may_start_unrequested(mode, ceiling),
+                starts,
+                "{mode} under {ceiling}"
+            );
+        }
     }
 
     #[test]

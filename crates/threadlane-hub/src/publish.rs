@@ -107,6 +107,9 @@ pub(crate) async fn proposal(
     if tool == crate::timers::CREATE_SCHEDULE {
         return crate::timers::proposal(db, lane, arguments).await;
     }
+    if tool == crate::tools::CREATE_TASK {
+        return crate::proposal::task(db, lane, arguments).await;
+    }
     if tool == crate::tools::ASK_USER {
         let (question, _) = crate::tools::question(arguments)?;
         return Ok(Proposal {

@@ -174,14 +174,17 @@ impl ClientApi {
             .await
             .map_err(api_error)?;
         let recorded = matches!(answered, Answered::Recorded(_));
-        if recorded {
-            inner.wake.wake(WakeTarget::Lane(current.lane_id));
-        }
         let decision = db
             .decision(decision)
             .await
             .map_err(api_error)?
             .ok_or_else(|| ApiError::NotFound(format!("decision {decision}")))?;
+        if recorded {
+            crate::proposal::record_answer(db, &decision, now)
+                .await
+                .map_err(api_error)?;
+            inner.wake.wake(WakeTarget::Lane(current.lane_id));
+        }
         Ok(DecisionReply::Answered {
             decision: Box::new(decision),
             recorded,

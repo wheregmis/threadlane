@@ -17,6 +17,7 @@ mod cycle;
 mod failures;
 mod fencing;
 mod github;
+mod initiative;
 mod live;
 mod loops;
 mod memory;
