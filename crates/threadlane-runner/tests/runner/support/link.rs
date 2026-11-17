@@ -67,6 +67,9 @@ struct State {
     journal: Vec<JournalEntry>,
     request_work: VecDeque<Result<Option<Lease>, LinkError>>,
     pending: VecDeque<Result<Vec<Event>, LinkError>>,
+    left_unwoken: VecDeque<Result<bool, LinkError>>,
+    /// How many times the runner asked `left_unwoken`.
+    unwoken_asked: usize,
     begin_run: VecDeque<Result<Begin, LinkError>>,
     append: VecDeque<Result<(), LinkError>>,
     call_tool: VecDeque<Result<Json, ToolError>>,
@@ -134,6 +137,16 @@ impl FakeLink {
 
     pub fn push_pending(&self, answer: Result<Vec<Event>, LinkError>) {
         self.state().pending.push_back(answer);
+    }
+
+    /// Scripts the next `left_unwoken` answer; unscripted, the task has
+    /// something to wake it.
+    pub fn push_left_unwoken(&self, answer: Result<bool, LinkError>) {
+        self.state().left_unwoken.push_back(answer);
+    }
+
+    pub fn unwoken_asked(&self) -> usize {
+        self.state().unwoken_asked
     }
 
     pub fn push_begin(&self, answer: Result<Begin, LinkError>) {
@@ -205,6 +218,12 @@ impl HubLink for FakeLink {
             lane: lease.lane_id,
         });
         state.pending.pop_front().unwrap_or_else(|| Ok(Vec::new()))
+    }
+
+    async fn left_unwoken(&self, _lease: &Lease) -> Result<bool, LinkError> {
+        let mut state = self.state();
+        state.unwoken_asked += 1;
+        state.left_unwoken.pop_front().unwrap_or(Ok(false))
     }
 
     async fn begin_run(&self, lease: &Lease) -> Result<Begin, LinkError> {

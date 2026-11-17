@@ -33,7 +33,7 @@ pub const TASK_RULES: &str = "\
 How you work on a task:
 - You work on the one task shown at the top of the prompt. When it is done, call finish_task with a summary of the result, then end your turn.
 - Nothing you write reaches the user. The lead sees your finish_task summary; your final text is only recorded as the reason for what you did.
-- Ending your turn without finish_task leaves the task waiting until something new arrives for it.
+- Your run ends when you end your turn. Nothing started in the background survives it and nothing will wake you for it, so run every command in the foreground and wait for it to finish before you go on. To wait for something outside your run, set a follow-up with set_follow_up. To stop for good, call finish_task. Ending your turn with neither leaves the task with nothing to wake it.
 - If the task names repositories, you work in its own worktree of each, on its own branch. The system commits whatever you leave in it onto that branch when your run ends, so your work is never left uncommitted.
 - Effects others can see, such as pushing a branch, opening or merging a pull request, or publishing a release, go only through the system's tools. Do not run git push or gh to do them yourself: those commands are refused.
 - Use publish_branch to push your task's branch and open_pull_request to open a draft pull request from it. They ask the user first: when a call answers \"waiting on you\", end your turn at once. You are resumed with their answer, and with the outcome once the system has performed the call.

@@ -10,7 +10,7 @@ use threadlane_core::ids::{
 use threadlane_core::model::*;
 use threadlane_core::store::*;
 use threadlane_core::time::{Clock, SystemClock, Timestamp};
-use threadlane_store::{Bootstrap, HubDb, TASK_SOURCE};
+use threadlane_store::{Bootstrap, HubDb, TASK_SOURCE, UNWOKEN_REASON};
 
 const T0: Timestamp = Timestamp::from_millis(1_767_225_600_000);
 const LEASE_TTL: Duration = Duration::from_secs(60);
@@ -1136,13 +1136,27 @@ async fn a_run_that_does_not_finish_leaves_the_task_sleeping_until_an_event_arri
     };
 
     let (lease, run) = run_pending(&hub, created.lane_id, a, T0).await;
+    assert!(hub.left_unwoken(created.lane_id).await.unwrap());
     hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
         .await
         .unwrap();
-    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Sleeping);
+    // Nothing will wake it: it says so, and the lead is told once.
+    let sleeping = task(&hub, created.id).await;
+    assert_eq!(sleeping.status, TaskStatus::Sleeping);
+    assert_eq!(sleeping.waiting_reason.as_deref(), Some(UNWOKEN_REASON));
+    let notices = task_results(&hub, &general).await;
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].source_event_id,
+        format!("unwoken:{}", run.id.get())
+    );
+    assert_eq!(notices[0].payload["status"], "sleeping");
+    assert_eq!(notices[0].payload["reason"], UNWOKEN_REASON);
     hub.release_lease(&lease).await.unwrap();
     hub.insert_event(&event_for("wake")).await.unwrap();
-    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Queued);
+    let woken = task(&hub, created.id).await;
+    assert_eq!(woken.status, TaskStatus::Queued);
+    assert_eq!(woken.waiting_reason, None, "woken, it no longer says so");
 
     // An event that arrives during the run queues the task at commit.
     let (lease, run) = run_pending(&hub, created.lane_id, a, T0).await;
@@ -1152,7 +1166,98 @@ async fn a_run_that_does_not_finish_leaves_the_task_sleeping_until_an_event_arri
         .await
         .unwrap();
     assert_eq!(task(&hub, created.id).await.status, TaskStatus::Queued);
-    assert!(task_results(&hub, &general).await.is_empty());
+    assert_eq!(task_results(&hub, &general).await.len(), 1, "no new notice");
+}
+
+#[tokio::test]
+async fn a_task_has_something_to_wake_it_with_a_timer_event_decision_or_result() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let a = machine(&hub, "a").await;
+    let created = hub
+        .create_task(None, &new_task(&general, agent, "wait", vec![]))
+        .await
+        .unwrap();
+    let lane = created.lane_id;
+    let (lease, run) = run_pending(&hub, lane, a, T0).await;
+    assert!(hub.left_unwoken(lane).await.unwrap(), "nothing yet");
+    assert!(
+        !hub.left_unwoken(general.lead_lane_id).await.unwrap(),
+        "a lead lane is never left unwoken"
+    );
+
+    // An event that arrives during the run.
+    hub.insert_event(&NewEvent {
+        lane_id: lane,
+        ..message(&general, "meanwhile")
+    })
+    .await
+    .unwrap();
+    assert!(!hub.left_unwoken(lane).await.unwrap(), "a pending event");
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+        .await
+        .unwrap();
+    hub.release_lease(&lease).await.unwrap();
+
+    // A follow-up of its own; one paused does not count.
+    let (lease, _run) = run_pending(&hub, lane, a, T0).await;
+    assert!(hub.left_unwoken(lane).await.unwrap());
+    let timer = hub
+        .create_timer(&NewTimer {
+            project_id: general.id,
+            lane_id: lane,
+            agent_id: None,
+            task_ref: Some(created.id),
+            category: TimerCategory::FollowUp,
+            due_at: T0,
+            recurrence: None,
+            instruction: "look at the checks".into(),
+            created_by: TimerCreator::Agent,
+            created_by_call: Some("call-f".into()),
+            requested: true,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !hub.left_unwoken(lane).await.unwrap(),
+        "an active follow-up"
+    );
+    hub.pause_timer(timer.id).await.unwrap();
+    assert!(
+        hub.left_unwoken(lane).await.unwrap(),
+        "a paused one wakes nothing"
+    );
+
+    // A decision waiting on you.
+    hub.open_decision(
+        Some(&lease),
+        &NewDecision {
+            project_id: general.id,
+            lane_id: lane,
+            task_id: Some(created.id),
+            session_id: None,
+            run_id: None,
+            tool_call_id: Some("call-d".into()),
+            tool: "publish_branch".into(),
+            arguments: json!({ "repository": "app" }),
+            arguments_hash: "sha256:abc".into(),
+            kind: DecisionKind::Approval,
+            question: "Push the branch?".into(),
+            context: String::new(),
+            options: vec![DecisionOption {
+                label: "Push".into(),
+                effect: json!({ "approve": true }),
+            }],
+            recommended: None,
+            offers_standing_rule: false,
+            expires_at: None,
+            created_at: T0,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!hub.left_unwoken(lane).await.unwrap(), "an open decision");
 }
 
 #[tokio::test]

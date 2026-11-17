@@ -30,7 +30,9 @@ use threadlane_core::store::{
 use threadlane_hub::{
     CREATE_TASK, FINISH_TASK, HubCore, HubError, HubSettings, MEMORY_CREATE, SEND_MESSAGE,
 };
-use threadlane_runner::{GitWorkspaces, PROGRESS_PROMPT, Runner, RunnerConfig, RunnerError};
+use threadlane_runner::{
+    GitWorkspaces, PROGRESS_PROMPT, QUIET_END_PROMPT, Runner, RunnerConfig, RunnerError,
+};
 use threadlane_store::{Bootstrap, HubDb};
 use threadlane_testkit::fakes::{FakeForge, FakeGithub};
 use threadlane_testkit::git::{bare_repository, git};
@@ -216,17 +218,18 @@ pub fn usable_report() -> MachineReport {
     }
 }
 
-/// What a task agent's final progress turn does unless a scenario says
-/// otherwise: it ends the turn.
+/// What a task agent's extra turn, for its progress file or for a quiet
+/// end, does unless a scenario says otherwise: it ends the turn.
 pub fn progress_turn() -> Script {
     Script::new().finish("Nothing more to save.")
 }
 
-/// A scripted backend whose final progress turns play [`progress_turn`],
-/// before any route a scenario adds.
+/// A scripted backend whose extra turns play [`progress_turn`], before any
+/// route a scenario adds.
 fn scripted(kind: BackendKind, clock: &FakeClock) -> ScriptedBackend {
     let backend = ScriptedBackend::new(kind, Arc::new(clock.clone()));
     backend.route(PROGRESS_PROMPT, progress_turn());
+    backend.route(QUIET_END_PROMPT, progress_turn());
     backend
 }
 

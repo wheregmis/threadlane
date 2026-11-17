@@ -115,9 +115,19 @@ impl AppState {
                                 .waiting_reason
                                 .clone()
                                 .unwrap_or_else(|| "waiting for a machine".to_owned()),
-                            (TaskStatus::Sleeping, None) => {
-                                "waiting for a timer or an event".to_owned()
-                            }
+                            // Claim a follow-up only when one is listed.
+                            (TaskStatus::Sleeping, None) => task
+                                .waiting_reason
+                                .clone()
+                                .or_else(|| {
+                                    self.follow_up_due(space, project, task.lane_id).map(|due| {
+                                        format!(
+                                            "sleeping until its follow-up at {}",
+                                            when.moment(due)
+                                        )
+                                    })
+                                })
+                                .unwrap_or_else(|| "sleeping".to_owned()),
                             _ => task
                                 .waiting_reason
                                 .clone()
