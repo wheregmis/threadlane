@@ -13,8 +13,8 @@ use serde_json::{Value as Json, json};
 use tempfile::TempDir;
 use threadlane_backend_claude::{ClaudeBackend, ClaudeConfig};
 use threadlane_core::backend::{
-    AgentBackend, AskRequest, BackendError, BackendEvent, BackendRun, NativeSession, Probe,
-    RunRequest,
+    AgentBackend, AskRequest, BackendError, BackendEvent, BackendRun, DENY_RULES, NativeSession,
+    Probe, RunRequest,
 };
 use threadlane_core::model::BackendKind;
 use threadlane_core::tools::{Tier, ToolDefinition, ToolEndpoint, ToolError};
@@ -266,10 +266,7 @@ async fn start_passes_every_option() {
         appended_instructions: "You are the lead.".to_owned(),
         model: Some("haiku".to_owned()),
         tools: Some(Arc::new(Endpoint)),
-        deny_rules: vec![
-            "Bash(git push:*)".to_owned(),
-            "Bash(gh pr merge:*)".to_owned(),
-        ],
+        deny_rules: vec!["git push".to_owned(), "gh pr merge".to_owned()],
         remove_builtin_tools: true,
         max_turns: Some(3),
         ..fake.request(NativeSession::Start {
@@ -336,6 +333,42 @@ async fn start_passes_every_option() {
         !Path::new(&mcp_path).exists(),
         "the config is removed with the run"
     );
+}
+
+/// Each of the system's deny rules (Plan.md §9.2 layer 2) reaches claude as
+/// a `--disallowedTools` Bash prefix rule, `Bash(<command>:*)`, the form that
+/// refuses every Bash command starting with those words.
+#[tokio::test]
+async fn each_deny_rule_reaches_claude_as_a_disallowed_bash_prefix() {
+    let expected = [
+        ("git push", "Bash(git push:*)"),
+        ("gh pr create", "Bash(gh pr create:*)"),
+        ("gh pr merge", "Bash(gh pr merge:*)"),
+        ("gh release", "Bash(gh release:*)"),
+        ("gh repo delete", "Bash(gh repo delete:*)"),
+    ];
+    assert_eq!(
+        DENY_RULES.to_vec(),
+        expected.map(|(rule, _)| rule).to_vec(),
+        "every rule in the list is checked here"
+    );
+    for (rule, disallowed) in expected {
+        let fake = recorder();
+        let request = RunRequest {
+            deny_rules: vec![rule.to_owned()],
+            ..fake.request(NativeSession::Start {
+                id: SESSION.to_owned(),
+            })
+        };
+        let mut run = fake.backend().run(request).await.expect("run starts");
+        collect(run.as_mut()).await;
+        let args = fake.invocations().remove(0);
+        let flag = args
+            .iter()
+            .position(|arg| arg == "--disallowedTools")
+            .unwrap_or_else(|| panic!("{rule}: no --disallowedTools in {args:?}"));
+        assert_eq!(args[flag + 1..], [disallowed.to_owned()], "{rule}");
+    }
 }
 
 #[tokio::test]

@@ -2,15 +2,20 @@
 //! §9.1, docs/milestone-1.md §9 "Tool gateway").
 
 use serde_json::{Value as Json, json};
-use threadlane_core::ids::RunId;
-use threadlane_core::model::{Lease, Mode, Run, RunStatus, ToolCallBegin, ToolCallKey, Trust};
-use threadlane_core::runtime::steps::tool_call as step;
-use threadlane_core::store::{OrgStore, SessionStore};
+use threadlane_core::ids::{DecisionId, RunId};
+use threadlane_core::link::{LinkError, Perform};
+use threadlane_core::model::{
+    DecisionKind, Lane, Lease, Mode, NewDecision, Run, RunStatus, ToolCallBegin, ToolCallKey, Trust,
+};
+use threadlane_core::runtime::steps::{perform, tool_call as step};
+use threadlane_core::runtime::{WakeTarget, Waker};
+use threadlane_core::store::{DecisionStore, OrgStore, SessionStore};
 use threadlane_core::tools::{GateRequest, ToolContext, ToolDefinition, ToolError, Verdict};
 
-use crate::error::{link_to_tool, tool_error};
+use crate::error::{link_error, link_to_tool, tool_error};
 use crate::link::LocalLink;
-use crate::tools::derived_call_key;
+use crate::publish::{approval_options, proposal};
+use crate::tools::{derived_call_key, offered_in};
 
 /// Key of the envelope a failed call's error is recorded in, so a repeated
 /// call returns the same error instead of "outcome unknown".
@@ -44,7 +49,16 @@ impl LocalLink {
             .tools
             .definition(tool)
             .ok_or_else(|| ToolError::UnknownTool(tool.to_owned()))?;
-        self.gate(&run, lane.project_id, &definition, arguments)
+        // Each lane kind has its own tools (Plan.md §5.1); not offering the
+        // others is not enough, a backend can name any tool.
+        if !offered_in(tool, lane.kind) {
+            return Err(ToolError::Blocked(format!(
+                "{tool} is not available in a {} lane",
+                lane.kind
+            )));
+        }
+        let ask = self
+            .gate(&run, lane.project_id, &definition, arguments)
             .await?;
 
         let key = ToolCallKey {
@@ -77,7 +91,11 @@ impl LocalLink {
             task_id: lane.task_id,
             call_id: call_id.map(str::to_owned),
         };
-        let outcome = inner.tools.execute(&context, tool, arguments.clone()).await;
+        let outcome = if ask {
+            self.ask(lease, &run, &lane, &key, tool, arguments).await
+        } else {
+            inner.tools.execute(&context, tool, arguments.clone()).await
+        };
         let record = match &outcome {
             Ok(result) => result.clone(),
             Err(error) => match error_record(error) {
@@ -95,13 +113,14 @@ impl LocalLink {
         outcome
     }
 
+    /// Whether the call may proceed (`false`) or must ask you (`true`).
     async fn gate(
         &self,
         run: &Run,
         project_id: threadlane_core::ids::ProjectId,
         definition: &ToolDefinition,
         arguments: &Json,
-    ) -> Result<(), ToolError> {
+    ) -> Result<bool, ToolError> {
         let inner = &self.core.inner;
         let db = &inner.db;
         let ceiling = db.effective_ceiling(project_id).await.map_err(tool_error)?;
@@ -130,14 +149,127 @@ impl LocalLink {
             tainted,
         };
         match inner.policy.decide(&request).await {
-            Verdict::Allow => Ok(()),
+            Verdict::Allow => Ok(false),
             Verdict::Block { reason } => Err(ToolError::Blocked(reason)),
-            // Decisions arrive in milestone 3; until then asking is refusing.
-            Verdict::Ask => Err(ToolError::Blocked(format!(
-                "{} needs the user's approval, which this hub cannot ask for yet",
-                definition.name
-            ))),
+            Verdict::Ask => Ok(true),
         }
+    }
+
+    /// Pauses the call as a decision, with its card, and tells the agent to
+    /// end its turn (Plan.md §9.4). The run then ends `deferred`.
+    async fn ask(
+        &self,
+        lease: &Lease,
+        run: &Run,
+        lane: &Lane,
+        key: &ToolCallKey,
+        tool: &str,
+        arguments: &Json,
+    ) -> Result<Json, ToolError> {
+        let inner = &self.core.inner;
+        let asked = proposal(&inner.db, lane, tool, arguments).await?;
+        inner
+            .db
+            .open_decision(
+                Some(lease),
+                &NewDecision {
+                    project_id: lane.project_id,
+                    lane_id: lane.id,
+                    task_id: lane.task_id,
+                    session_id: Some(run.session_id),
+                    run_id: Some(run.id),
+                    tool_call_id: Some(key.key.clone()),
+                    tool: tool.to_owned(),
+                    arguments: arguments.clone(),
+                    arguments_hash: derived_call_key(tool, arguments),
+                    kind: DecisionKind::Approval,
+                    question: asked.question,
+                    context: asked.context,
+                    options: approval_options(),
+                    recommended: Some(0),
+                    offers_standing_rule: false,
+                    expires_at: None,
+                    created_at: inner.clock.now(),
+                },
+            )
+            .await
+            .map_err(tool_error)?;
+        inner.wake.wake(WakeTarget::Dispatcher);
+        Err(ToolError::WaitingOnYou)
+    }
+
+    /// [`threadlane_core::link::HubLink::begin_perform`]: the stored call of
+    /// an approved decision in the leased lane, if its arguments still hash
+    /// to what you approved (invariant 7), with its intent recorded.
+    pub(crate) async fn begin_perform(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        id: DecisionId,
+    ) -> Result<Perform, LinkError> {
+        let inner = &self.core.inner;
+        let db = &inner.db;
+        self.check_lease(lease).await?;
+        self.active_run(lease, run_id).await?;
+        let decision = db
+            .decision(id)
+            .await
+            .map_err(link_error)?
+            .filter(|decision| decision.lane_id == lease.lane_id && decision.approved())
+            .ok_or_else(|| {
+                LinkError::Rejected(format!("{id} is not an approved decision in this lane"))
+            })?;
+        if let Some(outcome) = decision.outcome {
+            return Ok(Perform::Recorded { outcome });
+        }
+        if derived_call_key(&decision.tool, &decision.arguments) != decision.arguments_hash {
+            let outcome = json!({
+                "performed": false,
+                "error": format!(
+                    "the stored call of {id} is not the one the user approved: its arguments \
+                     no longer match their hash, so nothing was done"
+                ),
+            });
+            db.finish_perform(lease, id, &outcome)
+                .await
+                .map_err(link_error)?;
+            return Ok(Perform::Recorded { outcome });
+        }
+        let begin = db
+            .begin_perform(lease, id, inner.clock.now())
+            .await
+            .map_err(link_error)?;
+        let retry = match begin {
+            ToolCallBegin::Finished(outcome) => return Ok(Perform::Recorded { outcome }),
+            ToolCallBegin::Perform => false,
+            ToolCallBegin::OutcomeUnknown => true,
+        };
+        inner.hook.reach(perform::AFTER_BEGIN)?;
+        Ok(Perform::Call {
+            tool: decision.tool,
+            arguments: decision.arguments,
+            retry,
+        })
+    }
+
+    /// [`threadlane_core::link::HubLink::finish_perform`].
+    pub(crate) async fn finish_perform(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        id: DecisionId,
+        outcome: &Json,
+    ) -> Result<(), LinkError> {
+        let inner = &self.core.inner;
+        self.check_lease(lease).await?;
+        self.active_run(lease, run_id).await?;
+        inner
+            .db
+            .finish_perform(lease, id, outcome)
+            .await
+            .map_err(link_error)?;
+        inner.hook.reach(perform::AFTER_FINISH)?;
+        Ok(())
     }
 }
 
@@ -149,6 +281,7 @@ fn error_record(error: &ToolError) -> Option<Json> {
         ToolError::InvalidArguments(message) => ("invalid_arguments", message),
         ToolError::Blocked(message) => ("blocked", message),
         ToolError::Failed(message) => ("failed", message),
+        ToolError::WaitingOnYou => ("waiting_on_you", &String::new()),
         _ => return None,
     };
     Some(json!({ ERROR_RECORD: { "kind": kind, "message": message } }))
@@ -168,6 +301,7 @@ fn replay(result: Json) -> Result<Json, ToolError> {
         Some("unknown_tool") => ToolError::UnknownTool(message),
         Some("invalid_arguments") => ToolError::InvalidArguments(message),
         Some("blocked") => ToolError::Blocked(message),
+        Some("waiting_on_you") => ToolError::WaitingOnYou,
         _ => ToolError::Failed(message),
     })
 }
@@ -183,6 +317,7 @@ mod tests {
             ToolError::InvalidArguments("bad".into()),
             ToolError::Blocked("no".into()),
             ToolError::Failed("boom".into()),
+            ToolError::WaitingOnYou,
         ] {
             let record = error_record(&error).unwrap();
             assert_eq!(replay(record), Err(error));

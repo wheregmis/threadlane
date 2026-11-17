@@ -278,3 +278,112 @@ async fn set_mode_changes_a_binding_or_creates_one() {
         assert!(matches!(missing, Err(ApiError::NotFound(_))), "{missing:?}");
     }
 }
+
+fn add_repository(project: Option<&str>, name: &str, remote: &str) -> OrgRequest {
+    OrgRequest::AddRepository {
+        project: project.map(str::to_owned),
+        name: name.to_owned(),
+        remote_url: remote.to_owned(),
+        default_branch: None,
+    }
+}
+
+#[tokio::test]
+async fn repositories_are_registered_per_project_and_a_remote_only_once_in_the_space() {
+    let hub = TestHub::start().await;
+    org(
+        &hub,
+        OrgRequest::CreateProject {
+            name: "Payments".into(),
+            description: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let Ok(OrgReply::Repository { repository }) = org(
+        &hub,
+        add_repository(Some("Payments"), "api", "git@example.com:me/api.git"),
+    )
+    .await
+    else {
+        panic!("registered");
+    };
+    assert_eq!(repository.name, "api");
+    assert_eq!(repository.default_branch, "main", "the default branch");
+    let Ok(OrgReply::Repository { repository: docs }) = org(
+        &hub,
+        OrgRequest::AddRepository {
+            project: None,
+            name: "docs".into(),
+            remote_url: "git@example.com:me/docs.git".into(),
+            default_branch: Some("trunk".into()),
+        },
+    )
+    .await
+    else {
+        panic!("registered in General");
+    };
+    assert_eq!(docs.default_branch, "trunk");
+
+    let again = org(
+        &hub,
+        add_repository(None, "api", "git@example.com:me/api.git"),
+    )
+    .await;
+    assert_eq!(
+        again,
+        Err(ApiError::Invalid(
+            "the remote git@example.com:me/api.git is already registered in this space, as \
+             repository \"api\" of project \"Payments\""
+                .into()
+        ))
+    );
+    let same_name = org(
+        &hub,
+        add_repository(Some("Payments"), "api", "git@example.com:me/other.git"),
+    )
+    .await;
+    assert!(
+        matches!(&same_name, Err(ApiError::Invalid(message)) if message.contains("already has a repository named")),
+        "{same_name:?}"
+    );
+    for (name, remote) in [("-x", "r1"), ("a/b", "r2"), ("ok", "--upload-pack=x")] {
+        let refused = org(&hub, add_repository(None, name, remote)).await;
+        assert!(
+            matches!(refused, Err(ApiError::Invalid(_))),
+            "{name} {refused:?}"
+        );
+    }
+    let bad_branch = org(
+        &hub,
+        OrgRequest::AddRepository {
+            project: None,
+            name: "web".into(),
+            remote_url: "git@example.com:me/web.git".into(),
+            default_branch: Some("--orphan".into()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(bad_branch, Err(ApiError::Invalid(_))),
+        "{bad_branch:?}"
+    );
+
+    let Ok(OrgReply::Repositories { repositories }) = org(
+        &hub,
+        OrgRequest::Repositories {
+            project: Some("Payments".into()),
+        },
+    )
+    .await
+    else {
+        panic!("listed");
+    };
+    assert_eq!(repositories, vec![repository]);
+    let Ok(OrgReply::Repositories { repositories }) =
+        org(&hub, OrgRequest::Repositories { project: None }).await
+    else {
+        panic!("listed");
+    };
+    assert_eq!(repositories, vec![docs]);
+}

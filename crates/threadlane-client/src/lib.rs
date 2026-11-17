@@ -18,10 +18,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use threadlane_core::client::{
-    Accepted, ApiError, BindingSummary, FeedItem, HubApi, HubInfo, OrgReply, OrgRequest,
-    ProjectSummary, UserMessage,
+    Accepted, ApiError, BindingSummary, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
+    OrgReply, OrgRequest, ProjectSummary, UserMessage,
 };
-use threadlane_core::model::{Agent, Mode, OutboxKind};
+use threadlane_core::ids::DecisionId;
+use threadlane_core::model::{Agent, Decision, Mode, OutboxKind, Repository};
 use threadlane_transport_local::{LocalClient, SOCKET_FILE};
 use tokio::time::Instant;
 
@@ -133,6 +134,27 @@ pub struct Sent {
     pub client_message_id: String,
     /// The hub's acknowledgement.
     pub accepted: Accepted,
+}
+
+/// The decisions waiting on you in one space (Plan.md §11.3: their ids are
+/// per space).
+#[derive(Debug)]
+pub struct SpaceDecisions {
+    /// The space they belong to.
+    pub space: String,
+    /// Oldest first, or why the hub could not list them.
+    pub decisions: Result<Vec<Decision>, ClientError>,
+}
+
+/// A decision you answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpaceAnswer {
+    /// The space it belongs to.
+    pub space: String,
+    /// The decision as it now stands, with the answer that counts.
+    pub decision: Decision,
+    /// `false` if it had been answered before and this answer was ignored.
+    pub recorded: bool,
 }
 
 /// The projects of one space.
@@ -513,6 +535,54 @@ impl ClientCore {
         }
     }
 
+    /// Registers a repository in a project. `space: None` means the only
+    /// paired hub; `project: None` means the General project, and
+    /// `default_branch: None` the branch `main`.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error, for
+    /// example a remote already registered in the space.
+    pub async fn add_repository(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+        name: &str,
+        remote_url: &str,
+        default_branch: Option<&str>,
+    ) -> Result<Repository, ClientError> {
+        let request = OrgRequest::AddRepository {
+            project: project.map(str::to_owned),
+            name: name.to_owned(),
+            remote_url: remote_url.to_owned(),
+            default_branch: default_branch.map(str::to_owned),
+        };
+        match self.org(space, request).await? {
+            (_, OrgReply::Repository { repository }) => Ok(repository),
+            (space, _) => Err(wrong_reply(&space, "add repository")),
+        }
+    }
+
+    /// The repositories of a project. `space: None` means the only paired
+    /// hub; `project: None` means the General project.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn repositories(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Vec<Repository>, ClientError> {
+        let request = OrgRequest::Repositories {
+            project: project.map(str::to_owned),
+        };
+        match self.org(space, request).await? {
+            (_, OrgReply::Repositories { repositories }) => Ok(repositories),
+            (space, _) => Err(wrong_reply(&space, "repositories")),
+        }
+    }
+
     /// The agents of one space. `None` means the only paired hub.
     ///
     /// # Errors
@@ -590,6 +660,77 @@ impl ClientCore {
         match self.org(space, request).await? {
             (_, OrgReply::Binding { binding }) => Ok(binding),
             (space, _) => Err(wrong_reply(&space, "set mode")),
+        }
+    }
+
+    /// The decisions waiting on you in `space`, or in every paired hub when
+    /// `None`. A hub that cannot list them is reported in its place; the
+    /// others are unaffected.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, or no hub paired.
+    pub async fn decisions(&self, space: Option<&str>) -> Result<Vec<SpaceDecisions>, ClientError> {
+        let hubs: Vec<&PairedHub> = match space {
+            Some(name) => vec![
+                self.hubs
+                    .iter()
+                    .find(|hub| hub.name == name)
+                    .ok_or_else(|| self.unknown(name))?,
+            ],
+            None if self.hubs.is_empty() => return Err(ClientError::NoHubs),
+            None => self.hubs.iter().collect(),
+        };
+        let mut listed = Vec::with_capacity(hubs.len());
+        for hub in hubs {
+            let decisions = match self.api_for(hub).decisions(DecisionRequest::Pending).await {
+                Ok(DecisionReply::Pending { decisions }) => Ok(decisions),
+                Ok(_) => Err(wrong_reply(&hub.name, "pending decisions")),
+                Err(error) => Err(api_error(&hub.name, error)),
+            };
+            listed.push(SpaceDecisions {
+                space: hub.name.clone(),
+                decisions,
+            });
+        }
+        Ok(listed)
+    }
+
+    /// Answers decision `decision` (`D-0012`) of one space with the option
+    /// labeled `option`. `space: None` means the only paired hub. Answering
+    /// again is harmless: the first answer stands.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, an id that is not a
+    /// decision's, or the hub's error, for example an unknown option.
+    pub async fn answer(
+        &self,
+        space: Option<&str>,
+        decision: &str,
+        option: &str,
+        note: Option<&str>,
+    ) -> Result<SpaceAnswer, ClientError> {
+        let (space, api) = self.target(space)?;
+        let id = DecisionId::parse(decision).ok_or_else(|| {
+            api_error(
+                &space,
+                ApiError::Invalid(format!("{decision:?} is not a decision id like D-0012")),
+            )
+        })?;
+        let request = DecisionRequest::Answer {
+            decision: id,
+            option: option.to_owned(),
+            note: note.map(str::to_owned),
+        };
+        match api.decisions(request).await {
+            Ok(DecisionReply::Answered { decision, recorded }) => Ok(SpaceAnswer {
+                space,
+                decision: *decision,
+                recorded,
+            }),
+            Ok(_) => Err(wrong_reply(&space, "answer")),
+            Err(error) => Err(api_error(&space, error)),
         }
     }
 

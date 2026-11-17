@@ -89,7 +89,11 @@ impl Launch {
         }
         if !self.deny_rules.is_empty() {
             args.push("--disallowedTools".into());
-            args.extend(self.deny_rules.iter().map(OsString::from));
+            args.extend(
+                self.deny_rules
+                    .iter()
+                    .map(|rule| disallowed_tool(rule).into()),
+            );
         }
         if let Some(max_turns) = self.max_turns {
             args.extend(["--max-turns".into(), max_turns.to_string().into()]);
@@ -146,6 +150,12 @@ impl Launch {
             stdin_task,
         })
     }
+}
+
+/// A deny rule, a command prefix such as `git push`, as a Claude permission
+/// rule: `Bash(git push:*)` refuses every Bash command that starts with it.
+pub(crate) fn disallowed_tool(rule: &str) -> String {
+    format!("Bash({}:*)", rule.trim())
 }
 
 impl fmt::Debug for Launch {

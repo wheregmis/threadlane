@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use crate::harness::{REPLY, Sim, World, count, join, reply_after, reply_script, until};
 use crate::invariants::{assert_invariants, assert_one_active_run_per_lane, assert_quiet};
 
-fn spawn_runner(sim: &Sim) -> (oneshot::Sender<()>, JoinHandle<Result<(), RunnerError>>) {
+pub fn spawn_runner(sim: &Sim) -> (oneshot::Sender<()>, JoinHandle<Result<(), RunnerError>>) {
     let (stop, stopped) = oneshot::channel::<()>();
     let runner = sim.runner.clone();
     let task = tokio::spawn(async move {
@@ -30,7 +30,7 @@ fn spawn_runner(sim: &Sim) -> (oneshot::Sender<()>, JoinHandle<Result<(), Runner
     (stop, task)
 }
 
-fn spawn_hub(sim: &Sim) -> (oneshot::Sender<()>, JoinHandle<Result<(), HubError>>) {
+pub fn spawn_hub(sim: &Sim) -> (oneshot::Sender<()>, JoinHandle<Result<(), HubError>>) {
     let (stop, stopped) = oneshot::channel::<()>();
     let core = sim.core.clone();
     let task = tokio::spawn(async move {
@@ -42,7 +42,7 @@ fn spawn_hub(sim: &Sim) -> (oneshot::Sender<()>, JoinHandle<Result<(), HubError>
     (stop, task)
 }
 
-async fn sleepers_at_least(sim: &Sim, what: &str, sleepers: usize) {
+pub async fn sleepers_at_least(sim: &Sim, what: &str, sleepers: usize) {
     let clock = sim.clock().clone();
     until(what, || std::future::ready(clock.sleepers() >= sleepers)).await;
 }

@@ -2,6 +2,11 @@
 //!
 //! Ignored by default: it uses the account `claude` is logged in to. Run with
 //! `cargo test -p threadlane-backend-claude -- --ignored`.
+//!
+//! [`real_claude_passes_the_conformance_suite`] is the shared suite of
+//! Plan.md §16 that `conformance.rs` runs on a fake. It is what proves that
+//! each deny rule, sent as `Bash(<command>:*)`, refuses its command in the
+//! real `claude`.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,6 +16,7 @@ use serde_json::{Value as Json, json};
 use threadlane_backend_claude::{ClaudeBackend, ClaudeConfig};
 use threadlane_core::backend::{AgentBackend, BackendEvent, BackendRun, NativeSession, RunRequest};
 use threadlane_core::tools::{Tier, ToolDefinition, ToolEndpoint, ToolError};
+use threadlane_testkit::conformance::Conformance;
 
 /// Bounds each run; the prompts are tiny.
 const RUN_LIMIT: Duration = Duration::from_secs(180);
@@ -209,4 +215,20 @@ async fn real_claude_conforms() {
         .expect("resume starts");
     let events = collect(run.as_mut()).await;
     assert_eq!(events, vec![BackendEvent::SessionMissing]);
+}
+
+#[tokio::test]
+#[ignore = "runs the real claude on the logged-in account"]
+async fn real_claude_passes_the_conformance_suite() {
+    let suite = Conformance {
+        backend: Arc::new(ClaudeBackend::new(ClaudeConfig::default())),
+        model: Some("haiku".to_owned()),
+        new_session_id: || uuid::Uuid::new_v4().to_string(),
+        limit: RUN_LIMIT,
+    };
+    let work = tempfile::tempdir().expect("temp dir");
+    suite.run_with_tools_then_resume(work.path()).await;
+    let work = tempfile::tempdir().expect("temp dir");
+    suite.each_deny_rule_refuses_its_command(work.path()).await;
+    // A real usage limit cannot be provoked; the fake covers that row.
 }

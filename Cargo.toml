@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 threadlane-backend-claude = { path = "crates/threadlane-backend-claude" }
+threadlane-backend-codex = { path = "crates/threadlane-backend-codex" }
 threadlane-client = { path = "crates/threadlane-client" }
 threadlane-core = { path = "crates/threadlane-core" }
 threadlane-hub = { path = "crates/threadlane-hub" }

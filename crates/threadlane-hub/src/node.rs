@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use threadlane_backend_claude::ClaudeBackend;
+use threadlane_backend_codex::CodexBackend;
 use threadlane_core::backend::AgentBackend;
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::store::OrgStore;
 use threadlane_core::time::{Clock, SystemClock};
-use threadlane_runner::Runner;
+use threadlane_runner::{GitForge, GitWorkspaces, Runner};
 use threadlane_store::HubDb;
 use tokio::sync::watch;
 
@@ -165,8 +166,10 @@ async fn until_stopped(mut stopped: watch::Receiver<bool>) {
     let _ = stopped.wait_for(|stop| *stop).await;
 }
 
-/// Runs the hub's own runner (docs/milestone-1.md §9 "Binary") on Claude,
-/// with one working directory per lane under `<data dir>/lanes`, until
+/// Runs the hub's own runner (docs/milestone-1.md §9 "Binary") on Claude
+/// and Codex, with one working directory per lane under `<data dir>/lanes` and task
+/// worktrees under `<data dir>/workspaces`, publishing through `git` and
+/// `gh` ([`GitForge`]), until
 /// `shutdown` completes. It stops its runs and releases their leases on the
 /// way out.
 async fn start_embedded_runner(
@@ -181,17 +184,24 @@ async fn start_embedded_runner(
         .await
         .context("finding the hub's own machine")?;
     let claude = config.backends.claude.claude_config();
+    let codex = config.backends.codex.codex_config();
     let runner_config = config.runner_config(data_dir.lanes());
     tracing::info!(
-        program = %claude.program.display(),
+        claude = %claude.program.display(),
+        codex = %codex.program.display(),
         lanes_dir = %runner_config.lanes_dir.display(),
         max_parallel = runner_config.max_parallel,
         "starting the embedded runner"
     );
-    let backend: Arc<dyn AgentBackend> = Arc::new(ClaudeBackend::new(claude));
+    let backends: Vec<Arc<dyn AgentBackend>> = vec![
+        Arc::new(ClaudeBackend::new(claude)),
+        Arc::new(CodexBackend::new(codex)),
+    ];
     let runner = Runner::new(
         core.link(machine),
-        vec![backend],
+        backends,
+        Arc::new(GitWorkspaces::new(data_dir.workspaces())),
+        Arc::new(GitForge::default()),
         clock,
         Arc::new(NoHooks),
         runner_config,
@@ -214,11 +224,14 @@ mod tests {
 
     use super::*;
 
-    /// A configuration whose `claude` is `program`, so no test runs the real one.
+    /// A configuration whose `claude` is `program` and whose `codex` does not
+    /// exist, so no test runs the real ones.
     fn config_with_claude(program: &Path) -> HubConfig {
+        let codex = program.with_file_name("no-codex-here");
         HubConfig::parse(&format!(
-            "[runner]\ndebounce_secs = 0\n[backends.claude]\nprogram = {:?}",
-            program.display().to_string()
+            "[runner]\ndebounce_secs = 0\n[backends.claude]\nprogram = {:?}\n[backends.codex]\nprogram = {:?}",
+            program.display().to_string(),
+            codex.display().to_string()
         ))
         .unwrap()
     }

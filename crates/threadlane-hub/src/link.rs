@@ -4,11 +4,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
-use threadlane_core::ids::{MachineId, RunId, SessionId};
-use threadlane_core::link::{Begin, HubLink, HubMessage, LinkError, RunFailure};
-use threadlane_core::model::{Event, JournalEntry, Lane, Lease, MachineReport, RunOutcome};
+use threadlane_core::ids::{DecisionId, MachineId, RunId, SessionId};
+use threadlane_core::link::{Begin, HubLink, HubMessage, LinkError, Perform, RunFailure};
+use threadlane_core::model::{
+    BackendKind, Event, JournalEntry, Lane, Lease, MachineReport, RunOutcome,
+};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{InboxStore, MachineStore, SessionStore, StoreError};
+use threadlane_core::time::Timestamp;
 use threadlane_core::tools::ToolError;
 
 use crate::core::HubCore;
@@ -161,6 +164,36 @@ impl HubLink for LocalLink {
         final_text: Option<&str>,
     ) -> Result<RunOutcome, LinkError> {
         self.commit(lease, run_id, final_text).await
+    }
+
+    async fn account(
+        &self,
+        lease: &Lease,
+        backend: BackendKind,
+        account_label: Option<&str>,
+        resets_at: Option<Timestamp>,
+    ) -> Result<(), LinkError> {
+        self.usage_limit(lease, backend, account_label, resets_at)
+            .await
+    }
+
+    async fn begin_perform(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        decision: DecisionId,
+    ) -> Result<Perform, LinkError> {
+        LocalLink::begin_perform(self, lease, run_id, decision).await
+    }
+
+    async fn finish_perform(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        decision: DecisionId,
+        outcome: &Json,
+    ) -> Result<(), LinkError> {
+        LocalLink::finish_perform(self, lease, run_id, decision, outcome).await
     }
 
     async fn fail(

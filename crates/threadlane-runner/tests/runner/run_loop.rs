@@ -59,7 +59,7 @@ async fn hello_reports_backends_capabilities_and_load() {
         encode_backends(&[(BackendKind::Claude, probe)])
     );
     assert_eq!(report.load, 0);
-    assert!(!report.gh_login);
+    assert!(report.gh_login, "the fake forge is logged in");
     assert_eq!(report.capabilities["os"], std::env::consts::OS);
     assert_eq!(report.capabilities["arch"], std::env::consts::ARCH);
     assert_eq!(h.calls(), vec![Call::Hello]);

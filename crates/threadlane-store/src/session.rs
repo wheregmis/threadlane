@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::ids::{EventId, LaneId, ProjectId, RunId, SessionId};
 use threadlane_core::model::{
-    Event, EventKind, EventStatus, FailedRun, JournalEntry, LaneKind, Lease, NewEvent,
-    NewOutboxMessage, OutboxKind, RetryPolicy, Run, RunOutcome, RunStatus, Session, SessionChoice,
-    SessionStatus, StartRun, ToolCallBegin, ToolCallKey, ToolCallStatus, Trust, Urgency,
+    Event, EventStatus, FailedRun, JournalEntry, LaneKind, Lease, NewOutboxMessage, OutboxKind,
+    RetryPolicy, Run, RunOutcome, RunStatus, Session, SessionChoice, SessionStatus, StartRun,
+    ToolCallBegin, ToolCallKey, ToolCallStatus, Urgency,
 };
 use threadlane_core::store::{SessionStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
@@ -17,16 +17,13 @@ use turso::{Connection, Row};
 
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
-use crate::inbox::{EVENT_FIELDS, check_lease, decode_event, insert_event_in};
+use crate::inbox::{EVENT_FIELDS, check_lease, decode_event};
 use crate::outbox::enqueue_in;
 use crate::row::{Cols, json_text, opt_raw, params};
-
-/// Source name of the `system` events that report work which died in a task
-/// lane to the project's lead lane (Plan.md §4.9).
-pub const SYSTEM_SOURCE: &str = "system";
+use crate::task;
 
 /// Channel that system notices about dead work in a lead lane go to.
-const NOTICE_CHANNEL: &str = "client";
+pub(crate) const NOTICE_CHANNEL: &str = "client";
 
 const SESSION_FIELDS: &str = "id, lane_id, agent_id, backend, native_session_id, machine_id,
     status, created_at, last_active_at";
@@ -93,9 +90,9 @@ async fn active_run(conn: &Connection, lease: &Lease, run_id: RunId) -> StoreRes
     Ok(run)
 }
 
-/// The idempotency key of the report about a run's dead events: the source
-/// event id of the lead-lane event, or the `tool_call_id` of the notice. One
-/// run can be failed only once, and the key makes a second report a no-op.
+/// The idempotency key of the notice about a run's dead events, its
+/// `tool_call_id`. One run can be failed only once, and the key makes a
+/// second notice a no-op.
 fn dead_key(run_id: RunId) -> String {
     format!("dead:{run_id}")
 }
@@ -117,83 +114,48 @@ fn dead_notice_text(project: &str, attempts: u32, error: &str) -> String {
     }
 }
 
-/// Makes sure you hear about events that died in a failed run (Plan.md
-/// §4.9): a task lane reports to its project's lead lane, and the lead lane,
-/// where no agent is left to tell you, queues a system notice.
+/// Makes sure you hear about events that died in a failed run of a lead
+/// lane, where no agent is left to tell you (Plan.md §4.9): a system notice
+/// is queued. A task lane reports through its task's result instead.
 async fn report_dead(
     conn: &Connection,
     run: &Run,
-    dead: &[EventId],
     attempts: u32,
     error: &str,
     now: Timestamp,
 ) -> StoreResult<()> {
-    let (kind, project_id, project_name, lead_lane_id) = query_one(
+    let (kind, project_id, project_name) = query_one(
         conn,
-        "SELECT l.kind, p.id, p.name, lead.id FROM lanes l
-         JOIN projects p ON p.id = l.project_id
-         JOIN lanes lead ON lead.project_id = p.id AND lead.kind = 'lead'
+        "SELECT l.kind, p.id, p.name FROM lanes l JOIN projects p ON p.id = l.project_id
          WHERE l.id = ?1",
         params![run.lane_id.get()],
         |row| {
             let c = Cols(row);
-            Ok((
-                c.parse::<LaneKind>(0)?,
-                c.id::<ProjectId>(1)?,
-                c.text(2)?,
-                c.id::<LaneId>(3)?,
-            ))
+            Ok((c.parse::<LaneKind>(0)?, c.id::<ProjectId>(1)?, c.text(2)?))
         },
     )
     .await?;
-    match kind {
-        LaneKind::Task => {
-            insert_event_in(
-                conn,
-                &NewEvent {
-                    project_id,
-                    lane_id: lead_lane_id,
-                    source: SYSTEM_SOURCE.to_owned(),
-                    source_event_id: dead_key(run.id),
-                    kind: EventKind::System,
-                    payload: json!({
-                        "kind": "events_dead",
-                        "lane_id": run.lane_id,
-                        "run_id": run.id,
-                        "event_ids": dead,
-                        "error": error,
-                    }),
-                    trust: Trust::System,
-                    requested: true,
-                    session_ref: None,
-                    decision_ref: None,
-                    reply_to_ref: None,
-                    received_at: now,
-                },
-            )
-            .await?;
-        }
-        LaneKind::Lead => {
-            enqueue_in(
-                conn,
-                &NewOutboxMessage {
-                    project_id: Some(project_id),
-                    lane_id: Some(run.lane_id),
-                    session_id: None,
-                    run_id: Some(run.id),
-                    tool_call_id: Some(dead_key(run.id)),
-                    kind: OutboxKind::SystemNotice,
-                    decision_id: None,
-                    channel: NOTICE_CHANNEL.to_owned(),
-                    body: json!({ "text": dead_notice_text(&project_name, attempts, error) }),
-                    urgency: Urgency::High,
-                    not_before: None,
-                    created_at: now,
-                },
-            )
-            .await?;
-        }
+    if kind != LaneKind::Lead {
+        return Ok(());
     }
+    enqueue_in(
+        conn,
+        &NewOutboxMessage {
+            project_id: Some(project_id),
+            lane_id: Some(run.lane_id),
+            session_id: None,
+            run_id: Some(run.id),
+            tool_call_id: Some(dead_key(run.id)),
+            kind: OutboxKind::SystemNotice,
+            decision_id: None,
+            channel: NOTICE_CHANNEL.to_owned(),
+            body: json!({ "text": dead_notice_text(&project_name, attempts, error) }),
+            urgency: Urgency::High,
+            not_before: None,
+            created_at: now,
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -352,6 +314,7 @@ impl SessionStore for HubDb {
             )
             .await?;
         }
+        task::on_run_started(conn, lease.lane_id, lease.machine_id).await?;
         tx.commit().await?;
         Ok(run)
     }
@@ -418,6 +381,7 @@ impl SessionStore for HubDb {
             params![ended_at.as_millis(), run.session_id.get()],
         )
         .await?;
+        task::on_run_committed(conn, lease.lane_id, ended_at).await?;
         tx.commit().await
     }
 
@@ -487,8 +451,16 @@ impl SessionStore for HubDb {
             params![retry.backoff_until.as_millis(), lease.lane_id.get()],
         )
         .await?;
+        task::on_run_failed(
+            conn,
+            lease.lane_id,
+            !failed.dead.is_empty(),
+            error,
+            ended_at,
+        )
+        .await?;
         if !failed.dead.is_empty() {
-            report_dead(conn, &run, &failed.dead, dead_attempts, error, ended_at).await?;
+            report_dead(conn, &run, dead_attempts, error, ended_at).await?;
         }
         tx.commit().await?;
         Ok(failed)

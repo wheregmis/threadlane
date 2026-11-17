@@ -166,6 +166,8 @@ impl ReceivedRun {
 struct State {
     probe: Probe,
     scripts: VecDeque<Script>,
+    /// Scripts for runs whose prompt contains the text, first match wins.
+    routes: Vec<(String, Script)>,
     default_script: Option<Script>,
     answers: VecDeque<Result<Json, BackendError>>,
     received: Vec<ReceivedRun>,
@@ -178,18 +180,23 @@ impl State {
         self.sessions.iter().any(|known| known == id)
     }
 
-    fn next_script(&mut self) -> Option<Script> {
-        self.scripts
-            .pop_front()
-            .or_else(|| self.default_script.clone())
+    fn next_script(&mut self, prompt: &str) -> Option<Script> {
+        self.scripts.pop_front().or_else(|| {
+            self.routes
+                .iter()
+                .find(|(needle, _)| prompt.contains(needle.as_str()))
+                .map(|(_, script)| script.clone())
+                .or_else(|| self.default_script.clone())
+        })
     }
 }
 
 /// An [`AgentBackend`] that plays [`Script`]s, one per run.
 ///
 /// Queued scripts ([`ScriptedBackend::push`]) are used in order; when the
-/// queue is empty the default script ([`ScriptedBackend::set_default`]) is
-/// used. With neither, [`AgentBackend::run`] fails, so a test notices an
+/// queue is empty the first script routed to text in the run's prompt
+/// ([`ScriptedBackend::route`]) is used, else the default script
+/// ([`ScriptedBackend::set_default`]). With neither, [`AgentBackend::run`] fails, so a test notices an
 /// unexpected run.
 #[derive(Debug, Clone)]
 pub struct ScriptedBackend {
@@ -214,6 +221,7 @@ impl ScriptedBackend {
                     account_label: Some(format!("{kind}-scripted")),
                 },
                 scripts: VecDeque::new(),
+                routes: Vec::new(),
                 default_script: None,
                 answers: VecDeque::new(),
                 received: Vec::new(),
@@ -230,6 +238,14 @@ impl ScriptedBackend {
     /// the default.
     pub fn push(&self, script: Script) {
         self.state().scripts.push_back(script);
+    }
+
+    /// Uses `script` for every run that finds the queue empty and whose
+    /// prompt contains `needle`, unless an earlier route matches. A run that
+    /// is repeated after a crash gets the same script again, whichever lane
+    /// it is in and in whatever order the lanes run.
+    pub fn route(&self, needle: impl Into<String>, script: Script) {
+        self.state().routes.push((needle.into(), script));
     }
 
     /// Uses `script` for every run that finds the queue empty.
@@ -321,7 +337,7 @@ impl AgentBackend for ScriptedBackend {
             let (outcome, script) = match &request.session {
                 NativeSession::Resume { id } if !state.knows(id) => (SessionOutcome::Missing, None),
                 NativeSession::Start { id } | NativeSession::Resume { id } => {
-                    let script = state.next_script().ok_or_else(|| {
+                    let script = state.next_script(&request.prompt).ok_or_else(|| {
                         BackendError::Failed(
                             "scripted backend: no script queued for this run".into(),
                         )
@@ -653,6 +669,29 @@ mod tests {
         assert_eq!(received[0].session, resume("gone"));
         assert_eq!(received[0].session_outcome, SessionOutcome::Missing);
         assert!(!received[0].session_outcome.found());
+    }
+
+    #[tokio::test]
+    async fn a_routed_script_plays_for_prompts_with_its_text_after_the_queue() {
+        let (_clock, backend) = backend();
+        backend.set_default(Script::new().finish("default"));
+        backend.route("task", Script::new().finish("task"));
+        backend.route(
+            "ask",
+            Script::new().finish("never: an earlier route matches"),
+        );
+        let with_prompt = |id: &str, prompt: &str| RunRequest {
+            prompt: prompt.into(),
+            ..request(start(id))
+        };
+
+        let events = play(&backend, with_prompt("s1", "a task to ask about")).await;
+        assert_eq!(events, vec![started("s1"), finished("task")]);
+        let events = play(&backend, with_prompt("s2", "a message")).await;
+        assert_eq!(events, vec![started("s2"), finished("default")]);
+        backend.push(Script::new().finish("queued"));
+        let events = play(&backend, with_prompt("s3", "a task")).await;
+        assert_eq!(events, vec![started("s3"), finished("queued")]);
     }
 
     #[tokio::test]

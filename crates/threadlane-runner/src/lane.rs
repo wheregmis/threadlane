@@ -2,6 +2,7 @@
 
 use std::future;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use threadlane_core::link::LinkError;
 use threadlane_core::model::Lease;
@@ -73,6 +74,9 @@ impl From<LinkError> for LaneExit {
 pub(crate) struct LaneState {
     lease: Mutex<Lease>,
     stop: watch::Sender<Option<Stop>>,
+    /// The current run opened a decision: it must end its turn now
+    /// (Plan.md §9.4).
+    deferred: AtomicBool,
 }
 
 impl LaneState {
@@ -81,7 +85,18 @@ impl LaneState {
         Self {
             lease: Mutex::new(lease),
             stop,
+            deferred: AtomicBool::new(false),
         }
+    }
+
+    /// Marks the current run as waiting on a decision, or, with `false`,
+    /// starts a run with none.
+    pub(crate) fn set_deferred(&self, deferred: bool) {
+        self.deferred.store(deferred, Ordering::SeqCst);
+    }
+
+    pub(crate) fn deferred(&self) -> bool {
+        self.deferred.load(Ordering::SeqCst)
     }
 
     /// The current lease, as last renewed.

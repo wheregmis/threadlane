@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use threadlane_core::backend::NativeSession;
 use threadlane_core::link::{Begin, RunFailure};
-use threadlane_core::model::{EventStatus, OutboxKind, RunStatus, SessionStatus};
+use threadlane_core::model::{BackendKind, EventStatus, OutboxKind, RunStatus, SessionStatus};
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::store::{MachineStore, SessionStore};
 use threadlane_core::time::{Clock, Timestamp};
@@ -190,46 +190,86 @@ async fn a_missing_native_session_starts_a_new_one_at_once_without_an_attempt() 
     assert_eq!(fresh.events, vec![event]);
 }
 
+/// Begins a run that reaches its account's usage limit: reports it, fails
+/// the run, and releases the lane. Returns when it happened.
+async fn limited(hub: &TestHub, resets_at: Option<Timestamp>) -> Timestamp {
+    let (lease, run) = begin(&*hub.link).await;
+    let at = hub.clock.now();
+    hub.link
+        .account(
+            &lease,
+            BackendKind::Claude,
+            Some("me@example.com"),
+            resets_at,
+        )
+        .await
+        .unwrap();
+    hub.link
+        .fail(&lease, run.run_id, &RunFailure::UsageLimit)
+        .await
+        .unwrap();
+    hub.link.release(&lease).await.unwrap();
+    at
+}
+
 #[tokio::test]
 async fn a_usage_limit_cools_the_account_down_and_waits_for_the_reset() {
     let hub = TestHub::start().await;
     hub.hello().await;
     let event = hub.send("m-1", "do the thing").await.event_id;
     let resets_at = hub.clock.now() + Duration::from_secs(3600);
-    fail_once(
-        &hub,
-        &RunFailure::UsageLimit {
-            account_label: Some("me@example.com".into()),
-            resets_at: Some(resets_at),
-        },
-    )
-    .await;
+    let at = limited(&hub, Some(resets_at)).await;
     let accounts = hub.db.accounts().await.unwrap();
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0].label, "me@example.com");
     assert_eq!(accounts[0].cooldown_until, Some(resets_at));
-    assert_eq!(hub.general_lane().await.backoff_until, Some(resets_at));
-    assert_eq!(hub.event(event).await.attempts, 0);
-    assert_eq!(hub.link.request_work().await.unwrap(), None);
-
-    hub.clock.set(resets_at);
-    let (at, _) = fail_once(
-        &hub,
-        &RunFailure::UsageLimit {
-            account_label: None,
-            resets_at: None,
-        },
-    )
-    .await;
     assert_eq!(
         hub.general_lane().await.backoff_until,
-        Some(at + Duration::from_secs(300)),
-        "the fallback"
+        Some(at),
+        "the account holds the lane, not a backoff"
     );
     assert_eq!(hub.event(event).await.attempts, 0);
+    assert_eq!(hub.event(event).await.status, EventStatus::Pending);
+    assert_eq!(hub.link.request_work().await.unwrap(), None, "cooling down");
+    hub.clock.set(resets_at - Duration::from_millis(1));
     assert_eq!(
-        hub.db.accounts().await.unwrap().len(),
-        1,
-        "no label, no account"
+        hub.link.request_work().await.unwrap(),
+        None,
+        "still cooling"
     );
+
+    hub.clock.set(resets_at);
+    let at = limited(&hub, None).await;
+    assert_eq!(
+        hub.db.accounts().await.unwrap()[0].cooldown_until,
+        Some(at + Duration::from_secs(300)),
+        "the fallback, when the backend gave no reset time"
+    );
+    assert_eq!(hub.event(event).await.attempts, 0);
+    hub.clock.advance(Duration::from_secs(300));
+    assert!(hub.link.request_work().await.unwrap().is_some(), "reset");
+}
+
+#[tokio::test]
+async fn an_account_report_under_a_stale_lease_changes_nothing() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    hub.send("m-1", "do the thing").await;
+    let (lease, _) = begin(&*hub.link).await;
+    let stale = threadlane_core::model::Lease {
+        epoch: lease.epoch - 1,
+        ..lease
+    };
+    let refused = hub
+        .link
+        .account(&stale, BackendKind::Claude, Some("me@example.com"), None)
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(threadlane_core::link::LinkError::StaleLease { .. })
+        ),
+        "{refused:?}"
+    );
+    assert!(hub.db.accounts().await.unwrap().is_empty());
 }

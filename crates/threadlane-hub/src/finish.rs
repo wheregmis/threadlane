@@ -3,10 +3,9 @@
 
 use threadlane_core::ids::RunId;
 use threadlane_core::link::{LinkError, RunFailure};
-use threadlane_core::model::{BackendKind, Lease, RetryPolicy, Run, RunOutcome, RunStatus};
+use threadlane_core::model::{LaneKind, Lease, RetryPolicy, Run, RunOutcome, RunStatus};
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{DecisionStore, MachineStore, OutboxStore, SessionStore};
-use threadlane_core::time::Timestamp;
+use threadlane_core::store::{DecisionStore, OutboxStore, SessionStore};
 
 use crate::error::link_error;
 use crate::link::LocalLink;
@@ -38,6 +37,11 @@ impl LocalLink {
         db.commit_run(lease, run_id, outcome, final_text, inner.clock.now())
             .await
             .map_err(link_error)?;
+        if lane.kind == LaneKind::Task {
+            // A finished task's result waits in the lead lane, and its
+            // dependents and its parallel slot may now be free.
+            inner.wake.wake(WakeTarget::Runners);
+        }
         Ok(outcome)
     }
 
@@ -64,23 +68,16 @@ impl LocalLink {
                     },
                 )
             }
-            RunFailure::UsageLimit {
-                account_label,
-                resets_at,
-            } => {
-                let until = resets_at.unwrap_or(now + inner.settings.usage_limit_fallback);
-                if let Some(label) = account_label {
-                    self.cool_down(label, run.backend, until).await;
-                }
-                (
-                    "the account reached its usage limit".to_owned(),
-                    RetryPolicy {
-                        count_attempt: false,
-                        max_attempts: inner.settings.max_attempts,
-                        backoff_until: until,
-                    },
-                )
-            }
+            // The account call cooled the account down; placement holds
+            // the lane until one is free (Plan.md §5.3), so no backoff.
+            RunFailure::UsageLimit => (
+                "the account reached its usage limit".to_owned(),
+                RetryPolicy {
+                    count_attempt: false,
+                    max_attempts: inner.settings.max_attempts,
+                    backoff_until: now,
+                },
+            ),
             counted => {
                 let error = match counted {
                     RunFailure::Error { message } => message.clone(),
@@ -119,7 +116,7 @@ impl LocalLink {
 
     /// The run, if it is active under `lease`. Checked before any write that
     /// the store does not fence itself.
-    async fn active_run(&self, lease: &Lease, run_id: RunId) -> Result<Run, LinkError> {
+    pub(crate) async fn active_run(&self, lease: &Lease, run_id: RunId) -> Result<Run, LinkError> {
         self.core
             .inner
             .db
@@ -134,19 +131,5 @@ impl LocalLink {
             .ok_or_else(|| {
                 LinkError::Rejected(format!("run {run_id} is not active under this lease"))
             })
-    }
-
-    /// Stops placing work on an account until `until`. Best effort: the run
-    /// still fails and backs off if the account cannot be recorded.
-    async fn cool_down(&self, label: &str, backend: Option<BackendKind>, until: Timestamp) {
-        let db = &self.core.inner.db;
-        let backend = backend.unwrap_or(BackendKind::Claude);
-        let result = match db.ensure_account(label, backend).await {
-            Ok(_) => db.set_cooldown(label, Some(until)).await,
-            Err(error) => Err(error),
-        };
-        if let Err(error) = result {
-            tracing::warn!(account = label, %error, "cannot record the account's cooldown");
-        }
     }
 }

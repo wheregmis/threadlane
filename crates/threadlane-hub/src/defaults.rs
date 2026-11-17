@@ -1,6 +1,6 @@
 //! What every hub has from its first start (docs/milestone-1.md §9 "Defaults").
 
-use threadlane_core::model::{MachineTrust, Mode, NewAgent, NewBinding, NewMachine};
+use threadlane_core::model::{BackendKind, MachineTrust, Mode, NewAgent, NewBinding, NewMachine};
 use threadlane_core::store::{MachineStore, OrgStore, StoreResult};
 use threadlane_store::HubDb;
 
@@ -34,6 +34,9 @@ pub(crate) async fn ensure_defaults(db: &HubDb) -> StoreResult<()> {
         None => {
             db.create_agent(&NewAgent {
                 instructions: LEAD_INSTRUCTIONS.to_owned(),
+                // Codex cannot remove its built-in tools, so a lead runs on
+                // Claude only (Plan.md §18.4 item 12).
+                backends: vec![BackendKind::Claude],
                 ..NewAgent::named(LEAD_NAME, LEAD_ROLE)
             })
             .await?

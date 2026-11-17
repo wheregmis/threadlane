@@ -38,20 +38,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     out.flush()?;
 
     for n in first.. {
-        hub.create_task(&NewTask {
-            project_id: general.id,
-            agent_id: agent.id,
-            title: format!("gate {n}"),
-            goal: "x".repeat(512),
-            repositories: Vec::new(),
-            parent_task_id: None,
-            depends_on: Vec::new(),
-            origin: TaskOrigin::User,
-            status: TaskStatus::Queued,
-            priority: 0,
-            created_by_call: Some(format!("gate-{n}")),
-            created_at: clock.now(),
-        })
+        hub.create_task(
+            None,
+            &NewTask {
+                project_id: general.id,
+                agent_id: agent.id,
+                title: format!("gate {n}"),
+                goal: "x".repeat(512),
+                repositories: Vec::new(),
+                parent_task_id: None,
+                depends_on: Vec::new(),
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: Some(format!("gate-{n}")),
+                created_at: clock.now(),
+            },
+        )
         .await?;
         writeln!(out, "committed {n}")?;
         out.flush()?;

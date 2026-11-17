@@ -161,8 +161,9 @@ impl HubCore {
             .ok_or(HubError::NoHubMachine)
     }
 
-    /// Releases expired leases (their claimed events return to pending) and
-    /// nudges runners if any lane is ready. Returns the released lanes.
+    /// Releases expired leases (their claimed events return to pending),
+    /// sends the account notices that are due (Plan.md §5.3), and nudges
+    /// runners if any lane is ready. Returns the released lanes.
     ///
     /// # Errors
     ///
@@ -170,6 +171,9 @@ impl HubCore {
     pub async fn sweep_once(&self) -> Result<Vec<LaneId>, HubError> {
         let now = self.inner.clock.now();
         let expired = self.inner.db.expire_leases(now).await?;
+        // A cooldown may have ended, or the space may have run out of
+        // accounts without a notice yet (a crash in between).
+        self.notice_accounts().await?;
         if !expired.is_empty() || !self.inner.db.ready_lanes(now).await?.is_empty() {
             self.inner.wake.wake(WakeTarget::Runners);
         }
@@ -202,7 +206,18 @@ impl HubCore {
                 Err(HubError::Killed(killed)) => return Err(killed.into()),
                 Err(error) => tracing::error!(%error, "lease sweep failed"),
             }
-            self.inner.clock.sleep(self.inner.settings.poll).await;
+            // Wake when the next cooldown ends, so that work resumes then
+            // rather than on the next poll.
+            let poll = self.inner.clock.now() + self.inner.settings.poll;
+            let wake_at = match self.next_reset().await {
+                Ok(Some(reset)) => reset.min(poll),
+                Ok(None) => poll,
+                Err(error) => {
+                    tracing::error!(%error, "could not read the accounts");
+                    poll
+                }
+            };
+            self.inner.clock.sleep_until(wake_at).await;
         }
     }
 

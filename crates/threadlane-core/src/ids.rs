@@ -107,6 +107,19 @@ macro_rules! display_id {
             pub const fn get(self) -> i64 {
                 self.0
             }
+
+            /// Reads the short form, in either case (`T-0142`, `t-142`), or
+            /// the bare number.
+            #[must_use]
+            pub fn parse(text: &str) -> Option<Self> {
+                let text = text.trim();
+                let prefix = concat!($prefix, "-");
+                let digits = match text.get(..prefix.len()) {
+                    Some(head) if head.eq_ignore_ascii_case(prefix) => &text[prefix.len()..],
+                    _ => text,
+                };
+                digits.parse().ok().filter(|id| *id > 0).map(Self)
+            }
         }
 
         impl From<i64> for $name {
@@ -143,5 +156,11 @@ mod tests {
         assert_eq!(TaskId(142).to_string(), "T-0142");
         assert_eq!(DecisionId(12).to_string(), "D-0012");
         assert_eq!(TaskId(12345).to_string(), "T-12345");
+        for good in ["D-0012", "d-12", " 12 "] {
+            assert_eq!(DecisionId::parse(good), Some(DecisionId(12)), "{good}");
+        }
+        for bad in ["D-", "T-0012", "0", "-3", "D-x"] {
+            assert_eq!(DecisionId::parse(bad), None, "{bad}");
+        }
     }
 }

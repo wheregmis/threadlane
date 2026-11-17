@@ -7,16 +7,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 use threadlane_core::client::{
-    Accepted, ApiError, BindingSummary, FeedItem, HubApi, HubInfo, OrgReply, OrgRequest,
-    ProjectSummary, UserMessage,
+    Accepted, ApiError, BindingSummary, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
+    OrgReply, OrgRequest, ProjectSummary, UserMessage,
 };
 use threadlane_core::ids::ProjectId;
 use threadlane_core::model::{
-    Agent, Binding, EventKind, Inserted, Mode, NewAgent, NewBinding, NewEvent, NewProject, Project,
-    Trust,
+    Agent, Answered, Binding, DecisionAnswer, DecisionStatus, EventKind, Inserted, Mode, NewAgent,
+    NewBinding, NewEvent, NewProject, NewRepository, Project, Trust,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{InboxStore, OrgStore, OutboxStore, StoreError};
+use threadlane_core::store::{DecisionStore, InboxStore, OrgStore, OutboxStore, StoreError};
+use threadlane_core::workspace::{valid_branch_name, valid_repository_name};
 
 use crate::core::HubCore;
 use crate::defaults::ensure_defaults;
@@ -25,6 +26,9 @@ use crate::tools::CLIENT_CHANNEL;
 
 /// Source name of messages from the client.
 pub const CLIENT_SOURCE: &str = "client";
+
+/// The default branch of a repository registered without one.
+const DEFAULT_BRANCH: &str = "main";
 
 /// Feed items returned per call.
 const FEED_PAGE: u32 = 200;
@@ -249,6 +253,74 @@ impl HubApi for ClientApi {
                     project: summary(project),
                 })
             }
+            OrgRequest::AddRepository {
+                project,
+                name,
+                remote_url,
+                default_branch,
+            } => {
+                let project = self.project_named(project.as_deref()).await?;
+                let name = required("repository name", &name)?;
+                if !valid_repository_name(name) {
+                    return Err(ApiError::Invalid(format!(
+                        "{name:?} is not a valid repository name: use letters, digits, '.', \
+                         '_' and '-', starting with a letter or digit"
+                    )));
+                }
+                let remote_url = required("remote", &remote_url)?;
+                if remote_url.starts_with('-') {
+                    return Err(ApiError::Invalid(format!("{remote_url:?} is not a remote")));
+                }
+                let default_branch = default_branch
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|branch| !branch.is_empty())
+                    .unwrap_or(DEFAULT_BRANCH);
+                if !valid_branch_name(default_branch) {
+                    return Err(ApiError::Invalid(format!(
+                        "{default_branch:?} is not a valid branch name"
+                    )));
+                }
+                if let Some(existing) = db
+                    .repository_by_remote(remote_url)
+                    .await
+                    .map_err(api_error)?
+                {
+                    let owner = db
+                        .project(existing.project_id)
+                        .await
+                        .map_err(api_error)?
+                        .map_or_else(|| existing.project_id.to_string(), |project| project.name);
+                    return Err(ApiError::Invalid(format!(
+                        "the remote {remote_url} is already registered in this space, as \
+                         repository {:?} of project {owner:?}",
+                        existing.name
+                    )));
+                }
+                let repository = db
+                    .create_repository(&NewRepository {
+                        project_id: project.id,
+                        name: name.to_owned(),
+                        remote_url: remote_url.to_owned(),
+                        default_branch: default_branch.to_owned(),
+                        protected_branches: Vec::new(),
+                    })
+                    .await
+                    .map_err(|error| match error {
+                        StoreError::Conflict(_) => ApiError::Invalid(format!(
+                            "project {:?} already has a repository named {name:?}",
+                            project.name
+                        )),
+                        other => api_error(other),
+                    })?;
+                Ok(OrgReply::Repository { repository })
+            }
+            OrgRequest::Repositories { project } => {
+                let project = self.project_named(project.as_deref()).await?;
+                Ok(OrgReply::Repositories {
+                    repositories: db.repositories(project.id).await.map_err(api_error)?,
+                })
+            }
             OrgRequest::Agents => Ok(OrgReply::Agents {
                 agents: db.agents().await.map_err(api_error)?,
             }),
@@ -312,6 +384,76 @@ impl HubApi for ClientApi {
                         mode: binding.mode,
                         is_lead: binding.is_lead,
                     },
+                })
+            }
+            other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
+        }
+    }
+
+    async fn decisions(&self, request: DecisionRequest) -> Result<DecisionReply, ApiError> {
+        let inner = &self.core.inner;
+        let db = &inner.db;
+        match request {
+            DecisionRequest::Pending => Ok(DecisionReply::Pending {
+                decisions: db.open_decisions().await.map_err(api_error)?,
+            }),
+            DecisionRequest::Answer {
+                decision,
+                option,
+                note,
+            } => {
+                let current = db
+                    .decision(decision)
+                    .await
+                    .map_err(api_error)?
+                    .ok_or_else(|| ApiError::NotFound(format!("decision {decision}")))?;
+                // Answering is idempotent: the first answer stands.
+                if current.status != DecisionStatus::Pending {
+                    return Ok(DecisionReply::Answered {
+                        decision: Box::new(current),
+                        recorded: false,
+                    });
+                }
+                let wanted = option.trim();
+                let index = current
+                    .options
+                    .iter()
+                    .position(|option| option.label.eq_ignore_ascii_case(wanted))
+                    .ok_or_else(|| {
+                        let labels: Vec<&str> = current
+                            .options
+                            .iter()
+                            .map(|option| option.label.as_str())
+                            .collect();
+                        ApiError::Invalid(format!(
+                            "{decision} has no option {wanted:?}; answer with {}",
+                            labels.join(" or ")
+                        ))
+                    })?;
+                let answered = db
+                    .answer(
+                        decision,
+                        &DecisionAnswer {
+                            option: u32::try_from(index).unwrap_or(u32::MAX),
+                            note: note.filter(|note| !note.trim().is_empty()),
+                            standing_rule: false,
+                            answered_at: inner.clock.now(),
+                        },
+                    )
+                    .await
+                    .map_err(api_error)?;
+                let recorded = matches!(answered, Answered::Recorded(_));
+                if recorded {
+                    inner.wake.wake(WakeTarget::Lane(current.lane_id));
+                }
+                let decision = db
+                    .decision(decision)
+                    .await
+                    .map_err(api_error)?
+                    .ok_or_else(|| ApiError::NotFound(format!("decision {decision}")))?;
+                Ok(DecisionReply::Answered {
+                    decision: Box::new(decision),
+                    recorded,
                 })
             }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),

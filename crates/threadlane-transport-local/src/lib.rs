@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use threadlane_core::client::{
-    Accepted, ApiError, ClientRequest, ClientResponse, FeedItem, HubApi, HubInfo, OrgReply,
-    OrgRequest, ProjectSummary, UserMessage, dispatch,
+    Accepted, ApiError, ClientRequest, ClientResponse, DecisionReply, DecisionRequest, FeedItem,
+    HubApi, HubInfo, OrgReply, OrgRequest, ProjectSummary, UserMessage, dispatch,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -166,6 +166,16 @@ impl HubApi for LocalClient {
         {
             ClientResponse::Org { reply } => Ok(reply),
             other => Err(unexpected(other, "org")),
+        }
+    }
+
+    async fn decisions(&self, request: DecisionRequest) -> Result<DecisionReply, ApiError> {
+        match self
+            .call(&ClientRequest::Decisions { request }, REQUEST_TIMEOUT)
+            .await?
+        {
+            ClientResponse::Decisions { reply } => Ok(reply),
+            other => Err(unexpected(other, "decisions")),
         }
     }
 }

@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::Context;
 use serde::Deserialize;
 use threadlane_backend_claude::ClaudeConfig;
+use threadlane_backend_codex::CodexConfig;
 use threadlane_core::model::{BackendKind, Mode, SpaceSettings};
 use threadlane_runner::RunnerConfig;
 use threadlane_store::Bootstrap;
@@ -21,6 +22,9 @@ pub const DATABASE_FILE: &str = "hub.db";
 pub const LOCK_FILE: &str = "hub.lock";
 /// Name of the directory holding the embedded runner's lane directories.
 pub const LANES_DIR: &str = "lanes";
+/// Name of the directory holding the embedded runner's clones and task
+/// worktrees.
+pub const WORKSPACES_DIR: &str = "workspaces";
 
 /// How the hub writes its logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -89,7 +93,8 @@ pub struct TimingConfig {
     pub retry_backoff_base_secs: u64,
     /// The longest retry backoff.
     pub retry_backoff_max_secs: u64,
-    /// Backoff after a usage limit that gave no reset time (Plan.md §5.3).
+    /// How long an account cools down after a usage limit that gave no
+    /// reset time (Plan.md §5.3).
     pub usage_limit_fallback_secs: u64,
 }
 
@@ -205,11 +210,46 @@ impl ClaudeTable {
     }
 }
 
+/// The `[backends.codex]` table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CodexTable {
+    /// The `codex` executable: a path, or a name looked up on `PATH`.
+    pub program: PathBuf,
+    /// Sets `CODEX_HOME`, for a separate login (Plan.md §9.3).
+    pub home: Option<PathBuf>,
+    /// The model runs use when neither the agent nor its binding names one.
+    /// Unset means Codex's own default.
+    pub model: Option<String>,
+}
+
+impl Default for CodexTable {
+    fn default() -> Self {
+        Self {
+            program: CodexConfig::default().program,
+            home: None,
+            model: None,
+        }
+    }
+}
+
+impl CodexTable {
+    /// How the embedded runner starts Codex.
+    #[must_use]
+    pub fn codex_config(&self) -> CodexConfig {
+        CodexConfig {
+            program: self.program.clone(),
+            home: self.home.clone(),
+        }
+    }
+}
+
 /// The `[backends]` table: one sub-table per backend.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BackendsConfig {
     pub claude: ClaudeTable,
+    pub codex: CodexTable,
 }
 
 /// Everything in `hub.toml`. Every table is optional.
@@ -298,24 +338,32 @@ impl HubConfig {
             "runner.debounce_secs must be shorter than the lease"
         );
         let claude = &self.backends.claude;
-        anyhow::ensure!(
-            !claude.program.as_os_str().is_empty(),
-            "backends.claude.program must not be empty"
-        );
-        anyhow::ensure!(
-            claude
-                .config_dir
-                .as_ref()
-                .is_none_or(|dir| !dir.as_os_str().is_empty()),
-            "backends.claude.config_dir must not be empty when set"
-        );
-        anyhow::ensure!(
-            claude
-                .model
-                .as_ref()
-                .is_none_or(|model| !model.trim().is_empty() && model.trim() == model),
-            "backends.claude.model must be a model name without surrounding spaces"
-        );
+        let codex = &self.backends.codex;
+        for (name, program, dir, dir_key, model) in [
+            (
+                "claude",
+                &claude.program,
+                &claude.config_dir,
+                "config_dir",
+                &claude.model,
+            ),
+            ("codex", &codex.program, &codex.home, "home", &codex.model),
+        ] {
+            anyhow::ensure!(
+                !program.as_os_str().is_empty(),
+                "backends.{name}.program must not be empty"
+            );
+            anyhow::ensure!(
+                dir.as_ref().is_none_or(|dir| !dir.as_os_str().is_empty()),
+                "backends.{name}.{dir_key} must not be empty when set"
+            );
+            anyhow::ensure!(
+                model
+                    .as_ref()
+                    .is_none_or(|model| !model.trim().is_empty() && model.trim() == model),
+                "backends.{name}.model must be a model name without surrounding spaces"
+            );
+        }
         Ok(())
     }
 
@@ -349,13 +397,13 @@ impl HubConfig {
             max_turns: (runs.max_turns > 0).then_some(runs.max_turns),
             recent_messages: runs.recent_messages,
             usage_limit_fallback: Duration::from_secs(timing.usage_limit_fallback_secs),
-            default_models: self
-                .backends
-                .claude
-                .model
-                .iter()
-                .map(|model| (BackendKind::Claude, model.clone()))
-                .collect(),
+            default_models: [
+                (BackendKind::Claude, &self.backends.claude.model),
+                (BackendKind::Codex, &self.backends.codex.model),
+            ]
+            .into_iter()
+            .filter_map(|(kind, model)| Some((kind, model.clone()?)))
+            .collect(),
         }
     }
 
@@ -414,6 +462,12 @@ impl DataDir {
     #[must_use]
     pub fn lanes(&self) -> PathBuf {
         self.root.join(LANES_DIR)
+    }
+
+    /// Where the embedded runner keeps its clones and task worktrees.
+    #[must_use]
+    pub fn workspaces(&self) -> PathBuf {
+        self.root.join(WORKSPACES_DIR)
     }
 }
 
@@ -526,6 +580,11 @@ mod tests {
             program = "/opt/claude/bin/claude"
             config_dir = "/Users/me/.claude-work"
             model = "haiku"
+
+            [backends.codex]
+            program = "/opt/codex/bin/codex"
+            home = "/Users/me/.codex-work"
+            model = "gpt-5-codex"
             "#,
         )
         .unwrap();
@@ -548,8 +607,17 @@ mod tests {
             }
         );
         assert_eq!(
-            config.settings().default_models.get(&BackendKind::Claude),
-            Some(&"haiku".to_owned())
+            config.backends.codex.codex_config(),
+            CodexConfig {
+                program: PathBuf::from("/opt/codex/bin/codex"),
+                home: Some(PathBuf::from("/Users/me/.codex-work")),
+            }
+        );
+        let models = config.settings().default_models;
+        assert_eq!(models.get(&BackendKind::Claude), Some(&"haiku".to_owned()));
+        assert_eq!(
+            models.get(&BackendKind::Codex),
+            Some(&"gpt-5-codex".to_owned())
         );
     }
 
@@ -562,6 +630,7 @@ mod tests {
             config.backends.claude.claude_config(),
             ClaudeConfig::default()
         );
+        assert_eq!(config.backends.codex.codex_config(), CodexConfig::default());
         assert!(config.settings().default_models.is_empty());
     }
 
@@ -576,7 +645,11 @@ mod tests {
             "[backends.claude]\nmodel = \"\"",
             "[backends.claude]\nmodel = \" haiku\"",
             "[backends.claude]\nmodle = \"haiku\"",
-            "[backends.codex]\nmodel = \"gpt\"",
+            "[backends.codex]\nprogram = \"\"",
+            "[backends.codex]\nhome = \"\"",
+            "[backends.codex]\nmodel = \" gpt\"",
+            "[backends.codex]\nconfig_dir = \"/x\"",
+            "[backends.gemini]\nmodel = \"x\"",
         ] {
             assert!(HubConfig::parse(bad).is_err(), "{bad:?} is rejected");
         }

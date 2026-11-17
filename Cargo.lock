@@ -2236,9 +2236,24 @@ dependencies = [
  "thiserror",
  "threadlane-core",
  "threadlane-mcp",
+ "threadlane-testkit",
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "threadlane-backend-codex"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "threadlane-core",
+ "threadlane-mcp",
+ "threadlane-testkit",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2282,6 +2297,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "threadlane-backend-claude",
+ "threadlane-backend-codex",
  "threadlane-core",
  "threadlane-runner",
  "threadlane-store",

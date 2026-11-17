@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
+use crate::ids::MachineId;
 use crate::model::BackendKind;
 use crate::time::Timestamp;
 use crate::tools::ToolEndpoint;
@@ -49,17 +50,60 @@ pub fn encode_backends(probes: &[(BackendKind, Probe)]) -> Json {
 /// of [`BackendKind::ALL`]. Entries that do not decode are ignored.
 #[must_use]
 pub fn usable_backends(backends: &Json) -> Vec<BackendKind> {
+    usable_probes(backends)
+        .into_iter()
+        .map(|(kind, _)| kind)
+        .collect()
+}
+
+fn usable_probes(backends: &Json) -> Vec<(BackendKind, Probe)> {
     BackendKind::ALL
         .iter()
-        .copied()
-        .filter(|kind| {
-            backends
-                .get(kind.as_str())
-                .and_then(|probe| serde_json::from_value::<Probe>(probe.clone()).ok())
-                .is_some_and(|probe| probe.usable())
+        .filter_map(|kind| {
+            let probe =
+                serde_json::from_value::<Probe>(backends.get(kind.as_str())?.clone()).ok()?;
+            probe.usable().then_some((*kind, probe))
         })
         .collect()
 }
+
+/// The label of the account `kind` runs on, on `machine`: the one its probe
+/// reported, else one for this backend on this machine, so that its usage
+/// limit can still be recorded (Plan.md §5.3).
+#[must_use]
+pub fn account_label(kind: BackendKind, reported: Option<&str>, machine: MachineId) -> String {
+    match reported {
+        Some(label) if !label.trim().is_empty() => label.trim().to_owned(),
+        _ => format!("{kind}@machine-{machine}"),
+    }
+}
+
+/// The usable backends of `machine` whose account is not in `cooling`, the
+/// labels of the accounts cooling down now (Plan.md §5.3, §5.4 item 4).
+#[must_use]
+pub fn free_backends(backends: &Json, machine: MachineId, cooling: &[String]) -> Vec<BackendKind> {
+    usable_probes(backends)
+        .into_iter()
+        .filter(|(kind, probe)| {
+            let label = account_label(*kind, probe.account_label.as_deref(), machine);
+            !cooling.contains(&label)
+        })
+        .map(|(kind, _)| kind)
+        .collect()
+}
+
+/// The direct forms of shared effects every task run must refuse (Plan.md
+/// §9.2 layer 2), as command prefixes: a command is refused when its words
+/// start with one of these. Force variants (`git push --force`, `gh pr merge
+/// --admin`) start with the same words. Written once here; each driver
+/// translates them into its backend's own rules.
+pub const DENY_RULES: &[&str] = &[
+    "git push",
+    "gh pr create",
+    "gh pr merge",
+    "gh release",
+    "gh repo delete",
+];
 
 /// Whether a run starts the backend's session or resumes it (Plan.md §4.6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +134,8 @@ pub struct RunRequest {
     pub session: NativeSession,
     /// The system's tools, served to the agent through the tool server.
     pub tools: Option<Arc<dyn ToolEndpoint>>,
-    /// Direct commands the backend must refuse (Plan.md §9.2).
+    /// Direct commands the backend must refuse (Plan.md §9.2), as command
+    /// prefixes like those in [`DENY_RULES`]; the driver translates them.
     pub deny_rules: Vec<String>,
     /// Remove every built-in tool of the backend, leaving only the system's
     /// tools (leads and dreaming, Plan.md §5.1).

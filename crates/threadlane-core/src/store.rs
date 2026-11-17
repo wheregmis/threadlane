@@ -81,6 +81,8 @@ pub trait OrgStore: Send + Sync {
     async fn projects(&self) -> StoreResult<Vec<Project>>;
     /// The built-in General project, which every hub has from its first start.
     async fn general_project(&self) -> StoreResult<Project>;
+    /// Pauses or resumes a project: a paused project's lanes are not granted.
+    async fn set_project_paused(&self, id: ProjectId, paused: bool) -> StoreResult<()>;
 
     /// Registers a repository; its remote URL must be new to this space.
     async fn create_repository(&self, repository: &NewRepository) -> StoreResult<Repository>;
@@ -115,11 +117,21 @@ pub trait InboxStore: Send + Sync {
     async fn skip_events(&self, lease: &Lease, events: &[EventId], reason: &str)
     -> StoreResult<()>;
 
-    /// Lanes with pending events, no live lease, and no active backoff.
+    /// Lanes with pending events, no live lease, and no active backoff. A
+    /// paused project's lead lane is left out; its task lanes are not, so
+    /// that [`InboxStore::grant_lease`] records why they wait. A task lane
+    /// with a pending decision is left out: its events wait for your answer.
     async fn ready_lanes(&self, now: Timestamp) -> StoreResult<Vec<LaneId>>;
 
     /// Grants the lane to a machine if no live lease exists, incrementing the
-    /// epoch. Returns `None` if someone else holds it.
+    /// epoch. Returns `None` if someone else holds it, or if the lane's task
+    /// is not eligible (Plan.md §5.2): a dependency is not `done`, the project
+    /// is paused, or the project's or the binding's parallel limit is reached.
+    /// Nor is any lane, of either kind, granted when none of its agent's
+    /// backends is usable on the machine with an account that is not cooling
+    /// down (Plan.md §5.4 item 4); its task is then `blocked`.
+    /// The task then carries the reason as `waiting_reason`, cleared on grant.
+    /// A task that has ended is always eligible, so its events can be skipped.
     async fn grant_lease(
         &self,
         lane_id: LaneId,
@@ -173,10 +185,10 @@ pub trait SessionStore: Send + Sync {
     /// die at the limit, and the lane backs off until `retry.backoff_until`.
     ///
     /// So that you hear about work that died: when events die in a task lane,
-    /// a `system` failure event (source `system`, id `dead:<run id>`,
-    /// requested) is inserted into the project's lead lane; when they die in
-    /// the lead lane itself, where no agent is left to tell you, a
-    /// `system_notice` is queued in the outbox instead.
+    /// the task fails and its `task_result` reaches the lead lane (see
+    /// [`TaskStore`]); when they die in the lead lane itself, where no agent
+    /// is left to tell you, a `system_notice` is queued in the outbox
+    /// instead.
     async fn fail_run(
         &self,
         lease: &Lease,
@@ -236,13 +248,53 @@ pub trait TimerStore: Send + Sync {
 }
 
 /// Tasks and checkpoints (Plan.md §5.2, §5.5).
+///
+/// The run cycle moves a task through its lifecycle inside the lane's own
+/// transactions: [`SessionStore::start_run`] makes it `running`,
+/// [`SessionStore::commit_run`] `done` (if [`TaskStore::finish_task`] was
+/// called) or `sleeping`, [`SessionStore::fail_run`] `queued` again or
+/// `failed`, and a lost lease `queued`. Ending a task, by finishing,
+/// failing, or cancelling it, inserts one `task_result` event (source
+/// `task`, id `result:<task id>`) into the project's lead lane, requested
+/// when the task's origin is ([`crate::model::TaskOrigin::is_requested`]).
+///
+/// Writes a run makes take the lease of the lane the run works in, which for
+/// [`TaskStore::create_task`] and [`TaskStore::cancel_task`] is not the
+/// task's own lane.
 #[async_trait]
 pub trait TaskStore: Send + Sync {
-    /// Creates a task and its lane; a queued task also gets its start event.
-    /// A repeated `created_by_call` returns the original task.
-    async fn create_task(&self, task: &NewTask) -> StoreResult<Task>;
+    /// Creates a task and its lane in one transaction; a queued task also
+    /// gets its `task_start` event. A repeated `created_by_call` returns the
+    /// original task. Dependencies and the parent must be tasks of the same
+    /// project. `lease` is the creating run's, `None` when no run creates it.
+    async fn create_task(&self, lease: Option<&Lease>, task: &NewTask) -> StoreResult<Task>;
     async fn task(&self, id: TaskId) -> StoreResult<Option<Task>>;
     async fn tasks(&self, project_id: ProjectId) -> StoreResult<Vec<Task>>;
+    /// Changes what a task that has not ended is about. `None` keeps a field.
+    async fn update_task(
+        &self,
+        lease: &Lease,
+        id: TaskId,
+        title: Option<&str>,
+        goal: Option<&str>,
+        priority: Option<i64>,
+    ) -> StoreResult<Task>;
+    /// Cancels a task that has not ended and reports it to the lead lane.
+    /// Cancelling a cancelled task changes nothing. Pending events in its
+    /// lane are skipped by the next run cycle.
+    async fn cancel_task(
+        &self,
+        lease: Option<&Lease>,
+        id: TaskId,
+        now: Timestamp,
+    ) -> StoreResult<Task>;
+    /// Records the result of the running task whose lane `lease` holds. The
+    /// task becomes `done`, and its result is reported, when the run commits.
+    /// Recording again replaces the result.
+    async fn finish_task(&self, lease: &Lease, result: &Json) -> StoreResult<Task>;
+    /// Moves a task along its lifecycle, refusing a move Plan.md §5.2 does
+    /// not allow ([`TaskStatus::can_become`]) with [`StoreError::Conflict`].
+    /// `proposed` to `queued` inserts the start event.
     async fn set_task_status(
         &self,
         id: TaskId,
@@ -272,6 +324,16 @@ pub trait MachineStore: Send + Sync {
     async fn accounts(&self) -> StoreResult<Vec<Account>>;
     /// Stops placing work on an account until `until` (Plan.md §5.3).
     async fn set_cooldown(&self, label: &str, until: Option<Timestamp>) -> StoreResult<()>;
+    /// What a run reports when its account reaches its usage limit, under
+    /// the run's lease: the account, created if new, cools down until
+    /// `until`, or later if it already was.
+    async fn cool_down(
+        &self,
+        lease: &Lease,
+        label: &str,
+        backend: BackendKind,
+        until: Timestamp,
+    ) -> StoreResult<Account>;
 }
 
 /// Versioned memory files (Plan.md §8). Scope rules are applied by callers in
@@ -291,14 +353,47 @@ pub trait MemoryStore: Send + Sync {
 }
 
 /// Paused tool calls shown to you (Plan.md §9.4).
+///
+/// While a decision is pending in a task lane, the lane is not granted
+/// (Plan.md §9.4 "other events wait"), and its task is `waiting_on_you`
+/// once the run that asked has ended. A `user_message` arriving in a task
+/// lane declines every pending decision there, with the message as the note.
 #[async_trait]
 pub trait DecisionStore: Send + Sync {
-    async fn open_decision(&self, decision: &NewDecision) -> StoreResult<Decision>;
+    /// Opens a decision and queues its card on the client channel, in one
+    /// transaction (Plan.md §10.1, `kind` `decision`). A repeated
+    /// `(run_id, tool_call_id)` returns the original and queues nothing.
+    /// `lease` is the asking run's, `None` when no run asks.
+    async fn open_decision(
+        &self,
+        lease: Option<&Lease>,
+        decision: &NewDecision,
+    ) -> StoreResult<Decision>;
     async fn decision(&self, id: DecisionId) -> StoreResult<Option<Decision>>;
     async fn pending_decisions(&self, lane_id: LaneId) -> StoreResult<Vec<Decision>>;
+    /// Every pending decision in the space, oldest first.
+    async fn open_decisions(&self) -> StoreResult<Vec<Decision>>;
     /// Records your answer and inserts the answer event into the decision's
     /// lane, in one transaction. A second answer is ignored.
     async fn answer(&self, id: DecisionId, answer: &DecisionAnswer) -> StoreResult<Answered>;
+    /// Records, under the lease of the decision's lane, that its approved
+    /// call is about to be performed. [`ToolCallBegin::Finished`] carries
+    /// the recorded outcome; [`ToolCallBegin::OutcomeUnknown`] means an
+    /// earlier attempt began and recorded none.
+    async fn begin_perform(
+        &self,
+        lease: &Lease,
+        id: DecisionId,
+        now: Timestamp,
+    ) -> StoreResult<ToolCallBegin>;
+    /// Records the outcome of performing the call, or of refusing to, under
+    /// the lease of the decision's lane. An outcome already recorded is kept.
+    async fn finish_perform(
+        &self,
+        lease: &Lease,
+        id: DecisionId,
+        outcome: &Json,
+    ) -> StoreResult<()>;
 }
 
 /// Outgoing messages (Plan.md §10).
@@ -328,6 +423,17 @@ pub trait OutboxStore: Send + Sync {
     /// How many ordinary messages a run has queued, in any status. A run
     /// with at least one ended as `sent` (Plan.md §4.5).
     async fn count_for_run(&self, run_id: RunId) -> StoreResult<u32>;
+    /// Queues the system notice that no model account is free anywhere in
+    /// the space (`blocked`), or that one is again, unless the last such
+    /// notice already said so (Plan.md §5.3). Returns the queued message, or
+    /// `None` when nothing changed. One notice per change, however often it
+    /// is called and by whom.
+    async fn account_notice(
+        &self,
+        blocked: bool,
+        body: &Json,
+        now: Timestamp,
+    ) -> StoreResult<Option<OutboxMessage>>;
     /// Sent messages on a channel with `delivery_seq` greater than `after`,
     /// in delivery order. This is the client's feed (Plan.md §11.2).
     async fn delivered_after(

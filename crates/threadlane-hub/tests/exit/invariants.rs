@@ -3,12 +3,13 @@
 //! invariant 1 plus the feed checks of each scenario.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use serde_json::Value as Json;
-use threadlane_core::ids::{EventId, LaneId, SessionId};
-use threadlane_core::model::{EventStatus, OutboxKind, RunStatus};
+use threadlane_core::ids::{EventId, LaneId, RunId, SessionId, TaskId};
+use threadlane_core::model::{EventKind, EventStatus, OutboxKind, RunStatus, TaskStatus};
 use threadlane_core::store::SessionStore;
-use threadlane_hub::SEND_MESSAGE;
+use threadlane_hub::{CREATE_TASK, SEND_MESSAGE};
 
 use crate::harness::Sim;
 
@@ -18,6 +19,27 @@ pub async fn assert_invariants(sim: &Sim, scenario: &str) {
     assert_one_active_run_per_lane(sim, scenario).await;
     assert_no_event_in_two_committed_runs(sim, scenario).await;
     assert_one_outbox_row_per_send_message_call(sim, scenario).await;
+    assert_one_task_per_create_task_call(sim, scenario).await;
+    assert_one_result_per_ended_task(sim, scenario).await;
+    assert_no_two_tasks_share_a_worktree(sim, scenario);
+    assert_one_card_per_decision(sim, scenario).await;
+}
+
+/// Every decision that was asked has exactly one card in the outbox
+/// (Plan.md §10.1), however often a crash interrupted asking.
+pub async fn assert_one_card_per_decision(sim: &Sim, scenario: &str) {
+    let outbox = sim.outbox().await;
+    for decision in sim.decisions().await {
+        let cards = outbox
+            .iter()
+            .filter(|row| row.kind == OutboxKind::Decision && row.decision_id == Some(decision.id))
+            .count();
+        assert_eq!(
+            cards, 1,
+            "{scenario}: decision {} has {cards} cards",
+            decision.id
+        );
+    }
 }
 
 /// The end of a scenario: nothing holds a lease and no run is active.
@@ -40,6 +62,14 @@ pub async fn assert_quiet(sim: &Sim, scenario: &str) {
         active.is_empty(),
         "{scenario}: runs left active: {active:?}"
     );
+    for task in sim.tasks().await {
+        assert_ne!(
+            task.status,
+            TaskStatus::Running,
+            "{scenario}: task {} is running without a run",
+            task.id
+        );
+    }
 }
 
 /// Invariant 1: every accepted event became `done`, `skipped`, or `dead`.
@@ -92,21 +122,17 @@ pub async fn assert_no_event_in_two_committed_runs(sim: &Sim, scenario: &str) {
     }
 }
 
-/// Invariants 5 and 6: one `send_message` call produced at most one outbox
-/// row, however often a crash made the backend repeat it.
-///
-/// A call is what the mirrored journals show: a call id within a backend
-/// session (a resumed session repeats its ids), or, without an id, each
-/// `tool_use` entry on its own. So a session's message rows must not
-/// outnumber its calls, and no two rows may share an idempotency key.
-pub async fn assert_one_outbox_row_per_send_message_call(sim: &Sim, scenario: &str) {
+/// The calls to `tool` the mirrored journals show, per session: a call id
+/// within a backend session (a resumed session repeats its ids), or,
+/// without an id, each `tool_use` entry on its own.
+async fn calls_per_session(sim: &Sim, tool: &str) -> HashMap<SessionId, u32> {
     let mut ids: HashSet<(SessionId, String)> = HashSet::new();
     let mut calls: HashMap<SessionId, u32> = HashMap::new();
     for run in sim.runs().await {
         for entry in sim.journal(run.id).await {
             let entry = &entry.entry;
             if entry.get("type").and_then(Json::as_str) != Some("tool_use")
-                || entry.get("name").and_then(Json::as_str) != Some(SEND_MESSAGE)
+                || entry.get("name").and_then(Json::as_str) != Some(tool)
             {
                 continue;
             }
@@ -119,6 +145,72 @@ pub async fn assert_one_outbox_row_per_send_message_call(sim: &Sim, scenario: &s
             }
         }
     }
+    calls
+}
+
+/// Invariant 5 for `create_task`: one call created at most one task,
+/// however often a crash made the backend repeat it. Creation is keyed on
+/// the call, so a session's tasks must not outnumber its calls.
+pub async fn assert_one_task_per_create_task_call(sim: &Sim, scenario: &str) {
+    let calls = calls_per_session(sim, CREATE_TASK).await;
+    let mut tasks: HashMap<SessionId, u32> = HashMap::new();
+    for task in sim.tasks().await {
+        let key = task
+            .created_by_call
+            .clone()
+            .unwrap_or_else(|| panic!("{scenario}: task {} names no call", task.id));
+        // `s<session>:<call id>`, or `r<run>:<derived key>` without a call id.
+        let (scope, id) = key
+            .split_once(':')
+            .and_then(|(scope, _)| Some((scope.get(..1)?, scope.get(1..)?.parse::<i64>().ok()?)))
+            .unwrap_or_else(|| panic!("{scenario}: task {} has key {key}", task.id));
+        let session = match scope {
+            "s" => SessionId(id),
+            "r" => sim.db().run(RunId(id)).await.unwrap().unwrap().session_id,
+            _ => panic!("{scenario}: task {} has key {key}", task.id),
+        };
+        *tasks.entry(session).or_default() += 1;
+    }
+    for (session, tasks) in tasks {
+        let calls = calls.get(&session).copied().unwrap_or(0);
+        assert!(
+            tasks <= calls,
+            "{scenario}: invariant 5: session {session} has {tasks} tasks from {calls} create_task calls"
+        );
+    }
+}
+
+/// A task that ended was reported to its lead lane exactly once, and one
+/// that has not ended was not reported (docs/milestone-3.md §2 "Events").
+pub async fn assert_one_result_per_ended_task(sim: &Sim, scenario: &str) {
+    let mut results: HashMap<TaskId, u32> = HashMap::new();
+    for event in sim.events().await {
+        if event.kind == EventKind::TaskResult {
+            let task: TaskId = serde_json::from_value(event.payload["task_id"].clone()).unwrap();
+            *results.entry(task).or_default() += 1;
+        }
+    }
+    for task in sim.tasks().await {
+        let expected = u32::from(task.status.is_terminal());
+        assert_eq!(
+            results.get(&task.id).copied().unwrap_or(0),
+            expected,
+            "{scenario}: task {} is {} and was reported that many times",
+            task.id,
+            task.status
+        );
+    }
+}
+
+/// Invariants 5 and 6: one `send_message` call produced at most one outbox
+/// row, however often a crash made the backend repeat it.
+///
+/// A call is what the mirrored journals show: a call id within a backend
+/// session (a resumed session repeats its ids), or, without an id, each
+/// `tool_use` entry on its own. So a session's message rows must not
+/// outnumber its calls, and no two rows may share an idempotency key.
+pub async fn assert_one_outbox_row_per_send_message_call(sim: &Sim, scenario: &str) {
+    let calls = calls_per_session(sim, SEND_MESSAGE).await;
     let mut rows: HashMap<SessionId, u32> = HashMap::new();
     let mut keys: HashSet<String> = HashSet::new();
     for row in sim.outbox().await {
@@ -143,4 +235,32 @@ pub async fn assert_one_outbox_row_per_send_message_call(sim: &Sim, scenario: &s
             "{scenario}: invariant 6: session {session} has {rows} messages from {calls} send_message calls"
         );
     }
+}
+
+/// Invariant 15: two tasks never share a worktree. Every run of one task
+/// works in one directory, and no other task's run works in it.
+pub fn assert_no_two_tasks_share_a_worktree(sim: &Sim, scenario: &str) {
+    let mut dirs: HashMap<String, PathBuf> = HashMap::new();
+    let codex = sim.world.codex.iter().flat_map(|codex| codex.received());
+    for run in sim.backend().received().into_iter().chain(codex) {
+        let Some(task) = run
+            .prompt
+            .split_once("Your task, ")
+            .and_then(|(_, rest)| rest.split_once(':'))
+            .map(|(task, _)| task.to_owned())
+        else {
+            continue;
+        };
+        let dir = dirs.entry(task.clone()).or_insert(run.working_dir.clone());
+        assert_eq!(
+            *dir, run.working_dir,
+            "{scenario}: task {task} ran in two directories"
+        );
+    }
+    let distinct: HashSet<&PathBuf> = dirs.values().collect();
+    assert_eq!(
+        distinct.len(),
+        dirs.len(),
+        "{scenario}: invariant 15: tasks share a worktree: {dirs:?}"
+    );
 }

@@ -2,7 +2,7 @@
 //! backends. Stores are faked by `HubDb::open_in_memory` in `threadlane-store`.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -11,6 +11,7 @@ use threadlane_core::adapters::{
     ChannelAdapter, CheckpointBundle, Delivered, DeliveryError, PreparedWorkspace, SourceAdapter,
     SourceBatch, SourceError, SourceEvent, Workspace, WorkspaceError, WorkspaceSpec,
 };
+use threadlane_core::forge::{Forge, ForgeError};
 use threadlane_core::model::OutboxMessage;
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::tools::{
@@ -358,5 +359,122 @@ impl Workspace for FakeWorkspace {
         _bundles: &[CheckpointBundle],
     ) -> Result<PreparedWorkspace, WorkspaceError> {
         Ok(self.layout(spec))
+    }
+}
+
+/// One call a [`FakeForge`] received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgeCall {
+    Push {
+        worktree: PathBuf,
+        branch: String,
+    },
+    Open {
+        worktree: PathBuf,
+        branch: String,
+        base: String,
+        title: String,
+        body: String,
+    },
+    Find {
+        branch: String,
+    },
+}
+
+/// A [`Forge`] that touches no remote: it records every call, and each
+/// [`Forge::open_draft_pull_request`] opens a new pull request, so a test
+/// sees a second one if the system ever opens two. Clones share their record.
+#[derive(Debug, Clone, Default)]
+pub struct FakeForge {
+    calls: Arc<Mutex<Vec<ForgeCall>>>,
+    /// The pull requests opened, as (head branch, URL), oldest first.
+    opened: Arc<Mutex<Vec<(String, String)>>>,
+    /// Reported by [`Forge::logged_in`] inverted, so the default is logged in.
+    logged_out: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FakeForge {
+    /// Sets what [`Forge::logged_in`] reports; logged in until set.
+    pub fn set_logged_in(&self, logged_in: bool) {
+        self.logged_out
+            .store(!logged_in, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Every call, in order.
+    #[must_use]
+    pub fn calls(&self) -> Vec<ForgeCall> {
+        lock(&self.calls).clone()
+    }
+
+    /// The URLs of the pull requests opened, oldest first.
+    #[must_use]
+    pub fn pull_requests(&self) -> Vec<String> {
+        lock(&self.opened)
+            .iter()
+            .map(|(_, url)| url.clone())
+            .collect()
+    }
+
+    /// The branches pushed, once per push.
+    #[must_use]
+    pub fn pushes(&self) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                ForgeCall::Push { branch, .. } => Some(branch),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl Forge for FakeForge {
+    async fn push(&self, worktree: &Path, branch: &str) -> Result<(), ForgeError> {
+        lock(&self.calls).push(ForgeCall::Push {
+            worktree: worktree.to_owned(),
+            branch: branch.to_owned(),
+        });
+        Ok(())
+    }
+
+    async fn open_draft_pull_request(
+        &self,
+        worktree: &Path,
+        branch: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<String, ForgeError> {
+        self.push(worktree, branch).await?;
+        lock(&self.calls).push(ForgeCall::Open {
+            worktree: worktree.to_owned(),
+            branch: branch.to_owned(),
+            base: base.to_owned(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+        });
+        let mut opened = lock(&self.opened);
+        let url = format!("https://forge.test/pull/{}", opened.len() + 1);
+        opened.push((branch.to_owned(), url.clone()));
+        Ok(url)
+    }
+
+    async fn logged_in(&self) -> bool {
+        !self.logged_out.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    async fn find_pull_request(
+        &self,
+        _worktree: &Path,
+        branch: &str,
+    ) -> Result<Option<String>, ForgeError> {
+        lock(&self.calls).push(ForgeCall::Find {
+            branch: branch.to_owned(),
+        });
+        Ok(lock(&self.opened)
+            .iter()
+            .find(|(head, _)| head == branch)
+            .map(|(_, url)| url.clone()))
     }
 }

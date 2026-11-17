@@ -4,12 +4,12 @@
 use std::collections::HashMap;
 
 use serde_json::Value as Json;
-use threadlane_core::backend::{NativeSession, usable_backends};
+use threadlane_core::backend::{DENY_RULES, NativeSession, free_backends};
 use threadlane_core::ids::{EventId, SessionId};
 use threadlane_core::link::{Begin, LinkError, RunAssignment};
 use threadlane_core::model::{
-    Agent, BackendKind, Binding, Event, Lane, LaneKind, Lease, Mode, Session, SessionChoice,
-    SessionStatus, StartRun,
+    Agent, BackendKind, Binding, Event, Lane, LaneKind, Lease, Mode, Repository, Session,
+    SessionChoice, SessionStatus, StartRun, Task,
 };
 use threadlane_core::runtime::steps::begin_run as step;
 use threadlane_core::store::{
@@ -18,9 +18,11 @@ use threadlane_core::store::{
 use threadlane_core::time::Timestamp;
 use uuid::Uuid;
 
+use crate::accounts::cooling;
 use crate::context::{PromptParts, appended_instructions, render_prompt};
 use crate::error::link_error;
 use crate::link::LocalLink;
+use crate::tools::offered_in;
 
 /// Why events were skipped by the initiative check (Plan.md §4.3 step 3).
 pub const SKIP_REASON: &str = "not requested, and the lead works on request only";
@@ -28,6 +30,10 @@ pub const SKIP_REASON: &str = "not requested, and the lead works on request only
 /// Why events were skipped because the lane's agent is Off in its project
 /// (invariant 14).
 pub const OFF_REASON: &str = "the agent is off in this project";
+
+/// Why events were skipped because the lane's task has ended: done, failed,
+/// or cancelled.
+pub const ENDED_REASON: &str = "the task has ended";
 
 /// The session a run will work in, as decided before `start_run`.
 struct SessionPlan {
@@ -51,10 +57,12 @@ impl LocalLink {
             return Ok(Begin::Idle);
         }
 
-        // 2. Initiative. An agent that is effectively Off never starts
-        // (invariant 14); above Off, until milestone 9 every binding acts as
-        // On request.
-        let (agent, binding) = self.lane_agent(&lane).await?;
+        // 2. Initiative. A task that has ended does no more work. An agent
+        // that is effectively Off, or not bound in the project at all, never
+        // starts (invariant 14); above Off, until milestone 9 every binding
+        // acts as On request, and a task you asked for is requested work
+        // whatever arrives in its lane (docs/milestone-3.md §1 item 2).
+        let (agent, binding, task) = self.lane_agent(&lane).await?;
         let off = match &binding {
             Some(binding) => {
                 let ceiling = db
@@ -63,11 +71,15 @@ impl LocalLink {
                     .map_err(link_error)?;
                 binding.mode.stricter(ceiling) == Mode::Off
             }
-            None => false,
+            None => true,
         };
-        let skip = if off {
+        let requested = task.as_ref().is_some_and(|task| task.origin.is_requested())
+            || pending.iter().any(|event| event.requested);
+        let skip = if task.as_ref().is_some_and(|task| task.status.is_terminal()) {
+            Some(ENDED_REASON)
+        } else if off {
             Some(OFF_REASON)
-        } else if pending.iter().all(|event| !event.requested) {
+        } else if !requested {
             Some(SKIP_REASON)
         } else {
             None
@@ -125,13 +137,28 @@ impl LocalLink {
             Vec::new()
         };
         let decisions = db.pending_decisions(lane.id).await.map_err(link_error)?;
+        // The answers among the events: the approved calls, which the
+        // runner performs before the session resumes (Plan.md §9.4).
+        let mut perform = Vec::new();
+        for id in events.iter().filter_map(|event| event.decision_ref) {
+            if db
+                .decision(id)
+                .await
+                .map_err(link_error)?
+                .is_some_and(|decision| decision.approved())
+            {
+                perform.push(id);
+            }
+        }
         let prompt = render_prompt(&PromptParts {
             project: &project,
+            task: task.as_ref(),
             recent: &recent,
             decisions: &decisions,
             events: &events,
         });
         let appended_instructions = appended_instructions(&agent, lane.kind);
+        let repositories = self.task_repositories(task.as_ref()).await?;
         inner.hook.reach(step::AFTER_ASSEMBLE_CONTEXT)?;
 
         // 8. The assignment.
@@ -140,7 +167,10 @@ impl LocalLink {
             session_id: run.session_id,
             project_id: project.id,
             lane_kind: lane.kind,
+            task_id: task.as_ref().map(|task| task.id),
+            repositories,
             events: events.iter().map(|event| event.id).collect(),
+            perform,
             backend,
             model: model_for(
                 binding.as_ref(),
@@ -151,19 +181,33 @@ impl LocalLink {
             native_session: plan.native,
             appended_instructions,
             prompt,
-            tools: inner.tools.definitions(),
+            tools: inner
+                .tools
+                .definitions()
+                .into_iter()
+                .filter(|tool| offered_in(&tool.name, lane.kind))
+                .collect(),
+            // A lead has no file or shell tools to refuse anything with; a
+            // task agent has full access less the direct shared effects.
             remove_builtin_tools: lane.kind == LaneKind::Lead,
-            deny_rules: Vec::new(),
+            deny_rules: match lane.kind {
+                LaneKind::Lead => Vec::new(),
+                LaneKind::Task => DENY_RULES.iter().map(|rule| (*rule).to_owned()).collect(),
+            },
             wall_time_limit: inner.settings.wall_time_limit,
             max_turns: inner.settings.max_turns,
         })))
     }
 
-    /// The agent working the lane: the project's lead for a lead lane, the
-    /// task's agent for a task lane.
-    async fn lane_agent(&self, lane: &Lane) -> Result<(Agent, Option<Binding>), LinkError> {
+    /// The agent working the lane and its binding in the project: the
+    /// project's lead for a lead lane, the task's agent for a task lane, with
+    /// the task.
+    async fn lane_agent(
+        &self,
+        lane: &Lane,
+    ) -> Result<(Agent, Option<Binding>, Option<Task>), LinkError> {
         let db = &self.core.inner.db;
-        let (agent_id, binding) = match lane.kind {
+        let (agent_id, binding, task) = match lane.kind {
             LaneKind::Lead => {
                 let binding = db
                     .lead_binding(lane.project_id)
@@ -175,7 +219,7 @@ impl LocalLink {
                             lane.project_id
                         ))
                     })?;
-                (binding.agent_id, Some(binding))
+                (binding.agent_id, Some(binding), None)
             }
             LaneKind::Task => {
                 let task_id = lane.task_id.ok_or_else(|| {
@@ -192,7 +236,7 @@ impl LocalLink {
                     .map_err(link_error)?
                     .into_iter()
                     .find(|binding| binding.agent_id == task.agent_id);
-                (task.agent_id, binding)
+                (task.agent_id, binding, Some(task))
             }
         };
         let agent = db
@@ -200,7 +244,7 @@ impl LocalLink {
             .await
             .map_err(link_error)?
             .ok_or_else(|| LinkError::Rejected(format!("agent {agent_id} not found")))?;
-        Ok((agent, binding))
+        Ok((agent, binding, task))
     }
 
     /// Routes each pending event to a session and picks the group holding the
@@ -297,18 +341,48 @@ impl LocalLink {
             .filter(|session| session.status == SessionStatus::Open && session.lane_id == lane.id))
     }
 
-    /// The first of the agent's backends (all, in [`BackendKind::ALL`] order,
-    /// if it names none) that this machine reported usable.
-    async fn choose_backend(&self, agent: &Agent) -> Result<BackendKind, LinkError> {
-        let machine = self
+    /// The task's repositories, in the order it named them.
+    async fn task_repositories(&self, task: Option<&Task>) -> Result<Vec<Repository>, LinkError> {
+        let Some(task) = task.filter(|task| !task.repositories.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        let registered = self
             .core
             .inner
             .db
+            .repositories(task.project_id)
+            .await
+            .map_err(link_error)?;
+        task.repositories
+            .iter()
+            .map(|id| {
+                registered
+                    .iter()
+                    .find(|repository| repository.id == *id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        LinkError::Rejected(format!(
+                            "task {}'s repository {id} is not registered in its project",
+                            task.id
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    /// The first of the agent's backends (all, in [`BackendKind::ALL`] order,
+    /// if it names none) that this machine reported usable, on an account
+    /// that is not cooling down.
+    async fn choose_backend(&self, agent: &Agent) -> Result<BackendKind, LinkError> {
+        let db = &self.core.inner.db;
+        let machine = db
             .machine(self.machine)
             .await
             .map_err(link_error)?
             .ok_or_else(|| LinkError::Rejected(format!("machine {} not found", self.machine)))?;
-        let usable = usable_backends(&machine.backends);
+        let now = self.core.inner.clock.now();
+        let cooling = cooling(&db.accounts().await.map_err(link_error)?, now);
+        let usable = free_backends(&machine.backends, self.machine, &cooling);
         let preferred: &[BackendKind] = if agent.backends.is_empty() {
             BackendKind::ALL
         } else {
@@ -320,7 +394,7 @@ impl LocalLink {
             .find(|backend| usable.contains(backend))
             .ok_or_else(|| {
                 LinkError::Rejected(format!(
-                    "machine {} has none of agent {}'s backends usable",
+                    "machine {} has none of agent {}'s backends usable with a free account",
                     self.machine, agent.name
                 ))
             })

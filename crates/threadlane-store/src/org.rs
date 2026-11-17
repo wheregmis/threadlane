@@ -212,6 +212,20 @@ impl OrgStore for HubDb {
         .await
     }
 
+    async fn set_project_paused(&self, id: ProjectId, paused: bool) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        let changed = exec(
+            tx.conn(),
+            "UPDATE projects SET paused = ?1 WHERE id = ?2",
+            params![paused, id.get()],
+        )
+        .await?;
+        if changed != 1 {
+            return Err(StoreError::not_found("project", id));
+        }
+        tx.commit().await
+    }
+
     async fn create_repository(&self, repository: &NewRepository) -> StoreResult<Repository> {
         let tx = self.db.begin().await?;
         let created = query_one(

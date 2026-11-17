@@ -9,7 +9,9 @@ use threadlane_core::model::RunOutcome;
 use threadlane_core::store::OutboxStore;
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError, ToolRegistry};
-use threadlane_hub::{CombinedTools, SEND_MESSAGE};
+use threadlane_hub::{
+    CANCEL_TASK, CREATE_TASK, CombinedTools, LIST_TASKS, SEND_MESSAGE, UPDATE_TASK,
+};
 use threadlane_testkit::fakes::FakeTools;
 
 use crate::common::{PAST_LEASE, TestHub, begin};
@@ -173,17 +175,28 @@ async fn tools_above_tier_one_are_blocked() {
     let fake = FakeTools::new();
     fake.register(tool("read_notes", Tier::Read), Ok(json!({ "notes": [] })));
     fake.register(
-        tool("open_pull_request", Tier::SharedReversible),
+        tool("merge_pull_request", Tier::SharedReversible),
         Ok(json!({ "number": 7 })),
     );
     let tools = CombinedTools::new(vec![base.core.tools(), Arc::new(fake.clone())]);
     let core = base.core.clone().with_tools(Arc::new(tools));
     let hub = TestHub::around(core, base.clock.clone()).await;
     hub.hello().await;
-    hub.send("m-1", "open a PR").await;
+    hub.send("m-1", "merge the PR").await;
     let (lease, run) = begin(&*hub.link).await;
     let names: Vec<&str> = run.tools.iter().map(|tool| tool.name.as_str()).collect();
-    assert_eq!(names, vec![SEND_MESSAGE, "read_notes", "open_pull_request"]);
+    assert_eq!(
+        names,
+        vec![
+            SEND_MESSAGE,
+            CREATE_TASK,
+            UPDATE_TASK,
+            CANCEL_TASK,
+            LIST_TASKS,
+            "read_notes",
+            "merge_pull_request"
+        ]
+    );
 
     let blocked = hub
         .link
@@ -191,7 +204,7 @@ async fn tools_above_tier_one_are_blocked() {
             &lease,
             run.run_id,
             Some("toolu_1"),
-            "open_pull_request",
+            "merge_pull_request",
             &json!({}),
         )
         .await;
@@ -212,7 +225,7 @@ async fn tools_above_tier_one_are_blocked() {
     assert_eq!(fake.calls().len(), 1);
     assert_eq!(fake.calls()[0].call_id.as_deref(), Some("toolu_2"));
     assert_eq!(
-        ToolRegistry::definition(&*hub.core.tools(), "open_pull_request").map(|d| d.tier),
+        ToolRegistry::definition(&*hub.core.tools(), "merge_pull_request").map(|d| d.tier),
         Some(Tier::SharedReversible)
     );
 }

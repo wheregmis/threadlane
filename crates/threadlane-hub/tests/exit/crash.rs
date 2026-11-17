@@ -4,16 +4,23 @@
 //! binary: one crash plan stops both, and a restart builds both afresh on the
 //! same database, clock, and backend.
 
+use std::time::Duration;
+
 use serde_json::json;
-use threadlane_core::model::{EventStatus, RunOutcome};
-use threadlane_core::runtime::steps::{begin_run, dispatcher, placement, runner, tool_call};
+use threadlane_core::model::{EventStatus, RunOutcome, TaskStatus};
+use threadlane_core::runtime::steps::{
+    begin_run, dispatcher, perform, placement, runner, tool_call,
+};
 use threadlane_core::runtime::{Killed, Step};
 use threadlane_hub::HubError;
 use threadlane_runner::RunnerError;
 use threadlane_testkit::CrashPlan;
 
-use crate::harness::{PAST_LEASE, REPLY, Sim, reply_script};
+use crate::harness::{
+    PAST_LEASE, REPLY, Sim, World, add_engineer, finish_after, plan_tasks_in, reply_script,
+};
 use crate::invariants::{assert_invariants, assert_quiet};
+use crate::publish::{self, ask_script, assert_published, drive, publish_world};
 
 /// Every boundary one message passes through on its way to the feed.
 fn kill_points() -> Vec<Step> {
@@ -209,4 +216,137 @@ async fn a_second_process_does_not_pass_a_step_the_first_got_past_durably() {
         assert_quiet(&second, step.0).await;
         assert_invariants(&second, step.0).await;
     }
+}
+
+/// A world whose lead turns a message into one task in a repository, whose
+/// task agent finishes it in its worktree, and whose lead then replies with
+/// [`REPLY`]. Each kind of run gets its script from its prompt, so a run
+/// repeated after a crash plays the same script whichever lane runs first.
+async fn task_world() -> World {
+    let world = World::new().await;
+    add_engineer(&world.db, 1).await;
+    world.add_repository("app").await;
+    world.backend.route("task_result", reply_script());
+    world
+        .backend
+        .route("task_start", finish_after(Duration::ZERO));
+    world
+        .backend
+        .set_default(plan_tasks_in(&["app"], &[("page", &[])]));
+    world
+}
+
+/// Sends the message through a task, kills the process the `nth` time it
+/// reaches `step`, restarts, and checks the end state from the stores.
+async fn kill_task_cycle_and_recover(step: Step, nth: u32) {
+    let scenario = format!("task cycle, {step} #{nth}");
+    let world = task_world().await;
+    let plan = CrashPlan::kill_at_nth(step, nth);
+    let sim = world.boot(plan.clone()).await;
+    let event = sim.send("m-1", "Put the page up").await;
+    let died = live(&sim).await;
+    assert_eq!(
+        died.as_ref()
+            .err()
+            .and_then(Death::killed)
+            .map(|killed| killed.step),
+        Some(step),
+        "{scenario}: killed at the step, got {died:?}"
+    );
+    sim.clock().advance(PAST_LEASE);
+
+    let sim = sim.restart(CrashPlan::new()).await;
+    live(&sim)
+        .await
+        .unwrap_or_else(|death| panic!("{scenario}: recovery failed: {death:?}"));
+
+    assert_invariants(&sim, &scenario).await;
+    assert_quiet(&sim, &scenario).await;
+    assert_eq!(
+        sim.event(event).await.status,
+        EventStatus::Done,
+        "{scenario}"
+    );
+    let tasks = sim.tasks().await;
+    assert_eq!(tasks.len(), 1, "{scenario}: one task");
+    assert_eq!(tasks[0].status, TaskStatus::Done, "{scenario}");
+    let feed = sim.feed().await;
+    assert_eq!(feed.len(), 1, "{scenario}: exactly one reply in the feed");
+    assert_eq!(feed[0].message.body, json!({ "text": REPLY }), "{scenario}");
+}
+
+#[tokio::test]
+async fn killing_the_process_at_any_step_of_a_task_still_yields_one_task_one_result_and_one_reply()
+{
+    let plan = CrashPlan::new();
+    let sim = task_world().await.boot(plan.clone()).await;
+    sim.send("m-1", "Put the page up").await;
+    live(&sim).await.unwrap();
+    assert_eq!(sim.feed().await.len(), 1);
+    let reached = plan.reached();
+    // The task lane passes its own boundaries, besides the lead's.
+    for step in [
+        runner::TASK,
+        begin_run::ALL,
+        tool_call::ALL,
+        placement::ALL,
+        dispatcher::ALL,
+    ]
+    .concat()
+    {
+        assert!(reached.contains(&step), "the cycle reaches {step}");
+    }
+    // Every time any boundary is passed, in either lane.
+    for (index, &step) in reached.iter().enumerate() {
+        let nth = reached[..=index]
+            .iter()
+            .filter(|seen| **seen == step)
+            .count();
+        kill_task_cycle_and_recover(step, u32::try_from(nth).unwrap()).await;
+    }
+    println!("{} kill points in a task cycle", reached.len());
+}
+
+/// The publish scenario of docs/milestone-3.md §4, killed the `nth` time it
+/// reaches each boundary it passes, the new ones of asking and performing
+/// included: whatever is interrupted, exactly one draft pull request.
+#[tokio::test]
+async fn killing_the_process_at_any_step_still_opens_exactly_one_pull_request() {
+    let world = publish_world(World::new().await, ask_script()).await;
+    let plan = CrashPlan::new();
+    let sim = world.boot(plan.clone()).await;
+    sim.send("m-1", "Put the page up and open a pull request")
+        .await;
+    drive(&sim, "approve", None).await.unwrap();
+    assert_published(&sim, "reference").await;
+    let reached = plan.reached();
+    for step in [runner::TASK, tool_call::ALL, perform::ALL].concat() {
+        assert!(reached.contains(&step), "the scenario reaches {step}");
+    }
+
+    for (index, &step) in reached.iter().enumerate() {
+        let nth = reached[..=index]
+            .iter()
+            .filter(|seen| **seen == step)
+            .count();
+        let scenario = format!("publish, {step} #{nth}");
+        let world = publish_world(World::new().await, ask_script()).await;
+        let plan = CrashPlan::kill_at_nth(step, u32::try_from(nth).unwrap());
+        let sim = world.boot(plan.clone()).await;
+        sim.send("m-1", "Put the page up and open a pull request")
+            .await;
+        let died = drive(&sim, "approve", None).await;
+        assert_eq!(
+            died.as_ref().err().and_then(publish::Death::killed_at),
+            Some(step),
+            "{scenario}: killed at the step, got {died:?}"
+        );
+        sim.clock().advance(PAST_LEASE);
+        let sim = sim.restart(CrashPlan::new()).await;
+        drive(&sim, "approve", None)
+            .await
+            .unwrap_or_else(|death| panic!("{scenario}: recovery failed: {death:?}"));
+        assert_published(&sim, &scenario).await;
+    }
+    println!("{} kill points in a publish", reached.len());
 }

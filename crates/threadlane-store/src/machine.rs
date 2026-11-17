@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use threadlane_core::ids::MachineId;
 use threadlane_core::model::{
-    Account, BackendKind, Machine, MachineReport, MachineStatus, NewMachine,
+    Account, BackendKind, Lease, Machine, MachineReport, MachineStatus, NewMachine,
 };
 use threadlane_core::store::{MachineStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
@@ -11,6 +11,7 @@ use turso::Row;
 
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
+use crate::inbox::check_lease;
 use crate::row::{Cols, json_text, opt_ts, params};
 
 const MACHINE_FIELDS: &str = "id, name, endpoint_id, is_hub, trust, status, last_seen,
@@ -45,6 +46,41 @@ fn decode_account(row: &Row) -> StoreResult<Account> {
         max_parallel: c.opt_u32(3)?,
         cooldown_until: c.opt_ts(4)?,
     })
+}
+
+/// The account with this label, created if new, inside the caller's
+/// transaction.
+async fn ensure_account_in(
+    conn: &turso::Connection,
+    label: &str,
+    backend: BackendKind,
+) -> StoreResult<Account> {
+    let existing = query_opt(
+        conn,
+        &format!("SELECT {ACCOUNT_FIELDS} FROM accounts WHERE label = ?1"),
+        params![label],
+        decode_account,
+    )
+    .await?;
+    let account = match existing {
+        Some(account) if account.backend == backend => account,
+        Some(account) => {
+            return Err(StoreError::Conflict(format!(
+                "account {label} is a {} account, not {backend}",
+                account.backend
+            )));
+        }
+        None => query_one(
+            conn,
+            &format!(
+                "INSERT INTO accounts (label, backend) VALUES (?1, ?2) RETURNING {ACCOUNT_FIELDS}"
+            ),
+            params![label, backend.as_str()],
+            decode_account,
+        )
+        .await?,
+    };
+    Ok(account)
 }
 
 #[async_trait]
@@ -152,35 +188,33 @@ impl MachineStore for HubDb {
 
     async fn ensure_account(&self, label: &str, backend: BackendKind) -> StoreResult<Account> {
         let tx = self.db.begin().await?;
-        let existing = query_opt(
+        let account = ensure_account_in(tx.conn(), label, backend).await?;
+        tx.commit().await?;
+        Ok(account)
+    }
+
+    async fn cool_down(
+        &self,
+        lease: &Lease,
+        label: &str,
+        backend: BackendKind,
+        until: Timestamp,
+    ) -> StoreResult<Account> {
+        let tx = self.db.begin().await?;
+        check_lease(tx.conn(), lease).await?;
+        let account = ensure_account_in(tx.conn(), label, backend).await?;
+        let cooled = query_one(
             tx.conn(),
-            &format!("SELECT {ACCOUNT_FIELDS} FROM accounts WHERE label = ?1"),
-            params![label],
+            &format!(
+                "UPDATE accounts SET cooldown_until = MAX(COALESCE(cooldown_until, 0), ?1)
+                 WHERE id = ?2 RETURNING {ACCOUNT_FIELDS}"
+            ),
+            params![until.as_millis(), account.id.get()],
             decode_account,
         )
         .await?;
-        let account = match existing {
-            Some(account) if account.backend == backend => account,
-            Some(account) => {
-                return Err(StoreError::Conflict(format!(
-                    "account {label} is a {} account, not {backend}",
-                    account.backend
-                )));
-            }
-            None => {
-                query_one(
-                    tx.conn(),
-                    &format!(
-                        "INSERT INTO accounts (label, backend) VALUES (?1, ?2) RETURNING {ACCOUNT_FIELDS}"
-                    ),
-                    params![label, backend.as_str()],
-                    decode_account,
-                )
-                .await?
-            }
-        };
         tx.commit().await?;
-        Ok(account)
+        Ok(cooled)
     }
 
     async fn accounts(&self) -> StoreResult<Vec<Account>> {

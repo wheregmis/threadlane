@@ -189,6 +189,15 @@ str_enum! {
     }
 }
 
+impl TaskOrigin {
+    /// Whether work of this origin counts as requested by you (initiative
+    /// rule, docs/milestone-3.md §1 item 2).
+    #[must_use]
+    pub const fn is_requested(self) -> bool {
+        matches!(self, Self::User | Self::UserRoutine)
+    }
+}
+
 str_enum! {
     /// Task lifecycle (Plan.md §5.2).
     pub enum TaskStatus {
@@ -200,6 +209,31 @@ str_enum! {
         Done => "done",
         Failed => "failed",
         Cancelled => "cancelled",
+    }
+}
+
+impl TaskStatus {
+    /// Whether the task has ended for good.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
+    }
+
+    /// Whether the lifecycle of Plan.md §5.2 allows moving from `self` to
+    /// `next`. Any task that has not ended can be cancelled.
+    #[must_use]
+    pub const fn can_become(self, next: Self) -> bool {
+        use TaskStatus::{
+            Cancelled, Done, Failed, Proposed, Queued, Running, Sleeping, WaitingOnYou,
+        };
+        match (self, next) {
+            (from, Cancelled) => !from.is_terminal(),
+            (Proposed, Queued)
+            | (Queued, Running)
+            | (Running, WaitingOnYou | Sleeping | Queued | Done | Failed)
+            | (WaitingOnYou | Sleeping, Queued) => true,
+            _ => false,
+        }
     }
 }
 
@@ -349,6 +383,9 @@ pub struct Project {
     pub is_general: bool,
     /// Stricter ceiling than the space's, if set.
     pub mode_ceiling: Option<Mode>,
+    /// How many of the project's tasks may run at once; 0 means no limit.
+    /// Projects created through the client carry 0 (`NewProject::default`),
+    /// so 0 must not block them.
     pub max_parallel_tasks: u32,
     pub paused: bool,
     /// The project's lead lane, created with the project.
@@ -441,6 +478,8 @@ pub struct Binding {
     pub mode: Mode,
     pub is_lead: bool,
     pub models: Json,
+    /// How many of this agent's tasks in the project may run at once; 0
+    /// means no limit, as for [`Project::max_parallel_tasks`].
     pub max_parallel: u32,
     pub overrides: Json,
 }
@@ -786,10 +825,20 @@ pub struct NewTimer {
 }
 
 /// One option on a decision; each carries one complete call (Plan.md §9.4).
+/// An approval's options say in `effect` whether choosing them performs the
+/// stored call: `{"approve": true}` or `{"approve": false}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecisionOption {
     pub label: String,
     pub effect: Json,
+}
+
+impl DecisionOption {
+    /// Whether choosing this option performs the stored call.
+    #[must_use]
+    pub fn approves(&self) -> bool {
+        self.effect.get("approve") == Some(&Json::Bool(true))
+    }
 }
 
 /// A paused tool call shown to you (Plan.md §9.4 `decisions`).
@@ -812,9 +861,30 @@ pub struct Decision {
     pub recommended: Option<u32>,
     pub offers_standing_rule: bool,
     pub status: DecisionStatus,
+    /// A [`DecisionAnswer`], once answered.
     pub answer: Option<Json>,
     pub expires_at: Option<Timestamp>,
     pub created_at: Timestamp,
+    /// What performing the approved call did, once it was performed or
+    /// refused: `{"performed": true, ...}` or `{"performed": false, "error": ...}`.
+    pub outcome: Option<Json>,
+}
+
+impl Decision {
+    /// The option the answer chose, if answered.
+    #[must_use]
+    pub fn chosen(&self) -> Option<&DecisionOption> {
+        let option = self.answer.as_ref()?.get("option")?.as_u64()?;
+        self.options.get(usize::try_from(option).ok()?)
+    }
+
+    /// Whether the decision was answered with an option that performs the
+    /// stored call.
+    #[must_use]
+    pub fn approved(&self) -> bool {
+        self.status == DecisionStatus::Answered
+            && self.chosen().is_some_and(DecisionOption::approves)
+    }
 }
 
 /// Input for [`crate::store::DecisionStore::open_decision`].
@@ -942,6 +1012,38 @@ mod tests {
             assert_eq!(json, Json::String(kind.as_str().to_owned()));
         }
         assert!("bogus".parse::<TaskStatus>().is_err());
+    }
+
+    #[test]
+    fn tasks_move_only_along_the_lifecycle_of_plan_5_2() {
+        use TaskStatus::*;
+        let allowed = [
+            (Proposed, Queued),
+            (Proposed, Cancelled),
+            (Queued, Running),
+            (Queued, Cancelled),
+            (Running, WaitingOnYou),
+            (Running, Sleeping),
+            (Running, Queued),
+            (Running, Done),
+            (Running, Failed),
+            (Running, Cancelled),
+            (WaitingOnYou, Queued),
+            (WaitingOnYou, Cancelled),
+            (Sleeping, Queued),
+            (Sleeping, Cancelled),
+        ];
+        for &from in TaskStatus::ALL {
+            for &to in TaskStatus::ALL {
+                assert_eq!(
+                    from.can_become(to),
+                    allowed.contains(&(from, to)),
+                    "{from} to {to}"
+                );
+            }
+        }
+        assert!(TaskOrigin::User.is_requested() && TaskOrigin::UserRoutine.is_requested());
+        assert!(!TaskOrigin::Agent.is_requested() && !TaskOrigin::Event.is_requested());
     }
 
     #[test]

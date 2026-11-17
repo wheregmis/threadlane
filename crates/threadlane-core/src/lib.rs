@@ -7,6 +7,7 @@
 pub mod adapters;
 pub mod backend;
 pub mod client;
+pub mod forge;
 pub mod ids;
 pub mod link;
 pub mod model;
@@ -14,3 +15,4 @@ pub mod runtime;
 pub mod store;
 pub mod time;
 pub mod tools;
+pub mod workspace;

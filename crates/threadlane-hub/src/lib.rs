@@ -7,6 +7,7 @@
 //! dispatcher, and the lease sweep. [`Hub`] is the process around it: data
 //! directory, lock, database, socket.
 
+mod accounts;
 mod begin_run;
 pub mod config;
 mod context;
@@ -20,6 +21,7 @@ mod handler;
 mod link;
 mod node;
 mod placement;
+mod publish;
 mod settings;
 mod tools;
 mod wake;
@@ -31,8 +33,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::{DataDir, LogConfig, LogFormat};
 
-pub use crate::begin_run::{OFF_REASON, SKIP_REASON};
-pub use crate::context::{LEAD_RULES, format_time};
+pub use crate::begin_run::{ENDED_REASON, OFF_REASON, SKIP_REASON};
+pub use crate::context::{LEAD_RULES, TASK_RULES, format_time};
 pub use crate::core::HubCore;
 pub use crate::defaults::{
     HUB_ENDPOINT, HUB_MACHINE_NAME, LEAD_INSTRUCTIONS, LEAD_NAME, LEAD_ROLE,
@@ -43,8 +45,10 @@ pub use crate::handler::CLIENT_SOURCE;
 pub use crate::node::Hub;
 pub use crate::settings::HubSettings;
 pub use crate::tools::{
-    CLIENT_CHANNEL, CombinedTools, HubTools, SEND_MESSAGE, TierPolicy, derived_call_key,
+    CANCEL_TASK, CLIENT_CHANNEL, CREATE_TASK, CombinedTools, FINISH_TASK, HubTools, LIST_TASKS,
+    SEND_MESSAGE, TierPolicy, UPDATE_TASK, derived_call_key, offered_in,
 };
+pub use threadlane_core::forge::{OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 
 /// Installs the global `tracing` subscriber. `RUST_LOG` overrides the
 /// configured filter.

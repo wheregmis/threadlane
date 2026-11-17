@@ -11,11 +11,15 @@ use async_trait::async_trait;
 use serde_json::json;
 use tempfile::TempDir;
 use threadlane_core::client::{
-    Accepted, ApiError, BindingSummary, FeedItem, HubApi, HubInfo, OrgReply, OrgRequest,
-    ProjectSummary, UserMessage,
+    Accepted, ApiError, BindingSummary, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
+    OrgReply, OrgRequest, ProjectSummary, UserMessage,
 };
-use threadlane_core::ids::{AgentId, EventId, OutboxId, ProjectId};
-use threadlane_core::model::Agent;
+use threadlane_core::ids::{
+    AgentId, DecisionId, EventId, LaneId, OutboxId, ProjectId, RepositoryId,
+};
+use threadlane_core::model::{
+    Agent, Decision, DecisionKind, DecisionOption, DecisionStatus, Repository,
+};
 use threadlane_core::model::{Mode, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
 use threadlane_core::time::Timestamp;
 use threadlane_transport_local::{SOCKET_FILE, serve};
@@ -31,6 +35,8 @@ struct Shared {
     changed: watch::Sender<u64>,
     sent: Mutex<Vec<UserMessage>>,
     org: Mutex<Vec<OrgRequest>>,
+    /// D-0007, pending until it is answered.
+    decision: Mutex<Decision>,
 }
 
 impl Shared {
@@ -80,6 +86,7 @@ impl FakeHub {
             changed: watch::channel(0).0,
             sent: Mutex::new(Vec::new()),
             org: Mutex::new(Vec::new()),
+            decision: Mutex::new(pending_decision()),
         }))
     }
 }
@@ -192,6 +199,17 @@ impl HubApi for FakeHub {
                     is_lead: true,
                 }],
             },
+            OrgRequest::AddRepository {
+                name,
+                remote_url,
+                default_branch,
+                ..
+            } => OrgReply::Repository {
+                repository: repository(&name, &remote_url, default_branch.as_deref()),
+            },
+            OrgRequest::Repositories { .. } => OrgReply::Repositories {
+                repositories: vec![repository("app", "git@example.com:me/app.git", None)],
+            },
             OrgRequest::SetMode { agent, mode, .. } => OrgReply::Binding {
                 binding: BindingSummary {
                     agent,
@@ -202,6 +220,81 @@ impl HubApi for FakeHub {
             },
             other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         })
+    }
+
+    async fn decisions(&self, request: DecisionRequest) -> Result<DecisionReply, ApiError> {
+        let mut decision = self.0.decision.lock().expect("lock");
+        match request {
+            DecisionRequest::Pending => Ok(DecisionReply::Pending {
+                decisions: if decision.status == DecisionStatus::Pending {
+                    vec![decision.clone()]
+                } else {
+                    Vec::new()
+                },
+            }),
+            DecisionRequest::Answer {
+                decision: id,
+                option,
+                note,
+            } if id == decision.id => {
+                let recorded = decision.status == DecisionStatus::Pending;
+                if recorded {
+                    let index = decision
+                        .options
+                        .iter()
+                        .position(|known| known.label == option)
+                        .ok_or_else(|| ApiError::Invalid(format!("no option {option}")))?;
+                    decision.status = DecisionStatus::Answered;
+                    decision.answer = Some(json!({ "option": index, "note": note }));
+                }
+                Ok(DecisionReply::Answered {
+                    decision: Box::new(decision.clone()),
+                    recorded,
+                })
+            }
+            other => Err(ApiError::NotFound(format!("{other:?}"))),
+        }
+    }
+}
+
+fn pending_decision() -> Decision {
+    let option = |label: &str, approve: bool| DecisionOption {
+        label: label.to_owned(),
+        effect: json!({ "approve": approve }),
+    };
+    Decision {
+        id: DecisionId(7),
+        project_id: ProjectId(1),
+        lane_id: LaneId(4),
+        task_id: None,
+        session_id: None,
+        run_id: None,
+        tool_call_id: None,
+        tool: "open_pull_request".to_owned(),
+        arguments: json!({ "repository": "app", "title": "Add the page" }),
+        arguments_hash: String::new(),
+        kind: DecisionKind::Approval,
+        question: "Open a draft pull request?".to_owned(),
+        context: String::new(),
+        options: vec![option("approve", true), option("decline", false)],
+        recommended: Some(0),
+        offers_standing_rule: false,
+        status: DecisionStatus::Pending,
+        answer: None,
+        expires_at: None,
+        created_at: Timestamp::from_millis(1_000),
+        outcome: None,
+    }
+}
+
+fn repository(name: &str, remote_url: &str, default_branch: Option<&str>) -> Repository {
+    Repository {
+        id: RepositoryId(1),
+        project_id: ProjectId(3),
+        name: name.to_owned(),
+        remote_url: remote_url.to_owned(),
+        default_branch: default_branch.unwrap_or("main").to_owned(),
+        protected_branches: Vec::new(),
     }
 }
 
@@ -473,6 +566,104 @@ async fn the_cli_manages_projects_agents_and_modes() {
                 mode: Mode::Off,
             },
         ]
+    );
+    hub.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_registers_and_lists_repositories() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().expect("tempdir");
+    let client_dir = client.path();
+    let socket = hub.socket().display().to_string();
+    expect_success(
+        client_dir,
+        &["hub", "add", "work", &socket],
+        &format!("paired work: {socket}\n"),
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &[
+            "repo",
+            "add",
+            "app",
+            "git@example.com:me/app.git",
+            "-p",
+            "web",
+            "--branch",
+            "trunk",
+        ],
+        "registered repository app (git@example.com:me/app.git, branch trunk)\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["repos", "-p", "web"],
+        "app git@example.com:me/app.git (main)\n",
+    )
+    .await;
+    assert_eq!(
+        *hub.fake.0.org.lock().expect("lock"),
+        vec![
+            OrgRequest::AddRepository {
+                project: Some("web".to_owned()),
+                name: "app".to_owned(),
+                remote_url: "git@example.com:me/app.git".to_owned(),
+                default_branch: Some("trunk".to_owned()),
+            },
+            OrgRequest::Repositories {
+                project: Some("web".to_owned()),
+            },
+        ]
+    );
+    hub.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_lists_and_answers_decisions() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().expect("tempdir");
+    let client_dir = client.path();
+    let socket = hub.socket().display().to_string();
+    expect_success(
+        client_dir,
+        &["hub", "add", "work", &socket],
+        &format!("paired work: {socket}\n"),
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["decisions"],
+        "[work] D-0007 Open a draft pull request?\n    options: approve (recommended), decline\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["answer", "D-0007", "approve", "--note", "go ahead"],
+        "[work] D-0007 answered: approve\n",
+    )
+    .await;
+    assert_eq!(
+        hub.fake.0.decision.lock().expect("lock").answer,
+        Some(json!({ "option": 0, "note": "go ahead" }))
+    );
+    expect_success(
+        client_dir,
+        &["answer", "d-7", "decline", "-s", "work"],
+        "[work] D-0007 was already answered (approve); this answer was ignored\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["decisions", "-s", "work"],
+        "nothing waits on you\n",
+    )
+    .await;
+    let output = threadlane(client_dir, &["answer", "seven", "approve"]).await;
+    assert!(
+        !output.status.success(),
+        "an id that is not a decision's is refused"
     );
     hub.stop().await;
 }

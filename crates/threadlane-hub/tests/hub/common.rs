@@ -199,7 +199,7 @@ pub fn report_with(probe: Probe) -> MachineReport {
     MachineReport {
         capabilities: json!({}),
         backends: encode_backends(&[(BackendKind::Claude, probe)]),
-        gh_login: false,
+        gh_login: true,
         load: 0,
     }
 }

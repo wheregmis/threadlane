@@ -14,7 +14,8 @@ use crate::lane::{LaneState, Stop};
 /// [`HubLink::call_tool`].
 ///
 /// The backend only sees a failed call as a tool error, so a kill or a lost
-/// lease is also raised on the lane, which stops on it.
+/// lease is also raised on the lane, which stops on it, and a call that
+/// opened a decision marks the run deferred, which ends it.
 #[derive(Debug)]
 pub(crate) struct LaneTools {
     link: Arc<dyn HubLink>,
@@ -57,6 +58,10 @@ impl ToolEndpoint for LaneTools {
             Some(Stop::LeaseLost) => return Err(ToolError::LeaseLost),
             Some(Stop::Shutdown) | None => {}
         }
+        // Nothing more happens in a run that waits on you (Plan.md §9.4).
+        if self.lane.deferred() {
+            return Err(ToolError::WaitingOnYou);
+        }
         let lease = self.lane.lease();
         let result = self
             .link
@@ -65,6 +70,7 @@ impl ToolEndpoint for LaneTools {
         match &result {
             Err(ToolError::Killed(killed)) => self.lane.signal(Stop::Killed(*killed)),
             Err(ToolError::LeaseLost) => self.lane.signal(Stop::LeaseLost),
+            Err(ToolError::WaitingOnYou) => self.lane.set_deferred(true),
             _ => {}
         }
         result

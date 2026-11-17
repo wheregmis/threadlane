@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use tempfile::TempDir;
 use threadlane_core::client::{
-    Accepted, ApiError, ClientResponse, FeedItem, HubApi, HubInfo, OrgReply, OrgRequest,
-    ProjectSummary, UserMessage,
+    Accepted, ApiError, ClientResponse, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
+    OrgReply, OrgRequest, ProjectSummary, UserMessage,
 };
 use threadlane_core::ids::{EventId, OutboxId, ProjectId};
 use threadlane_core::model::{Mode, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
@@ -128,6 +128,15 @@ impl HubApi for FakeHub {
                     is_general: false,
                     paused: false,
                 },
+            }),
+            _ => Err(ApiError::Invalid("unsupported".to_owned())),
+        }
+    }
+
+    async fn decisions(&self, request: DecisionRequest) -> Result<DecisionReply, ApiError> {
+        match request {
+            DecisionRequest::Pending => Ok(DecisionReply::Pending {
+                decisions: Vec::new(),
             }),
             _ => Err(ApiError::Invalid("unsupported".to_owned())),
         }
@@ -301,6 +310,12 @@ async fn every_request_kind_round_trips() {
     assert_eq!(
         client.org(OrgRequest::Agents).await,
         Err(ApiError::Invalid("unsupported".to_owned()))
+    );
+    assert_eq!(
+        client.decisions(DecisionRequest::Pending).await,
+        Ok(DecisionReply::Pending {
+            decisions: Vec::new()
+        })
     );
     // The wire form of an organization request and its answer.
     assert_eq!(

@@ -30,7 +30,8 @@ pub struct HubSettings {
     pub max_turns: Option<u32>,
     /// How many recent messages a new lead session is shown (Plan.md §8.5).
     pub recent_messages: u32,
-    /// Backoff after a usage limit that gave no reset time.
+    /// How long an account cools down after a usage limit that gave no
+    /// reset time (Plan.md §5.3).
     pub usage_limit_fallback: Duration,
     /// The model a backend runs when neither the agent nor its binding names
     /// one. A backend missing here runs its own default model.

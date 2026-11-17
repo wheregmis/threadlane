@@ -1,8 +1,9 @@
 //! [`OutboxStore`] on the hub database (Plan.md §10).
 
 use async_trait::async_trait;
+use serde_json::Value as Json;
 use threadlane_core::ids::{OutboxId, ProjectId, RunId};
-use threadlane_core::model::{NewOutboxMessage, OutboxKind, OutboxMessage, OutboxStatus};
+use threadlane_core::model::{NewOutboxMessage, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
 use threadlane_core::store::{OutboxStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
 use turso::{Connection, Row};
@@ -10,6 +11,11 @@ use turso::{Connection, Row};
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
 use crate::row::{Cols, json_text, opt_raw, opt_ts, params};
+use crate::session::NOTICE_CHANNEL;
+
+/// Key prefix of the account notices: `system:account:<n>:blocked`, then
+/// `system:account:<n>:resumed`, for the n-th time the space was blocked.
+const ACCOUNT_NOTICE: &str = "system:account:";
 
 const OUTBOX_FIELDS: &str = "id, project_id, lane_id, session_id, run_id, tool_call_id, kind,
     decision_id, channel, body, urgency, status, not_before, attempts, channel_message_id,
@@ -216,6 +222,58 @@ impl OutboxStore for HubDb {
             |row| Cols(row).u32(0),
         )
         .await
+    }
+
+    async fn account_notice(
+        &self,
+        blocked: bool,
+        body: &Json,
+        now: Timestamp,
+    ) -> StoreResult<Option<OutboxMessage>> {
+        let tx = self.db.begin().await?;
+        let last: Option<String> = query_opt(
+            tx.conn(),
+            "SELECT tool_call_id FROM outbox WHERE tool_call_id LIKE ?1 ORDER BY id DESC LIMIT 1",
+            params![format!("{ACCOUNT_NOTICE}%")],
+            |row| Cols(row).text(0),
+        )
+        .await?;
+        let (episode, was_blocked) = match &last {
+            None => (0, false),
+            Some(key) => {
+                let rest = key.strip_prefix(ACCOUNT_NOTICE).unwrap_or_default();
+                let (episode, state) = rest.split_once(':').unwrap_or_default();
+                let episode: u64 = episode
+                    .parse()
+                    .map_err(|_| StoreError::Corrupt(format!("account notice key {key:?}")))?;
+                (episode, state == "blocked")
+            }
+        };
+        let key = match (blocked, was_blocked) {
+            (true, false) => format!("{ACCOUNT_NOTICE}{}:blocked", episode + 1),
+            (false, true) => format!("{ACCOUNT_NOTICE}{episode}:resumed"),
+            _ => return Ok(None),
+        };
+        let queued = enqueue_in(
+            tx.conn(),
+            &NewOutboxMessage {
+                project_id: None,
+                lane_id: None,
+                session_id: None,
+                run_id: None,
+                tool_call_id: Some(key),
+                kind: OutboxKind::SystemNotice,
+                decision_id: None,
+                channel: NOTICE_CHANNEL.to_owned(),
+                body: body.clone(),
+                urgency: Urgency::High,
+                not_before: None,
+                created_at: now,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(queued))
     }
 
     async fn delivered_after(

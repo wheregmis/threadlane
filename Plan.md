@@ -1482,15 +1482,17 @@ Two things hold throughout:
 
 ### Milestone 3: Tasks on the first machine
 
-- Task store, task lanes, lifecycle, dependencies, parallel limits.
-- Lead tools for tasks; `finish_task` and `task_result`.
-- Workspaces: one worktree per task per repository.
-- Codex backend driver; a task runs on whichever of its agent's backends is available.
-- Accounts on one machine: cooldown on a usage limit, blocked tasks, system notices.
-- Backends started with full access and the deny rules of section 9.2.
-- Decisions of the approval kind: options, argument binding, answered from the command-line client.
-- `publish_branch` and `open_pull_request` as a draft, both always asking.
-- Backend conformance tests (section 16).
+**Status:** done on the scripted backend and fakes; design in `docs/milestone-3.md`. Not yet checked: the live conformance suite against the real `claude` and `codex`, a real `gh` and remote, and the exit scenario with the Linux machine as primary.
+
+- [x] Task store, task lanes, lifecycle, dependencies, parallel limits.
+- [x] Lead tools for tasks; `finish_task` and `task_result`.
+- [x] Workspaces: one worktree per task per repository.
+- [x] Codex backend driver; a task runs on whichever of its agent's backends is available.
+- [x] Accounts on one machine: cooldown on a usage limit, blocked tasks, system notices.
+- [x] Backends started with full access and the deny rules of section 9.2.
+- [x] Decisions of the approval kind: options, argument binding, answered from the command-line client.
+- [x] `publish_branch` and `open_pull_request` as a draft, both always asking.
+- [x] Backend conformance tests (section 16).
 
 **Exit:** One goal becomes several tasks that run in parallel on one machine in separate worktrees of the same repository, and you receive one combined result. A dependent task waits. A finished task asks before publishing; after your answer its branch is pushed and a draft pull request opened, exactly once. A direct push by the agent is refused by the deny rules. When no account is available, tasks show as blocked, none fails or uses an attempt, you receive one system notice, and work resumes by itself when a limit resets. The same scenario passes with the Mac as primary and with the Linux machine as primary. Invariants 7, 8, 15.
 

@@ -1,21 +1,33 @@
-//! [`TaskStore`] on the hub database (Plan.md §5.2).
+//! [`TaskStore`] on the hub database (Plan.md §5.2), and the task side of the
+//! run cycle's transactions.
 
 use async_trait::async_trait;
-use serde_json::json;
-use threadlane_core::ids::{LaneId, ProjectId, TaskId};
+use serde_json::{Value as Json, json};
+use threadlane_core::backend::{free_backends, usable_backends};
+use threadlane_core::ids::{DecisionId, LaneId, MachineId, ProjectId, TaskId};
 use threadlane_core::model::{
-    EventKind, LaneKind, NewEvent, NewTask, Task, TaskOrigin, TaskStatus, Trust,
+    BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
 };
 use threadlane_core::store::{StoreError, StoreResult, TaskStore};
+use threadlane_core::time::Timestamp;
 use turso::{Connection, Row};
 
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
-use crate::inbox::insert_event_in;
+use crate::inbox::{check_lease, insert_event_in};
 use crate::row::{Cols, json_text, opt_raw, params};
 
-/// Source name of `task_start` events.
+/// Source name of `task_start` and `task_result` events.
 pub const TASK_SOURCE: &str = "task";
+
+/// The `waiting_reason` of a task that may not start for lack of a model
+/// account (Plan.md §5.3 "blocked, not failed").
+pub const BLOCKED_REASON: &str = "blocked: every model account it can use is at its usage limit";
+
+/// The `waiting_reason` of a task with repositories offered to a machine
+/// that is not logged in to `gh` (Plan.md §5.4 item 5).
+pub const NO_GH_REASON: &str =
+    "this machine is not logged in to gh, so it cannot reach the task's repositories";
 
 const TASK_FIELDS: &str = "id, project_id, lane_id, agent_id, title, goal, repositories,
     parent_task_id, origin, status, priority, created_by_call, last_machine_id, waiting_reason,
@@ -65,6 +77,17 @@ async fn task_in(
     }
 }
 
+async fn existing_task(conn: &Connection, id: TaskId) -> StoreResult<Task> {
+    task_in(conn, "id = ?1", id.get().into())
+        .await?
+        .ok_or_else(|| StoreError::not_found("task", id))
+}
+
+/// The task a lane works, if it is a task lane.
+pub(crate) async fn task_of_lane(conn: &Connection, lane_id: LaneId) -> StoreResult<Option<Task>> {
+    task_in(conn, "lane_id = ?1", lane_id.get().into()).await
+}
+
 async fn dependencies(conn: &Connection, id: TaskId) -> StoreResult<Vec<TaskId>> {
     query_all(
         conn,
@@ -75,9 +98,544 @@ async fn dependencies(conn: &Connection, id: TaskId) -> StoreResult<Vec<TaskId>>
     .await
 }
 
+/// Checks that a run's lease is current and works in `project_id`.
+async fn check_run_lease(
+    conn: &Connection,
+    lease: Option<&Lease>,
+    project_id: ProjectId,
+) -> StoreResult<()> {
+    let Some(lease) = lease else {
+        return Ok(());
+    };
+    check_lease(conn, lease).await?;
+    let lane_project: ProjectId = query_one(
+        conn,
+        "SELECT project_id FROM lanes WHERE id = ?1",
+        params![lease.lane_id.get()],
+        |row| Cols(row).id(0),
+    )
+    .await?;
+    if lane_project != project_id {
+        return Err(StoreError::Invalid(format!(
+            "lane {} works in project {lane_project}, not {project_id}",
+            lease.lane_id
+        )));
+    }
+    Ok(())
+}
+
+/// The oldest decision pending in the lane, if any.
+async fn pending_decision(conn: &Connection, lane_id: LaneId) -> StoreResult<Option<DecisionId>> {
+    query_opt(
+        conn,
+        "SELECT id FROM decisions WHERE lane_id = ?1 AND status = 'pending' ORDER BY id LIMIT 1",
+        params![lane_id.get()],
+        |row| Cols(row).id(0),
+    )
+    .await
+}
+
+/// Why a task waits on a pending decision.
+fn waiting_on(decision: DecisionId) -> String {
+    format!("waiting on your answer to {decision}")
+}
+
+/// Puts a running task whose lane has a pending decision in
+/// `waiting_on_you`, with the reason. Returns whether it did.
+async fn wait_on_decision(conn: &Connection, task: &Task) -> StoreResult<bool> {
+    let Some(decision) = pending_decision(conn, task.lane_id).await? else {
+        return Ok(false);
+    };
+    transition(conn, task, TaskStatus::WaitingOnYou).await?;
+    exec(
+        conn,
+        "UPDATE tasks SET waiting_reason = ?1 WHERE id = ?2",
+        params![waiting_on(decision), task.id.get()],
+    )
+    .await?;
+    Ok(true)
+}
+
+/// The task's result with the branch and pull request of the calls it had
+/// performed for it (docs/milestone-3.md §4 "Result"). shortcut: with
+/// several repositories the last one performed wins; key them by repository
+/// when a task publishes more than one.
+async fn with_published(conn: &Connection, task: &Task) -> StoreResult<Option<Json>> {
+    let outcomes: Vec<Json> = query_all(
+        conn,
+        "SELECT outcome FROM decisions WHERE lane_id = ?1 AND outcome IS NOT NULL ORDER BY id",
+        params![task.lane_id.get()],
+        |row| Cols(row).json(0),
+    )
+    .await?;
+    let mut result = task.result.clone();
+    if let Some(Json::Object(fields)) = result.as_mut() {
+        for outcome in outcomes
+            .iter()
+            .filter(|outcome| outcome.get("performed") == Some(&Json::Bool(true)))
+        {
+            for key in ["branch", "pull_request"] {
+                if let Some(value) = outcome.get(key) {
+                    fields.insert(key.to_owned(), value.clone());
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Moves a task to `status`, refusing what the lifecycle does not allow.
+async fn transition(conn: &Connection, task: &Task, status: TaskStatus) -> StoreResult<()> {
+    if !task.status.can_become(status) {
+        return Err(StoreError::Conflict(format!(
+            "task {} cannot go from {} to {status}",
+            task.id, task.status
+        )));
+    }
+    exec(
+        conn,
+        "UPDATE tasks SET status = ?1 WHERE id = ?2",
+        params![status.as_str(), task.id.get()],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn insert_start_event(conn: &Connection, task: &Task) -> StoreResult<()> {
+    insert_event_in(
+        conn,
+        &NewEvent {
+            project_id: task.project_id,
+            lane_id: task.lane_id,
+            source: TASK_SOURCE.to_owned(),
+            source_event_id: format!("start:{}", task.id.get()),
+            kind: EventKind::TaskStart,
+            payload: json!({ "task_id": task.id, "title": task.title, "goal": task.goal }),
+            trust: Trust::System,
+            requested: task.origin.is_requested(),
+            session_ref: None,
+            decision_ref: None,
+            reply_to_ref: None,
+            received_at: task.created_at,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Ends a task as `status` and tells the project's lead lane, once, with
+/// `why` as the error of a failed task or the reason for another ending. A
+/// task that failed or was cancelled cancels the tasks waiting for it, and
+/// theirs in turn.
+async fn end_task(
+    conn: &Connection,
+    task: &Task,
+    status: TaskStatus,
+    why: Option<&str>,
+    now: Timestamp,
+) -> StoreResult<()> {
+    transition(conn, task, status).await?;
+    // Nothing is left to approve for a task that has ended.
+    exec(
+        conn,
+        "UPDATE decisions SET status = 'cancelled' WHERE lane_id = ?1 AND status = 'pending'",
+        params![task.lane_id.get()],
+    )
+    .await?;
+    let lead_lane_id: LaneId = query_one(
+        conn,
+        "SELECT id FROM lanes WHERE project_id = ?1 AND kind = ?2",
+        params![task.project_id.get(), LaneKind::Lead.as_str()],
+        |row| Cols(row).id(0),
+    )
+    .await?;
+    let mut payload = json!({
+        "task_id": task.id,
+        "task": task.id.to_string(),
+        "title": task.title,
+        "status": status,
+        "result": task.result,
+    });
+    if let Some(why) = why {
+        let key = if status == TaskStatus::Failed {
+            "error"
+        } else {
+            "reason"
+        };
+        payload[key] = json!(why);
+    }
+    insert_event_in(
+        conn,
+        &NewEvent {
+            project_id: task.project_id,
+            lane_id: lead_lane_id,
+            source: TASK_SOURCE.to_owned(),
+            source_event_id: format!("result:{}", task.id.get()),
+            kind: EventKind::TaskResult,
+            payload,
+            trust: Trust::System,
+            requested: task.origin.is_requested(),
+            session_ref: None,
+            decision_ref: None,
+            reply_to_ref: None,
+            received_at: now,
+        },
+    )
+    .await?;
+    if matches!(status, TaskStatus::Failed | TaskStatus::Cancelled) {
+        cancel_dependents(conn, task, status, now).await?;
+    }
+    Ok(())
+}
+
+/// Cancels every task that waits for `task`, which ended as `status`, since
+/// it can never become `done`.
+async fn cancel_dependents(
+    conn: &Connection,
+    task: &Task,
+    status: TaskStatus,
+    now: Timestamp,
+) -> StoreResult<()> {
+    let dependents: Vec<TaskId> = query_all(
+        conn,
+        "SELECT t.id FROM task_dependencies d JOIN tasks t ON t.id = d.task_id
+         WHERE d.depends_on = ?1 AND t.status NOT IN ('done', 'failed', 'cancelled')
+         ORDER BY t.id",
+        params![task.id.get()],
+        |row| Cols(row).id(0),
+    )
+    .await?;
+    let reason = dependency_ended(task.id, status);
+    for id in dependents {
+        let dependent = existing_task(conn, id).await?;
+        Box::pin(end_task(
+            conn,
+            &dependent,
+            TaskStatus::Cancelled,
+            Some(&reason),
+            now,
+        ))
+        .await?;
+    }
+    Ok(())
+}
+
+/// Why a task was cancelled when `dependency` ended as `status`.
+fn dependency_ended(dependency: TaskId, status: TaskStatus) -> String {
+    let ended = if status == TaskStatus::Failed {
+        "failed"
+    } else {
+        "was cancelled"
+    };
+    format!("{dependency}, which it depended on, {ended}")
+}
+
+/// [`SessionStore::start_run`]: a queued task starts running here.
+///
+/// [`SessionStore::start_run`]: threadlane_core::store::SessionStore::start_run
+pub(crate) async fn on_run_started(
+    conn: &Connection,
+    lane_id: LaneId,
+    machine_id: MachineId,
+) -> StoreResult<()> {
+    exec(
+        conn,
+        "UPDATE tasks SET status = ?1, last_machine_id = ?2, waiting_reason = NULL
+         WHERE lane_id = ?3 AND status = ?4",
+        params![
+            TaskStatus::Running.as_str(),
+            machine_id.get(),
+            lane_id.get(),
+            TaskStatus::Queued.as_str()
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// [`SessionStore::commit_run`]: a running task with a pending decision
+/// waits on you; one that recorded its result is done, with the branch and
+/// pull request performed for it; otherwise it sleeps until an event
+/// arrives, or is queued again if one already has.
+///
+/// [`SessionStore::commit_run`]: threadlane_core::store::SessionStore::commit_run
+pub(crate) async fn on_run_committed(
+    conn: &Connection,
+    lane_id: LaneId,
+    now: Timestamp,
+) -> StoreResult<()> {
+    let Some(task) = task_of_lane(conn, lane_id).await? else {
+        return Ok(());
+    };
+    if task.status != TaskStatus::Running || wait_on_decision(conn, &task).await? {
+        return Ok(());
+    }
+    if task.result.is_some() {
+        let result = with_published(conn, &task).await?;
+        exec(
+            conn,
+            "UPDATE tasks SET result = ?1 WHERE id = ?2",
+            params![json_text(&result)?, task.id.get()],
+        )
+        .await?;
+        let task = Task { result, ..task };
+        return end_task(conn, &task, TaskStatus::Done, None, now).await;
+    }
+    let pending = query_one(
+        conn,
+        "SELECT COUNT(*) FROM events WHERE lane_id = ?1 AND status = 'pending'",
+        params![lane_id.get()],
+        |row| Cols(row).i64(0),
+    )
+    .await?;
+    let next = if pending > 0 {
+        TaskStatus::Queued
+    } else {
+        TaskStatus::Sleeping
+    };
+    transition(conn, &task, next).await
+}
+
+/// [`SessionStore::fail_run`]: a running task is queued again, or fails when
+/// its events died.
+///
+/// [`SessionStore::fail_run`]: threadlane_core::store::SessionStore::fail_run
+pub(crate) async fn on_run_failed(
+    conn: &Connection,
+    lane_id: LaneId,
+    died: bool,
+    error: &str,
+    now: Timestamp,
+) -> StoreResult<()> {
+    let Some(task) = task_of_lane(conn, lane_id).await? else {
+        return Ok(());
+    };
+    if task.status != TaskStatus::Running {
+        return Ok(());
+    }
+    if died {
+        end_task(conn, &task, TaskStatus::Failed, Some(error), now).await
+    } else if wait_on_decision(conn, &task).await? {
+        Ok(())
+    } else {
+        transition(conn, &task, TaskStatus::Queued).await
+    }
+}
+
+/// A lane's lease went away with a run in flight: its task is queued again,
+/// or waits on you if the run asked something.
+pub(crate) async fn on_lane_reclaimed(conn: &Connection, lane_id: LaneId) -> StoreResult<()> {
+    if let Some(task) = task_of_lane(conn, lane_id).await?
+        && task.status == TaskStatus::Running
+        && wait_on_decision(conn, &task).await?
+    {
+        return Ok(());
+    }
+    exec(
+        conn,
+        "UPDATE tasks SET status = ?1 WHERE lane_id = ?2 AND status = ?3",
+        params![
+            TaskStatus::Queued.as_str(),
+            lane_id.get(),
+            TaskStatus::Running.as_str()
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// An event arrived in a lane: a sleeping task is queued again (Plan.md
+/// §5.2), and so is one waiting on you once nothing is pending to answer.
+pub(crate) async fn on_event_inserted(conn: &Connection, lane_id: LaneId) -> StoreResult<()> {
+    exec(
+        conn,
+        "UPDATE tasks SET status = ?1 WHERE lane_id = ?2 AND status = ?3",
+        params![
+            TaskStatus::Queued.as_str(),
+            lane_id.get(),
+            TaskStatus::Sleeping.as_str()
+        ],
+    )
+    .await?;
+    if pending_decision(conn, lane_id).await?.is_none() {
+        exec(
+            conn,
+            "UPDATE tasks SET status = ?1, waiting_reason = NULL WHERE lane_id = ?2 AND status = ?3",
+            params![
+                TaskStatus::Queued.as_str(),
+                lane_id.get(),
+                TaskStatus::WaitingOnYou.as_str()
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Why the lane's task may not start now (Plan.md §5.2, §5.4 items 1 and 2),
+/// or `None` if it may, or if the lane has no task. A limit of 0 is no
+/// limit. Only tasks whose lane holds a live lease count as running.
+async fn waiting_reason(
+    conn: &Connection,
+    task: &Task,
+    now: Timestamp,
+) -> StoreResult<Option<String>> {
+    let (paused, project_limit) = query_one(
+        conn,
+        "SELECT paused, max_parallel_tasks FROM projects WHERE id = ?1",
+        params![task.project_id.get()],
+        |row| {
+            let c = Cols(row);
+            Ok((c.bool(0)?, c.i64(1)?))
+        },
+    )
+    .await?;
+    if paused {
+        return Ok(Some("the project is paused".to_owned()));
+    }
+    if let Some(decision) = pending_decision(conn, task.lane_id).await? {
+        return Ok(Some(waiting_on(decision)));
+    }
+    let waiting_for: Vec<TaskId> = query_all(
+        conn,
+        "SELECT t.id FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on
+         WHERE d.task_id = ?1 AND t.status != ?2 ORDER BY t.id",
+        params![task.id.get(), TaskStatus::Done.as_str()],
+        |row| Cols(row).id(0),
+    )
+    .await?;
+    if !waiting_for.is_empty() {
+        let names: Vec<String> = waiting_for.iter().map(ToString::to_string).collect();
+        return Ok(Some(format!("waiting for {} to be done", names.join(", "))));
+    }
+    let running = |agent: Option<i64>| {
+        query_one(
+            conn,
+            "SELECT COUNT(*) FROM tasks t JOIN lanes l ON l.id = t.lane_id
+             WHERE t.project_id = ?1 AND t.id != ?2 AND (?3 IS NULL OR t.agent_id = ?3)
+               AND l.lease_owner IS NOT NULL AND l.lease_expires_at > ?4
+               AND t.status NOT IN ('done', 'failed', 'cancelled')",
+            params![
+                task.project_id.get(),
+                task.id.get(),
+                agent.map_or(turso::Value::Null, turso::Value::Integer),
+                now.as_millis()
+            ],
+            |row| Cols(row).i64(0),
+        )
+    };
+    if project_limit > 0 && running(None).await? >= project_limit {
+        return Ok(Some(format!(
+            "the project already runs its limit of {project_limit} tasks at once"
+        )));
+    }
+    let agent_limit = query_opt(
+        conn,
+        "SELECT max_parallel FROM bindings WHERE project_id = ?1 AND agent_id = ?2",
+        params![task.project_id.get(), task.agent_id.get()],
+        |row| Cols(row).i64(0),
+    )
+    .await?
+    .unwrap_or(0);
+    if agent_limit > 0 && running(Some(task.agent_id.get())).await? >= agent_limit {
+        return Ok(Some(format!(
+            "its agent already runs its limit of {agent_limit} tasks at once in this project"
+        )));
+    }
+    Ok(None)
+}
+
+/// [`BLOCKED_REASON`] if the agent working the lane has backends usable on
+/// the machine but every one of them runs on an account cooling down
+/// (Plan.md §5.4 item 4). A machine with none of them usable at all is not
+/// blocked for lack of an account; placement leaves it out.
+async fn blocked(
+    conn: &Connection,
+    lane_id: LaneId,
+    machine_id: MachineId,
+    now: Timestamp,
+) -> StoreResult<Option<String>> {
+    let preferred = query_opt(
+        conn,
+        "SELECT a.backends FROM lanes l JOIN agents a ON a.id = COALESCE(
+             (SELECT agent_id FROM tasks WHERE lane_id = l.id),
+             (SELECT agent_id FROM bindings WHERE project_id = l.project_id AND is_lead = 1))
+         WHERE l.id = ?1",
+        params![lane_id.get()],
+        |row| Cols(row).de::<Vec<BackendKind>>(0),
+    )
+    .await?;
+    let backends = query_opt(
+        conn,
+        "SELECT backends FROM machines WHERE id = ?1",
+        params![machine_id.get()],
+        |row| Cols(row).json(0),
+    )
+    .await?;
+    let (Some(preferred), Some(backends)) = (preferred, backends) else {
+        return Ok(None);
+    };
+    let cooling: Vec<String> = query_all(
+        conn,
+        "SELECT label FROM accounts WHERE cooldown_until > ?1",
+        params![now.as_millis()],
+        |row| Cols(row).text(0),
+    )
+    .await?;
+    let wanted = |kind: &BackendKind| preferred.is_empty() || preferred.contains(kind);
+    let usable = usable_backends(&backends).iter().any(wanted);
+    let free = free_backends(&backends, machine_id, &cooling)
+        .iter()
+        .any(wanted);
+    Ok((usable && !free).then(|| BLOCKED_REASON.to_owned()))
+}
+
+/// Whether the machine reported `gh` logged in.
+async fn gh_login(conn: &Connection, machine_id: MachineId) -> StoreResult<bool> {
+    Ok(query_opt(
+        conn,
+        "SELECT gh_login FROM machines WHERE id = ?1",
+        params![machine_id.get()],
+        |row| Cols(row).bool(0),
+    )
+    .await?
+    .unwrap_or(false))
+}
+
+/// [`InboxStore::grant_lease`]: records why the lane's task may not start, or
+/// clears the reason. Returns whether the lane may be granted.
+///
+/// [`InboxStore::grant_lease`]: threadlane_core::store::InboxStore::grant_lease
+pub(crate) async fn check_eligible(
+    conn: &Connection,
+    lane_id: LaneId,
+    machine_id: MachineId,
+    now: Timestamp,
+) -> StoreResult<bool> {
+    let task = task_of_lane(conn, lane_id).await?;
+    let reason = match &task {
+        Some(task) if task.status.is_terminal() => None,
+        Some(task) => match waiting_reason(conn, task, now).await? {
+            None if !task.repositories.is_empty() && !gh_login(conn, machine_id).await? => {
+                Some(NO_GH_REASON.to_owned())
+            }
+            None => blocked(conn, lane_id, machine_id, now).await?,
+            reason => reason,
+        },
+        None => blocked(conn, lane_id, machine_id, now).await?,
+    };
+    exec(
+        conn,
+        "UPDATE tasks SET waiting_reason = ?1 WHERE lane_id = ?2",
+        params![reason.as_deref(), lane_id.get()],
+    )
+    .await?;
+    Ok(reason.is_none())
+}
+
 #[async_trait]
 impl TaskStore for HubDb {
-    async fn create_task(&self, task: &NewTask) -> StoreResult<Task> {
+    async fn create_task(&self, lease: Option<&Lease>, task: &NewTask) -> StoreResult<Task> {
         if !matches!(task.status, TaskStatus::Proposed | TaskStatus::Queued) {
             return Err(StoreError::Invalid(format!(
                 "a task starts proposed or queued, not {}",
@@ -86,11 +644,27 @@ impl TaskStore for HubDb {
         }
         let tx = self.db.begin().await?;
         let conn = tx.conn();
+        check_run_lease(conn, lease, task.project_id).await?;
         if let Some(call) = &task.created_by_call
             && let Some(existing) =
                 task_in(conn, "created_by_call = ?1", call.as_str().into()).await?
         {
             return Ok(existing);
+        }
+        for other in task.depends_on.iter().chain(&task.parent_task_id) {
+            let project = query_opt(
+                conn,
+                "SELECT project_id FROM tasks WHERE id = ?1",
+                params![other.get()],
+                |row| Cols(row).id::<ProjectId>(0),
+            )
+            .await?;
+            if project != Some(task.project_id) {
+                return Err(StoreError::Invalid(format!(
+                    "{other} is not a task of project {}",
+                    task.project_id
+                )));
+            }
         }
         let lane_id: LaneId = query_one(
             conn,
@@ -135,29 +709,33 @@ impl TaskStore for HubDb {
             )
             .await?;
         }
-        if task.status == TaskStatus::Queued {
-            insert_event_in(
+        let created = existing_task(conn, id).await?;
+        let ended_badly = query_opt(
+            conn,
+            "SELECT t.id, t.status FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on
+             WHERE d.task_id = ?1 AND t.status IN ('failed', 'cancelled') ORDER BY t.id LIMIT 1",
+            params![id.get()],
+            |row| {
+                let c = Cols(row);
+                Ok((c.id::<TaskId>(0)?, c.parse::<TaskStatus>(1)?))
+            },
+        )
+        .await?;
+        if let Some((dependency, status)) = ended_badly {
+            // It could never start: cancel it as if it had been waiting.
+            let reason = dependency_ended(dependency, status);
+            end_task(
                 conn,
-                &NewEvent {
-                    project_id: task.project_id,
-                    lane_id,
-                    source: TASK_SOURCE.to_owned(),
-                    source_event_id: format!("start:{}", id.get()),
-                    kind: EventKind::TaskStart,
-                    payload: json!({ "task_id": id, "title": task.title, "goal": task.goal }),
-                    trust: Trust::System,
-                    requested: matches!(task.origin, TaskOrigin::User | TaskOrigin::UserRoutine),
-                    session_ref: None,
-                    decision_ref: None,
-                    reply_to_ref: None,
-                    received_at: task.created_at,
-                },
+                &created,
+                TaskStatus::Cancelled,
+                Some(&reason),
+                task.created_at,
             )
             .await?;
+        } else if created.status == TaskStatus::Queued {
+            insert_start_event(conn, &created).await?;
         }
-        let created = task_in(conn, "id = ?1", id.get().into())
-            .await?
-            .ok_or_else(|| StoreError::not_found("task", id))?;
+        let created = existing_task(conn, id).await?;
         tx.commit().await?;
         Ok(created)
     }
@@ -182,6 +760,83 @@ impl TaskStore for HubDb {
         Ok(tasks)
     }
 
+    async fn update_task(
+        &self,
+        lease: &Lease,
+        id: TaskId,
+        title: Option<&str>,
+        goal: Option<&str>,
+        priority: Option<i64>,
+    ) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let task = existing_task(conn, id).await?;
+        check_run_lease(conn, Some(lease), task.project_id).await?;
+        if task.status.is_terminal() {
+            return Err(StoreError::Conflict(format!(
+                "task {id} is {}; it can no longer change",
+                task.status
+            )));
+        }
+        exec(
+            conn,
+            "UPDATE tasks SET title = ?1, goal = ?2, priority = ?3 WHERE id = ?4",
+            params![
+                title.unwrap_or(&task.title),
+                goal.unwrap_or(&task.goal),
+                priority.unwrap_or(task.priority),
+                id.get()
+            ],
+        )
+        .await?;
+        let updated = existing_task(conn, id).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    async fn cancel_task(
+        &self,
+        lease: Option<&Lease>,
+        id: TaskId,
+        now: Timestamp,
+    ) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let task = existing_task(conn, id).await?;
+        check_run_lease(conn, lease, task.project_id).await?;
+        if task.status == TaskStatus::Cancelled {
+            return Ok(task);
+        }
+        end_task(conn, &task, TaskStatus::Cancelled, None, now).await?;
+        let cancelled = existing_task(conn, id).await?;
+        tx.commit().await?;
+        Ok(cancelled)
+    }
+
+    async fn finish_task(&self, lease: &Lease, result: &Json) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        check_lease(conn, lease).await?;
+        let task = task_of_lane(conn, lease.lane_id)
+            .await?
+            .ok_or_else(|| StoreError::Invalid(format!("lane {} has no task", lease.lane_id)))?;
+        if task.status != TaskStatus::Running {
+            return Err(StoreError::Conflict(format!(
+                "task {} is {}, not running",
+                task.id, task.status
+            )));
+        }
+        exec(
+            conn,
+            "UPDATE tasks SET result = ?1 WHERE id = ?2",
+            params![json_text(result)?, task.id.get()],
+        )
+        .await?;
+        let finished = existing_task(conn, task.id).await?;
+        tx.commit().await?;
+        Ok(finished)
+    }
+
     async fn set_task_status(
         &self,
         id: TaskId,
@@ -189,14 +844,21 @@ impl TaskStore for HubDb {
         waiting_reason: Option<&str>,
     ) -> StoreResult<()> {
         let tx = self.db.begin().await?;
-        let changed = exec(
-            tx.conn(),
-            "UPDATE tasks SET status = ?1, waiting_reason = ?2 WHERE id = ?3",
-            params![status.as_str(), waiting_reason, id.get()],
+        let conn = tx.conn();
+        let task = existing_task(conn, id).await?;
+        if status.is_terminal() {
+            end_task(conn, &task, status, None, self.now()).await?;
+        } else {
+            transition(conn, &task, status).await?;
+        }
+        exec(
+            conn,
+            "UPDATE tasks SET waiting_reason = ?1 WHERE id = ?2",
+            params![waiting_reason, id.get()],
         )
         .await?;
-        if changed != 1 {
-            return Err(StoreError::not_found("task", id));
+        if task.status == TaskStatus::Proposed && status == TaskStatus::Queued {
+            insert_start_event(conn, &task).await?;
         }
         tx.commit().await
     }

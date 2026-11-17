@@ -6,7 +6,7 @@ use serde_json::json;
 use threadlane_core::backend::{BackendEvent, NativeSession};
 use threadlane_core::ids::{LaneId, RunId, SessionId};
 use threadlane_core::link::{LinkError, RunFailure};
-use threadlane_core::model::{EventKind, LaneKind};
+use threadlane_core::model::{BackendKind, EventKind, LaneKind};
 use threadlane_core::runtime::steps::{runner, tool_call};
 use threadlane_core::runtime::{Killed, Step};
 use threadlane_core::tools::ToolError;
@@ -22,8 +22,15 @@ const LANE_ID: LaneId = LaneId(LANE);
 
 /// One granted lane, one run that says something and finishes, then idle.
 fn script_one_run(h: &Harness) {
+    script_one_run_in(h, LaneKind::Lead);
+}
+
+/// [`script_one_run`] in a lane of `kind`.
+fn script_one_run_in(h: &Harness, kind: LaneKind) {
     h.link.grant(lease(LANE));
-    h.link.push_begin(Ok(run(assignment(11))));
+    let mut assignment = assignment(11);
+    assignment.lane_kind = kind;
+    h.link.push_begin(Ok(run(assignment)));
     h.backend
         .scripted
         .push(Script::new().text("thinking").finish("done"));
@@ -461,7 +468,7 @@ async fn a_run_past_its_wall_time_is_stopped_and_fails_with_limit_exceeded() {
 }
 
 #[tokio::test]
-async fn a_usage_limit_fails_with_usage_limit() {
+async fn a_usage_limit_is_reported_then_fails_with_usage_limit() {
     let h = Harness::new();
     h.link.grant(lease(LANE));
     h.link.push_begin(Ok(run(assignment(11))));
@@ -472,13 +479,21 @@ async fn a_usage_limit_fails_with_usage_limit() {
 
     h.runner.work_once().await.expect("work_once");
 
-    assert_eq!(
-        fail_of(&h),
-        RunFailure::UsageLimit {
-            account_label: Some("claude-scripted".into()),
-            resets_at: Some(resets_at),
-        }
-    );
+    let account = h
+        .calls()
+        .iter()
+        .position(|call| {
+            *call
+                == Call::Account {
+                    backend: BackendKind::Claude,
+                    label: Some("claude-scripted".into()),
+                    resets_at: Some(resets_at),
+                }
+        })
+        .expect("the usage limit is reported with the probe's label");
+    let fail = h.calls().iter().position(is_fail).expect("the run fails");
+    assert!(account < fail, "reported before the run fails");
+    assert_eq!(fail_of(&h), RunFailure::UsageLimit);
 }
 
 #[tokio::test]
@@ -538,54 +553,54 @@ async fn a_different_native_session_id_is_recorded() {
 }
 
 #[tokio::test]
-async fn a_task_lane_fails_clearly() {
+async fn a_task_lane_runs_in_its_working_directory_like_a_lead_lane() {
     let h = Harness::new();
-    h.link.grant(lease(LANE));
-    let mut task = assignment(11);
-    task.lane_kind = LaneKind::Task;
-    h.link.push_begin(Ok(run(task)));
+    script_one_run_in(&h, LaneKind::Task);
 
-    h.runner.work_once().await.expect("work_once");
+    assert!(h.runner.work_once().await.expect("work_once"));
 
-    match fail_of(&h) {
-        RunFailure::Error { message } => {
-            assert!(
-                message.contains("task lanes are not supported yet"),
-                "{message}"
-            );
-        }
-        other => panic!("expected an error failure, got {other:?}"),
-    }
-    assert!(h.backend.scripted.received().is_empty());
+    let received = h.backend.scripted.received();
+    assert_eq!(received.len(), 1, "the backend ran");
     assert_eq!(
-        h.plan.reached(),
-        vec![
-            runner::AFTER_CLAIM,
-            runner::AFTER_DEBOUNCE,
-            runner::AFTER_START_RUN,
-            runner::AFTER_RELEASE,
-        ]
+        received[0].working_dir,
+        h.config.lanes_dir.join(LANE.to_string())
     );
+    assert!(
+        h.calls()
+            .iter()
+            .any(|call| matches!(call, Call::Complete { .. }))
+    );
+    assert!(!h.calls().iter().any(is_fail));
+    assert_eq!(h.plan.reached(), runner::TASK);
 }
 
 #[tokio::test]
-async fn a_kill_at_every_lead_step_stops_everything() {
+async fn a_kill_at_every_step_of_either_lane_kind_stops_everything() {
+    for (kind, steps) in [
+        (LaneKind::Lead, runner::LEAD),
+        (LaneKind::Task, runner::TASK),
+    ] {
+        a_kill_at_every_step_stops_everything(kind, steps).await;
+    }
+}
+
+async fn a_kill_at_every_step_stops_everything(kind: LaneKind, steps: &[Step]) {
     let link = std::sync::Arc::new(FakeLink::default());
     let counter = std::sync::Arc::new(CallCounter::new(std::sync::Arc::clone(&link)));
     let happy = Harness::with_hook(link, counter.clone());
-    script_one_run(&happy);
+    script_one_run_in(&happy, kind);
     happy.runner.work_once().await.expect("work_once");
     let happy_calls = happy.calls();
 
-    for &step in runner::LEAD {
+    for &step in steps {
         let calls_before_kill = counter
             .reached()
             .into_iter()
             .find(|(reached, _)| *reached == step)
             .map(|(_, calls)| calls)
-            .expect("the happy run reaches every lead step");
+            .expect("the happy run reaches every step of its lane kind");
         let h = Harness::with_plan(CrashPlan::kill_at(step));
-        script_one_run(&h);
+        script_one_run_in(&h, kind);
 
         assert_killed_at(h.runner.work_once().await, step);
 

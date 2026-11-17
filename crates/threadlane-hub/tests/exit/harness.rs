@@ -8,6 +8,7 @@
 //! building a fresh `Sim` on the same `World`.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,18 +16,22 @@ use serde_json::{Value as Json, json};
 use tempfile::TempDir;
 use threadlane_core::backend::{AgentBackend, Probe, encode_backends};
 use threadlane_core::client::{FeedItem, HubApi, UserMessage};
-use threadlane_core::ids::{EventId, MachineId, OutboxId, RunId};
+use threadlane_core::ids::{DecisionId, EventId, MachineId, OutboxId, RunId};
 use threadlane_core::link::HubLink;
 use threadlane_core::model::{
-    BackendKind, Event, JournalEntry, Lane, MachineReport, MachineTrust, NewMachine, OutboxMessage,
-    Run, RunStatus,
+    BackendKind, Decision, Event, JournalEntry, Lane, MachineReport, MachineTrust, Mode, NewAgent,
+    NewBinding, NewMachine, NewRepository, OutboxMessage, Repository, Run, RunStatus, Task,
 };
 use threadlane_core::runtime::Step;
 use threadlane_core::runtime::steps::runner::{AFTER_CLAIM, AFTER_DEBOUNCE};
-use threadlane_core::store::{InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore};
-use threadlane_hub::{HubCore, HubError, HubSettings, SEND_MESSAGE};
-use threadlane_runner::{Runner, RunnerConfig, RunnerError};
+use threadlane_core::store::{
+    DecisionStore, InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore, TaskStore,
+};
+use threadlane_hub::{CREATE_TASK, FINISH_TASK, HubCore, HubError, HubSettings, SEND_MESSAGE};
+use threadlane_runner::{GitWorkspaces, Runner, RunnerConfig, RunnerError};
 use threadlane_store::{Bootstrap, HubDb};
+use threadlane_testkit::fakes::FakeForge;
+use threadlane_testkit::git::bare_repository;
 use threadlane_testkit::{CrashPlan, FakeClock, Script, ScriptedBackend};
 use tokio::task::JoinHandle;
 
@@ -40,8 +45,12 @@ pub const REPLY: &str = "Here is your answer.";
 pub const RATIONALE: &str = "Answered the question.";
 
 /// How many times a test yields to other tasks before it gives up waiting.
-/// Only yields: no test waits on real time.
+/// Only yields, except while `git` runs (task worktrees): see [`until`].
 const YIELDS: u32 = 200_000;
+
+/// How long [`until`] waits in all for real work outside the process, such
+/// as `git` setting up a worktree.
+const REAL_WAIT: Duration = Duration::from_secs(30);
 
 /// A lead that thinks aloud, replies once through `send_message`, and finishes.
 pub fn reply_script() -> Script {
@@ -65,12 +74,78 @@ fn reply_from(script: Script, call_id: &str, text: &str) -> Script {
         .finish(RATIONALE)
 }
 
+/// The agent the lead gives tasks to in the task scenarios.
+pub const ENGINEER: &str = "Engineer";
+
+/// What a task agent reports when it finishes.
+pub const TASK_SUMMARY: &str = "Done as asked.";
+
+/// A task agent that finishes its task, after waiting `wait` on the clock.
+pub fn finish_after(wait: Duration) -> Script {
+    Script::new()
+        .wait(wait)
+        .text("Working on it.")
+        .call("toolu_f", FINISH_TASK, json!({ "summary": TASK_SUMMARY }))
+        .finish("Finished the task.")
+}
+
+/// A lead that turns the goal into tasks for the engineer: a title and the
+/// titles of the tasks, created before it, that it depends on.
+pub fn plan_tasks(tasks: &[(&str, &[&str])]) -> Script {
+    plan_tasks_in(&[], tasks)
+}
+
+/// [`plan_tasks`], each task working in `repositories`.
+pub fn plan_tasks_in(repositories: &[&str], tasks: &[(&str, &[&str])]) -> Script {
+    let mut script = Script::new().text("Splitting the goal into tasks.");
+    for (n, (title, depends_on)) in tasks.iter().enumerate() {
+        let depends_on: Vec<String> = depends_on
+            .iter()
+            .map(|title| {
+                let index = tasks.iter().position(|(other, _)| other == title).unwrap();
+                format!("T-{:04}", index + 1)
+            })
+            .collect();
+        script = script.call(
+            format!("toolu_c{n}"),
+            CREATE_TASK,
+            json!({
+                "title": title,
+                "goal": format!("{title} is done"),
+                "agent": ENGINEER,
+                "depends_on": depends_on,
+                "repositories": repositories,
+            }),
+        );
+    }
+    script.finish("Planned the tasks.")
+}
+
+/// Binds an engineer to General that may run `max_parallel` tasks at once.
+pub async fn add_engineer(db: &HubDb, max_parallel: u32) {
+    let agent = db
+        .create_agent(&NewAgent::named(ENGINEER, "engineer"))
+        .await
+        .unwrap();
+    db.bind(&NewBinding {
+        project_id: db.general_project().await.unwrap().id,
+        agent_id: agent.id,
+        mode: Mode::OnRequest,
+        is_lead: false,
+        max_parallel,
+    })
+    .await
+    .unwrap();
+}
+
 /// How many times `plan` saw `step`.
 pub fn count(plan: &CrashPlan, step: Step) -> usize {
     plan.reached().iter().filter(|seen| **seen == step).count()
 }
 
 /// Yields until `check` holds. Panics, naming `what`, if it never does.
+/// Once yielding alone has not made it hold, it also waits a little real
+/// time between checks, for `git` subprocesses to finish.
 pub async fn until<F, Fut>(what: &str, mut check: F)
 where
     F: FnMut() -> Fut,
@@ -82,6 +157,13 @@ where
         }
         tokio::task::yield_now().await;
     }
+    let deadline = std::time::Instant::now() + REAL_WAIT;
+    while std::time::Instant::now() < deadline {
+        if check().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     panic!("never happened: {what}");
 }
 
@@ -91,7 +173,7 @@ pub async fn join<T>(what: &str, task: JoinHandle<T>) -> T {
     task.await.unwrap_or_else(|error| panic!("{what}: {error}"))
 }
 
-/// A machine report with Claude installed and logged in.
+/// A machine report with Claude and `gh` installed and logged in.
 pub fn usable_report() -> MachineReport {
     MachineReport {
         capabilities: json!({}),
@@ -104,7 +186,7 @@ pub fn usable_report() -> MachineReport {
                 account_label: None,
             },
         )]),
-        gh_login: false,
+        gh_login: true,
         load: 0,
     }
 }
@@ -119,6 +201,10 @@ pub struct World {
     pub lanes: Arc<TempDir>,
     pub settings: HubSettings,
     pub runner_config: RunnerConfig,
+    /// The repositories' forge: what was pushed and opened survives too.
+    pub forge: FakeForge,
+    /// A second backend on the machine, if the scenario has one.
+    pub codex: Option<ScriptedBackend>,
 }
 
 impl World {
@@ -127,10 +213,21 @@ impl World {
     }
 
     pub async fn with_settings(settings: HubSettings) -> Self {
+        Self::on(settings, None).await
+    }
+
+    /// A world whose hub database is the file `hub.db` in `dir`.
+    pub async fn on_disk(dir: &std::path::Path) -> Self {
+        Self::on(HubSettings::default(), Some(dir.join("hub.db"))).await
+    }
+
+    async fn on(settings: HubSettings, file: Option<PathBuf>) -> Self {
         let clock = FakeClock::at_default_start();
-        let db = HubDb::open_in_memory(&Bootstrap::default(), Arc::new(clock.clone()))
-            .await
-            .unwrap();
+        let db = match file {
+            Some(path) => HubDb::open(&path, &Bootstrap::default(), Arc::new(clock.clone())).await,
+            None => HubDb::open_in_memory(&Bootstrap::default(), Arc::new(clock.clone())).await,
+        }
+        .unwrap();
         let backend = ScriptedBackend::new(BackendKind::Claude, Arc::new(clock.clone()));
         let lanes = Arc::new(tempfile::tempdir().unwrap());
         let runner_config = RunnerConfig::new(lanes.path());
@@ -141,7 +238,39 @@ impl World {
             lanes,
             settings,
             runner_config,
+            forge: FakeForge::default(),
+            codex: None,
         }
+    }
+
+    /// Adds a scripted Codex next to the scripted Claude, on its own account.
+    pub fn with_codex(mut self) -> Self {
+        self.codex = Some(ScriptedBackend::new(
+            BackendKind::Codex,
+            Arc::new(self.clock.clone()),
+        ));
+        self
+    }
+
+    /// Where the machine keeps its clones and task worktrees.
+    pub fn workspaces(&self) -> PathBuf {
+        self.lanes.path().join("workspaces")
+    }
+
+    /// Registers a local bare repository named `name` in General, made in
+    /// the machine's temp directory.
+    pub async fn add_repository(&self, name: &str) -> Repository {
+        let remote = bare_repository(&self.lanes.path().join("remotes"), name);
+        self.db
+            .create_repository(&NewRepository {
+                project_id: self.db.general_project().await.unwrap().id,
+                name: name.to_owned(),
+                remote_url: remote.display().to_string(),
+                default_branch: "main".to_owned(),
+                protected_branches: Vec::new(),
+            })
+            .await
+            .unwrap()
     }
 
     /// Starts a process: a fresh `HubCore` and `Runner`, both stopped by
@@ -169,10 +298,15 @@ impl World {
     }
 
     fn runner(&self, link: Arc<dyn HubLink>, plan: &CrashPlan) -> Runner {
-        let backend: Arc<dyn AgentBackend> = Arc::new(self.backend.clone());
+        let mut backends: Vec<Arc<dyn AgentBackend>> = vec![Arc::new(self.backend.clone())];
+        if let Some(codex) = &self.codex {
+            backends.push(Arc::new(codex.clone()));
+        }
         Runner::new(
             link,
-            vec![backend],
+            backends,
+            Arc::new(GitWorkspaces::new(self.workspaces())),
+            Arc::new(self.forge.clone()),
             Arc::new(self.clock.clone()),
             Arc::new(plan.clone()),
             self.runner_config.clone(),
@@ -333,13 +467,48 @@ impl Sim {
             .collect()
     }
 
-    /// Every lane of every project.
+    /// Every lane of every project: lead lanes, then task lanes.
     pub async fn lanes(&self) -> Vec<Lane> {
-        let mut lanes = Vec::new();
+        let mut ids = Vec::new();
         for project in self.db().projects().await.unwrap() {
-            lanes.push(self.db().lane(project.lead_lane_id).await.unwrap().unwrap());
+            ids.push(project.lead_lane_id);
+        }
+        ids.extend(self.tasks().await.iter().map(|task| task.lane_id));
+        let mut lanes = Vec::new();
+        for id in ids {
+            lanes.push(self.db().lane(id).await.unwrap().unwrap());
         }
         lanes
+    }
+
+    /// Every decision, oldest first.
+    pub async fn decisions(&self) -> Vec<Decision> {
+        let mut all = Vec::new();
+        for id in 1.. {
+            match self.db().decision(DecisionId(id)).await.unwrap() {
+                Some(decision) => all.push(decision),
+                None => return all,
+            }
+        }
+        unreachable!()
+    }
+
+    /// Every task of every project.
+    pub async fn tasks(&self) -> Vec<Task> {
+        let mut tasks = Vec::new();
+        for project in self.db().projects().await.unwrap() {
+            tasks.extend(self.db().tasks(project.id).await.unwrap());
+        }
+        tasks
+    }
+
+    /// The task with this short id, for example `T-0001`.
+    pub async fn task(&self, id: &str) -> Task {
+        self.tasks()
+            .await
+            .into_iter()
+            .find(|task| task.id.to_string() == id)
+            .unwrap_or_else(|| panic!("no task {id}"))
     }
 
     pub async fn general_lane(&self) -> Lane {
@@ -416,16 +585,14 @@ impl Work {
     /// Lets `work_once` finish, moving the clock past the debounce window
     /// if the runner waits in it and the caller has not done so.
     pub async fn finish(mut self, sim: &Sim) -> Result<bool, RunnerError> {
-        for _ in 0..YIELDS {
-            if self.task.is_finished() {
-                return self.task.await.expect("work_once panicked");
-            }
+        until("work_once finishes", || {
             if !self.debounced && self.in_debounce(sim) {
                 sim.clock().advance(sim.world.runner_config.debounce);
                 self.debounced = true;
             }
-            tokio::task::yield_now().await;
-        }
-        panic!("work_once never finished");
+            std::future::ready(self.task.is_finished())
+        })
+        .await;
+        self.task.await.expect("work_once panicked")
     }
 }

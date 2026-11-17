@@ -42,6 +42,20 @@ enum Command {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// Register repositories.
+    Repo {
+        #[command(subcommand)]
+        command: RepoCommand,
+    },
+    /// List the repositories of a project.
+    Repos {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project; the General project if left out.
+        #[arg(short, long)]
+        project: Option<String>,
+    },
     /// List the agents of a space.
     Agents {
         /// The space (paired hub name); may be left out if only one is paired.
@@ -93,6 +107,25 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true)]
         text: Vec<String>,
     },
+    /// List the decisions waiting on you, in every paired space or in one.
+    Decisions {
+        /// Only this space (paired hub name).
+        #[arg(short, long)]
+        space: Option<String>,
+    },
+    /// Answer a decision with one of its options.
+    Answer {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// A note for the agent, for example why you decline.
+        #[arg(long)]
+        note: Option<String>,
+        /// The decision, for example D-0012.
+        decision: String,
+        /// The option, for example approve or decline.
+        option: String,
+    },
     /// Show new messages, decisions, and notices from a space.
     Feed {
         /// The space (paired hub name); may be left out if only one is paired.
@@ -119,6 +152,26 @@ enum ProjectCommand {
         /// What the project is about.
         #[arg(long, default_value = "")]
         description: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RepoCommand {
+    /// Register a repository in a project; tasks name it to work in it.
+    Add {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project; the General project if left out.
+        #[arg(short, long)]
+        project: Option<String>,
+        /// The default branch tasks start from; `main` if left out.
+        #[arg(long)]
+        branch: Option<String>,
+        /// The repository's name in the project.
+        name: String,
+        /// Where `git` clones it from; it must be new to the space.
+        remote: String,
     },
 }
 
@@ -205,6 +258,41 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 .await?;
             println!("created project {}", project.name);
         }
+        Command::Repo {
+            command:
+                RepoCommand::Add {
+                    space,
+                    project,
+                    branch,
+                    name,
+                    remote,
+                },
+        } => {
+            let repository = core
+                .add_repository(
+                    space.as_deref(),
+                    project.as_deref(),
+                    &name,
+                    &remote,
+                    branch.as_deref(),
+                )
+                .await?;
+            println!(
+                "registered repository {} ({}, branch {})",
+                repository.name, repository.remote_url, repository.default_branch
+            );
+        }
+        Command::Repos { space, project } => {
+            for repository in core
+                .repositories(space.as_deref(), project.as_deref())
+                .await?
+            {
+                println!(
+                    "{} {} ({})",
+                    repository.name, repository.remote_url, repository.default_branch
+                );
+            }
+        }
         Command::Agents { space } => {
             for agent in core.agents(space.as_deref()).await? {
                 println!("{} ({})", agent.name, agent.role);
@@ -281,6 +369,32 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     .await?;
             }
         }
+        Command::Decisions { space } => return decisions(&core, space.as_deref()).await,
+        Command::Answer {
+            space,
+            note,
+            decision,
+            option,
+        } => {
+            let answered = core
+                .answer(space.as_deref(), &decision, &option, note.as_deref())
+                .await?;
+            let chosen = answered
+                .decision
+                .chosen()
+                .map_or("?", |option| option.label.as_str());
+            if answered.recorded {
+                println!(
+                    "[{}] {} answered: {chosen}",
+                    answered.space, answered.decision.id
+                );
+            } else {
+                println!(
+                    "[{}] {} was already answered ({chosen}); this answer was ignored",
+                    answered.space, answered.decision.id
+                );
+            }
+        }
         Command::Feed {
             space,
             follow,
@@ -335,6 +449,44 @@ fn hub(core: &mut ClientCore, command: HubCommand) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Prints each pending decision with its space; fails if a hub could not
+/// list its decisions.
+async fn decisions(core: &ClientCore, space: Option<&str>) -> anyhow::Result<ExitCode> {
+    let mut code = ExitCode::SUCCESS;
+    let mut none = true;
+    for listed in core.decisions(space).await? {
+        let decisions = match listed.decisions {
+            Ok(decisions) => decisions,
+            Err(error) => {
+                code = ExitCode::FAILURE;
+                println!("[{}] could not list decisions: {error}", listed.space);
+                continue;
+            }
+        };
+        for decision in decisions {
+            none = false;
+            let options: Vec<String> = decision
+                .options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| {
+                    if decision.recommended == u32::try_from(index).ok() {
+                        format!("{} (recommended)", option.label)
+                    } else {
+                        option.label.clone()
+                    }
+                })
+                .collect();
+            println!("[{}] {} {}", listed.space, decision.id, decision.question);
+            println!("    options: {}", options.join(", "));
+        }
+    }
+    if none && code == ExitCode::SUCCESS {
+        println!("nothing waits on you");
+    }
+    Ok(code)
 }
 
 /// Prints one line per hub; fails if any hub is not reachable.

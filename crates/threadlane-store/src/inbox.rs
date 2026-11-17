@@ -3,15 +3,20 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::Value as Json;
 use threadlane_core::ids::{EventId, LaneId, MachineId};
-use threadlane_core::model::{Event, EventStatus, Inserted, Lane, Lease, NewEvent, RunStatus};
+use threadlane_core::model::{
+    Event, EventKind, EventStatus, Inserted, Lane, LaneKind, Lease, NewEvent, RunStatus,
+};
 use threadlane_core::store::{InboxStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
 use turso::{Connection, Row};
 
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
+use crate::decision;
 use crate::row::{Cols, json_text, opt_raw, params};
+use crate::task;
 
 pub(crate) const EVENT_FIELDS: &str = "id, project_id, lane_id, source, source_event_id, kind,
     payload, trust, requested, session_ref, decision_ref, reply_to_ref, status, claimed_by_run,
@@ -95,23 +100,26 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
     if let Some(id) = existing {
         return Ok(Inserted::Duplicate(id));
     }
-    let lane_project: Option<i64> = query_opt(
+    let lane: Option<(i64, LaneKind)> = query_opt(
         conn,
-        "SELECT project_id FROM lanes WHERE id = ?1",
+        "SELECT project_id, kind FROM lanes WHERE id = ?1",
         params![event.lane_id.get()],
-        |row| Cols(row).i64(0),
+        |row| {
+            let c = Cols(row);
+            Ok((c.i64(0)?, c.parse(1)?))
+        },
     )
     .await?;
-    match lane_project {
+    let kind = match lane {
         None => return Err(StoreError::not_found("lane", event.lane_id)),
-        Some(project) if project != event.project_id.get() => {
+        Some((project, _)) if project != event.project_id.get() => {
             return Err(StoreError::Invalid(format!(
                 "lane {} belongs to project {project}, not {}",
                 event.lane_id, event.project_id
             )));
         }
-        Some(_) => {}
-    }
+        Some((_, kind)) => kind,
+    };
     let id = query_one(
         conn,
         "INSERT INTO events (project_id, lane_id, source, source_event_id, kind, payload, trust,
@@ -134,12 +142,23 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
         |row| Cols(row).id(0),
     )
     .await?;
+    if kind == LaneKind::Task && event.kind == EventKind::UserMessage {
+        let note = event
+            .payload
+            .get("text")
+            .and_then(Json::as_str)
+            .unwrap_or_default();
+        decision::decline_pending_in(conn, event.lane_id, note, event.received_at).await?;
+    }
+    task::on_event_inserted(conn, event.lane_id).await?;
     Ok(Inserted::New(id))
 }
 
 /// Ends whatever was in flight on a lane whose lease is going away: claimed
-/// events return to pending and active runs are abandoned.
+/// events return to pending, active runs are abandoned, and a running task
+/// is queued again.
 async fn reclaim_lane(conn: &Connection, lane_id: LaneId, now: Timestamp) -> StoreResult<()> {
+    task::on_lane_reclaimed(conn, lane_id).await?;
     exec(
         conn,
         "UPDATE events SET status = 'pending', claimed_by_run = NULL
@@ -247,9 +266,11 @@ impl InboxStore for HubDb {
             "SELECT l.id FROM lanes l
              JOIN projects p ON p.id = l.project_id
              JOIN events e ON e.lane_id = l.id AND e.status = 'pending'
-             WHERE p.paused = 0
+             WHERE (p.paused = 0 OR l.kind = 'task')
                AND (l.lease_owner IS NULL OR l.lease_expires_at <= ?1)
                AND (l.backoff_until IS NULL OR l.backoff_until <= ?1)
+               AND NOT (l.kind = 'task' AND EXISTS (
+                   SELECT 1 FROM decisions d WHERE d.lane_id = l.id AND d.status = 'pending'))
              GROUP BY l.id
              ORDER BY MIN(e.id)",
             params![now.as_millis()],
@@ -278,6 +299,10 @@ impl InboxStore for HubDb {
         let live = lane.lease_owner.is_some()
             && lane.lease_expires_at.is_some_and(|expires| expires > now);
         if live {
+            return Ok(None);
+        }
+        if !task::check_eligible(tx.conn(), lane_id, machine_id, now).await? {
+            tx.commit().await?;
             return Ok(None);
         }
         if lane.lease_owner.is_some() {

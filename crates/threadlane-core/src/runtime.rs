@@ -91,13 +91,15 @@ pub mod steps {
         pub const AFTER_DEBOUNCE: Step = Step("runner.after_debounce");
         /// The hub opened the run and claimed its events.
         pub const AFTER_START_RUN: Step = Step("runner.after_start_run");
-        /// Task lanes: the worktrees are ready.
+        /// Task lanes: the working directory is ready: its worktrees, or a
+        /// plain directory for a task without repositories.
         pub const AFTER_PREPARE_WORKSPACE: Step = Step("runner.after_prepare_workspace");
         /// The backend process was started.
         pub const AFTER_BACKEND_START: Step = Step("runner.after_backend_start");
         /// The backend finished and its events were mirrored.
         pub const AFTER_BACKEND_RUN: Step = Step("runner.after_backend_run");
-        /// Task lanes: the checkpoint was saved.
+        /// Task lanes: uncommitted work was committed on the task branch.
+        /// The bundle upload of Plan.md §5.5 is milestone 6.
         pub const AFTER_CHECKPOINT: Step = Step("runner.after_checkpoint");
         /// The hub committed the run.
         pub const AFTER_COMMIT: Step = Step("runner.after_commit");
@@ -127,6 +129,21 @@ pub mod steps {
             AFTER_START_RUN,
             AFTER_BACKEND_START,
             AFTER_BACKEND_RUN,
+            AFTER_COMMIT,
+            AFTER_RECHECK,
+            AFTER_RELEASE,
+        ];
+
+        /// The boundaries a task lane reaches: the lead's, plus preparing
+        /// its worktrees and committing its work.
+        pub const TASK: &[Step] = &[
+            AFTER_CLAIM,
+            AFTER_DEBOUNCE,
+            AFTER_START_RUN,
+            AFTER_PREPARE_WORKSPACE,
+            AFTER_BACKEND_START,
+            AFTER_BACKEND_RUN,
+            AFTER_CHECKPOINT,
             AFTER_COMMIT,
             AFTER_RECHECK,
             AFTER_RELEASE,
@@ -166,6 +183,22 @@ pub mod steps {
         pub const ALL: &[Step] = &[AFTER_BEGIN, AFTER_EFFECT, AFTER_FINISH];
     }
 
+    /// Performing a stored call you approved, Plan.md §9.4: the hub records
+    /// the intent and the outcome, the runner makes the effect in between.
+    pub mod perform {
+        use super::Step;
+
+        /// The hub recorded that the call is about to be performed.
+        pub const AFTER_BEGIN: Step = Step("perform.after_begin");
+        /// The runner made the effect through the forge.
+        pub const AFTER_EFFECT: Step = Step("perform.after_effect");
+        /// The hub recorded the outcome.
+        pub const AFTER_FINISH: Step = Step("perform.after_finish");
+
+        /// Every boundary, in order.
+        pub const ALL: &[Step] = &[AFTER_BEGIN, AFTER_EFFECT, AFTER_FINISH];
+    }
+
     /// Scheduler pass, Plan.md §7.3.
     pub mod scheduler {
         use super::Step;
@@ -188,6 +221,20 @@ pub mod steps {
 
         /// Every dispatcher boundary, in pass order.
         pub const ALL: &[Step] = &[AFTER_READ, AFTER_DELIVER, AFTER_MARK_SENT];
+    }
+
+    /// A usage limit inside the hub, Plan.md §5.3.
+    pub mod account {
+        use super::Step;
+
+        /// The account's cooldown was recorded.
+        pub const AFTER_COOLDOWN: Step = Step("account.after_cooldown");
+        /// The system notice that the space is blocked, or has resumed, was
+        /// queued.
+        pub const AFTER_NOTICE: Step = Step("account.after_notice");
+
+        /// Every boundary, in order.
+        pub const ALL: &[Step] = &[AFTER_COOLDOWN, AFTER_NOTICE];
     }
 
     /// Placement, Plan.md §5.4.

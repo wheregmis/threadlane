@@ -77,6 +77,13 @@ impl HubApi for FakeHub {
     async fn org(&self, _request: OrgRequest) -> Result<OrgReply, ApiError> {
         Ok(OrgReply::Agents { agents: Vec::new() })
     }
+
+    /// Nothing waits on you here.
+    async fn decisions(&self, _request: DecisionRequest) -> Result<DecisionReply, ApiError> {
+        Ok(DecisionReply::Pending {
+            decisions: Vec::new(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -101,6 +108,10 @@ impl HubApi for DownHub {
     }
 
     async fn org(&self, _request: OrgRequest) -> Result<OrgReply, ApiError> {
+        Err(ApiError::Unreachable("connection refused".to_owned()))
+    }
+
+    async fn decisions(&self, _request: DecisionRequest) -> Result<DecisionReply, ApiError> {
         Err(ApiError::Unreachable("connection refused".to_owned()))
     }
 }

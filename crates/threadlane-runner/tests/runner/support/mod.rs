@@ -18,7 +18,8 @@ use threadlane_core::model::{BackendKind, Event, EventKind, EventStatus, LaneKin
 use threadlane_core::runtime::{Killed, Step, StepHook};
 use threadlane_core::time::{Clock, Timestamp};
 use threadlane_core::tools::{Tier, ToolDefinition};
-use threadlane_runner::{Runner, RunnerConfig, RunnerError};
+use threadlane_runner::{GitWorkspaces, Runner, RunnerConfig, RunnerError};
+use threadlane_testkit::fakes::FakeForge;
 use threadlane_testkit::{CrashPlan, FakeClock, ScriptedBackend};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -58,7 +59,10 @@ pub fn assignment(run: i64) -> RunAssignment {
         session_id: SessionId(100 + run),
         project_id: ProjectId(1),
         lane_kind: LaneKind::Lead,
+        task_id: None,
+        repositories: Vec::new(),
         events: vec![EventId(1000 + run)],
+        perform: Vec::new(),
         backend: BackendKind::Claude,
         model: Some("opus".into()),
         native_session: NativeSession::Start {
@@ -290,6 +294,8 @@ impl Harness {
         let runner = Runner::new(
             Arc::clone(&link) as Arc<_>,
             vec![Arc::new(backend.clone())],
+            Arc::new(GitWorkspaces::new(dir.path().join("workspaces"))),
+            Arc::new(FakeForge::default()),
             Arc::new(clock.clone()),
             hook,
             config.clone(),

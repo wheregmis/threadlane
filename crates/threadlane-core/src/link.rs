@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
 use crate::backend::NativeSession;
-use crate::ids::{EventId, LaneId, ProjectId, RunId, SessionId};
-use crate::model::{BackendKind, Event, JournalEntry, LaneKind, Lease, MachineReport, RunOutcome};
+use crate::ids::{DecisionId, EventId, LaneId, ProjectId, RunId, SessionId, TaskId};
+use crate::model::{
+    BackendKind, Event, JournalEntry, LaneKind, Lease, MachineReport, Repository, RunOutcome,
+};
 use crate::runtime::Killed;
 use crate::time::Timestamp;
 use crate::tools::{ToolDefinition, ToolError};
@@ -27,8 +29,19 @@ pub struct RunAssignment {
     pub session_id: SessionId,
     pub project_id: ProjectId,
     pub lane_kind: LaneKind,
+    /// The task a task lane works.
+    pub task_id: Option<TaskId>,
+    /// The task's repositories, in the order it named them: one worktree
+    /// each, the first one the working directory (Plan.md §5.5). Empty for a
+    /// lead, and for a task that names none, which works in a plain
+    /// directory.
+    pub repositories: Vec<Repository>,
     /// The events this run consumes.
     pub events: Vec<EventId>,
+    /// Decisions answered with approval among those events: the runner
+    /// performs each stored call, through [`HubLink::begin_perform`], before
+    /// the backend starts, and gives the session the outcome (Plan.md §9.4).
+    pub perform: Vec<DecisionId>,
     /// Which backend to run on; one the machine reported as usable.
     pub backend: BackendKind,
     pub model: Option<String>,
@@ -42,7 +55,8 @@ pub struct RunAssignment {
     pub tools: Vec<ToolDefinition>,
     /// Remove every built-in tool of the backend (leads and dreaming, §5.1).
     pub remove_builtin_tools: bool,
-    /// Direct commands the backend must refuse (Plan.md §9.2).
+    /// Direct commands the backend must refuse (Plan.md §9.2), as command
+    /// prefixes ([`crate::backend::DENY_RULES`]).
     pub deny_rules: Vec<String>,
     pub wall_time_limit: Duration,
     pub max_turns: Option<u32>,
@@ -55,6 +69,24 @@ pub enum Begin {
     Run(Box<RunAssignment>),
     /// Nothing runnable is pending in the lane; release the lease.
     Idle,
+}
+
+/// The hub's answer to [`HubLink::begin_perform`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Perform {
+    /// Perform this call now, exactly as given: it is the stored call, and
+    /// its arguments still hash to what you approved. `retry` means an
+    /// earlier attempt started and its outcome is unknown: check what it did
+    /// before repeating an effect that is not safe to repeat.
+    Call {
+        tool: String,
+        arguments: Json,
+        retry: bool,
+    },
+    /// Nothing to perform: the recorded outcome of an earlier attempt, or why
+    /// the call is refused. Give it to the session.
+    Recorded { outcome: Json },
 }
 
 /// Why a run did not complete, as the runner reports it.
@@ -70,11 +102,10 @@ pub enum RunFailure {
     /// session and the events are retried at once in a fresh one, without
     /// counting an attempt (§8.6).
     SessionMissing,
-    /// The account reached its usage limit. No attempt is counted (§5.3).
-    UsageLimit {
-        account_label: Option<String>,
-        resets_at: Option<Timestamp>,
-    },
+    /// The account reached its usage limit, already reported with
+    /// [`HubLink::account`]. No attempt is counted, and the events wait for
+    /// a free account rather than a backoff (§5.3).
+    UsageLimit,
 }
 
 /// Messages the hub pushes to a runner.
@@ -170,6 +201,39 @@ pub trait HubLink: Send + Sync + fmt::Debug {
         run_id: RunId,
         final_text: Option<&str>,
     ) -> Result<RunOutcome, LinkError>;
+
+    /// Reports that the account `backend` runs on reached its usage limit,
+    /// resetting at `resets_at` if the backend said (Plan.md §5.3, §5.6
+    /// `account`). `account_label` is the label the backend's probe
+    /// reported, if any. Sent before failing the run with
+    /// [`RunFailure::UsageLimit`].
+    async fn account(
+        &self,
+        lease: &Lease,
+        backend: BackendKind,
+        account_label: Option<&str>,
+        resets_at: Option<Timestamp>,
+    ) -> Result<(), LinkError>;
+
+    /// Records that the runner is about to perform the stored call of
+    /// `decision`, answered with approval in this lane, and returns it once
+    /// checked against its `arguments_hash` (invariant 7). The record makes
+    /// the call take effect at most once across runs (invariant 5).
+    async fn begin_perform(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        decision: DecisionId,
+    ) -> Result<Perform, LinkError>;
+
+    /// Records what performing the stored call of `decision` did.
+    async fn finish_perform(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        decision: DecisionId,
+        outcome: &Json,
+    ) -> Result<(), LinkError>;
 
     /// Ends a run that did not complete (Plan.md §4.9).
     async fn fail(

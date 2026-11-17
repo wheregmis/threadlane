@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value as Json, json};
@@ -11,15 +12,20 @@ use threadlane_core::backend::{
     AgentBackend, BackendError, BackendEvent, BackendRun, NativeSession, Probe, RunRequest,
     encode_backends,
 };
-use threadlane_core::ids::RunId;
-use threadlane_core::link::{Begin, HubLink, HubMessage, LinkError, RunAssignment, RunFailure};
+use threadlane_core::forge::{Forge, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::ids::{DecisionId, RunId};
+use threadlane_core::link::{
+    Begin, HubLink, HubMessage, LinkError, Perform, RunAssignment, RunFailure,
+};
 use threadlane_core::model::{BackendKind, EventKind, LaneKind, Lease, MachineReport};
+use threadlane_core::runtime::steps::perform;
 use threadlane_core::runtime::steps::runner::{
-    AFTER_BACKEND_RUN, AFTER_BACKEND_START, AFTER_CLAIM, AFTER_COMMIT, AFTER_DEBOUNCE,
-    AFTER_RECHECK, AFTER_RELEASE, AFTER_START_RUN,
+    AFTER_BACKEND_RUN, AFTER_BACKEND_START, AFTER_CHECKPOINT, AFTER_CLAIM, AFTER_COMMIT,
+    AFTER_DEBOUNCE, AFTER_PREPARE_WORKSPACE, AFTER_RECHECK, AFTER_RELEASE, AFTER_START_RUN,
 };
 use threadlane_core::runtime::{Killed, Step, StepHook};
 use threadlane_core::time::{Clock, Timestamp};
+use threadlane_core::workspace::{Workspaces, task_branch};
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, info, warn};
@@ -30,10 +36,6 @@ use crate::lane::{LaneExit, LaneState, Stop};
 use crate::mirror::{Flush, Mirror};
 use crate::tools::LaneTools;
 
-/// The failure reported for a run in a task lane until milestone 3.
-const TASK_LANES_UNSUPPORTED: &str =
-    "task lanes are not supported yet: this runner only works lead lanes (milestone 1)";
-
 /// Claims lanes from a hub and executes their runs on a backend
 /// (docs/milestone-1.md §8).
 #[derive(Debug)]
@@ -42,11 +44,15 @@ pub struct Runner {
 }
 
 impl Runner {
-    /// A runner that works lanes granted by `link` on `backends`.
+    /// A runner that works lanes granted by `link` on `backends`, with task
+    /// worktrees from `workspaces`, performing the calls you approve through
+    /// `forge`.
     #[must_use]
     pub fn new(
         link: Arc<dyn HubLink>,
         backends: Vec<Arc<dyn AgentBackend>>,
+        workspaces: Arc<dyn Workspaces>,
+        forge: Arc<dyn Forge>,
         clock: Arc<dyn Clock>,
         hook: Arc<dyn StepHook>,
         config: RunnerConfig,
@@ -55,16 +61,19 @@ impl Runner {
             inner: Arc::new(Inner {
                 link,
                 backends,
+                workspaces,
+                forge,
                 clock,
                 hook,
                 config,
                 lanes: Mutex::default(),
                 probes: Mutex::default(),
+                gh_login: AtomicBool::new(false),
             }),
         }
     }
 
-    /// Probes the backends and sends `hello`.
+    /// Probes the backends and the forge login, and sends `hello`.
     ///
     /// A backend whose probe fails is reported as unusable rather than
     /// failing the call.
@@ -79,6 +88,8 @@ impl Runner {
             probes.push((backend.kind(), probe(backend.as_ref()).await));
         }
         *self.inner.probes.lock().expect("probes lock poisoned") = probes;
+        let gh_login = self.inner.forge.logged_in().await;
+        self.inner.gh_login.store(gh_login, Ordering::Relaxed);
         let report = self.inner.report(self.inner.load());
         self.inner.link.hello(&report).await?;
         Ok(())
@@ -225,6 +236,8 @@ enum Ended {
     /// The stream closed without a terminal event.
     Closed,
     WallTime,
+    /// The agent went on working after a call of the run opened a decision.
+    Deferred,
 }
 
 /// What woke the event loop.
@@ -244,12 +257,16 @@ struct RunningLanes {
 struct Inner {
     link: Arc<dyn HubLink>,
     backends: Vec<Arc<dyn AgentBackend>>,
+    workspaces: Arc<dyn Workspaces>,
+    forge: Arc<dyn Forge>,
     clock: Arc<dyn Clock>,
     hook: Arc<dyn StepHook>,
     config: RunnerConfig,
     lanes: Mutex<RunningLanes>,
     /// What `hello` found, reused by heartbeats.
     probes: Mutex<Vec<(BackendKind, Probe)>>,
+    /// Whether `hello` found the forge logged in.
+    gh_login: AtomicBool,
 }
 
 impl Inner {
@@ -291,12 +308,14 @@ impl Inner {
         Ok(self.release(lane).await?)
     }
 
-    /// Waits the debounce window if a user message is pending (§4.8).
+    /// Waits the debounce window if a user message or a task's result is
+    /// pending (§4.8), so that messages in a row, and the results of tasks
+    /// that end close together, reach the lead in one run.
     async fn debounce(&self, lane: &LaneState) -> Result<(), LaneExit> {
         let pending = self.link.pending(&lane.lease()).await?;
         if !pending
             .iter()
-            .any(|event| event.kind == EventKind::UserMessage)
+            .any(|event| matches!(event.kind, EventKind::UserMessage | EventKind::TaskResult))
         {
             return Ok(());
         }
@@ -333,27 +352,33 @@ impl Inner {
         assignment: &RunAssignment,
     ) -> Result<AfterRun, LaneExit> {
         let run_id = assignment.run_id;
-        if assignment.lane_kind == LaneKind::Task {
-            let message = TASK_LANES_UNSUPPORTED.to_owned();
-            return self.fail(lane, run_id, RunFailure::Error { message }).await;
-        }
+        lane.set_deferred(false);
         let Some(backend) = self.backend(assignment.backend) else {
             let message = format!("backend {} is not available here", assignment.backend);
             return self.fail(lane, run_id, RunFailure::Error { message }).await;
         };
-        let working_dir = match self.working_dir(lane).await {
+        let working_dir = match self.working_dir(lane, assignment).await {
             Ok(dir) => dir,
             Err(message) => return self.fail(lane, run_id, RunFailure::Error { message }).await,
         };
+        if assignment.lane_kind == LaneKind::Task {
+            self.reach(AFTER_PREPARE_WORKSPACE)?;
+        }
         lane.check()?;
+        let performed = self.perform(lane, assignment).await?;
 
         let deadline = self.clock.now() + assignment.wall_time_limit;
-        let request = self.request(lane, assignment, working_dir);
+        let request = self.request(lane, assignment, working_dir, performed);
         let mut run = match backend.run(request).await {
             Ok(run) => run,
+            Err(BackendError::UsageLimit { resets_at }) => {
+                self.usage_limit(lane, assignment.backend, resets_at)
+                    .await?;
+                return self.fail(lane, run_id, RunFailure::UsageLimit).await;
+            }
             Err(error) => {
-                let failure = self.backend_failure(assignment.backend, error).await;
-                return self.fail(lane, run_id, failure).await;
+                let message = format!("the backend could not start the run: {error}");
+                return self.fail(lane, run_id, RunFailure::Error { message }).await;
             }
         };
         self.reach(AFTER_BACKEND_START)?;
@@ -381,15 +406,22 @@ impl Inner {
             .await?
         {
             Ended::Terminal(BackendEvent::Finished { final_text, .. }) => {
-                return self
-                    .commit(lane, assignment.run_id, final_text.as_deref())
-                    .await;
+                return self.commit(lane, assignment, final_text.as_deref()).await;
+            }
+            // The runner ends the run if the agent does not (Plan.md §9.4).
+            Ended::Deferred => {
+                stop_backend(run).await;
+                mirror
+                    .flush(self.link.as_ref(), &lane.lease(), Flush::Required)
+                    .await?;
+                return self.commit(lane, assignment, Some(STOPPED_WAITING)).await;
             }
             Ended::Terminal(BackendEvent::Failed { error }) => RunFailure::Error { message: error },
-            Ended::Terminal(BackendEvent::UsageLimit { resets_at }) => RunFailure::UsageLimit {
-                account_label: self.account_label(assignment.backend).await,
-                resets_at,
-            },
+            Ended::Terminal(BackendEvent::UsageLimit { resets_at }) => {
+                self.usage_limit(lane, assignment.backend, resets_at)
+                    .await?;
+                RunFailure::UsageLimit
+            }
             Ended::Terminal(BackendEvent::SessionMissing) => RunFailure::SessionMissing,
             Ended::Terminal(event) => RunFailure::Error {
                 message: format!("unexpected terminal backend event: {event:?}"),
@@ -408,6 +440,11 @@ impl Inner {
                 }
             }
         };
+        // Keep what the run did, even though it failed; the next run goes on
+        // from it.
+        if let Err(error) = self.checkpoint(assignment).await {
+            warn!(run = %assignment.run_id, %error, "could not commit the failed run's work");
+        }
         self.fail(lane, assignment.run_id, failure).await
     }
 
@@ -460,6 +497,9 @@ impl Inner {
             if event.is_terminal() {
                 return Ok(Ended::Terminal(event));
             }
+            if lane.deferred() && matches!(event, BackendEvent::ToolUse { .. }) {
+                return Ok(Ended::Deferred);
+            }
         }
     }
 
@@ -494,10 +534,18 @@ impl Inner {
     async fn commit(
         &self,
         lane: &LaneState,
-        run_id: RunId,
+        assignment: &RunAssignment,
         final_text: Option<&str>,
     ) -> Result<AfterRun, LaneExit> {
+        let run_id = assignment.run_id;
         self.reach(AFTER_BACKEND_RUN)?;
+        if assignment.lane_kind == LaneKind::Task {
+            if let Err(error) = self.checkpoint(assignment).await {
+                let message = format!("could not commit the run's work: {error}");
+                return self.fail(lane, run_id, RunFailure::Error { message }).await;
+            }
+            self.reach(AFTER_CHECKPOINT)?;
+        }
         let outcome = self
             .link
             .complete(&lane.lease(), run_id, final_text)
@@ -541,11 +589,124 @@ impl Inner {
         }
     }
 
+    /// Performs the stored calls you approved, before the backend starts
+    /// (Plan.md §9.4), and returns what to tell the session about them. The
+    /// hub records the intent before and the outcome after, so a call takes
+    /// effect at most once whatever is interrupted.
+    async fn perform(
+        &self,
+        lane: &LaneState,
+        assignment: &RunAssignment,
+    ) -> Result<String, LaneExit> {
+        let mut told = String::new();
+        for &decision in &assignment.perform {
+            let begin = self
+                .link
+                .begin_perform(&lane.lease(), assignment.run_id, decision)
+                .await?;
+            let outcome = match begin {
+                Perform::Recorded { outcome } => outcome,
+                Perform::Call {
+                    tool,
+                    arguments,
+                    retry,
+                } => {
+                    let outcome = match self.call_forge(assignment, &tool, &arguments, retry).await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => json!({ "performed": false, "error": error }),
+                    };
+                    self.reach(perform::AFTER_EFFECT)?;
+                    self.link
+                        .finish_perform(&lane.lease(), assignment.run_id, decision, &outcome)
+                        .await?;
+                    outcome
+                }
+            };
+            told.push_str(&describe(decision, &outcome));
+        }
+        Ok(told)
+    }
+
+    /// Makes the effect of one stored call, in the task's worktree of the
+    /// repository it names, on the task's own branch. After an interrupted
+    /// attempt (`retry`) a pull request already opened is found, not opened
+    /// again.
+    async fn call_forge(
+        &self,
+        assignment: &RunAssignment,
+        tool: &str,
+        arguments: &Json,
+        retry: bool,
+    ) -> Result<Json, String> {
+        let task = assignment
+            .task_id
+            .ok_or("only a task's calls are performed")?;
+        let name = arguments
+            .get("repository")
+            .and_then(Json::as_str)
+            .ok_or("the call names no repository")?;
+        let index = assignment
+            .repositories
+            .iter()
+            .position(|repository| repository.name == name)
+            .ok_or_else(|| format!("{name:?} is not one of the task's repositories"))?;
+        let worktrees = self
+            .workspaces
+            .prepare(task, &assignment.repositories)
+            .await
+            .map_err(|error| error.to_string())?;
+        let worktree = worktrees.get(index).ok_or("no worktree was set up")?;
+        let branch = task_branch(task);
+        let mut outcome = json!({ "performed": true, "repository": name, "branch": branch });
+        match tool {
+            PUBLISH_BRANCH => self
+                .forge
+                .push(worktree, &branch)
+                .await
+                .map_err(|error| error.to_string())?,
+            OPEN_PULL_REQUEST => {
+                let text = |field: &str| {
+                    arguments
+                        .get(field)
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                };
+                let found = if retry {
+                    self.forge
+                        .find_pull_request(worktree, &branch)
+                        .await
+                        .map_err(|error| error.to_string())?
+                } else {
+                    None
+                };
+                let url = match found {
+                    Some(url) => url,
+                    None => self
+                        .forge
+                        .open_draft_pull_request(
+                            worktree,
+                            &branch,
+                            &assignment.repositories[index].default_branch,
+                            text("title").trim(),
+                            text("body"),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?,
+                };
+                outcome["pull_request"] = json!(url);
+            }
+            other => return Err(format!("the runner does not perform {other}")),
+        }
+        Ok(outcome)
+    }
+
     fn request(
         &self,
         lane: &Arc<LaneState>,
         assignment: &RunAssignment,
         working_dir: PathBuf,
+        performed: String,
     ) -> RunRequest {
         let tools = LaneTools::new(
             Arc::clone(&self.link),
@@ -555,7 +716,7 @@ impl Inner {
         );
         RunRequest {
             working_dir,
-            prompt: assignment.prompt.clone(),
+            prompt: format!("{}{performed}", assignment.prompt),
             appended_instructions: assignment.appended_instructions.clone(),
             model: assignment.model.clone(),
             session: assignment.native_session.clone(),
@@ -567,8 +728,64 @@ impl Inner {
         }
     }
 
-    /// `<lanes_dir>/<lane id>`, created if missing.
-    async fn working_dir(&self, lane: &LaneState) -> Result<PathBuf, String> {
+    /// Commits what a task run left uncommitted in its worktrees, on the
+    /// task branch. Nothing to do for a lead, or a task without
+    /// repositories.
+    async fn checkpoint(&self, assignment: &RunAssignment) -> Result<(), String> {
+        let Some(task) = assignment.task_id else {
+            return Ok(());
+        };
+        let message = format!("Threadlane: work of {task}, run {}", assignment.run_id);
+        self.workspaces
+            .checkpoint(task, &assignment.repositories, &message)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Reports the usage limit to the hub, which cools the account down.
+    /// Only a kill or a lost lease stops the run from being failed after.
+    async fn usage_limit(
+        &self,
+        lane: &LaneState,
+        backend: BackendKind,
+        resets_at: Option<Timestamp>,
+    ) -> Result<(), LaneExit> {
+        let label = self.account_label(backend).await;
+        match self
+            .link
+            .account(&lane.lease(), backend, label.as_deref(), resets_at)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error @ (LinkError::Killed(_) | LinkError::StaleLease { .. })) => Err(error.into()),
+            Err(error) => {
+                warn!(%error, "could not report the usage limit");
+                Ok(())
+            }
+        }
+    }
+
+    /// The task's worktree of its first repository, set up if needed, for a
+    /// task that names repositories; otherwise `<lanes_dir>/<lane id>`,
+    /// created if missing.
+    async fn working_dir(
+        &self,
+        lane: &LaneState,
+        assignment: &RunAssignment,
+    ) -> Result<PathBuf, String> {
+        if let Some(task) = assignment.task_id
+            && !assignment.repositories.is_empty()
+        {
+            let paths = self
+                .workspaces
+                .prepare(task, &assignment.repositories)
+                .await
+                .map_err(|error| format!("could not set up the task's worktrees: {error}"))?;
+            return paths
+                .into_iter()
+                .next()
+                .ok_or_else(|| "no worktree was set up".to_owned());
+        }
         let dir = self.config.lanes_dir.join(lane.lease().lane_id.to_string());
         tokio::fs::create_dir_all(&dir).await.map_err(|error| {
             format!(
@@ -581,18 +798,6 @@ impl Inner {
 
     fn backend(&self, kind: BackendKind) -> Option<&Arc<dyn AgentBackend>> {
         self.backends.iter().find(|backend| backend.kind() == kind)
-    }
-
-    async fn backend_failure(&self, kind: BackendKind, error: BackendError) -> RunFailure {
-        match error {
-            BackendError::UsageLimit { resets_at } => RunFailure::UsageLimit {
-                account_label: self.account_label(kind).await,
-                resets_at,
-            },
-            other => RunFailure::Error {
-                message: format!("the backend could not start the run: {other}"),
-            },
-        }
     }
 
     /// The account the backend runs on: from `hello`'s probe, or probed now.
@@ -643,7 +848,7 @@ impl Inner {
         MachineReport {
             capabilities: capabilities(self.config.max_parallel),
             backends: encode_backends(&probes),
-            gh_login: false,
+            gh_login: self.gh_login.load(Ordering::Relaxed),
             load,
         }
     }
@@ -747,6 +952,36 @@ async fn probe(backend: &dyn AgentBackend) -> Probe {
             }
         }
     }
+}
+
+/// The rationale of a run stopped for going on after it asked you.
+const STOPPED_WAITING: &str =
+    "Stopped by the runner: the run went on working after a call of it waited on the user.";
+
+/// What the session is told about a stored call the system performed.
+fn describe(decision: DecisionId, outcome: &Json) -> String {
+    let text = |field: &str| {
+        outcome
+            .get(field)
+            .and_then(Json::as_str)
+            .unwrap_or_default()
+    };
+    if outcome.get("performed") != Some(&Json::Bool(true)) {
+        return format!(
+            "\nOutcome of {decision}: not performed. {}\n",
+            text("error")
+        );
+    }
+    let mut told = format!(
+        "\nOutcome of {decision}: the system performed it for you. Branch {} of {} is pushed.",
+        text("branch"),
+        text("repository")
+    );
+    if let Some(url) = outcome.get("pull_request").and_then(Json::as_str) {
+        told.push_str(&format!(" The draft pull request is {url}."));
+    }
+    told.push('\n');
+    told
 }
 
 async fn stop_backend(run: &mut dyn BackendRun) {

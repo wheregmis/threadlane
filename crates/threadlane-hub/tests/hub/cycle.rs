@@ -7,7 +7,9 @@ use threadlane_core::model::{
 };
 use threadlane_core::store::{InboxStore, SessionStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{SEND_MESSAGE, SKIP_REASON};
+use threadlane_hub::{
+    CANCEL_TASK, CREATE_TASK, LIST_TASKS, SEND_MESSAGE, SKIP_REASON, UPDATE_TASK,
+};
 
 use crate::common::{RATIONALE, Reply, TestHub, begin, play};
 
@@ -33,7 +35,13 @@ async fn a_message_produces_one_sent_reply_in_the_feed() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec![SEND_MESSAGE]
+        vec![
+            SEND_MESSAGE,
+            CREATE_TASK,
+            UPDATE_TASK,
+            CANCEL_TASK,
+            LIST_TASKS
+        ]
     );
     assert_eq!(assignment.max_turns, Some(40));
 

@@ -13,7 +13,10 @@ use threadlane_core::model::{
 use threadlane_core::runtime::steps::{placement, runner};
 use threadlane_core::store::{OrgStore, SessionStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{HubSettings, LEAD_NAME, LEAD_ROLE, OFF_REASON, SEND_MESSAGE};
+use threadlane_hub::{
+    CANCEL_TASK, CREATE_TASK, HubSettings, LEAD_NAME, LEAD_ROLE, LIST_TASKS, OFF_REASON,
+    SEND_MESSAGE, UPDATE_TASK,
+};
 use threadlane_testkit::{CrashPlan, Script, SessionOutcome};
 
 use crate::harness::{RATIONALE, REPLY, Sim, World, count, reply_script, reply_with, until};
@@ -58,7 +61,17 @@ async fn a_message_produces_exactly_one_reply() {
     assert!(matches!(run.session, NativeSession::Start { .. }));
     assert_eq!(run.session_outcome, SessionOutcome::Created);
     assert!(run.prompt.contains("Are you there?"), "{}", run.prompt);
-    assert_eq!(run.tools, [SEND_MESSAGE]);
+    assert_eq!(
+        run.tools,
+        [
+            SEND_MESSAGE,
+            CREATE_TASK,
+            UPDATE_TASK,
+            CANCEL_TASK,
+            LIST_TASKS
+        ],
+        "a lead gets the lead's tools only"
+    );
     assert!(run.remove_builtin_tools, "a lead has no built-in tools");
     assert_eq!(run.model, None, "no model configured anywhere");
     let lane = sim.general_lane().await;

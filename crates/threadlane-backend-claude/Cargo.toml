@@ -18,6 +18,7 @@ tokio = { workspace = true, features = ["process", "io-util", "sync", "rt", "tim
 tracing.workspace = true
 
 [dev-dependencies]
+threadlane-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid.workspace = true
 

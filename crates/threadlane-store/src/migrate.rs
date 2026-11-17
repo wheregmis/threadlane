@@ -6,7 +6,10 @@ use crate::db::{Db, db_err, query_one};
 use crate::row::Cols;
 
 /// Every migration, in order. Index `i` brings the schema to version `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_initial.sql")];
+pub(crate) const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_initial.sql"),
+    include_str!("../migrations/0002_decision_outcome.sql"),
+];
 
 /// The schema version this build expects.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

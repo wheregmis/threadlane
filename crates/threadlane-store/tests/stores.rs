@@ -4,11 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use threadlane_core::ids::{DecisionId, EventId, LaneId, MachineId, RunId};
+use threadlane_core::ids::{
+    AgentId, DecisionId, EventId, LaneId, MachineId, OutboxId, RunId, TaskId,
+};
 use threadlane_core::model::*;
 use threadlane_core::store::*;
 use threadlane_core::time::{Clock, SystemClock, Timestamp};
-use threadlane_store::{Bootstrap, HubDb, SYSTEM_SOURCE};
+use threadlane_store::{Bootstrap, HubDb, TASK_SOURCE};
 
 const T0: Timestamp = Timestamp::from_millis(1_767_225_600_000);
 const LEASE_TTL: Duration = Duration::from_secs(60);
@@ -765,17 +767,31 @@ async fn timers_fire_each_occurrence_once() {
     assert!(hub.due_timers(tomorrow).await.unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn tasks_get_a_lane_and_a_start_event() {
-    let hub = hub().await;
-    let general = hub.general_project().await.unwrap();
-    let engineer = hub
-        .create_agent(&NewAgent::named("Engineer", "engineer"))
+/// An agent bound to `project` that may run `max_parallel` tasks at once there.
+async fn engineer(hub: &HubDb, project: &Project, max_parallel: u32) -> AgentId {
+    let agent = hub
+        .create_agent(&NewAgent::named(
+            format!("Engineer {} {max_parallel}", project.id),
+            "engineer",
+        ))
         .await
         .unwrap();
-    let new_task = |title: &str, call: &str, depends_on| NewTask {
-        project_id: general.id,
-        agent_id: engineer.id,
+    hub.bind(&NewBinding {
+        project_id: project.id,
+        agent_id: agent.id,
+        mode: Mode::OnRequest,
+        is_lead: false,
+        max_parallel,
+    })
+    .await
+    .unwrap();
+    agent.id
+}
+
+fn new_task(project: &Project, agent: AgentId, title: &str, depends_on: Vec<TaskId>) -> NewTask {
+    NewTask {
+        project_id: project.id,
+        agent_id: agent,
         title: title.into(),
         goal: "done when tests pass".into(),
         repositories: Vec::new(),
@@ -784,39 +800,596 @@ async fn tasks_get_a_lane_and_a_start_event() {
         origin: TaskOrigin::User,
         status: TaskStatus::Queued,
         priority: 0,
-        created_by_call: Some(call.into()),
+        created_by_call: Some(format!("call-{}-{title}", project.id)),
         created_at: T0,
-    };
+    }
+}
+
+async fn task(hub: &HubDb, id: TaskId) -> Task {
+    hub.task(id).await.unwrap().unwrap()
+}
+
+/// The `task_result` events waiting in the project's lead lane.
+async fn task_results(hub: &HubDb, project: &Project) -> Vec<Event> {
+    hub.pending_events(project.lead_lane_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::TaskResult)
+        .collect()
+}
+
+#[tokio::test]
+async fn tasks_get_a_lane_and_a_start_event_once_per_creating_call() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
     let first = hub
-        .create_task(&new_task("first", "c1", vec![]))
+        .create_task(None, &new_task(&general, agent, "first", vec![]))
         .await
         .unwrap();
     assert_eq!(first.id.to_string(), "T-0001");
+    assert_eq!(first.status, TaskStatus::Queued);
     let again = hub
-        .create_task(&new_task("ignored", "c1", vec![]))
+        .create_task(
+            None,
+            &NewTask {
+                title: "ignored".into(),
+                ..new_task(&general, agent, "first", vec![])
+            },
+        )
         .await
         .unwrap();
     assert_eq!(again, first, "creation is idempotent per call");
     let second = hub
-        .create_task(&new_task("second", "c2", vec![first.id]))
+        .create_task(None, &new_task(&general, agent, "second", vec![first.id]))
         .await
         .unwrap();
     assert_eq!(second.depends_on, vec![first.id]);
+    assert_eq!(
+        hub.tasks(general.id).await.unwrap(),
+        vec![first.clone(), second]
+    );
 
     let lane = hub.lane(first.lane_id).await.unwrap().unwrap();
     assert_eq!(lane.kind, LaneKind::Task);
     assert_eq!(lane.task_id, Some(first.id));
     let start = hub.pending_events(first.lane_id).await.unwrap();
-    assert_eq!(start.len(), 1);
+    assert_eq!(
+        start.len(),
+        1,
+        "one start event, however often it was created"
+    );
     assert_eq!(start[0].kind, EventKind::TaskStart);
-    assert!(start[0].requested);
+    assert_eq!(start[0].source, TASK_SOURCE);
+    assert_eq!(
+        start[0].source_event_id,
+        format!("start:{}", first.id.get())
+    );
+    assert!(start[0].requested, "a task you asked for is requested work");
 
-    hub.set_task_status(first.id, TaskStatus::Running, None)
+    let unasked = hub
+        .create_task(
+            None,
+            &NewTask {
+                origin: TaskOrigin::Agent,
+                ..new_task(&general, agent, "unasked", vec![])
+            },
+        )
         .await
         .unwrap();
-    let tasks = hub.tasks(general.id).await.unwrap();
-    assert_eq!(tasks.len(), 2);
-    assert_eq!(tasks[0].status, TaskStatus::Running);
+    assert!(!hub.pending_events(unasked.lane_id).await.unwrap()[0].requested);
+
+    let proposed = hub
+        .create_task(
+            None,
+            &NewTask {
+                status: TaskStatus::Proposed,
+                ..new_task(&general, agent, "proposed", vec![])
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        hub.pending_events(proposed.lane_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    hub.set_task_status(proposed.id, TaskStatus::Queued, None)
+        .await
+        .unwrap();
+    assert_eq!(hub.pending_events(proposed.lane_id).await.unwrap().len(), 1);
+
+    let other = hub
+        .create_project(&NewProject {
+            name: "Other".into(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    for bad in [
+        new_task(&other, agent, "across", vec![first.id]),
+        NewTask {
+            parent_task_id: Some(first.id),
+            ..new_task(&other, agent, "child", vec![])
+        },
+        new_task(&general, agent, "dangling", vec![TaskId(99)]),
+    ] {
+        let refused = hub.create_task(None, &bad).await;
+        assert!(
+            matches!(refused, Err(StoreError::Invalid(_))),
+            "{refused:?}"
+        );
+    }
+    assert!(hub.tasks(other.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_task_status_changes_only_along_its_lifecycle() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 0).await;
+    // How to bring a fresh queued task to each status.
+    let path = |status: TaskStatus| -> Vec<TaskStatus> {
+        use TaskStatus::*;
+        match status {
+            Proposed | Queued => vec![],
+            Running => vec![Running],
+            WaitingOnYou | Sleeping | Done | Failed => vec![Running, status],
+            Cancelled => vec![Cancelled],
+        }
+    };
+    let mut ended = Vec::new();
+    for (n, &from) in TaskStatus::ALL.iter().enumerate() {
+        for (m, &to) in TaskStatus::ALL.iter().enumerate() {
+            let created = hub
+                .create_task(
+                    None,
+                    &NewTask {
+                        status: if from == TaskStatus::Proposed {
+                            from
+                        } else {
+                            TaskStatus::Queued
+                        },
+                        ..new_task(&general, agent, &format!("{n}-{m}"), vec![])
+                    },
+                )
+                .await
+                .unwrap();
+            for step in path(from) {
+                hub.set_task_status(created.id, step, None).await.unwrap();
+            }
+            assert_eq!(task(&hub, created.id).await.status, from);
+            let moved = hub.set_task_status(created.id, to, Some("because")).await;
+            if from.can_become(to) {
+                assert_eq!(moved, Ok(()), "{from} to {to}");
+                assert_eq!(task(&hub, created.id).await.status, to);
+            } else {
+                assert!(
+                    matches!(moved, Err(StoreError::Conflict(_))),
+                    "{from} to {to}: {moved:?}"
+                );
+                assert_eq!(task(&hub, created.id).await.status, from, "{from} to {to}");
+            }
+            if task(&hub, created.id).await.status.is_terminal() {
+                ended.push(created.id);
+            }
+        }
+    }
+    let mut reported: Vec<TaskId> = task_results(&hub, &general)
+        .await
+        .iter()
+        .map(|event| serde_json::from_value(event.payload["task_id"].clone()).unwrap())
+        .collect();
+    reported.sort();
+    ended.sort();
+    assert_eq!(reported, ended, "every task that ended was reported once");
+}
+
+#[tokio::test]
+async fn the_run_cycle_takes_a_task_from_queued_to_done_and_reports_it_once() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let a = machine(&hub, "a").await;
+    let created = hub
+        .create_task(None, &new_task(&general, agent, "fix", vec![]))
+        .await
+        .unwrap();
+
+    let (lease, run) = run_pending(&hub, created.lane_id, a, T0).await;
+    let running = task(&hub, created.id).await;
+    assert_eq!(running.status, TaskStatus::Running);
+    assert_eq!(running.last_machine_id, Some(a));
+
+    let result = json!({ "summary": "fixed" });
+    let finished = hub.finish_task(&lease, &result).await.unwrap();
+    assert_eq!(finished.result, Some(result.clone()));
+    assert_eq!(
+        finished.status,
+        TaskStatus::Running,
+        "done only when the run commits"
+    );
+    hub.finish_task(&lease, &result).await.unwrap();
+    assert!(task_results(&hub, &general).await.is_empty());
+
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+        .await
+        .unwrap();
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Done);
+    let results = task_results(&hub, &general).await;
+    assert_eq!(results.len(), 1);
+    let event = &results[0];
+    assert_eq!(event.source, TASK_SOURCE);
+    assert_eq!(
+        event.source_event_id,
+        format!("result:{}", created.id.get())
+    );
+    assert_eq!(event.trust, Trust::System);
+    assert!(event.requested);
+    assert_eq!(event.payload["task"], "T-0001");
+    assert_eq!(event.payload["status"], "done");
+    assert_eq!(event.payload["result"], result);
+
+    let late = hub.finish_task(&lease, &result).await;
+    assert!(matches!(late, Err(StoreError::Conflict(_))), "{late:?}");
+    hub.release_lease(&lease).await.unwrap();
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Done);
+}
+
+#[tokio::test]
+async fn a_run_that_does_not_finish_leaves_the_task_sleeping_until_an_event_arrives() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let a = machine(&hub, "a").await;
+    let created = hub
+        .create_task(None, &new_task(&general, agent, "wait", vec![]))
+        .await
+        .unwrap();
+    let event_for = |id: &str| NewEvent {
+        lane_id: created.lane_id,
+        ..message(&general, id)
+    };
+
+    let (lease, run) = run_pending(&hub, created.lane_id, a, T0).await;
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+        .await
+        .unwrap();
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Sleeping);
+    hub.release_lease(&lease).await.unwrap();
+    hub.insert_event(&event_for("wake")).await.unwrap();
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Queued);
+
+    // An event that arrives during the run queues the task at commit.
+    let (lease, run) = run_pending(&hub, created.lane_id, a, T0).await;
+    hub.insert_event(&event_for("meanwhile")).await.unwrap();
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Running);
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+        .await
+        .unwrap();
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Queued);
+    assert!(task_results(&hub, &general).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_run_queues_the_task_again_and_dead_events_fail_it_once() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let a = machine(&hub, "a").await;
+    let created = hub
+        .create_task(None, &new_task(&general, agent, "flaky", vec![]))
+        .await
+        .unwrap();
+
+    let (lease, run) = run_pending(&hub, created.lane_id, a, T0).await;
+    let failed = hub
+        .fail_run(&lease, run.id, "boom", retry(true, 2), T0)
+        .await
+        .unwrap();
+    assert_eq!(failed.retried.len(), 1);
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Queued);
+    hub.release_lease(&lease).await.unwrap();
+
+    let later = T0 + Duration::from_secs(60);
+    let (lease, run) = run_pending(&hub, created.lane_id, a, later).await;
+    let failed = hub
+        .fail_run(&lease, run.id, "boom again", retry(true, 2), later)
+        .await
+        .unwrap();
+    assert_eq!(failed.dead.len(), 1);
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Failed);
+    let told = hub.pending_events(general.lead_lane_id).await.unwrap();
+    assert_eq!(told.len(), 1, "only the task's result: {told:?}");
+    assert_eq!(told[0].kind, EventKind::TaskResult);
+    assert_eq!(told[0].payload["status"], "failed");
+    assert_eq!(told[0].payload["error"], "boom again");
+    assert!(told[0].requested);
+    assert!(
+        notices(&hub).await.is_empty(),
+        "the lead can still tell you"
+    );
+
+    let again = hub
+        .fail_run(&lease, run.id, "boom again", retry(true, 2), later)
+        .await;
+    assert!(matches!(again, Err(StoreError::Conflict(_))), "{again:?}");
+    assert_eq!(
+        hub.pending_events(general.lead_lane_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_lost_lease_queues_a_running_task_again() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let a = machine(&hub, "a").await;
+    let created = hub
+        .create_task(None, &new_task(&general, agent, "lost", vec![]))
+        .await
+        .unwrap();
+    run_pending(&hub, created.lane_id, a, T0).await;
+    hub.expire_leases(T0 + LEASE_TTL).await.unwrap();
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Queued);
+    assert_eq!(hub.pending_events(created.lane_id).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let a = machine(&hub, "a").await;
+    let created = hub
+        .create_task(None, &new_task(&general, agent, "drop", vec![]))
+        .await
+        .unwrap();
+    let lead = hub
+        .grant_lease(general.lead_lane_id, a, T0, LEASE_TTL)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let updated = hub
+        .update_task(&lead, created.id, Some("drop it"), None, Some(3))
+        .await
+        .unwrap();
+    assert_eq!(updated.title, "drop it");
+    assert_eq!(updated.goal, created.goal, "an absent field is kept");
+    assert_eq!(updated.priority, 3);
+
+    let cancelled = hub.cancel_task(Some(&lead), created.id, T0).await.unwrap();
+    assert_eq!(cancelled.status, TaskStatus::Cancelled);
+    assert_eq!(
+        hub.cancel_task(Some(&lead), created.id, T0).await.unwrap(),
+        cancelled,
+        "cancelling again changes nothing"
+    );
+    let results = task_results(&hub, &general).await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].payload["status"], "cancelled");
+
+    let changed = hub
+        .update_task(&lead, created.id, Some("again"), None, None)
+        .await;
+    assert!(
+        matches!(changed, Err(StoreError::Conflict(_))),
+        "{changed:?}"
+    );
+
+    let other = hub
+        .create_project(&NewProject {
+            name: "Other".into(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    let foreign = hub
+        .grant_lease(other.lead_lane_id, a, T0, LEASE_TTL)
+        .await
+        .unwrap()
+        .unwrap();
+    let fresh = hub
+        .create_task(None, &new_task(&general, agent, "keep", vec![]))
+        .await
+        .unwrap();
+    let across = hub.cancel_task(Some(&foreign), fresh.id, T0).await;
+    assert!(matches!(across, Err(StoreError::Invalid(_))), "{across:?}");
+
+    hub.release_lease(&lead).await.unwrap();
+    let stale = hub.cancel_task(Some(&lead), fresh.id, T0).await;
+    assert!(
+        matches!(stale, Err(StoreError::StaleLease { .. })),
+        "{stale:?}"
+    );
+    let stale = hub
+        .update_task(&lead, fresh.id, Some("x"), None, None)
+        .await;
+    assert!(
+        matches!(stale, Err(StoreError::StaleLease { .. })),
+        "{stale:?}"
+    );
+    let stale = hub
+        .create_task(Some(&lead), &new_task(&general, agent, "late", vec![]))
+        .await;
+    assert!(
+        matches!(stale, Err(StoreError::StaleLease { .. })),
+        "{stale:?}"
+    );
+    assert_eq!(task(&hub, fresh.id).await.status, TaskStatus::Queued);
+    assert_eq!(hub.tasks(general.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn only_a_running_task_s_own_lane_finishes_it_under_its_current_lease() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let a = machine(&hub, "a").await;
+    let created = hub
+        .create_task(None, &new_task(&general, agent, "own", vec![]))
+        .await
+        .unwrap();
+    let lead = hub
+        .grant_lease(general.lead_lane_id, a, T0, LEASE_TTL)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = json!({ "summary": "x" });
+    let not_a_task = hub.finish_task(&lead, &result).await;
+    assert!(
+        matches!(not_a_task, Err(StoreError::Invalid(_))),
+        "{not_a_task:?}"
+    );
+
+    let (lease, _) = run_pending(&hub, created.lane_id, a, T0).await;
+    hub.expire_leases(T0 + LEASE_TTL).await.unwrap();
+    let stale = hub.finish_task(&lease, &result).await;
+    assert!(
+        matches!(stale, Err(StoreError::StaleLease { .. })),
+        "{stale:?}"
+    );
+    assert_eq!(task(&hub, created.id).await.result, None);
+}
+
+#[tokio::test]
+async fn a_task_lane_is_granted_only_when_its_task_is_eligible() {
+    let hub = hub().await;
+    let a = machine(&hub, "a").await;
+    let grant = |lane: LaneId| hub.grant_lease(lane, a, T0, LEASE_TTL);
+
+    // A project limit of two, and an agent without a limit of its own.
+    let limited = hub
+        .create_project(&NewProject {
+            name: "Limited".into(),
+            max_parallel_tasks: 2,
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    let agent = engineer(&hub, &limited, 0).await;
+    let mut ids = Vec::new();
+    for title in ["a", "b", "c"] {
+        ids.push(
+            hub.create_task(None, &new_task(&limited, agent, title, vec![]))
+                .await
+                .unwrap(),
+        );
+    }
+    let dependent = hub
+        .create_task(None, &new_task(&limited, agent, "d", vec![ids[0].id]))
+        .await
+        .unwrap();
+    let [first, second, third] = [&ids[0], &ids[1], &ids[2]];
+
+    let lease = grant(first.lane_id).await.unwrap().expect("granted");
+    assert!(grant(second.lane_id).await.unwrap().is_some());
+    assert_eq!(grant(third.lane_id).await.unwrap(), None);
+    assert_eq!(
+        task(&hub, third.id).await.waiting_reason.as_deref(),
+        Some("the project already runs its limit of 2 tasks at once")
+    );
+    assert_eq!(grant(dependent.lane_id).await.unwrap(), None);
+    assert_eq!(
+        task(&hub, dependent.id).await.waiting_reason.as_deref(),
+        Some("waiting for T-0001 to be done")
+    );
+    let ready = hub.ready_lanes(T0).await.unwrap();
+    assert!(ready.contains(&third.lane_id) && ready.contains(&dependent.lane_id));
+
+    // The first task finishes: its slot goes to the third.
+    let events = hub
+        .pending_events(first.lane_id)
+        .await
+        .unwrap()
+        .iter()
+        .map(|event| event.id)
+        .collect();
+    let run = hub.start_run(&lease, &new_run(events, T0)).await.unwrap();
+    hub.finish_task(&lease, &json!({ "summary": "a" }))
+        .await
+        .unwrap();
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+        .await
+        .unwrap();
+    hub.release_lease(&lease).await.unwrap();
+    assert!(grant(third.lane_id).await.unwrap().is_some());
+    assert_eq!(
+        task(&hub, third.id).await.waiting_reason,
+        None,
+        "cleared on grant"
+    );
+    assert_eq!(grant(dependent.lane_id).await.unwrap(), None);
+    assert_eq!(
+        task(&hub, dependent.id).await.waiting_reason.as_deref(),
+        Some("the project already runs its limit of 2 tasks at once"),
+        "its dependency is done; now it waits for a slot"
+    );
+
+    // No project limit (0), and an agent limit of one.
+    let unlimited = hub
+        .create_project(&NewProject {
+            name: "Unlimited".into(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(unlimited.max_parallel_tasks, 0);
+    let single = engineer(&hub, &unlimited, 1).await;
+    let one = hub
+        .create_task(None, &new_task(&unlimited, single, "one", vec![]))
+        .await
+        .unwrap();
+    let two = hub
+        .create_task(None, &new_task(&unlimited, single, "two", vec![]))
+        .await
+        .unwrap();
+    assert!(grant(one.lane_id).await.unwrap().is_some());
+    assert_eq!(grant(two.lane_id).await.unwrap(), None);
+    assert_eq!(
+        task(&hub, two.id).await.waiting_reason.as_deref(),
+        Some("its agent already runs its limit of 1 tasks at once in this project")
+    );
+    let free = engineer(&hub, &unlimited, 0).await;
+    let three = hub
+        .create_task(None, &new_task(&unlimited, free, "three", vec![]))
+        .await
+        .unwrap();
+    assert!(
+        grant(three.lane_id).await.unwrap().is_some(),
+        "another agent's limit"
+    );
+
+    // A paused project's tasks wait and say so.
+    let paused = hub
+        .create_project(&NewProject {
+            name: "Paused".into(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    let idle = engineer(&hub, &paused, 0).await;
+    let held = hub
+        .create_task(None, &new_task(&paused, idle, "held", vec![]))
+        .await
+        .unwrap();
+    hub.set_project_paused(paused.id, true).await.unwrap();
+    assert!(hub.ready_lanes(T0).await.unwrap().contains(&held.lane_id));
+    assert_eq!(grant(held.lane_id).await.unwrap(), None);
+    assert_eq!(
+        task(&hub, held.id).await.waiting_reason.as_deref(),
+        Some("the project is paused")
+    );
+    // A task that ended is granted anyway, so its events can be skipped.
+    hub.cancel_task(None, held.id, T0).await.unwrap();
+    assert!(grant(held.lane_id).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -908,34 +1481,37 @@ async fn decisions_are_answered_once_and_wake_their_lane() {
     let hub = hub().await;
     let general = hub.general_project().await.unwrap();
     let decision = hub
-        .open_decision(&NewDecision {
-            project_id: general.id,
-            lane_id: general.lead_lane_id,
-            task_id: None,
-            session_id: None,
-            run_id: None,
-            tool_call_id: Some("call-3".into()),
-            tool: "open_pull_request".into(),
-            arguments: json!({ "repository": "payments-service" }),
-            arguments_hash: "sha256:abc".into(),
-            kind: DecisionKind::Approval,
-            question: "Open a draft pull request?".into(),
-            context: String::new(),
-            options: vec![
-                DecisionOption {
-                    label: "Open draft".into(),
-                    effect: json!({ "approve": true }),
-                },
-                DecisionOption {
-                    label: "Not now".into(),
-                    effect: json!({ "approve": false }),
-                },
-            ],
-            recommended: Some(0),
-            offers_standing_rule: true,
-            expires_at: None,
-            created_at: T0,
-        })
+        .open_decision(
+            None,
+            &NewDecision {
+                project_id: general.id,
+                lane_id: general.lead_lane_id,
+                task_id: None,
+                session_id: None,
+                run_id: None,
+                tool_call_id: Some("call-3".into()),
+                tool: "open_pull_request".into(),
+                arguments: json!({ "repository": "payments-service" }),
+                arguments_hash: "sha256:abc".into(),
+                kind: DecisionKind::Approval,
+                question: "Open a draft pull request?".into(),
+                context: String::new(),
+                options: vec![
+                    DecisionOption {
+                        label: "Open draft".into(),
+                        effect: json!({ "approve": true }),
+                    },
+                    DecisionOption {
+                        label: "Not now".into(),
+                        effect: json!({ "approve": false }),
+                    },
+                ],
+                recommended: Some(0),
+                offers_standing_rule: true,
+                expires_at: None,
+                created_at: T0,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(decision.id, DecisionId(1));
@@ -970,6 +1546,54 @@ async fn decisions_are_answered_once_and_wake_their_lane() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn opening_a_decision_queues_one_card_and_a_repeat_opens_nothing() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let new = NewDecision {
+        project_id: general.id,
+        lane_id: general.lead_lane_id,
+        task_id: None,
+        session_id: None,
+        run_id: Some(RunId(9)),
+        tool_call_id: Some("call-1".into()),
+        tool: "publish_branch".into(),
+        arguments: json!({ "repository": "app" }),
+        arguments_hash: "publish_branch:abc".into(),
+        kind: DecisionKind::Approval,
+        question: "Push branch threadlane/T-0001 of app?".into(),
+        context: String::new(),
+        options: vec![
+            DecisionOption {
+                label: "approve".into(),
+                effect: json!({ "approve": true }),
+            },
+            DecisionOption {
+                label: "decline".into(),
+                effect: json!({ "approve": false }),
+            },
+        ],
+        recommended: Some(0),
+        offers_standing_rule: false,
+        expires_at: None,
+        created_at: T0,
+    };
+    let first = hub.open_decision(None, &new).await.unwrap();
+    let again = hub.open_decision(None, &new).await.unwrap();
+    assert_eq!(first, again);
+    assert_eq!(hub.open_decisions().await.unwrap(), vec![first.clone()]);
+    let card = hub.message(OutboxId(1)).await.unwrap().unwrap();
+    assert_eq!(card.kind, OutboxKind::Decision);
+    assert_eq!(card.decision_id, Some(first.id));
+    assert_eq!(card.urgency, Urgency::High);
+    assert_eq!(card.body["recommended"], json!("approve"));
+    assert!(
+        hub.message(OutboxId(2)).await.unwrap().is_none(),
+        "one card"
+    );
+    assert_eq!(first.outcome, None);
 }
 
 #[tokio::test]
@@ -1201,76 +1825,6 @@ async fn dead_events_in_a_lead_lane_queue_one_system_notice() {
 }
 
 #[tokio::test]
-async fn dead_events_in_a_task_lane_tell_the_lead_lane_once() {
-    let hub = hub().await;
-    let general = hub.general_project().await.unwrap();
-    let a = machine(&hub, "a").await;
-    let engineer = hub
-        .create_agent(&NewAgent::named("Engineer", "engineer"))
-        .await
-        .unwrap();
-    let task = hub
-        .create_task(&NewTask {
-            project_id: general.id,
-            agent_id: engineer.id,
-            title: "fix the build".into(),
-            goal: "tests pass".into(),
-            repositories: Vec::new(),
-            parent_task_id: None,
-            depends_on: Vec::new(),
-            origin: TaskOrigin::User,
-            status: TaskStatus::Queued,
-            priority: 0,
-            created_by_call: None,
-            created_at: T0,
-        })
-        .await
-        .unwrap();
-    let (lease, run) = run_pending(&hub, task.lane_id, a, T0).await;
-    let failed = hub
-        .fail_run(&lease, run.id, "boom", retry(true, 1), T0)
-        .await
-        .unwrap();
-    assert_eq!(failed.dead.len(), 1);
-
-    let told = hub.pending_events(general.lead_lane_id).await.unwrap();
-    assert_eq!(told.len(), 1, "{told:?}");
-    let event = &told[0];
-    assert_eq!(event.source, SYSTEM_SOURCE);
-    assert_eq!(event.source_event_id, format!("dead:{}", run.id));
-    assert_eq!(event.kind, EventKind::System);
-    assert_eq!(event.trust, Trust::System);
-    assert!(event.requested);
-    assert_eq!(event.project_id, general.id);
-    assert_eq!(
-        event.payload,
-        json!({
-            "kind": "events_dead",
-            "lane_id": task.lane_id,
-            "run_id": run.id,
-            "event_ids": failed.dead,
-            "error": "boom",
-        })
-    );
-    assert!(
-        notices(&hub).await.is_empty(),
-        "the lead can still tell you"
-    );
-
-    let again = hub
-        .fail_run(&lease, run.id, "boom", retry(true, 1), T0)
-        .await;
-    assert!(matches!(again, Err(StoreError::Conflict(_))), "{again:?}");
-    assert_eq!(
-        hub.pending_events(general.lead_lane_id)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[tokio::test]
 async fn the_journal_appends_in_order_once_and_only_under_the_lease() {
     let hub = hub().await;
     let general = hub.general_project().await.unwrap();
@@ -1493,4 +2047,232 @@ async fn a_repeated_send_is_handed_to_the_run_that_commits() {
     assert_eq!(kept.id, first.id);
     assert_eq!(kept.run_id, Some(retried.id));
     assert_eq!(hub.count_for_run(third.id).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_failed_task_cancels_what_waits_for_it_transitively_with_one_result_each() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let a = machine(&hub, "a").await;
+    let schema = hub
+        .create_task(None, &new_task(&general, agent, "schema", vec![]))
+        .await
+        .unwrap();
+    let migration = hub
+        .create_task(
+            None,
+            &new_task(&general, agent, "migration", vec![schema.id]),
+        )
+        .await
+        .unwrap();
+    let rollout = hub
+        .create_task(
+            None,
+            &new_task(&general, agent, "rollout", vec![migration.id]),
+        )
+        .await
+        .unwrap();
+    let unrelated = hub
+        .create_task(None, &new_task(&general, agent, "docs", vec![]))
+        .await
+        .unwrap();
+
+    let (lease, run) = run_pending(&hub, schema.lane_id, a, T0).await;
+    hub.fail_run(&lease, run.id, "boom", retry(true, 1), T0)
+        .await
+        .unwrap();
+    assert_eq!(task(&hub, schema.id).await.status, TaskStatus::Failed);
+    assert_eq!(task(&hub, migration.id).await.status, TaskStatus::Cancelled);
+    assert_eq!(task(&hub, rollout.id).await.status, TaskStatus::Cancelled);
+    assert_eq!(task(&hub, unrelated.id).await.status, TaskStatus::Queued);
+    let results = task_results(&hub, &general).await;
+    let told: Vec<_> = results
+        .iter()
+        .map(|event| {
+            (
+                event.payload["task"].as_str().unwrap().to_owned(),
+                event.payload["status"].as_str().unwrap().to_owned(),
+                event.payload["reason"].as_str().map(str::to_owned),
+            )
+        })
+        .collect();
+    assert_eq!(
+        told,
+        [
+            ("T-0001".to_owned(), "failed".to_owned(), None),
+            (
+                "T-0002".to_owned(),
+                "cancelled".to_owned(),
+                Some("T-0001, which it depended on, failed".to_owned())
+            ),
+            (
+                "T-0003".to_owned(),
+                "cancelled".to_owned(),
+                Some("T-0002, which it depended on, was cancelled".to_owned())
+            ),
+        ]
+    );
+
+    // A task created after its dependency failed never waits.
+    let late = hub
+        .create_task(None, &new_task(&general, agent, "late", vec![schema.id]))
+        .await
+        .unwrap();
+    assert_eq!(late.status, TaskStatus::Cancelled);
+    assert!(hub.pending_events(late.lane_id).await.unwrap().is_empty());
+    assert_eq!(task_results(&hub, &general).await.len(), 4);
+}
+
+/// Reports a machine with Claude logged in on account `label`.
+async fn report_claude(hub: &HubDb, id: MachineId, label: &str) {
+    let report = MachineReport {
+        capabilities: json!({}),
+        backends: json!({ "claude": {
+            "installed": true, "version": "2.1", "logged_in": true, "account_label": label
+        } }),
+        gh_login: false,
+        load: 0,
+    };
+    hub.report(id, &report, T0).await.unwrap();
+}
+
+#[tokio::test]
+async fn no_lane_is_granted_while_every_account_its_agent_can_use_cools_down() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let lead = hub
+        .create_agent(&NewAgent::named("Lead", "lead"))
+        .await
+        .unwrap();
+    hub.bind(&NewBinding {
+        project_id: general.id,
+        agent_id: lead.id,
+        mode: Mode::OnRequest,
+        is_lead: true,
+        max_parallel: 1,
+    })
+    .await
+    .unwrap();
+    let a = machine(&hub, "a").await;
+    report_claude(&hub, a, "claude-work").await;
+    let created = hub
+        .create_task(None, &new_task(&general, agent, "page", vec![]))
+        .await
+        .unwrap();
+    hub.insert_event(&message(&general, "m-1")).await.unwrap();
+
+    // The lead lane runs into the limit and reports it under its lease.
+    let (lease, run) = run_pending(&hub, general.lead_lane_id, a, T0).await;
+    let until = T0 + Duration::from_secs(3600);
+    let cooled = hub
+        .cool_down(&lease, "claude-work", BackendKind::Claude, until)
+        .await
+        .unwrap();
+    assert_eq!(cooled.cooldown_until, Some(until));
+    let earlier = hub
+        .cool_down(&lease, "claude-work", BackendKind::Claude, T0)
+        .await
+        .unwrap();
+    assert_eq!(earlier.cooldown_until, Some(until), "never shortened");
+    hub.fail_run(&lease, run.id, "usage limit", retry(false, 5), T0)
+        .await
+        .unwrap();
+    hub.release_lease(&lease).await.unwrap();
+    let stale = hub
+        .cool_down(&lease, "claude-work", BackendKind::Claude, until)
+        .await;
+    assert!(
+        matches!(stale, Err(StoreError::StaleLease { .. })),
+        "{stale:?}"
+    );
+
+    let now = T0 + Duration::from_secs(60);
+    assert_eq!(
+        hub.grant_lease(created.lane_id, a, now, LEASE_TTL)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        task(&hub, created.id).await.waiting_reason.as_deref(),
+        Some(threadlane_store::BLOCKED_REASON)
+    );
+    assert_eq!(task(&hub, created.id).await.status, TaskStatus::Queued);
+    assert_eq!(
+        hub.grant_lease(general.lead_lane_id, a, now, LEASE_TTL)
+            .await
+            .unwrap(),
+        None,
+        "the lead too"
+    );
+
+    // Another machine on another account may take it.
+    let b = machine(&hub, "b").await;
+    report_claude(&hub, b, "claude-home").await;
+    let lease = hub
+        .grant_lease(created.lane_id, b, now, LEASE_TTL)
+        .await
+        .unwrap()
+        .expect("a free account");
+    assert_eq!(task(&hub, created.id).await.waiting_reason, None);
+    hub.release_lease(&lease).await.unwrap();
+
+    // And the first one may once the limit resets.
+    assert!(
+        hub.grant_lease(general.lead_lane_id, a, until, LEASE_TTL)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn the_account_notices_are_queued_once_per_change() {
+    let hub = hub().await;
+    let blocked = json!({ "text": "blocked" });
+    let resumed = json!({ "text": "resumed" });
+    assert!(
+        hub.account_notice(false, &resumed, T0)
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing to resume from"
+    );
+    let first = hub.account_notice(true, &blocked, T0).await.unwrap();
+    assert_eq!(
+        first.as_ref().map(|m| m.kind),
+        Some(OutboxKind::SystemNotice)
+    );
+    assert!(
+        hub.account_notice(true, &blocked, T0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        hub.account_notice(false, &resumed, T0)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        hub.account_notice(false, &resumed, T0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        hub.account_notice(true, &blocked, T0)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let texts: Vec<_> = notices(&hub)
+        .await
+        .iter()
+        .map(|m| m.body["text"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(texts, ["blocked", "resumed", "blocked"]);
 }

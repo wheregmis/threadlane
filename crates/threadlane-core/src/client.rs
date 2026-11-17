@@ -3,7 +3,8 @@
 //! [`HubApi`] describes one space and has no notion of any other. The hub
 //! implements it; a transport carries it to clients as [`ClientRequest`] and
 //! [`ClientResponse`]. Later milestones add capabilities; so far: who am I
-//! talking to, send a message, follow the feed, and the organization.
+//! talking to, send a message, follow the feed, the organization, and
+//! decisions.
 
 use std::fmt;
 use std::time::Duration;
@@ -11,8 +12,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{EventId, ProjectId};
-use crate::model::{Agent, Mode, OutboxMessage};
+use crate::ids::{DecisionId, EventId, ProjectId};
+use crate::model::{Agent, Decision, Mode, OutboxMessage, Repository};
 use crate::time::Timestamp;
 
 /// What a hub says about itself.
@@ -73,13 +74,25 @@ pub struct BindingSummary {
     pub is_lead: bool,
 }
 
-/// The Organization capability (Plan.md §11.2): projects, agents, bindings.
+/// The Organization capability (Plan.md §11.2): projects, repositories,
+/// agents, bindings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OrgRequest {
     /// Creates a project with its lead lane and lead binding.
     CreateProject { name: String, description: String },
+    /// Registers a repository in a project. `None` means the General
+    /// project, and a default branch of `main`. A remote already registered
+    /// in this space is refused.
+    AddRepository {
+        project: Option<String>,
+        name: String,
+        remote_url: String,
+        default_branch: Option<String>,
+    },
+    /// The repositories of a project. `None` means the General project.
+    Repositories { project: Option<String> },
     /// Every agent in the space.
     Agents,
     CreateAgent {
@@ -104,10 +117,46 @@ pub enum OrgRequest {
 #[non_exhaustive]
 pub enum OrgReply {
     Project { project: ProjectSummary },
+    Repository { repository: Repository },
+    Repositories { repositories: Vec<Repository> },
     Agents { agents: Vec<Agent> },
     Agent { agent: Agent },
     Bindings { bindings: Vec<BindingSummary> },
     Binding { binding: BindingSummary },
+}
+
+/// The Decisions capability (Plan.md §9.4, §11.2): what waits on you, and
+/// your answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DecisionRequest {
+    /// Every decision in the space still waiting on you, oldest first.
+    Pending,
+    /// Answers a decision with one of its options, by label (any case).
+    /// Answering is idempotent: a decision already answered keeps its
+    /// first answer.
+    Answer {
+        decision: DecisionId,
+        option: String,
+        note: Option<String>,
+    },
+}
+
+/// The answer to a [`DecisionRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DecisionReply {
+    Pending {
+        decisions: Vec<Decision>,
+    },
+    /// The decision as it now stands. `recorded` is `false` when it had
+    /// been answered before and this answer was ignored.
+    Answered {
+        decision: Box<Decision>,
+        recorded: bool,
+    },
 }
 
 /// Why a client request failed.
@@ -140,6 +189,8 @@ pub trait HubApi: Send + Sync + fmt::Debug {
     async fn feed(&self, after: i64, wait: Duration) -> Result<Vec<FeedItem>, ApiError>;
     /// Reads or changes the space's projects, agents, and bindings.
     async fn org(&self, request: OrgRequest) -> Result<OrgReply, ApiError>;
+    /// Lists or answers the decisions waiting on you.
+    async fn decisions(&self, request: DecisionRequest) -> Result<DecisionReply, ApiError>;
 }
 
 /// [`HubApi`] as it crosses a transport.
@@ -152,6 +203,7 @@ pub enum ClientRequest {
     SendMessage { message: UserMessage },
     Feed { after: i64, wait_ms: u64 },
     Org { request: OrgRequest },
+    Decisions { request: DecisionRequest },
 }
 
 /// The answer to a [`ClientRequest`].
@@ -164,6 +216,7 @@ pub enum ClientResponse {
     Accepted { accepted: Accepted },
     Feed { items: Vec<FeedItem> },
     Org { reply: OrgReply },
+    Decisions { reply: DecisionReply },
     Error { error: ApiError },
 }
 
@@ -187,6 +240,10 @@ pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientRespons
             .org(request)
             .await
             .map(|reply| ClientResponse::Org { reply }),
+        ClientRequest::Decisions { request } => api
+            .decisions(request)
+            .await
+            .map(|reply| ClientResponse::Decisions { reply }),
     };
     result.unwrap_or_else(|error| ClientResponse::Error { error })
 }

@@ -6,9 +6,10 @@ use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
-use threadlane_core::ids::{LaneId, RunId, SessionId};
-use threadlane_core::link::{Begin, HubLink, HubMessage, LinkError, RunFailure};
-use threadlane_core::model::{Event, JournalEntry, Lease, MachineReport, RunOutcome};
+use threadlane_core::ids::{DecisionId, LaneId, RunId, SessionId};
+use threadlane_core::link::{Begin, HubLink, HubMessage, LinkError, Perform, RunFailure};
+use threadlane_core::model::{BackendKind, Event, JournalEntry, Lease, MachineReport, RunOutcome};
+use threadlane_core::time::Timestamp;
 use threadlane_core::tools::ToolError;
 use tokio::sync::mpsc;
 
@@ -43,6 +44,11 @@ pub enum Call {
     Complete {
         run: RunId,
         final_text: Option<String>,
+    },
+    Account {
+        backend: BackendKind,
+        label: Option<String>,
+        resets_at: Option<Timestamp>,
     },
     Fail {
         run: RunId,
@@ -267,6 +273,41 @@ impl HubLink for FakeLink {
             final_text: final_text.map(str::to_owned),
         });
         state.complete.pop_front().unwrap_or(Ok(RunOutcome::Silent))
+    }
+
+    async fn account(
+        &self,
+        _lease: &Lease,
+        backend: BackendKind,
+        account_label: Option<&str>,
+        resets_at: Option<Timestamp>,
+    ) -> Result<(), LinkError> {
+        self.record(Call::Account {
+            backend,
+            label: account_label.map(str::to_owned),
+            resets_at,
+        });
+        Ok(())
+    }
+
+    /// No assignment here asks to perform anything.
+    async fn begin_perform(
+        &self,
+        _lease: &Lease,
+        _run_id: RunId,
+        decision: DecisionId,
+    ) -> Result<Perform, LinkError> {
+        Err(LinkError::Rejected(format!("{decision} was not scripted")))
+    }
+
+    async fn finish_perform(
+        &self,
+        _lease: &Lease,
+        _run_id: RunId,
+        decision: DecisionId,
+        _outcome: &Json,
+    ) -> Result<(), LinkError> {
+        Err(LinkError::Rejected(format!("{decision} was not scripted")))
     }
 
     async fn fail(

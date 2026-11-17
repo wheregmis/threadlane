@@ -9,11 +9,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
-use threadlane_core::ids::{RunId, SessionId};
-use threadlane_core::link::{Begin, HubLink, HubMessage, LinkError, RunFailure};
+use threadlane_core::ids::{DecisionId, RunId, SessionId};
+use threadlane_core::link::{Begin, HubLink, HubMessage, LinkError, Perform, RunFailure};
 use threadlane_core::model::{
-    Event, EventStatus, JournalEntry, Lease, MachineReport, OutboxKind, RunOutcome, RunStatus,
+    BackendKind, Event, EventStatus, JournalEntry, Lease, MachineReport, OutboxKind, RunOutcome,
+    RunStatus,
 };
+use threadlane_core::time::Timestamp;
 use threadlane_core::tools::ToolError;
 use threadlane_hub::HubCore;
 use threadlane_testkit::FakeClock;
@@ -135,6 +137,27 @@ impl HubLink for StaleBefore {
         self.inner.complete(lease, run_id, final_text).await
     }
 
+    async fn begin_perform(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        decision: DecisionId,
+    ) -> Result<Perform, LinkError> {
+        self.inner.begin_perform(lease, run_id, decision).await
+    }
+
+    async fn finish_perform(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        decision: DecisionId,
+        outcome: &Json,
+    ) -> Result<(), LinkError> {
+        self.inner
+            .finish_perform(lease, run_id, decision, outcome)
+            .await
+    }
+
     async fn fail(
         &self,
         lease: &Lease,
@@ -142,6 +165,18 @@ impl HubLink for StaleBefore {
         failure: &RunFailure,
     ) -> Result<(), LinkError> {
         self.inner.fail(lease, run_id, failure).await
+    }
+
+    async fn account(
+        &self,
+        lease: &Lease,
+        backend: BackendKind,
+        account_label: Option<&str>,
+        resets_at: Option<Timestamp>,
+    ) -> Result<(), LinkError> {
+        self.inner
+            .account(lease, backend, account_label, resets_at)
+            .await
     }
 
     async fn release(&self, lease: &Lease) -> Result<(), LinkError> {
