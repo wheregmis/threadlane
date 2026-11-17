@@ -274,10 +274,10 @@ impl Desktop {
                     "Name the space, then give the hub's data directory if it runs on this \
                      computer, or a join code from `threadlane pair-code` on a computer already paired.",
                 )
+                .child(div().w(px(240.)).child(Input::new(&self.space_name)))
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(div().w(px(180.)).child(Input::new(&self.space_name)))
                         .child(div().flex_1().child(Input::new(&self.hub_dir)))
                         .child(
                             Button::new("pair-directory")
@@ -286,8 +286,17 @@ impl Desktop {
                                 .on_click(cx.listener(|this, _, _, cx| this.pair_directory(cx))),
                         ),
                 )
-                .child(div().text_sm().text_color(muted).child("Or with a join code:"))
-                .child(self.join_form(cx)),
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(&self.join_code)))
+                        .child(
+                            Button::new("pair-code")
+                                .primary()
+                                .label("Pair by join code")
+                                .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
+                        ),
+                ),
             )
             .into_any_element()
     }

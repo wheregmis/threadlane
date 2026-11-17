@@ -22,13 +22,14 @@ impl When {
         format!("{:02}:{:02}", minutes / 60, minutes % 60)
     }
 
-    /// `Today`, `Yesterday`, or the local date as `2026-11-17`.
+    /// `Today`, `Yesterday`, `Tomorrow`, or the local date as `2026-11-17`.
     #[must_use]
     pub fn day(&self, at: Timestamp) -> String {
         let day = self.local_day(at);
         match self.local_day(self.now) - day {
             0 => "Today".to_owned(),
             1 => "Yesterday".to_owned(),
+            -1 => "Tomorrow".to_owned(),
             _ => {
                 let (year, month, day) = civil_from_days(day);
                 format!("{year:04}-{month:02}-{day:02}")
@@ -109,6 +110,7 @@ mod tests {
         assert_eq!(utc.day(now - hour * 24), "Yesterday");
         assert_eq!(utc.day(now - hour * 48), "2026-11-15");
         assert_eq!(utc.moment(now - hour * 24), "Yesterday 23:30");
+        assert_eq!(utc.moment(now + hour * 24), "Tomorrow 23:30");
         // An hour east, it is already tomorrow there.
         let east = When {
             now,

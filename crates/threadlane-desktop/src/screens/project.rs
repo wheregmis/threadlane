@@ -31,7 +31,9 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (in_space, named) = (space.to_owned(), project.to_owned());
-        let bar = TabBar::new("project-tabs")
+        // Keyed by the tab shown, so the bar's sliding indicator starts fresh
+        // under it instead of carrying a half-finished slide from another tab.
+        let bar = TabBar::new(SharedString::from(format!("project-tabs-{}", tab.label())))
             .underline()
             .selected_index(tab.index())
             .on_click(cx.listener(move |this, index: &usize, _, cx| {
