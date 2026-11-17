@@ -23,7 +23,6 @@ use uuid::Uuid;
 use crate::accounts::cooling;
 use crate::context::{PromptParts, appended_instructions, loaded_memory, render_prompt};
 use crate::error::link_error;
-use crate::gate::may_start_unrequested;
 use crate::link::LocalLink;
 use crate::tools::offered_in;
 
@@ -69,26 +68,23 @@ impl LocalLink {
         // requested work whatever arrives in its lane (docs/milestone-3.md
         // §1 item 2).
         let (agent, binding, task) = self.lane_agent(&lane).await?;
-        let (off, may_start) = match &binding {
+        let mode = match &binding {
             Some(binding) => {
                 let ceiling = db
                     .effective_ceiling(lane.project_id)
                     .await
                     .map_err(link_error)?;
-                (
-                    binding.mode.stricter(ceiling) == Mode::Off,
-                    may_start_unrequested(binding.mode, ceiling),
-                )
+                binding.mode.stricter(ceiling)
             }
-            None => (true, false),
+            None => Mode::Off,
         };
         let requested = task.as_ref().is_some_and(|task| task.origin.is_requested())
             || pending.iter().any(|event| event.requested);
         let skip = if task.as_ref().is_some_and(|task| task.status.is_terminal()) {
             Some(ENDED_REASON)
-        } else if off {
+        } else if mode == Mode::Off {
             Some(OFF_REASON)
-        } else if !requested && !may_start {
+        } else if !requested && !crate::gate::may_start_unrequested(mode) {
             Some(SKIP_REASON)
         } else {
             None
@@ -105,6 +101,49 @@ impl LocalLink {
 
         // 3. Session routing, grouping, isolation.
         let (session, events) = self.choose_batch(&lane, pending, now).await?;
+
+        let mut retained = Vec::with_capacity(events.len());
+        let mut tainted = false;
+        for event in events {
+            if event.trust == threadlane_core::model::Trust::External {
+                let answer = self
+                    .core
+                    .permission_question(
+                        lease,
+                        &format!("event:{}", event.id.get()),
+                        crate::review::Question::Screen,
+                        &crate::review::event_data(&event),
+                    )
+                    .await
+                    .map_err(link_error)?;
+                match answer["verdict"].as_str() {
+                    Some("drop") => {
+                        db.skip_events(
+                            lease,
+                            &[event.id],
+                            answer["reason"].as_str().unwrap_or("Dropped by screening"),
+                        )
+                        .await
+                        .map_err(link_error)?;
+                        continue;
+                    }
+                    Some("clean") => {}
+                    _ => tainted = true,
+                }
+            }
+            retained.push(event);
+        }
+        let events = retained;
+        let requested = task.as_ref().is_some_and(|t| t.origin.is_requested())
+            || events.iter().any(|e| e.requested);
+        let initiative = if tainted { mode.stepped_down() } else { mode };
+        if events.is_empty() || (!requested && !crate::gate::may_start_unrequested(initiative)) {
+            let ids: Vec<_> = events.iter().map(|e| e.id).collect();
+            db.skip_events(lease, &ids, SKIP_REASON)
+                .await
+                .map_err(link_error)?;
+            return Ok(Begin::Idle);
+        }
 
         // 4. Backend.
         let backend = self.choose_backend(&agent).await?;

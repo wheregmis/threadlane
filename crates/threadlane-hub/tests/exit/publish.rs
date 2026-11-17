@@ -144,6 +144,7 @@ pub async fn assert_published(sim: &Sim, scenario: &str) {
     assert_eq!(opened.len(), 1, "{scenario}: exactly one pull request");
     for call in forge.calls() {
         match call {
+            ForgeCall::Apply { .. } => panic!("unexpected repository action"),
             ForgeCall::Open {
                 branch,
                 base,
@@ -313,71 +314,77 @@ async fn a_declined_call_is_not_performed_and_the_session_resumes_with_your_note
 
 #[tokio::test]
 async fn a_stored_call_that_no_longer_matches_its_hash_performs_nothing() {
-    // The task agent ends its first run without asking anything.
-    let world = publish_world(World::new().await, Script::new().finish("Working on it.")).await;
-    let sim = world.boot(CrashPlan::new()).await;
-    sim.send("m-1", "Put the page up").await;
-    live(&sim).await.unwrap();
-    let task = sim.task("T-0001").await;
-    assert_eq!(task.status, TaskStatus::Sleeping);
-    let session = sim
-        .db()
-        .latest_open_session(task.lane_id)
-        .await
-        .unwrap()
-        .unwrap();
+    for (tool, arguments) in [(OPEN_PULL_REQUEST, pull_request())]
+        .into_iter()
+        .chain(super::review::actions())
+    {
+        // The task agent ends its first run without asking anything.
+        let world = publish_world(World::new().await, Script::new().finish("Working on it.")).await;
+        let sim = world.boot(CrashPlan::new()).await;
+        sim.send("m-1", "Put the page up").await;
+        live(&sim).await.unwrap();
+        let task = sim.task("T-0001").await;
+        assert_eq!(task.status, TaskStatus::Sleeping);
+        let session = sim
+            .db()
+            .latest_open_session(task.lane_id)
+            .await
+            .unwrap()
+            .unwrap();
 
-    // A stored call whose arguments are not the ones its hash binds, as if
-    // they had been changed after it was asked.
-    let option = |label: &str, approve: bool| DecisionOption {
-        label: label.to_owned(),
-        effect: json!({ "approve": approve }),
-    };
-    sim.db()
-        .open_decision(
-            None,
-            &NewDecision {
-                project_id: task.project_id,
-                lane_id: task.lane_id,
-                task_id: Some(task.id),
-                session_id: Some(session.id),
-                run_id: None,
-                tool_call_id: None,
-                tool: OPEN_PULL_REQUEST.to_owned(),
-                arguments: json!({ "repository": "app", "title": "Something else" }),
-                arguments_hash: derived_call_key(OPEN_PULL_REQUEST, &pull_request()),
-                kind: DecisionKind::Approval,
-                question: "Open a draft pull request?".to_owned(),
-                context: String::new(),
-                options: vec![option("approve", true), option("decline", false)],
-                recommended: Some(0),
-                offers_standing_rule: false,
-                expires_at: None,
-                created_at: sim.clock().now(),
-            },
-        )
-        .await
-        .unwrap();
-    drive(&sim, "approve", None).await.unwrap();
+        // A stored call whose arguments are not the ones its hash binds, as if
+        // they had been changed after it was asked.
+        let option = |label: &str, approve: bool| DecisionOption {
+            label: label.to_owned(),
+            effect: json!({ "approve": approve }),
+        };
+        sim.db()
+            .open_decision(
+                None,
+                &NewDecision {
+                    project_id: task.project_id,
+                    lane_id: task.lane_id,
+                    task_id: Some(task.id),
+                    session_id: Some(session.id),
+                    run_id: None,
+                    tool_call_id: None,
+                    tool: tool.to_owned(),
+                    arguments: arguments.clone(),
+                    arguments_hash: derived_call_key(tool, &json!({"repository":"different"})),
+                    kind: DecisionKind::Approval,
+                    question: "Open a draft pull request?".to_owned(),
+                    context: String::new(),
+                    options: vec![option("approve", true), option("decline", false)],
+                    recommended: Some(0),
+                    offers_standing_rule: false,
+                    expires_at: None,
+                    created_at: sim.clock().now(),
+                },
+            )
+            .await
+            .unwrap();
+        drive(&sim, "approve", None).await.unwrap();
 
-    assert_invariants(&sim, "tampered").await;
-    assert_quiet(&sim, "tampered").await;
-    assert!(
-        sim.world.forge.calls().is_empty(),
-        "invariant 7: nothing was performed"
-    );
-    let decision = &sim.decisions().await[0];
-    assert!(decision.approved());
-    assert_eq!(
-        decision.outcome.as_ref().unwrap()["performed"],
-        json!(false)
-    );
-    let resumed = task_prompts(&sim).pop().unwrap();
-    assert!(
-        resumed.contains("Outcome of D-0001: not performed") && resumed.contains("no longer match"),
-        "the session is told why: {resumed}"
-    );
-    assert_eq!(sim.task("T-0001").await.status, TaskStatus::Done);
+        assert_invariants(&sim, "tampered").await;
+        assert_quiet(&sim, "tampered").await;
+        assert!(
+            sim.world.forge.calls().is_empty(),
+            "invariant 7: nothing was performed"
+        );
+        let decision = &sim.decisions().await[0];
+        assert!(decision.approved());
+        assert_eq!(
+            decision.outcome.as_ref().unwrap()["performed"],
+            json!(false)
+        );
+        let resumed = task_prompts(&sim).pop().unwrap();
+        assert!(
+            resumed.contains("Outcome of D-0001: not performed")
+                && resumed.contains("no longer match"),
+            "the session is told why: {resumed}"
+        );
+        assert_eq!(sim.task("T-0001").await.status, TaskStatus::Done);
+    }
 }
 
 #[tokio::test]

@@ -69,15 +69,11 @@ fn cell(row: Row, mode: Mode) -> Cell {
 }
 
 /// Whether a lane may start a run on events that are not work you requested
-/// (Plan.md §2.3, the initiative row), for an agent of `mode` in a project
-/// under `ceiling`: On request records them and starts nothing; Assisted
+/// (Plan.md §2.3, the initiative row), for an agent of effective `mode`: On request records them and starts nothing; Assisted
 /// and Autonomous start. Off starts nothing at all, and is decided first.
-// shortcut: not stepped down for taint, and neither is a proposal in the
-// gate: until screening (stage C) can find external content clean, every
-// external event taints its run, and those are the events this row is for.
 #[must_use]
-pub fn may_start_unrequested(mode: Mode, ceiling: Mode) -> bool {
-    mode.stricter(ceiling) >= Mode::Assisted
+pub fn may_start_unrequested(mode: Mode) -> bool {
+    mode >= Mode::Assisted
 }
 
 /// The pattern a standing rule made from this call stores: its target
@@ -164,14 +160,9 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
     } else {
         Row::Tier(input.tier)
     };
-    // Two agents, stricter wins; the lead's mode is not stepped down here
-    // (see `may_start_unrequested`).
-    let row_mode = input.new_work.map_or(mode, |assignee| {
-        input
-            .mode
-            .stricter(ceiling)
-            .stricter(assignee.stricter(ceiling))
-    });
+    let row_mode = input
+        .new_work
+        .map_or(mode, |assignee| mode.stricter(assignee));
     let mut verdict = cell(row, row_mode);
     if let Some(&set) = input.overrides.get(&input.tier) {
         verdict = match row {
@@ -492,7 +483,7 @@ mod tests {
             ),
             proposal(case("an off assignee blocks", T1, AU, Block), Mode::Off),
             tainted(proposal(
-                case("taint does not step a task down", T1, AU, Allow),
+                case("tainted autonomous lead proposes", T1, AU, Ask),
                 AU,
             )),
             Case {
@@ -588,7 +579,7 @@ mod tests {
             (AS, Mode::Off, false),
         ] {
             assert_eq!(
-                may_start_unrequested(mode, ceiling),
+                may_start_unrequested(mode.stricter(ceiling)),
                 starts,
                 "{mode} under {ceiling}"
             );

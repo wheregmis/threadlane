@@ -37,6 +37,8 @@ pub(crate) struct Inner {
     /// How clients reach this hub over iroh, for join codes; `None` while
     /// the hub does not serve iroh.
     pub(crate) iroh: Option<EndpointAddr>,
+    /// The local drivers for permission questions, in preference order.
+    pub(crate) backends: Vec<Arc<dyn threadlane_core::backend::AgentBackend>>,
     /// Where the GitHub poller reads; `None` runs no poller.
     pub(crate) github: Option<Arc<dyn GithubSource>>,
 }
@@ -83,6 +85,7 @@ impl HubCore {
                 channels: vec![Arc::new(ClientChannel)],
                 iroh: None,
                 github: None,
+                backends: Vec::new(),
             }),
         })
     }
@@ -112,6 +115,15 @@ impl HubCore {
     #[must_use]
     pub fn with_github(self, source: Arc<dyn GithubSource>) -> Self {
         self.map_inner(|inner| inner.github = Some(source))
+    }
+
+    /// Attaches the hub machine's backends for screening and permission review.
+    #[must_use]
+    pub fn with_backends(
+        self,
+        backends: Vec<Arc<dyn threadlane_core::backend::AgentBackend>>,
+    ) -> Self {
+        self.map_inner(|inner| inner.backends = backends)
     }
 
     fn map_inner(self, change: impl FnOnce(&mut Inner)) -> Self {

@@ -207,10 +207,62 @@ impl AgentBackend for ClaudeBackend {
         }
     }
 
-    async fn ask(&self, _request: AskRequest) -> Result<Json, BackendError> {
-        Err(BackendError::Failed(
-            "ask is not implemented for the Claude backend yet".to_owned(),
-        ))
+    async fn ask(&self, request: AskRequest) -> Result<Json, BackendError> {
+        let dir = tempfile::tempdir().map_err(|e| BackendError::Failed(e.to_string()))?;
+        let mut command = self.command();
+        command
+            .current_dir(dir.path())
+            .env("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
+            .args([
+                "-p",
+                "--output-format",
+                "json",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--no-session-persistence",
+                "--setting-sources",
+                "",
+                "--json-schema",
+            ])
+            .arg(request.answer_schema.to_string());
+        if let Some(model) = request.model {
+            command.arg("--model").arg(model);
+        }
+        command.arg("--").arg(request.question);
+        let output = tokio::time::timeout(request.timeout, command.output())
+            .await
+            .map_err(|_| BackendError::Timeout)?
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    BackendError::NotInstalled
+                } else {
+                    BackendError::Failed(e.to_string())
+                }
+            })?;
+        let result: Json = serde_json::from_slice(&output.stdout)
+            .map_err(|e| BackendError::Failed(format!("invalid Claude result: {e}")))?;
+        if result["type"] != "result" {
+            return Err(BackendError::Failed("missing Claude result".into()));
+        }
+        match stream::StreamParser::new(false).result(
+            result
+                .as_object()
+                .ok_or_else(|| BackendError::Failed("invalid result".into()))?,
+        ) {
+            threadlane_core::backend::BackendEvent::UsageLimit { resets_at } => {
+                Err(BackendError::UsageLimit { resets_at })
+            }
+            threadlane_core::backend::BackendEvent::Finished { .. } if output.status.success() => {
+                result
+                    .get("structured_output")
+                    .cloned()
+                    .ok_or_else(|| BackendError::Failed("missing structured answer".into()))
+            }
+            _ => Err(BackendError::Failed(
+                "Claude could not answer the question".into(),
+            )),
+        }
     }
 }
 

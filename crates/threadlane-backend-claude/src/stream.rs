@@ -195,7 +195,7 @@ impl StreamParser {
         self.rate_limited = Some(resets_at);
     }
 
-    fn result(&self, message: &Map<String, Json>) -> BackendEvent {
+    pub(crate) fn result(&self, message: &Map<String, Json>) -> BackendEvent {
         let subtype = message
             .get("subtype")
             .and_then(Json::as_str)

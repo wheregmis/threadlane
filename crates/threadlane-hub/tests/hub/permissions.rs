@@ -276,8 +276,8 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
     let fake = FakeTools::new();
     fake.register(
         ToolDefinition {
-            name: "merge".into(),
-            description: "Merge a pull request.".into(),
+            name: "release".into(),
+            description: "Publish a release.".into(),
             input_schema: json!({ "type": "object" }),
             tier: Tier::SharedHardToUndo,
             safe_to_repeat: false,
@@ -297,7 +297,7 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
 
     // On request, in a project that allows Autonomous: asked, with a rule.
     assert_eq!(
-        call(&hub, &lease, &run, "c-1", "merge", &merge).await,
+        call(&hub, &lease, &run, "c-1", "release", &merge).await,
         Err(ToolError::WaitingOnYou)
     );
     assert!(decision(&hub, 1).await.offers_standing_rule);
@@ -314,7 +314,7 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
     assert_eq!(rules(&hub).await[0].rule.tier, Tier::SharedHardToUndo);
 
     // Still asked On request and Assisted; in Autonomous it is reviewed,
-    // which is asked until the classifier exists.
+    // which falls back to a card when no reviewer is available.
     for (n, mode) in [Mode::OnRequest, Mode::Assisted, Mode::Autonomous]
         .into_iter()
         .enumerate()
@@ -329,7 +329,7 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
             .unwrap();
         let id = format!("c-{}", n + 2);
         assert_eq!(
-            call(&hub, &lease, &run, &id, "merge", &merge).await,
+            call(&hub, &lease, &run, &id, "release", &merge).await,
             Err(ToolError::WaitingOnYou),
             "{mode}"
         );

@@ -87,6 +87,9 @@ async fn a_failing_build_is_recorded_proposed_or_tasked_by_mode() {
         let sim = world.boot(CrashPlan::new()).await;
         // After boot, which makes the lead's binding.
         both_at(&world, mode).await;
+        world.backend.push_answer(Ok(
+            json!({"verdict":"clean","reason":"An ordinary build result."}),
+        ));
         github.notify(failing_build());
         assert_eq!(sim.core.poll_github_once().await.unwrap().inserted, 1);
         live(&sim).await;

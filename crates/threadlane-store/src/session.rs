@@ -481,12 +481,16 @@ impl SessionStore for HubDb {
         active_run(conn, lease, key.run_id).await?;
         let existing = query_opt(
             conn,
-            "SELECT status, result, safe_to_repeat FROM tool_calls WHERE run_id = ?1 AND call_key = ?2",
+            "SELECT status, result, safe_to_repeat, tool, arguments FROM tool_calls WHERE run_id = ?1 AND call_key = ?2",
             params![key.run_id.get(), key.key.as_str()],
             |row| {
                 let c = Cols(row);
+                let status = c.parse::<ToolCallStatus>(0)?;
+                if status == ToolCallStatus::Started && (c.text(3)? != tool || c.json(4)? != *arguments) {
+                    return Err(StoreError::Conflict("tool call id reused with different arguments".into()));
+                }
                 Ok((
-                    c.parse::<ToolCallStatus>(0)?,
+                    status,
                     c.opt_json(1)?,
                     c.bool(2)?,
                 ))
@@ -514,8 +518,8 @@ impl SessionStore for HubDb {
             Some((ToolCallStatus::Finished, result, _)) => {
                 ToolCallBegin::Finished(result.unwrap_or(Json::Null))
             }
-            Some((ToolCallStatus::Started, _, true)) => ToolCallBegin::Perform,
-            Some((ToolCallStatus::Started, _, false)) => ToolCallBegin::OutcomeUnknown,
+            Some((ToolCallStatus::Started, _, true)) if safe_to_repeat => ToolCallBegin::Perform,
+            Some((ToolCallStatus::Started, _, _)) => ToolCallBegin::OutcomeUnknown,
         };
         tx.commit().await?;
         Ok(begin)

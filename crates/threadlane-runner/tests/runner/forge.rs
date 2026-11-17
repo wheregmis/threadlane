@@ -226,3 +226,55 @@ async fn the_gh_login_is_read_from_the_exit_status_of_gh_auth_status_alone() {
         "no gh is no login"
     );
 }
+
+#[tokio::test]
+async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
+    use threadlane_core::forge::{CommentTarget, RepositoryAction};
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let number = std::num::NonZeroU64::new(12).unwrap();
+    let remote = "git@github.test:ACME/APP.git";
+    for target in [CommentTarget::Issue, CommentTarget::PullRequest] {
+        forge
+            .apply(
+                remote,
+                &RepositoryAction::Comment {
+                    target,
+                    number,
+                    body: "--help".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    forge
+        .apply(
+            remote,
+            &RepositoryAction::CreateIssue {
+                title: "Title".into(),
+                body: "First line\nNext".into(),
+            },
+        )
+        .await
+        .unwrap();
+    forge
+        .apply(remote, &RepositoryAction::Merge { number })
+        .await
+        .unwrap();
+    let repo = "--repo=github.test/acme/app";
+    assert_eq!(
+        gh.invocations(),
+        [
+            vec!["issue", "comment", "12", "--body=--help", repo],
+            vec!["pr", "comment", "12", "--body=--help", repo],
+            vec![
+                "issue",
+                "create",
+                "--title=Title",
+                "--body=First line\nNext",
+                repo
+            ],
+            vec!["pr", "merge", "12", "--merge", repo],
+        ]
+    );
+}

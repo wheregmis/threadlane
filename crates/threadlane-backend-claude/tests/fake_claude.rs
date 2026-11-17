@@ -174,23 +174,73 @@ fn started() -> BackendEvent {
 }
 
 #[tokio::test]
-async fn kind_is_claude_and_ask_is_not_implemented() {
-    let backend = ClaudeBackend::default();
-    assert_eq!(backend.kind(), BackendKind::Claude);
-    let answer = backend
-        .ask(AskRequest {
-            question: "?".to_owned(),
-            answer_schema: json!({}),
-            model: None,
-            timeout: Duration::from_secs(1),
-        })
-        .await;
-    assert_eq!(
-        answer,
-        Err(BackendError::Failed(
-            "ask is not implemented for the Claude backend yet".to_owned()
-        ))
+async fn ask_reads_the_structured_result_with_tools_disabled() {
+    let fake = Fake::new(
+        r#"printf '%s\n' "$@" > "@DIR@/args"
+echo '{"type":"result","subtype":"success","structured_output":{"decision":"allow"}}'"#,
     );
+    assert_eq!(fake.backend().kind(), BackendKind::Claude);
+    assert_eq!(
+        fake.backend().ask(question()).await.unwrap(),
+        json!({"decision":"allow"})
+    );
+    let args = fake.record("args");
+    for flag in [
+        "--tools\n\n",
+        "--strict-mcp-config\n",
+        "--output-format\njson\n",
+        "--json-schema\n{}\n",
+        "--model\nsmall\n",
+        "--\n?\n",
+    ] {
+        assert!(args.contains(flag), "{args}");
+    }
+}
+
+fn question() -> AskRequest {
+    AskRequest {
+        question: "?".into(),
+        answer_schema: json!({}),
+        model: Some("small".into()),
+        timeout: Duration::from_secs(2),
+    }
+}
+
+#[tokio::test]
+async fn ask_times_out_and_kills_the_child() {
+    let request = AskRequest {
+        timeout: Duration::from_millis(50),
+        ..question()
+    };
+    assert_eq!(
+        Fake::new("exec sleep 5").backend().ask(request).await,
+        Err(BackendError::Timeout)
+    );
+}
+
+#[tokio::test]
+async fn ask_recognizes_a_usage_limit_on_a_failed_exit() {
+    let fake = Fake::new(
+        r#"echo '{"type":"result","subtype":"error","api_error_status":429}'
+exit 1"#,
+    );
+    assert_eq!(
+        fake.backend().ask(question()).await,
+        Err(BackendError::UsageLimit { resets_at: None })
+    );
+}
+
+#[tokio::test]
+async fn ask_refuses_garbage_and_missing_structured_output() {
+    for body in [
+        "echo garbage",
+        r#"echo '{"type":"result","subtype":"success","result":"allow"}'"#,
+    ] {
+        assert!(matches!(
+            Fake::new(body).backend().ask(question()).await,
+            Err(BackendError::Failed(_))
+        ));
+    }
 }
 
 #[tokio::test]
@@ -396,6 +446,10 @@ async fn each_deny_rule_reaches_claude_as_a_disallowed_bash_prefix() {
     let expected = [
         ("git push", "Bash(git push:*)"),
         ("gh pr create", "Bash(gh pr create:*)"),
+        ("gh pr comment", "Bash(gh pr comment:*)"),
+        ("gh issue comment", "Bash(gh issue comment:*)"),
+        ("gh issue create", "Bash(gh issue create:*)"),
+        ("gh issue new", "Bash(gh issue new:*)"),
         ("gh pr merge", "Bash(gh pr merge:*)"),
         ("gh release", "Bash(gh release:*)"),
         ("gh repo delete", "Bash(gh repo delete:*)"),

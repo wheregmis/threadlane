@@ -100,6 +100,10 @@ pub fn free_backends(backends: &Json, machine: MachineId, cooling: &[String]) ->
 pub const DENY_RULES: &[&str] = &[
     "git push",
     "gh pr create",
+    "gh pr comment",
+    "gh issue comment",
+    "gh issue create",
+    "gh issue new",
     "gh pr merge",
     "gh release",
     "gh repo delete",

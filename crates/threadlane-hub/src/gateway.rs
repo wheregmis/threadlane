@@ -64,14 +64,16 @@ impl LocalLink {
             )));
         }
         let (verdict, new_work) = self.gate(&run, &lane, &definition, arguments).await?;
-        let action = match verdict {
-            Verdict::Allow { rule: None } => Action::Execute,
-            Verdict::Allow { rule: Some(rule) } => Action::ByRule(rule),
-            // Review is asked until the classifier exists (stage C).
-            Verdict::Review { offers_rule } | Verdict::Ask { offers_rule } => Action::Ask {
+        let asked = match verdict {
+            Verdict::Allow { rule } => rule.map(Asked::Rule),
+            Verdict::Review { offers_rule } => Some(Asked::Review {
                 offers_rule,
                 proposal: new_work,
-            },
+            }),
+            Verdict::Ask { offers_rule } => Some(Asked::You {
+                offers_rule,
+                proposal: new_work,
+            }),
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
         };
 
@@ -85,7 +87,7 @@ impl LocalLink {
                 &key,
                 tool,
                 arguments,
-                definition.safe_to_repeat,
+                definition.safe_to_repeat || matches!(asked, Some(Asked::Review { .. })),
                 inner.clock.now(),
             )
             .await
@@ -105,28 +107,10 @@ impl LocalLink {
             task_id: lane.task_id,
             call_id: call_id.map(str::to_owned),
         };
-        let outcome = match action {
-            Action::Execute => inner.tools.execute(&context, tool, arguments.clone()).await,
-            Action::Ask {
-                offers_rule,
-                proposal,
-            } => {
-                self.ask(
-                    lease,
-                    &run,
-                    &lane,
-                    &key,
-                    tool,
-                    arguments,
-                    Asked::You {
-                        offers_rule,
-                        proposal,
-                    },
-                )
-                .await
-            }
-            Action::ByRule(rule) => {
-                self.ask(lease, &run, &lane, &key, tool, arguments, Asked::Rule(rule))
+        let outcome = match asked {
+            None => inner.tools.execute(&context, tool, arguments.clone()).await,
+            Some(asked) => {
+                self.ask(lease, &run, &lane, &key, tool, arguments, asked)
                     .await
             }
         };
@@ -185,9 +169,8 @@ impl LocalLink {
             None => Vec::new(),
         };
         let events = db.run_events(run.id).await.map_err(tool_error)?;
-        // Any external content in the run's batch taints it: it reaches the
-        // agent whatever else triggered the run (Plan.md §9.1 step 2).
-        let tainted = events.iter().any(|event| event.trust == Trust::External);
+        let tainted = events.iter().any(|e| e.trust == Trust::External)
+            && db.run_tainted(run.id).await.map_err(tool_error)?;
         // A run you triggered: every event in its batch is from you
         // (docs/milestone-5.md §1 decision 6).
         let requested = !events.is_empty() && events.iter().all(|event| event.trust == Trust::User);
@@ -256,13 +239,16 @@ impl LocalLink {
         let proposal = crate::publish::proposal(&inner.db, lane, tool, arguments).await?;
         let (kind, options, recommended) = if tool == ASK_USER {
             (DecisionKind::Input, question(arguments)?.1, None)
-        } else if matches!(asked, Asked::You { proposal: true, .. }) {
+        } else if matches!(
+            asked,
+            Asked::You { proposal: true, .. } | Asked::Review { proposal: true, .. }
+        ) {
             (DecisionKind::Proposal, crate::proposal::options(), Some(0))
         } else {
             (DecisionKind::Approval, approval_options(), Some(0))
         };
         let now = inner.clock.now();
-        let decision = NewDecision {
+        let mut decision = NewDecision {
             project_id: lane.project_id,
             lane_id: lane.id,
             task_id: lane.task_id,
@@ -282,17 +268,37 @@ impl LocalLink {
                 Asked::You {
                     offers_rule: true,
                     ..
+                } | Asked::Review {
+                    offers_rule: true,
+                    ..
                 }
             ),
-            expires_at: match asked {
-                Asked::You { .. } => Some(now + inner.settings.decision_expiry),
-                Asked::Rule(_) => None,
-            },
+            expires_at: (!matches!(asked, Asked::Rule(_)))
+                .then(|| now + inner.settings.decision_expiry),
             created_at: now,
         };
         match asked {
-            Asked::You { .. } => inner.db.open_decision(Some(lease), &decision).await,
-            Asked::Rule(rule) => inner.db.allow_by_rule(lease, &decision, rule).await,
+            Asked::Review { .. } => {
+                let (id, reason) = self.classify(lease, run, &decision).await?;
+                if reason.is_some() {
+                    decision.offers_standing_rule = false;
+                    decision.expires_at = None;
+                }
+                inner
+                    .db
+                    .reviewed_decision(lease, &id, &decision, reason.as_deref())
+                    .await
+            }
+            Asked::You { .. } => inner
+                .db
+                .open_decision(Some(lease), &decision)
+                .await
+                .map(|_| ()),
+            Asked::Rule(rule) => inner
+                .db
+                .allow_by_rule(lease, &decision, rule)
+                .await
+                .map(|_| ()),
         }
         .map_err(tool_error)?;
         inner.wake.wake(WakeTarget::Dispatcher);
@@ -310,13 +316,17 @@ impl LocalLink {
     ) -> Result<Perform, LinkError> {
         let inner = &self.core.inner;
         let db = &inner.db;
-        self.check_lease(lease).await?;
+        let lane = self.check_lease(lease).await?;
         self.active_run(lease, run_id).await?;
         let decision = db
             .decision(id)
             .await
             .map_err(link_error)?
-            .filter(|decision| decision.lane_id == lease.lane_id && decision.approved())
+            .filter(|decision| {
+                decision.lane_id == lane.id
+                    && decision.project_id == lane.project_id
+                    && decision.approved()
+            })
             .ok_or_else(|| {
                 LinkError::Rejected(format!("{id} is not an approved decision in this lane"))
             })?;
@@ -354,6 +364,40 @@ impl LocalLink {
         }
         if decision.tool == CREATE_TASK {
             return self.perform_task(lease, run_id, &decision).await;
+        }
+        if matches!(
+            decision.tool.as_str(),
+            crate::COMMENT | crate::CREATE_ISSUE | crate::MERGE
+        ) {
+            let action = crate::publish::repository_action(&decision.tool, &decision.arguments)
+                .map_err(|e| LinkError::Rejected(e.to_string()))?;
+            if lane.kind != threadlane_core::model::LaneKind::Task {
+                return Err(LinkError::Rejected(
+                    "repository actions require a task lane".into(),
+                ));
+            }
+            let repo = db
+                .repositories(lane.project_id)
+                .await
+                .map_err(link_error)?
+                .into_iter()
+                .find(|r| decision.arguments["repository"] == r.name)
+                .ok_or_else(|| LinkError::Rejected("repository is no longer registered".into()))?;
+            // shortcut: a lost forge response stays unknown until these writes have a remote idempotency key.
+            if !db
+                .claim_forge_dispatch(lease, id)
+                .await
+                .map_err(link_error)?
+            {
+                let outcome =
+                    json!({"unknown":true,"error":"A previous dispatch was interrupted."});
+                self.finish_perform(lease, run_id, id, &outcome).await?;
+                return Ok(Perform::Recorded { outcome });
+            }
+            return Ok(Perform::Repository {
+                remote: repo.remote_url,
+                action,
+            });
         }
         Ok(Perform::Call {
             tool: decision.tool,
@@ -516,17 +560,11 @@ impl LocalLink {
     }
 }
 
-/// What the gateway does with a call the gate let through.
-enum Action {
-    Execute,
-    Ask { offers_rule: bool, proposal: bool },
-    ByRule(StandingRuleId),
-}
-
 /// Who answers a paused call; `proposal` when it starts work you did not
 /// request.
 #[derive(Clone, Copy)]
 enum Asked {
+    Review { offers_rule: bool, proposal: bool },
     You { offers_rule: bool, proposal: bool },
     Rule(StandingRuleId),
 }

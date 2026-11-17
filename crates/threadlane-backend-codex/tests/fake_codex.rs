@@ -275,7 +275,7 @@ async fn start_passes_every_option_and_keeps_the_token_off_the_command_line() {
         appended_instructions: "You are a task agent.\nUse \"the tools\".".to_owned(),
         model: Some("gpt-test".to_owned()),
         tools: Some(Arc::new(Endpoint)),
-        deny_rules: vec!["git push".to_owned(), "gh pr merge".to_owned()],
+        deny_rules: DENY_RULES.iter().map(|s| (*s).to_owned()).collect(),
         max_turns: Some(3),
         ..fake.request(NativeSession::Start {
             id: "chosen-by-the-hub".to_owned(),
@@ -348,9 +348,11 @@ async fn start_passes_every_option_and_keeps_the_token_off_the_command_line() {
     );
 
     let rules = fake.record("rules");
-    assert_eq!(rules.lines().count(), 2, "{rules}");
-    assert!(rules.contains(r#"pattern = ["git", "push"], decision = "forbidden""#));
-    assert!(rules.contains(r#"pattern = ["gh", "pr", "merge"], decision = "forbidden""#));
+    let expected = DENY_RULES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(rules, threadlane_backend_codex::execution_policy(&expected));
     assert!(
         !work.join(".codex").exists(),
         "the rules file is gone once the run ended"
@@ -577,6 +579,11 @@ echo '{}'"#,
         "sandbox_mode=\"read-only\"",
         "web_search=\"disabled\"",
         "--ephemeral",
+        "--ignore-user-config",
+        "shell_tool",
+        "unified_exec",
+        "plugins",
+        "apps",
         "--output-schema",
     ] {
         assert!(
@@ -584,6 +591,26 @@ echo '{}'"#,
             "{expected} in {args:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_tool_use_invalidates_a_one_shot_answer() {
+    let fake = Fake::new(
+        r#"cat >/dev/null
+echo '{"type":"item.started","item":{"type":"command_execution","command":"pwd","id":"tool"}}'
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"verdict\\":\\"allow\\"}"}}'
+echo '{"type":"turn.completed"}'"#,
+    );
+    let got = fake
+        .backend()
+        .ask(AskRequest {
+            question: "Review.".into(),
+            answer_schema: json!({}),
+            model: None,
+            timeout: Duration::from_secs(2),
+        })
+        .await;
+    assert!(matches!(got,Err(BackendError::Failed(reason)) if reason.contains("used a tool")));
 }
 
 #[tokio::test]

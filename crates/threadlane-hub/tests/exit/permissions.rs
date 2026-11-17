@@ -25,7 +25,7 @@ async fn live(sim: &Sim) {
 }
 
 /// Lets General go up to Autonomous and gives the engineer `mode` there.
-async fn engineer_in(world: &World, mode: Mode) {
+pub(super) async fn engineer_in(world: &World, mode: Mode) {
     let db = &world.db;
     let mut space = db.space().await.unwrap();
     space.mode_ceiling = Mode::Autonomous;
@@ -94,7 +94,7 @@ async fn the_same_scenario_under_each_mode_does_exactly_what_its_row_permits() {
         }
 
         // Above Off a tier 2 call asks: On request by the matrix, Assisted
-        // and Autonomous by review, which asks until the classifier exists.
+        // and Autonomous by review, with no scripted answer, so review falls back to a card.
         let decisions = sim.decisions().await;
         assert_eq!(decisions.len(), 1, "{mode}");
         let asked = &decisions[0];

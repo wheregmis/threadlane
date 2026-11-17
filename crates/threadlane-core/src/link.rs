@@ -90,6 +90,11 @@ pub enum Perform {
         arguments: Json,
         retry: bool,
     },
+    /// Perform this validated call on the remote selected by the hub.
+    Repository {
+        remote: String,
+        action: crate::forge::RepositoryAction,
+    },
     /// Nothing to perform: the recorded outcome of an earlier attempt, of a
     /// call the hub performed itself (a memory change, which has no effect
     /// on the machine), or why the call is refused. Give it to the session.

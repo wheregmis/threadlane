@@ -197,6 +197,7 @@ struct State {
     /// Scripts for runs whose prompt contains the text, first match wins.
     routes: Vec<(String, Script)>,
     default_script: Option<Script>,
+    questions: Vec<String>,
     answers: VecDeque<Result<Json, BackendError>>,
     received: Vec<ReceivedRun>,
     /// Native session ids this backend knows, in the order they were created.
@@ -252,6 +253,7 @@ impl ScriptedBackend {
                 routes: Vec::new(),
                 default_script: None,
                 answers: VecDeque::new(),
+                questions: Vec::new(),
                 received: Vec::new(),
                 sessions: Vec::new(),
             })),
@@ -290,6 +292,11 @@ impl ScriptedBackend {
     /// Removes the default script, so a run with an empty queue fails again.
     pub fn clear_default(&self) {
         self.state().default_script = None;
+    }
+
+    /// The one-shot questions received in order.
+    pub fn questions(&self) -> Vec<String> {
+        self.state().questions.clone()
     }
 
     /// Queues the answer for the next one-shot question.
@@ -428,8 +435,10 @@ impl AgentBackend for ScriptedBackend {
         Ok(Box::new(run))
     }
 
-    async fn ask(&self, _request: AskRequest) -> Result<Json, BackendError> {
-        self.state().answers.pop_front().unwrap_or_else(|| {
+    async fn ask(&self, request: AskRequest) -> Result<Json, BackendError> {
+        let mut state = self.state();
+        state.questions.push(request.question);
+        state.answers.pop_front().unwrap_or_else(|| {
             Err(BackendError::Failed(
                 "scripted backend: no answer queued".into(),
             ))

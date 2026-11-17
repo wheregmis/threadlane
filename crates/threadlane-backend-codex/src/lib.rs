@@ -29,7 +29,8 @@
 //! - **Usage**: the `usage` of `turn.completed`. **Usage limit**: recognised
 //!   from the error text, without a reset time (see `stream.rs`).
 //! - **Ask**: `exec --output-schema` in a read-only sandbox, ephemeral, in a
-//!   temporary directory.
+//!   temporary directory, ignoring user tool configuration and disabling shell, image, app,
+//!   plugin and multi-agent features. Tool activity invalidates the answer.
 //! - **Removing built-in tools** (leads): Codex has no switch to remove its
 //!   shell and file tools. The nearest is a read-only sandbox with web
 //!   search off: the lead can still run commands that only read (files
@@ -277,6 +278,11 @@ async fn answer(run: &mut dyn BackendRun) -> Result<Json, BackendError> {
                 return serde_json::from_str(&text).map_err(|error| {
                     BackendError::Failed(format!("codex's answer is not JSON: {error}"))
                 });
+            }
+            BackendEvent::ToolUse { .. } | BackendEvent::ToolResult { .. } => {
+                return Err(BackendError::Failed(
+                    "codex used a tool during a one-shot question".into(),
+                ));
             }
             BackendEvent::UsageLimit { resets_at } => {
                 return Err(BackendError::UsageLimit { resets_at });

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use threadlane_core::forge::{Forge, ForgeError};
+use threadlane_core::forge::{CommentTarget, Forge, ForgeError, RepositoryAction};
 use threadlane_core::workspace::valid_branch_name;
 use tokio::process::Command;
 
@@ -113,6 +113,37 @@ impl Forge for GitForge {
             .rfind(|line| !line.is_empty())
             .map(str::to_owned)
             .ok_or_else(|| ForgeError("gh pr create printed no pull request URL".to_owned()))
+    }
+
+    async fn apply(&self, remote: &str, action: &RepositoryAction) -> Result<String, ForgeError> {
+        let repo = threadlane_core::github::normalize_remote(remote)
+            .ok_or_else(|| ForgeError("the registered remote is not a forge repository".into()))?;
+        let mut argv = match action {
+            RepositoryAction::Comment {
+                target,
+                number,
+                body,
+            } => args(&[
+                match target {
+                    CommentTarget::PullRequest => "pr",
+                    CommentTarget::Issue => "issue",
+                },
+                "comment",
+                &number.to_string(),
+                &format!("--body={body}"),
+            ]),
+            RepositoryAction::CreateIssue { title, body } => args(&[
+                "issue",
+                "create",
+                &format!("--title={title}"),
+                &format!("--body={body}"),
+            ]),
+            RepositoryAction::Merge { number } => {
+                args(&["pr", "merge", &number.to_string(), "--merge"])
+            }
+        };
+        argv.push(format!("--repo={repo}").into());
+        self.gh(Path::new("."), argv).await
     }
 
     /// `gh auth status` succeeds. Only its exit status is read: its output

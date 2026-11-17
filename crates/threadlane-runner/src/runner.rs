@@ -701,6 +701,19 @@ impl Inner {
                 .await?;
             let outcome = match begin {
                 Perform::Recorded { outcome } => outcome,
+                Perform::Repository { remote, action } => {
+                    let outcome = match self.forge.apply(&remote, &action).await {
+                        Ok(result) => {
+                            json!({"performed": true, "summary": format!("Completed the repository action. {}", result.trim())})
+                        }
+                        Err(error) => json!({"performed": false, "error": error.to_string()}),
+                    };
+                    self.reach(perform::AFTER_EFFECT)?;
+                    self.link
+                        .finish_perform(&lane.lease(), assignment.run_id, decision, &outcome)
+                        .await?;
+                    outcome
+                }
                 Perform::Call {
                     tool,
                     arguments,
@@ -1079,6 +1092,11 @@ fn describe(decision: DecisionId, outcome: &Json) -> String {
             .and_then(Json::as_str)
             .unwrap_or_default()
     };
+    if outcome["unknown"] == Json::Bool(true) {
+        return format!(
+            "\nOutcome of {decision}: unknown after interruption. Check the repository before retrying.\n"
+        );
+    }
     if outcome.get("performed") != Some(&Json::Bool(true)) {
         return format!(
             "\nOutcome of {decision}: not performed. {}\n",

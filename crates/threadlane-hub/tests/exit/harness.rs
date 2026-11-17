@@ -355,6 +355,16 @@ impl World {
     /// Starts a process: a fresh `HubCore` and `Runner`, both stopped by
     /// `plan`, and the runner's `hello`.
     pub async fn boot(&self, plan: CrashPlan) -> Sim {
+        self.boot_with_reviewers(plan, vec![Arc::new(self.backend.clone())])
+            .await
+    }
+
+    /// Uses separate hub question drivers while task execution stays scripted.
+    pub async fn boot_with_reviewers(
+        &self,
+        plan: CrashPlan,
+        reviewers: Vec<Arc<dyn AgentBackend>>,
+    ) -> Sim {
         let core = HubCore::new(
             self.db.clone(),
             Arc::new(self.clock.clone()),
@@ -363,6 +373,7 @@ impl World {
         )
         .await
         .unwrap();
+        let core = core.with_backends(reviewers);
         let core = match &self.github {
             Some(github) => core.with_github(Arc::new(github.clone())),
             None => core,

@@ -321,6 +321,11 @@ impl Workspace for FakeWorkspace {
 /// One call a [`FakeForge`] received.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForgeCall {
+    /// An approved issue, pull request comment or merge.
+    Apply {
+        remote: String,
+        action: threadlane_core::forge::RepositoryAction,
+    },
     Push {
         worktree: PathBuf,
         branch: String,
@@ -386,6 +391,18 @@ impl FakeForge {
 
 #[async_trait]
 impl Forge for FakeForge {
+    async fn apply(
+        &self,
+        remote: &str,
+        action: &threadlane_core::forge::RepositoryAction,
+    ) -> Result<String, ForgeError> {
+        lock(&self.calls).push(ForgeCall::Apply {
+            remote: remote.to_owned(),
+            action: action.clone(),
+        });
+        Ok("done".into())
+    }
+
     async fn push(&self, worktree: &Path, branch: &str) -> Result<(), ForgeError> {
         lock(&self.calls).push(ForgeCall::Push {
             worktree: worktree.to_owned(),

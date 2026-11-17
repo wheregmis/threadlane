@@ -174,6 +174,8 @@ pub mod steps {
 
         /// The call was recorded as started.
         pub const AFTER_BEGIN: Step = Step("tool_call.after_begin");
+        /// The classifier answer is durable, before the decision or block is returned.
+        pub const AFTER_REVIEW: Step = Step("review.after_answer");
         /// The tool took effect.
         pub const AFTER_EFFECT: Step = Step("tool_call.after_effect");
         /// The result was recorded.

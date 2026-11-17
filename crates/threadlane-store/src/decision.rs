@@ -448,6 +448,172 @@ async fn insert_decision_in(
     Ok((created, true))
 }
 
+async fn enqueue_card(conn: &Connection, created: &Decision) -> StoreResult<()> {
+    // Decisions bypass pacing (Plan.md §10.2); the key makes the card
+    // one per decision.
+    enqueue_in(
+        conn,
+        &NewOutboxMessage {
+            project_id: Some(created.project_id),
+            lane_id: Some(created.lane_id),
+            session_id: created.session_id,
+            run_id: created.run_id,
+            tool_call_id: Some(format!("decision:{}", created.id.get())),
+            kind: OutboxKind::Decision,
+            decision_id: Some(created.id),
+            channel: NOTICE_CHANNEL.to_owned(),
+            body: card(created),
+            urgency: Urgency::High,
+            not_before: None,
+            created_at: created.created_at,
+        },
+    )
+    .await?;
+    if let Some(due_at) = created.expires_at {
+        insert_timer_in(
+            conn,
+            &NewTimer {
+                project_id: created.project_id,
+                lane_id: created.lane_id,
+                agent_id: None,
+                task_ref: created.task_id,
+                category: TimerCategory::FollowUp,
+                due_at,
+                recurrence: None,
+                instruction: format!("expire {}", created.id),
+                created_by: TimerCreator::System,
+                created_by_call: Some(expiry_call(created.id)),
+                requested: false,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+impl HubDb {
+    /// Claims a question once. A retry freezes and receives the last recorded answer,
+    /// including the conservative default if the first ask was interrupted.
+    pub async fn claim_question(
+        &self,
+        lease: &Lease,
+        key: &str,
+        fallback: &Json,
+    ) -> StoreResult<Option<Json>> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        check_lease(conn, lease).await?;
+        let inserted = exec(
+            conn,
+            "INSERT INTO permission_questions(question_key, answer, pending)
+            VALUES (?1, ?2, 1) ON CONFLICT(question_key) DO NOTHING",
+            params![key, json_text(fallback)?],
+        )
+        .await?;
+        let result = if inserted == 1 {
+            None
+        } else {
+            exec(
+                conn,
+                "UPDATE permission_questions SET pending=0 WHERE question_key=?1 AND pending=1",
+                params![key],
+            )
+            .await?;
+            Some(
+                query_one(
+                    conn,
+                    "SELECT answer FROM permission_questions WHERE question_key=?1",
+                    params![key],
+                    |r| Cols(r).json(0),
+                )
+                .await?,
+            )
+        };
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Records an answer under the current lease, returning the frozen answer on a race.
+    pub async fn finish_question(
+        &self,
+        lease: &Lease,
+        key: &str,
+        answer: &Json,
+    ) -> StoreResult<Json> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        check_lease(conn, lease).await?;
+        exec(conn, "UPDATE permission_questions SET answer=?2,pending=0 WHERE question_key=?1 AND pending=1",params![key,json_text(answer)?]).await?;
+        let result = query_one(
+            conn,
+            "SELECT answer FROM permission_questions WHERE question_key=?1",
+            params![key],
+            |r| Cols(r).json(0),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Whether this run consumed any external event without a recorded clean screen.
+    pub async fn run_tainted(&self, run: threadlane_core::ids::RunId) -> StoreResult<bool> {
+        query_one(&self.db.reader()?, "SELECT EXISTS(SELECT 1 FROM run_events re JOIN events e ON e.id=re.event_id
+          LEFT JOIN permission_questions q ON q.question_key='event:' || e.id
+          WHERE re.run_id=?1 AND e.trust='external' AND COALESCE(json_extract(q.answer,'$.verdict'),'tainted') != 'clean')",
+          params![run.get()], |r| Cols(r).bool(0)).await
+    }
+
+    /// Stores the reviewed call, answering it automatically or opening its fallback card.
+    /// A replay of the same question also reuses its decision across run attempts.
+    pub async fn reviewed_decision(
+        &self,
+        lease: &Lease,
+        key: &str,
+        new: &NewDecision,
+        reason: Option<&str>,
+    ) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        check_lease(conn, lease).await?;
+        let existing = query_one(
+            conn,
+            "SELECT decision_id FROM permission_questions WHERE question_key=?1",
+            params![key],
+            |r| Cols(r).opt_id::<DecisionId>(0),
+        )
+        .await?;
+        if existing.is_none() {
+            let (decision, inserted) = insert_decision_in(conn, Some(lease), new).await?;
+            if inserted {
+                if let Some(reason) = reason {
+                    close_in(conn, &decision, DecisionStatus::Answered,
+                        &json!({"option":0,"classifier":"allow","reason":reason,"standing_rule":false,"answered_at":new.created_at}),
+                        format!("The classifier allowed {} ({}). Its outcome follows.", decision.id, new.tool),
+                        Trust::System, new.created_at).await?;
+                } else {
+                    enqueue_card(conn, &decision).await?;
+                }
+            }
+            exec(
+                conn,
+                "UPDATE permission_questions SET decision_id=?2 WHERE question_key=?1",
+                params![key, decision.id.get()],
+            )
+            .await?;
+        }
+        tx.commit().await
+    }
+
+    /// Grants one dispatch of a repository effect even after lease recovery.
+    pub async fn claim_forge_dispatch(&self, lease: &Lease, id: DecisionId) -> StoreResult<bool> {
+        let tx = self.db.begin().await?;
+        check_lease(tx.conn(), lease).await?;
+        let changed = exec(tx.conn(), "UPDATE decisions SET forge_dispatched=1 WHERE id=?1 AND lane_id=?2 AND forge_dispatched=0",params![id.get(),lease.lane_id.get()]).await?;
+        tx.commit().await?;
+        Ok(changed == 1)
+    }
+}
+
 #[async_trait]
 impl DecisionStore for HubDb {
     async fn open_decision(
@@ -461,45 +627,7 @@ impl DecisionStore for HubDb {
         if !new {
             return Ok(created);
         }
-        // Decisions bypass pacing (Plan.md §10.2); the key makes the card
-        // one per decision.
-        enqueue_in(
-            conn,
-            &NewOutboxMessage {
-                project_id: Some(created.project_id),
-                lane_id: Some(created.lane_id),
-                session_id: created.session_id,
-                run_id: created.run_id,
-                tool_call_id: Some(format!("decision:{}", created.id.get())),
-                kind: OutboxKind::Decision,
-                decision_id: Some(created.id),
-                channel: NOTICE_CHANNEL.to_owned(),
-                body: card(&created),
-                urgency: Urgency::High,
-                not_before: None,
-                created_at: created.created_at,
-            },
-        )
-        .await?;
-        if let Some(due_at) = created.expires_at {
-            insert_timer_in(
-                conn,
-                &NewTimer {
-                    project_id: created.project_id,
-                    lane_id: created.lane_id,
-                    agent_id: None,
-                    task_ref: created.task_id,
-                    category: TimerCategory::FollowUp,
-                    due_at,
-                    recurrence: None,
-                    instruction: format!("expire {}", created.id),
-                    created_by: TimerCreator::System,
-                    created_by_call: Some(expiry_call(created.id)),
-                    requested: false,
-                },
-            )
-            .await?;
-        }
+        enqueue_card(conn, &created).await?;
         tx.commit().await?;
         Ok(created)
     }

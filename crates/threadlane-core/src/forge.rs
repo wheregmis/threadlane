@@ -1,8 +1,4 @@
-//! Shared effects on a repository's forge (Plan.md §9.2, docs/milestone-3.md
-//! §1 item 4): push a branch, open a draft pull request.
-//!
-//! Only the runner calls a [`Forge`], and only to perform a stored call you
-//! approved (Plan.md §9.4). The agent never reaches it.
+//! Shared repository effects that the runner performs after hub approval (Plan.md §9.2).
 
 use std::fmt;
 use std::path::Path;
@@ -15,13 +11,44 @@ pub const PUBLISH_BRANCH: &str = "publish_branch";
 /// publishing the branch in the same call (tier 2, task lanes only).
 pub const OPEN_PULL_REQUEST: &str = "open_pull_request";
 
+/// Post a comment on a registered repository's issue or pull request.
+pub const COMMENT: &str = "comment";
+/// Create an issue in a registered repository.
+pub const CREATE_ISSUE: &str = "create_issue";
+/// Merge a registered repository's pull request.
+pub const MERGE: &str = "merge";
+
+/// A validated shared effect addressed to a registered repository.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RepositoryAction {
+    /// Comment on the numbered issue or pull request.
+    Comment {
+        target: CommentTarget,
+        number: std::num::NonZeroU64,
+        body: String,
+    },
+    /// Create an issue with this title and body.
+    CreateIssue { title: String, body: String },
+    /// Merge the numbered pull request.
+    Merge { number: std::num::NonZeroU64 },
+}
+
+/// Kind of numbered GitHub item to comment on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentTarget {
+    /// A pull request.
+    PullRequest,
+    /// An issue.
+    Issue,
+}
+
 /// Why a forge operation failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("forge: {0}")]
 pub struct ForgeError(pub String);
 
-/// Pushes branches and opens draft pull requests, from a task's worktree,
-/// with the logins of the tools that hold them (invariant 8).
+/// Performs approved repository effects with the forge tools' existing logins (invariant 8).
 #[async_trait]
 pub trait Forge: Send + Sync + fmt::Debug {
     /// Pushes `branch` from the worktree at `worktree` to its remote. Safe to
@@ -40,6 +67,9 @@ pub trait Forge: Send + Sync + fmt::Debug {
         title: &str,
         body: &str,
     ) -> Result<String, ForgeError>;
+
+    /// Performs an approved repository action against the registered remote.
+    async fn apply(&self, remote: &str, action: &RepositoryAction) -> Result<String, ForgeError>;
 
     /// Whether this machine is logged in to the forge, so a task's
     /// repositories can be reached from it (Plan.md §5.4 item 5).

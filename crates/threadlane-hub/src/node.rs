@@ -8,7 +8,6 @@ use anyhow::Context;
 use threadlane_backend_claude::ClaudeBackend;
 use threadlane_backend_codex::CodexBackend;
 use threadlane_core::admission::AdmissionStore;
-use threadlane_core::backend::AgentBackend;
 use threadlane_core::client::{PairingReply, PairingRequest};
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::store::OrgStore;
@@ -94,7 +93,15 @@ impl Hub {
             self.config.settings(),
         )
         .await
-        .map(|core| core.with_github(Arc::new(GhSource::with_gh(&self.config.github.gh))))
+        .map(|core| {
+            core.with_github(Arc::new(GhSource::with_gh(&self.config.github.gh)))
+                .with_backends(vec![
+                    Arc::new(ClaudeBackend::new(
+                        self.config.backends.claude.claude_config(),
+                    )),
+                    Arc::new(CodexBackend::new(self.config.backends.codex.codex_config())),
+                ])
+        })
         .context("starting the hub's roles")
     }
 
@@ -249,13 +256,9 @@ async fn start_embedded_runner(
         max_parallel = runner_config.max_parallel,
         "starting the embedded runner"
     );
-    let backends: Vec<Arc<dyn AgentBackend>> = vec![
-        Arc::new(ClaudeBackend::new(claude)),
-        Arc::new(CodexBackend::new(codex)),
-    ];
     let runner = Runner::new(
         core.link(machine),
-        backends,
+        core.inner.backends.clone(),
         Arc::new(GitWorkspaces::new(data_dir.workspaces())),
         Arc::new(GitForge::with_gh(&config.github.gh)),
         clock,

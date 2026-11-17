@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
-use threadlane_core::forge::{OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{COMMENT, CREATE_ISSUE, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::model::{
     Decision, DecisionOption, LaneKind, MemoryAuthor, NewOutboxMessage, NewTask, OutboxKind, Run,
@@ -51,7 +51,9 @@ const MAX_LABEL: usize = 80;
 pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
     match tool {
         SEND_MESSAGE | UPDATE_TASK | CANCEL_TASK | LIST_TASKS => kind == LaneKind::Lead,
-        FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST => kind == LaneKind::Task,
+        FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE => {
+            kind == LaneKind::Task
+        }
         _ => true,
     }
 }
@@ -887,9 +889,11 @@ impl ToolRegistry for HubTools {
                 .await
             }
             // The gate asks before these, and the runner performs them.
-            PUBLISH_BRANCH | OPEN_PULL_REQUEST => Err(ToolError::Blocked(format!(
-                "{name} is performed only once the user approves it"
-            ))),
+            PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE => {
+                Err(ToolError::Blocked(format!(
+                    "{name} is performed only once the user approves it"
+                )))
+            }
             // The gate always asks: the answer is the outcome.
             ASK_USER => Err(ToolError::Blocked(format!(
                 "{name} is answered by the user, through a decision"
@@ -1045,7 +1049,15 @@ mod tests {
         assert_eq!(
             offered(LaneKind::Task),
             [
-                &[CREATE_TASK, FINISH_TASK, PUBLISH_BRANCH, OPEN_PULL_REQUEST][..],
+                &[
+                    CREATE_TASK,
+                    FINISH_TASK,
+                    PUBLISH_BRANCH,
+                    OPEN_PULL_REQUEST,
+                    COMMENT,
+                    CREATE_ISSUE,
+                    MERGE
+                ][..],
                 &memory
             ]
             .concat()

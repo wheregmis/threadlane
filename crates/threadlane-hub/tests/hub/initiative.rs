@@ -29,6 +29,14 @@ const ENGINEER: &str = "Engineer";
 /// an engineer bound at `engineer`.
 async fn hub_with(hook: Arc<dyn StepHook>, lead: Mode, engineer: Mode) -> TestHub {
     let hub = TestHub::with(HubSettings::default(), hook).await;
+    let backend = threadlane_testkit::ScriptedBackend::new(
+        threadlane_core::model::BackendKind::Claude,
+        Arc::new(hub.clock.clone()),
+    );
+    backend.push_answer(Ok(
+        json!({"verdict":"clean","reason":"An ordinary build result."}),
+    ));
+    let hub = TestHub::around(hub.core.with_backends(vec![Arc::new(backend)]), hub.clock).await;
     hub.hello().await;
     let db = &hub.db;
     let mut space = db.space().await.unwrap();

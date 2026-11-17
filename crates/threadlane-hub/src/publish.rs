@@ -1,12 +1,10 @@
-//! The shared-effect tools of milestone 3, `publish_branch` and
-//! `open_pull_request` (Plan.md §9.2 layer 1, docs/milestone-3.md §4), and
-//! what a decision on a gated call asks you.
+//! The sanctioned forge tools and the proposals the gate reviews or shows the owner.
 //!
 //! The hub never performs them. The gate checks a call and opens a decision
 //! on it; the runner performs the stored call once you approve (§9.4).
 
 use serde_json::{Value as Json, json};
-use threadlane_core::forge::{OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{COMMENT, CREATE_ISSUE, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::model::{DecisionOption, Lane};
 use threadlane_core::store::{OrgStore, TaskStore};
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
@@ -43,27 +41,27 @@ pub(crate) fn approval_options() -> Vec<DecisionOption> {
     ]
 }
 
-/// The definitions of the two tools.
+/// Task-lane forge tools and their permission tiers.
 pub(crate) fn definitions() -> Vec<ToolDefinition> {
     let repository = json!({
         "type": "string",
-        "description": "The registered name of one of the task's repositories."
+        "description": "A repository registered in the task's project."
     });
     let define = |name: &str, description: &str, schema: Json| ToolDefinition {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: schema,
-        // Shared and reversible (Plan.md §2.3): a branch can be deleted and a
-        // draft closed.
-        tier: Tier::SharedReversible,
+        tier: if name == MERGE {
+            Tier::SharedHardToUndo
+        } else {
+            Tier::SharedReversible
+        },
         safe_to_repeat: false,
     };
     vec![
         define(
             PUBLISH_BRANCH,
-            "Push your task's branch of one repository to its remote. The user is asked \
-             first: the call returns at once with \"waiting on you\", and you must then end \
-             your turn. Once they answer, you are resumed with the outcome.",
+            "Push your task's branch of one repository to its remote. End your turn if the call waits for approval.",
             json!({
                 "type": "object",
                 "properties": { "repository": repository.clone() },
@@ -74,9 +72,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         define(
             OPEN_PULL_REQUEST,
             "Open a draft pull request from your task's branch of one repository into its \
-             default branch, pushing the branch first. The user is asked first: the call \
-             returns at once with \"waiting on you\", and you must then end your turn. Once \
-             they answer, you are resumed with the outcome.",
+             default branch, pushing the branch first. End your turn if the call waits for approval.",
             json!({
                 "type": "object",
                 "properties": {
@@ -88,13 +84,88 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         ),
+        define(
+            COMMENT,
+            "Comment on an issue or pull request in a registered project repository.",
+            json!({
+                "type":"object","properties":{"repository":repository,"target":{"enum":["issue","pull_request"]},"number":{"type":"integer","minimum":1},"body":{"type":"string"}},
+                "required":["repository","target","number","body"],"additionalProperties":false
+            }),
+        ),
+        define(
+            CREATE_ISSUE,
+            "Create an issue in a registered project repository.",
+            json!({
+                "type":"object","properties":{"repository":repository,"title":{"type":"string"},"body":{"type":"string"}},
+                "required":["repository","title"],"additionalProperties":false
+            }),
+        ),
+        define(
+            MERGE,
+            "Merge a pull request in a registered project repository.",
+            json!({
+                "type":"object","properties":{"repository":repository,"number":{"type":"integer","minimum":1}},
+                "required":["repository","number"],"additionalProperties":false
+            }),
+        ),
     ]
 }
 
-/// Checks a gated call and says what to ask you about it. A call to one of
-/// the two tools must come from a task lane and name one of the task's
-/// repositories, registered in its project (invariant 19), with plain text
-/// arguments; any other tool is shown as it was called.
+/// Parses the arguments again before handing the stored call to the runner.
+pub(crate) fn repository_action(
+    tool: &str,
+    a: &Json,
+) -> Result<threadlane_core::forge::RepositoryAction, ToolError> {
+    use threadlane_core::forge::RepositoryAction;
+    let number = || {
+        a["number"]
+            .as_u64()
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or_else(|| invalid("number must be a positive integer"))
+    };
+    let body = || match a.get("body") {
+        Some(Json::String(s)) if plain_text(s) => Ok(s.clone()),
+        None if tool == CREATE_ISSUE => Ok(String::new()),
+        _ => Err(invalid(
+            "body must be plain text of at most 20000 characters",
+        )),
+    };
+    match tool {
+        COMMENT => {
+            fields(a, &["repository", "target", "number", "body"])?;
+            let target = serde_json::from_value(a["target"].clone())
+                .map_err(|_| invalid("target must be issue or pull_request"))?;
+            let body = body()?;
+            if body.trim().is_empty() {
+                return Err(invalid("a comment needs a body"));
+            }
+            Ok(RepositoryAction::Comment {
+                target,
+                number: number()?,
+                body,
+            })
+        }
+        CREATE_ISSUE => {
+            fields(a, &["repository", "title", "body"])?;
+            let title = a["title"]
+                .as_str()
+                .filter(|s| plain_line(s))
+                .ok_or_else(|| invalid("title must be one plain line of at most 200 characters"))?;
+            Ok(RepositoryAction::CreateIssue {
+                title: title.trim().to_owned(),
+                body: body()?,
+            })
+        }
+        MERGE => {
+            fields(a, &["repository", "number"])?;
+            Ok(RepositoryAction::Merge { number: number()? })
+        }
+        _ => Err(invalid("unknown repository action")),
+    }
+}
+
+/// Validates the arguments and repository before any human or backend is asked.
+/// Publishing also needs a worktree belonging to this task.
 pub(crate) async fn proposal(
     db: &HubDb,
     lane: &Lane,
@@ -117,18 +188,15 @@ pub(crate) async fn proposal(
             context: String::new(),
         });
     }
-    if tool != PUBLISH_BRANCH && tool != OPEN_PULL_REQUEST {
+    if !matches!(
+        tool,
+        PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE
+    ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
             context: format!("Arguments: {arguments}"),
         });
     }
-    let allowed: &[&str] = if tool == PUBLISH_BRANCH {
-        &["repository"]
-    } else {
-        &["repository", "title", "body"]
-    };
-    let object = fields(arguments, allowed)?;
     let task_id = lane
         .task_id
         .ok_or_else(|| ToolError::Blocked(format!("{tool} is available only in a task lane")))?;
@@ -137,7 +205,7 @@ pub(crate) async fn proposal(
         .await
         .map_err(tool_error)?
         .ok_or_else(|| ToolError::Failed(format!("task {task_id} not found")))?;
-    let name = match object.get("repository") {
+    let name = match arguments.get("repository") {
         Some(Json::String(name)) if valid_repository_name(name) => name.as_str(),
         _ => return Err(invalid("repository must be a registered repository name")),
     };
@@ -148,6 +216,33 @@ pub(crate) async fn proposal(
         .ok_or_else(|| {
             ToolError::InvalidArguments(format!("no repository {name:?} in this project"))
         })?;
+    if matches!(tool, COMMENT | CREATE_ISSUE | MERGE) {
+        repository_action(tool, arguments)?;
+        let question = match tool {
+            COMMENT => format!(
+                "Comment on {} #{} in {name}?",
+                arguments["target"].as_str().unwrap_or_default(),
+                arguments["number"]
+            ),
+            MERGE => format!("Merge pull request #{} in {name}?", arguments["number"]),
+            _ => format!("Create issue {} in {name}?", arguments["title"]),
+        };
+        return Ok(Proposal {
+            question,
+            context: format!(
+                "Task {}: {}.\n{}",
+                task.id,
+                task.title,
+                arguments["body"].as_str().unwrap_or_default()
+            ),
+        });
+    }
+    let allowed: &[&str] = if tool == PUBLISH_BRANCH {
+        &["repository"]
+    } else {
+        &["repository", "title", "body"]
+    };
+    let object = fields(arguments, allowed)?;
     if !task.repositories.contains(&repository.id) {
         return Err(ToolError::InvalidArguments(format!(
             "repository {name:?} is not one this task works in"

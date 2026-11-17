@@ -24,5 +24,6 @@ mod memory;
 mod milestone;
 mod permissions;
 mod publish;
+mod review;
 mod tasks;
 mod timers;

@@ -28,6 +28,7 @@ const TABLES: &[&str] = &[
     "memory_files",
     "memory_versions",
     "outbox",
+    "permission_questions",
     "project_machines",
     "projects",
     "repositories",

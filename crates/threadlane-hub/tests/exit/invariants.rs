@@ -44,7 +44,13 @@ pub async fn assert_one_card_per_decision(sim: &Sim, scenario: &str) {
             .count();
         assert_eq!(
             cards,
-            usize::from(!by_rule),
+            usize::from(
+                !by_rule
+                    && !decision
+                        .answer
+                        .as_ref()
+                        .is_some_and(|a| a["classifier"] == "allow")
+            ),
             "{scenario}: decision {} has {cards} cards",
             decision.id
         );

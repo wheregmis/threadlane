@@ -111,7 +111,17 @@ impl Launch {
             args.extend(["--output-schema".into(), schema.display().to_string()]);
         }
         if self.ephemeral {
-            args.push("--ephemeral".into());
+            args.extend(["--ephemeral".into(), "--ignore-user-config".into()]);
+            for feature in [
+                "shell_tool",
+                "unified_exec",
+                "view_image",
+                "apps",
+                "plugins",
+                "multi_agent",
+            ] {
+                args.extend(["--disable".into(), feature.into()]);
+            }
         }
         if let NativeSession::Resume { id } = session {
             args.push(id.clone());
