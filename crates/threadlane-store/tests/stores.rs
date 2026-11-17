@@ -1564,6 +1564,66 @@ async fn memory_writes_are_versioned_with_their_run_and_written_once_per_call() 
 }
 
 #[tokio::test]
+async fn your_own_changes_need_no_run_keep_the_rules_and_rewrite_the_index() {
+    let hub = hub().await;
+    let (by, run) = memory_author(&hub).await;
+    let note = "projects/1/notes/build.md";
+    hub.write(&by, note, "# Build\nBy the lead.").await.unwrap();
+
+    // You may write instructions directly, as a new version with no run.
+    let mine = hub
+        .write_by_owner("projects/1/instructions.md", "Be brief.", T0)
+        .await
+        .unwrap();
+    assert_eq!((mine.version, mine.written_by_run), (1, None));
+    let edited = hub
+        .write_by_owner(note, "# Build\nBy you.", T0)
+        .await
+        .unwrap();
+    assert_eq!((edited.version, edited.written_by_run), (2, None));
+    let index = hub.read("projects/1/notes/INDEX.md").await.unwrap().unwrap();
+    assert_eq!(index.content, "- [Build](build.md): By you.\n");
+    assert_eq!(index.written_by_run, None);
+    let authors: Vec<_> = hub
+        .history(note)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|f| f.written_by_run)
+        .collect();
+    assert_eq!(authors, [Some(run.id), None]);
+
+    // The same budgets, title rules and index protection as a run's.
+    let over = "x".repeat(threadlane_core::memory::INSTRUCTIONS_BUDGET + 1);
+    for (path, content, why) in [
+        ("space/instructions.md", over.as_str(), "trim it"),
+        ("projects/1/notes/a.md", "no description", "title line"),
+        ("projects/1/notes/INDEX.md", "# A\nForged.", "written by the system"),
+        ("projects/1/../2/a.md", "x", "memory path"),
+    ] {
+        assert!(
+            matches!(
+                hub.write_by_owner(path, content, T0).await,
+                Err(StoreError::Invalid(message)) if message.contains(why)
+            ),
+            "{path}"
+        );
+    }
+
+    let deleted = hub.delete_by_owner(note, T0).await.unwrap();
+    assert!(deleted.deleted && deleted.written_by_run.is_none());
+    assert_eq!(hub.read("projects/1/notes/INDEX.md").await.unwrap(), None);
+    assert!(matches!(
+        hub.delete_by_owner(note, T0).await,
+        Err(StoreError::NotFound { .. })
+    ));
+    assert!(matches!(
+        hub.delete_by_owner("projects/1/notes/INDEX.md", T0).await,
+        Err(StoreError::Invalid(_))
+    ));
+}
+
+#[tokio::test]
 async fn a_rename_is_a_deletion_and_a_write_and_keeps_both_histories() {
     let hub = hub().await;
     let (by, _) = memory_author(&hub).await;

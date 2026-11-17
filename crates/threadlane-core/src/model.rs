@@ -982,8 +982,9 @@ pub struct MemoryFile {
     pub content: String,
     /// Increments on every write, starting at 1.
     pub version: i64,
-    /// The run that wrote this version. Every write carries one; only rows
-    /// from before milestone 5 can lack it.
+    /// The run that wrote this version; `None` when you wrote it yourself
+    /// ([`crate::store::MemoryStore::write_by_owner`]), or for a row from
+    /// before milestone 5.
     pub written_by_run: Option<RunId>,
     pub deleted: bool,
     pub written_at: Timestamp,

@@ -350,9 +350,11 @@ pub trait MachineStore: Send + Sync {
 }
 
 /// Versioned memory files (Plan.md §8.3). Scope is the caller's: the hub
-/// maps every path an agent names to a stored one first (invariant 12).
+/// maps every path an agent or you name to a stored one first (invariant 12).
 ///
-/// Every change is atomic and versioned with its run, under the run's lease.
+/// Every change is atomic and versioned with its run, under the run's lease,
+/// or, for a change you make yourself, with no run (`written_by_run` is
+/// `None`).
 /// It is checked against the rules of [`crate::memory::check`], and rewrites
 /// the [`crate::memory::index_for`] index of every file it touches in the
 /// same transaction. A change repeated with the same
@@ -380,6 +382,18 @@ pub trait MemoryStore: Send + Sync {
     /// version at `to`, so each path keeps its history. Returns the version
     /// at `to`.
     async fn rename(&self, by: &MemoryAuthor, from: &str, to: &str) -> StoreResult<MemoryFile>;
+    /// Your own write (Plan.md §8.3: you own the space, so instructions
+    /// included): [`MemoryStore::write`] with no run, lease or call key,
+    /// under the same rules and with the same indexes.
+    async fn write_by_owner(
+        &self,
+        path: &str,
+        content: &str,
+        at: Timestamp,
+    ) -> StoreResult<MemoryFile>;
+    /// Your own deletion: [`MemoryStore::delete`] with no run, lease or
+    /// call key.
+    async fn delete_by_owner(&self, path: &str, at: Timestamp) -> StoreResult<MemoryFile>;
     /// Current, non-deleted files whose path starts with `prefix`, by path.
     async fn list(&self, prefix: &str) -> StoreResult<Vec<MemoryFile>>;
     /// Every version of a file, oldest first.
