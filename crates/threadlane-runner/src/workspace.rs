@@ -62,8 +62,11 @@ impl GitWorkspaces {
     /// Workspaces under `root`, created as needed.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
         Self {
-            root: root.into(),
+            // Git runs inside a clone (`-C`), where a relative worktree path
+            // would land under the clone instead of under `root`.
+            root: std::path::absolute(&root).unwrap_or(root),
             setup: Arc::default(),
         }
     }
@@ -327,4 +330,16 @@ async fn remove_file(file: &Path) -> Result<(), WorkspaceError> {
 
 fn io_error(what: &str, path: &Path, error: &io::Error) -> WorkspaceError {
     WorkspaceError(format!("{what} {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_root_is_made_absolute() {
+        let workspaces = GitWorkspaces::new("data/workspaces");
+        assert!(workspaces.root.is_absolute(), "{:?}", workspaces.root);
+        assert!(workspaces.root.ends_with("data/workspaces"));
+    }
 }
