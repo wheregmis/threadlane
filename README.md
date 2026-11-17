@@ -163,6 +163,31 @@ wait as blocked instead of failing, the feed gets one notice saying when work
 should resume, and one more when it does. `[timing] usage_limit_fallback_secs`
 sets how long an account waits when the backend did not say.
 
+## Desktop app
+
+The app shows every paired space at once: Home with what needs you, what
+runs and what finished; each project's task board, conversation with its
+lead, and agents' modes; a task's timeline; and the machines of each space.
+macOS shows its notifications only from an app bundle, so build one:
+
+```sh
+scripts/bundle-desktop.sh                  # target/Threadlane.app, ad-hoc signed
+```
+
+Start a hub and pair the app's client directory with it, as for the
+command-line client, then open the app with that directory:
+
+```sh
+cargo run -p threadlane-hub -- --data-dir ~/threadlane/work run
+threadlane hub add work ~/threadlane/work         # or: threadlane hub join work <code>
+open --env THREADLANE_CLIENT_DIR="$HOME/.config/threadlane" target/Threadlane.app
+```
+
+Without `--env`, the app uses the same default client directory as
+`threadlane`. `THREADLANE_DESKTOP_OPEN` opens a screen at start: `home`,
+`agents`, `machines`, `<space>/<project>[/conversation|/agents]`, or
+`<space>/T-0001`.
+
 ## Long and live tests
 
 The database gate of `Plan.md` §18.1 runs briefly in `cargo test`. The full
