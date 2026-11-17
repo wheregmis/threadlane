@@ -699,6 +699,7 @@ async fn timers_fire_each_occurrence_once() {
             instruction: "check the build".into(),
             created_by: TimerCreator::Agent,
             created_by_call: Some("call-9".into()),
+            requested: true,
         })
         .await
         .unwrap();
@@ -714,6 +715,7 @@ async fn timers_fire_each_occurrence_once() {
             due_at: T0,
             recurrence: None,
             created_by: TimerCreator::Agent,
+            requested: true,
         })
         .await
         .unwrap();
@@ -727,10 +729,14 @@ async fn timers_fire_each_occurrence_once() {
             task_ref: None,
             category: TimerCategory::Schedule,
             due_at: T0,
-            recurrence: Some(json!({ "rule": "FREQ=DAILY", "time_zone": "Europe/Berlin" })),
+            recurrence: Some(Recurrence {
+                rule: Rule::Daily { hour: 9, minute: 0 },
+                zone: "Europe/Berlin".into(),
+            }),
             instruction: "daily summary".into(),
             created_by: TimerCreator::User,
             created_by_call: None,
+            requested: true,
         })
         .await
         .unwrap();
@@ -765,6 +771,75 @@ async fn timers_fire_each_occurrence_once() {
 
     hub.cancel_timer(schedule.id).await.unwrap();
     assert!(hub.due_timers(tomorrow).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn timers_list_by_project_pause_resume_and_fire_requested_as_created() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let timer = |requested: bool, call: &str| NewTimer {
+        project_id: general.id,
+        lane_id: general.lead_lane_id,
+        agent_id: None,
+        task_ref: None,
+        category: TimerCategory::FollowUp,
+        due_at: T0,
+        recurrence: None,
+        instruction: "look again".into(),
+        created_by: TimerCreator::Agent,
+        created_by_call: Some(call.into()),
+        requested,
+    };
+    let unrequested = hub.create_timer(&timer(false, "a")).await.unwrap();
+    let requested = hub.create_timer(&timer(true, "b")).await.unwrap();
+    let ended = hub.create_timer(&timer(true, "c")).await.unwrap();
+    hub.cancel_timer(ended.id).await.unwrap();
+    let listed: Vec<_> = hub
+        .project_timers(general.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|timer| timer.id)
+        .collect();
+    assert_eq!(
+        listed,
+        [unrequested.id, requested.id],
+        "ended timers are left out"
+    );
+
+    let paused = hub.pause_timer(requested.id).await.unwrap();
+    assert_eq!(paused.status, TimerStatus::Paused);
+    assert_eq!(hub.pause_timer(requested.id).await.unwrap(), paused);
+    assert_eq!(
+        hub.due_timers(T0).await.unwrap().len(),
+        1,
+        "paused is not due"
+    );
+    assert_eq!(hub.project_timers(general.id).await.unwrap().len(), 2);
+    let later = T0 + Duration::from_secs(60);
+    let resumed = hub.resume_timer(requested.id, Some(later)).await.unwrap();
+    assert_eq!(
+        (resumed.status, resumed.due_at),
+        (TimerStatus::Active, later)
+    );
+    assert!(matches!(
+        hub.pause_timer(ended.id).await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert!(matches!(
+        hub.resume_timer(ended.id, None).await,
+        Err(StoreError::Conflict(_))
+    ));
+
+    hub.fire(unrequested.id, T0, None, T0).await.unwrap();
+    hub.fire(requested.id, later, None, later).await.unwrap();
+    let events = hub.pending_events(general.lead_lane_id).await.unwrap();
+    assert_eq!(
+        events.iter().map(|e| e.requested).collect::<Vec<_>>(),
+        [false, true]
+    );
+    assert_eq!(events[0].payload["created_by"], "agent");
+    assert_eq!(events[1].payload["occurrence"], json!(later));
 }
 
 /// An agent bound to `project` that may run `max_parallel` tasks at once there.

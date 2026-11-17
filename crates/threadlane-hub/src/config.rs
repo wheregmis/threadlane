@@ -434,6 +434,7 @@ impl HubConfig {
             max_turns: (runs.max_turns > 0).then_some(runs.max_turns),
             recent_messages: runs.recent_messages,
             usage_limit_fallback: Duration::from_secs(timing.usage_limit_fallback_secs),
+            scheduler: Duration::from_secs(timing.scheduler_secs),
             default_models: [
                 (BackendKind::Claude, &self.backends.claude.model),
                 (BackendKind::Codex, &self.backends.codex.model),

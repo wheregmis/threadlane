@@ -102,6 +102,9 @@ pub(crate) async fn proposal(
     if crate::memory::is_change(tool) {
         return crate::memory::proposal(lane.project_id, lane.task_id, tool, arguments);
     }
+    if crate::timers::asks(tool) {
+        return crate::timers::proposal(db, lane, arguments).await;
+    }
     if tool != PUBLISH_BRANCH && tool != OPEN_PULL_REQUEST {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),

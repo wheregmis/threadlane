@@ -36,6 +36,8 @@ pub struct HubSettings {
     /// How long an account cools down after a usage limit that gave no
     /// reset time (Plan.md §5.3).
     pub usage_limit_fallback: Duration,
+    /// Scheduler pass interval (Plan.md §7.3).
+    pub scheduler: Duration,
     /// The model a backend runs when neither the agent nor its binding names
     /// one. A backend missing here runs its own default model.
     pub default_models: HashMap<BackendKind, String>,
@@ -56,6 +58,7 @@ impl Default for HubSettings {
             max_turns: Some(40),
             recent_messages: 5,
             usage_limit_fallback: Duration::from_secs(5 * 60),
+            scheduler: Duration::from_secs(10),
             default_models: HashMap::new(),
         }
     }

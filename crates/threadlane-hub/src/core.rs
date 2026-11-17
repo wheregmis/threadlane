@@ -198,9 +198,9 @@ impl HubCore {
         Ok(expired)
     }
 
-    /// Runs the sweep loop and the dispatcher loop until `shutdown`
-    /// completes. Both run every `poll`; the dispatcher also runs on every
-    /// dispatcher wake hint. Store errors are logged and retried on the next
+    /// Runs the sweep loop, the dispatcher loop, and the scheduler until
+    /// `shutdown` completes. The first two run every `poll`, the dispatcher
+    /// also on every dispatcher wake hint; the scheduler every `scheduler`. Store errors are logged and retried on the next
     /// pass.
     ///
     /// # Errors
@@ -211,6 +211,19 @@ impl HubCore {
             () = shutdown => Ok(()),
             result = self.sweep_loop() => result,
             result = self.dispatch_loop() => result,
+            result = self.schedule_loop() => result,
+        }
+    }
+
+    async fn schedule_loop(&self) -> Result<(), HubError> {
+        loop {
+            match self.schedule_once().await {
+                Ok(0) => {}
+                Ok(lanes) => tracing::debug!(lanes, "fired timers"),
+                Err(HubError::Killed(killed)) => return Err(killed.into()),
+                Err(error) => tracing::error!(%error, "scheduler pass failed"),
+            }
+            self.inner.clock.sleep(self.inner.settings.scheduler).await;
         }
     }
 

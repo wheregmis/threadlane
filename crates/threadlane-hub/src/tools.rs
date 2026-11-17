@@ -715,6 +715,7 @@ impl ToolRegistry for HubTools {
         definitions.extend(task_definitions());
         definitions.extend(crate::publish::definitions());
         definitions.extend(crate::memory::definitions());
+        definitions.extend(crate::timers::definitions());
         definitions
     }
 
@@ -738,6 +739,20 @@ impl ToolRegistry for HubTools {
             LIST_TASKS => self.list_tasks(context, &arguments).await,
             FINISH_TASK => self.finish_task(context, &arguments).await,
             name if crate::memory::is_memory(name) => self.memory(context, name, &arguments).await,
+            name if crate::timers::is_timer(name) => {
+                let run = self.run(context).await?;
+                let key = effect_key(context, &run, name, &arguments);
+                crate::timers::execute(
+                    &self.db,
+                    self.clock.now(),
+                    context,
+                    &run,
+                    key,
+                    name,
+                    &arguments,
+                )
+                .await
+            }
             // The gate asks before these, and the runner performs them.
             PUBLISH_BRANCH | OPEN_PULL_REQUEST => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
@@ -898,6 +913,11 @@ mod tests {
                     .into_iter()
                     .map(|tool| tool.name),
             );
+            names.extend(
+                crate::timers::definitions()
+                    .into_iter()
+                    .map(|tool| tool.name),
+            );
             names
                 .into_iter()
                 .filter(|name| offered_in(name, kind))
@@ -909,6 +929,10 @@ mod tests {
             crate::memory::MEMORY_EDIT,
             crate::memory::MEMORY_DELETE,
             crate::memory::MEMORY_RENAME,
+            crate::timers::SET_FOLLOW_UP,
+            crate::timers::CREATE_SCHEDULE,
+            crate::timers::LIST_TIMERS,
+            crate::timers::CANCEL_TIMER,
         ];
         assert_eq!(
             offered(LaneKind::Lead),

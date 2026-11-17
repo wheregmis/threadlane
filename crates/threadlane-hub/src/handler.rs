@@ -11,6 +11,7 @@ use threadlane_core::client::{
     OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest,
     ProjectSummary, UserMessage,
 };
+use threadlane_core::client::{TimerReply, TimerRequest};
 use threadlane_core::ids::ProjectId;
 use threadlane_core::model::{
     Agent, Answered, Binding, DecisionAnswer, DecisionStatus, EventKind, Inserted, Mode, NewAgent,
@@ -469,6 +470,10 @@ impl HubApi for ClientApi {
 
     async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
         overview::handle(self, request).await
+    }
+
+    async fn timers(&self, request: TimerRequest) -> Result<TimerReply, ApiError> {
+        crate::timers::handle(&self.core, request).await
     }
 }
 

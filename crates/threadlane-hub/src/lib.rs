@@ -24,7 +24,9 @@ mod node;
 mod pairing;
 mod placement;
 mod publish;
+mod recurrence;
 mod settings;
+mod timers;
 mod tools;
 mod wake;
 
@@ -48,6 +50,7 @@ pub use crate::memory::{MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME
 pub use crate::node::Hub;
 pub use crate::pairing::JOIN_CODE_TTL;
 pub use crate::settings::HubSettings;
+pub use crate::timers::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
 pub use crate::tools::{
     CANCEL_TASK, CLIENT_CHANNEL, CREATE_TASK, CombinedTools, FINISH_TASK, HubTools, LIST_TASKS,
     SEND_MESSAGE, TierPolicy, UPDATE_TASK, derived_call_key, offered_in,

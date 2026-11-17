@@ -13,8 +13,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::admission::AdmittedKey;
-use crate::ids::{DecisionId, EventId, ProjectId, TaskId};
-use crate::model::{Account, Agent, Decision, Machine, Mode, OutboxMessage, Repository, Run, Task};
+use crate::ids::{DecisionId, EventId, ProjectId, TaskId, TimerId};
+use crate::model::{
+    Account, Agent, Decision, Machine, Mode, OutboxMessage, Recurrence, Repository, Run, Task,
+    Timer,
+};
 use crate::time::Timestamp;
 
 /// What a hub says about itself.
@@ -346,6 +349,13 @@ pub trait HubApi: Send + Sync + fmt::Debug {
     async fn pairing(&self, request: PairingRequest) -> Result<PairingReply, ApiError>;
     /// Reads the tasks, conversation history, and machines the app shows.
     async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError>;
+    /// Lists, creates, pauses, resumes, and cancels follow-ups and routines.
+    /// The default refuses, for an implementation that offers none.
+    async fn timers(&self, request: TimerRequest) -> Result<TimerReply, ApiError> {
+        Err(ApiError::Invalid(format!(
+            "timers are not offered here: {request:?}"
+        )))
+    }
 }
 
 /// [`HubApi`] as it crosses a transport.
@@ -361,6 +371,7 @@ pub enum ClientRequest {
     Decisions { request: DecisionRequest },
     Pairing { request: PairingRequest },
     Overview { request: OverviewRequest },
+    Timers { request: TimerRequest },
 }
 
 /// The answer to a [`ClientRequest`].
@@ -381,6 +392,7 @@ pub enum ClientResponse {
     Pairing { reply: PairingReply },
     Overview { reply: OverviewReply },
     Error { error: ApiError },
+    Timers { reply: TimerReply },
 }
 
 /// Answers one request from an API. Shared by every transport's server side.
@@ -415,6 +427,51 @@ pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientRespons
             .overview(request)
             .await
             .map(|reply| ClientResponse::Overview { reply }),
+        ClientRequest::Timers { request } => api
+            .timers(request)
+            .await
+            .map(|reply| ClientResponse::Timers { reply }),
     };
     result.unwrap_or_else(|error| ClientResponse::Error { error })
+}
+
+/// The Timers capability (Plan.md §7, docs/milestone-8.md §2): follow-ups
+/// and routines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TimerRequest {
+    /// The timers of a project that have not ended, active or paused, oldest
+    /// first. `None` means the General project.
+    List { project: Option<String> },
+    /// Creates a routine of yours in a project's lead lane; its events count
+    /// as work you requested. `None` means the General project. Creating
+    /// with the same `client_request_id` twice is a successful no-op.
+    CreateRoutine {
+        project: Option<String>,
+        instruction: String,
+        recurrence: Recurrence,
+        client_request_id: String,
+    },
+    /// Pauses a timer; it fires nothing until resumed.
+    Pause { timer: TimerId },
+    /// Resumes a paused timer: a routine at its next occurrence from now, a
+    /// follow-up at its due time, or at once if that has passed.
+    Resume { timer: TimerId },
+    /// Cancels a timer for good.
+    Cancel { timer: TimerId },
+}
+
+/// The answer to a [`TimerRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TimerReply {
+    Timers {
+        timers: Vec<Timer>,
+    },
+    /// The timer as it now stands.
+    Timer {
+        timer: Timer,
+    },
 }

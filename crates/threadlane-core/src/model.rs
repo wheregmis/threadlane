@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
@@ -287,6 +288,19 @@ str_enum! {
         User => "user",
         Agent => "agent",
         System => "system",
+    }
+}
+
+str_enum! {
+    /// A day of the week, Monday first, for [`Rule::Weekdays`].
+    pub enum Weekday {
+        Mon => "mon",
+        Tue => "tue",
+        Wed => "wed",
+        Thu => "thu",
+        Fri => "fri",
+        Sat => "sat",
+        Sun => "sun",
     }
 }
 
@@ -800,13 +814,120 @@ pub struct Timer {
     pub category: TimerCategory,
     pub due_at: Timestamp,
     /// Schedules only: a recurrence rule plus a named time zone.
-    pub recurrence: Option<Json>,
+    pub recurrence: Option<Recurrence>,
     pub instruction: String,
     pub status: TimerStatus,
     pub created_by: TimerCreator,
     pub created_by_call: Option<String>,
     pub last_fired_at: Option<Timestamp>,
     pub fire_count: u32,
+    /// Whether the events it fires count as work you requested, taken from
+    /// its creator (docs/milestone-8.md §1 decision 3).
+    pub requested: bool,
+}
+
+/// The most timers a project may have that have not ended, active or paused
+/// (docs/milestone-8.md §1 decision 5).
+pub const MAX_LIVE_TIMERS: usize = 20;
+/// The shortest interval an agent's routine may repeat at.
+pub const MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// The soonest an agent's follow-up may be due.
+pub const MIN_FOLLOW_UP_DELAY: Duration = Duration::from_secs(60);
+
+/// When a routine fires: a rule of our own, not RRULE, evaluated in a named
+/// time zone so "9am daily" stays 9am across daylight-saving changes
+/// (docs/milestone-8.md §1 decision 1). Stored as JSON in
+/// `timers.recurrence`, for example
+/// `{"rule": "weekdays", "days": ["mon", "fri"], "hour": 8, "minute": 30,
+/// "zone": "Europe/Berlin"}`. The hub computes the occurrences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recurrence {
+    #[serde(flatten)]
+    pub rule: Rule,
+    /// IANA time zone name, for example `Europe/Berlin`.
+    pub zone: String,
+}
+
+/// The cadence of a [`Recurrence`]. Times are local to its zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "rule", rename_all = "snake_case")]
+pub enum Rule {
+    /// Every `minutes` minutes of elapsed time.
+    Interval { minutes: u32 },
+    /// Every day at a local time.
+    Daily { hour: u8, minute: u8 },
+    /// On the named days of the week at a local time.
+    Weekdays {
+        days: Vec<Weekday>,
+        hour: u8,
+        minute: u8,
+    },
+    /// Every month on `day` at a local time; in a shorter month, on its
+    /// last day.
+    Monthly { day: u8, hour: u8, minute: u8 },
+}
+
+impl Recurrence {
+    /// Checks the rule's fields; the zone is checked by the hub, which has
+    /// the zone database.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong, in a sentence.
+    pub fn check(&self) -> Result<(), String> {
+        if self.zone.trim().is_empty() {
+            return Err("a recurrence needs a time zone, for example Europe/Berlin".into());
+        }
+        let time = |hour: u8, minute: u8| {
+            if hour < 24 && minute < 60 {
+                Ok(())
+            } else {
+                Err(format!("{hour:02}:{minute:02} is not a time of day"))
+            }
+        };
+        match &self.rule {
+            Rule::Interval { minutes } if *minutes == 0 => {
+                Err("an interval must be at least one minute".into())
+            }
+            Rule::Interval { .. } => Ok(()),
+            Rule::Daily { hour, minute } => time(*hour, *minute),
+            Rule::Weekdays { days, .. } if days.is_empty() => {
+                Err("name at least one day of the week".into())
+            }
+            Rule::Weekdays { hour, minute, .. } => time(*hour, *minute),
+            Rule::Monthly { day, .. } if !(1..=31).contains(day) => {
+                Err(format!("{day} is not a day of the month"))
+            }
+            Rule::Monthly { hour, minute, .. } => time(*hour, *minute),
+        }
+    }
+
+    /// The shortest time between two occurrences, near enough to compare
+    /// with [`MIN_SCHEDULE_INTERVAL`]: a calendar rule repeats at most daily.
+    #[must_use]
+    pub fn min_interval(&self) -> Duration {
+        match self.rule {
+            Rule::Interval { minutes } => Duration::from_secs(u64::from(minutes) * 60),
+            _ => Duration::from_secs(23 * 60 * 60),
+        }
+    }
+}
+
+impl fmt::Display for Recurrence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.rule {
+            Rule::Interval { minutes } => return write!(f, "every {minutes} minutes"),
+            Rule::Daily { hour, minute } => write!(f, "daily at {hour:02}:{minute:02}")?,
+            Rule::Weekdays { days, hour, minute } => {
+                let days: Vec<&str> = days.iter().map(|day| day.as_str()).collect();
+                write!(f, "on {} at {hour:02}:{minute:02}", days.join(","))?;
+            }
+            Rule::Monthly { day, hour, minute } => {
+                write!(f, "monthly on day {day} at {hour:02}:{minute:02}")?;
+            }
+        }
+        write!(f, " {}", self.zone)
+    }
 }
 
 /// Input for [`crate::store::TimerStore::create_timer`].
@@ -818,10 +939,12 @@ pub struct NewTimer {
     pub task_ref: Option<TaskId>,
     pub category: TimerCategory,
     pub due_at: Timestamp,
-    pub recurrence: Option<Json>,
+    pub recurrence: Option<Recurrence>,
     pub instruction: String,
     pub created_by: TimerCreator,
     pub created_by_call: Option<String>,
+    /// See [`Timer::requested`].
+    pub requested: bool,
 }
 
 /// One option on a decision; each carries one complete call (Plan.md §9.4).
@@ -1049,6 +1172,54 @@ mod tests {
         }
         assert!(TaskOrigin::User.is_requested() && TaskOrigin::UserRoutine.is_requested());
         assert!(!TaskOrigin::Agent.is_requested() && !TaskOrigin::Event.is_requested());
+    }
+
+    #[test]
+    fn a_recurrence_is_plain_json_with_its_zone() {
+        let weekly = Recurrence {
+            rule: Rule::Weekdays {
+                days: vec![Weekday::Mon, Weekday::Fri],
+                hour: 8,
+                minute: 30,
+            },
+            zone: "Europe/Berlin".into(),
+        };
+        let json = serde_json::json!({
+            "rule": "weekdays", "days": ["mon", "fri"], "hour": 8, "minute": 30,
+            "zone": "Europe/Berlin",
+        });
+        assert_eq!(serde_json::to_value(&weekly).unwrap(), json);
+        assert_eq!(serde_json::from_value::<Recurrence>(json).unwrap(), weekly);
+        assert_eq!(weekly.to_string(), "on mon,fri at 08:30 Europe/Berlin");
+        assert!(weekly.check().is_ok());
+        let every = |minutes| Recurrence {
+            rule: Rule::Interval { minutes },
+            zone: "UTC".into(),
+        };
+        assert_eq!(every(20).min_interval(), Duration::from_secs(1200));
+        assert!(every(0).check().is_err());
+        for bad in [
+            Rule::Daily {
+                hour: 24,
+                minute: 0,
+            },
+            Rule::Monthly {
+                day: 0,
+                hour: 9,
+                minute: 0,
+            },
+            Rule::Weekdays {
+                days: Vec::new(),
+                hour: 9,
+                minute: 0,
+            },
+        ] {
+            let recurrence = Recurrence {
+                rule: bad,
+                zone: "UTC".into(),
+            };
+            assert!(recurrence.check().is_err(), "{recurrence:?}");
+        }
     }
 
     #[test]

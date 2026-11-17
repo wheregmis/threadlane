@@ -123,7 +123,7 @@ async fn milestone_3_exit() {
     // loops wait, and the reset alone wakes them.
     let (stop_hub, hub) = spawn_hub(&sim);
     let (stop_runner, runner) = spawn_runner(&sim);
-    sleepers_at_least(&sim, "every loop waits on the clock", 4).await;
+    sleepers_at_least(&sim, "every loop waits on the clock", 5).await;
     sim.clock().set(resets_at);
 
     // "that run in parallel on one machine in separate worktrees of the
@@ -135,7 +135,7 @@ async fn milestone_3_exit() {
                 .iter()
                 .all(|task| task.status == TaskStatus::Running)
             && sim.backend().received().len() == 4
-            && sim.clock().sleepers() >= 8
+            && sim.clock().sleepers() >= 9
     })
     .await;
     let active: BTreeSet<_> = sim

@@ -13,6 +13,7 @@ use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, CombinedTools, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT,
     MEMORY_RENAME, MEMORY_VIEW, SEND_MESSAGE, UPDATE_TASK,
 };
+use threadlane_hub::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
 use threadlane_testkit::fakes::FakeTools;
 
 use crate::common::{PAST_LEASE, TestHub, begin};
@@ -199,6 +200,10 @@ async fn tools_above_tier_one_are_blocked() {
             MEMORY_EDIT,
             MEMORY_DELETE,
             MEMORY_RENAME,
+            SET_FOLLOW_UP,
+            CREATE_SCHEDULE,
+            LIST_TIMERS,
+            CANCEL_TIMER,
             "read_notes",
             "merge_pull_request"
         ]

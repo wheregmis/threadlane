@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde_json::json;
 use threadlane_core::model::{EventKind, RunStatus, TaskStatus};
 use threadlane_core::store::{InboxStore, SessionStore};
+use threadlane_hub::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
 use threadlane_hub::{
     CREATE_TASK, FINISH_TASK, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME,
     MEMORY_VIEW, OPEN_PULL_REQUEST, PUBLISH_BRANCH, SEND_MESSAGE,
@@ -168,6 +169,10 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
                     MEMORY_EDIT,
                     MEMORY_DELETE,
                     MEMORY_RENAME,
+                    SET_FOLLOW_UP,
+                    CREATE_SCHEDULE,
+                    LIST_TIMERS,
+                    CANCEL_TIMER,
                 ]
             );
             assert!(
@@ -289,10 +294,11 @@ async fn with_the_long_running_loops_results_that_end_close_together_reach_the_l
     .await;
     let (stop_hub, hub) = spawn_hub(&sim);
     let (stop_runner, runner) = spawn_runner(&sim);
-    // The sweep and dispatcher loops, the runner's heartbeat and poll.
-    sleepers_at_least(&sim, "every loop waits on the clock", 4).await;
+    // The sweep, dispatcher and scheduler loops, the runner's heartbeat and
+    // poll.
+    sleepers_at_least(&sim, "every loop waits on the clock", 5).await;
     sim.send("m-1", "Ship the report page").await;
-    sleepers_at_least(&sim, "the lead debounces the goal", 5).await;
+    sleepers_at_least(&sim, "the lead debounces the goal", 6).await;
     sim.clock().advance(sim.world.runner_config.debounce);
 
     // The lead plans; two tasks run, each waiting on the clock.
@@ -326,7 +332,7 @@ async fn with_the_long_running_loops_results_that_end_close_together_reach_the_l
                 .all(|task| task.status == TaskStatus::Done)
                 && lead.lease_owner.is_some()
                 && sim.db().pending_events(lead.id).await.unwrap().len() == 3
-                && sim.clock().sleepers() >= 5
+                && sim.clock().sleepers() >= 6
         }
     })
     .await;

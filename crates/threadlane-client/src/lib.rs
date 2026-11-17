@@ -1632,5 +1632,7 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), ClientError> {
     result.map_err(failed)
 }
 
+mod timers;
+
 #[cfg(test)]
 mod tests;

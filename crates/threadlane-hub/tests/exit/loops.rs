@@ -144,20 +144,21 @@ async fn the_long_running_loops_deliver_a_reply_to_a_waiting_feed() {
     sim.backend().set_default(reply_script());
     let (stop_hub, hub) = spawn_hub(&sim);
     let (stop_runner, runner) = spawn_runner(&sim);
-    // The sweep and dispatcher loops, the runner's heartbeat and poll.
-    sleepers_at_least(&sim, "every loop waits on the clock", 4).await;
+    // The sweep, dispatcher and scheduler loops, the runner's heartbeat and
+    // poll.
+    sleepers_at_least(&sim, "every loop waits on the clock", 5).await;
     let start = sim.clock().now();
 
     let api = sim.api.clone();
     let feed = tokio::spawn(async move { api.feed(0, Duration::from_secs(60)).await });
-    sleepers_at_least(&sim, "the feed waits", 5).await;
+    sleepers_at_least(&sim, "the feed waits", 6).await;
 
     let event = sim.send("m-1", "Are you there?").await;
     // The wake hint reaches the runner, which claims and debounces.
     let plan = sim.plan.clone();
     let clock = sim.clock().clone();
     until("the runner claims and debounces", || {
-        std::future::ready(count(&plan, AFTER_CLAIM) == 1 && clock.sleepers() >= 6)
+        std::future::ready(count(&plan, AFTER_CLAIM) == 1 && clock.sleepers() >= 7)
     })
     .await;
     sim.clock().advance(sim.world.runner_config.debounce);

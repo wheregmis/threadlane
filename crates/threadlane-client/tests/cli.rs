@@ -15,6 +15,8 @@ use threadlane_core::client::{
     OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest,
     ProjectSummary, UserMessage,
 };
+use threadlane_core::client::{TimerReply, TimerRequest};
+use threadlane_core::ids::TimerId;
 use threadlane_core::ids::{
     AgentId, DecisionId, EventId, LaneId, OutboxId, ProjectId, RepositoryId,
 };
@@ -22,6 +24,9 @@ use threadlane_core::model::{
     Agent, Decision, DecisionKind, DecisionOption, DecisionStatus, Repository,
 };
 use threadlane_core::model::{Mode, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
+use threadlane_core::model::{
+    Recurrence, Rule, Timer, TimerCategory, TimerCreator, TimerStatus, Weekday,
+};
 use threadlane_core::time::Timestamp;
 use threadlane_transport_local::{SOCKET_FILE, serve};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -38,6 +43,7 @@ struct Shared {
     org: Mutex<Vec<OrgRequest>>,
     /// D-0007, pending until it is answered.
     decision: Mutex<Decision>,
+    timers: Mutex<Vec<TimerRequest>>,
 }
 
 impl Shared {
@@ -88,6 +94,7 @@ impl FakeHub {
             sent: Mutex::new(Vec::new()),
             org: Mutex::new(Vec::new()),
             decision: Mutex::new(pending_decision()),
+            timers: Mutex::new(Vec::new()),
         }))
     }
 }
@@ -263,6 +270,82 @@ impl HubApi for FakeHub {
 
     async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
         Err(ApiError::Invalid(format!("unsupported {request:?}")))
+    }
+
+    async fn timers(&self, request: TimerRequest) -> Result<TimerReply, ApiError> {
+        self.0.timers.lock().expect("lock").push(request.clone());
+        Ok(match request {
+            TimerRequest::List { .. } => TimerReply::Timers {
+                timers: vec![
+                    timer(
+                        3,
+                        Some(daily_berlin()),
+                        TimerStatus::Active,
+                        TimerCreator::User,
+                    ),
+                    timer(4, None, TimerStatus::Paused, TimerCreator::Agent),
+                ],
+            },
+            TimerRequest::CreateRoutine { recurrence, .. } => TimerReply::Timer {
+                timer: timer(5, Some(recurrence), TimerStatus::Active, TimerCreator::User),
+            },
+            TimerRequest::Pause { timer: id } => TimerReply::Timer {
+                timer: timer(
+                    id.0,
+                    Some(daily_berlin()),
+                    TimerStatus::Paused,
+                    TimerCreator::User,
+                ),
+            },
+            TimerRequest::Resume { timer: id } | TimerRequest::Cancel { timer: id } => {
+                TimerReply::Timer {
+                    timer: timer(
+                        id.0,
+                        Some(daily_berlin()),
+                        TimerStatus::Active,
+                        TimerCreator::User,
+                    ),
+                }
+            }
+            other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
+        })
+    }
+}
+
+fn daily_berlin() -> Recurrence {
+    Recurrence {
+        rule: Rule::Daily { hour: 9, minute: 0 },
+        zone: "Europe/Berlin".to_owned(),
+    }
+}
+
+/// A timer due long ago, so the CLI shows it as due now.
+fn timer(
+    id: i64,
+    recurrence: Option<Recurrence>,
+    status: TimerStatus,
+    created_by: TimerCreator,
+) -> Timer {
+    Timer {
+        id: TimerId(id),
+        project_id: ProjectId(1),
+        lane_id: LaneId(1),
+        agent_id: None,
+        task_ref: None,
+        category: if recurrence.is_some() {
+            TimerCategory::Schedule
+        } else {
+            TimerCategory::FollowUp
+        },
+        due_at: Timestamp::from_millis(1_000),
+        recurrence,
+        instruction: "Summarize the night.".to_owned(),
+        status,
+        created_by,
+        created_by_call: None,
+        last_fired_at: None,
+        fire_count: 0,
+        requested: true,
     }
 }
 
@@ -795,4 +878,171 @@ async fn an_unreachable_hub_gives_one_line_and_a_failure_exit_code() {
         stderr(&output),
         "threadlane: several hubs are paired (down, home); choose one with --space\n"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_lists_adds_and_changes_routines() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().expect("tempdir");
+    let client_dir = client.path();
+    let socket = hub.socket().display().to_string();
+    expect_success(
+        client_dir,
+        &["hub", "add", "work", &socket],
+        &format!("paired work: {socket}\n"),
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["routines", "-p", "web"],
+        "3 daily at 09:00 Europe/Berlin, due now: Summarize the night.\n\
+         4 follow-up, due now (paused), set by agent: Summarize the night.\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &[
+            "routine",
+            "add",
+            "--daily",
+            "09:00",
+            "--zone",
+            "Europe/Berlin",
+            "-p",
+            "web",
+            "Summarize",
+            "the",
+            "night.",
+        ],
+        "created routine 5 daily at 09:00 Europe/Berlin, due now: Summarize the night.\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &[
+            "routine",
+            "add",
+            "--weekdays",
+            "mon,fri",
+            "--at",
+            "8:30",
+            "--zone",
+            "UTC",
+            "standup",
+        ],
+        "created routine 5 on mon,fri at 08:30 UTC, due now: Summarize the night.\n",
+    )
+    .await;
+    // Without --zone, this computer's zone.
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        command(client_dir, &["routine", "add", "--every", "2h", "poll"])
+            .env("TZ", "Asia/Tokyo")
+            .output(),
+    )
+    .await
+    .expect("threadlane finishes")
+    .expect("threadlane runs");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "created routine 5 every 120 minutes, due now: Summarize the night.\n"
+    );
+    expect_success(
+        client_dir,
+        &["routine", "pause", "3"],
+        "paused 3 daily at 09:00 Europe/Berlin, due now (paused): Summarize the night.\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["routine", "resume", "3"],
+        "resumed 3 daily at 09:00 Europe/Berlin, due now: Summarize the night.\n",
+    )
+    .await;
+    expect_success(client_dir, &["routine", "cancel", "3"], "cancelled 3\n").await;
+
+    for bad in [
+        &["routine", "add", "--daily", "25:00", "--zone", "UTC", "x"][..],
+        &["routine", "add", "--every", "0", "--zone", "UTC", "x"],
+        &["routine", "add", "--weekdays", "mon", "--zone", "UTC", "x"],
+        &[
+            "routine", "add", "--daily", "09:00", "--every", "2h", "--zone", "UTC", "x",
+        ],
+        &["routine", "pause", "T-1"],
+    ] {
+        let output = threadlane(client_dir, bad).await;
+        assert!(!output.status.success(), "threadlane {bad:?} is refused");
+    }
+
+    let sent = hub.fake.0.timers.lock().expect("lock").clone();
+    assert_eq!(
+        sent,
+        vec![
+            TimerRequest::List {
+                project: Some("web".to_owned())
+            },
+            created(
+                Some("web"),
+                "Summarize the night.",
+                Rule::Daily { hour: 9, minute: 0 },
+                "Europe/Berlin",
+                &sent,
+            ),
+            created(
+                None,
+                "standup",
+                Rule::Weekdays {
+                    days: vec![Weekday::Mon, Weekday::Fri],
+                    hour: 8,
+                    minute: 30
+                },
+                "UTC",
+                &sent,
+            ),
+            created(
+                None,
+                "poll",
+                Rule::Interval { minutes: 120 },
+                "Asia/Tokyo",
+                &sent,
+            ),
+            TimerRequest::Pause { timer: TimerId(3) },
+            TimerRequest::Resume { timer: TimerId(3) },
+            TimerRequest::Cancel { timer: TimerId(3) },
+        ]
+    );
+    hub.stop().await;
+}
+
+/// The create request with this instruction among `sent`, checked but for its
+/// fresh request id.
+fn created(
+    project: Option<&str>,
+    instruction: &str,
+    rule: Rule,
+    zone: &str,
+    sent: &[TimerRequest],
+) -> TimerRequest {
+    let client_request_id = sent
+        .iter()
+        .find_map(|request| match request {
+            TimerRequest::CreateRoutine {
+                instruction: seen,
+                client_request_id,
+                ..
+            } if seen == instruction => Some(client_request_id.clone()),
+            _ => None,
+        })
+        .expect("sent");
+    assert!(!client_request_id.is_empty());
+    TimerRequest::CreateRoutine {
+        project: project.map(str::to_owned),
+        instruction: instruction.to_owned(),
+        recurrence: Recurrence {
+            rule,
+            zone: zone.to_owned(),
+        },
+        client_request_id,
+    }
 }

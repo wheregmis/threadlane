@@ -152,7 +152,7 @@ async fn with_no_account_free_tasks_show_blocked_you_get_one_notice_and_work_res
     // The long-running loops wait; the reset alone wakes them.
     let (stop_hub, hub) = spawn_hub(&sim);
     let (stop_runner, runner) = spawn_runner(&sim);
-    sleepers_at_least(&sim, "every loop waits on the clock", 4).await;
+    sleepers_at_least(&sim, "every loop waits on the clock", 5).await;
     sim.clock().set(resets_at);
     let probe = sim.clone();
     until("work resumes and everything is answered", || {

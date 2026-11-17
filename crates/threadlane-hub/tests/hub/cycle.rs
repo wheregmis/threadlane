@@ -11,6 +11,7 @@ use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME,
     MEMORY_VIEW, SEND_MESSAGE, SKIP_REASON, UPDATE_TASK,
 };
+use threadlane_hub::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
 
 use crate::common::{RATIONALE, Reply, TestHub, begin, play};
 
@@ -47,6 +48,10 @@ async fn a_message_produces_one_sent_reply_in_the_feed() {
             MEMORY_EDIT,
             MEMORY_DELETE,
             MEMORY_RENAME,
+            SET_FOLLOW_UP,
+            CREATE_SCHEDULE,
+            LIST_TIMERS,
+            CANCEL_TIMER,
         ]
     );
     assert_eq!(assignment.max_turns, Some(40));

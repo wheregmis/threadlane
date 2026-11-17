@@ -2,9 +2,9 @@
 
 use async_trait::async_trait;
 use serde_json::json;
-use threadlane_core::ids::TimerId;
+use threadlane_core::ids::{ProjectId, TimerId};
 use threadlane_core::model::{
-    EventKind, Inserted, NewEvent, NewTimer, Timer, TimerCategory, TimerCreator, TimerStatus, Trust,
+    EventKind, Inserted, NewEvent, NewTimer, Timer, TimerCategory, TimerStatus, Trust,
 };
 use threadlane_core::store::{StoreError, StoreResult, TimerStore};
 use threadlane_core::time::Timestamp;
@@ -19,7 +19,8 @@ use crate::row::{Cols, json_text, opt_raw, params};
 pub const TIMER_SOURCE: &str = "timer";
 
 const TIMER_FIELDS: &str = "id, project_id, lane_id, agent_id, task_ref, category, due_at,
-    recurrence, instruction, status, created_by, created_by_call, last_fired_at, fire_count";
+    recurrence, instruction, status, created_by, created_by_call, last_fired_at, fire_count,
+    requested";
 
 fn decode_timer(row: &Row) -> StoreResult<Timer> {
     let c = Cols(row);
@@ -31,13 +32,14 @@ fn decode_timer(row: &Row) -> StoreResult<Timer> {
         task_ref: c.opt_id(4)?,
         category: c.parse(5)?,
         due_at: c.ts(6)?,
-        recurrence: c.opt_json(7)?,
+        recurrence: c.opt_de(7)?,
         instruction: c.text(8)?,
         status: c.parse(9)?,
         created_by: c.parse(10)?,
         created_by_call: c.opt_text(11)?,
         last_fired_at: c.opt_ts(12)?,
         fire_count: c.u32(13)?,
+        requested: c.bool(14)?,
     })
 }
 
@@ -57,14 +59,43 @@ fn occurrence_id(id: TimerId, occurrence: Timestamp) -> String {
     format!("{id}:{}", occurrence.as_millis())
 }
 
-/// Whether a fired timer counts as work you requested (Plan.md §2.3, §7.3).
-/// A follow-up an agent set continues existing work; a routine an agent
-/// created does not.
-fn requested(timer: &Timer) -> bool {
-    match timer.created_by {
-        TimerCreator::User | TimerCreator::System => true,
-        TimerCreator::Agent => timer.category == TimerCategory::FollowUp,
+/// Moves a timer from `from` to `to`, leaving one already at `to` as it is;
+/// one in any other status has ended. `due_at` replaces its due time.
+async fn set_status(
+    db: &HubDb,
+    id: TimerId,
+    from: TimerStatus,
+    to: TimerStatus,
+    due_at: Option<Timestamp>,
+) -> StoreResult<Timer> {
+    let tx = db.db.begin().await?;
+    let timer = timer_in(tx.conn(), id)
+        .await?
+        .ok_or_else(|| StoreError::not_found("timer", id))?;
+    if timer.status == to {
+        return Ok(timer);
     }
+    if timer.status != from {
+        return Err(StoreError::Conflict(format!(
+            "timer {id} is {}, so it cannot become {to}",
+            timer.status
+        )));
+    }
+    exec(
+        tx.conn(),
+        "UPDATE timers SET status = ?1, due_at = ?2 WHERE id = ?3",
+        params![
+            to.as_str(),
+            due_at.unwrap_or(timer.due_at).as_millis(),
+            id.get()
+        ],
+    )
+    .await?;
+    let changed = timer_in(tx.conn(), id)
+        .await?
+        .ok_or_else(|| StoreError::not_found("timer", id))?;
+    tx.commit().await?;
+    Ok(changed)
 }
 
 #[async_trait]
@@ -90,8 +121,9 @@ impl TimerStore for HubDb {
             tx.conn(),
             &format!(
                 "INSERT INTO timers (project_id, lane_id, agent_id, task_ref, category, due_at,
-                     recurrence, instruction, status, created_by, created_by_call)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10) RETURNING {TIMER_FIELDS}"
+                     recurrence, instruction, status, created_by, created_by_call, requested)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11)
+                 RETURNING {TIMER_FIELDS}"
             ),
             params![
                 timer.project_id.get(),
@@ -104,6 +136,7 @@ impl TimerStore for HubDb {
                 timer.instruction.as_str(),
                 timer.created_by.as_str(),
                 timer.created_by_call.as_deref(),
+                timer.requested,
             ],
             decode_timer,
         )
@@ -202,9 +235,10 @@ impl TimerStore for HubDb {
                     "instruction": timer.instruction,
                     "occurrence": occurrence,
                     "task_ref": timer.task_ref,
+                    "created_by": timer.created_by,
                 }),
                 trust: Trust::System,
-                requested: requested(&timer),
+                requested: timer.requested,
                 session_ref: None,
                 decision_ref: None,
                 reply_to_ref: None,
@@ -228,5 +262,27 @@ impl TimerStore for HubDb {
             return Err(StoreError::not_found("timer", id));
         }
         tx.commit().await
+    }
+
+    async fn project_timers(&self, project_id: ProjectId) -> StoreResult<Vec<Timer>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {TIMER_FIELDS} FROM timers
+                 WHERE project_id = ?1 AND status IN ('active', 'paused') ORDER BY id"
+            ),
+            params![project_id.get()],
+            decode_timer,
+        )
+        .await
+    }
+
+    async fn pause_timer(&self, id: TimerId) -> StoreResult<Timer> {
+        set_status(self, id, TimerStatus::Active, TimerStatus::Paused, None).await
+    }
+
+    async fn resume_timer(&self, id: TimerId, due_at: Option<Timestamp>) -> StoreResult<Timer> {
+        set_status(self, id, TimerStatus::Paused, TimerStatus::Active, due_at).await
     }
 }

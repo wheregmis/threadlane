@@ -17,6 +17,7 @@ use crate::error::{link_error, link_to_tool, tool_error};
 use crate::link::LocalLink;
 use crate::memory;
 use crate::publish::{approval_options, proposal};
+use crate::timers;
 use crate::tools::{derived_call_key, offered_in};
 
 /// Key of the envelope a failed call's error is recorded in, so a repeated
@@ -151,7 +152,9 @@ impl LocalLink {
         };
         match inner.policy.decide(&request).await {
             // Instructions change only when you asked, or you approve.
-            Verdict::Allow => Ok(!yours && memory::protected(&definition.name, arguments)),
+            // An agent's routine asks first (docs/milestone-8.md §1 decision 4).
+            Verdict::Allow => Ok(timers::asks(&definition.name)
+                || (!yours && memory::protected(&definition.name, arguments))),
             Verdict::Block { reason } => Err(ToolError::Blocked(reason)),
             Verdict::Ask => Ok(true),
         }
@@ -250,6 +253,9 @@ impl LocalLink {
         if memory::is_change(&decision.tool) {
             return self.perform_memory(lease, run_id, &decision).await;
         }
+        if timers::asks(&decision.tool) {
+            return self.perform_schedule(lease, run_id, &decision).await;
+        }
         Ok(Perform::Call {
             tool: decision.tool,
             arguments: decision.arguments,
@@ -298,6 +304,42 @@ impl LocalLink {
             }
             Err(error) => json!({ "performed": false, "error": error.to_string() }),
         };
+        inner.hook.reach(perform::AFTER_EFFECT)?;
+        self.finish_perform(lease, run_id, decision.id, &outcome)
+            .await?;
+        Ok(Perform::Recorded { outcome })
+    }
+
+    /// Creates an approved routine in the hub, which is where timers are,
+    /// with the same record and step boundaries as [`Self::perform_memory`].
+    /// The routine is keyed on the decision, so performing it again after
+    /// an interruption creates nothing more (invariant 5).
+    async fn perform_schedule(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        decision: &Decision,
+    ) -> Result<Perform, LinkError> {
+        let inner = &self.core.inner;
+        let lane = self.check_lease(lease).await?;
+        let outcome =
+            match timers::perform_schedule(&inner.db, inner.clock.now(), &lane, decision).await {
+                Ok(result) => json!({
+                    "performed": true,
+                    "summary": format!(
+                        "Routine {} is created; it is next due at {}.",
+                        result["timer_id"].as_str().unwrap_or_default(),
+                        result["due_at"].as_str().unwrap_or_default()
+                    ),
+                    "result": result,
+                }),
+                Err(ToolError::LeaseLost) => {
+                    return Err(LinkError::StaleLease {
+                        lane_id: lease.lane_id,
+                    });
+                }
+                Err(error) => json!({ "performed": false, "error": error.to_string() }),
+            };
         inner.hook.reach(perform::AFTER_EFFECT)?;
         self.finish_perform(lease, run_id, decision.id, &outcome)
             .await?;

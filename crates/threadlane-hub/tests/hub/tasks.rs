@@ -17,6 +17,7 @@ use threadlane_hub::{
     MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW, OFF_REASON, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
     SEND_MESSAGE, SKIP_REASON, TASK_RULES, UPDATE_TASK,
 };
+use threadlane_hub::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
 
 use crate::common::{PAST_LEASE, TestHub, begin, usable_report};
 
@@ -280,6 +281,10 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             MEMORY_EDIT,
             MEMORY_DELETE,
             MEMORY_RENAME,
+            SET_FOLLOW_UP,
+            CREATE_SCHEDULE,
+            LIST_TIMERS,
+            CANCEL_TIMER,
         ]
     );
     assert!(
@@ -322,6 +327,10 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             MEMORY_EDIT,
             MEMORY_DELETE,
             MEMORY_RENAME,
+            SET_FOLLOW_UP,
+            CREATE_SCHEDULE,
+            LIST_TIMERS,
+            CANCEL_TIMER,
         ]
     );
     assert!(

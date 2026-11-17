@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use serde_json::json;
-use threadlane_core::client::{HubApi, UserMessage};
+use threadlane_core::client::{HubApi, TimerReply, TimerRequest, UserMessage};
 use threadlane_hub::Hub;
 use threadlane_hub::config::{DataDir, HubConfig};
 use threadlane_transport_local::{LocalClient, SOCKET_FILE, serve};
@@ -61,6 +61,14 @@ async fn a_served_hub_answers_a_local_client() {
     assert_eq!(info.expect("the hub answers").space, "Space");
     let projects = client.projects().await.unwrap();
     assert_eq!(projects.len(), 1);
+    assert_eq!(
+        client
+            .timers(TimerRequest::List { project: None })
+            .await
+            .unwrap(),
+        TimerReply::Timers { timers: Vec::new() },
+        "the Timers capability crosses the socket"
+    );
 
     let accepted = client
         .send_message(&UserMessage {

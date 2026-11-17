@@ -256,6 +256,16 @@ pub trait TimerStore: Send + Sync {
         now: Timestamp,
     ) -> StoreResult<Inserted>;
     async fn cancel_timer(&self, id: TimerId) -> StoreResult<()>;
+    /// A project's timers that have not ended, active or paused, oldest
+    /// first. Their number is what the cap on live timers counts.
+    async fn project_timers(&self, project_id: ProjectId) -> StoreResult<Vec<Timer>>;
+    /// Pauses an active timer; pausing a paused one changes nothing. A timer
+    /// that has ended is a [`StoreError::Conflict`].
+    async fn pause_timer(&self, id: TimerId) -> StoreResult<Timer>;
+    /// Makes a paused timer active again, due at `due_at` if given;
+    /// resuming an active one changes nothing. A timer that has ended is a
+    /// [`StoreError::Conflict`].
+    async fn resume_timer(&self, id: TimerId, due_at: Option<Timestamp>) -> StoreResult<Timer>;
 }
 
 /// Tasks and checkpoints (Plan.md §5.2, §5.5).

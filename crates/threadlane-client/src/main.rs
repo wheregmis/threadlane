@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
 use threadlane_core::client::ApiError;
 use threadlane_core::model::{Mode, OutboxKind};
+use threadlane_core::model::{Recurrence, Rule, Timer, TimerCreator, TimerStatus, Weekday};
 use threadlane_core::time::{Clock as _, SystemClock};
 
 /// Talk to your Threadlane hubs.
@@ -156,6 +157,20 @@ enum Command {
         #[arg(long)]
         from_start: bool,
     },
+    /// List the routines and follow-ups of a project that have not ended.
+    Routines {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project; the General project if left out.
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+    /// Add, pause, resume, and cancel routines.
+    Routine {
+        #[command(subcommand)]
+        command: RoutineCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -233,6 +248,63 @@ enum HubCommand {
     Remove {
         /// The hub's name.
         name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RoutineCommand {
+    /// Add a routine of yours: the project's lead is woken with the
+    /// instruction on a cadence, as work you asked for.
+    #[command(group(ArgGroup::new("cadence").required(true)))]
+    Add {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project; the General project if left out.
+        #[arg(short, long)]
+        project: Option<String>,
+        /// Every so long: minutes, or with a unit, for example 90m or 2h.
+        #[arg(long, group = "cadence", value_name = "INTERVAL", value_parser = parse_every)]
+        every: Option<u32>,
+        /// Every day at this local time.
+        #[arg(long, group = "cadence", value_name = "HH:MM", value_parser = parse_time)]
+        daily: Option<(u8, u8)>,
+        /// On these days, for example mon,wed,fri, at the time of --at.
+        #[arg(long, group = "cadence", value_delimiter = ',', requires = "at")]
+        weekdays: Vec<Weekday>,
+        /// The local time for --weekdays.
+        #[arg(long, value_name = "HH:MM", value_parser = parse_time, requires = "weekdays")]
+        at: Option<(u8, u8)>,
+        /// The time zone, for example Europe/Berlin; this computer's if left out.
+        #[arg(long)]
+        zone: Option<String>,
+        /// The instruction; several words are joined with spaces.
+        #[arg(required = true, trailing_var_arg = true)]
+        instruction: Vec<String>,
+    },
+    /// Pause a routine or follow-up; it fires nothing until resumed.
+    Pause {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// Its number, as `threadlane routines` lists it.
+        timer: String,
+    },
+    /// Resume a paused routine at its next occurrence.
+    Resume {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// Its number, as `threadlane routines` lists it.
+        timer: String,
+    },
+    /// Cancel a routine or follow-up for good.
+    Cancel {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// Its number, as `threadlane routines` lists it.
+        timer: String,
     },
 }
 
@@ -476,8 +548,138 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
             }
             core.commit_feed()?;
         }
+        Command::Routines { space, project } => {
+            let timers = core.routines(space.as_deref(), project.as_deref()).await?;
+            if timers.is_empty() {
+                println!("no routines or follow-ups");
+            }
+            for timer in timers {
+                println!("{}", timer_line(&timer));
+            }
+        }
+        Command::Routine { command } => routine(&core, command).await?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+async fn routine(core: &ClientCore, command: RoutineCommand) -> anyhow::Result<()> {
+    match command {
+        RoutineCommand::Add {
+            space,
+            project,
+            every,
+            daily,
+            weekdays,
+            at,
+            zone,
+            instruction,
+        } => {
+            let rule = match (every, daily, at) {
+                (Some(minutes), _, _) => Rule::Interval { minutes },
+                (_, Some((hour, minute)), _) => Rule::Daily { hour, minute },
+                (_, _, Some((hour, minute))) => Rule::Weekdays {
+                    days: weekdays,
+                    hour,
+                    minute,
+                },
+                _ => anyhow::bail!("give --every, --daily, or --weekdays with --at"),
+            };
+            let zone = match zone {
+                Some(zone) => zone,
+                None => local_zone().ok_or_else(|| {
+                    anyhow::anyhow!("this computer's time zone is unknown; give --zone")
+                })?,
+            };
+            let timer = core
+                .add_routine(
+                    space.as_deref(),
+                    project.as_deref(),
+                    &instruction.join(" "),
+                    Recurrence { rule, zone },
+                )
+                .await?;
+            println!("created routine {}", timer_line(&timer));
+        }
+        RoutineCommand::Pause { space, timer } => {
+            let timer = core.pause_timer(space.as_deref(), &timer).await?;
+            println!("paused {}", timer_line(&timer));
+        }
+        RoutineCommand::Resume { space, timer } => {
+            let timer = core.resume_timer(space.as_deref(), &timer).await?;
+            println!("resumed {}", timer_line(&timer));
+        }
+        RoutineCommand::Cancel { space, timer } => {
+            let timer = core.cancel_timer(space.as_deref(), &timer).await?;
+            println!("cancelled {}", timer.id);
+        }
+    }
+    Ok(())
+}
+
+/// A timer on one line: its number, cadence, when next, and instruction.
+fn timer_line(timer: &Timer) -> String {
+    let what = timer
+        .recurrence
+        .as_ref()
+        .map_or_else(|| "follow-up".to_owned(), ToString::to_string);
+    let wait = timer.due_at.saturating_since(SystemClock.now()).as_secs() / 60;
+    let next = match (wait / (24 * 60), wait / 60 % 24, wait % 60) {
+        (0, 0, 0) => "due now".to_owned(),
+        (0, 0, minutes) => format!("next in {minutes}m"),
+        (0, hours, minutes) => format!("next in {hours}h {minutes}m"),
+        (days, hours, _) => format!("next in {days}d {hours}h"),
+    };
+    let paused = if timer.status == TimerStatus::Paused {
+        " (paused)"
+    } else {
+        ""
+    };
+    let by = match timer.created_by {
+        TimerCreator::User => String::new(),
+        other => format!(", set by {other}"),
+    };
+    format!(
+        "{} {what}, {next}{paused}{by}: {}",
+        timer.id, timer.instruction
+    )
+}
+
+/// `HH:MM`, a local time of day.
+fn parse_time(text: &str) -> Result<(u8, u8), String> {
+    let parsed = text.split_once(':').and_then(|(hour, minute)| {
+        let hour: u8 = hour.parse().ok()?;
+        let minute: u8 = minute.parse().ok()?;
+        (hour < 24 && minute < 60).then_some((hour, minute))
+    });
+    parsed.ok_or_else(|| format!("{text:?} is not a time like 08:30"))
+}
+
+/// An interval in minutes: `90`, `90m`, or `2h`.
+fn parse_every(text: &str) -> Result<u32, String> {
+    let text = text.trim();
+    let (number, unit) = match text.strip_suffix('h') {
+        Some(hours) => (hours, 60),
+        None => (text.strip_suffix('m').unwrap_or(text), 1),
+    };
+    number
+        .parse::<u32>()
+        .ok()
+        .and_then(|number| number.checked_mul(unit))
+        .filter(|minutes| *minutes > 0)
+        .ok_or_else(|| format!("{text:?} is not an interval like 90m or 2h"))
+}
+
+/// This computer's time zone name: `TZ`, else where `/etc/localtime` points.
+fn local_zone() -> Option<String> {
+    if let Ok(zone) = std::env::var("TZ")
+        && !zone.trim().is_empty()
+    {
+        return Some(zone.trim().trim_start_matches(':').to_owned());
+    }
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let target = target.to_str()?;
+    let (_, zone) = target.split_once("zoneinfo/")?;
+    Some(zone.to_owned())
 }
 
 async fn hub(core: &mut ClientCore, command: HubCommand) -> anyhow::Result<()> {

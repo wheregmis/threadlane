@@ -1525,6 +1525,8 @@ The smallest app that replaces the command line for daily use. The remaining scr
 
 ### Milestone 6: A second machine
 
+**Status:** deferred; design drafted in `docs/milestone-6.md`. The order agreed on 2026-11-17: finish and battle-test everything on the first machine (milestones 8 to 11, without guest machines), make a prerelease, then add a second machine and guests.
+
 - Join codes for machines, machine keys, drain, revoke.
 - Hub link (section 5.6), local journal with ordered sync.
 - Placement with eligibility, affinity, and patience.
@@ -1538,6 +1540,8 @@ The smallest app that replaces the command line for daily use. The remaining scr
 ### Milestone 7: Resilience
 
 What happens when something goes away (sections 5.8 and 5.9).
+
+**Status:** deferred. The order agreed on 2026-11-17: finish and battle-test everything on the first machine (milestones 8 to 11, without guest machines), make a prerelease, then add a second machine and guests.
 
 - A machine dropping mid-run: lease expiry, the task moving, the returning machine fenced off.
 - The primary away from the other machine's network: working alone, with reasons shown for what waits.
