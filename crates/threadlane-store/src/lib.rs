@@ -9,6 +9,7 @@
 //! ([`HubDb::open_in_memory`]), which is how the store interfaces are faked
 //! (Plan.md §18.1): one implementation, so fakes and production cannot drift.
 
+mod admission;
 mod db;
 mod decision;
 mod inbox;

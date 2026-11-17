@@ -5,6 +5,7 @@
 //! `threadlane-testkit`.
 
 pub mod adapters;
+pub mod admission;
 pub mod backend;
 pub mod client;
 pub mod ids;

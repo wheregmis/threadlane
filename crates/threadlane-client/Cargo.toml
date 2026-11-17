@@ -18,6 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 threadlane-core.workspace = true
+threadlane-transport-iroh.workspace = true
 threadlane-transport-local.workspace = true
 tokio.workspace = true
 toml.workspace = true
@@ -25,6 +26,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+threadlane-hub.workspace = true
+threadlane-store.workspace = true
 
 [lints]
 workspace = true

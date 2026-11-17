@@ -16,6 +16,7 @@ the crates below.
 | `threadlane-mcp` | `McpServer`: serves a run's tools to a backend over loopback HTTP |
 | `threadlane-backend-claude` | `ClaudeBackend`: drives `claude -p` |
 | `threadlane-transport-local` | `LocalClient` and `serve`: the client interface over a Unix socket |
+| `threadlane-transport-iroh` | `IrohClient`, `serve`, join codes: the client interface over iroh |
 | `threadlane-client` | The client core and the `threadlane` command-line client |
 | `threadlane-runner` | `Runner`: claims lanes from a hub and executes their runs |
 | `threadlane-hub` | `HubCore` and the `threadlane-hub` binary, with an embedded runner |
@@ -40,7 +41,8 @@ cargo run -p threadlane-hub -- --data-dir ~/threadlane/work run
 ```
 
 The data directory defaults to `$THREADLANE_HUB_DIR`, then
-`./.threadlane-dev/hub`. It holds `hub.db`, the socket `hub.sock`, and
+`./.threadlane-dev/hub`. It holds `hub.db`, the socket `hub.sock`, the hub's
+iroh key `hub.key` (created on first start, readable only by you), and
 `lanes/` (one working directory per lane). The hub serves its socket, runs
 your messages through the logged-in `claude`, and stops on Ctrl-C.
 `threadlane-hub --data-dir DIR check` checks the database and exits.
@@ -74,6 +76,26 @@ threadlane status
 threadlane send "What changed in the build yesterday?"
 threadlane feed --follow
 ```
+
+From another computer on the same network, pair over iroh instead. A new hub
+prints a join code on start while no client is paired; a paired client gets
+more with `threadlane pair-code`. A code works once, for ten minutes, and the
+new client makes a key of its own for that hub alone:
+
+```sh
+threadlane hub join work tl1-…          # the code the hub printed
+threadlane pair-code                     # a code for the next client
+threadlane clients                       # the keys the hub has admitted
+threadlane revoke client-2               # cut one off at once
+```
+
+Every other command works the same over either pairing; over iroh, `feed
+--follow` is pushed by the hub. The `[iroh]` table of `hub.toml` takes
+`enabled`, `local_discovery` (both on by default), and `bind` (for example
+`"0.0.0.0:7720"`; by default a free port, which local discovery lets clients
+follow). `THREADLANE_LOCAL_DISCOVERY=off` turns discovery off in the client.
+No relay and no outside lookup is used, so client and hub must share a
+network.
 
 `send` waits for the reply (up to `--timeout`, 120 s by default) unless given
 `--no-wait`. `-s <space>` picks a hub when several are paired and `-p

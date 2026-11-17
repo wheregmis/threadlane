@@ -1,11 +1,14 @@
-//! The hub process: its data directory, lock, database, socket, and roles.
+//! The hub process: its data directory, lock, database, key, transports, and
+//! roles.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::Context;
 use threadlane_backend_claude::ClaudeBackend;
+use threadlane_core::admission::AdmissionStore;
 use threadlane_core::backend::AgentBackend;
+use threadlane_core::client::{PairingReply, PairingRequest};
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::store::OrgStore;
 use threadlane_core::time::{Clock, SystemClock};
@@ -92,18 +95,48 @@ impl Hub {
         .context("starting the hub's roles")
     }
 
-    /// Serves the client interface on `<data dir>/hub.sock` and runs the
-    /// hub's roles until `shutdown` completes.
+    /// Serves the client interface on `<data dir>/hub.sock` and, unless
+    /// `[iroh]` turns it off, over iroh with the key in `<data dir>/hub.key`
+    /// (created on first start). Runs the hub's roles until `shutdown`
+    /// completes. While no client is admitted, prints a join code first.
     ///
     /// # Errors
     ///
-    /// Fails if the socket cannot be bound or a role stops with an error.
+    /// Fails if the socket or the endpoint cannot be bound, the key cannot be
+    /// read or created, or a role stops with an error.
     pub async fn run(&self, shutdown: impl Future<Output = ()> + Send) -> anyhow::Result<()> {
-        let core = self.core().await?;
+        let mut core = self.core().await?;
+        let iroh = &self.config.iroh;
+        let endpoint = if iroh.enabled {
+            let key_file = self.data_dir.key();
+            let secret = threadlane_transport_iroh::load_or_create_key(&key_file)
+                .with_context(|| format!("reading the hub's key {}", key_file.display()))?;
+            let endpoint =
+                threadlane_transport_iroh::hub_endpoint(secret, iroh.bind, iroh.local_discovery)
+                    .await?;
+            core = core.with_iroh(threadlane_transport_iroh::hub_addr(&endpoint));
+            tracing::info!(id = %endpoint.id(), addrs = ?endpoint.bound_sockets(), "serving iroh");
+            print_first_join_code(&core).await?;
+            Some(endpoint)
+        } else {
+            None
+        };
         let (stop, stopped) = watch::channel(false);
         let socket = self.data_dir.socket();
         let work = async {
             tokio::try_join!(
+                async {
+                    if let Some(endpoint) = endpoint {
+                        threadlane_transport_iroh::serve(
+                            endpoint,
+                            core.api(),
+                            core.gate(),
+                            until_stopped(stopped.clone()),
+                        )
+                        .await;
+                    }
+                    anyhow::Ok(())
+                },
                 async {
                     threadlane_transport_local::serve(
                         &socket,
@@ -160,6 +193,27 @@ impl Hub {
     }
 }
 
+/// Prints a join code on standard output while no client is admitted, for
+/// pairing the first one (Plan.md §3.5). Not logged: logs keep no secrets.
+async fn print_first_join_code(core: &HubCore) -> anyhow::Result<()> {
+    let keys = core.db().admitted_keys().await?;
+    if keys.iter().any(|key| key.is_active()) {
+        return Ok(());
+    }
+    let reply = core
+        .api()
+        .pairing(PairingRequest::IssueJoinCode)
+        .await
+        .context("issuing the first join code")?;
+    if let PairingReply::JoinCode { code, .. } = reply {
+        println!(
+            "No client is paired with this hub yet. Within {} minutes, on the new client run:\n\n    threadlane hub join <name> {code}\n",
+            crate::JOIN_CODE_TTL.as_secs() / 60
+        );
+    }
+    Ok(())
+}
+
 async fn until_stopped(mut stopped: watch::Receiver<bool>) {
     // An error means the sender is gone, which also means stop.
     let _ = stopped.wait_for(|stop| *stop).await;
@@ -214,10 +268,12 @@ mod tests {
 
     use super::*;
 
-    /// A configuration whose `claude` is `program`, so no test runs the real one.
+    /// A configuration whose `claude` is `program`, so no test runs the real
+    /// one, and whose iroh endpoint stays on loopback with no discovery.
     fn config_with_claude(program: &Path) -> HubConfig {
         HubConfig::parse(&format!(
-            "[runner]\ndebounce_secs = 0\n[backends.claude]\nprogram = {:?}",
+            "[iroh]\nbind = \"127.0.0.1:0\"\nlocal_discovery = false\n\
+             [runner]\ndebounce_secs = 0\n[backends.claude]\nprogram = {:?}",
             program.display().to_string()
         ))
         .unwrap()

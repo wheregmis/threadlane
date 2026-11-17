@@ -2,27 +2,36 @@
 //! merging of what they report, with no user interface in it.
 //!
 //! [`ClientCore`] keeps the list of paired hubs in `hubs.toml` and the feed
-//! position per hub in `state.json`, both in the client directory. Every item
-//! it hands out is labeled with its space, which is the name the hub was
-//! paired under. See `docs/milestone-1.md` §7.
+//! position per hub in `state.json`, both in the client directory. A hub is
+//! reached over its Unix socket on this computer, or over iroh with a key of
+//! this client's own for that hub alone, kept in `keys/<name>.key` (Plan.md
+//! §3.5 "one key per joining"). Every item it hands out is labeled with its
+//! space, which is the name the hub was paired under. See
+//! `docs/milestone-1.md` §7.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
+use std::fmt;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Write as _};
+use std::net::SocketAddr;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
+use threadlane_core::admission::AdmittedKey;
 use threadlane_core::client::{
     Accepted, ApiError, BindingSummary, FeedItem, HubApi, HubInfo, OrgReply, OrgRequest,
-    ProjectSummary, UserMessage,
+    PairingReply, PairingRequest, ProjectSummary, UserMessage,
 };
 use threadlane_core::model::{Agent, Mode, OutboxKind};
+use threadlane_core::time::Timestamp;
+use threadlane_transport_iroh::{EndpointAddr, EndpointId, IrohClient, JoinCode, TransportAddr};
 use threadlane_transport_local::{LocalClient, SOCKET_FILE};
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 /// The file in the client directory that lists the paired hubs.
@@ -30,6 +39,13 @@ pub const HUBS_FILE: &str = "hubs.toml";
 
 /// The file in the client directory that holds the feed position per hub.
 pub const STATE_FILE: &str = "state.json";
+
+/// The directory in the client directory that holds one key per hub paired
+/// over iroh.
+pub const KEYS_DIR: &str = "keys";
+
+/// The pause before polling a socket hub's feed again after an error.
+const POLL_BACKOFF: Duration = Duration::from_secs(1);
 
 /// How long [`ClientCore::status`] waits for one hub before calling it
 /// unreachable.
@@ -92,6 +108,12 @@ impl ClientDirs {
     pub fn state_file(&self) -> PathBuf {
         self.root.join(STATE_FILE)
     }
+
+    /// The key this client uses for the hub paired as `name` over iroh.
+    #[must_use]
+    pub fn key_file(&self, name: &str) -> PathBuf {
+        self.root.join(KEYS_DIR).join(format!("{name}.key"))
+    }
 }
 
 /// A hub this client is paired with.
@@ -99,8 +121,32 @@ impl ClientDirs {
 pub struct PairedHub {
     /// The name the hub was paired under; it labels everything from this hub.
     pub name: String,
-    /// The hub's socket.
-    pub socket: PathBuf,
+    /// How to reach it.
+    #[serde(flatten)]
+    pub reach: Reach,
+}
+
+/// How a paired hub is reached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Reach {
+    /// Its Unix socket, on this computer.
+    Socket { socket: PathBuf },
+    /// Over iroh: its id and the addresses its join code gave. Local
+    /// discovery finds it if those change.
+    Iroh {
+        hub: EndpointId,
+        addrs: Vec<SocketAddr>,
+    },
+}
+
+impl fmt::Display for Reach {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Socket { socket } => write!(f, "{}", socket.display()),
+            Self::Iroh { hub, .. } => write!(f, "iroh {}", hub.fmt_short()),
+        }
+    }
 }
 
 /// One hub as [`ClientCore::status`] reports it.
@@ -108,8 +154,9 @@ pub struct PairedHub {
 pub struct HubStatus {
     /// The name the hub was paired under.
     pub name: String,
-    /// The hub's socket. Empty for a hub injected with [`ClientCore::with_hub`].
-    pub socket: PathBuf,
+    /// How it is reached. An empty socket for a hub injected with
+    /// [`ClientCore::with_hub`].
+    pub reach: Reach,
     /// What the hub says about itself, or why it could not be asked.
     pub info: Result<HubInfo, ApiError>,
 }
@@ -182,6 +229,21 @@ impl SpaceFeedItem {
     }
 }
 
+/// Items from the feed of one hub or several, each labeled with its space.
+/// An error is one failed attempt to reach a hub; the stream goes on.
+pub type FeedStream = mpsc::Receiver<Result<SpaceFeedItem, ClientError>>;
+
+/// A new join code from a hub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedCode {
+    /// The space it joins.
+    pub space: String,
+    /// The code, for `threadlane hub join`.
+    pub code: String,
+    /// When it stops working; it also stops after one use.
+    pub expires_at: Timestamp,
+}
+
 /// Why a client operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -217,6 +279,9 @@ pub enum ClientError {
         /// What went wrong.
         reason: String,
     },
+    /// The text given is not a join code.
+    #[error("invalid join code: {0}")]
+    InvalidJoinCode(String),
     /// The hub answered with an error.
     #[error("hub {space} refused the request")]
     Api {
@@ -327,6 +392,10 @@ pub struct ClientCore {
     position: BTreeMap<String, i64>,
     /// Hubs whose position moved past what is saved.
     unsaved: BTreeSet<String>,
+    /// One iroh client per hub paired over iroh, made on first use.
+    iroh: Mutex<HashMap<String, Arc<IrohClient>>>,
+    /// Whether iroh looks for hubs on the local network.
+    local_discovery: bool,
 }
 
 impl ClientCore {
@@ -362,7 +431,18 @@ impl ClientCore {
             saved: state.cursors,
             position: BTreeMap::new(),
             unsaved: BTreeSet::new(),
+            iroh: Mutex::default(),
+            local_discovery: true,
         })
+    }
+
+    /// Whether to look for hubs on the local network when reaching them over
+    /// iroh (on by default). Without it, only the addresses from a hub's join
+    /// code are tried.
+    #[must_use]
+    pub fn with_local_discovery(mut self, on: bool) -> Self {
+        self.local_discovery = on;
+        self
     }
 
     /// Uses `api` for the hub `name` instead of its socket. If no hub of that
@@ -372,7 +452,9 @@ impl ClientCore {
         if !self.hubs.iter().any(|hub| hub.name == name) {
             self.hubs.push(PairedHub {
                 name: name.to_owned(),
-                socket: PathBuf::new(),
+                reach: Reach::Socket {
+                    socket: PathBuf::new(),
+                },
             });
             self.transient.insert(name.to_owned());
         }
@@ -402,11 +484,70 @@ impl ClientCore {
         } else {
             socket
         };
-        let mut hubs = self.hubs.clone();
-        hubs.push(PairedHub {
+        self.add_hub(PairedHub {
             name: name.to_owned(),
-            socket,
+            reach: Reach::Socket { socket },
+        })
+    }
+
+    /// Pairs the hub of a join code under `name` over iroh: makes a new key
+    /// for this hub alone, presents the code's one-time secret, and saves the
+    /// pairing once the hub has admitted the key.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::InvalidName`], [`ClientError::AlreadyPaired`],
+    /// [`ClientError::InvalidJoinCode`], the hub unreachable or refusing the
+    /// code, or an error writing the key or the list.
+    pub async fn join(&mut self, name: &str, code: &str) -> Result<(), ClientError> {
+        validate_name(name)?;
+        if self.hubs.iter().any(|hub| hub.name == name) {
+            return Err(ClientError::AlreadyPaired(name.to_owned()));
+        }
+        let code: JoinCode = code.parse().map_err(ClientError::InvalidJoinCode)?;
+        let key_file = self.dirs.key_file(name);
+        let failed = |source| ClientError::Write {
+            path: key_file.clone(),
+            source,
+        };
+        if let Some(dir) = key_file.parent() {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(failed)?;
+        }
+        // Left over from a pairing of this name that is gone; never reused.
+        match fs::remove_file(&key_file) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(failed(error)),
+            _ => {}
+        }
+        let secret = threadlane_transport_iroh::create_key(&key_file).map_err(failed)?;
+        if let Err(error) =
+            threadlane_transport_iroh::join(secret, &code, self.local_discovery).await
+        {
+            let _ignored = fs::remove_file(&key_file);
+            return Err(api_error(name, error));
+        }
+        let added = self.add_hub(PairedHub {
+            name: name.to_owned(),
+            reach: Reach::Iroh {
+                hub: code.hub.id,
+                addrs: code.hub.ip_addrs().copied().collect(),
+            },
         });
+        if added.is_err() {
+            let _ignored = fs::remove_file(&key_file);
+        }
+        added
+    }
+
+    /// Saves the list with `hub` added; its feed starts at the beginning.
+    fn add_hub(&mut self, hub: PairedHub) -> Result<(), ClientError> {
+        let name = hub.name.clone();
+        let name = name.as_str();
+        let mut hubs = self.hubs.clone();
+        hubs.push(hub);
         self.save_hubs(&hubs)?;
         self.hubs = hubs;
 
@@ -434,6 +575,17 @@ impl ClientCore {
         self.hubs = hubs;
         self.injected.remove(name);
         self.transient.remove(name);
+        self.iroh.lock().expect("iroh clients lock").remove(name);
+        let key_file = self.dirs.key_file(name);
+        match fs::remove_file(&key_file) {
+            Err(source) if source.kind() != io::ErrorKind::NotFound => {
+                return Err(ClientError::Write {
+                    path: key_file,
+                    source,
+                });
+            }
+            _ => {}
+        }
         self.position.remove(name);
         self.unsaved.remove(name);
         if self.saved.contains_key(name) {
@@ -451,30 +603,33 @@ impl ClientCore {
     /// Asks every paired hub about itself, all at once. A hub that does not
     /// answer is reported as unreachable; the others are unaffected.
     pub async fn status(&self) -> Vec<HubStatus> {
-        let checks: Vec<_> =
-            self.hubs
-                .iter()
-                .map(|hub| {
-                    let api = self.api_for(hub);
-                    let check = tokio::spawn(async move {
-                        tokio::time::timeout(STATUS_TIMEOUT, api.info()).await
-                    });
-                    (hub.clone(), check)
-                })
-                .collect();
+        let checks: Vec<_> = self
+            .hubs
+            .iter()
+            .map(|hub| {
+                let api = self.api_for(hub);
+                let check = tokio::spawn(async move {
+                    let api = api.map_err(|error| ApiError::Unreachable(error.to_string()))?;
+                    tokio::time::timeout(STATUS_TIMEOUT, api.info())
+                        .await
+                        .unwrap_or_else(|_elapsed| {
+                            Err(ApiError::Unreachable(format!(
+                                "no answer within {} s",
+                                STATUS_TIMEOUT.as_secs()
+                            )))
+                        })
+                });
+                (hub.clone(), check)
+            })
+            .collect();
         let mut statuses = Vec::with_capacity(checks.len());
         for (hub, check) in checks {
-            let info = match check.await {
-                Ok(Ok(info)) => info,
-                Ok(Err(_elapsed)) => Err(ApiError::Unreachable(format!(
-                    "no answer within {} s",
-                    STATUS_TIMEOUT.as_secs()
-                ))),
-                Err(error) => Err(ApiError::Internal(format!("status check failed: {error}"))),
-            };
+            let info = check.await.unwrap_or_else(|error| {
+                Err(ApiError::Internal(format!("status check failed: {error}")))
+            });
             statuses.push(HubStatus {
                 name: hub.name,
-                socket: hub.socket,
+                reach: hub.reach,
                 info,
             });
         }
@@ -600,6 +755,68 @@ impl ClientCore {
     ) -> Result<(String, OrgReply), ClientError> {
         let (space, api) = self.target(space)?;
         let reply = api.org(request).await.map_err(|e| api_error(&space, e))?;
+        Ok((space, reply))
+    }
+
+    /// Asks one hub for a new join code. `None` means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn pair_code(&self, space: Option<&str>) -> Result<IssuedCode, ClientError> {
+        match self.pairing(space, PairingRequest::IssueJoinCode).await? {
+            (space, PairingReply::JoinCode { code, expires_at }) => Ok(IssuedCode {
+                space,
+                code,
+                expires_at,
+            }),
+            (space, _) => Err(wrong_reply(&space, "join code")),
+        }
+    }
+
+    /// The keys one hub has admitted, revoked ones included. `None` means the
+    /// only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn clients(&self, space: Option<&str>) -> Result<Vec<AdmittedKey>, ClientError> {
+        match self.pairing(space, PairingRequest::Clients).await? {
+            (_, PairingReply::Clients { clients }) => Ok(clients),
+            (space, _) => Err(wrong_reply(&space, "clients")),
+        }
+    }
+
+    /// Revokes a client at one hub, which closes its connections at once.
+    /// `None` means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn revoke(
+        &self,
+        space: Option<&str>,
+        name: &str,
+    ) -> Result<AdmittedKey, ClientError> {
+        let request = PairingRequest::Revoke {
+            name: name.to_owned(),
+        };
+        match self.pairing(space, request).await? {
+            (_, PairingReply::Revoked { client }) => Ok(client),
+            (space, _) => Err(wrong_reply(&space, "revoke")),
+        }
+    }
+
+    async fn pairing(
+        &self,
+        space: Option<&str>,
+        request: PairingRequest,
+    ) -> Result<(String, PairingReply), ClientError> {
+        let (space, api) = self.target(space)?;
+        let reply = api
+            .pairing(request)
+            .await
+            .map_err(|e| api_error(&space, e))?;
         Ok((space, reply))
     }
 
@@ -750,6 +967,116 @@ impl ClientCore {
         }
     }
 
+    /// The feed of one space from its cursor on, as a stream that stays
+    /// open: pushed by the hub over iroh, long-polled over a socket. `None`
+    /// means the only paired hub. Pass each item shown to
+    /// [`ClientCore::acknowledge`]. Must be called inside a Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or this client's key for
+    /// the hub cannot be read.
+    pub fn follow(&self, space: Option<&str>) -> Result<FeedStream, ClientError> {
+        let (name, _api) = self.target(space)?;
+        let (items, stream) = mpsc::channel(64);
+        for hub in self.hubs.iter().filter(|hub| hub.name == name) {
+            self.follow_hub(hub, items.clone())?;
+        }
+        Ok(stream)
+    }
+
+    /// The feeds of every paired hub merged into one stream, each item
+    /// labeled with its space (Plan.md §11.3). A hub that cannot be reached
+    /// shows up as errors; the others are unaffected. Must be called inside a
+    /// Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::NoHubs`], or a key that cannot be read.
+    pub fn follow_all(&self) -> Result<FeedStream, ClientError> {
+        if self.hubs.is_empty() {
+            return Err(ClientError::NoHubs);
+        }
+        let (items, stream) = mpsc::channel(64);
+        for hub in &self.hubs {
+            self.follow_hub(hub, items.clone())?;
+        }
+        Ok(stream)
+    }
+
+    /// Feeds one hub's items into `items` from a task of their own, until
+    /// the receiver is dropped.
+    fn follow_hub(
+        &self,
+        hub: &PairedHub,
+        items: mpsc::Sender<Result<SpaceFeedItem, ClientError>>,
+    ) -> Result<(), ClientError> {
+        let space = hub.name.clone();
+        let mut after = self.next_after(&space);
+        let label = |result: Result<FeedItem, ApiError>, space: &str| {
+            result
+                .map(|item| SpaceFeedItem {
+                    space: space.to_owned(),
+                    item,
+                })
+                .map_err(|error| api_error(space, error))
+        };
+        if !self.injected.contains_key(&space) && matches!(hub.reach, Reach::Iroh { .. }) {
+            let mut pushed = self.iroh_client(hub)?.follow(after);
+            tokio::spawn(async move {
+                while let Some(result) = pushed.recv().await {
+                    if items.send(label(result, &space)).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            return Ok(());
+        }
+        let api = self.api_for(hub)?;
+        tokio::spawn(async move {
+            loop {
+                let polled = tokio::select! {
+                    polled = api.feed(after, LONGEST_POLL) => polled,
+                    () = items.closed() => return,
+                };
+                let results: Vec<_> = match polled {
+                    Ok(polled) => polled
+                        .into_iter()
+                        .filter(|item| item.seq > after)
+                        .map(Ok)
+                        .collect(),
+                    Err(error) => vec![Err(error)],
+                };
+                let failed = results.iter().any(Result::is_err);
+                for result in results {
+                    if let Ok(item) = &result {
+                        after = item.seq;
+                    }
+                    if items.send(label(result, &space)).await.is_err() {
+                        return;
+                    }
+                }
+                if failed {
+                    tokio::time::sleep(POLL_BACKOFF).await;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Records that `item`, from a feed stream, was shown, and saves its
+    /// position at once.
+    ///
+    /// # Errors
+    ///
+    /// An error reading or writing [`STATE_FILE`].
+    pub fn acknowledge(&mut self, item: &SpaceFeedItem) -> Result<(), ClientError> {
+        if item.item.seq > self.next_after(&item.space) {
+            self.advance(&item.space, item.item.seq);
+        }
+        self.commit_feed()
+    }
+
     fn advance(&mut self, space: &str, seq: i64) {
         self.position.insert(space.to_owned(), seq);
         self.unsaved.insert(space.to_owned());
@@ -785,14 +1112,38 @@ impl ClientCore {
             (None, [only]) => only,
             (None, _) => return Err(ClientError::AmbiguousHub(self.names())),
         };
-        Ok((hub.name.clone(), self.api_for(hub)))
+        Ok((hub.name.clone(), self.api_for(hub)?))
     }
 
-    fn api_for(&self, hub: &PairedHub) -> Arc<dyn HubApi> {
-        match self.injected.get(&hub.name) {
-            Some(api) => Arc::clone(api),
-            None => Arc::new(LocalClient::new(&hub.socket)),
+    fn api_for(&self, hub: &PairedHub) -> Result<Arc<dyn HubApi>, ClientError> {
+        if let Some(api) = self.injected.get(&hub.name) {
+            return Ok(Arc::clone(api));
         }
+        Ok(match &hub.reach {
+            Reach::Socket { socket } => Arc::new(LocalClient::new(socket)),
+            Reach::Iroh { .. } => self.iroh_client(hub)?,
+        })
+    }
+
+    /// The one iroh client of a hub paired over iroh, made on first use.
+    fn iroh_client(&self, hub: &PairedHub) -> Result<Arc<IrohClient>, ClientError> {
+        let Reach::Iroh { hub: id, addrs } = &hub.reach else {
+            return Err(self.unknown(&hub.name));
+        };
+        let mut clients = self.iroh.lock().expect("iroh clients lock");
+        if let Some(client) = clients.get(&hub.name) {
+            return Ok(Arc::clone(client));
+        }
+        let key_file = self.dirs.key_file(&hub.name);
+        let secret =
+            threadlane_transport_iroh::load_key(&key_file).map_err(|source| ClientError::Read {
+                path: key_file,
+                source,
+            })?;
+        let addr = EndpointAddr::from_parts(*id, addrs.iter().copied().map(TransportAddr::Ip));
+        let client = Arc::new(IrohClient::new(secret, addr, self.local_discovery));
+        clients.insert(hub.name.clone(), Arc::clone(&client));
+        Ok(client)
     }
 
     fn save_hubs(&self, hubs: &[PairedHub]) -> Result<(), ClientError> {

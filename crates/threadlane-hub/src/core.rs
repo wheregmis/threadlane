@@ -12,12 +12,14 @@ use threadlane_core::store::{InboxStore, MachineStore};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{PermissionPolicy, ToolRegistry};
 use threadlane_store::HubDb;
+use threadlane_transport_iroh::{EndpointAddr, Gate};
 
 use crate::defaults::ensure_defaults;
 use crate::dispatcher::ClientChannel;
 use crate::error::HubError;
 use crate::handler::ClientApi;
 use crate::link::LocalLink;
+use crate::pairing::HubGate;
 use crate::settings::HubSettings;
 use crate::tools::{HubTools, TierPolicy};
 use crate::wake::WakeHub;
@@ -32,6 +34,9 @@ pub(crate) struct Inner {
     pub(crate) tools: Arc<dyn ToolRegistry>,
     pub(crate) policy: Arc<dyn PermissionPolicy>,
     pub(crate) channels: Vec<Arc<dyn ChannelAdapter>>,
+    /// How clients reach this hub over iroh, for join codes; `None` while
+    /// the hub does not serve iroh.
+    pub(crate) iroh: Option<EndpointAddr>,
 }
 
 /// The hub of one space: handler, placement, begin-run, tool gateway,
@@ -76,6 +81,7 @@ impl HubCore {
                 tools,
                 policy: Arc::new(TierPolicy::default()),
                 channels: vec![Arc::new(ClientChannel)],
+                iroh: None,
             }),
         })
     }
@@ -98,6 +104,12 @@ impl HubCore {
     #[must_use]
     pub fn with_channels(self, channels: Vec<Arc<dyn ChannelAdapter>>) -> Self {
         self.map_inner(|inner| inner.channels = channels)
+    }
+
+    /// The same hub, issuing join codes that reach it at `addr` over iroh.
+    #[must_use]
+    pub fn with_iroh(self, addr: EndpointAddr) -> Self {
+        self.map_inner(|inner| inner.iroh = Some(addr))
     }
 
     fn map_inner(self, change: impl FnOnce(&mut Inner)) -> Self {
@@ -136,6 +148,12 @@ impl HubCore {
     #[must_use]
     pub fn api(&self) -> Arc<dyn HubApi> {
         Arc::new(ClientApi::new(self.clone()))
+    }
+
+    /// Who may connect over iroh: the admitted keys, joining, revocation.
+    #[must_use]
+    pub fn gate(&self) -> Arc<dyn Gate> {
+        Arc::new(HubGate::new(self.clone()))
     }
 
     /// The link a runner on `machine` talks to the hub through. It receives

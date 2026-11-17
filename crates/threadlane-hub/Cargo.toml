@@ -17,6 +17,7 @@ threadlane-backend-claude.workspace = true
 threadlane-core.workspace = true
 threadlane-runner.workspace = true
 threadlane-store.workspace = true
+threadlane-transport-iroh.workspace = true
 threadlane-transport-local.workspace = true
 tokio.workspace = true
 toml.workspace = true

@@ -12,7 +12,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use threadlane_core::client::{
     Accepted, ApiError, BindingSummary, FeedItem, HubApi, HubInfo, OrgReply, OrgRequest,
-    ProjectSummary, UserMessage,
+    PairingReply, PairingRequest, ProjectSummary, UserMessage,
 };
 use threadlane_core::ids::{AgentId, EventId, OutboxId, ProjectId};
 use threadlane_core::model::Agent;
@@ -202,6 +202,10 @@ impl HubApi for FakeHub {
             },
             other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         })
+    }
+
+    async fn pairing(&self, request: PairingRequest) -> Result<PairingReply, ApiError> {
+        Err(ApiError::Invalid(format!("unsupported {request:?}")))
     }
 }
 

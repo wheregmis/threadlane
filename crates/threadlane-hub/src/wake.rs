@@ -49,12 +49,14 @@ impl Mailbox {
     }
 }
 
-/// Routes wake hints to links, the dispatcher loop, and feed waiters.
+/// Routes wake hints to links, the dispatcher loop, feed waiters, and open
+/// client connections (on revocation).
 #[derive(Debug)]
 pub(crate) struct WakeHub {
     links: Mutex<Vec<Weak<Mailbox>>>,
     dispatcher: Notify,
     deliveries: watch::Sender<u64>,
+    revocations: watch::Sender<u64>,
 }
 
 impl Default for WakeHub {
@@ -63,6 +65,7 @@ impl Default for WakeHub {
             links: Mutex::default(),
             dispatcher: Notify::new(),
             deliveries: watch::Sender::new(0),
+            revocations: watch::Sender::new(0),
         }
     }
 }
@@ -104,6 +107,17 @@ impl WakeHub {
     /// A receiver that sees every delivery after this call.
     pub(crate) fn deliveries(&self) -> watch::Receiver<u64> {
         self.deliveries.subscribe()
+    }
+
+    /// Tells open client connections that a key was revoked.
+    pub(crate) fn revoked(&self) {
+        self.revocations
+            .send_modify(|count| *count = count.wrapping_add(1));
+    }
+
+    /// A receiver that sees every revocation after this call.
+    pub(crate) fn revocations(&self) -> watch::Receiver<u64> {
+        self.revocations.subscribe()
     }
 }
 
