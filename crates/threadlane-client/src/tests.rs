@@ -91,6 +91,13 @@ impl HubApi for FakeHub {
             clients: Vec::new(),
         })
     }
+
+    /// Answers every request with its delivered items as the recent ones.
+    async fn overview(&self, _request: OverviewRequest) -> Result<OverviewReply, ApiError> {
+        Ok(OverviewReply::Recent {
+            items: self.items.lock().expect("lock").clone(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -123,6 +130,10 @@ impl HubApi for DownHub {
     }
 
     async fn pairing(&self, _request: PairingRequest) -> Result<PairingReply, ApiError> {
+        Err(ApiError::Unreachable("connection refused".to_owned()))
+    }
+
+    async fn overview(&self, _request: OverviewRequest) -> Result<OverviewReply, ApiError> {
         Err(ApiError::Unreachable("connection refused".to_owned()))
     }
 }
@@ -438,6 +449,21 @@ async fn status_shows_an_unreachable_hub_next_to_a_reachable_one() {
 
     let error = core.projects(Some("home")).await.expect_err("down");
     assert!(matches!(error, ClientError::Unreachable { .. }));
+
+    // A listing from every hub reports the one that is away in its place.
+    let recent = core.recent(None, 10).await.expect("recent");
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].space, "work");
+    assert!(recent[0].listed.as_ref().is_ok_and(Vec::is_empty));
+    assert!(matches!(
+        recent[1].listed,
+        Err(ClientError::Unreachable { .. })
+    ));
+    let wrong = core.running(Some("work")).await.expect("running");
+    assert!(
+        matches!(wrong[0].listed, Err(ClientError::Api { .. })),
+        "an answer of the wrong kind is an error"
+    );
     assert_eq!(
         error.to_string(),
         "hub home is unreachable: connection refused"

@@ -4,7 +4,7 @@
 //! implements it; a transport carries it to clients as [`ClientRequest`] and
 //! [`ClientResponse`]. Later milestones add capabilities; so far: who am I
 //! talking to, send a message, follow the feed, the organization, decisions,
-//! and pairing.
+//! pairing, and the overview the app's screens show.
 
 use std::fmt;
 use std::time::Duration;
@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::admission::AdmittedKey;
-use crate::ids::{DecisionId, EventId, ProjectId};
-use crate::model::{Agent, Decision, Mode, OutboxMessage, Repository};
+use crate::ids::{DecisionId, EventId, ProjectId, TaskId};
+use crate::model::{Account, Agent, Decision, Machine, Mode, OutboxMessage, Repository, Run, Task};
 use crate::time::Timestamp;
 
 /// What a hub says about itself.
@@ -196,6 +196,113 @@ pub enum PairingReply {
     },
 }
 
+/// A task as the board, the running list, and the task screen show it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub task: Task,
+    /// Its project's name.
+    pub project: String,
+    /// Its agent's name.
+    pub agent: String,
+    /// The machine of its active run, else the one it last ran on.
+    pub machine: Option<String>,
+    /// When its active run started; `None` while no run is active.
+    pub running_since: Option<Timestamp>,
+}
+
+/// One run of a task, with the name of the machine it ran on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub run: Run,
+    pub machine: String,
+}
+
+/// Everything the task screen shows (Plan.md §11.1 "Task").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskDetail {
+    pub summary: TaskSummary,
+    /// The branch it works on.
+    pub branch: String,
+    /// The names of the repositories it touches.
+    pub repositories: Vec<String>,
+    /// Its runs, oldest first.
+    pub runs: Vec<RunSummary>,
+    /// Every decision asked in its lane, oldest first.
+    pub decisions: Vec<Decision>,
+    /// The tasks it depends on and the tasks that depend on it.
+    pub related: Vec<TaskSummary>,
+}
+
+/// One entry of the conversation with a project's lead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "from", rename_all = "snake_case")]
+#[non_exhaustive]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "only with serde_json's preserve_order, which GPUI turns on in the workspace build"
+)]
+pub enum ConversationEntry {
+    /// A message you sent.
+    You {
+        event_id: EventId,
+        text: String,
+        at: Timestamp,
+    },
+    /// A delivered message, decision card, or notice, as the feed has it.
+    Delivered { item: FeedItem },
+}
+
+/// The Overview capability (Plan.md §11.2 "Tasks", "Machines"): what the
+/// app's screens show. Read-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OverviewRequest {
+    /// Every task of a project, oldest first. `None` means the General
+    /// project.
+    Tasks { project: Option<String> },
+    /// Every running task in the space, oldest first.
+    Running,
+    /// One task in full.
+    Task { task: TaskId },
+    /// The newest `limit` entries of the conversation with a project's lead
+    /// before `before` (the newest of all when `None`), oldest first. `None`
+    /// as the project means the General project.
+    Conversation {
+        project: Option<String>,
+        before: Option<Timestamp>,
+        limit: u32,
+    },
+    /// The newest `limit` delivered items in the space, of any project or
+    /// none, oldest first.
+    Recent { limit: u32 },
+    /// The machines that joined the space, and its model accounts.
+    Machines,
+}
+
+/// The answer to an [`OverviewRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OverviewReply {
+    Tasks {
+        tasks: Vec<TaskSummary>,
+    },
+    Task {
+        task: Box<TaskDetail>,
+    },
+    Conversation {
+        entries: Vec<ConversationEntry>,
+    },
+    Recent {
+        items: Vec<FeedItem>,
+    },
+    Machines {
+        machines: Vec<Machine>,
+        accounts: Vec<Account>,
+    },
+}
+
 /// Why a client request failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", content = "message", rename_all = "snake_case")]
@@ -230,6 +337,8 @@ pub trait HubApi: Send + Sync + fmt::Debug {
     async fn decisions(&self, request: DecisionRequest) -> Result<DecisionReply, ApiError>;
     /// Issues join codes, lists admitted keys, revokes them.
     async fn pairing(&self, request: PairingRequest) -> Result<PairingReply, ApiError>;
+    /// Reads the tasks, conversation history, and machines the app shows.
+    async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError>;
 }
 
 /// [`HubApi`] as it crosses a transport.
@@ -244,6 +353,7 @@ pub enum ClientRequest {
     Org { request: OrgRequest },
     Decisions { request: DecisionRequest },
     Pairing { request: PairingRequest },
+    Overview { request: OverviewRequest },
 }
 
 /// The answer to a [`ClientRequest`].
@@ -262,6 +372,7 @@ pub enum ClientResponse {
     Org { reply: OrgReply },
     Decisions { reply: DecisionReply },
     Pairing { reply: PairingReply },
+    Overview { reply: OverviewReply },
     Error { error: ApiError },
 }
 
@@ -293,6 +404,10 @@ pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientRespons
             .pairing(request)
             .await
             .map(|reply| ClientResponse::Pairing { reply }),
+        ClientRequest::Overview { request } => api
+            .overview(request)
+            .await
+            .map(|reply| ClientResponse::Overview { reply }),
     };
     result.unwrap_or_else(|error| ClientResponse::Error { error })
 }

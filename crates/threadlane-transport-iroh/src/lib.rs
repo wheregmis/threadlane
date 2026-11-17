@@ -31,8 +31,8 @@ use iroh_mdns_address_lookup::MdnsAddressLookup;
 use serde::{Deserialize, Serialize};
 use threadlane_core::client::{
     Accepted, ApiError, ClientRequest, ClientResponse, DecisionReply, DecisionRequest, FeedItem,
-    HubApi, HubInfo, OrgReply, OrgRequest, PairingReply, PairingRequest, ProjectSummary,
-    UserMessage, dispatch,
+    HubApi, HubInfo, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
+    PairingRequest, ProjectSummary, UserMessage, dispatch,
 };
 use threadlane_transport_local::{MAX_FEED_WAIT, cap_wait, encode, unexpected};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -794,6 +794,16 @@ impl HubApi for IrohClient {
         {
             ClientResponse::Pairing { reply } => Ok(reply),
             other => Err(unexpected(other, "pairing")),
+        }
+    }
+
+    async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
+        match self
+            .call(&ClientRequest::Overview { request }, REQUEST_TIMEOUT)
+            .await?
+        {
+            ClientResponse::Overview { reply } => Ok(reply),
+            other => Err(unexpected(other, "overview")),
         }
     }
 }

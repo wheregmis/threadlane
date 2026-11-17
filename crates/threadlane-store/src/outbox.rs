@@ -295,4 +295,31 @@ impl OutboxStore for HubDb {
         )
         .await
     }
+
+    async fn sent_before(
+        &self,
+        channel: &str,
+        project_id: Option<ProjectId>,
+        before: Option<Timestamp>,
+        limit: u32,
+    ) -> StoreResult<Vec<OutboxMessage>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {OUTBOX_FIELDS} FROM outbox
+                 WHERE status = 'sent' AND channel = ?1 AND (?2 IS NULL OR project_id = ?2)
+                   AND sent_at < ?3
+                 ORDER BY sent_at DESC, delivery_seq DESC LIMIT ?4"
+            ),
+            params![
+                channel,
+                project_id.map_or(turso::Value::Null, |id| turso::Value::Integer(id.get())),
+                before.map_or(i64::MAX, Timestamp::as_millis),
+                i64::from(limit)
+            ],
+            decode_message,
+        )
+        .await
+    }
 }

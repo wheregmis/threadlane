@@ -13,6 +13,7 @@ mod fencing;
 mod handler;
 mod memory;
 mod org;
+mod overview;
 mod placement;
 mod run_loop;
 mod sessions;

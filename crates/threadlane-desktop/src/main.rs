@@ -1,27 +1,34 @@
-//! `threadlane-desktop`: the thin desktop app (Plan.md §15 milestone 4).
+//! `threadlane-desktop`: the desktop app (Plan.md §11.1).
 //!
-//! Three screens over [`AppState`]: Home, the conversation with a project's
-//! lead, and answering a decision, from the queue, a card, or a system
-//! notification. Tokio runs on its own threads beside GPUI's executor
+//! The shell and its screens over [`AppState`]: Home, a project with its
+//! tasks, conversation and agents, a task, the agents of each space, and the
+//! machines. Decisions are answered from Home, a project, a task, or a
+//! system notification. Tokio runs on its own threads beside GPUI's executor
 //! (Plan.md §18.4 item 3): every hub call is spawned there and its result
-//! handed back to the view.
+//! handed back to the view. The screens live in `screens/`.
 
 use std::future::Future;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
-use threadlane_core::model::OutboxKind;
-use threadlane_desktop::{AppState, Card, decision_of_tag, pump, refresh};
+use threadlane_core::ids::TaskId;
+use threadlane_core::model::Mode;
+use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
+use threadlane_desktop::{
+    AppState, When, decision_of_tag, load_earlier, load_project, pump, refresh,
+};
 use tokio::runtime::Runtime;
 use tokio::sync::{RwLock, mpsc};
 
-/// How often Home asks every hub again, so reachability stays current.
+mod screens;
+
+/// How often the app asks every hub again, so reachability, what runs, and
+/// the open screen stay current.
 const REFRESH_EVERY: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
@@ -50,6 +57,9 @@ fn main() -> ExitCode {
         runtime.spawn(pump(Arc::clone(&core), stream, shown));
     }
     let tokio = runtime.handle().clone();
+    let start = std::env::var("THREADLANE_DESKTOP_OPEN")
+        .ok()
+        .and_then(|open| Screen::named(&open));
 
     application().with_assets(assets::Assets).run(move |cx| {
         cx.set_app_identity("dev.threadlane.desktop", "Threadlane");
@@ -61,7 +71,7 @@ fn main() -> ExitCode {
         })
         .detach();
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(960.), px(720.)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(780.)), cx)),
             titlebar: Some(TitlebarOptions {
                 title: Some("Threadlane".into()),
                 ..Default::default()
@@ -69,7 +79,7 @@ fn main() -> ExitCode {
             ..Default::default()
         };
         let opened = open_window(options, cx, |window, cx| {
-            cx.new(|cx| Desktop::new(core, tokio, feed, window, cx))
+            cx.new(|cx| Desktop::new(core, tokio, feed, start, window, cx))
         });
         match opened {
             Ok((_window, view)) => {
@@ -96,18 +106,98 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Local time minus UTC in minutes, as `date +%z` says; UTC if it cannot.
+fn local_offset_minutes() -> i64 {
+    let Ok(output) = Command::new("date").arg("+%z").output() else {
+        return 0;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    let (sign, digits) = match text.split_at_checked(1) {
+        Some(("-", digits)) => (-1, digits),
+        Some(("+", digits)) => (1, digits),
+        _ => return 0,
+    };
+    let (Some(hours), Some(minutes)) = (
+        digits.get(..2).and_then(|h| h.parse::<i64>().ok()),
+        digits.get(2..4).and_then(|m| m.parse::<i64>().ok()),
+    ) else {
+        return 0;
+    };
+    sign * (hours * 60 + minutes)
+}
+
+/// An error with its causes: `hub work refused the request: not found: task T-0001`.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        text = format!("{text}: {next}");
+        cause = next.source();
+    }
+    text
+}
+
 /// Which screen the window shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Screen {
     Home,
-    /// The conversation with the lead of `project` in `space`.
-    Conversation {
+    /// One project of one space, on one of its tabs.
+    Project {
         space: String,
         project: String,
+        tab: Tab,
     },
+    /// One task of one space.
+    Task {
+        space: String,
+        task: TaskId,
+    },
+    /// The agents of every space.
+    Agents,
+    /// The spaces and their machines.
+    Machines,
 }
 
-/// The window's one view: the screens over [`AppState`].
+impl Screen {
+    /// The screen `THREADLANE_DESKTOP_OPEN` names: `home`, `agents`,
+    /// `machines`, `<space>/<project>[/tasks|conversation|agents]`, or
+    /// `<space>/T-0001`. For looking at a screen without clicking to it.
+    fn named(open: &str) -> Option<Self> {
+        let parts: Vec<&str> = open.split('/').collect();
+        Some(match parts.as_slice() {
+            ["home"] => Self::Home,
+            ["agents"] => Self::Agents,
+            ["machines"] => Self::Machines,
+            [space, task] if TaskId::parse(task).is_some() && task.starts_with(['T', 't']) => {
+                Self::Task {
+                    space: (*space).to_owned(),
+                    task: TaskId::parse(task)?,
+                }
+            }
+            [space, project, rest @ ..] => Self::Project {
+                space: (*space).to_owned(),
+                project: (*project).to_owned(),
+                tab: match rest {
+                    ["conversation"] => Tab::Conversation,
+                    ["agents"] => Tab::Agents,
+                    _ => Tab::Tasks,
+                },
+            },
+            _ => return None,
+        })
+    }
+}
+
+/// The tabs of the project screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Tasks,
+    Conversation,
+    Agents,
+}
+
+/// The window's one view: the shell and its screens over [`AppState`].
 struct Desktop {
     state: AppState,
     core: Arc<RwLock<ClientCore>>,
@@ -119,6 +209,7 @@ struct Desktop {
     status: Option<SharedString>,
     /// Empty the note at the next render, which has the window it needs.
     clear_note: bool,
+    offset_minutes: i64,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -128,11 +219,12 @@ impl Desktop {
         core: Arc<RwLock<ClientCore>>,
         tokio: tokio::runtime::Handle,
         mut feed: mpsc::UnboundedReceiver<SpaceFeedItem>,
+        start: Option<Screen>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let composer =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Message the project's lead"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Tell your team what you need…"));
         let note = cx.new(|cx| InputState::new(window, cx).placeholder("Note (optional)"));
         let subscriptions = vec![cx.subscribe_in(
             &composer,
@@ -162,13 +254,22 @@ impl Desktop {
             state: AppState::default(),
             core,
             tokio,
-            screen: Screen::Home,
+            screen: start.unwrap_or(Screen::Home),
             composer,
             note,
             status: None,
             clear_note: false,
+            offset_minutes: local_offset_minutes(),
             _tasks: vec![follow, refresh_loop],
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// Now, in local time.
+    fn when(&self) -> When {
+        When {
+            now: SystemClock.now(),
+            offset_minutes: self.offset_minutes,
         }
     }
 
@@ -198,9 +299,43 @@ impl Desktop {
             |this, refreshed, _| this.state.apply(refreshed),
             cx,
         );
+        self.load_screen(cx);
+    }
+
+    /// Loads what the open screen shows beyond what a refresh brings.
+    fn load_screen(&mut self, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        match self.screen.clone() {
+            Screen::Project { space, project, .. } => self.run(
+                async move { load_project(&*core.read().await, &space, &project).await },
+                |this, loaded, _| this.state.apply_project(loaded),
+                cx,
+            ),
+            Screen::Task { space, task } => self.run(
+                async move {
+                    let loaded = core
+                        .read()
+                        .await
+                        .task(Some(&space), &task.to_string())
+                        .await;
+                    (space, loaded)
+                },
+                |this, (space, loaded), _| match loaded {
+                    Ok(detail) => this.state.apply_task(&space, detail),
+                    Err(error) => this.status = Some(describe(&error).into()),
+                },
+                cx,
+            ),
+            Screen::Home | Screen::Agents | Screen::Machines => {}
+        }
     }
 
     fn receive(&mut self, item: SpaceFeedItem, cx: &mut Context<Self>) {
+        let for_open_project = matches!(
+            &self.screen,
+            Screen::Project { space, project, .. }
+                if *space == item.space && item.item.project_name.as_deref() == Some(project)
+        );
         if let Some(alert) = self.state.receive(item) {
             let decision = matches!(alert, threadlane_desktop::Alert::Decision { .. });
             cx.show_system_notification(SystemNotification {
@@ -221,12 +356,17 @@ impl Desktop {
                 self.refresh(cx);
             }
         }
+        // What the lead says often comes with tasks it made or finished.
+        if for_open_project {
+            self.load_screen(cx);
+        }
         cx.notify();
     }
 
     fn go(&mut self, screen: Screen, cx: &mut Context<Self>) {
         self.screen = screen;
         self.status = None;
+        self.load_screen(cx);
         cx.notify();
     }
 
@@ -251,16 +391,28 @@ impl Desktop {
                     ));
                     this.status = Some(format!("Answered {}.", answer.decision.id).into());
                     this.clear_note = true;
+                    this.load_screen(cx);
                 }
-                Err(error) => this.status = Some(error.to_string().into()),
+                Err(error) => this.status = Some(describe(&error).into()),
             },
             cx,
         );
         cx.notify();
     }
 
+    /// Sends the composer's text to the open project's lead, or from Home
+    /// to the project the picker names.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Screen::Conversation { space, project } = self.screen.clone() else {
+        let target = match &self.screen {
+            Screen::Project { space, project, .. } => Some((space.clone(), project.clone())),
+            _ => self
+                .state
+                .target()
+                .map(|(space, project)| (space.to_owned(), project.to_owned())),
+        };
+        let Some((space, project)) = target else {
+            self.status = Some("No project to send to: pair a hub first.".into());
+            cx.notify();
             return;
         };
         let text = self.composer.read(cx).value().trim().to_owned();
@@ -273,20 +425,82 @@ impl Desktop {
         self.status = Some("Sending…".into());
         self.run(
             async move {
-                core.read()
+                let sent = core
+                    .read()
                     .await
                     .send(Some(&space), Some(&project), &text)
-                    .await
+                    .await;
+                (space, project, text, sent)
             },
-            |this, sent, _| {
-                this.status = Some(match sent {
-                    Ok(_) => "Sent to the lead.".into(),
-                    Err(error) => error.to_string().into(),
-                });
+            |this, (space, project, text, sent), _| match sent {
+                Ok(sent) => {
+                    let at = SystemClock.now();
+                    this.state
+                        .sent(&space, &project, &text, sent.accepted.event_id, at);
+                    this.status = Some(format!("Sent to the lead of {space} / {project}.").into());
+                }
+                Err(error) => this.status = Some(describe(&error).into()),
             },
             cx,
         );
         cx.notify();
+    }
+
+    fn set_mode(
+        &mut self,
+        space: String,
+        project: String,
+        agent: String,
+        mode: Mode,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let set = core
+                    .read()
+                    .await
+                    .set_mode(Some(&space), Some(&project), &agent, mode)
+                    .await;
+                (space, project, set)
+            },
+            |this, (space, project, set), _| match set {
+                Ok(binding) => {
+                    this.status =
+                        Some(format!("{} is now {} here.", binding.agent, binding.mode).into());
+                    this.state.mode_set(&space, &project, binding);
+                }
+                Err(error) => this.status = Some(describe(&error).into()),
+            },
+            cx,
+        );
+    }
+
+    fn earlier(
+        &mut self,
+        space: String,
+        project: String,
+        before: Timestamp,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move { load_earlier(&*core.read().await, &space, &project, before).await },
+            |this, loaded, _| this.state.apply_earlier(loaded),
+            cx,
+        );
+    }
+
+    fn issue_code(&mut self, space: String, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move { core.read().await.pair_code(Some(&space)).await },
+            |this, issued, _| match issued {
+                Ok(code) => this.state.issued(code),
+                Err(error) => this.status = Some(describe(&error).into()),
+            },
+            cx,
+        );
     }
 }
 
@@ -297,208 +511,36 @@ impl Render for Desktop {
                 .update(cx, |note, cx| note.set_value("", window, cx));
         }
         let muted = cx.theme().muted_foreground;
+        let when = self.when();
         let body = match self.screen.clone() {
-            Screen::Home => self.home(cx),
-            Screen::Conversation { space, project } => self.conversation(&space, &project, cx),
+            Screen::Home => self.home(&when, cx),
+            Screen::Project {
+                space,
+                project,
+                tab,
+            } => self.project(&space, &project, tab, &when, cx),
+            Screen::Task { space, task } => self.task(&space, task, &when, cx),
+            Screen::Agents => self.agents(cx),
+            Screen::Machines => self.machines(&when, cx),
         };
-        v_flex()
+        h_flex()
             .size_full()
-            .p_4()
-            .gap_3()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(body)
-            .children(
-                self.status
-                    .clone()
-                    .map(|status| div().text_sm().text_color(muted).child(status)),
-            )
-    }
-}
-
-impl Desktop {
-    /// Home: the spaces and their projects, and the merged queue.
-    fn home(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let danger = cx.theme().danger;
-        let mut spaces = v_flex().gap_2().child(heading("Spaces"));
-        if self.state.spaces().is_empty() {
-            spaces = spaces.child(div().text_color(muted).child(
-                "No hub is paired. Pair one with `threadlane hub join <name> <code>`, then reopen the app.",
-            ));
-        }
-        for space in self.state.spaces() {
-            let reach = match &space.unreachable {
-                None => div().text_sm().text_color(muted).child("reachable"),
-                Some(why) => div()
-                    .text_sm()
-                    .text_color(danger)
-                    .child(format!("unreachable: {why}")),
-            };
-            let projects = h_flex()
-                .gap_2()
-                .flex_wrap()
-                .children(space.projects.iter().map(|project| {
-                    let screen = Screen::Conversation {
-                        space: space.name.clone(),
-                        project: project.name.clone(),
-                    };
-                    Button::new(SharedString::from(format!(
-                        "open-{}-{}",
-                        space.name, project.id
-                    )))
-                    .label(project.name.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
-                }));
-            spaces = spaces.child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(space.name.clone()),
-                            )
-                            .child(reach),
-                    )
-                    .child(projects),
-            );
-        }
-
-        let mut queue = v_flex()
-            .gap_2()
-            .child(heading("Waiting on you"))
-            .child(Input::new(&self.note));
-        if self.state.queue().is_empty() {
-            queue = queue.child(div().text_color(muted).child("Nothing waits on you."));
-        }
-        for queued in self.state.queue() {
-            let label = match self
-                .state
-                .project_name(&queued.space, queued.decision.project_id)
-            {
-                Some(project) => format!("{}/{project}", queued.space),
-                None => queued.space.clone(),
-            };
-            let id = queued.decision.id.to_string();
-            let options = queued
-                .decision
-                .options
-                .iter()
-                .map(|option| option.label.clone())
-                .collect::<Vec<_>>();
-            queue = queue.child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted)
-                            .child(format!("{label} · {id}")),
-                    )
-                    .child(queued.decision.question.clone())
-                    .child(self.option_buttons(&queued.space, &id, &options, cx)),
-            );
-        }
-
-        v_flex()
-            .id("home")
-            .flex_1()
-            .overflow_y_scroll()
-            .gap_6()
-            .child(spaces)
-            .child(queue)
-            .into_any_element()
-    }
-
-    /// The conversation with one project's lead: its feed and a composer.
-    fn conversation(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let mut feed = v_flex().id("feed").flex_1().overflow_y_scroll().gap_3();
-        let mut empty = true;
-        for item in self.state.conversation(space, project) {
-            empty = false;
-            let kind = match item.kind() {
-                OutboxKind::Message => "lead",
-                OutboxKind::SystemNotice => "notice",
-                OutboxKind::Decision => "decision",
-            };
-            let mut entry = v_flex()
-                .gap_1()
-                .child(div().text_xs().text_color(muted).child(kind));
-            match Card::of(item) {
-                Some(card) => {
-                    entry = entry.child(format!("{}: {}", card.id, card.question));
-                    entry = if self.state.is_pending(space, &card.id) {
-                        entry.child(self.option_buttons(space, &card.id, &card.options, cx))
-                    } else {
-                        entry.child(div().text_sm().text_color(muted).child("answered"))
-                    };
-                }
-                None => entry = entry.child(item.text()),
-            }
-            feed = feed.child(entry);
-        }
-        if empty {
-            feed =
-                feed.child(div().text_color(muted).child(
-                    "Nothing new from this lead since you last looked. Send it a goal below.",
-                ));
-        }
-        v_flex()
-            .flex_1()
-            .gap_3()
+            .child(self.sidebar(cx))
             .child(
-                h_flex()
+                v_flex()
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .p_4()
                     .gap_3()
-                    .child(
-                        Button::new("back")
-                            .label("Home")
-                            .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Home, cx))),
-                    )
-                    .child(heading(format!("{space}/{project}"))),
-            )
-            .child(feed)
-            .child(Input::new(&self.note))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.composer)))
-                    .child(
-                        Button::new("send")
-                            .primary()
-                            .label("Send")
-                            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+                    .child(body)
+                    .children(
+                        self.status
+                            .clone()
+                            .map(|status| div().text_sm().text_color(muted).child(status)),
                     ),
             )
-            .into_any_element()
     }
-
-    /// One button per option of decision `id` in `space`; a click answers
-    /// with that option and the note, if any.
-    fn option_buttons(
-        &self,
-        space: &str,
-        id: &str,
-        options: &[String],
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        h_flex().gap_2().children(options.iter().map(|option| {
-            let (space, id, option) = (space.to_owned(), id.to_owned(), option.clone());
-            Button::new(SharedString::from(format!("answer-{space}-{id}-{option}")))
-                .label(option.clone())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.answer(space.clone(), id.clone(), option.clone(), cx);
-                }))
-        }))
-    }
-}
-
-fn heading(text: impl Into<SharedString>) -> Div {
-    div()
-        .text_lg()
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(text.into())
 }

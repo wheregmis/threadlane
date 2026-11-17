@@ -1,5 +1,5 @@
-//! The client interface: handler (Plan.md §6.3), feed, info, projects, and
-//! the organization (Plan.md §11.2).
+//! The client interface: handler (Plan.md §6.3), feed, info, projects, the
+//! organization, and the overview (Plan.md §11.2).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use threadlane_core::client::{
     Accepted, ApiError, BindingSummary, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo,
-    OrgReply, OrgRequest, PairingReply, PairingRequest, ProjectSummary, UserMessage,
+    OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest,
+    ProjectSummary, UserMessage,
 };
 use threadlane_core::ids::ProjectId;
 use threadlane_core::model::{
@@ -23,6 +24,8 @@ use crate::core::HubCore;
 use crate::defaults::ensure_defaults;
 use crate::error::api_error;
 use crate::tools::CLIENT_CHANNEL;
+
+mod overview;
 
 /// Source name of messages from the client.
 pub const CLIENT_SOURCE: &str = "client";
@@ -462,6 +465,10 @@ impl HubApi for ClientApi {
 
     async fn pairing(&self, request: PairingRequest) -> Result<PairingReply, ApiError> {
         crate::pairing::handle(&self.core, request).await
+    }
+
+    async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
+        overview::handle(self, request).await
     }
 }
 
