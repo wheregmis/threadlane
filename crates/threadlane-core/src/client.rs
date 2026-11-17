@@ -326,6 +326,9 @@ pub struct TaskSummary {
     pub machine: Option<String>,
     /// When its active run started; `None` while no run is active.
     pub running_since: Option<Timestamp>,
+    /// When the task completed, if it is done and its result event is recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<Timestamp>,
 }
 
 /// One run of a task, with the name of the machine it ran on.
@@ -353,6 +356,9 @@ pub struct TaskDetail {
     /// [`ConversationEntry::You`] entries.
     #[serde(default)]
     pub messages: Vec<ConversationEntry>,
+    /// The original proposer of accepted work, including its subtasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<String>,
 }
 
 /// One entry of the conversation with a project's lead.
@@ -409,6 +415,8 @@ pub enum OverviewRequest {
     Recorded { project: Option<String>, limit: u32 },
     /// How many such events the whole space has.
     RecordedCount,
+    /// Runs on a project's lead lane, oldest first. `None` means General.
+    LeadRuns { project: Option<String> },
 }
 
 /// An event that arrived but started no run, because no one asked for the
@@ -459,6 +467,20 @@ pub enum OverviewReply {
     RecordedCount {
         total: u64,
     },
+    /// Runs of the project's lead lane, oldest first.
+    LeadRuns {
+        /// Records and message markers from the lead lane.
+        runs: Vec<LeadRun>,
+    },
+}
+
+/// A lead run with whether it put an ordinary message in the outbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeadRun {
+    /// Its status, outcome, timestamps, and recorded rationale.
+    pub run: Run,
+    /// Whether it queued an ordinary message, including ones yet to be delivered.
+    pub sent_message: bool,
 }
 
 /// The Memory capability (Plan.md §8.3, §11.1 "Memory"): the files a

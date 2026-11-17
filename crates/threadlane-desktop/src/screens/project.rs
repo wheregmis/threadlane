@@ -31,6 +31,7 @@ impl Desktop {
         project: &str,
         tab: Tab,
         when: &When,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (in_space, named) = (space.to_owned(), project.to_owned());
@@ -55,7 +56,7 @@ impl Desktop {
         let lead = self.state.lead_line(space, project, when);
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
-            Tab::Conversation => self.conversation_tab(space, project, when, cx),
+            Tab::Conversation => self.conversation_tab(space, project, when, window, cx),
             Tab::Agents => self.agents_tab(space, project, cx),
             Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Memory => self.memory_tab(space, project, when, cx),
@@ -139,7 +140,51 @@ impl Desktop {
             .board(space, project, when)
             .into_iter()
             .map(|column| {
-                let title = format!("{} {}", column.title, column.cards.len());
+                let title = format!("{} {}", column.title, column.count);
+                let proposals = column.proposals.into_iter().map(|proposal| {
+                    let id = proposal.id;
+                    let button = |label, option: Option<String>| {
+                        option.map(|option| {
+                            let space = space.to_owned();
+                            Button::new(SharedString::from(format!(
+                                "proposal-{space}-{id}-{label}"
+                            )))
+                            .small()
+                            .tab_stop(true)
+                            .label(label)
+                            .accessibility_label(format!("{label} proposal {id}"))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.answer(
+                                        space.clone(),
+                                        id.to_string(),
+                                        option.clone(),
+                                        None,
+                                        cx,
+                                    );
+                                },
+                            ))
+                        })
+                    };
+                    v_flex()
+                        .gap_1()
+                        .p_2()
+                        .min_w_0()
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_dashed()
+                        .border_color(cx.theme().border)
+                        .rounded(cx.theme().radius)
+                        .child(div().whitespace_normal().child(proposal.title))
+                        .child(div().text_xs().text_color(muted).child(proposal.meta))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .flex_wrap()
+                                .children(button("Start", proposal.start))
+                                .children(button("Decline", proposal.decline).map(Button::ghost)),
+                        )
+                });
                 let cards = column.cards.into_iter().map(|card| {
                     let screen = Screen::Task {
                         space: space.to_owned(),
@@ -164,6 +209,7 @@ impl Desktop {
                                                     space.clone(),
                                                     id.clone(),
                                                     option.clone(),
+                                                    None,
                                                     cx,
                                                 );
                                             });
@@ -186,6 +232,8 @@ impl Desktop {
                                 format!("card-{}", card.id),
                                 format!("{} {}", card.id, card.title),
                             )
+                            .min_w_0()
+                            .tab_stop(true)
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
                             ),
@@ -201,7 +249,13 @@ impl Desktop {
                     .bg(cx.theme().muted)
                     .rounded(cx.theme().radius)
                     .child(div().text_xs().text_color(muted).child(title))
+                    .children(proposals)
                     .children(cards)
+                    .children(
+                        column
+                            .more
+                            .map(|label| div().text_xs().text_color(muted).child(label)),
+                    )
             });
         let board = match self.state.project_gap(space, project, Part::Tasks) {
             Some(gap) => div()
@@ -305,6 +359,7 @@ impl Desktop {
         space: &str,
         project: &str,
         when: &When,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -363,23 +418,52 @@ impl Desktop {
                 Line::You { text, time } => lines.child(said("You", time, text)),
                 Line::Lead { text, time } => lines.child(said("Lead", time, text)),
                 Line::Notice { text, time } => lines.child(said("Notice", time, text)),
+                Line::Quiet {
+                    id,
+                    text,
+                    toggle,
+                    reasons,
+                } => {
+                    let space = space.to_owned();
+                    let button = Button::new(SharedString::from(format!("quiet-{space}-{id}")))
+                        .small()
+                        .ghost()
+                        .tab_stop(true)
+                        .label(toggle)
+                        .accessibility_label(format!("{toggle}: {text}"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.toggle_quiet(&space, id);
+                            cx.notify();
+                        }));
+                    lines.child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .flex_wrap()
+                                    .child(div().text_sm().text_color(muted).min_w_0().child(text))
+                                    .child(button),
+                            )
+                            .children(reasons.into_iter().map(|reason| {
+                                div()
+                                    .text_sm()
+                                    .child(format!("{} · {}", reason.time, reason.text))
+                            })),
+                    )
+                }
                 Line::Decision {
                     card,
                     time,
                     pending,
-                } => {
-                    let queued = self.state.queue().iter().find(|queued| {
-                        queued.space == space && queued.decision.id.to_string() == card.id
-                    });
-                    match queued {
-                        Some(queued) if pending => lines.child(self.decision(queued, cx)),
-                        _ => lines.child(said(
-                            "Decision",
-                            time,
-                            format!("{}: {} (answered)", card.id, card.question),
-                        )),
-                    }
-                }
+                } => match self.state.queued_card(space, &card) {
+                    Some(queued) if pending => lines.child(self.decision(queued, window, cx)),
+                    _ => lines.child(said(
+                        card.label(),
+                        time,
+                        format!("{}: {} (answered)", card.id, card.question),
+                    )),
+                },
             };
         }
         if let Some(recorded) = recorded {
@@ -433,7 +517,6 @@ impl Desktop {
                     && self.state.project_name(space, queued.decision.project_id) == Some(project)
             })
             .collect();
-        let any_open = !open.is_empty();
         if open.is_empty() {
             side = side.child(div().text_sm().text_color(muted).child("None."));
         }
@@ -492,7 +575,6 @@ impl Desktop {
                     .min_w_0()
                     .gap_2()
                     .child(lines)
-                    .children(any_open.then(|| self.note_field()))
                     .child(
                         h_flex()
                             .gap_2()
@@ -1178,6 +1260,8 @@ impl Desktop {
             return Button::new("add-repository")
                 .small()
                 .ghost()
+                .self_start()
+                .tab_stop(true)
                 .label("+ Add repository")
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.open_repository_form(&in_space, &named, true);

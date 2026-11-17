@@ -282,11 +282,9 @@ impl HubTools {
                 )
             }
         };
-        // shortcut: an accepted proposal is marked User, the origin of work
-        // you requested; give it its own origin once the app shows one.
         let (origin, created_by_call) = match accepted {
             Some(decision) => (
-                TaskOrigin::User,
+                TaskOrigin::Accepted,
                 format!(
                     "s{}:perform:{}",
                     decision.session_id.unwrap_or(run.session_id),

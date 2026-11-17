@@ -1568,11 +1568,13 @@ The two ways work can start or continue without a message from you.
 
 ### Milestone 9: Modes and permissions
 
-- Tiers, forbidden list, mode matrix, ceilings, overrides.
-- Initiative rule and proposals.
-- The remaining shared-effect tools, such as `comment` and `merge`, through the hub gate.
-- Decisions completed: proposals, questions, expiry, standing rules.
-- Trust labels, tainting, screening, and the classifier as one-shot backend questions, failing closed.
+**Status:** done on the scripted backend and fakes; design in `docs/milestone-9.md`. Not yet checked: any mode above On request, a proposal, the classifier or screening on the real `claude`; `comment`, `create_issue` and `merge` against the real `gh`; the red-team suite in `docs/redteam.md`, which is live and has never been run, so there is no measured rate. Deferred with the second machine: a paused call surviving a machine change. Known gaps: the forbidden list is the built-in tier only; after you decline a proposal the lead's next run counts as requested; a forge write whose answer is lost is recorded as unknown and not retried.
+
+- [x] Tiers, forbidden list, mode matrix, ceilings, overrides.
+- [x] Initiative rule and proposals.
+- [x] The remaining shared-effect tools, such as `comment` and `merge`, through the hub gate.
+- [x] Decisions completed: proposals, questions, expiry, standing rules.
+- [x] Trust labels, tainting, screening, and the classifier as one-shot backend questions, failing closed.
 
 **Exit:** The same scenario under each mode starts and does exactly what its row permits, for an agent using the system's tools. In Assisted mode a failing build on a registered repository produces a proposal, and in Autonomous mode it produces a task. A tier 3 call pauses, survives a machine change, and executes exactly once after your answer. A standing rule removes the next identical ask and can be revoked. The direct form of every gated action is refused by the deny rules on both backends. In the red-team scenarios of section 14.2, injected instructions do not lead to a shared effect; that is measured, not guaranteed. A shared-effect tool refuses a repository that is not registered in the run's project, including one registered in another space. Invariants 7, 13, 14, 16, 19.
 

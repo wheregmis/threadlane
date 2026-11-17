@@ -503,6 +503,7 @@ fn pending_decision() -> Decision {
         expires_at: None,
         created_at: Timestamp::from_millis(1_000),
         outcome: None,
+        proposed_by: None,
     }
 }
 

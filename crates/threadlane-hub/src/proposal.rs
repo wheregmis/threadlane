@@ -5,8 +5,11 @@
 //! to a project note for the lead, not a rule in the gate.
 
 use serde_json::{Value as Json, json};
-use threadlane_core::model::{Decision, DecisionOption, Lane};
-use threadlane_core::store::{MemoryStore, StoreError};
+use threadlane_core::ids::DecisionId;
+use threadlane_core::model::{Decision, DecisionKind, DecisionOption, Lane, Task, TaskOrigin};
+use threadlane_core::store::{
+    DecisionStore, MemoryStore, OrgStore, SessionStore, StoreError, TaskStore,
+};
 use threadlane_core::time::Timestamp;
 use threadlane_core::tools::ToolError;
 use threadlane_store::HubDb;
@@ -103,4 +106,47 @@ pub(crate) async fn record_answer(
     ));
     db.write_by_owner(&path, &content, at).await?;
     Ok(())
+}
+
+/// The agent that made this proposal, from its original run.
+pub(crate) async fn author(db: &HubDb, decision: &Decision) -> Result<Option<String>, StoreError> {
+    let Some(run_id) = decision.run_id else {
+        return Ok(None);
+    };
+    let Some(agent_id) = db.run(run_id).await?.and_then(|run| run.agent_id) else {
+        return Ok(None);
+    };
+    Ok(db.agent(agent_id).await?.map(|agent| agent.name))
+}
+
+/// Follows accepted work back to the proposal whose call created it.
+pub(crate) async fn accepted_author(db: &HubDb, task: &Task) -> Result<Option<String>, StoreError> {
+    let mut parent = None;
+    loop {
+        let task = parent.as_ref().unwrap_or(task);
+        if task.origin != TaskOrigin::Accepted {
+            break;
+        }
+        let decision_id = task
+            .created_by_call
+            .as_deref()
+            .and_then(|key| key.split_once(":perform:"))
+            .and_then(|(_, id)| DecisionId::parse(id));
+        if let Some(id) = decision_id
+            && let Some(decision) = db.decision(id).await?
+            && decision.project_id == task.project_id
+            && decision.kind == DecisionKind::Proposal
+            && decision.approved()
+        {
+            return author(db, &decision).await;
+        }
+        let Some(parent_id) = task.parent_task_id else {
+            break;
+        };
+        parent = db.task(parent_id).await?;
+        if parent.is_none() {
+            break;
+        }
+    }
+    Ok(None)
 }

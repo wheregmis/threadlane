@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -38,6 +38,9 @@ struct FakeHub {
     created: Mutex<Vec<ProjectSummary>>,
     machines: Mutex<Vec<Machine>>,
     lead: Mutex<Option<Timestamp>>,
+    lead_runs: Mutex<Vec<LeadRun>>,
+    task_runs: Mutex<Vec<RunSummary>>,
+    now: AtomicI64,
     decisions: Mutex<Vec<Decision>>,
     tasks: Mutex<Vec<TaskSummary>>,
     history: Mutex<Vec<ConversationEntry>>,
@@ -64,6 +67,13 @@ impl FakeHub {
             decisions: Mutex::new(decisions),
             ..Self::default()
         })
+    }
+
+    fn when(&self) -> When {
+        When {
+            now: Timestamp::from_millis(self.now.load(Ordering::SeqCst)),
+            offset_minutes: 0,
+        }
     }
 
     fn up(&self) -> Result<(), ApiError> {
@@ -310,12 +320,22 @@ impl HubApi for FakeHub {
                     recorded: true,
                 })
             }
-            DecisionRequest::Answer { decision: id, .. } => {
+            DecisionRequest::Answer {
+                decision: id,
+                option,
+                note,
+            } => {
                 let index = decisions
                     .iter()
                     .position(|decision| decision.id == id)
                     .ok_or_else(|| ApiError::NotFound(id.to_string()))?;
                 let mut decision = decisions.remove(index);
+                let option = decision
+                    .options
+                    .iter()
+                    .position(|choice| choice.label == option)
+                    .ok_or_else(|| ApiError::Invalid(format!("unknown option {option}")))?;
+                decision.answer = Some(json!({ "option": option, "note": note }));
                 decision.status = DecisionStatus::Answered;
                 Ok(DecisionReply::Answered {
                     decision: Box::new(decision),
@@ -371,6 +391,9 @@ impl HubApi for FakeHub {
             OverviewRequest::Lead { .. } => Ok(OverviewReply::Lead {
                 running_since: *self.lead.lock().expect("lock"),
             }),
+            OverviewRequest::LeadRuns { .. } => Ok(OverviewReply::LeadRuns {
+                runs: self.lead_runs.lock().expect("lock").clone(),
+            }),
             OverviewRequest::Recorded { limit, .. } => {
                 let recorded = self.recorded.lock().expect("lock");
                 Ok(OverviewReply::Recorded {
@@ -390,15 +413,24 @@ impl HubApi for FakeHub {
                     .into_iter()
                     .find(|summary| summary.task.id == task)
                     .ok_or_else(|| ApiError::NotFound(format!("task {task}")))?;
+                let runs = self
+                    .task_runs
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .filter(|row| row.run.lane_id == summary.task.lane_id)
+                    .cloned()
+                    .collect();
                 Ok(OverviewReply::Task {
                     task: Box::new(TaskDetail {
                         summary,
                         branch: format!("threadlane/{task}"),
                         repositories: Vec::new(),
-                        runs: Vec::new(),
+                        runs,
                         decisions: Vec::new(),
                         related: Vec::new(),
                         messages: Vec::new(),
+                        proposed_by: None,
                     }),
                 })
             }
@@ -616,6 +648,7 @@ fn decision(id: i64, created_at: i64) -> Decision {
         expires_at: None,
         created_at: Timestamp::from_millis(created_at),
         outcome: None,
+        proposed_by: None,
     }
 }
 
@@ -688,6 +721,7 @@ fn task(id: i64, status: TaskStatus, waiting_reason: Option<&str>) -> TaskSummar
         agent: "Engineer".to_owned(),
         machine: (status == TaskStatus::Running).then(|| "macbook".to_owned()),
         running_since: (status == TaskStatus::Running).then(|| Timestamp::from_millis(0)),
+        completed_at: None,
     }
 }
 
@@ -877,6 +911,7 @@ fn said(lines: &[Line]) -> Vec<String> {
             Line::Lead { text, .. } => format!("lead: {text}"),
             Line::Notice { text, .. } => format!("notice: {text}"),
             Line::Decision { card, pending, .. } => format!("{}: pending {pending}", card.id),
+            Line::Quiet { text, .. } => text.clone(),
         })
         .collect()
 }
@@ -1211,6 +1246,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
             ),
         ],
         decisions: vec![asked],
+        proposed_by: None,
         related: Vec::new(),
         messages: vec![ConversationEntry::You {
             event_id: EventId(9),
@@ -1224,7 +1260,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
     };
 
     assert_eq!(
-        chips(&detail),
+        chips(&detail, &when),
         [
             "Engineer",
             "claude",
@@ -1234,6 +1270,12 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
             "Requested by you",
             "Done"
         ]
+    );
+    let mut accepted = detail.clone();
+    accepted.summary.task.origin = TaskOrigin::Accepted;
+    accepted.proposed_by = Some("Coordinator".to_owned());
+    assert!(
+        chips(&accepted, &when).contains(&"Proposed by Coordinator, accepted by you".to_owned())
     );
     let moments: Vec<_> = timeline(&detail, &when)
         .into_iter()
@@ -2136,6 +2178,7 @@ fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
         decisions: Vec::new(),
         related: Vec::new(),
         messages: Vec::new(),
+        proposed_by: None,
     };
     let [runs, tokens] = usage(&detail, &when());
     assert_eq!(runs, "2 runs · 7 min", "the running one counts until now");
@@ -2527,6 +2570,7 @@ fn notification_settings_are_kept_in_the_client_directory_and_applied() {
             id: "D-0001".to_owned(),
             question: "Merge?".to_owned(),
             options: Vec::new(),
+            kind: None,
         },
     };
     let notice = Alert::Notice {
@@ -3114,4 +3158,306 @@ async fn the_space_ceiling_is_set_from_settings_after_saying_what_it_permits() {
             .is_none(),
         "the project may now go to Autonomous"
     );
+}
+
+#[tokio::test]
+async fn proposals_and_questions_have_distinct_cards_and_notifications() {
+    let mut proposal = decision(1, 1_000);
+    proposal.kind = DecisionKind::Proposal;
+    proposal.proposed_by = Some("Coordinator".to_owned());
+    proposal.arguments = json!({ "agent": "Engineer", "repositories": ["api", "web"] });
+    let mut input = decision(2, 2_000);
+    input.kind = DecisionKind::Input;
+    input.recommended = None;
+    input.arguments = json!({ "question": "Where shall this go?" });
+    input.options[0].label = "Staging".to_owned();
+    let work = FakeHub::new("Work", vec![proposal, input]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let mut cards = state.needs_you().map(AppState::decision_card);
+    let proposal = cards.next().unwrap();
+    assert_eq!(proposal.chip, Some("Proposal"));
+    assert!(proposal.dashed);
+    assert_eq!(proposal.recommended, Some(0));
+    assert_eq!(
+        proposal.context.as_deref(),
+        Some("You did not ask for this. Coordinator is Assisted here, so it proposes first.")
+    );
+    assert_eq!(
+        proposal.would_run_as.as_deref(),
+        Some("Would run as: Engineer · api, web")
+    );
+    let question = cards.next().unwrap();
+    assert_eq!(question.chip, Some("Question"));
+    assert!(!question.dashed);
+    assert_eq!(question.note_label, "Your answer (optional)");
+    assert!(question.details.is_empty());
+    assert!(question.recommended.is_none());
+    drop(cards);
+
+    for (seq, kind, option) in [(1, "proposal", "start"), (2, "question", "Staging")] {
+        let alert = state.receive(item(
+            "work",
+            seq,
+            OutboxKind::Decision,
+            json!({ "decision": format!("D-{seq:04}"), "kind": if seq == 1 { "proposal" } else { "input" },
+                "question": "Decide?", "options": [option] }),
+        )).unwrap();
+        assert_eq!(alert.title(), format!("work/api: {kind} D-{seq:04}"));
+        assert_eq!(alert.options(), [option]);
+    }
+}
+
+#[tokio::test]
+async fn the_proposed_column_answers_open_proposals_in_the_same_project_and_space() {
+    let mut proposal = decision(1, 1_000);
+    proposal.kind = DecisionKind::Proposal;
+    proposal.arguments = json!({ "title": "Fix the build", "agent": "Engineer" });
+    proposal.options[0].label = "start".to_owned();
+    proposal.options[1].label = "not now".to_owned();
+    proposal.options.insert(
+        0,
+        DecisionOption {
+            label: "never again".to_owned(),
+            effect: json!({ "approve": false, "never_again": true }),
+        },
+    );
+    let mut second = proposal.clone();
+    second.id = DecisionId(2);
+    let mut other_project = proposal.clone();
+    other_project.id = DecisionId(3);
+    other_project.project_id = ProjectId(2);
+    let work = FakeHub::new(
+        "Work",
+        vec![proposal.clone(), second, other_project, decision(4, 0)],
+    );
+    let home = FakeHub::new("Home", vec![proposal]);
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    let board = state.board("work", "api", &when());
+    assert_eq!(board[0].title, "Proposed");
+    let [first, second] = &board[0].proposals[..] else {
+        panic!("two open proposals");
+    };
+    assert_eq!(first.title, "Fix the build");
+    assert_eq!(first.meta, "Lead proposes · Engineer");
+    for (card, option, approved) in [
+        (first, &first.start, true),
+        (second, &second.decline, false),
+    ] {
+        let answer = core
+            .answer(
+                Some("work"),
+                &card.id.to_string(),
+                option.as_deref().unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer.decision.approved(), approved);
+        assert_eq!(
+            answer.decision.chosen().unwrap().label,
+            if approved { "start" } else { "not now" }
+        );
+        state.answered(&answer);
+    }
+    assert_ne!(state.board("work", "api", &when())[0].title, "Proposed");
+    assert_eq!(
+        state.board("work", "General", &when())[0].proposals.len(),
+        1
+    );
+    assert_eq!(state.board("home", "api", &when())[0].proposals.len(), 1);
+}
+
+#[tokio::test]
+async fn quiet_lead_runs_group_in_chronological_order_and_reveal_why() {
+    let work = FakeHub::new("Work", Vec::new());
+    let at = |minutes: i64| Timestamp::from_millis(minutes * 60_000);
+    *work.lead_runs.lock().unwrap() = [
+        (
+            1,
+            8 * 60 + 55,
+            Some("Already handled"),
+            Some(RunOutcome::Silent),
+        ),
+        (2, 9 * 60 + 8, None, Some(RunOutcome::Silent)),
+        (3, 9 * 60 + 10, Some("I replied"), Some(RunOutcome::Sent)),
+        (4, 14 * 60 + 52, None, Some(RunOutcome::Deferred)),
+        (5, 15 * 60, None, None),
+    ]
+    .into_iter()
+    .map(|(id, minutes, rationale, outcome)| LeadRun {
+        sent_message: outcome == Some(RunOutcome::Sent),
+        run: Run {
+            id: RunId(id),
+            lane_id: LaneId(1),
+            session_id: SessionId(1),
+            machine_id: MachineId(1),
+            lease_epoch: 1,
+            agent_id: None,
+            backend: None,
+            status: if outcome.is_some() {
+                RunStatus::Committed
+            } else {
+                RunStatus::Active
+            },
+            outcome,
+            rationale: rationale.map(str::to_owned),
+            error: None,
+            started_at: at(minutes - 1),
+            ended_at: outcome.map(|_| at(minutes)),
+        },
+    })
+    .collect();
+    *work.history.lock().unwrap() = vec![
+        ConversationEntry::You {
+            event_id: EventId(1),
+            text: "Look at the build".to_owned(),
+            at: at(8 * 60 + 41),
+        },
+        ConversationEntry::Delivered {
+            item: feed_item(
+                1,
+                OutboxKind::Message,
+                json!({ "text": "On it." }),
+                at(9 * 60 + 14).as_millis(),
+            ),
+        },
+    ];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_project(load_project(&core, "work", "api").await);
+    let lines = state.conversation("work", "api", &when());
+    assert!(matches!(
+        &lines[..],
+        [
+            Line::Day(_),
+            Line::You { .. },
+            Line::Quiet { .. },
+            Line::Lead { .. },
+            Line::Quiet { .. }
+        ]
+    ));
+    assert!(
+        matches!(&lines[2], Line::Quiet { text, toggle: "Why", reasons, .. } if
+        text == "Lead ran twice and stayed quiet · 08:55, 09:08" && reasons.is_empty())
+    );
+    assert!(
+        matches!(&lines[4], Line::Quiet { text, .. } if text == "Lead ran and stayed quiet · 14:52")
+    );
+
+    state.toggle_quiet("work", RunId(1));
+    state.toggle_quiet("work", RunId(4));
+    let lines = state.conversation("work", "api", &when());
+    let Line::Quiet {
+        reasons,
+        toggle: "Hide",
+        ..
+    } = &lines[2]
+    else {
+        panic!("expanded quiet group");
+    };
+    assert_eq!(
+        reasons
+            .iter()
+            .map(|reason| (reason.time.as_str(), reason.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("08:55", "Already handled"),
+            ("09:08", "The run ended silently.")
+        ]
+    );
+    assert!(
+        matches!(&lines[4], Line::Quiet { reasons, .. } if reasons[0].text == "Stopped to ask you.")
+    );
+}
+
+#[tokio::test]
+async fn running_elapsed_advances_on_home_and_the_task_without_reloading() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(7, TaskStatus::Running, None);
+    running.machine = Some("hub".to_owned());
+    let started = Timestamp::from_millis(2 * 60_000);
+    running.running_since = Some(started);
+    *work.tasks.lock().unwrap() = vec![running.clone()];
+    *work.task_runs.lock().unwrap() = vec![RunSummary {
+        machine: "hub".to_owned(),
+        run: Run {
+            id: RunId(1),
+            lane_id: running.task.lane_id,
+            session_id: SessionId(1),
+            machine_id: MachineId(1),
+            lease_epoch: 1,
+            agent_id: Some(running.task.agent_id),
+            backend: Some(BackendKind::Claude),
+            status: RunStatus::Active,
+            outcome: None,
+            rationale: None,
+            error: None,
+            started_at: started,
+            ended_at: None,
+        },
+    }];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_task(load_task(&core, "work", TaskId(7)).await);
+
+    let home = state.running()[0].1;
+    let detail = state.task("work", TaskId(7)).unwrap();
+    for (now, want) in [(2 * 60_000, "less than a minute"), (8 * 60_000, "6 min")] {
+        work.now.store(now, Ordering::SeqCst);
+        let when = work.when();
+        assert_eq!(running_elapsed(home, &when).as_deref(), Some(want));
+        assert!(chips(detail, &when).contains(&format!("Running · {want}")));
+        assert!(timeline(detail, &when).iter().any(|moment| {
+            moment.text == format!("Engineer on hub with claude: working for {want}")
+        }));
+    }
+    work.tasks.lock().unwrap()[0].task.status = TaskStatus::Done;
+    {
+        let mut runs = work.task_runs.lock().unwrap();
+        runs[0].run.status = RunStatus::Committed;
+        runs[0].run.ended_at = Some(work.when().now);
+    }
+    state.apply(refresh(&core).await);
+    state.apply_task(load_task(&core, "work", TaskId(7)).await);
+    work.now.store(15 * 60_000, Ordering::SeqCst);
+    let when = work.when();
+    let detail = state.task("work", TaskId(7)).unwrap();
+    assert!(state.running().is_empty());
+    assert!(chips(detail, &when).contains(&"Done".to_owned()));
+    assert!(timeline(detail, &when).iter().any(|moment| {
+        moment.text == "Engineer on hub with claude: worked for 6 min, ended quietly"
+    }));
+}
+
+#[tokio::test]
+async fn the_done_column_shows_the_five_most_recent_completions() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().unwrap() = (1..=7)
+        .map(|id| {
+            let mut task = task(id, TaskStatus::Done, None);
+            task.completed_at = Some(Timestamp::from_millis((8 - id) * 60_000));
+            task
+        })
+        .collect();
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_project(load_project(&core, "work", "api").await);
+    let board = state.board("work", "api", &when());
+    let done = board.iter().find(|column| column.title == "Done").unwrap();
+    assert_eq!(done.count, 7);
+    assert_eq!(done.more.as_deref(), Some("2 more…"));
+    assert_eq!(
+        done.cards
+            .iter()
+            .map(|card| card.id.get())
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5],
+    );
+    assert_eq!(done.cards[0].meta, "Engineer · 00:07");
 }

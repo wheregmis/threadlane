@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 
 use threadlane_core::client::{
-    ApiError, ConversationEntry, FeedItem, OverviewReply, OverviewRequest, RecordedEvent,
+    ApiError, ConversationEntry, FeedItem, LeadRun, OverviewReply, OverviewRequest, RecordedEvent,
     RunSummary, TaskDetail, TaskSummary,
 };
 use threadlane_core::ids::{AgentId, MachineId, ProjectId};
-use threadlane_core::model::{Event, OutboxMessage, RunStatus, Task, TaskStatus};
+use threadlane_core::model::{Event, OutboxMessage, RunOutcome, RunStatus, Task, TaskStatus};
 use threadlane_core::store::{
     DecisionStore, InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore, TaskStore,
 };
@@ -97,6 +97,11 @@ async fn summary(db: &HubDb, names: &Names, task: Task) -> Result<TaskSummary, A
             .unwrap_or_else(|| task.agent_id.to_string()),
         machine,
         running_since: active.map(|run| run.started_at),
+        completed_at: if task.status == TaskStatus::Done {
+            db.task_completed_at(task.id).await.map_err(api_error)?
+        } else {
+            None
+        },
         task,
     })
 }
@@ -223,6 +228,9 @@ pub(super) async fn handle(
                 .map(you)
                 .collect();
             messages.reverse();
+            let proposed_by = crate::proposal::accepted_author(db, &task)
+                .await
+                .map_err(api_error)?;
             Ok(OverviewReply::Task {
                 task: Box::new(TaskDetail {
                     branch: task_branch(task.id),
@@ -232,6 +240,7 @@ pub(super) async fn handle(
                     related,
                     messages,
                     summary: summary(db, &names, task).await?,
+                    proposed_by,
                 }),
             })
         }
@@ -319,6 +328,22 @@ pub(super) async fn handle(
                 .await
                 .map_err(api_error)?;
             Ok(OverviewReply::RecordedCount { total })
+        }
+        OverviewRequest::LeadRuns { project } => {
+            let project = api.project_named(project.as_deref()).await?;
+            let runs = db
+                .lane_runs(project.lead_lane_id)
+                .await
+                .map_err(api_error)?;
+            let mut listed = Vec::with_capacity(runs.len());
+            for run in runs {
+                let sent_message = match run.outcome {
+                    Some(outcome) => outcome == RunOutcome::Sent,
+                    None => db.count_for_run(run.id).await.map_err(api_error)? > 0,
+                };
+                listed.push(LeadRun { run, sent_message });
+            }
+            Ok(OverviewReply::LeadRuns { runs: listed })
         }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }

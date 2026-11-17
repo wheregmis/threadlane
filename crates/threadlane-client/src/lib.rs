@@ -25,9 +25,9 @@ use serde_json::Value as Json;
 use threadlane_core::admission::AdmittedKey;
 use threadlane_core::client::{
     Accepted, ApiError, BindingSummary, ConversationEntry, DecisionReply, DecisionRequest,
-    FeedItem, HubApi, HubInfo, MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply,
-    OverviewRequest, PairingReply, PairingRequest, ProjectSummary, TaskDetail, TaskSummary,
-    UserMessage,
+    FeedItem, HubApi, HubInfo, LeadRun, MemoryReply, MemoryRequest, OrgReply, OrgRequest,
+    OverviewReply, OverviewRequest, PairingReply, PairingRequest, ProjectSummary, TaskDetail,
+    TaskSummary, UserMessage,
 };
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::model::{
@@ -1136,6 +1136,26 @@ impl ClientCore {
         match self.overview(space, request).await? {
             (_, OverviewReply::Lead { running_since }) => Ok(running_since),
             (space, _) => Err(wrong_reply(&space, "lead")),
+        }
+    }
+
+    /// Lists a project's lead runs, their message markers, and recorded rationale.
+    /// `space: None` means the only paired hub and `project: None` means General.
+    ///
+    /// # Errors
+    ///
+    /// No such hub or project, several hubs and none named, or the hub's error.
+    pub async fn lead_runs(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Vec<LeadRun>, ClientError> {
+        let request = OverviewRequest::LeadRuns {
+            project: project.map(str::to_owned),
+        };
+        match self.overview(space, request).await? {
+            (_, OverviewReply::LeadRuns { runs }) => Ok(runs),
+            (space, _) => Err(wrong_reply(&space, "lead runs")),
         }
     }
 
