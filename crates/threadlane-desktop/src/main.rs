@@ -609,16 +609,21 @@ impl Desktop {
 
     fn answer(&mut self, space: String, id: String, option: String, cx: &mut Context<Self>) {
         let note = self.note.read(cx).value().trim().to_owned();
+        let always = self.state.answers_always(&space, &id, &option);
         let core = Arc::clone(&self.core);
         self.state
             .report(Activity::Working(format!("Answering {space} {id}…")));
         self.run(
             async move {
                 let note = (!note.is_empty()).then_some(note);
-                core.read()
-                    .await
-                    .answer(Some(&space), &id, &option, note.as_deref())
-                    .await
+                let core = core.read().await;
+                if always {
+                    core.answer_always(Some(&space), &id, &option, note.as_deref())
+                        .await
+                } else {
+                    core.answer(Some(&space), &id, &option, note.as_deref())
+                        .await
+                }
             },
             |this, answered, cx| match answered {
                 Ok(answer) => {

@@ -75,6 +75,45 @@ impl Desktop {
             needs = needs.child(self.decision(queued, cx));
         }
 
+        // Tasks that failed or are stuck, under "Needs you" (shown only when
+        // there are some, so a quiet Home stays quiet).
+        let attention = state.needs_attention();
+        let attention = (!attention.is_empty()).then(|| {
+            let mut list = v_flex()
+                .gap_1()
+                .child(section(format!("Needs attention ({})", attention.len())));
+            for row in attention {
+                let screen = Screen::Task {
+                    space: row.space.clone(),
+                    task: row.task,
+                };
+                list = list.child(
+                    Button::new(SharedString::from(format!(
+                        "attention-{}-{}",
+                        row.space, row.task
+                    )))
+                    .text()
+                    .w_full()
+                    .accessibility_label(format!("Open {}: {}", row.title, row.why))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .items_start()
+                            .child(div().text_sm().child(row.title.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .whitespace_normal()
+                                    .child(format!("{} / {}", row.space, row.why)),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+                );
+            }
+            list
+        });
+
         let running = state.running();
         let mut table = v_flex()
             .gap_1()
@@ -181,6 +220,7 @@ impl Desktop {
             .child(div().text_sm().text_color(muted).child(state.status_line()))
             .children(banners)
             .child(needs)
+            .children(attention)
             .child(table)
             .child(recent)
             .child(self.home_composer(cx))
