@@ -37,7 +37,7 @@ use crate::row::{Cols, json_text, params};
 
 pub use crate::decision::NO_RESPONSE;
 pub use crate::migrate::SCHEMA_VERSION;
-pub use crate::task::{BLOCKED_REASON, NO_GH_REASON, TASK_SOURCE};
+pub use crate::task::{BLOCKED_REASON, NO_GH_REASON, TASK_SOURCE, UNWOKEN_REASON};
 pub use crate::timer::TIMER_SOURCE;
 
 /// Name of the built-in project every space has (Plan.md §2.1).

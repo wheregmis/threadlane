@@ -7,19 +7,20 @@
 use std::time::Duration;
 
 use serde_json::json;
-use threadlane_core::model::{EventStatus, RunOutcome, TaskStatus};
+use threadlane_core::model::{EventKind, EventStatus, RunOutcome, TaskStatus};
 use threadlane_core::runtime::steps::{
     begin_run, dispatcher, perform, placement, runner, tool_call,
 };
 use threadlane_core::runtime::{Killed, Step};
 use threadlane_core::store::MemoryStore;
-use threadlane_hub::{FINISH_TASK, HubError, MEMORY_CREATE};
-use threadlane_runner::{PROGRESS_PROMPT, RunnerError};
+use threadlane_hub::{FINISH_TASK, HubError, MEMORY_CREATE, SET_FOLLOW_UP};
+use threadlane_runner::{PROGRESS_PROMPT, QUIET_END_PROMPT, RunnerError};
+use threadlane_store::UNWOKEN_REASON;
 use threadlane_testkit::{CrashPlan, Script};
 
 use crate::harness::{
     PAST_LEASE, REPLY, Sim, TASK_SUMMARY, World, add_engineer, finish_after, plan_tasks_in,
-    progress_content, progress_turn, reply_script,
+    progress_content, progress_turn, reply_script, write_progress,
 };
 use crate::invariants::{assert_invariants, assert_quiet};
 use crate::publish::{self, ask_script, assert_published, drive, publish_world};
@@ -334,7 +335,11 @@ async fn killing_the_process_at_any_step_of_a_task_that_takes_its_final_progress
         .filter(|run| run.tools.iter().any(|tool| tool == FINISH_TASK))
         .collect();
     assert_eq!(task_runs.len(), 2, "the task's run and its progress turn");
-    assert_eq!(task_runs[1].prompt, PROGRESS_PROMPT);
+    // Nothing is set to wake the task either: one turn asks for both.
+    assert_eq!(
+        task_runs[1].prompt,
+        format!("{PROGRESS_PROMPT}\n\n{QUIET_END_PROMPT}")
+    );
     assert_eq!(task_runs[1].session_id(), task_runs[0].session_id());
     let reached = plan.reached();
     for (index, &step) in reached.iter().enumerate() {
@@ -425,4 +430,147 @@ async fn killing_the_process_at_any_step_still_opens_exactly_one_pull_request() 
         assert_published(&sim, &scenario).await;
     }
     println!("{} kill points in a publish", reached.len());
+}
+
+/// A task world whose task agent, as in the real run, writes its progress
+/// file and ends its turn saying it waits for checks it left running, and
+/// in the extra turn of a quiet end plays `quiet`.
+async fn quiet_world(quiet: Script) -> World {
+    let world = task_world_with(
+        Script::new()
+            .text("Running the checks.")
+            .call_for("toolu_p", MEMORY_CREATE, write_progress)
+            .finish("Waiting for clippy and fmt to finish."),
+        progress_turn(),
+    )
+    .await;
+    world.backend.route(QUIET_END_PROMPT, quiet);
+    world
+}
+
+/// The runs of the task agent, which alone is offered `finish_task`.
+fn task_runs(sim: &Sim) -> Vec<threadlane_testkit::ReceivedRun> {
+    sim.backend()
+        .received()
+        .into_iter()
+        .filter(|run| run.tools.iter().any(|tool| tool == FINISH_TASK))
+        .collect()
+}
+
+/// How many notices of a task left with nothing to wake it reached the lead.
+async fn unwoken_notices(sim: &Sim) -> usize {
+    sim.events()
+        .await
+        .into_iter()
+        .filter(|event| {
+            event.kind == EventKind::TaskResult && event.payload["reason"] == UNWOKEN_REASON
+        })
+        .count()
+}
+
+/// The end state of [`quiet_world`] after an extra turn that did nothing:
+/// the task sleeps saying why, and the lead was told once and told you once.
+async fn assert_left_unwoken(sim: &Sim, scenario: &str) {
+    let tasks = sim.tasks().await;
+    assert_eq!(tasks.len(), 1, "{scenario}: one task");
+    assert_eq!(tasks[0].status, TaskStatus::Sleeping, "{scenario}");
+    assert_eq!(
+        tasks[0].waiting_reason.as_deref(),
+        Some(UNWOKEN_REASON),
+        "{scenario}"
+    );
+    assert_eq!(unwoken_notices(sim).await, 1, "{scenario}: one notice");
+    assert_eq!(sim.feed().await.len(), 1, "{scenario}: one reply");
+}
+
+/// The real run's defect: a task ends its run with nothing to wake it. It
+/// gets one extra turn; when that turn changes nothing either, the task is
+/// marked and the lead told exactly once, whatever step the process is
+/// killed at.
+#[tokio::test]
+async fn a_task_left_with_nothing_to_wake_it_says_so_once_at_any_kill() {
+    let plan = CrashPlan::new();
+    let sim = quiet_world(progress_turn()).await.boot(plan.clone()).await;
+    sim.send("m-1", "Put the page up").await;
+    live(&sim).await.unwrap();
+    let runs = task_runs(&sim);
+    assert_eq!(runs.len(), 2, "the task's run and exactly one extra turn");
+    assert_eq!(runs[1].prompt, QUIET_END_PROMPT);
+    assert_eq!(runs[1].session_id(), runs[0].session_id());
+    assert_left_unwoken(&sim, "no kill").await;
+
+    let reached = plan.reached();
+    for (index, &step) in reached.iter().enumerate() {
+        let nth = reached[..=index]
+            .iter()
+            .filter(|seen| **seen == step)
+            .count();
+        let scenario = format!("quiet end, {step} #{nth}");
+        let plan = CrashPlan::kill_at_nth(step, u32::try_from(nth).unwrap());
+        let sim = quiet_world(progress_turn()).await.boot(plan).await;
+        sim.send("m-1", "Put the page up").await;
+        let died = live(&sim).await;
+        assert_eq!(
+            died.as_ref().err().and_then(Death::killed).map(|k| k.step),
+            Some(step),
+            "{scenario}: {died:?}"
+        );
+        sim.clock().advance(PAST_LEASE);
+        let sim = sim.restart(CrashPlan::new()).await;
+        live(&sim)
+            .await
+            .unwrap_or_else(|death| panic!("{scenario}: recovery failed: {death:?}"));
+        assert_invariants(&sim, &scenario).await;
+        assert_quiet(&sim, &scenario).await;
+        assert_left_unwoken(&sim, &scenario).await;
+    }
+}
+
+/// Finishing in the extra turn ends the task as finishing ever does.
+#[tokio::test]
+async fn finishing_in_the_extra_turn_ends_the_task() {
+    let sim = quiet_world(
+        Script::new()
+            .call("toolu_f", FINISH_TASK, json!({ "summary": TASK_SUMMARY }))
+            .finish("Finished after all."),
+    )
+    .await
+    .boot(CrashPlan::new())
+    .await;
+    sim.send("m-1", "Put the page up").await;
+    live(&sim).await.unwrap();
+
+    assert_eq!(task_runs(&sim).len(), 2);
+    let tasks = sim.tasks().await;
+    assert_eq!(tasks[0].status, TaskStatus::Done);
+    assert_eq!(tasks[0].waiting_reason, None);
+    assert_eq!(unwoken_notices(&sim).await, 0);
+    assert_eq!(sim.feed().await.len(), 1);
+}
+
+/// A follow-up set in the run is something to wake the task: no extra turn,
+/// no mark, no notice.
+#[tokio::test]
+async fn a_task_that_set_a_follow_up_gets_no_extra_turn() {
+    let world = quiet_world(progress_turn()).await;
+    world.backend.route(
+        "task_start",
+        Script::new()
+            .call_for("toolu_p", MEMORY_CREATE, write_progress)
+            .call(
+                "toolu_s",
+                SET_FOLLOW_UP,
+                json!({ "instruction": "Look at the checks again.", "in_minutes": 30 }),
+            )
+            .finish("Set a follow-up for the checks."),
+    );
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Put the page up").await;
+    live(&sim).await.unwrap();
+
+    assert_eq!(task_runs(&sim).len(), 1);
+    let tasks = sim.tasks().await;
+    assert_eq!(tasks[0].status, TaskStatus::Sleeping);
+    assert_eq!(tasks[0].waiting_reason, None);
+    assert_eq!(unwoken_notices(&sim).await, 0);
 }

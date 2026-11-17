@@ -171,6 +171,12 @@ pub trait HubLink: Send + Sync + fmt::Debug {
     /// debounce window (Plan.md §4.8); it changes nothing.
     async fn pending(&self, lease: &Lease) -> Result<Vec<Event>, LinkError>;
 
+    /// Whether the leased task lane would be left with nothing to wake it
+    /// if its run ended now: `finish_task` not called, and no pending
+    /// decision, pending event or active timer of its own. The runner then
+    /// takes one more turn then. It changes nothing.
+    async fn left_unwoken(&self, lease: &Lease) -> Result<bool, LinkError>;
+
     /// Starts the next run in the lane: the hub reads pending events, applies
     /// the initiative check, routes to a session, opens the run record, and
     /// assembles context (Plan.md §4.3 steps 2 to 5.3).

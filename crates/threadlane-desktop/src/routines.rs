@@ -5,10 +5,11 @@
 use std::collections::BTreeMap;
 
 use threadlane_client::{ClientCore, ClientError};
-use threadlane_core::ids::TimerId;
+use threadlane_core::ids::{LaneId, TimerId};
 use threadlane_core::model::{
     Recurrence, Rule, Timer, TimerCategory, TimerCreator, TimerStatus, Weekday,
 };
+use threadlane_core::time::Timestamp;
 
 use crate::{Answer, AppState, Gap, Part, When, gap_in, take};
 
@@ -302,6 +303,27 @@ impl AppState {
             .map_or(Some(Gap::Loading), |view| {
                 gap_in(&view.answers, Part::Routines)
             })
+    }
+
+    /// When the soonest active follow-up of `lane` in `project` is due, if
+    /// one is listed.
+    pub(crate) fn follow_up_due(
+        &self,
+        space: &str,
+        project: &str,
+        lane: LaneId,
+    ) -> Option<Timestamp> {
+        self.routines
+            .get(&(space.to_owned(), project.to_owned()))?
+            .timers
+            .iter()
+            .filter(|timer| {
+                timer.lane_id == lane
+                    && timer.category == TimerCategory::FollowUp
+                    && timer.status == TimerStatus::Active
+            })
+            .map(|timer| timer.due_at)
+            .min()
     }
 
     /// The routines and follow-ups of `project` in `space`, oldest first.

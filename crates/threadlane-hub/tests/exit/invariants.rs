@@ -191,10 +191,11 @@ pub async fn assert_one_task_per_create_task_call(sim: &Sim, scenario: &str) {
 
 /// A task that ended was reported to its lead lane exactly once, and one
 /// that has not ended was not reported (docs/milestone-3.md §2 "Events").
+/// The notice of a task left with nothing to wake it is not a result.
 pub async fn assert_one_result_per_ended_task(sim: &Sim, scenario: &str) {
     let mut results: HashMap<TaskId, u32> = HashMap::new();
     for event in sim.events().await {
-        if event.kind == EventKind::TaskResult {
+        if event.kind == EventKind::TaskResult && event.source_event_id.starts_with("result:") {
             let task: TaskId = serde_json::from_value(event.payload["task_id"].clone()).unwrap();
             *results.entry(task).or_default() += 1;
         }

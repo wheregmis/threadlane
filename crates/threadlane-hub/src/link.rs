@@ -10,7 +10,7 @@ use threadlane_core::model::{
     BackendKind, Event, JournalEntry, Lane, Lease, MachineReport, RunOutcome,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{InboxStore, MachineStore, SessionStore, StoreError};
+use threadlane_core::store::{InboxStore, MachineStore, SessionStore, StoreError, TaskStore};
 use threadlane_core::time::Timestamp;
 use threadlane_core::tools::ToolError;
 
@@ -113,6 +113,16 @@ impl HubLink for LocalLink {
             .inner
             .db
             .pending_events(lease.lane_id)
+            .await
+            .map_err(link_error)
+    }
+
+    async fn left_unwoken(&self, lease: &Lease) -> Result<bool, LinkError> {
+        self.check_lease(lease).await?;
+        self.core
+            .inner
+            .db
+            .left_unwoken(lease.lane_id)
             .await
             .map_err(link_error)
     }
