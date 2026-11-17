@@ -55,6 +55,7 @@ fn decode_decision(row: &Row) -> StoreResult<Decision> {
         expires_at: c.opt_ts(18)?,
         created_at: c.ts(19)?,
         outcome: c.opt_json(20)?,
+        proposed_by: None,
     })
 }
 
@@ -93,6 +94,7 @@ fn card(decision: &Decision) -> Json {
         "context": decision.context,
         "options": labels,
         "recommended": recommended,
+        "kind": decision.kind,
     })
 }
 

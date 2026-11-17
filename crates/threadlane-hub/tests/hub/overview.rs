@@ -6,12 +6,12 @@ use std::time::Duration;
 use threadlane_core::client::{ApiError, ConversationEntry, OverviewReply, OverviewRequest};
 use threadlane_core::ids::TaskId;
 use threadlane_core::model::{
-    LaneKind, Mode, NewAgent, NewBinding, NewTask, RunStatus, TaskOrigin, TaskStatus,
+    LaneKind, Mode, NewAgent, NewBinding, NewTask, RunOutcome, RunStatus, TaskOrigin, TaskStatus,
 };
 use threadlane_core::store::{MachineStore, OrgStore, TaskStore};
 use threadlane_core::time::Clock;
 
-use crate::common::{Reply, TestHub, begin, play};
+use crate::common::{RATIONALE, Reply, TestHub, begin, play};
 
 async fn overview(hub: &TestHub, request: OverviewRequest) -> OverviewReply {
     hub.api.overview(request).await.unwrap()
@@ -260,4 +260,94 @@ async fn machines_lists_every_machine_and_account() {
     assert_eq!(machines, hub.db.machines().await.unwrap());
     assert_eq!(machines.len(), 2);
     assert_eq!(accounts, hub.db.accounts().await.unwrap());
+}
+
+#[tokio::test]
+async fn lead_runs_return_rationale_and_whether_the_run_queued_a_message() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    hub.send("m-1", "Check the build").await;
+    let quiet = play(&*hub.link, Reply::Silent)
+        .await
+        .unwrap()
+        .only_run()
+        .run_id;
+    hub.clock.advance(Duration::from_secs(60));
+    hub.send("m-2", "Any news?").await;
+    let replied = play(&*hub.link, Reply::Send(Some("toolu_1"), "On it"))
+        .await
+        .unwrap()
+        .only_run()
+        .run_id;
+    hub.clock.advance(Duration::from_secs(60));
+    hub.send("m-3", "And the docs?").await;
+    let (_lease, active) = begin(&*hub.link).await;
+
+    let request = OverviewRequest::LeadRuns { project: None };
+    let OverviewReply::LeadRuns { runs } = overview(&hub, request).await else {
+        panic!("lead runs");
+    };
+    assert_eq!(
+        runs.iter().map(|entry| entry.run.id).collect::<Vec<_>>(),
+        [quiet, replied, active.run_id]
+    );
+    assert_eq!(runs[0].run.outcome, Some(RunOutcome::Silent));
+    assert_eq!(runs[0].run.rationale.as_deref(), Some(RATIONALE));
+    assert!(!runs[0].sent_message);
+    assert!(runs[1].sent_message, "the message is still in the outbox");
+    assert_eq!(runs[2].run.status, RunStatus::Active);
+    assert!(!runs[2].sent_message);
+    assert!(matches!(
+        hub.api
+            .overview(OverviewRequest::LeadRuns {
+                project: Some("missing".to_owned())
+            })
+            .await,
+        Err(ApiError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn done_task_summaries_report_when_the_hub_recorded_the_result() {
+    let hub = TestHub::start().await;
+    let project = hub.general().await;
+    let lead = hub.db.lead_binding(project.id).await.unwrap().unwrap();
+    let task = hub
+        .db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: project.id,
+                agent_id: lead.agent_id,
+                title: "Update docs".to_owned(),
+                goal: "Explain the new screen".to_owned(),
+                repositories: Vec::new(),
+                parent_task_id: None,
+                depends_on: Vec::new(),
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    hub.clock.advance(Duration::from_secs(60));
+    hub.db
+        .set_task_status(task.id, TaskStatus::Running, None)
+        .await
+        .unwrap();
+    hub.db
+        .set_task_status(task.id, TaskStatus::Done, None)
+        .await
+        .unwrap();
+    let OverviewReply::Tasks { tasks } =
+        overview(&hub, OverviewRequest::Tasks { project: None }).await
+    else {
+        panic!("tasks");
+    };
+    assert_eq!(tasks[0].task.id, task.id);
+    assert_ne!(tasks[0].task.created_at, hub.clock.now());
+    assert_eq!(tasks[0].completed_at, Some(hub.clock.now()));
 }

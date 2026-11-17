@@ -3,10 +3,12 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use threadlane_desktop::{Gap, Queued};
+use threadlane_desktop::{AppState, Gap, Queued};
 
 use crate::Desktop;
 
@@ -42,7 +44,7 @@ fn link(id: impl Into<SharedString>, label: String) -> Button {
         .text()
         .w_full()
         .accessibility_label(label.clone())
-        .child(div().w_full().whitespace_normal().child(label))
+        .child(div().flex_1().min_w_0().whitespace_normal().child(label))
 }
 
 /// A screen's title.
@@ -80,7 +82,7 @@ impl Desktop {
     /// A decision waiting on you: where it comes from, its question, why it
     /// is asked, the call's arguments, and one button per option, the recommended one marked
     /// (Plan.md §9.4). A click answers with that option and the note.
-    fn decision(&self, queued: &Queued, cx: &mut Context<Self>) -> Div {
+    fn decision(&self, queued: &Queued, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
         let decision = &queued.decision;
         let project = self
@@ -90,27 +92,35 @@ impl Desktop {
         let task = decision
             .task_id
             .map_or_else(String::new, |task| format!(" · {task}"));
-        let proposal = if decision.kind == threadlane_core::model::DecisionKind::Proposal {
-            " · Proposal"
-        } else {
-            ""
-        };
+        let card = AppState::decision_card(queued);
         let id = decision.id.to_string();
-        let recommended = decision
-            .recommended
-            .and_then(|index| usize::try_from(index).ok());
+        let note = window.use_keyed_state(
+            SharedString::from(format!("note-{}-{id}", queued.space)),
+            cx,
+            InputState::new,
+        );
         let copy_id = self.copyable(format!("copy-{}-{id}", queued.space), id.clone(), cx);
         let options = decision.options.iter().enumerate().map(|(index, option)| {
             let (space, id, label) = (queued.space.clone(), id.clone(), option.label.clone());
             let button = Button::new(SharedString::from(format!("answer-{space}-{id}-{index}")));
-            let button = if recommended == Some(index) {
+            let button = if card.recommended == Some(index) {
                 button.primary().label(format!("{label} (recommended)"))
             } else {
                 button.label(label.clone())
             };
-            button.on_click(cx.listener(move |this, _, _, cx| {
-                this.answer(space.clone(), id.clone(), label.clone(), cx);
-            }))
+            let note = note.clone();
+            button
+                .tab_stop(true)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let text = note.read(cx).value().trim().to_owned();
+                    this.answer(
+                        space.clone(),
+                        id.clone(),
+                        label.clone(),
+                        (!text.is_empty()).then_some(text),
+                        cx,
+                    );
+                }))
         });
         v_flex()
             .gap_1()
@@ -118,13 +128,19 @@ impl Desktop {
             .border_1()
             .border_color(cx.theme().border)
             .rounded(cx.theme().radius)
+            .when(card.dashed, |card| card.border_dashed())
             .child(
-                h_flex().gap_1().child(copy_id).child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(format!("· {} / {project}{task}{proposal}", queued.space)),
-                ),
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(copy_id)
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(format!("· {} / {project}{task}", queued.space)),
+                    )
+                    .children(card.chip.map(|chip| Tag::new().outline().child(chip))),
             )
             .child(
                 div()
@@ -132,15 +148,26 @@ impl Desktop {
                     .child(decision.question.clone()),
             )
             .children(
-                threadlane_desktop::context_line(decision)
-                    .map(|line| div().text_sm().text_color(muted).child(line.to_owned())),
+                card.context
+                    .map(|line| div().text_sm().text_color(muted).child(line)),
             )
             .children(
-                threadlane_desktop::arguments(decision)
+                card.details
                     .into_iter()
                     .map(|line| div().text_sm().child(line)),
             )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .py_1()
+                    .child(div().text_sm().child(card.note_label))
+                    .child(Input::new(&note).aria_label(card.note_label)),
+            )
             .child(h_flex().gap_2().flex_wrap().children(options))
+            .children(
+                card.would_run_as
+                    .map(|line| div().text_sm().text_color(muted).child(line)),
+            )
             .children(self.state.always_offer(queued).map(|(label, ticked)| {
                 let (space, id) = (queued.space.clone(), decision.id);
                 Checkbox::new(SharedString::from(format!("always-{space}-{id}")))
@@ -152,10 +179,5 @@ impl Desktop {
                         cx.notify();
                     }))
             }))
-    }
-
-    /// The note sent with the next answer.
-    fn note_field(&self) -> Input {
-        Input::new(&self.note)
     }
 }

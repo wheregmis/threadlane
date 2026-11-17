@@ -685,9 +685,17 @@ impl HubApi for ClientApi {
         let inner = &self.core.inner;
         let db = &inner.db;
         match request {
-            DecisionRequest::Pending => Ok(DecisionReply::Pending {
-                decisions: db.open_decisions().await.map_err(api_error)?,
-            }),
+            DecisionRequest::Pending => {
+                let mut decisions = db.open_decisions().await.map_err(api_error)?;
+                for decision in &mut decisions {
+                    if decision.kind == threadlane_core::model::DecisionKind::Proposal {
+                        decision.proposed_by = crate::proposal::author(db, decision)
+                            .await
+                            .map_err(api_error)?;
+                    }
+                }
+                Ok(DecisionReply::Pending { decisions })
+            }
             DecisionRequest::Answer {
                 decision,
                 option,

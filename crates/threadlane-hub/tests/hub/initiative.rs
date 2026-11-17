@@ -207,8 +207,16 @@ async fn a_task_from_unrequested_work_follows_the_stricter_of_the_two_agents() {
             tasks.is_empty(),
             "{what}: nothing is created before you answer"
         );
-        let decision = hub.db.decision(DecisionId(1)).await.unwrap().unwrap();
+        let DecisionReply::Pending { decisions } =
+            hub.api.decisions(DecisionRequest::Pending).await.unwrap()
+        else {
+            panic!("pending decisions");
+        };
+        let [decision] = &decisions[..] else {
+            panic!("one proposal");
+        };
         assert_eq!(decision.kind, DecisionKind::Proposal, "{what}");
+        assert_eq!(decision.proposed_by.as_deref(), Some("Lead"));
         assert_eq!(decision.tool, CREATE_TASK);
         assert_eq!(decision.arguments, fix_the_build());
         assert_eq!(
@@ -316,6 +324,7 @@ async fn starting_a_proposal_creates_the_task_once_even_killed_at_each_perform_s
         let tasks = hub.db.tasks(hub.general().await.id).await.unwrap();
         assert_eq!(tasks.len(), 1, "{what}: created exactly once");
         let task = &tasks[0];
+        assert_eq!(task.origin, TaskOrigin::Accepted, "{what}");
         assert!(task.origin.is_requested(), "{what}: your work from now on");
         assert!(
             task.created_by_call
@@ -328,6 +337,33 @@ async fn starting_a_proposal_creates_the_task_once_even_killed_at_each_perform_s
         // The On request engineer runs it: it is requested work.
         let (lease, task_run) = begin(&*hub.link).await;
         assert_eq!(task_run.task_id, Some(task.id), "{what}");
+        if step.is_none() {
+            call(
+                &hub,
+                &lease,
+                &task_run,
+                "child",
+                CREATE_TASK,
+                &json!({ "title": "Check logs", "goal": "Find the regression" }),
+            )
+            .await
+            .unwrap();
+            let tasks = hub.db.tasks(hub.general().await.id).await.unwrap();
+            assert_eq!(tasks[1].parent_task_id, Some(task.id));
+            assert_eq!(tasks[1].origin, TaskOrigin::Accepted);
+            assert!(tasks[1].origin.is_requested());
+            for task in tasks {
+                let OverviewReply::Task { task } = hub
+                    .api
+                    .overview(OverviewRequest::Task { task: task.id })
+                    .await
+                    .unwrap()
+                else {
+                    panic!("task detail");
+                };
+                assert_eq!(task.proposed_by.as_deref(), Some("Lead"));
+            }
+        }
         end(&hub, &lease, &task_run).await;
     }
 }

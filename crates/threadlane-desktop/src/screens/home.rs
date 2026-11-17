@@ -7,13 +7,18 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_desktop::{Part, When};
+use threadlane_desktop::{Part, When, running_elapsed};
 
 use super::{gap_line, heading, section};
 use crate::{Desktop, Screen};
 
 impl Desktop {
-    pub(crate) fn home(&self, when: &When, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn home(
+        &self,
+        when: &When,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let state = &self.state;
 
@@ -64,15 +69,11 @@ impl Desktop {
                 "No hub is paired. Pair one with `threadlane hub add <name> <data-dir>` or \
                  `threadlane hub join <name> <code>`, then reopen the app.",
             ));
-        } else if state.needs_you().count() == 0 {
-            if gaps.is_empty() {
-                needs = needs.child(div().text_color(muted).child("Nothing waits on you."));
-            }
-        } else {
-            needs = needs.child(self.note_field());
+        } else if state.needs_you().count() == 0 && gaps.is_empty() {
+            needs = needs.child(div().text_color(muted).child("Nothing waits on you."));
         }
         for queued in state.needs_you() {
-            needs = needs.child(self.decision(queued, cx));
+            needs = needs.child(self.decision(queued, window, cx));
         }
 
         // Tasks that failed or are stuck, under "Needs you" (shown only when
@@ -142,10 +143,7 @@ impl Desktop {
                 summary.project.clone(),
                 summary.agent.clone(),
                 summary.machine.clone().unwrap_or_default(),
-                summary
-                    .running_since
-                    .map(|since| when.since(since))
-                    .unwrap_or_default(),
+                running_elapsed(summary, when).unwrap_or_default(),
             ];
             table = table.child(
                 Button::new(SharedString::from(format!("running-{space}-{}", task.id)))

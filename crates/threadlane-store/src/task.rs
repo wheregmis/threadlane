@@ -852,6 +852,17 @@ impl TaskStore for HubDb {
         task_in(&conn, "id = ?1", id.get().into()).await
     }
 
+    async fn task_completed_at(&self, id: TaskId) -> StoreResult<Option<Timestamp>> {
+        let conn = self.db.reader()?;
+        query_opt(
+            &conn,
+            "SELECT received_at FROM events WHERE source = ?1 AND source_event_id = ?2",
+            params![TASK_SOURCE, format!("result:{}", id.get())],
+            |row| Cols(row).ts(0),
+        )
+        .await
+    }
+
     async fn tasks(&self, project_id: ProjectId) -> StoreResult<Vec<Task>> {
         let conn = self.db.reader()?;
         let mut tasks = query_all(

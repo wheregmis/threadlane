@@ -37,6 +37,9 @@ const REFRESH_EVERY: Duration = Duration::from_secs(30);
 /// How soon the app asks again while a hub is away or refused a part.
 const RETRY_EVERY: Duration = Duration::from_secs(5);
 
+/// Repaint visible elapsed times without waiting for a hub refresh.
+const CLOCK_EVERY: Duration = Duration::from_secs(1);
+
 fn main() -> ExitCode {
     let runtime = match Runtime::new() {
         Ok(runtime) => runtime,
@@ -125,7 +128,7 @@ fn main() -> ExitCode {
                     let (space, id) = (space.to_owned(), id.to_owned());
                     let option = response.action_id.map(|option| option.to_string());
                     let _gone = view.update(cx, |this, cx| match option {
-                        Some(option) => this.answer(space, id, option, cx),
+                        Some(option) => this.answer(space, id, option, None, cx),
                         None => this.go(Screen::Home, cx),
                     });
                 });
@@ -259,7 +262,6 @@ struct Desktop {
     composer: Entity<InputState>,
     /// The task screen's composer (wireframe 5).
     task_composer: Entity<InputState>,
-    note: Entity<InputState>,
     /// The Memory tab's editor.
     memory_editor: Entity<TextareaState>,
     /// The "+ Add space" form's name and join code.
@@ -275,7 +277,6 @@ struct Desktop {
     project_name: Entity<InputState>,
     project_description: Entity<InputState>,
     /// Empty the note at the next render, which has the window it needs.
-    clear_note: bool,
     /// Empty the new project form at the next render.
     clear_project_form: bool,
     /// The "+ New routine" form's instruction, N, time, day of the month
@@ -322,7 +323,6 @@ impl Desktop {
     ) -> Self {
         let composer =
             cx.new(|cx| InputState::new(window, cx).placeholder("Tell your team what you need…"));
-        let note = cx.new(|cx| InputState::new(window, cx).placeholder("Note (optional)"));
         let task_composer =
             cx.new(|cx| InputState::new(window, cx).placeholder("Add to this task…"));
         let memory_editor = cx.new(|cx| TextareaState::new(window, cx).rows(16));
@@ -406,6 +406,32 @@ impl Desktop {
                 }
             }
         });
+        let clock = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CLOCK_EVERY).await;
+                if this
+                    .update(cx, |this, cx| {
+                        let running = match &this.screen {
+                            Screen::Home => !this.state.running().is_empty(),
+                            Screen::Task { space, task } => {
+                                this.state.task(space, *task).is_some_and(|detail| {
+                                    detail.runs.iter().any(|row| {
+                                        row.run.status == threadlane_core::model::RunStatus::Active
+                                    }) || detail.summary.running_since.is_some()
+                                })
+                            }
+                            _ => false,
+                        };
+                        if running {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         Self {
             state,
             core,
@@ -413,7 +439,6 @@ impl Desktop {
             screen: start.unwrap_or(Screen::Home),
             composer,
             task_composer,
-            note,
             memory_editor,
             space_name,
             join_code,
@@ -422,7 +447,6 @@ impl Desktop {
             clear_join: false,
             project_name,
             project_description,
-            clear_note: false,
             clear_project_form: false,
             routine_instruction,
             routine_every,
@@ -442,7 +466,7 @@ impl Desktop {
             clear_fields: Vec::new(),
             full_screen: false,
             offset_minutes: local_offset_minutes(),
-            _tasks: vec![follow, refresh_loop],
+            _tasks: vec![follow, refresh_loop, clock],
             _subscriptions: subscriptions,
         }
     }
@@ -615,15 +639,20 @@ impl Desktop {
         cx.notify();
     }
 
-    fn answer(&mut self, space: String, id: String, option: String, cx: &mut Context<Self>) {
-        let note = self.note.read(cx).value().trim().to_owned();
+    fn answer(
+        &mut self,
+        space: String,
+        id: String,
+        option: String,
+        note: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let always = self.state.answers_always(&space, &id, &option);
         let core = Arc::clone(&self.core);
         self.state
             .report(Activity::Working(format!("Answering {space} {id}…")));
         self.run(
             async move {
-                let note = (!note.is_empty()).then_some(note);
                 let core = core.read().await;
                 if always {
                     core.answer_always(Some(&space), &id, &option, note.as_deref())
@@ -648,7 +677,6 @@ impl Desktop {
                         "Answered {} / {}{chosen}.",
                         answer.space, answer.decision.id
                     )));
-                    this.clear_note = true;
                     this.load_screen(cx);
                 }
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
@@ -1138,10 +1166,6 @@ impl Desktop {
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.clear_note) {
-            self.note
-                .update(cx, |note, cx| note.set_value("", window, cx));
-        }
         if let Some(text) = self.fill_editor.take() {
             self.memory_editor
                 .update(cx, |editor, cx| editor.set_value(text, window, cx));
@@ -1169,13 +1193,13 @@ impl Render for Desktop {
         }
         let when = self.when();
         let body = match self.screen.clone() {
-            Screen::Home => self.home(&when, cx),
+            Screen::Home => self.home(&when, window, cx),
             Screen::Project {
                 space,
                 project,
                 tab,
-            } => self.project(&space, &project, tab, &when, cx),
-            Screen::Task { space, task } => self.task(&space, task, &when, cx),
+            } => self.project(&space, &project, tab, &when, window, cx),
+            Screen::Task { space, task } => self.task(&space, task, &when, window, cx),
             Screen::Agents => self.agents(cx),
             Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),

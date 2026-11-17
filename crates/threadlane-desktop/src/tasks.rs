@@ -2,12 +2,14 @@
 //! §11.1).
 
 use serde_json::Value as Json;
-use threadlane_core::client::{ConversationEntry, TaskDetail};
+use threadlane_core::client::{ConversationEntry, TaskDetail, TaskSummary};
 use threadlane_core::ids::{DecisionId, TaskId};
-use threadlane_core::model::{DecisionStatus, RunOutcome, RunStatus, TaskOrigin, TaskStatus};
+use threadlane_core::model::{
+    DecisionKind, DecisionStatus, RunOutcome, RunStatus, TaskOrigin, TaskStatus,
+};
 use threadlane_core::time::Timestamp;
 
-use crate::{AppState, When, duration};
+use crate::{AppState, When, duration, proposed_assignee};
 
 /// The start of a `waiting_reason` that says no model account is free
 /// (`threadlane-store`'s `BLOCKED_REASON`, Plan.md §5.3).
@@ -18,8 +20,14 @@ const BLOCKED: &str = "blocked";
 pub struct Column {
     /// `Queued`, `Running`, `Waiting on you`, ...
     pub title: &'static str,
-    /// Its tasks, oldest first.
+    /// Its visible tasks, oldest first except for Done.
     pub cards: Vec<BoardCard>,
+    /// The total shown in the column heading, including any collapsed tasks.
+    pub count: usize,
+    /// The count label for hidden Done cards, if any.
+    pub more: Option<String>,
+    /// Open proposals that have yet to create a task.
+    pub proposals: Vec<ProposalCard>,
 }
 
 /// One task on the board.
@@ -37,6 +45,24 @@ pub struct BoardCard {
     /// That decision's options, which answer it from the card.
     pub options: Vec<String>,
 }
+
+/// An open proposal on the board with the two in-place answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalCard {
+    /// The decision to answer.
+    pub id: DecisionId,
+    /// The proposed task's title.
+    pub title: String,
+    /// The proposing agent and the assignee.
+    pub meta: String,
+    /// The option that starts the task.
+    pub start: Option<String>,
+    /// The option that declines this proposal once.
+    pub decline: Option<String>,
+}
+
+/// How many of the most recently finished tasks the board shows.
+const DONE_SHOWN: usize = 5;
 
 /// The columns in board order, and whether each is shown when empty.
 const COLUMNS: [(&str, bool); 9] = [
@@ -86,12 +112,26 @@ impl AppState {
         COLUMNS
             .iter()
             .filter_map(|&(title, always)| {
-                let cards: Vec<BoardCard> = tasks
+                let mut matching: Vec<_> = tasks
                     .iter()
                     .filter(|summary| {
                         column_of(summary.task.status, summary.task.waiting_reason.as_deref())
                             == title
                     })
+                    .collect();
+                let total = matching.len();
+                if title == "Done" {
+                    matching.sort_by_key(|summary| {
+                        std::cmp::Reverse((
+                            summary.completed_at.unwrap_or(summary.task.created_at),
+                            summary.task.id,
+                        ))
+                    });
+                    matching.truncate(DONE_SHOWN);
+                }
+                let hidden = total - matching.len();
+                let cards: Vec<BoardCard> = matching
+                    .into_iter()
                     .map(|summary| {
                         let task = &summary.task;
                         let open = self.open_for(space, task.id).map(|q| &q.decision);
@@ -127,6 +167,11 @@ impl AppState {
                                     })
                                 })
                                 .unwrap_or_else(|| "sleeping".to_owned()),
+                            (TaskStatus::Done, None) => summary
+                                .completed_at
+                                .map(|at| when.moment(at))
+                                .or_else(|| summary.machine.clone())
+                                .unwrap_or_default(),
                             _ => task
                                 .waiting_reason
                                 .clone()
@@ -146,16 +191,81 @@ impl AppState {
                         }
                     })
                     .collect();
-                (always || !cards.is_empty()).then_some(Column { title, cards })
+                let proposals = if title == "Proposed" {
+                    self.proposals(space, project)
+                } else {
+                    Vec::new()
+                };
+                let count = total + proposals.len();
+                (always || count != 0).then_some(Column {
+                    title,
+                    cards,
+                    count,
+                    more: (hidden > 0).then(|| format!("{hidden} more…")),
+                    proposals,
+                })
+            })
+            .collect()
+    }
+
+    fn proposals(&self, space: &str, project: &str) -> Vec<ProposalCard> {
+        self.queue()
+            .iter()
+            .filter(|q| {
+                q.space == space
+                    && q.decision.kind == DecisionKind::Proposal
+                    && self.project_name(space, q.decision.project_id) == Some(project)
+            })
+            .map(|q| {
+                let decision = &q.decision;
+                let proposer =
+                    decision
+                        .proposed_by
+                        .as_deref()
+                        .unwrap_or(if decision.task_id.is_some() {
+                            "The task’s agent"
+                        } else {
+                            "Lead"
+                        });
+                ProposalCard {
+                    id: decision.id,
+                    title: decision.arguments["title"]
+                        .as_str()
+                        .unwrap_or(&decision.question)
+                        .to_owned(),
+                    meta: format!("{proposer} proposes · {}", proposed_assignee(decision)),
+                    start: decision
+                        .options
+                        .iter()
+                        .find(|option| option.approves())
+                        .map(|option| option.label.clone()),
+                    decline: decision
+                        .options
+                        .iter()
+                        .find(|option| {
+                            option.effect["approve"] == Json::Bool(false)
+                                && option.effect["never_again"] != Json::Bool(true)
+                        })
+                        .map(|option| option.label.clone()),
+                }
             })
             .collect()
     }
 }
 
+/// How long the task's active run has been working, if the hub reported a start.
+#[must_use]
+pub fn running_elapsed(summary: &TaskSummary, when: &When) -> Option<String> {
+    if summary.task.status != TaskStatus::Running {
+        return None;
+    }
+    summary.running_since.map(|since| when.since(since))
+}
+
 /// The task screen's header chips: agent, backend, machine, repositories,
 /// branch, origin, status (Plan.md §11.1 "Task").
 #[must_use]
-pub fn chips(detail: &TaskDetail) -> Vec<String> {
+pub fn chips(detail: &TaskDetail, when: &When) -> Vec<String> {
     let summary = &detail.summary;
     let task = &summary.task;
     let backend = detail
@@ -174,18 +284,29 @@ pub fn chips(detail: &TaskDetail) -> Vec<String> {
     ];
     chips.extend(detail.repositories.iter().cloned());
     chips.push(detail.branch.clone());
-    chips.push(origin(task.origin).to_owned());
-    chips.push(status_label(task.status, task.waiting_reason.as_deref()).to_owned());
+    chips.push(origin(detail));
+    let status = status_label(task.status, task.waiting_reason.as_deref());
+    chips.push(running_elapsed(summary, when).map_or_else(
+        || status.to_owned(),
+        |elapsed| format!("{status} · {elapsed}"),
+    ));
     chips
 }
 
-fn origin(origin: TaskOrigin) -> &'static str {
-    match origin {
+fn origin(detail: &TaskDetail) -> String {
+    match detail.summary.task.origin {
         TaskOrigin::User => "Requested by you",
         TaskOrigin::UserRoutine => "From your routine",
         TaskOrigin::Event => "From an outside event",
         TaskOrigin::Agent => "Started by an agent",
+        TaskOrigin::Accepted => {
+            return format!(
+                "Proposed by {}, accepted by you",
+                detail.proposed_by.as_deref().unwrap_or("an agent")
+            );
+        }
     }
+    .to_owned()
 }
 
 /// The tools whose approved call pushes the task's branch.
@@ -297,7 +418,7 @@ pub fn timeline(detail: &TaskDetail, when: &When) -> Vec<Moment> {
     let task = &summary.task;
     let mut moments: Vec<(Timestamp, String)> = vec![(
         task.created_at,
-        format!("Created: {}. {}.", task.title, origin(task.origin)),
+        format!("Created: {}. {}.", task.title, origin(detail)),
     )];
     for run in &detail.runs {
         let run_summary = &run.run;
@@ -305,11 +426,12 @@ pub fn timeline(detail: &TaskDetail, when: &When) -> Vec<Moment> {
             .backend
             .map_or_else(String::new, |kind| format!(" with {kind}"));
         let on = format!("{} on {}{backend}", summary.agent, run.machine);
-        let text = match (run_summary.status, run_summary.ended_at) {
-            (RunStatus::Active, _) | (_, None) => {
+        let text = match run_summary.status {
+            RunStatus::Active => {
                 format!("{on}: working for {}", when.since(run_summary.started_at))
             }
-            (status, Some(ended)) => {
+            status => {
+                let ended = run_summary.ended_at.unwrap_or(run_summary.started_at);
                 let took = duration(ended.saturating_since(run_summary.started_at));
                 let outcome = match (status, run_summary.outcome) {
                     (RunStatus::Committed, Some(RunOutcome::Sent)) => "reported back".to_owned(),

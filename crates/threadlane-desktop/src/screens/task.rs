@@ -19,6 +19,7 @@ impl Desktop {
         space: &str,
         task: TaskId,
         when: &When,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -57,12 +58,10 @@ impl Desktop {
                     .child(div().text_sm().min_w_0().child(moment.text)),
             );
         }
-        let open = self.state.open_for(space, task).map(|queued| {
-            v_flex()
-                .gap_2()
-                .child(self.note_field())
-                .child(self.decision(queued, cx))
-        });
+        let open = self
+            .state
+            .open_for(space, task)
+            .map(|queued| self.decision(queued, window, cx));
 
         let change = changes(detail);
         let mut published = v_flex()
@@ -199,7 +198,7 @@ impl Desktop {
             )
             .child(
                 h_flex().gap_2().flex_wrap().children(
-                    chips(detail)
+                    chips(detail, when)
                         .into_iter()
                         .map(|chip| Tag::secondary().child(chip)),
                 ),

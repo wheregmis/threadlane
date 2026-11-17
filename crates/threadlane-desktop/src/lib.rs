@@ -15,11 +15,13 @@ use threadlane_client::{
 };
 use threadlane_core::admission::AdmittedKey;
 use threadlane_core::client::{
-    BindingSummary, ConversationEntry, HubInfo, ProjectSummary, RecordedEvent, StandingRuleSummary,
-    TaskDetail, TaskSummary,
+    BindingSummary, ConversationEntry, HubInfo, LeadRun, ProjectSummary, RecordedEvent,
+    StandingRuleSummary, TaskDetail, TaskSummary,
 };
-use threadlane_core::ids::{DecisionId, EventId, ProjectId, TaskId};
-use threadlane_core::model::{Account, Agent, Decision, Machine, MachineStatus, Mode, OutboxKind};
+use threadlane_core::ids::{DecisionId, EventId, ProjectId, RunId, TaskId};
+use threadlane_core::model::{
+    Account, Agent, Decision, DecisionKind, Machine, MachineStatus, Mode, OutboxKind,
+};
 use threadlane_core::time::Timestamp;
 use tokio::sync::{RwLock, mpsc};
 
@@ -55,7 +57,8 @@ pub use routines::{
 };
 pub use settings::{Notifications, SETTINGS_FILE, SpaceRow};
 pub use tasks::{
-    BoardCard, Changes, Column, Moment, changes, chips, status_label, timeline, usage,
+    BoardCard, Changes, Column, Moment, changes, chips, running_elapsed, status_label, timeline,
+    usage,
 };
 
 /// How many of the newest delivered items Home asks each hub for.
@@ -471,6 +474,45 @@ pub struct Queued {
     pub decision: Decision,
 }
 
+/// What an open decision card shows on Home, in conversation, and in a task.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DecisionCard {
+    /// Proposal or question chip, when the decision has a distinct kind.
+    pub chip: Option<&'static str>,
+    /// Whether the card has the proposal border.
+    pub dashed: bool,
+    /// Why the decision appeared, when known.
+    pub context: Option<String>,
+    /// The details of the stored action.
+    pub details: Vec<String>,
+    /// The proposed assignee and repositories, shown below the options.
+    pub would_run_as: Option<String>,
+    /// Label for the note field shown above the options.
+    pub note_label: &'static str,
+    /// The recommended option's index, if the hub picked one.
+    pub recommended: Option<usize>,
+}
+
+fn decision_label(kind: DecisionKind) -> &'static str {
+    match kind {
+        DecisionKind::Approval => "Decision",
+        DecisionKind::Input => "Question",
+        DecisionKind::Proposal => "Proposal",
+    }
+}
+
+/// Who would run the proposed task if you start it.
+fn proposed_assignee(decision: &Decision) -> &str {
+    decision.arguments["agent"]
+        .as_str()
+        .or(decision.proposed_by.as_deref())
+        .unwrap_or(if decision.task_id.is_some() {
+            "the task’s agent"
+        } else {
+            "Lead"
+        })
+}
+
 /// A decision card on the feed: what the hub put in its body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
@@ -480,6 +522,8 @@ pub struct Card {
     pub question: String,
     /// The labels of its options, in order.
     pub options: Vec<String>,
+    /// The decision's kind, on hubs that include it in the feed.
+    pub kind: Option<DecisionKind>,
 }
 
 impl Card {
@@ -515,7 +559,17 @@ impl Card {
             id,
             question,
             options,
+            kind: body
+                .get("kind")
+                .and_then(Json::as_str)
+                .and_then(|kind| kind.parse().ok()),
         })
+    }
+
+    /// How to name the card in the conversation or a notification.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        decision_label(self.kind.unwrap_or(DecisionKind::Approval))
     }
 }
 
@@ -557,7 +611,9 @@ impl Alert {
     #[must_use]
     pub fn title(&self) -> String {
         match self {
-            Self::Decision { label, card, .. } => format!("{label}: decision {}", card.id),
+            Self::Decision { label, card, .. } => {
+                format!("{label}: {} {}", card.label().to_ascii_lowercase(), card.id)
+            }
             Self::Notice { label, .. } => format!("{label}: notice"),
         }
     }
@@ -675,6 +731,7 @@ pub struct ProjectLoad {
     lead: Result<Option<Timestamp>, ClientError>,
     recorded: Result<(Vec<RecordedEvent>, u64), ClientError>,
     rules: Result<Vec<StandingRuleSummary>, ClientError>,
+    lead_runs: Result<Vec<LeadRun>, ClientError>,
 }
 
 /// Asks a project's hub for its tasks, repositories, bindings, the newest
@@ -694,6 +751,7 @@ pub async fn load_project(core: &ClientCore, space: &str, project: &str) -> Proj
             .recorded(in_space, named, control::RECORDED_SHOWN)
             .await,
         rules: core.standing_rules(in_space, named).await,
+        lead_runs: core.lead_runs(in_space, named).await,
     }
 }
 
@@ -804,6 +862,7 @@ pub struct ProjectView {
     recorded: Option<Result<(Vec<RecordedEvent>, u64), String>>,
     /// Its standing rules, revoked ones included.
     pub rules: Vec<StandingRuleSummary>,
+    lead_runs: Vec<LeadRun>,
 }
 
 /// A message you sent, as the conversation shows it.
@@ -883,6 +942,7 @@ pub struct AppState {
     revoking: Option<InSpace<threadlane_core::ids::StandingRuleId>>,
     /// The decisions whose "Always allow" is ticked.
     always: HashSet<InSpace<DecisionId>>,
+    expanded_quiet: HashSet<InSpace<RunId>>,
     /// The ceiling you asked to set a space to, until you confirm or keep it.
     space_ceiling_asked: Option<InSpace<Mode>>,
 }
@@ -954,6 +1014,77 @@ impl AppState {
         self.queue.iter().filter(|queued| self.shown(&queued.space))
     }
 
+    /// The contents and treatment of an open decision card, by decision kind.
+    #[must_use]
+    pub fn decision_card(queued: &Queued) -> DecisionCard {
+        let decision = &queued.decision;
+        let dashed = decision.kind == DecisionKind::Proposal;
+        let (context, details, would_run_as, note_label) = match decision.kind {
+            DecisionKind::Proposal => {
+                let proposer =
+                    decision
+                        .proposed_by
+                        .as_deref()
+                        .unwrap_or(if decision.task_id.is_some() {
+                            "The task’s agent"
+                        } else {
+                            "Lead"
+                        });
+                let repositories = decision.arguments["repositories"].as_array().map(|names| {
+                    names
+                        .iter()
+                        .filter_map(Json::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
+                let repositories = match repositories.as_deref() {
+                    Some("") => "no repositories",
+                    Some(names) => names,
+                    None if decision.task_id.is_some() => "inherits task repositories",
+                    None => "no repositories",
+                };
+                (
+                    Some(format!(
+                        "You did not ask for this. {proposer} is Assisted here, so it proposes first."
+                    )),
+                    context_line(decision)
+                        .into_iter()
+                        .filter(|line| !line.starts_with("From work you did not ask for."))
+                        .map(str::to_owned)
+                        .collect(),
+                    Some(format!(
+                        "Would run as: {} · {repositories}",
+                        proposed_assignee(decision)
+                    )),
+                    "Note (optional)",
+                )
+            }
+            DecisionKind::Input => (
+                context_line(decision).map(str::to_owned),
+                Vec::new(),
+                None,
+                "Your answer (optional)",
+            ),
+            DecisionKind::Approval => (
+                context_line(decision).map(str::to_owned),
+                arguments(decision),
+                None,
+                "Note (optional)",
+            ),
+        };
+        DecisionCard {
+            chip: (decision.kind != DecisionKind::Approval).then(|| decision_label(decision.kind)),
+            dashed,
+            context,
+            details,
+            would_run_as,
+            note_label,
+            recommended: decision
+                .recommended
+                .and_then(|index| usize::try_from(index).ok()),
+        }
+    }
+
     /// How many decisions wait on you in project `id` of `space`.
     #[must_use]
     pub fn open_in(&self, space: &str, id: ProjectId) -> usize {
@@ -961,6 +1092,15 @@ impl AppState {
             .iter()
             .filter(|queued| queued.space == space && queued.decision.project_id == id)
             .count()
+    }
+
+    /// The pending decision that goes with a delivered card, if it still waits.
+    #[must_use]
+    pub fn queued_card(&self, space: &str, card: &Card) -> Option<&Queued> {
+        let id = DecisionId::parse(&card.id)?;
+        self.queue
+            .iter()
+            .find(|queued| queued.space == space && queued.decision.id == id)
     }
 
     /// The decision waiting on you in task `task` of `space`, if any.
@@ -976,6 +1116,9 @@ impl AppState {
     #[must_use]
     pub fn task_hint(&self, space: &str, task: TaskId) -> String {
         match self.open_for(space, task) {
+            Some(queued) if queued.decision.kind == DecisionKind::Input => {
+                format!("Sending answers {} with your message.", queued.decision.id)
+            }
             Some(queued) => format!(
                 "Goes to {task}, not the lead. Sending declines {} with your message as the note.",
                 queued.decision.id
@@ -1208,6 +1351,7 @@ impl AppState {
         self.codes.remove(name);
         self.recorded_open.retain(|(space, _)| space != name);
         self.always.retain(|(space, _)| space != name);
+        self.expanded_quiet.retain(|(space, _)| space != name);
         if self
             .open_agent
             .as_ref()
@@ -1389,6 +1533,7 @@ impl AppState {
             lead,
             recorded,
             rules,
+            lead_runs,
         } = load;
         let view = self
             .projects
@@ -1400,6 +1545,10 @@ impl AppState {
         view.lead = take(&mut view.answers, Part::Lead, lead);
         view.recorded = Some(recorded.map_err(|error| describe(&error)));
         view.rules = take(&mut view.answers, Part::Rules, rules);
+        // An older hub can still serve the rest of the conversation.
+        if let Ok(runs) = lead_runs {
+            view.lead_runs = runs;
+        }
         let listed = history.is_ok();
         let entries = take(&mut view.answers, Part::Conversation, history);
         if listed {
@@ -1727,10 +1876,17 @@ impl AppState {
         }
         let alert = match item.kind() {
             OutboxKind::Message => None,
-            OutboxKind::Decision => Card::of(&item).map(|card| Alert::Decision {
-                space: item.space.clone(),
-                label: item.label(),
-                card,
+            OutboxKind::Decision => Card::of(&item).map(|mut card| {
+                if card.kind.is_none() {
+                    card.kind = self
+                        .queued_card(&item.space, &card)
+                        .map(|queued| queued.decision.kind);
+                }
+                Alert::Decision {
+                    space: item.space.clone(),
+                    label: item.label(),
+                    card,
+                }
             }),
             OutboxKind::SystemNotice => Some(Alert::Notice {
                 label: item.label(),

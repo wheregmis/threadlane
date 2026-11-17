@@ -325,6 +325,9 @@ pub trait TaskStore: Send + Sync {
     /// project. `lease` is the creating run's, `None` when no run creates it.
     async fn create_task(&self, lease: Option<&Lease>, task: &NewTask) -> StoreResult<Task>;
     async fn task(&self, id: TaskId) -> StoreResult<Option<Task>>;
+
+    /// When the hub recorded the result of a completed task, if it has that event.
+    async fn task_completed_at(&self, id: TaskId) -> StoreResult<Option<Timestamp>>;
     /// Whether the lane's running task would be left with nothing to wake
     /// it if its run ended now: no result recorded with `finish_task`, no
     /// pending decision, no pending event, no active timer of its own and no

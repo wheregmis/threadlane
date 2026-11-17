@@ -135,7 +135,11 @@ async fn a_failing_build_is_recorded_proposed_or_tasked_by_mode() {
                 }
                 let tasks = sim.tasks().await;
                 assert_eq!(tasks.len(), 1, "{mode}: created once");
-                assert_eq!(tasks[0].origin, TaskOrigin::User, "{mode}: you started it");
+                assert_eq!(
+                    tasks[0].origin,
+                    TaskOrigin::Accepted,
+                    "{mode}: you started it"
+                );
                 assert_eq!(tasks[0].status, TaskStatus::Done, "{mode}");
                 assert_eq!(
                     sim.decisions().await[0].outcome.as_ref().unwrap()["performed"],

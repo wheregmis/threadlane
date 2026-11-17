@@ -189,6 +189,8 @@ str_enum! {
         UserRoutine => "user_routine",
         Event => "event",
         Agent => "agent",
+        /// Proposed by an agent and started by you, or descended from that work.
+        Accepted => "accepted",
     }
 }
 
@@ -197,7 +199,7 @@ impl TaskOrigin {
     /// rule, docs/milestone-3.md §1 item 2).
     #[must_use]
     pub const fn is_requested(self) -> bool {
-        matches!(self, Self::User | Self::UserRoutine)
+        matches!(self, Self::User | Self::UserRoutine | Self::Accepted)
     }
 }
 
@@ -993,6 +995,9 @@ pub struct Decision {
     /// What performing the approved call did, once it was performed or
     /// refused: `{"performed": true, ...}` or `{"performed": false, "error": ...}`.
     pub outcome: Option<Json>,
+    /// The asking run's agent, when an open proposal is listed for the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<String>,
 }
 
 impl Decision {
