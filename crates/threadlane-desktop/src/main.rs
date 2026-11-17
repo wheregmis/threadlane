@@ -315,12 +315,16 @@ impl Desktop {
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
+        // The open screen loads once the refresh is in: the Agents screen
+        // needs the projects it lists.
         self.run(
             async move { refresh(&*core.read().await).await },
-            |this, refreshed, _| this.state.apply(refreshed),
+            |this, refreshed, cx| {
+                this.state.apply(refreshed);
+                this.load_screen(cx);
+            },
             cx,
         );
-        self.load_screen(cx);
     }
 
     /// Loads what the open screen shows beyond what a refresh brings.
