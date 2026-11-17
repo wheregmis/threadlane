@@ -277,6 +277,43 @@ impl HubDb {
         tx.commit().await
     }
 
+    /// Whether the lane was stopped and has yet to resume.
+    pub async fn lane_stopped(&self, lane: LaneId) -> StoreResult<bool> {
+        let conn = self.db.reader()?;
+        query_one(
+            &conn,
+            "SELECT stopped FROM lanes WHERE id = ?1",
+            params![lane.get()],
+            |row| Cols(row).bool(0),
+        )
+        .await
+    }
+
+    /// Permanent delivery failures recorded for a project, newest first.
+    pub async fn delivery_failures(
+        &self,
+        project: ProjectId,
+        before: Option<Timestamp>,
+        limit: u32,
+    ) -> StoreResult<Vec<Event>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {EVENT_FIELDS} FROM events
+                      WHERE project_id = ?1 AND kind = 'delivery_failure' AND received_at < ?2
+                      ORDER BY received_at DESC, id DESC LIMIT ?3"
+            ),
+            params![
+                project.get(),
+                before.map_or(i64::MAX, Timestamp::as_millis),
+                i64::from(limit)
+            ],
+            decode_event,
+        )
+        .await
+    }
+
     /// Checks that the lease is still current and has not been interrupted.
     pub async fn check_running(&self, lease: &Lease) -> StoreResult<()> {
         let conn = self.db.reader()?;

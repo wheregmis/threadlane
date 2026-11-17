@@ -285,7 +285,15 @@ pub fn chips(detail: &TaskDetail, when: &When) -> Vec<String> {
     chips.extend(detail.repositories.iter().cloned());
     chips.push(detail.branch.clone());
     chips.push(origin(detail));
-    let status = status_label(task.status, task.waiting_reason.as_deref());
+    let status = if detail.stopped {
+        if task.status == TaskStatus::Running {
+            "Stopping"
+        } else {
+            "Stopped"
+        }
+    } else {
+        status_label(task.status, task.waiting_reason.as_deref())
+    };
     chips.push(running_elapsed(summary, when).map_or_else(
         || status.to_owned(),
         |elapsed| format!("{status} · {elapsed}"),
@@ -439,6 +447,7 @@ pub fn timeline(detail: &TaskDetail, when: &When) -> Vec<Moment> {
                         "stopped to ask you".to_owned()
                     }
                     (RunStatus::Committed, _) => "ended quietly".to_owned(),
+                    (RunStatus::Stopped, _) => "stopped by you".to_owned(),
                     (RunStatus::Failed, _) => format!(
                         "failed: {}",
                         run_summary.error.as_deref().unwrap_or("no reason given")

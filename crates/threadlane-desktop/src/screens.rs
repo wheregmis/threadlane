@@ -10,7 +10,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_desktop::{AppState, Gap, Queued};
 
-use crate::Desktop;
+use crate::{Desktop, Screen};
 
 mod agents;
 mod home;
@@ -61,6 +61,86 @@ fn section(text: impl Into<SharedString>) -> Div {
         .text_sm()
         .font_weight(FontWeight::SEMIBOLD)
         .child(text.into())
+}
+
+impl Desktop {
+    fn stop_button(
+        &self,
+        space: &str,
+        target: threadlane_core::client::LaneTarget,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        use gpui_kit::component::Disableable as _;
+        let pending = self.state.stopping(space, &target);
+        let space = space.to_owned();
+        Button::new("stop-run")
+            .small()
+            .outline()
+            .tab_stop(true)
+            .disabled(pending)
+            .label(if pending {
+                "Requesting stop…"
+            } else {
+                "Stop"
+            })
+            .accessibility_label(label)
+            .on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.stop_lane(space.clone(), target.clone(), cx)
+                }),
+            )
+    }
+
+    fn digest_entry(
+        &self,
+        space: &str,
+        digest: threadlane_desktop::Digest,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let seq = digest.seq;
+        let space = space.to_owned();
+        let in_space = space.clone();
+        v_flex()
+            .gap_1()
+            .items_start()
+            .child(
+                Button::new(SharedString::from(format!("digest-{space}-{seq}")))
+                    .small()
+                    .ghost()
+                    .tab_stop(true)
+                    .label(digest.toggle)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.toggle_result(&in_space, seq);
+                        cx.notify();
+                    })),
+            )
+            .children(digest.results.into_iter().map(|result| {
+                let mut row = v_flex().gap_1().pl_3().min_w_0().items_start();
+                if let Some(project) = result.project {
+                    let screen = Screen::Project {
+                        space: space.clone(),
+                        project: project.clone(),
+                        tab: crate::Tab::Conversation,
+                    };
+                    row = row.child(
+                        Button::new(SharedString::from(format!(
+                            "digest-{space}-{seq}-{}",
+                            result.id
+                        )))
+                        .small()
+                        .ghost()
+                        .tab_stop(true)
+                        .label(project.clone())
+                        .accessibility_label(format!("Open {project} in {space}"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+                    );
+                } else {
+                    row = row.child(div().text_sm().child(space.clone()));
+                }
+                row.child(div().text_sm().child(result.text))
+            }))
+    }
 }
 
 impl Desktop {

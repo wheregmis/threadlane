@@ -1,9 +1,9 @@
 //! Machines as the machines screen shows them (Plan.md §5.3, §11.1).
 
-use threadlane_core::backend::Probe;
-use threadlane_core::model::{BackendKind, Machine, MachineStatus};
+use threadlane_core::backend::{Probe, usable_backends};
+use threadlane_core::model::{Agent, BackendKind, Machine, MachineStatus};
 
-use crate::When;
+use crate::{AppState, Part, When};
 
 /// One machine of one space.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +36,7 @@ pub fn machine_row(machine: &Machine, when: &When) -> MachineRow {
             let probe = machine
                 .backends
                 .get(kind.as_str())
-                .and_then(|probe| serde_json::from_value::<Probe>(probe.clone()).ok());
+                .and_then(|value| serde_json::from_value::<Probe>(value.clone()).ok());
             match probe {
                 None => format!("{kind} not reported"),
                 Some(probe) if !probe.installed => format!("{kind} not installed"),
@@ -68,5 +68,32 @@ pub fn machine_row(machine: &Machine, when: &When) -> MachineRow {
             "gh not logged in".to_owned()
         },
         load: format!("{} of {} running", machine.load, machine.max_parallel),
+    }
+}
+
+impl AppState {
+    /// Which online machines in this space report a usable backend for the agent.
+    #[must_use]
+    pub fn agent_runs_on(&self, space: &str, agent: &Agent) -> Option<String> {
+        let space = self.space(space)?;
+        if space.gap(Part::Machines).is_some() {
+            return None;
+        }
+        let names: Vec<_> = space
+            .machines
+            .iter()
+            .filter(|machine| machine.status == MachineStatus::Online)
+            .filter(|machine| {
+                usable_backends(&machine.backends)
+                    .iter()
+                    .any(|kind| agent.backends.is_empty() || agent.backends.contains(kind))
+            })
+            .map(|machine| machine.name.as_str())
+            .collect();
+        Some(if names.is_empty() {
+            "No online machine has a usable backend.".to_owned()
+        } else {
+            format!("Runs on {}", names.join(", "))
+        })
     }
 }

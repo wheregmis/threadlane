@@ -267,24 +267,11 @@ impl ClientApi {
             .into_iter()
             .map(|project| (project.id, project.name))
             .collect();
-        messages
-            .into_iter()
-            .map(|message| {
-                let (Some(seq), Some(delivered_at)) = (message.delivery_seq, message.sent_at)
-                else {
-                    return Err(ApiError::Internal(format!(
-                        "sent message {} has no delivery position",
-                        message.id
-                    )));
-                };
-                Ok(FeedItem {
-                    seq,
-                    project_name: message.project_id.and_then(|id| names.get(&id).cloned()),
-                    delivered_at,
-                    message,
-                })
-            })
-            .collect()
+        let mut items = Vec::with_capacity(messages.len());
+        for message in messages {
+            items.push(overview::feed_item(db, message, &names).await?);
+        }
+        Ok(items)
     }
 }
 

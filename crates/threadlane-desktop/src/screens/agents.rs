@@ -63,7 +63,12 @@ impl Desktop {
                                 .child(agent.name.clone()),
                         )
                         .child(div().text_sm().child(agent.role.clone()))
-                        .child(div().text_sm().text_color(muted).child(backends)),
+                        .child(div().text_sm().text_color(muted).child(backends))
+                        .children(
+                            self.state
+                                .agent_runs_on(&space.name, agent)
+                                .map(|line| div().text_sm().text_color(muted).child(line)),
+                        ),
                 );
             }
 

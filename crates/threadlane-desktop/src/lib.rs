@@ -15,12 +15,13 @@ use threadlane_client::{
 };
 use threadlane_core::admission::AdmittedKey;
 use threadlane_core::client::{
-    BindingSummary, ConversationEntry, HubInfo, LeadRun, ProjectSummary, RecordedEvent,
-    StandingRuleSummary, TaskDetail, TaskSummary,
+    BindingSummary, ConversationEntry, HeldResults, HubInfo, LaneTarget, LeadRun, ProjectSummary,
+    RecordedEvent, StandingRuleSummary, TaskDetail, TaskSummary,
 };
 use threadlane_core::ids::{DecisionId, EventId, ProjectId, RunId, TaskId};
 use threadlane_core::model::{
-    Account, Agent, Decision, DecisionKind, Machine, MachineStatus, Mode, OutboxKind,
+    Account, Agent, Decision, DecisionKind, Machine, MachineStatus, Mode, OutboxKind, Pacing,
+    TaskStatus,
 };
 use threadlane_core::time::Timestamp;
 use tokio::sync::{RwLock, mpsc};
@@ -42,7 +43,7 @@ pub use control::{
     AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository, copy_agent,
     same_remote,
 };
-pub use conversation::Line;
+pub use conversation::{Digest, Line, belongs_in_conversation};
 pub use machines::{MachineRow, machine_row};
 pub use memory::{
     LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, change_memory, editable,
@@ -55,7 +56,9 @@ pub use permissions::{
 pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
 };
-pub use settings::{Notifications, SETTINGS_FILE, SpaceRow};
+pub use settings::{
+    Notifications, PACING_FIELDS, PacingField, SETTINGS_FILE, SpaceRow, parse_pacing,
+};
 pub use tasks::{
     BoardCard, Changes, Column, Moment, changes, chips, running_elapsed, status_label, timeline,
     usage,
@@ -213,6 +216,7 @@ pub struct Space {
     /// How many events it recorded and did not act on; `None` while its
     /// hub has not said, or cannot (one from before it could).
     pub recorded: Option<u64>,
+    held: Option<HeldResults>,
     /// The tasks of all its projects, for what needs attention on Home.
     pub tasks: Vec<TaskSummary>,
 }
@@ -232,6 +236,7 @@ impl Space {
             info: None,
             reached_by: String::new(),
             recorded: None,
+            held: None,
             tasks: Vec::new(),
         }
     }
@@ -658,6 +663,7 @@ pub struct Refresh {
     machines: Vec<SpaceListing<SpaceMachines>>,
     recent: Vec<SpaceListing<Vec<SpaceFeedItem>>>,
     recorded: Vec<SpaceListing<u64>>,
+    held: Vec<SpaceListing<Option<HeldResults>>>,
     tasks: Vec<(String, Result<Vec<TaskSummary>, ClientError>)>,
 }
 
@@ -694,6 +700,7 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
         machines: core.machines(None).await.unwrap_or_default(),
         recent: core.recent(None, RECENT).await.unwrap_or_default(),
         recorded: core.recorded_count(None).await.unwrap_or_default(),
+        held: core.held_results(None).await.unwrap_or_default(),
         tasks,
     }
 }
@@ -728,7 +735,7 @@ pub struct ProjectLoad {
     repositories: Result<Vec<threadlane_core::model::Repository>, ClientError>,
     bindings: Result<Vec<BindingSummary>, ClientError>,
     history: Result<Vec<ConversationEntry>, ClientError>,
-    lead: Result<Option<Timestamp>, ClientError>,
+    lead: Result<(Option<Timestamp>, bool), ClientError>,
     recorded: Result<(Vec<RecordedEvent>, u64), ClientError>,
     rules: Result<Vec<StandingRuleSummary>, ClientError>,
     lead_runs: Result<Vec<LeadRun>, ClientError>,
@@ -746,7 +753,7 @@ pub async fn load_project(core: &ClientCore, space: &str, project: &str) -> Proj
         repositories: core.repositories(in_space, named).await,
         bindings: core.bindings(in_space, named).await,
         history: core.conversation(in_space, named, None, PAGE).await,
-        lead: core.lead(in_space, named).await,
+        lead: core.lead_status(in_space, named).await,
         recorded: core
             .recorded(in_space, named, control::RECORDED_SHOWN)
             .await,
@@ -855,6 +862,7 @@ pub struct ProjectView {
     pub bindings: Vec<BindingSummary>,
     /// When the run its lead is working on started; `None` while idle.
     pub lead: Option<Timestamp>,
+    stopped: bool,
     answers: BTreeMap<Part, Answer>,
     /// The events it recorded and did not act on, and how many in all, or
     /// why its hub could not say. Kept out of `answers`: a hub from before
@@ -895,6 +903,7 @@ pub struct AppState {
     notified: HashSet<InSpace<i64>>,
     /// Your messages, by space and event id.
     said: BTreeMap<InSpace<EventId>, Said>,
+    failures: BTreeMap<InSpace<EventId>, Said>,
     loaded: HashMap<InSpace<String>, Loaded>,
     projects: HashMap<InSpace<String>, ProjectView>,
     tasks: HashMap<InSpace<TaskId>, TaskDetail>,
@@ -905,7 +914,12 @@ pub struct AppState {
     /// The space Home shows; `None` for all.
     filter: Option<String>,
     /// Where the Home composer sends: space and project.
-    target: Option<InSpace<String>>,
+    target_space: Option<String>,
+    last_targets: BTreeMap<String, String>,
+    pacing: HashMap<String, Result<Pacing, String>>,
+    pacing_edit: Option<String>,
+    pacing_saving: bool,
+    stopping: Vec<InSpace<LaneTarget>>,
     codes: HashMap<String, IssuedCode>,
     /// Each project's memory, for the Memory tab.
     memory: HashMap<InSpace<String>, memory::MemoryView>,
@@ -1003,6 +1017,9 @@ impl AppState {
     /// Shows one space on Home, or every space with `None`.
     pub fn set_filter(&mut self, space: Option<&str>) {
         self.filter = space.map(str::to_owned);
+        if let Some(space) = space {
+            self.target_space = Some(space.to_owned());
+        }
     }
 
     fn shown(&self, space: &str) -> bool {
@@ -1115,15 +1132,29 @@ impl AppState {
     /// the task, and while a decision is open there, that it declines it.
     #[must_use]
     pub fn task_hint(&self, space: &str, task: TaskId) -> String {
+        let stopped = self.task(space, task).is_some_and(|detail| detail.stopped);
+        let destination = if stopped {
+            "Send a message to resume this task.".to_owned()
+        } else {
+            format!("Goes to {task}, not the lead.")
+        };
         match self.open_for(space, task) {
             Some(queued) if queued.decision.kind == DecisionKind::Input => {
-                format!("Sending answers {} with your message.", queued.decision.id)
+                let prefix = if stopped {
+                    format!("{destination} ")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{prefix}Sending answers {} with your message.",
+                    queued.decision.id
+                )
             }
             Some(queued) => format!(
-                "Goes to {task}, not the lead. Sending declines {} with your message as the note.",
+                "{destination} Sending declines {} with your message as the note.",
                 queued.decision.id
             ),
-            None => format!("Goes to {task}, not the lead."),
+            None => destination,
         }
     }
 
@@ -1146,12 +1177,16 @@ impl AppState {
     /// (and of each space as a whole) in the spaces it shows, newest first.
     #[must_use]
     pub fn recent(&self) -> Vec<&SpaceFeedItem> {
-        let mut latest: HashMap<(&str, Option<&str>), &SpaceFeedItem> = HashMap::new();
+        let mut latest = HashMap::<_, &SpaceFeedItem>::new();
         for item in self.delivered.values() {
             if item.kind() == OutboxKind::Decision || !self.shown(&item.space) {
                 continue;
             }
-            let key = (item.space.as_str(), item.item.project_name.as_deref());
+            let key = (
+                item.space.as_str(),
+                item.item.project_name.as_deref(),
+                (!item.item.digest.is_empty()).then_some(item.item.seq),
+            );
             let newer = latest
                 .get(&key)
                 .is_none_or(|known| known.item.delivered_at <= item.item.delivered_at);
@@ -1236,21 +1271,57 @@ impl AppState {
     /// else the General project of the first space shown (Plan.md §2.1).
     #[must_use]
     pub fn target(&self) -> Option<(&str, &str)> {
-        if let Some((space, project)) = &self.target {
-            return Some((space, project));
-        }
-        self.spaces
-            .iter()
-            .filter(|space| self.shown(&space.name))
-            .find_map(|space| {
-                let general = space.projects.iter().find(|project| project.is_general)?;
-                Some((space.name.as_str(), general.name.as_str()))
+        self.target_space
+            .as_deref()
+            .and_then(|name| self.space(name))
+            .and_then(|space| self.target_in(space))
+            .or_else(|| {
+                self.spaces
+                    .iter()
+                    .filter(|space| self.shown(&space.name))
+                    .find_map(|space| self.target_in(space))
             })
     }
 
-    /// Makes the Home composer send to `project` of `space`.
+    fn target_in<'a>(&self, space: &'a Space) -> Option<(&'a str, &'a str)> {
+        let last = self.last_targets.get(&space.name);
+        let project = space
+            .projects
+            .iter()
+            .find(|project| Some(&project.name) == last)
+            .or_else(|| space.projects.iter().find(|project| project.is_general))
+            .or_else(|| space.projects.first())?;
+        Some((&space.name, &project.name))
+    }
+
+    /// Makes the Home composer send to `project` of `space` and remembers the choice.
     pub fn set_target(&mut self, space: &str, project: &str) {
-        self.target = Some((space.to_owned(), project.to_owned()));
+        self.target_space = Some(space.to_owned());
+        self.remember_target(space, project);
+    }
+
+    /// Pacing notices for the spaces Home shows, using the display clock.
+    #[must_use]
+    pub fn held_lines(&self, when: &When) -> Vec<String> {
+        self.spaces
+            .iter()
+            .filter(|space| self.shown(&space.name) && space.reach == Reach::Reachable)
+            .filter_map(|space| {
+                let held = space.held?;
+                let count = held.count;
+                let noun = if count == 1 { "result" } else { "results" };
+                let release = if held.next == held.latest {
+                    "until"
+                } else {
+                    "· next at"
+                };
+                let time = when.moment(held.next);
+                Some(format!(
+                    "{} · {count} {noun} held {release} {time}",
+                    space.name
+                ))
+            })
+            .collect()
     }
 
     /// What the project screen shows of `project` in `space`, once loaded.
@@ -1379,8 +1450,17 @@ impl AppState {
         if self.filter.as_deref() == Some(name) {
             self.filter = None;
         }
-        if self.target.as_ref().is_some_and(|(space, _)| space == name) {
-            self.target = None;
+        self.failures.retain(|(space, _), _| space != name);
+        self.pacing.remove(name);
+        self.stopping.retain(|(space, _)| space != name);
+        if self.pacing_edit.as_deref() == Some(name) {
+            self.pacing_edit = None;
+        }
+        if self.target_space.as_deref() == Some(name) {
+            self.target_space = None;
+        }
+        if self.last_targets.remove(name).is_some() {
+            self.save_targets();
         }
     }
 
@@ -1397,6 +1477,7 @@ impl AppState {
             machines,
             recent,
             recorded,
+            held,
             tasks,
         } = refresh;
         let mut spaces = Vec::with_capacity(statuses.len());
@@ -1426,8 +1507,10 @@ impl AppState {
             spaces.iter().position(|space| space.name == name)
         };
         for (name, listed) in projects {
+            let current = listed.is_ok();
             if let Some(at) = find(&mut spaces, &name)
                 && let Some(listed) = spaces[at].take(Part::Projects, listed)
+                && current
             {
                 spaces[at].projects = listed;
             }
@@ -1474,6 +1557,11 @@ impl AppState {
                 && spaces[at].reach == Reach::Reachable
             {
                 spaces[at].recorded = listed.ok();
+            }
+        }
+        for SpaceListing { space, listed } in held {
+            if let Some(at) = find(&mut spaces, &space) {
+                spaces[at].held = listed.ok().flatten();
             }
         }
         let mut items = Vec::new();
@@ -1542,7 +1630,7 @@ impl AppState {
         view.tasks = take(&mut view.answers, Part::Tasks, tasks);
         view.repositories = take(&mut view.answers, Part::Repositories, repositories);
         view.bindings = take(&mut view.answers, Part::Bindings, bindings);
-        view.lead = take(&mut view.answers, Part::Lead, lead);
+        (view.lead, view.stopped) = take(&mut view.answers, Part::Lead, lead);
         view.recorded = Some(recorded.map_err(|error| describe(&error)));
         view.rules = take(&mut view.answers, Part::Rules, rules);
         // An older hub can still serve the rest of the conversation.
@@ -1585,8 +1673,17 @@ impl AppState {
             Some(Gap::Failed(why)) => Some(format!("Whether the lead is working: {why}")),
             Some(Gap::Loading) => None,
             None => {
-                let since = self.project(space, project)?.lead?;
-                Some(format!("Lead is working · started {}", when.time(since)))
+                let view = self.project(space, project)?;
+                match (view.stopped, view.lead) {
+                    (true, Some(_)) => {
+                        Some("Stopping the lead. Send a message to resume the lane.".to_owned())
+                    }
+                    (true, None) => Some("Lead stopped. Send a message to resume.".to_owned()),
+                    (false, Some(since)) => {
+                        Some(format!("Lead is working · started {}", when.time(since)))
+                    }
+                    (false, None) => None,
+                }
             }
         }
     }
@@ -1613,6 +1710,17 @@ impl AppState {
             let at = match entry {
                 ConversationEntry::You { event_id, text, at } => {
                     self.said.insert(
+                        (space.to_owned(), event_id),
+                        Said {
+                            project: project.to_owned(),
+                            text,
+                            at,
+                        },
+                    );
+                    at
+                }
+                ConversationEntry::DeliveryFailure { event_id, text, at } => {
+                    self.failures.insert(
                         (space.to_owned(), event_id),
                         Said {
                             project: project.to_owned(),
@@ -1807,6 +1915,74 @@ impl AppState {
         }
     }
 
+    /// The Stop target in the conversation header, while the lead is running.
+    #[must_use]
+    pub fn lead_stop(&self, space: &str, project: &str) -> Option<LaneTarget> {
+        let view = self.project(space, project)?;
+        (view.lead.is_some() && !view.stopped).then(|| LaneTarget::Lead {
+            project: Some(project.to_owned()),
+        })
+    }
+
+    /// The Stop target on a running task.
+    #[must_use]
+    pub fn task_stop(&self, space: &str, task: TaskId) -> Option<LaneTarget> {
+        let detail = self.task(space, task)?;
+        (detail.summary.task.status == TaskStatus::Running && !detail.stopped)
+            .then_some(LaneTarget::Task { task })
+    }
+
+    /// A stop request is still waiting for the hub.
+    #[must_use]
+    pub fn stopping(&self, space: &str, target: &LaneTarget) -> bool {
+        self.stopping
+            .iter()
+            .any(|(name, pending)| name == space && pending == target)
+    }
+
+    /// Marks a stop request as in flight. Returns false if it is already in flight.
+    pub fn begin_stop(&mut self, space: &str, target: &LaneTarget) -> bool {
+        if self.stopping(space, target) {
+            return false;
+        }
+        self.stopping.push((space.to_owned(), target.clone()));
+        true
+    }
+
+    /// Takes the outcome of the hub's stop request.
+    pub fn finish_stop(
+        &mut self,
+        space: &str,
+        target: &LaneTarget,
+        result: Result<(), ClientError>,
+    ) {
+        self.stopping
+            .retain(|(name, pending)| name != space || pending != target);
+        match result {
+            Ok(()) => {
+                match target {
+                    LaneTarget::Lead {
+                        project: Some(project),
+                    } => {
+                        if let Some(view) =
+                            self.projects.get_mut(&(space.to_owned(), project.clone()))
+                        {
+                            view.stopped = true;
+                        }
+                    }
+                    LaneTarget::Task { task } => {
+                        if let Some(detail) = self.tasks.get_mut(&(space.to_owned(), *task)) {
+                            detail.stopped = true;
+                        }
+                    }
+                    _ => {}
+                }
+                self.report(Activity::Done("Stop requested.".to_owned()));
+            }
+            Err(error) => self.report(Activity::Failed(describe(&error))),
+        }
+    }
+
     /// Takes a message its hub accepted, so the conversation shows it before
     /// the history does.
     pub fn sent(&mut self, space: &str, project: &str, text: &str, event: EventId, at: Timestamp) {
@@ -1817,7 +1993,13 @@ impl AppState {
                 text: text.to_owned(),
                 at,
             });
-        self.target = Some((space.to_owned(), project.to_owned()));
+        self.remember_target(space, project);
+        if let Some(view) = self
+            .projects
+            .get_mut(&(space.to_owned(), project.to_owned()))
+        {
+            view.stopped = false;
+        }
     }
 
     /// Takes a message to a task its hub accepted, so the task's timeline
@@ -1831,6 +2013,7 @@ impl AppState {
         at: Timestamp,
     ) {
         if let Some(detail) = self.tasks.get_mut(&(space.to_owned(), task)) {
+            detail.stopped = false;
             let known = detail.messages.iter().any(|entry| {
                 matches!(entry, ConversationEntry::You { event_id, .. } if *event_id == event)
             });

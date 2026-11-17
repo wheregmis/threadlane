@@ -59,6 +59,7 @@ impl Shared {
         let mut items = self.items.lock().expect("lock");
         let seq = i64::try_from(items.len()).expect("small") + 1;
         items.push(FeedItem {
+            digest: Vec::new(),
             seq,
             message: OutboxMessage {
                 id: OutboxId(seq),
@@ -355,7 +356,10 @@ impl HubApi for FakeHub {
     }
 
     async fn overview(&self, request: OverviewRequest) -> Result<OverviewReply, ApiError> {
-        Err(ApiError::Invalid(format!("unsupported {request:?}")))
+        match request {
+            OverviewRequest::HeldResults => Ok(OverviewReply::HeldResults { held: None }),
+            _ => Err(ApiError::Invalid(format!("unsupported {request:?}"))),
+        }
     }
 
     async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError> {

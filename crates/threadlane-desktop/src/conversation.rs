@@ -1,9 +1,10 @@
 //! The conversation with a project's lead (Plan.md §4.5, §11.1): your
 //! messages and what the hub delivered, in time order with day marks.
 
-use threadlane_core::client::LeadRun;
+use threadlane_client::SpaceFeedItem;
+use threadlane_core::client::{DigestResult, LeadRun};
 use threadlane_core::ids::RunId;
-use threadlane_core::model::{OutboxKind, Run, RunOutcome, RunStatus};
+use threadlane_core::model::{Mode, OutboxKind, Run, RunOutcome, RunStatus};
 use threadlane_core::time::Timestamp;
 
 use crate::{AppState, Card, Moment, When};
@@ -25,6 +26,25 @@ pub enum Line {
         /// What it said.
         text: String,
         /// When it was delivered.
+        time: String,
+    },
+    /// A run interrupted by the owner.
+    Stopped {
+        /// When the run stopped.
+        time: String,
+    },
+    /// A delivery that failed permanently.
+    DeliveryFailure {
+        /// What failed.
+        text: String,
+        /// When it failed.
+        time: String,
+    },
+    /// A delivery containing several project results.
+    Digest {
+        /// The disclosure and its contents when expanded.
+        digest: Digest,
+        /// When the digest was delivered.
         time: String,
     },
     /// A system notice.
@@ -56,6 +76,17 @@ pub enum Line {
     },
 }
 
+/// A digest as shown in Home and the conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Digest {
+    /// Position of the digest in this space's feed.
+    pub seq: i64,
+    /// The disclosure button's label.
+    pub toggle: String,
+    /// The original results when expanded.
+    pub results: Vec<DigestResult>,
+}
+
 enum Entry<'a> {
     Visible(Line),
     Run(&'a LeadRun),
@@ -75,7 +106,47 @@ fn reason(run: &Run) -> &str {
         })
 }
 
+/// Whether a feed item belongs in this project's conversation.
+#[must_use]
+pub fn belongs_in_conversation(item: &SpaceFeedItem, space: &str, project: &str) -> bool {
+    item.space == space
+        && (item.item.project_name.as_deref() == Some(project)
+            || item
+                .item
+                .digest
+                .iter()
+                .any(|result| result.project.as_deref() == Some(project)))
+}
+
 impl AppState {
+    /// The lead's configured mode under the project's effective ceiling.
+    #[must_use]
+    pub fn lead_mode(&self, space: &str, project: &str) -> Option<Mode> {
+        let binding = self
+            .project(space, project)?
+            .bindings
+            .iter()
+            .find(|binding| binding.is_lead)?;
+        Some(binding.mode.stricter(self.project_ceiling(space, project)))
+    }
+
+    /// The digest disclosure for a delivered item, if it has original results.
+    #[must_use]
+    pub fn digest(&self, item: &SpaceFeedItem) -> Option<Digest> {
+        let results = &item.item.digest;
+        if results.is_empty() {
+            return None;
+        }
+        let seq = item.item.seq;
+        let open = self.expanded.contains(&(item.space.clone(), seq));
+        let verb = if open { "Hide" } else { "Show" };
+        Some(Digest {
+            seq,
+            toggle: format!("{verb} digest · {} results", results.len()),
+            results: if open { results.clone() } else { Vec::new() },
+        })
+    }
+
     /// The conversation with the lead of `project` in `space`, oldest
     /// first, with a day mark before each day's first line.
     #[must_use]
@@ -94,16 +165,31 @@ impl AppState {
                 ));
             }
         }
+        for ((in_space, _), failure) in &self.failures {
+            if in_space == space && failure.project == project {
+                lines.push((
+                    failure.at,
+                    i64::MAX,
+                    Entry::Visible(Line::DeliveryFailure {
+                        text: failure.text.clone(),
+                        time: when.time(failure.at),
+                    }),
+                ));
+            }
+        }
         for item in self.delivered.values() {
-            if item.space != space || item.item.project_name.as_deref() != Some(project) {
+            if !belongs_in_conversation(item, space, project) {
                 continue;
             }
             let at = item.item.delivered_at;
             let time = when.time(at);
             let line = match item.kind() {
-                OutboxKind::Message => Line::Lead {
-                    text: item.text(),
-                    time,
+                OutboxKind::Message => match self.digest(item) {
+                    Some(digest) => Line::Digest { digest, time },
+                    None => Line::Lead {
+                        text: item.text(),
+                        time,
+                    },
                 },
                 OutboxKind::SystemNotice => Line::Notice {
                     text: item.text(),
@@ -140,6 +226,9 @@ impl AppState {
             let day = when.day(at);
             let line = match entry {
                 Entry::Visible(line) => line,
+                Entry::Run(run) if run.run.status == RunStatus::Stopped => Line::Stopped {
+                    time: when.time(at),
+                },
                 Entry::Run(first) if !first.sent_message => {
                     let id = first.run.id;
                     let expanded = self.expanded_quiet.contains(&(space.to_owned(), id));
@@ -152,7 +241,7 @@ impl AppState {
                         });
                     }
                     while let Some((at, _, Entry::Run(next))) = lines.next_if(|(at, _, entry)| {
-                        matches!(entry, Entry::Run(run) if !run.sent_message)
+                        matches!(entry, Entry::Run(run) if !run.sent_message && run.run.status != RunStatus::Stopped)
                             && when.day(*at) == day
                     }) {
                         let time = when.time(at);

@@ -3,11 +3,14 @@
 //! notifications it raises, and its version.
 
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 use threadlane_core::model::Mode;
-use threadlane_desktop::mode_label;
+use threadlane_desktop::{PACING_FIELDS, mode_label};
 
 use super::project::mode_name;
 use super::{heading, section};
@@ -34,6 +37,7 @@ impl Desktop {
             .child(section("Spaces"));
         for row in self.state.settings_rows() {
             let ceiling = self.space_ceiling(&row.paired_as, cx);
+            let pacing = self.space_pacing(&row.paired_as, cx);
             screen = screen.child(
                 v_flex()
                     .gap_1()
@@ -67,7 +71,8 @@ impl Desktop {
                             row.reached_by
                         },
                     ))
-                    .child(ceiling),
+                    .child(ceiling)
+                    .child(pacing),
             );
         }
         let notifications = self.state.notifications();
@@ -174,5 +179,96 @@ impl Desktop {
             );
         }
         part
+    }
+}
+
+impl Desktop {
+    fn space_pacing(&self, space: &str, cx: &mut Context<Self>) -> Div {
+        let muted = cx.theme().muted_foreground;
+        let mut panel = v_flex()
+            .gap_2()
+            .pt_3()
+            .items_start()
+            .child(section("Delivery pacing"));
+        let editing = self.state.pacing_editor(space);
+        let values = match self.state.pacing_values(space) {
+            Ok(values) => values,
+            Err(why) => {
+                panel = panel.child(div().text_sm().text_color(muted).child(why.to_owned()));
+                if editing.is_none() {
+                    return panel;
+                }
+                Default::default()
+            }
+        };
+        for (index, (field, value)) in PACING_FIELDS.iter().zip(values).enumerate() {
+            if editing.is_none() && value.is_empty() {
+                continue;
+            }
+            let label = div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .child(field.label);
+            let mut row = v_flex().gap_1().w_full().child(label);
+            if !field.explanation.is_empty() {
+                row = row.child(div().text_sm().text_color(muted).child(field.explanation));
+            }
+            panel = panel.child(match editing {
+                Some(saving) => row.child(
+                    Input::new(&self.pacing_inputs[index])
+                        .aria_label(format!("{} for {space}", field.label))
+                        .disabled(saving),
+                ),
+                None => row.child(div().text_sm().child(value)),
+            });
+        }
+        let space = space.to_owned();
+        let controls = match editing {
+            Some(saving) => h_flex()
+                .gap_2()
+                .child(
+                    Button::new(SharedString::from(format!("save-pacing-{space}")))
+                        .small()
+                        .primary()
+                        .tab_stop(true)
+                        .disabled(saving)
+                        .label(if saving { "Saving…" } else { "Save pacing" })
+                        .accessibility_label(format!("Save delivery pacing for {space}"))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.save_pacing(space.clone(), cx)),
+                        ),
+                )
+                .child(
+                    Button::new("keep-pacing")
+                        .small()
+                        .ghost()
+                        .tab_stop(true)
+                        .disabled(saving)
+                        .label("Cancel")
+                        .accessibility_label("Cancel delivery pacing edit")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state.keep_pacing();
+                            cx.notify();
+                        })),
+                ),
+            None => h_flex().child(
+                Button::new(SharedString::from(format!("edit-pacing-{space}")))
+                    .small()
+                    .outline()
+                    .tab_stop(true)
+                    .label("Edit pacing")
+                    .disabled(!self.state.can_edit_pacing())
+                    .accessibility_label(format!("Edit delivery pacing for {space}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(values) = this.state.edit_pacing(&space) {
+                            for (input, value) in this.pacing_inputs.iter().zip(values) {
+                                input.update(cx, |input, cx| input.set_value(value, window, cx));
+                            }
+                            cx.notify();
+                        }
+                    })),
+            ),
+        };
+        panel.child(controls)
     }
 }

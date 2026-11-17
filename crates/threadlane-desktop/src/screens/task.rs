@@ -134,6 +134,10 @@ impl Desktop {
                 .children(usage(detail, when)),
         );
 
+        let stop = self
+            .state
+            .task_stop(space, task)
+            .map(|target| self.stop_button(space, target, format!("Stop {task}"), cx));
         let control = match self.state.task_control(space, task) {
             TaskControl::Ended => None,
             TaskControl::Cancel => {
@@ -210,6 +214,7 @@ impl Desktop {
                     .clone()
                     .map(|why| div().text_sm().text_color(muted).child(why)),
             )
+            .children(stop)
             .children(control)
             .child(
                 h_flex()

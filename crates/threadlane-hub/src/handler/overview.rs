@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use threadlane_core::client::{
-    ApiError, ConversationEntry, FeedItem, LeadRun, OverviewReply, OverviewRequest, RecordedEvent,
-    RunSummary, TaskDetail, TaskSummary,
+    ApiError, ConversationEntry, DigestResult, FeedItem, LeadRun, OverviewReply, OverviewRequest,
+    RecordedEvent, RunSummary, TaskDetail, TaskSummary,
 };
 use threadlane_core::ids::{AgentId, MachineId, ProjectId};
 use threadlane_core::model::{Event, OutboxMessage, RunOutcome, RunStatus, Task, TaskStatus};
@@ -119,7 +119,8 @@ async fn summaries(
 }
 
 /// A sent message as the feed has it.
-fn feed_item(
+pub(super) async fn feed_item(
+    db: &HubDb,
     message: OutboxMessage,
     projects: &HashMap<ProjectId, String>,
 ) -> Result<FeedItem, ApiError> {
@@ -129,7 +130,26 @@ fn feed_item(
             message.id
         )));
     };
+    let digest = if message.body["digest"].is_array() {
+        db.digest_originals(message.id)
+            .await
+            .map_err(api_error)?
+            .into_iter()
+            .map(|original| DigestResult {
+                id: original.id,
+                project: original
+                    .project_id
+                    .and_then(|id| projects.get(&id).cloned()),
+                text: original.body["text"]
+                    .as_str()
+                    .map_or_else(|| original.body.to_string(), str::to_owned),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(FeedItem {
+        digest,
         seq,
         project_name: message.project_id.and_then(|id| projects.get(&id).cloned()),
         delivered_at,
@@ -231,6 +251,7 @@ pub(super) async fn handle(
             let proposed_by = crate::proposal::accepted_author(db, &task)
                 .await
                 .map_err(api_error)?;
+            let stopped = db.lane_stopped(task.lane_id).await.map_err(api_error)?;
             Ok(OverviewReply::Task {
                 task: Box::new(TaskDetail {
                     branch: task_branch(task.id),
@@ -240,6 +261,7 @@ pub(super) async fn handle(
                     related,
                     messages,
                     summary: summary(db, &names, task).await?,
+                    stopped,
                     proposed_by,
                 }),
             })
@@ -264,10 +286,24 @@ pub(super) async fn handle(
                 .await
                 .map_err(api_error)?
             {
-                let item = feed_item(message, &names.projects)?;
+                let item = feed_item(db, message, &names.projects).await?;
                 entries.push((item.delivered_at, ConversationEntry::Delivered { item }));
             }
-            // The newest `limit` of both, then oldest first.
+            for event in db
+                .delivery_failures(project.id, before, limit)
+                .await
+                .map_err(api_error)?
+            {
+                entries.push((
+                    event.received_at,
+                    ConversationEntry::DeliveryFailure {
+                        event_id: event.id,
+                        text: event_text(&event),
+                        at: event.received_at,
+                    },
+                ));
+            }
+            // The newest entries from all sources, then oldest first.
             entries.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
             entries.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
             entries.reverse();
@@ -277,14 +313,14 @@ pub(super) async fn handle(
         }
         OverviewRequest::Recent { limit } => {
             let names = Names::of(db).await?;
-            let mut items = db
+            let messages = db
                 .sent_before(CLIENT_CHANNEL, None, None, limit.min(FEED_PAGE))
                 .await
-                .map_err(api_error)?
-                .into_iter()
-                .map(|message| feed_item(message, &names.projects))
-                .collect::<Result<Vec<_>, _>>()?;
-            items.reverse();
+                .map_err(api_error)?;
+            let mut items = Vec::with_capacity(messages.len());
+            for message in messages.into_iter().rev() {
+                items.push(feed_item(db, message, &names.projects).await?);
+            }
             Ok(OverviewReply::Recent { items })
         }
         OverviewRequest::Machines => Ok(OverviewReply::Machines {
@@ -300,7 +336,14 @@ pub(super) async fn handle(
                 .into_iter()
                 .rfind(|run| run.status == RunStatus::Active)
                 .map(|run| run.started_at);
-            Ok(OverviewReply::Lead { running_since })
+            let stopped = db
+                .lane_stopped(project.lead_lane_id)
+                .await
+                .map_err(api_error)?;
+            Ok(OverviewReply::Lead {
+                running_since,
+                stopped,
+            })
         }
         OverviewRequest::Recorded { project, limit } => {
             let project = api.project_named(project.as_deref()).await?;
@@ -345,6 +388,12 @@ pub(super) async fn handle(
             }
             Ok(OverviewReply::LeadRuns { runs: listed })
         }
+        OverviewRequest::HeldResults => Ok(OverviewReply::HeldResults {
+            held: db
+                .held_results(CLIENT_CHANNEL, api.core.inner.clock.now())
+                .await
+                .map_err(api_error)?,
+        }),
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }
 }

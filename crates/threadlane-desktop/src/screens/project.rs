@@ -54,6 +54,15 @@ impl Desktop {
             .children(Tab::ALL.map(Tab::label));
         let paused = self.state.is_paused(space, project);
         let lead = self.state.lead_line(space, project, when);
+        let stop = (tab == Tab::Conversation)
+            .then(|| self.state.lead_stop(space, project))
+            .flatten()
+            .map(|target| {
+                self.stop_button(space, target, format!("Stop the lead of {project}"), cx)
+            });
+        let ceiling = self.state.project_ceiling(space, project);
+        let lead_mode = self.state.lead_mode(space, project);
+        let muted = cx.theme().muted_foreground;
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
             Tab::Conversation => self.conversation_tab(space, project, when, window, cx),
@@ -110,15 +119,28 @@ impl Desktop {
                                 space.to_owned()
                             }),
                     )
-                    .children(lead.map(|line| {
+                    .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(line)
-                    }))
+                            .child(format!("Ceiling · {}", mode_name(ceiling))),
+                    )
                     .child(div().flex_1())
                     .child(actions),
             )
+            .children(lead_mode.filter(|_| tab == Tab::Conversation).map(|mode| {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(format!("Lead mode · {}", mode_name(mode)))
+            }))
+            .children(lead.map(|line| {
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(div().text_sm().text_color(muted).child(line))
+                    .children(stop)
+            }))
             .children(form)
             .child(bar)
             .child(body)
@@ -347,9 +369,31 @@ impl Desktop {
             .min_w_0()
             .items_start()
             .gap_4()
-            .child(board)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_3()
+                    .child(board)
+                    .child(self.project_composer(project, cx)),
+            )
             .child(side)
             .into_any_element()
+    }
+
+    fn project_composer(&self, project: &str, cx: &mut Context<Self>) -> Div {
+        h_flex()
+            .gap_2()
+            .child(div().flex_1().child(
+                Input::new(&self.composer).aria_label(format!("Message the lead of {project}")),
+            ))
+            .child(
+                Button::new("send")
+                    .primary()
+                    .tab_stop(true)
+                    .label("Send")
+                    .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+            )
     }
 
     /// The conversation with the lead, then the tasks and open decisions of
@@ -418,6 +462,18 @@ impl Desktop {
                 Line::You { text, time } => lines.child(said("You", time, text)),
                 Line::Lead { text, time } => lines.child(said("Lead", time, text)),
                 Line::Notice { text, time } => lines.child(said("Notice", time, text)),
+                Line::Stopped { time } => {
+                    lines.child(said("Lead run stopped", time, String::new()))
+                }
+                Line::DeliveryFailure { text, time } => {
+                    lines.child(said("Delivery failed", time, text))
+                }
+                Line::Digest { digest, time } => lines.child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_xs().text_color(muted).child(time))
+                        .child(self.digest_entry(space, digest, cx)),
+                ),
                 Line::Quiet {
                     id,
                     text,
@@ -575,14 +631,7 @@ impl Desktop {
                     .min_w_0()
                     .gap_2()
                     .child(lines)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().flex_1().child(Input::new(&self.composer)))
-                            .child(Button::new("send").primary().label("Send").on_click(
-                                cx.listener(|this, _, window, cx| this.send(window, cx)),
-                            )),
-                    ),
+                    .child(self.project_composer(project, cx)),
             )
             .child(side)
             .into_any_element()
