@@ -122,7 +122,13 @@ impl Fake {
     /// directory.
     fn new(body: &str) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
-        let script = body
+        // Linux refuses to run a script with no interpreter line.
+        let shebang = if body.starts_with("#!") {
+            ""
+        } else {
+            "#!/bin/sh\n"
+        };
+        let script = format!("{shebang}{body}")
             .replace("@DIR@", &dir.path().display().to_string())
             .replace("@RULES@", RULES_FILE);
         let program = dir.path().join("codex");
