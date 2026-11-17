@@ -540,7 +540,7 @@ impl Desktop {
                 let editing = self.state.memory_editing(space, project);
                 detail = detail.child(section(path.to_owned()));
                 let mut actions = h_flex().gap_2();
-                if file.is_some() && threadlane_desktop::editable(path) {
+                if self.state.memory_can_edit(space, project) {
                     let (in_space, named) = (space.to_owned(), project.to_owned());
                     if editing {
                         let (save_space, save_project) = (in_space.clone(), named.clone());
@@ -601,7 +601,7 @@ impl Desktop {
                     );
                 }
                 detail = match (file, editing) {
-                    (Some(_), true) => detail.child(Textarea::new(&self.memory_editor)),
+                    (_, true) => detail.child(Textarea::new(&self.memory_editor)),
                     (Some(file), false) => detail.child(
                         div()
                             .p_2()
@@ -611,12 +611,13 @@ impl Desktop {
                             .whitespace_normal()
                             .child(file.content.clone()),
                     ),
-                    (None, _) => detail.child(
-                        div()
-                            .text_sm()
-                            .text_color(muted)
-                            .child("This file is deleted."),
-                    ),
+                    (None, false) => detail.child(div().text_sm().text_color(muted).child(
+                        if self.state.memory_can_edit(space, project) {
+                            "Not written yet. Instructions are loaded into every run."
+                        } else {
+                            "This file is deleted."
+                        },
+                    )),
                 };
                 detail = detail.child(section("Versions"));
                 for line in self.state.memory_versions(space, project, when) {

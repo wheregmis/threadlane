@@ -1346,6 +1346,10 @@ async fn the_memory_tab_groups_the_files_the_lead_sees_and_you_change_them_as_yo
             ),
             ("Space notes", vec![row("space/notes/style.md", "Style")]),
             (
+                "Project instructions",
+                vec![row("project/instructions.md", "Not written yet")]
+            ),
+            (
                 "Project notes",
                 vec![
                     row("project/notes/INDEX.md", "INDEX.md"),
@@ -1377,15 +1381,18 @@ async fn the_memory_tab_groups_the_files_the_lead_sees_and_you_change_them_as_yo
     assert!(!state.memory_editing("work", "api"));
     assert!(!editable("project/notes/INDEX.md"));
 
-    // Instructions are yours to write; a write over budget shows the refusal.
+    // Instructions are yours to write, even before they exist; a write over
+    // budget shows the refusal.
     let path = "project/instructions.md";
+    state.select_memory("work", "api", path);
+    assert!(state.memory_can_edit("work", "api"));
+    assert_eq!(state.edit_memory("work", "api", true).as_deref(), Some(""));
     let saved = state
         .apply_change(change_memory(&core, "work", "api", path, Some("Ship it.".to_owned())).await);
     assert_eq!(
         saved.as_deref(),
         Ok("Saved project/instructions.md as version 1.")
     );
-    state.select_memory("work", "api", path);
     assert!(state.memory_groups("work", "api")[2].files[0].selected);
     assert_eq!(
         state.edit_memory("work", "api", true).as_deref(),

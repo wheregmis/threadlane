@@ -23,6 +23,12 @@ const GROUPS: [(&str, &str); 6] = [
     ("project/tasks/", "Task progress files"),
 ];
 
+/// The instructions files, which you may write while they do not exist yet.
+const INSTRUCTIONS: [&str; 2] = ["space/instructions.md", "project/instructions.md"];
+
+/// The title of an instructions file that does not exist yet.
+const UNWRITTEN: &str = "Not written yet";
+
 /// The title of the group for files no other group takes.
 const OTHER: &str = "Other files";
 
@@ -269,7 +275,9 @@ impl AppState {
     }
 
     /// The Memory tab's list: the files the lead can see, in their groups,
-    /// empty groups left out.
+    /// empty groups left out. Once listed, both instructions files are
+    /// there, `Not written yet` while they do not exist, so you can write
+    /// them.
     #[must_use]
     pub fn memory_groups(&self, space: &str, project: &str) -> Vec<MemoryGroup> {
         let Some(view) = self.memory_view(space, project) else {
@@ -281,16 +289,25 @@ impl AppState {
             .chain(std::iter::once(OTHER));
         titles
             .filter_map(|title| {
-                let files: Vec<MemoryRow> = view
+                let row = |path: &str, title: String| MemoryRow {
+                    path: path.to_owned(),
+                    title,
+                    selected: view.selected.as_deref() == Some(path),
+                };
+                let mut files: Vec<MemoryRow> = view
                     .files
                     .iter()
                     .filter(|file| group_of(&file.path) == title)
-                    .map(|file| MemoryRow {
-                        path: file.path.clone(),
-                        title: title_of(file),
-                        selected: view.selected.as_deref() == Some(file.path.as_str()),
-                    })
+                    .map(|file| row(&file.path, title_of(file)))
                     .collect();
+                let unwritten = INSTRUCTIONS.iter().find(|path| {
+                    group_of(path) == title && !view.files.iter().any(|file| file.path == **path)
+                });
+                if let Some(path) = unwritten
+                    && gap_in(&view.answers, crate::Part::Memory).is_none()
+                {
+                    files.push(row(path, UNWRITTEN.to_owned()));
+                }
                 (!files.is_empty()).then_some(MemoryGroup { title, files })
             })
             .collect()
@@ -346,6 +363,17 @@ impl AppState {
             .collect()
     }
 
+    /// Whether you may edit the selected file: a current file that is not
+    /// an index, or an instructions file not written yet.
+    #[must_use]
+    pub fn memory_can_edit(&self, space: &str, project: &str) -> bool {
+        let Some(path) = self.memory_selected(space, project) else {
+            return false;
+        };
+        editable(path)
+            && (self.memory_file(space, project).is_some() || INSTRUCTIONS.contains(&path))
+    }
+
     /// Whether the selected file is open for editing.
     #[must_use]
     pub fn memory_editing(&self, space: &str, project: &str) -> bool {
@@ -356,10 +384,11 @@ impl AppState {
     /// Opens the selected file for editing, or closes it, unless it is an
     /// index. Returns the text to edit when it opens.
     pub fn edit_memory(&mut self, space: &str, project: &str, open: bool) -> Option<String> {
-        let content = self
-            .memory_file(space, project)
-            .filter(|file| editable(&file.path))
-            .map(|file| file.content.clone());
+        let content = self.memory_can_edit(space, project).then(|| {
+            self.memory_file(space, project)
+                .map(|file| file.content.clone())
+                .unwrap_or_default()
+        });
         let view = self.memory_view_mut(space, project);
         view.refused = None;
         view.editing = open && content.is_some();
