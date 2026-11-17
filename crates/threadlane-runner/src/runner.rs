@@ -353,6 +353,7 @@ impl Inner {
     ) -> Result<AfterRun, LaneExit> {
         let run_id = assignment.run_id;
         lane.set_deferred(false);
+        lane.set_progress_written(false);
         let Some(backend) = self.backend(assignment.backend) else {
             let message = format!("backend {} is not available here", assignment.backend);
             return self.fail(lane, run_id, RunFailure::Error { message }).await;
@@ -369,7 +370,7 @@ impl Inner {
 
         let deadline = self.clock.now() + assignment.wall_time_limit;
         let request = self.request(lane, assignment, working_dir, performed);
-        let mut run = match backend.run(request).await {
+        let mut run = match backend.run(request.clone()).await {
             Ok(run) => run,
             Err(BackendError::UsageLimit { resets_at }) => {
                 self.usage_limit(lane, assignment.backend, resets_at)
@@ -383,7 +384,15 @@ impl Inner {
         };
         self.reach(AFTER_BACKEND_START)?;
 
-        let result = self.follow(lane, assignment, run.as_mut(), deadline).await;
+        let result = self
+            .follow(
+                lane,
+                assignment,
+                run.as_mut(),
+                deadline,
+                (backend.as_ref(), &request),
+            )
+            .await;
         if let Err(exit) = &result
             && !matches!(exit, LaneExit::Killed(_))
         {
@@ -393,12 +402,15 @@ impl Inner {
     }
 
     /// Mirrors the run's events until it ends, then completes or fails it.
+    /// `started` is the backend and the request that started the run, for
+    /// the final progress turn.
     async fn follow(
         &self,
         lane: &LaneState,
         assignment: &RunAssignment,
         run: &mut dyn BackendRun,
         deadline: Timestamp,
+        started: (&dyn AgentBackend, &RunRequest),
     ) -> Result<AfterRun, LaneExit> {
         let mut mirror = Mirror::new(assignment.run_id);
         let failure = match self
@@ -406,6 +418,14 @@ impl Inner {
             .await?
         {
             Ended::Terminal(BackendEvent::Finished { final_text, .. }) => {
+                // A run waiting on you ends now; it is resumed with the answer.
+                if assignment.lane_kind == LaneKind::Task
+                    && !lane.deferred()
+                    && !lane.progress_written()
+                {
+                    self.progress_turn(lane, assignment, started, &mut mirror, deadline)
+                        .await?;
+                }
                 return self.commit(lane, assignment, final_text.as_deref()).await;
             }
             // The runner ends the run if the agent does not (Plan.md §9.4).
@@ -446,6 +466,57 @@ impl Inner {
             warn!(run = %assignment.run_id, %error, "could not commit the failed run's work");
         }
         self.fail(lane, assignment.run_id, failure).await
+    }
+
+    /// The final progress turn (docs/milestone-5.md §1 decision 7): resumes
+    /// the session once with [`PROGRESS_PROMPT`], mirroring the turn into the
+    /// same journal under the run's own deadline. However the turn ends, the
+    /// run then ends as it would have; only a stop, a kill or a lost lease
+    /// ends it otherwise.
+    async fn progress_turn(
+        &self,
+        lane: &LaneState,
+        assignment: &RunAssignment,
+        (backend, started): (&dyn AgentBackend, &RunRequest),
+        mirror: &mut Mirror,
+        deadline: Timestamp,
+    ) -> Result<(), LaneExit> {
+        let (NativeSession::Start { id: assigned } | NativeSession::Resume { id: assigned }) =
+            &assignment.native_session;
+        let id = mirror.native_session().unwrap_or(assigned).to_owned();
+        let request = RunRequest {
+            prompt: PROGRESS_PROMPT.to_owned(),
+            session: NativeSession::Resume { id },
+            ..started.clone()
+        };
+        let mut run = match backend.run(request).await {
+            Ok(run) => run,
+            Err(error) => {
+                warn!(run = %assignment.run_id, %error, "could not start the final progress turn");
+                return Ok(());
+            }
+        };
+        let ended = self
+            .mirror_events(lane, assignment, run.as_mut(), mirror, deadline)
+            .await;
+        match ended {
+            Ok(Ended::Terminal(BackendEvent::UsageLimit { resets_at })) => {
+                self.usage_limit(lane, assignment.backend, resets_at).await
+            }
+            Ok(Ended::Terminal(_) | Ended::Closed) => Ok(()),
+            Ok(Ended::Deferred | Ended::WallTime) => {
+                stop_backend(run.as_mut()).await;
+                Ok(mirror
+                    .flush(self.link.as_ref(), &lane.lease(), Flush::Required)
+                    .await?)
+            }
+            Err(exit) => {
+                if !matches!(exit, LaneExit::Killed(_)) {
+                    stop_backend(run.as_mut()).await;
+                }
+                Err(exit)
+            }
+        }
     }
 
     /// Races the event stream against the wall-time limit and the lane's
@@ -953,6 +1024,14 @@ async fn probe(backend: &dyn AgentBackend) -> Probe {
         }
     }
 }
+
+/// What the final progress turn asks of a task's agent when its run is
+/// about to end without its progress file written (docs/milestone-5.md §1
+/// decision 7).
+pub const PROGRESS_PROMPT: &str = "Before this run ends: you did not update your task's \
+progress file in it. Write project/tasks/<your task id>.md now with memory_create or \
+memory_edit: what is done, what is left, and what the next session on this task must know. \
+Then end your turn.";
 
 /// The rationale of a run stopped for going on after it asked you.
 const STOPPED_WAITING: &str =

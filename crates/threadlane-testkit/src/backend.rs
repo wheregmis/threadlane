@@ -24,6 +24,10 @@ use threadlane_core::tools::ToolEndpoint;
 
 /// One step of a scripted run.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    unpredictable_function_pointer_comparisons,
+    reason = "two scripts are equal only if they name the same argument functions"
+)]
 pub enum ScriptStep {
     /// Emit assistant text.
     Text(String),
@@ -36,6 +40,14 @@ pub enum ScriptStep {
         call_id: Option<String>,
         name: String,
         arguments: Json,
+    },
+    /// [`ScriptStep::CallTool`] with arguments made from the run's prompt,
+    /// for a script shared by runs that must each name their own thing,
+    /// such as a task's own progress file.
+    CallToolFor {
+        call_id: Option<String>,
+        name: String,
+        arguments: fn(&str) -> Json,
     },
     /// Wait on the run's clock.
     Wait(Duration),
@@ -86,6 +98,22 @@ impl Script {
         arguments: Json,
     ) -> Self {
         self.then(ScriptStep::CallTool {
+            call_id: Some(call_id.into()),
+            name: name.into(),
+            arguments,
+        })
+    }
+
+    /// Appends a call to one of the system's tools whose arguments
+    /// `arguments` makes from the run's prompt.
+    #[must_use]
+    pub fn call_for(
+        self,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: fn(&str) -> Json,
+    ) -> Self {
+        self.then(ScriptStep::CallToolFor {
             call_id: Some(call_id.into()),
             name: name.into(),
             arguments,
@@ -243,9 +271,15 @@ impl ScriptedBackend {
     /// Uses `script` for every run that finds the queue empty and whose
     /// prompt contains `needle`, unless an earlier route matches. A run that
     /// is repeated after a crash gets the same script again, whichever lane
-    /// it is in and in whatever order the lanes run.
+    /// it is in and in whatever order the lanes run. A route for the same
+    /// text again replaces the earlier one, in its place.
     pub fn route(&self, needle: impl Into<String>, script: Script) {
-        self.state().routes.push((needle.into(), script));
+        let needle = needle.into();
+        let mut state = self.state();
+        match state.routes.iter_mut().find(|(known, _)| *known == needle) {
+            Some(route) => route.1 = script,
+            None => state.routes.push((needle, script)),
+        }
     }
 
     /// Uses `script` for every run that finds the queue empty.
@@ -368,6 +402,7 @@ impl AgentBackend for ScriptedBackend {
 
         let run = match script {
             None => ScriptedRun {
+                prompt: String::new(),
                 steps: VecDeque::new(),
                 buffered: VecDeque::from([BackendEvent::SessionMissing]),
                 tools: None,
@@ -380,6 +415,7 @@ impl AgentBackend for ScriptedBackend {
                     NativeSession::Start { id } | NativeSession::Resume { id } => id,
                 };
                 ScriptedRun {
+                    prompt: request.prompt,
                     steps: script.steps.into(),
                     buffered: VecDeque::from([BackendEvent::SessionStarted { native_session_id }]),
                     tools: request.tools,
@@ -418,6 +454,7 @@ enum Pending {
 }
 
 struct ScriptedRun {
+    prompt: String,
     steps: VecDeque<ScriptStep>,
     buffered: VecDeque<BackendEvent>,
     tools: Option<Arc<dyn ToolEndpoint>>,
@@ -506,6 +543,18 @@ impl BackendRun for ScriptedRun {
                         return self.end_with(event);
                     }
                     return Some(event);
+                }
+                ScriptStep::CallToolFor {
+                    call_id,
+                    name,
+                    arguments,
+                } => {
+                    let arguments = arguments(&self.prompt);
+                    self.steps.push_front(ScriptStep::CallTool {
+                        call_id,
+                        name,
+                        arguments,
+                    });
                 }
                 ScriptStep::CallTool {
                     call_id,

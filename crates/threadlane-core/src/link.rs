@@ -22,6 +22,12 @@ use crate::runtime::Killed;
 use crate::time::Timestamp;
 use crate::tools::{ToolDefinition, ToolError};
 
+/// The field the hub sets to `true` in the result of a memory call that
+/// wrote the run's own task progress file. The runner reads it to know
+/// whether a task run needs its final progress turn (docs/milestone-5.md §1
+/// decision 7).
+pub const PROGRESS_WRITTEN: &str = "progress_written";
+
 /// Everything a runner needs to execute one run. Built by the hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunAssignment {

@@ -27,8 +27,10 @@ use threadlane_core::runtime::steps::runner::{AFTER_CLAIM, AFTER_DEBOUNCE};
 use threadlane_core::store::{
     DecisionStore, InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore, TaskStore,
 };
-use threadlane_hub::{CREATE_TASK, FINISH_TASK, HubCore, HubError, HubSettings, SEND_MESSAGE};
-use threadlane_runner::{GitWorkspaces, Runner, RunnerConfig, RunnerError};
+use threadlane_hub::{
+    CREATE_TASK, FINISH_TASK, HubCore, HubError, HubSettings, MEMORY_CREATE, SEND_MESSAGE,
+};
+use threadlane_runner::{GitWorkspaces, PROGRESS_PROMPT, Runner, RunnerConfig, RunnerError};
 use threadlane_store::{Bootstrap, HubDb};
 use threadlane_testkit::fakes::FakeForge;
 use threadlane_testkit::git::bare_repository;
@@ -80,13 +82,36 @@ pub const ENGINEER: &str = "Engineer";
 /// What a task agent reports when it finishes.
 pub const TASK_SUMMARY: &str = "Done as asked.";
 
-/// A task agent that finishes its task, after waiting `wait` on the clock.
+/// A task agent that writes its progress file and finishes its task, after
+/// waiting `wait` on the clock.
 pub fn finish_after(wait: Duration) -> Script {
     Script::new()
         .wait(wait)
         .text("Working on it.")
+        .call_for("toolu_p", MEMORY_CREATE, write_progress)
         .call("toolu_f", FINISH_TASK, json!({ "summary": TASK_SUMMARY }))
         .finish("Finished the task.")
+}
+
+/// The task a task run's prompt names, as `T-0001`.
+pub fn prompt_task(prompt: &str) -> &str {
+    prompt
+        .split_once("Your task, ")
+        .and_then(|(_, rest)| rest.split_once(':'))
+        .map_or("T-unknown", |(id, _)| id)
+}
+
+/// The progress file of a task as the agent of the task its prompt names
+/// writes it.
+pub fn progress_content(task: &str) -> String {
+    format!("# {task}\nDone as asked; nothing is left.\n")
+}
+
+/// The arguments of a `memory_create` call writing the progress file of the
+/// task the prompt names.
+pub fn write_progress(prompt: &str) -> Json {
+    let task = prompt_task(prompt);
+    json!({ "path": format!("project/tasks/{task}.md"), "content": progress_content(task) })
 }
 
 /// A lead that turns the goal into tasks for the engineer: a title and the
@@ -191,6 +216,20 @@ pub fn usable_report() -> MachineReport {
     }
 }
 
+/// What a task agent's final progress turn does unless a scenario says
+/// otherwise: it ends the turn.
+pub fn progress_turn() -> Script {
+    Script::new().finish("Nothing more to save.")
+}
+
+/// A scripted backend whose final progress turns play [`progress_turn`],
+/// before any route a scenario adds.
+fn scripted(kind: BackendKind, clock: &FakeClock) -> ScriptedBackend {
+    let backend = ScriptedBackend::new(kind, Arc::new(clock.clone()));
+    backend.route(PROGRESS_PROMPT, progress_turn());
+    backend
+}
+
 /// What survives a restart.
 #[derive(Debug, Clone)]
 pub struct World {
@@ -228,7 +267,7 @@ impl World {
             None => HubDb::open_in_memory(&Bootstrap::default(), Arc::new(clock.clone())).await,
         }
         .unwrap();
-        let backend = ScriptedBackend::new(BackendKind::Claude, Arc::new(clock.clone()));
+        let backend = scripted(BackendKind::Claude, &clock);
         let lanes = Arc::new(tempfile::tempdir().unwrap());
         let runner_config = RunnerConfig::new(lanes.path());
         Self {
@@ -245,10 +284,7 @@ impl World {
 
     /// Adds a scripted Codex next to the scripted Claude, on its own account.
     pub fn with_codex(mut self) -> Self {
-        self.codex = Some(ScriptedBackend::new(
-            BackendKind::Codex,
-            Arc::new(self.clock.clone()),
-        ));
+        self.codex = Some(scripted(BackendKind::Codex, &self.clock));
         self
     }
 

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{free_backends, usable_backends};
 use threadlane_core::ids::{DecisionId, LaneId, MachineId, ProjectId, TaskId};
+use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
 };
@@ -15,6 +16,7 @@ use turso::{Connection, Row};
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
 use crate::inbox::{check_lease, insert_event_in};
+use crate::memory::live_in;
 use crate::row::{Cols, json_text, opt_raw, params};
 
 /// Source name of `task_start` and `task_result` events.
@@ -824,6 +826,13 @@ impl TaskStore for HubDb {
             return Err(StoreError::Conflict(format!(
                 "task {} is {}, not running",
                 task.id, task.status
+            )));
+        }
+        let progress = progress_path(task.project_id, task.id);
+        if live_in(conn, &progress).await?.is_none() {
+            return Err(StoreError::Invalid(format!(
+                "{progress} does not exist: write the task's progress file, what was done and \
+                 what is left, before finishing it"
             )));
         }
         exec(

@@ -4,6 +4,8 @@
 //!
 //! Paths here are stored paths: `space/…` and `projects/<project id>/…`.
 
+use crate::ids::{ProjectId, TaskId};
+
 /// The file name of every index. Only the hub writes one.
 pub const INDEX_FILE: &str = "INDEX.md";
 
@@ -27,6 +29,13 @@ fn split_root(path: &str) -> Option<(&str, &str)> {
     let (id, rest) = path.strip_prefix("projects/")?.split_once('/')?;
     let numeric = !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit());
     numeric.then_some((&path[.."projects/".len() + id.len()], rest))
+}
+
+/// The stored path of `task`'s progress file in `project`:
+/// `projects/<project>/tasks/<task id>.md` (Plan.md §8.3).
+#[must_use]
+pub fn progress_path(project: ProjectId, task: TaskId) -> String {
+    format!("projects/{}/tasks/{task}.md", project.get())
 }
 
 /// Whether `path` is the space's or a project's `instructions.md`.

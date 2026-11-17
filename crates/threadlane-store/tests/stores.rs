@@ -1004,6 +1004,13 @@ async fn the_run_cycle_takes_a_task_from_queued_to_done_and_reports_it_once() {
     assert_eq!(running.last_machine_id, Some(a));
 
     let result = json!({ "summary": "fixed" });
+    let unwritten = hub.finish_task(&lease, &result).await;
+    assert!(
+        matches!(&unwritten, Err(StoreError::Invalid(message))
+            if message.starts_with("projects/1/tasks/T-0001.md does not exist")),
+        "a task finishes only once its progress file exists: {unwritten:?}"
+    );
+    write_progress(&hub, &lease, &run, &created).await;
     let finished = hub.finish_task(&lease, &result).await.unwrap();
     assert_eq!(finished.result, Some(result.clone()));
     assert_eq!(
@@ -1313,6 +1320,7 @@ async fn a_task_lane_is_granted_only_when_its_task_is_eligible() {
         .map(|event| event.id)
         .collect();
     let run = hub.start_run(&lease, &new_run(events, T0)).await.unwrap();
+    write_progress(&hub, &lease, &run, first).await;
     hub.finish_task(&lease, &json!({ "summary": "a" }))
         .await
         .unwrap();
@@ -1440,6 +1448,20 @@ async fn machines_report_and_accounts_cool_down() {
     );
     hub.set_cooldown("claude-work", Some(T0)).await.unwrap();
     assert_eq!(hub.accounts().await.unwrap()[0].cooldown_until, Some(T0));
+}
+
+/// Writes `task`'s progress file in `run`, which `finish_task` requires.
+async fn write_progress(hub: &HubDb, lease: &Lease, run: &Run, task: &Task) {
+    let by = MemoryAuthor {
+        lease: *lease,
+        run_id: run.id,
+        call_key: "progress".into(),
+        at: T0,
+    };
+    let path = threadlane_core::memory::progress_path(task.project_id, task.id);
+    hub.write(&by, &path, &format!("# {}\nWhat is done.", task.id))
+        .await
+        .unwrap();
 }
 
 /// A run in General's lead lane, and an author for its memory writes.

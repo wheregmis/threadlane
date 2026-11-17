@@ -14,7 +14,7 @@ use threadlane_core::model::{
     TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{OrgStore, OutboxStore, SessionStore, TaskStore};
+use threadlane_core::store::{OrgStore, OutboxStore, SessionStore, StoreError, TaskStore};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{
     GateRequest, PermissionPolicy, Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry,
@@ -450,13 +450,15 @@ impl HubTools {
             call_key: effect_key(context, &run, tool, arguments),
             at: self.clock.now(),
         };
-        // A task lane is the one lane kind that works a task.
-        let kind = if context.task_id.is_some() {
-            LaneKind::Task
-        } else {
-            LaneKind::Lead
-        };
-        crate::memory::execute(&self.db, &by, context.project_id, kind, tool, arguments).await
+        crate::memory::execute(
+            &self.db,
+            &by,
+            context.project_id,
+            context.task_id,
+            tool,
+            arguments,
+        )
+        .await
     }
 
     async fn finish_task(
@@ -470,7 +472,11 @@ impl HubTools {
             .db
             .finish_task(&context.lease, &json!({ "summary": summary }))
             .await
-            .map_err(tool_error)?;
+            .map_err(|error| match error {
+                // No progress file yet: the agent can write it and retry.
+                StoreError::Invalid(_) => crate::memory::refused(context.project_id, error),
+                other => tool_error(other),
+            })?;
         Ok(json!({
             "task_id": task.id.to_string(),
             "finished": true,
@@ -654,7 +660,8 @@ fn task_definitions() -> Vec<ToolDefinition> {
         define(
             FINISH_TASK,
             "Report your task done with a summary of the result, then end your turn. \
-             The summary is what the lead sees.",
+             The summary is what the lead sees. Write your progress file, \
+             project/tasks/<task id>.md, first: finishing is refused without it.",
             Tier::Local,
             json!({
                 "type": "object",

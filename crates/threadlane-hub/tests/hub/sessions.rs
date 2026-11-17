@@ -1,10 +1,13 @@
 //! Session routing and the native-session rule (Plan.md §4.4, §8.6).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use threadlane_core::backend::NativeSession;
 use threadlane_core::model::SessionStatus;
 use threadlane_core::store::SessionStore;
+use threadlane_hub::HubSettings;
+use threadlane_testkit::CrashPlan;
 
 use crate::common::{Reply, TestHub, play};
 
@@ -113,6 +116,42 @@ async fn a_session_last_used_on_another_machine_is_closed_and_replaced() {
     assert_eq!(old.status, SessionStatus::Closed);
     let new = hub.db.session(second.session_id).await.unwrap().unwrap();
     assert_eq!(new.machine_id, Some(laptop));
+}
+
+#[tokio::test]
+async fn a_session_past_the_age_limit_is_closed_and_replaced_however_recently_used() {
+    let hour = Duration::from_secs(60 * 60);
+    let settings = HubSettings {
+        idle_window: 48 * hour,
+        ..HubSettings::default()
+    };
+    assert_eq!(settings.session_max_age, 24 * hour, "the default age limit");
+    let hub = TestHub::with(settings, Arc::new(CrashPlan::new())).await;
+    hub.hello().await;
+    hub.send("m-1", "first").await;
+    let first = play(&*hub.link, Reply::Silent).await.unwrap();
+    let first = first.only_run().clone();
+
+    // Within the age limit: resumed.
+    hub.clock.advance(23 * hour);
+    hub.send("m-2", "second").await;
+    let second = play(&*hub.link, Reply::Silent).await.unwrap();
+    let second = second.only_run().clone();
+    assert_eq!(second.session_id, first.session_id);
+    assert!(matches!(
+        second.native_session,
+        NativeSession::Resume { .. }
+    ));
+
+    // Used an hour ago, but older than a day: a fresh session.
+    hub.clock.advance(hour + Duration::from_secs(1));
+    hub.send("m-3", "third").await;
+    let third = play(&*hub.link, Reply::Silent).await.unwrap();
+    let third = third.only_run();
+    assert_ne!(third.session_id, first.session_id);
+    assert!(matches!(third.native_session, NativeSession::Start { .. }));
+    let old = hub.db.session(first.session_id).await.unwrap().unwrap();
+    assert_eq!(old.status, SessionStatus::Closed);
 }
 
 fn uuid_v4(id: &str) {

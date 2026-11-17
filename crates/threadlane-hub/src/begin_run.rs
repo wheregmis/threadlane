@@ -7,6 +7,7 @@ use serde_json::Value as Json;
 use threadlane_core::backend::{DENY_RULES, NativeSession, free_backends};
 use threadlane_core::ids::{EventId, SessionId};
 use threadlane_core::link::{Begin, LinkError, RunAssignment};
+use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     Agent, BackendKind, Binding, Event, Lane, LaneKind, Lease, Mode, Repository, Session,
     SessionChoice, SessionStatus, StartRun, Task,
@@ -102,7 +103,7 @@ impl LocalLink {
         let backend = self.choose_backend(&agent).await?;
 
         // 5. Native session.
-        let plan = self.plan_session(session, backend).await?;
+        let plan = self.plan_session(session, backend, now).await?;
 
         // 6. Open the run and claim its events.
         let run = db
@@ -140,11 +141,7 @@ impl LocalLink {
         // A fresh task session starts from the task's progress file.
         let progress = match &task {
             Some(task) if plan.new_native_id.is_some() => db
-                .read(&format!(
-                    "projects/{}/tasks/{}.md",
-                    project.id.get(),
-                    task.id
-                ))
+                .read(&progress_path(project.id, task.id))
                 .await
                 .map_err(link_error)?
                 .map(|file| file.content),
@@ -424,17 +421,25 @@ impl LocalLink {
     }
 
     /// Resume the backend's own session only on the same machine and backend
-    /// with a known native id; otherwise close the session and start fresh
-    /// (Plan.md §8.6).
+    /// with a known native id, while it is younger than the age limit;
+    /// otherwise close the session and start fresh, from the task's progress
+    /// file for a task (Plan.md §8.6). A missing native session is the third
+    /// cause: the run fails `SessionMissing` and the hub closes it then.
     async fn plan_session(
         &self,
         session: Option<Session>,
         backend: BackendKind,
+        now: Timestamp,
     ) -> Result<SessionPlan, LinkError> {
         if let Some(session) = session {
+            let young = now.saturating_since(session.created_at)
+                <= self.core.inner.settings.session_max_age;
             match &session.native_session_id {
+                // Milestone 6 resumes on another machine from a checkpoint;
+                // until then a session last used elsewhere is replaced.
                 Some(native)
-                    if session.machine_id == Some(self.machine)
+                    if young
+                        && session.machine_id == Some(self.machine)
                         && session.backend == Some(backend) =>
                 {
                     return Ok(SessionPlan {

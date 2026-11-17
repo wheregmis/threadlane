@@ -86,6 +86,20 @@ async fn task(hub: &TestHub, id: &str) -> Task {
 }
 
 /// Commits the run and releases the lane.
+/// Writes the progress file of `task`, which `finish_task` requires.
+async fn write_progress(hub: &TestHub, lease: &Lease, run: &RunAssignment, task: &str) {
+    call(
+        hub,
+        lease,
+        run,
+        "toolu_p",
+        MEMORY_CREATE,
+        json!({ "path": format!("project/tasks/{task}.md"), "content": format!("# {task}\nDone.") }),
+    )
+    .await
+    .unwrap();
+}
+
 async fn finish_run(hub: &TestHub, lease: &Lease, run: &RunAssignment) -> RunOutcome {
     let outcome = hub.link.complete(lease, run.run_id, None).await.unwrap();
     assert_eq!(hub.link.begin_run(lease).await.unwrap(), Begin::Idle);
@@ -362,6 +376,7 @@ async fn a_task_run_works_on_its_task_and_finishing_reports_one_result_to_the_le
     assert_eq!(running.last_machine_id, Some(hub.machine));
 
     let summary = json!({ "summary": "The page is up." });
+    write_progress(&hub, &lease, &run, "T-0001").await;
     let finished = call(&hub, &lease, &run, "toolu_f", FINISH_TASK, summary.clone())
         .await
         .unwrap();
@@ -665,6 +680,7 @@ async fn a_dependency_and_the_parallel_limits_hold_tasks_back_with_their_reason(
     );
     assert_eq!(task(&hub, "T-0003").await.status, TaskStatus::Queued);
 
+    write_progress(&hub, &first, &first_run, "T-0001").await;
     call(
         &hub,
         &first,

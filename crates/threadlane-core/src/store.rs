@@ -301,7 +301,9 @@ pub trait TaskStore: Send + Sync {
     ) -> StoreResult<Task>;
     /// Records the result of the running task whose lane `lease` holds. The
     /// task becomes `done`, and its result is reported, when the run commits.
-    /// Recording again replaces the result.
+    /// Recording again replaces the result. Refused with
+    /// [`StoreError::Invalid`] while the task has no progress file
+    /// ([`crate::memory::progress_path`]).
     async fn finish_task(&self, lease: &Lease, result: &Json) -> StoreResult<Task>;
     /// Moves a task along its lifecycle, refusing a move Plan.md §5.2 does
     /// not allow ([`TaskStatus::can_become`]) with [`StoreError::Conflict`].

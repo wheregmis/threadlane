@@ -16,6 +16,9 @@ pub struct HubSettings {
     /// A lead lane resumes its latest session if it was active this recently
     /// (Plan.md §4.4 rule 5).
     pub idle_window: Duration,
+    /// A session older than this is closed and a fresh one started, from
+    /// the task's progress file for a task (Plan.md §8.6).
+    pub session_max_age: Duration,
     /// Events reaching this many failed attempts die (Plan.md §4.9).
     pub max_attempts: u32,
     /// First retry backoff, doubled per attempt.
@@ -44,6 +47,7 @@ impl Default for HubSettings {
             lease_ttl: Duration::from_secs(60),
             poll: Duration::from_secs(30),
             idle_window: Duration::from_secs(30 * 60),
+            session_max_age: Duration::from_secs(24 * 60 * 60),
             max_attempts: 5,
             retry_backoff_base: Duration::from_secs(10),
             retry_backoff_max: Duration::from_secs(10 * 60),

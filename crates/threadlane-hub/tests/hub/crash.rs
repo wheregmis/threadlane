@@ -12,7 +12,7 @@ use threadlane_core::model::{EventKind, EventStatus, LaneKind, TaskStatus};
 use threadlane_core::runtime::steps::{begin_run, dispatcher, perform, placement, tool_call};
 use threadlane_core::runtime::{NoHooks, Step};
 use threadlane_core::store::{InboxStore, TaskStore};
-use threadlane_hub::{CREATE_TASK, FINISH_TASK, HubSettings, SEND_MESSAGE};
+use threadlane_hub::{CREATE_TASK, FINISH_TASK, HubSettings, MEMORY_CREATE, SEND_MESSAGE};
 use threadlane_testkit::CrashPlan;
 
 use crate::common::{PAST_LEASE, RATIONALE, Reply, Stop, TestHub, begin, play};
@@ -140,6 +140,19 @@ async fn task_cycle(hub: &TestHub) -> Result<(), Stop> {
                     json!({ "title": "page", "goal": "the page is up" }),
                 ),
             };
+            if run.lane_kind == LaneKind::Task {
+                let progress =
+                    json!({ "path": "project/tasks/T-0001.md", "content": "# T-0001\nDone." });
+                hub.link
+                    .call_tool(
+                        &lease,
+                        run.run_id,
+                        Some("toolu_p"),
+                        MEMORY_CREATE,
+                        &progress,
+                    )
+                    .await?;
+            }
             hub.link
                 .call_tool(&lease, run.run_id, Some(call_id), tool, &arguments)
                 .await?;

@@ -12,12 +12,14 @@ use threadlane_core::runtime::steps::{
     begin_run, dispatcher, perform, placement, runner, tool_call,
 };
 use threadlane_core::runtime::{Killed, Step};
-use threadlane_hub::HubError;
-use threadlane_runner::RunnerError;
-use threadlane_testkit::CrashPlan;
+use threadlane_core::store::MemoryStore;
+use threadlane_hub::{FINISH_TASK, HubError, MEMORY_CREATE};
+use threadlane_runner::{PROGRESS_PROMPT, RunnerError};
+use threadlane_testkit::{CrashPlan, Script};
 
 use crate::harness::{
-    PAST_LEASE, REPLY, Sim, World, add_engineer, finish_after, plan_tasks_in, reply_script,
+    PAST_LEASE, REPLY, Sim, TASK_SUMMARY, World, add_engineer, finish_after, plan_tasks_in,
+    progress_content, progress_turn, reply_script,
 };
 use crate::invariants::{assert_invariants, assert_quiet};
 use crate::publish::{self, ask_script, assert_published, drive, publish_world};
@@ -223,24 +225,54 @@ async fn a_second_process_does_not_pass_a_step_the_first_got_past_durably() {
 /// [`REPLY`]. Each kind of run gets its script from its prompt, so a run
 /// repeated after a crash plays the same script whichever lane runs first.
 async fn task_world() -> World {
+    task_world_with(finish_after(Duration::ZERO), progress_turn()).await
+}
+
+/// [`task_world`] whose task agent plays `task` and, in a final progress
+/// turn, `progress`.
+async fn task_world_with(task: Script, progress: Script) -> World {
     let world = World::new().await;
     add_engineer(&world.db, 1).await;
     world.add_repository("app").await;
+    world.backend.route(PROGRESS_PROMPT, progress);
     world.backend.route("task_result", reply_script());
-    world
-        .backend
-        .route("task_start", finish_after(Duration::ZERO));
+    world.backend.route("task_start", task);
     world
         .backend
         .set_default(plan_tasks_in(&["app"], &[("page", &[])]));
     world
 }
 
+/// A task world whose task agent ends its run without writing its progress
+/// file, so the runner gives it the final progress turn, in which it writes
+/// the file and finishes the task.
+async fn progress_turn_world() -> World {
+    task_world_with(
+        Script::new()
+            .text("Working on it.")
+            .finish("Stopping here."),
+        // The progress prompt names no task; the session knows it is T-0001.
+        Script::new()
+            .call(
+                "toolu_p",
+                MEMORY_CREATE,
+                json!({ "path": "project/tasks/T-0001.md", "content": progress_content("T-0001") }),
+            )
+            .call("toolu_f", FINISH_TASK, json!({ "summary": TASK_SUMMARY }))
+            .finish("Saved my progress and finished."),
+    )
+    .await
+}
+
 /// Sends the message through a task, kills the process the `nth` time it
 /// reaches `step`, restarts, and checks the end state from the stores.
 async fn kill_task_cycle_and_recover(step: Step, nth: u32) {
-    let scenario = format!("task cycle, {step} #{nth}");
-    let world = task_world().await;
+    kill_cycle_and_recover(task_world().await, "task cycle", step, nth).await;
+}
+
+/// [`kill_task_cycle_and_recover`] in `world`.
+async fn kill_cycle_and_recover(world: World, name: &str, step: Step, nth: u32) {
+    let scenario = format!("{name}, {step} #{nth}");
     let plan = CrashPlan::kill_at_nth(step, nth);
     let sim = world.boot(plan.clone()).await;
     let event = sim.send("m-1", "Put the page up").await;
@@ -273,6 +305,50 @@ async fn kill_task_cycle_and_recover(step: Step, nth: u32) {
     let feed = sim.feed().await;
     assert_eq!(feed.len(), 1, "{scenario}: exactly one reply in the feed");
     assert_eq!(feed[0].message.body, json!({ "text": REPLY }), "{scenario}");
+    let progress = sim
+        .db()
+        .history("projects/1/tasks/T-0001.md")
+        .await
+        .unwrap();
+    assert_eq!(
+        progress.len(),
+        1,
+        "{scenario}: the progress file is written once"
+    );
+}
+
+/// The task cycle with a final progress turn, killed the `nth` time it
+/// reaches each boundary it passes, inside the extra turn included: one
+/// progress file version, one task done, one reply.
+#[tokio::test]
+async fn killing_the_process_at_any_step_of_a_task_that_takes_its_final_progress_turn() {
+    let plan = CrashPlan::new();
+    let sim = progress_turn_world().await.boot(plan.clone()).await;
+    sim.send("m-1", "Put the page up").await;
+    live(&sim).await.unwrap();
+    assert_eq!(sim.feed().await.len(), 1);
+    let task_runs: Vec<_> = sim
+        .backend()
+        .received()
+        .into_iter()
+        .filter(|run| run.tools.iter().any(|tool| tool == FINISH_TASK))
+        .collect();
+    assert_eq!(task_runs.len(), 2, "the task's run and its progress turn");
+    assert_eq!(task_runs[1].prompt, PROGRESS_PROMPT);
+    assert_eq!(task_runs[1].session_id(), task_runs[0].session_id());
+    let reached = plan.reached();
+    for (index, &step) in reached.iter().enumerate() {
+        let nth = reached[..=index]
+            .iter()
+            .filter(|seen| **seen == step)
+            .count();
+        let world = progress_turn_world().await;
+        kill_cycle_and_recover(world, "progress turn", step, u32::try_from(nth).unwrap()).await;
+    }
+    println!(
+        "{} kill points in a task with a progress turn",
+        reached.len()
+    );
 }
 
 #[tokio::test]

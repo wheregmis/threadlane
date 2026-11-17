@@ -1,4 +1,4 @@
-//! Milestone 1 and 3 exit tests: the real hub and the real runner together
+//! Milestone 1, 3 and 5 exit tests: the real hub and the real runner together
 //! (Plan.md §15 milestones 1 and 3, docs/milestone-1.md §10,
 //! docs/milestone-3.md §2 and §3).
 //!
@@ -11,6 +11,7 @@ mod invariants;
 
 mod accounts;
 mod backends;
+mod context;
 mod crash;
 mod cycle;
 mod failures;

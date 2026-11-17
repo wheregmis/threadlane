@@ -434,6 +434,21 @@ async fn a_resume_that_codex_answers_with_a_new_session_is_missing_and_stopped()
 }
 
 #[tokio::test]
+async fn a_resume_that_codex_refuses_for_want_of_the_session_is_missing() {
+    let fake = Fake::new("echo 'Error: No saved session found with ID old' >&2\nexit 1");
+    let mut run = fake
+        .backend()
+        .run(fake.request(NativeSession::Resume { id: "old".into() }))
+        .await
+        .expect("run starts");
+    assert_eq!(
+        collect(run.as_mut()).await,
+        vec![BackendEvent::SessionMissing],
+        "its own outcome, not a failure"
+    );
+}
+
+#[tokio::test]
 async fn output_closing_without_a_result_fails_with_the_stderr_tail() {
     let fake = Fake::new(&format!(
         "echo '{}'\necho 'something broke badly' >&2\nexit 3",

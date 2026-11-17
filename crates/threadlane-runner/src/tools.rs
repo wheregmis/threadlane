@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::ids::RunId;
-use threadlane_core::link::HubLink;
+use threadlane_core::link::{HubLink, PROGRESS_WRITTEN};
 use threadlane_core::tools::{ToolDefinition, ToolEndpoint, ToolError};
 
 use crate::lane::{LaneState, Stop};
@@ -15,7 +15,8 @@ use crate::lane::{LaneState, Stop};
 ///
 /// The backend only sees a failed call as a tool error, so a kill or a lost
 /// lease is also raised on the lane, which stops on it, and a call that
-/// opened a decision marks the run deferred, which ends it.
+/// opened a decision marks the run deferred, which ends it. A result that
+/// says the task's progress file was written marks that on the lane.
 #[derive(Debug)]
 pub(crate) struct LaneTools {
     link: Arc<dyn HubLink>,
@@ -71,6 +72,9 @@ impl ToolEndpoint for LaneTools {
             Err(ToolError::Killed(killed)) => self.lane.signal(Stop::Killed(*killed)),
             Err(ToolError::LeaseLost) => self.lane.signal(Stop::LeaseLost),
             Err(ToolError::WaitingOnYou) => self.lane.set_deferred(true),
+            Ok(output) if output.get(PROGRESS_WRITTEN) == Some(&Json::Bool(true)) => {
+                self.lane.set_progress_written(true);
+            }
             _ => {}
         }
         result

@@ -56,7 +56,7 @@ fn unindexed(path: &str) -> StoreResult<()> {
     not_an_index(path).map_err(StoreError::Invalid)
 }
 
-async fn live_in(conn: &Connection, path: &str) -> StoreResult<Option<MemoryFile>> {
+pub(crate) async fn live_in(conn: &Connection, path: &str) -> StoreResult<Option<MemoryFile>> {
     query_opt(
         conn,
         &format!(

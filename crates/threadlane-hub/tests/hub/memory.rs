@@ -10,7 +10,7 @@ use threadlane_core::model::{LaneKind, Lease, Mode, NewAgent, NewBinding, NewPro
 use threadlane_core::store::{DecisionStore, MemoryStore, OrgStore};
 use threadlane_core::tools::ToolError;
 use threadlane_hub::{
-    CREATE_TASK, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW,
+    CREATE_TASK, FINISH_TASK, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW,
 };
 
 use crate::common::{TestHub, begin};
@@ -337,6 +337,101 @@ async fn a_task_run_has_the_memory_tools_too() {
     .await
     .unwrap();
     assert_eq!(run.end().await, RunOutcome::Silent);
+}
+
+#[tokio::test]
+async fn a_task_agent_writes_only_its_own_progress_file_and_finishes_only_once_it_exists() {
+    let hub = hub().await;
+    let run = task_run(&hub).await;
+    let progress = |title: &str| format!("# {title}\nWhat is done and what is left.");
+    let finish = json!({ "summary": "Done." });
+    refused(
+        run.call("f1", FINISH_TASK, finish.clone()).await,
+        "project/tasks/T-0001.md does not exist",
+    );
+
+    let other = "another task's file";
+    for (id, tool, arguments) in [
+        (
+            "o1",
+            MEMORY_CREATE,
+            json!({ "path": "project/tasks/T-0002.md", "content": progress(other) }),
+        ),
+        (
+            "o2",
+            MEMORY_CREATE,
+            json!({ "path": "project/tasks/T-0001/extra.md", "content": progress(other) }),
+        ),
+        (
+            "o3",
+            MEMORY_RENAME,
+            json!({ "from": "project/notes/a.md", "to": "project/tasks/T-0002.md" }),
+        ),
+        (
+            "o4",
+            MEMORY_RENAME,
+            json!({ "from": "project/tasks/T-0002.md", "to": "project/notes/a.md" }),
+        ),
+        (
+            "o5",
+            MEMORY_DELETE,
+            json!({ "path": "project/tasks/T-0002.md" }),
+        ),
+    ] {
+        refused(
+            run.call(id, tool, arguments).await,
+            "only your own task's progress file, project/tasks/T-0001.md",
+        );
+    }
+
+    let written = run
+        .call(
+            "p1",
+            MEMORY_CREATE,
+            json!({ "path": "project/tasks/T-0001.md", "content": progress("T-0001") }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(written["progress_written"], json!(true), "{written}");
+    let note = run
+        .call(
+            "n1",
+            MEMORY_CREATE,
+            json!({ "path": "project/notes/page.md", "content": progress("Page") }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(note.get("progress_written"), None, "{note}");
+    assert_eq!(
+        run.call("f2", FINISH_TASK, finish).await.unwrap()["finished"],
+        json!(true)
+    );
+    run.end().await;
+
+    // The lead reads every task's file, and writing one is not its progress.
+    let lead = lead_run(&hub, "m-2").await;
+    let viewed = lead
+        .call(
+            "v1",
+            MEMORY_VIEW,
+            json!({ "path": "project/tasks/T-0001.md" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(viewed["content"], json!(progress("T-0001")));
+    let edited = lead
+        .call(
+            "e1",
+            MEMORY_EDIT,
+            json!({
+                "path": "project/tasks/T-0001.md",
+                "old_text": "what is left",
+                "new_text": "nothing left",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.get("progress_written"), None, "{edited}");
 }
 
 #[tokio::test]

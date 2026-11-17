@@ -23,6 +23,8 @@ pub(crate) struct Mirror {
     run_id: RunId,
     next_seq: i64,
     unsent: Vec<JournalEntry>,
+    /// The session id the backend last reported.
+    native_session: Option<String>,
 }
 
 impl Mirror {
@@ -31,10 +33,19 @@ impl Mirror {
             run_id,
             next_seq: 1,
             unsent: Vec::new(),
+            native_session: None,
         }
     }
 
+    /// The session id the backend last reported in this run, if it did.
+    pub(crate) fn native_session(&self) -> Option<&str> {
+        self.native_session.as_deref()
+    }
+
     pub(crate) fn record(&mut self, event: &BackendEvent, at: Timestamp) {
+        if let BackendEvent::SessionStarted { native_session_id } = event {
+            self.native_session = Some(native_session_id.clone());
+        }
         let entry = serde_json::to_value(event).unwrap_or_else(
             |error| json!({ "type": "unserializable", "error": error.to_string() }),
         );

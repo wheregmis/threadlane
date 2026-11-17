@@ -367,6 +367,16 @@ async fn an_answer_is_stored_once_and_arrives_in_the_lane_as_requested_work() {
         .call_tool(
             &lease,
             run.run_id,
+            Some("toolu_p"),
+            threadlane_hub::MEMORY_CREATE,
+            &json!({ "path": "project/tasks/T-0001.md", "content": "# T-0001\nOpened it." }),
+        )
+        .await
+        .unwrap();
+    hub.link
+        .call_tool(
+            &lease,
+            run.run_id,
             Some("toolu_f"),
             threadlane_hub::FINISH_TASK,
             &json!({ "summary": "Opened it." }),

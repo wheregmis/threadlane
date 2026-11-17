@@ -77,6 +77,9 @@ pub(crate) struct LaneState {
     /// The current run opened a decision: it must end its turn now
     /// (Plan.md §9.4).
     deferred: AtomicBool,
+    /// The current run wrote its task's progress file, as the hub said in a
+    /// tool result (docs/milestone-5.md §1 decision 7).
+    progress_written: AtomicBool,
 }
 
 impl LaneState {
@@ -86,6 +89,7 @@ impl LaneState {
             lease: Mutex::new(lease),
             stop,
             deferred: AtomicBool::new(false),
+            progress_written: AtomicBool::new(false),
         }
     }
 
@@ -97,6 +101,16 @@ impl LaneState {
 
     pub(crate) fn deferred(&self) -> bool {
         self.deferred.load(Ordering::SeqCst)
+    }
+
+    /// Marks the current run as having written its progress file, or, with
+    /// `false`, starts a run that has not.
+    pub(crate) fn set_progress_written(&self, written: bool) {
+        self.progress_written.store(written, Ordering::SeqCst);
+    }
+
+    pub(crate) fn progress_written(&self) -> bool {
+        self.progress_written.load(Ordering::SeqCst)
     }
 
     /// The current lease, as last renewed.

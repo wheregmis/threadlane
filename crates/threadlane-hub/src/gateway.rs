@@ -280,7 +280,7 @@ impl LocalLink {
             &inner.db,
             &by,
             lane.project_id,
-            lane.kind,
+            lane.task_id,
             &decision.tool,
             &decision.arguments,
         )

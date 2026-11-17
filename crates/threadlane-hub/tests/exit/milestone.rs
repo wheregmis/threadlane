@@ -12,11 +12,13 @@ use threadlane_core::backend::DENY_RULES;
 use threadlane_core::client::{DecisionReply, DecisionRequest};
 use threadlane_core::model::{EventStatus, OutboxKind, RunOutcome, RunStatus, TaskStatus};
 use threadlane_core::time::Clock;
-use threadlane_hub::{FINISH_TASK, OPEN_PULL_REQUEST, SEND_MESSAGE};
+use threadlane_hub::{FINISH_TASK, MEMORY_CREATE, OPEN_PULL_REQUEST, SEND_MESSAGE};
 use threadlane_store::BLOCKED_REASON;
 use threadlane_testkit::{CrashPlan, Script, ScriptStep};
 
-use crate::harness::{Sim, World, add_engineer, finish_after, join, plan_tasks_in, until};
+use crate::harness::{
+    Sim, World, add_engineer, finish_after, join, plan_tasks_in, until, write_progress,
+};
 use crate::invariants::{assert_invariants, assert_quiet};
 use crate::loops::{sleepers_at_least, spawn_hub, spawn_runner};
 
@@ -50,6 +52,7 @@ async fn world() -> World {
     backend.route(
         "decision_answer",
         Script::new()
+            .call_for("toolu_p", MEMORY_CREATE, write_progress)
             .call("toolu_f", FINISH_TASK, json!({ "summary": PUBLISHED }))
             .finish("Finished the task."),
     );

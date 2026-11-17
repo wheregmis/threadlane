@@ -8,7 +8,9 @@
 //! approve ([`crate::gateway`]).
 
 use serde_json::{Map, Value as Json, json};
-use threadlane_core::ids::ProjectId;
+use threadlane_core::ids::{ProjectId, TaskId};
+use threadlane_core::link::PROGRESS_WRITTEN;
+use threadlane_core::memory::progress_path;
 use threadlane_core::model::{LaneKind, MemoryAuthor, MemoryFile};
 use threadlane_core::store::{MemoryStore, StoreError};
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
@@ -106,6 +108,33 @@ pub(crate) fn protected(tool: &str, arguments: &Json) -> bool {
         })
 }
 
+/// The lane kind of a run that works `task`, if any: a task lane is the one
+/// lane kind that works a task.
+fn kind_of(task: Option<TaskId>) -> LaneKind {
+    if task.is_some() {
+        LaneKind::Task
+    } else {
+        LaneKind::Lead
+    }
+}
+
+/// Refuses a change by `task`'s agent to any progress file but its own
+/// (docs/milestone-5.md §4). The lead may change any of them.
+fn own_progress(project: ProjectId, task: Option<TaskId>, stored: &str) -> Result<(), ToolError> {
+    let Some(task) = task else {
+        return Ok(());
+    };
+    let own = format!("projects/{}/", project.get());
+    if stored.starts_with(&format!("{own}tasks/")) && stored != progress_path(project, task) {
+        let named = stored.replacen(&own, "project/", 1);
+        return Err(ToolError::InvalidArguments(format!(
+            "{named:?}: in project/tasks/ you may change only your own task's progress file, \
+             project/tasks/{task}.md"
+        )));
+    }
+    Ok(())
+}
+
 /// A memory call, checked, with stored paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Call {
@@ -137,15 +166,23 @@ fn text<'a>(object: &'a Map<String, Json>, name: &str) -> Result<&'a str, ToolEr
         .ok_or_else(|| ToolError::InvalidArguments(format!("{name} must be text")))
 }
 
-/// Checks a call's arguments and maps its paths.
+/// Checks a call's arguments and maps its paths, for a run in `project`
+/// working `task` (a lead's run works none).
 fn parse(
     project: ProjectId,
-    kind: LaneKind,
+    task: Option<TaskId>,
     tool: &str,
     arguments: &Json,
 ) -> Result<Call, ToolError> {
+    let kind = kind_of(task);
     let path = |object: &Map<String, Json>, name: &str| -> Result<String, ToolError> {
         scope(project, kind, text(object, name)?)
+    };
+    // A path the call changes.
+    let changed = |object: &Map<String, Json>, name: &str| -> Result<String, ToolError> {
+        let stored = path(object, name)?;
+        own_progress(project, task, &stored)?;
+        Ok(stored)
     };
     Ok(match tool {
         MEMORY_VIEW => Call::View {
@@ -154,7 +191,7 @@ fn parse(
         MEMORY_CREATE => {
             let object = fields(arguments, &["path", "content"])?;
             Call::Create {
-                path: path(object, "path")?,
+                path: changed(object, "path")?,
                 content: text(object, "content")?.to_owned(),
             }
         }
@@ -165,19 +202,19 @@ fn parse(
                 return Err(invalid("old_text must not be empty"));
             }
             Call::Edit {
-                path: path(object, "path")?,
+                path: changed(object, "path")?,
                 old: old.to_owned(),
                 new: text(object, "new_text")?.to_owned(),
             }
         }
         MEMORY_DELETE => Call::Delete {
-            path: path(fields(arguments, &["path"])?, "path")?,
+            path: changed(fields(arguments, &["path"])?, "path")?,
         },
         MEMORY_RENAME => {
             let object = fields(arguments, &["from", "to"])?;
             Call::Rename {
-                from: path(object, "from")?,
-                to: path(object, "to")?,
+                from: changed(object, "from")?,
+                to: changed(object, "to")?,
             }
         }
         other => return Err(ToolError::UnknownTool(other.to_owned())),
@@ -186,7 +223,7 @@ fn parse(
 
 /// A refusal from the store as a run in `project` sees it, with its paths
 /// as the run names them.
-fn refused(project: ProjectId, error: StoreError) -> ToolError {
+pub(crate) fn refused(project: ProjectId, error: StoreError) -> ToolError {
     let named =
         |message: &str| message.replace(&format!("projects/{}/", project.get()), "project/");
     match error {
@@ -200,20 +237,31 @@ fn refused(project: ProjectId, error: StoreError) -> ToolError {
     }
 }
 
-/// Performs a memory call of a run in a lane of `kind` in `project`, written
-/// as `by`. Paths in the result are as the run names them.
+/// Performs a memory call of a run in `project` working `task` (a lead's
+/// run works none), written as `by`. Paths in the result are as the run
+/// names them. A write of the task's own progress file says so in
+/// [`PROGRESS_WRITTEN`], for the runner.
 pub(crate) async fn execute(
     db: &HubDb,
     by: &MemoryAuthor,
     project: ProjectId,
-    kind: LaneKind,
+    task: Option<TaskId>,
     tool: &str,
     arguments: &Json,
 ) -> Result<Json, ToolError> {
+    let kind = kind_of(task);
     let refused = |error| refused(project, error);
     let shown = |file: &MemoryFile| visible(project, kind, &file.path).unwrap_or_default();
-    let written = |file: MemoryFile| json!({ "path": shown(&file), "version": file.version });
-    match parse(project, kind, tool, arguments)? {
+    let progress =
+        |file: &MemoryFile| task.is_some_and(|task| file.path == progress_path(project, task));
+    let written = |file: MemoryFile| {
+        let mut result = json!({ "path": shown(&file), "version": file.version });
+        if progress(&file) {
+            result[PROGRESS_WRITTEN] = json!(true);
+        }
+        result
+    };
+    match parse(project, task, tool, arguments)? {
         Call::View { path } => {
             if let Some(file) = db.read(&path).await.map_err(tool_error)? {
                 return Ok(json!({
@@ -251,11 +299,15 @@ pub(crate) async fn execute(
         }
         Call::Rename { from, to } => {
             let file = db.rename(by, &from, &to).await.map_err(refused)?;
-            Ok(json!({
+            let mut result = json!({
                 "from": visible(project, kind, &from),
                 "to": shown(&file),
                 "version": file.version,
-            }))
+            });
+            if progress(&file) {
+                result[PROGRESS_WRITTEN] = json!(true);
+            }
+            Ok(result)
         }
     }
 }
@@ -264,7 +316,7 @@ pub(crate) async fn execute(
 /// checked first, so a call its run may not make is refused, not asked.
 pub(crate) fn proposal(
     project: ProjectId,
-    kind: LaneKind,
+    task: Option<TaskId>,
     tool: &str,
     arguments: &Json,
 ) -> Result<Proposal, ToolError> {
@@ -276,7 +328,7 @@ pub(crate) fn proposal(
             .and_then(Json::as_str)
             .unwrap_or_default()
     };
-    let (question, detail) = match parse(project, kind, tool, arguments)? {
+    let (question, detail) = match parse(project, task, tool, arguments)? {
         Call::Create { path, content } => {
             // Asking about a write the store would refuse helps no one.
             threadlane_core::memory::check(&path, &content).map_err(ToolError::InvalidArguments)?;

@@ -92,6 +92,9 @@ pub struct TimingConfig {
     /// A lead lane resumes its latest session if it was active this recently
     /// (Plan.md §4.4 rule 5).
     pub idle_window_secs: u64,
+    /// A session older than this is closed and a fresh one started
+    /// (Plan.md §8.6).
+    pub session_max_age_secs: u64,
     /// First retry backoff, doubled per attempt (Plan.md §4.9).
     pub retry_backoff_base_secs: u64,
     /// The longest retry backoff.
@@ -109,6 +112,7 @@ impl Default for TimingConfig {
             poll_secs: 30,
             scheduler_secs: 10,
             idle_window_secs: 30 * 60,
+            session_max_age_secs: 24 * 60 * 60,
             retry_backoff_base_secs: 10,
             retry_backoff_max_secs: 10 * 60,
             usage_limit_fallback_secs: 5 * 60,
@@ -342,6 +346,10 @@ impl HubConfig {
             timing.usage_limit_fallback_secs > 0,
             "timing.usage_limit_fallback_secs must be positive"
         );
+        anyhow::ensure!(
+            timing.session_max_age_secs > 0,
+            "timing.session_max_age_secs must be positive"
+        );
         let runs = &self.runs;
         anyhow::ensure!(runs.max_attempts > 0, "runs.max_attempts must be positive");
         anyhow::ensure!(
@@ -417,6 +425,7 @@ impl HubConfig {
             lease_ttl: timing.lease_ttl(),
             poll: timing.poll(),
             idle_window: Duration::from_secs(timing.idle_window_secs),
+            session_max_age: Duration::from_secs(timing.session_max_age_secs),
             max_attempts: runs.max_attempts,
             retry_backoff_base: Duration::from_secs(timing.retry_backoff_base_secs),
             retry_backoff_max: Duration::from_secs(timing.retry_backoff_max_secs),
@@ -524,6 +533,7 @@ mod tests {
             r#"
             [timing]
             idle_window_secs = 600
+            session_max_age_secs = 3600
             retry_backoff_base_secs = 5
             retry_backoff_max_secs = 60
             usage_limit_fallback_secs = 120
@@ -539,6 +549,7 @@ mod tests {
         .unwrap();
         let settings = config.settings();
         assert_eq!(settings.idle_window, Duration::from_secs(600));
+        assert_eq!(settings.session_max_age, Duration::from_secs(3600));
         assert_eq!(settings.retry_backoff_base, Duration::from_secs(5));
         assert_eq!(settings.retry_backoff_max, Duration::from_secs(60));
         assert_eq!(settings.usage_limit_fallback, Duration::from_secs(120));
@@ -557,6 +568,7 @@ mod tests {
         assert!(HubConfig::parse("[runs]\nwall_time_limit_secs = 0").is_err());
         assert!(HubConfig::parse("[runs]\nmax_atempts = 3").is_err());
         assert!(HubConfig::parse("[timing]\nretry_backoff_base_secs = 0").is_err());
+        assert!(HubConfig::parse("[timing]\nsession_max_age_secs = 0").is_err());
         assert!(
             HubConfig::parse("[timing]\nretry_backoff_base_secs = 60\nretry_backoff_max_secs = 10")
                 .is_err()
