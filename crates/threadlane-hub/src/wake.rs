@@ -81,11 +81,12 @@ impl WakeHub {
         mailbox
     }
 
-    fn nudge_links(&self) {
+    /// Pushes a cancellation or wake hint to the links.
+    pub(crate) fn push(&self, message: HubMessage) {
         let mut links = self.links.lock().expect("wake lock poisoned");
         links.retain(|link| match link.upgrade() {
             Some(mailbox) => {
-                mailbox.push(HubMessage::Nudge);
+                mailbox.push(message.clone());
                 true
             }
             None => false,
@@ -124,7 +125,7 @@ impl WakeHub {
 impl Waker for WakeHub {
     fn wake(&self, target: WakeTarget) {
         match target {
-            WakeTarget::Runners | WakeTarget::Lane(_) => self.nudge_links(),
+            WakeTarget::Runners | WakeTarget::Lane(_) => self.push(HubMessage::Nudge),
             WakeTarget::Dispatcher => self.dispatcher.notify_one(),
         }
     }

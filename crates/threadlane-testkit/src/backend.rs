@@ -51,6 +51,8 @@ pub enum ScriptStep {
     },
     /// Wait on the run's clock.
     Wait(Duration),
+    /// Open a turn boundary where the runner can supply a user message.
+    TurnBoundary,
     /// Emit any event verbatim. A terminal event ends the run.
     Emit(BackendEvent),
     /// Finish with this final text, which becomes the run's rationale.
@@ -547,6 +549,7 @@ impl BackendRun for ScriptedRun {
             };
             match step {
                 ScriptStep::Text(text) => return Some(BackendEvent::Text { text }),
+                ScriptStep::TurnBoundary => return Some(BackendEvent::TurnBoundary),
                 ScriptStep::Emit(event) => {
                     if event.is_terminal() {
                         return self.end_with(event);
@@ -597,6 +600,12 @@ impl BackendRun for ScriptedRun {
                 ScriptStep::Hang => self.pending = Pending::Hang,
             }
         }
+    }
+
+    async fn fold_in(&mut self, message: &str) -> Result<bool, BackendError> {
+        self.prompt.push_str("\n\n");
+        self.prompt.push_str(message);
+        Ok(true)
     }
 
     async fn stop(&mut self) -> Result<(), BackendError> {

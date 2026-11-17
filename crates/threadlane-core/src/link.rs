@@ -118,6 +118,8 @@ pub enum RunFailure {
     /// [`HubLink::account`]. No attempt is counted, and the events wait for
     /// a free account rather than a backoff (§5.3).
     UsageLimit,
+    /// The user stopped the lane. The runner has checkpointed its work.
+    Stopped,
 }
 
 /// Messages the hub pushes to a runner.
@@ -144,6 +146,9 @@ pub enum LinkError {
     /// The hub cannot be reached right now; retry later.
     #[error("hub unreachable")]
     Unreachable,
+    /// The user interrupted the run under this lease.
+    #[error("lane stopped by the user")]
+    Stopped,
     /// The lease is no longer this runner's. Stop the run and write nothing more.
     #[error("stale lease on lane {lane_id}")]
     StaleLease { lane_id: LaneId },
@@ -186,6 +191,23 @@ pub trait HubLink: Send + Sync + fmt::Debug {
     /// the initiative check, routes to a session, opens the run record, and
     /// assembles context (Plan.md §4.3 steps 2 to 5.3).
     async fn begin_run(&self, lease: &Lease) -> Result<Begin, LinkError>;
+
+    /// Checks for a user stop under the current lease.
+    async fn check_running(&self, _lease: &Lease) -> Result<(), LinkError> {
+        Ok(())
+    }
+
+    /// Associates user messages accepted by the backend with this run.
+    async fn folded_in(
+        &self,
+        _lease: &Lease,
+        _run: RunId,
+        _events: &[EventId],
+    ) -> Result<(), LinkError> {
+        Err(LinkError::Rejected(
+            "fold-in is unsupported by this link".to_owned(),
+        ))
+    }
 
     /// Records the backend's own session id once it is known.
     async fn native_session(

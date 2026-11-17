@@ -286,6 +286,13 @@ async fn end_task(
     now: Timestamp,
 ) -> StoreResult<()> {
     transition(conn, task, status).await?;
+    // A terminal task's lane can drain its events without starting a backend.
+    exec(
+        conn,
+        "UPDATE lanes SET stopped = 0 WHERE id = ?1 AND stopped = 1",
+        params![task.lane_id.get()],
+    )
+    .await?;
     // Nothing is left to approve for a task that has ended.
     exec(
         conn,

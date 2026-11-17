@@ -241,8 +241,10 @@ pub async fn assert_one_outbox_row_per_send_message_call(sim: &Sim, scenario: &s
             keys.insert(key.clone()),
             "{scenario}: invariant 6: two rows under key {key}"
         );
-        let session = row.session_id.expect("a message from a run has a session");
-        *rows.entry(session).or_default() += 1;
+        if row.run_id.is_some() {
+            let session = row.session_id.expect("a message from a run has a session");
+            *rows.entry(session).or_default() += 1;
+        }
     }
     for (session, rows) in rows {
         let calls = calls.get(&session).copied().unwrap_or(0);

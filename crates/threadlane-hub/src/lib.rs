@@ -24,6 +24,7 @@ mod handler;
 mod link;
 mod memory;
 mod node;
+mod pacing;
 mod pairing;
 mod placement;
 mod proposal;

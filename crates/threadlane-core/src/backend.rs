@@ -202,6 +202,8 @@ pub enum BackendEvent {
     },
     /// The run failed.
     Failed { error: String },
+    /// The backend is between turns and can accept another user message.
+    TurnBoundary,
 }
 
 impl BackendEvent {
@@ -249,6 +251,11 @@ pub enum BackendError {
 pub trait BackendRun: Send + fmt::Debug {
     /// The next event, or `None` once the run has ended.
     async fn next_event(&mut self) -> Option<BackendEvent>;
+    /// Offers trusted user input after a turn boundary. Returns false when unsupported.
+    async fn fold_in(&mut self, _message: &str) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     /// Halts the run on cancel or limit.
     async fn stop(&mut self) -> Result<(), BackendError>;
 }

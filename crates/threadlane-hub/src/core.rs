@@ -33,6 +33,7 @@ pub(crate) struct Inner {
     pub(crate) settings: HubSettings,
     pub(crate) wake: Arc<WakeHub>,
     pub(crate) tools: Arc<dyn ToolRegistry>,
+    pub(crate) dispatch: Arc<tokio::sync::Mutex<()>>,
     pub(crate) channels: Vec<Arc<dyn ChannelAdapter>>,
     /// How clients reach this hub over iroh, for join codes; `None` while
     /// the hub does not serve iroh.
@@ -82,6 +83,7 @@ impl HubCore {
                 settings,
                 wake,
                 tools,
+                dispatch: Arc::default(),
                 channels: vec![Arc::new(ClientChannel)],
                 iroh: None,
                 github: None,
@@ -271,15 +273,25 @@ impl HubCore {
 
     async fn dispatch_loop(&self) -> Result<(), HubError> {
         loop {
+            let started_at = self.inner.clock.now();
             match self.dispatch_once().await {
                 Ok(0) => {}
                 Ok(sent) => tracing::debug!(sent, "dispatched messages"),
                 Err(HubError::Killed(killed)) => return Err(killed.into()),
                 Err(error) => tracing::error!(%error, "dispatcher pass failed"),
             }
+            let poll = self.inner.clock.now() + self.inner.settings.poll;
+            let deadline = match self.inner.db.next_delivery_after(started_at).await {
+                Ok(Some(next)) => next.min(poll),
+                Ok(None) => poll,
+                Err(error) => {
+                    tracing::error!(%error, "could not read the next delivery deadline");
+                    poll
+                }
+            };
             tokio::select! {
                 () = self.inner.wake.dispatcher_woken() => {}
-                () = self.inner.clock.sleep(self.inner.settings.poll) => {}
+                () = self.inner.clock.sleep_until(deadline) => {}
             }
         }
     }

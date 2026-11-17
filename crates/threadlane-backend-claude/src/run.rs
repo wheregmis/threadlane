@@ -10,11 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::json;
 use tempfile::TempDir;
 use threadlane_core::backend::{BackendError, BackendEvent, BackendRun, NativeSession};
 use threadlane_mcp::McpServer;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::stream::StreamParser;
@@ -61,6 +63,8 @@ impl Launch {
         let mut args: Vec<OsString> = [
             "-p",
             "--output-format",
+            "stream-json",
+            "--input-format",
             "stream-json",
             "--verbose",
             "--permission-mode",
@@ -123,11 +127,19 @@ impl Launch {
             return Err(std::io::Error::other("claude's pipes were not set up"));
         };
 
-        let prompt = self.prompt.clone();
+        let prompt = user_input(&self.prompt);
+        let (input, mut extra) = mpsc::channel::<String>(1);
         let stdin_task = tokio::spawn(async move {
-            // Dropping `stdin` at the end closes it, which ends the prompt.
-            if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
-                tracing::debug!(%error, "could not write the prompt to claude");
+            let mut line = prompt;
+            loop {
+                if let Err(error) = stdin.write_all(line.as_bytes()).await {
+                    tracing::debug!(%error, "could not write input to claude");
+                    break;
+                }
+                let Some(next) = extra.recv().await else {
+                    break;
+                };
+                line = next;
             }
         });
 
@@ -150,6 +162,7 @@ impl Launch {
             stdout: BufReader::new(stdout),
             stderr: tail,
             stderr_task: Some(stderr_task),
+            input: Some(input),
             stdin_task,
         })
     }
@@ -195,6 +208,16 @@ impl Tail {
     }
 }
 
+fn user_input(text: &str) -> String {
+    let message = json!({
+        "type": "user",
+        "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+        "parent_tool_use_id": null,
+        "session_id": "",
+    });
+    format!("{message}\n")
+}
+
 /// A spawned claude process.
 #[derive(Debug)]
 struct Process {
@@ -202,6 +225,7 @@ struct Process {
     stdout: BufReader<ChildStdout>,
     stderr: Arc<Mutex<Tail>>,
     stderr_task: Option<JoinHandle<()>>,
+    input: Option<mpsc::Sender<String>>,
     stdin_task: JoinHandle<()>,
 }
 
@@ -335,6 +359,14 @@ impl ClaudeRun {
         if self.parser.ended_by_result() {
             // Another turn may follow; the last result ends the run at EOF.
             self.held = events.pop();
+            if matches!(self.held, Some(BackendEvent::Finished { .. }))
+                && self
+                    .process
+                    .as_ref()
+                    .is_some_and(|process| process.input.is_some())
+            {
+                events.push(BackendEvent::TurnBoundary);
+            }
             self.parser.next_turn();
         }
         self.pending.extend(events);
@@ -409,6 +441,10 @@ impl BackendRun for ClaudeRun {
                 self.done = true;
                 return None;
             };
+            if self.held.is_some() {
+                // The runner had the opportunity to offer more input at the boundary.
+                process.input.take();
+            }
             match process.stdout.read_until(b'\n', &mut self.line).await {
                 Ok(0) if self.line.is_empty() => self.on_eof().await,
                 Ok(_) => self.take_line().await,
@@ -422,6 +458,25 @@ impl BackendRun for ClaudeRun {
                 }
             }
         }
+    }
+
+    async fn fold_in(&mut self, message: &str) -> Result<bool, BackendError> {
+        let Some(input) = self
+            .process
+            .as_ref()
+            .and_then(|process| process.input.as_ref())
+        else {
+            return Ok(false);
+        };
+        if !matches!(self.held, Some(BackendEvent::Finished { .. })) {
+            return Ok(false);
+        }
+        input
+            .send(user_input(message))
+            .await
+            .map_err(|_| BackendError::Failed("claude closed its streaming input".to_owned()))?;
+        self.held.take();
+        Ok(true)
     }
 
     async fn stop(&mut self) -> Result<(), BackendError> {
@@ -469,6 +524,8 @@ mod tests {
             [
                 "-p",
                 "--output-format",
+                "stream-json",
+                "--input-format",
                 "stream-json",
                 "--verbose",
                 "--permission-mode",

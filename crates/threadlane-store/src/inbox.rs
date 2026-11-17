@@ -3,10 +3,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::Value as Json;
+use serde_json::{Value as Json, json};
 use threadlane_core::ids::{EventId, LaneId, MachineId, ProjectId};
 use threadlane_core::model::{
-    Event, EventKind, EventStatus, Inserted, Lane, LaneKind, Lease, NewEvent, RunStatus,
+    Event, EventKind, EventStatus, Inserted, Lane, LaneKind, Lease, NewEvent, Trust,
 };
 use threadlane_core::store::{InboxStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
@@ -120,7 +120,7 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
         }
         Some((_, kind)) => kind,
     };
-    let id = query_one(
+    let id: EventId = query_one(
         conn,
         "INSERT INTO events (project_id, lane_id, source, source_event_id, kind, payload, trust,
              requested, session_ref, decision_ref, reply_to_ref, status, received_at)
@@ -142,6 +142,18 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
         |row| Cols(row).id(0),
     )
     .await?;
+    if event.kind == EventKind::Stop {
+        exec(
+            conn,
+            "UPDATE events SET status = 'done' WHERE id = ?1",
+            params![id.get()],
+        )
+        .await?;
+        return Ok(Inserted::New(id));
+    }
+    if event.kind == EventKind::UserMessage && event.trust == Trust::User {
+        resume_lane_in(conn, event.lane_id).await?;
+    }
     if kind == LaneKind::Task && event.kind == EventKind::UserMessage {
         let note = event
             .payload
@@ -157,7 +169,11 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
 /// Ends whatever was in flight on a lane whose lease is going away: claimed
 /// events return to pending, active runs are abandoned, and a running task
 /// is queued again.
-async fn reclaim_lane(conn: &Connection, lane_id: LaneId, now: Timestamp) -> StoreResult<()> {
+pub(crate) async fn reclaim_lane(
+    conn: &Connection,
+    lane_id: LaneId,
+    now: Timestamp,
+) -> StoreResult<()> {
     task::on_lane_reclaimed(conn, lane_id).await?;
     exec(
         conn,
@@ -168,16 +184,105 @@ async fn reclaim_lane(conn: &Connection, lane_id: LaneId, now: Timestamp) -> Sto
     .await?;
     exec(
         conn,
-        "UPDATE runs SET status = ?1, ended_at = ?2, error = 'lease ended'
-         WHERE lane_id = ?3 AND status = 'active'",
-        params![
-            RunStatus::Abandoned.as_str(),
-            now.as_millis(),
-            lane_id.get()
-        ],
+        "UPDATE runs SET ended_at = ?1,
+             status = CASE WHEN lease_epoch = (SELECT cancelled_epoch FROM lanes WHERE id = ?2)
+                           THEN 'stopped' ELSE 'abandoned' END,
+             error = CASE WHEN lease_epoch = (SELECT cancelled_epoch FROM lanes WHERE id = ?2)
+                          THEN 'stopped by the user' ELSE 'lease ended' END
+         WHERE lane_id = ?2 AND status = 'active'",
+        params![now.as_millis(), lane_id.get()],
     )
     .await?;
     Ok(())
+}
+
+pub(crate) async fn check_running(conn: &Connection, lease: &Lease) -> StoreResult<()> {
+    let cancelled = query_one(
+        conn,
+        "SELECT cancelled_epoch FROM lanes WHERE id = ?1",
+        params![lease.lane_id.get()],
+        |row| Cols(row).opt_i64(0),
+    )
+    .await?;
+    if cancelled == Some(lease.epoch) {
+        return Err(StoreError::Stopped);
+    }
+    Ok(())
+}
+
+async fn resume_lane_in(conn: &Connection, lane: LaneId) -> StoreResult<()> {
+    exec(
+        conn,
+        "UPDATE lanes SET stopped = 0, backoff_until = NULL WHERE id = ?1 AND stopped = 1",
+        params![lane.get()],
+    )
+    .await?;
+    Ok(())
+}
+
+impl HubDb {
+    /// Records a user stop and pauses the lane atomically. Returns the epoch to interrupt.
+    pub async fn stop_lane(
+        &self,
+        lane: LaneId,
+        source_event_id: String,
+        now: Timestamp,
+    ) -> StoreResult<Option<i64>> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let (project_id, epoch) = query_opt(
+            conn,
+            "SELECT project_id, CASE WHEN lease_owner IS NOT NULL THEN lease_epoch END
+             FROM lanes WHERE id = ?1",
+            params![lane.get()],
+            |row| Ok((Cols(row).id(0)?, Cols(row).opt_i64(1)?)),
+        )
+        .await?
+        .ok_or_else(|| StoreError::not_found("lane", lane))?;
+        let inserted = insert_event_in(
+            conn,
+            &NewEvent {
+                project_id,
+                lane_id: lane,
+                source: "client_stop".to_owned(),
+                source_event_id,
+                kind: EventKind::Stop,
+                payload: json!({ "text": "Stopped by the user." }),
+                trust: Trust::User,
+                requested: true,
+                session_ref: None,
+                decision_ref: None,
+                reply_to_ref: None,
+                received_at: now,
+            },
+        )
+        .await?;
+        if matches!(inserted, Inserted::Duplicate(_)) {
+            return Ok(None);
+        }
+        exec(
+            conn,
+            "UPDATE lanes SET stopped = 1, cancelled_epoch = ?1 WHERE id = ?2",
+            params![epoch, lane.get()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(epoch)
+    }
+
+    /// Resumes a lane without clearing cancellation of its previous run.
+    pub async fn resume_lane(&self, lane: LaneId) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        resume_lane_in(tx.conn(), lane).await?;
+        tx.commit().await
+    }
+
+    /// Checks that the lease is still current and has not been interrupted.
+    pub async fn check_running(&self, lease: &Lease) -> StoreResult<()> {
+        let conn = self.db.reader()?;
+        check_lease(&conn, lease).await?;
+        check_running(&conn, lease).await
+    }
 }
 
 fn ttl_millis(ttl: Duration) -> StoreResult<i64> {
@@ -236,6 +341,7 @@ impl InboxStore for HubDb {
     ) -> StoreResult<()> {
         let tx = self.db.begin().await?;
         check_lease(tx.conn(), lease).await?;
+        check_running(tx.conn(), lease).await?;
         for event in events {
             let changed = exec(
                 tx.conn(),
@@ -266,7 +372,7 @@ impl InboxStore for HubDb {
             "SELECT l.id FROM lanes l
              JOIN projects p ON p.id = l.project_id
              JOIN events e ON e.lane_id = l.id AND e.status = 'pending'
-             WHERE (p.paused = 0 OR l.kind = 'task')
+             WHERE l.stopped = 0 AND (p.paused = 0 OR l.kind = 'task')
                AND (l.lease_owner IS NULL OR l.lease_expires_at <= ?1)
                AND (l.backoff_until IS NULL OR l.backoff_until <= ?1)
                AND NOT (l.kind = 'task' AND EXISTS (
@@ -298,7 +404,14 @@ impl InboxStore for HubDb {
         .ok_or_else(|| StoreError::not_found("lane", lane_id))?;
         let live = lane.lease_owner.is_some()
             && lane.lease_expires_at.is_some_and(|expires| expires > now);
-        if live {
+        let stopped = query_one(
+            tx.conn(),
+            "SELECT stopped FROM lanes WHERE id = ?1",
+            params![lane_id.get()],
+            |row| Cols(row).bool(0),
+        )
+        .await?;
+        if live || stopped {
             return Ok(None);
         }
         if !task::check_eligible(tx.conn(), lane_id, machine_id, now).await? {

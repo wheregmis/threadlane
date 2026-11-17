@@ -228,6 +228,59 @@ enum Command {
         /// How many at once; 0 for no limit.
         count: u32,
     },
+    /// Read or change space delivery pacing.
+    Pacing {
+        /// The space (paired hub name).
+        #[arg(short, long)]
+        space: Option<String>,
+        /// Maximum non-urgent deliveries per hour.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        rate: Option<u32>,
+        /// Daily quiet hours as HH:MM-HH:MM.
+        #[arg(long, requires = "zone")]
+        quiet: Option<String>,
+        /// Named time zone for quiet hours, for example America/Toronto.
+        #[arg(long, requires = "quiet")]
+        zone: Option<String>,
+        /// Minutes to collect low-urgency deliveries into one digest.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        digest: Option<u32>,
+        /// Turn off delivery pacing.
+        #[arg(long, conflicts_with_all = ["rate", "quiet", "digest"])]
+        off: bool,
+    },
+    /// Interrupt a project's lead or a task and retain its work.
+    Stop(LaneArgs),
+    /// Resume a stopped lead or task.
+    Resume(LaneArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct LaneArgs {
+    /// The space (paired hub name).
+    #[arg(short, long)]
+    space: Option<String>,
+    /// The project; the General project if left out.
+    #[arg(short, long, conflicts_with = "task")]
+    project: Option<String>,
+    /// A task ID, such as T-0001.
+    #[arg(long)]
+    task: Option<String>,
+}
+
+impl LaneArgs {
+    fn target(&self) -> anyhow::Result<threadlane_core::client::LaneTarget> {
+        use threadlane_core::client::LaneTarget;
+        Ok(match &self.task {
+            Some(task) => LaneTarget::Task {
+                task: threadlane_core::ids::TaskId::parse(task)
+                    .ok_or_else(|| anyhow::anyhow!("{task:?} is not a task id like T-0001"))?,
+            },
+            None => LaneTarget::Lead {
+                project: self.project.clone(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -745,8 +798,94 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 n => println!("{} may run {n} at once", binding.agent),
             }
         }
+        Command::Pacing {
+            space,
+            rate,
+            quiet,
+            zone,
+            digest,
+            off,
+        } => {
+            use threadlane_core::model::{Pacing, QuietHours};
+            let quiet = quiet
+                .zip(zone)
+                .map(|(range, zone)| {
+                    let (start, end) = range
+                        .split_once('-')
+                        .ok_or_else(|| anyhow::anyhow!("quiet hours must be HH:MM-HH:MM"))?;
+                    Ok::<_, anyhow::Error>(QuietHours {
+                        start_minute: quiet_minute(start)?,
+                        end_minute: quiet_minute(end)?,
+                        time_zone: zone,
+                    })
+                })
+                .transpose()?;
+            let space = space.as_deref();
+            let mut pacing = if off {
+                Pacing::default()
+            } else {
+                core.pacing(space).await?
+            };
+            if off || rate.is_some() || quiet.is_some() || digest.is_some() {
+                pacing.rate = rate.or(pacing.rate);
+                pacing.quiet = quiet.or(pacing.quiet);
+                pacing.digest_minutes = digest.or(pacing.digest_minutes);
+                pacing = core.set_pacing(space, pacing).await?;
+            }
+            println!(
+                "Rate: {}",
+                pacing
+                    .rate
+                    .map_or_else(|| "off".to_owned(), |rate| format!("{rate}/hour"))
+            );
+            println!(
+                "Quiet hours: {}",
+                pacing.quiet.map_or_else(
+                    || "off".to_owned(),
+                    |quiet| {
+                        format!(
+                            "{}-{} ({})",
+                            local_time(quiet.start_minute),
+                            local_time(quiet.end_minute),
+                            quiet.time_zone
+                        )
+                    }
+                )
+            );
+            println!(
+                "Digest: {}",
+                pacing
+                    .digest_minutes
+                    .map_or_else(|| "off".to_owned(), |minutes| format!("{minutes} minutes"))
+            );
+        }
+        Command::Stop(args) => {
+            core.stop(args.space.as_deref(), args.target()?).await?;
+            println!("Stop requested.");
+        }
+        Command::Resume(args) => {
+            core.resume_lane(args.space.as_deref(), args.target()?)
+                .await?;
+            println!("Lane resumed.");
+        }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn quiet_minute(value: &str) -> anyhow::Result<u16> {
+    let [h1, h2, b':', m1, m2] = value.as_bytes() else {
+        anyhow::bail!("{value:?} must be a time in HH:MM");
+    };
+    anyhow::ensure!(
+        [h1, h2, m1, m2].into_iter().all(u8::is_ascii_digit),
+        "{value:?} must be a time in HH:MM"
+    );
+    let (hour, minute) = parse_time(value).map_err(anyhow::Error::msg)?;
+    Ok(u16::from(hour) * 60 + u16::from(minute))
+}
+
+fn local_time(minute: u16) -> String {
+    format!("{:02}:{:02}", minute / 60, minute % 60)
 }
 
 async fn routine(core: &ClientCore, command: RoutineCommand) -> anyhow::Result<()> {

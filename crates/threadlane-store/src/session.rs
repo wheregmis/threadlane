@@ -17,7 +17,7 @@ use turso::{Connection, Row};
 
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
-use crate::inbox::{EVENT_FIELDS, check_lease, decode_event};
+use crate::inbox::{EVENT_FIELDS, check_lease, check_running, decode_event, reclaim_lane};
 use crate::outbox::enqueue_in;
 use crate::row::{Cols, json_text, opt_raw, params};
 use crate::task;
@@ -238,6 +238,7 @@ impl SessionStore for HubDb {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
         check_lease(conn, lease).await?;
+        check_running(conn, lease).await?;
 
         let session_id: SessionId = match start.session {
             SessionChoice::New => query_one(
@@ -293,27 +294,7 @@ impl SessionStore for HubDb {
         )
         .await?;
 
-        for event in &start.events {
-            let changed = exec(
-                conn,
-                "UPDATE events SET status = 'claimed', claimed_by_run = ?1
-                 WHERE id = ?2 AND lane_id = ?3 AND status = 'pending'",
-                params![run.id.get(), event.get(), lease.lane_id.get()],
-            )
-            .await?;
-            if changed != 1 {
-                return Err(StoreError::Conflict(format!(
-                    "event {event} is not pending in lane {}",
-                    lease.lane_id
-                )));
-            }
-            exec(
-                conn,
-                "INSERT INTO run_events (run_id, event_id) VALUES (?1, ?2)",
-                params![run.id.get(), event.get()],
-            )
-            .await?;
-        }
+        claim_events(conn, lease.lane_id, run.id, &start.events).await?;
         task::on_run_started(conn, lease.lane_id, lease.machine_id).await?;
         tx.commit().await?;
         Ok(run)
@@ -356,6 +337,7 @@ impl SessionStore for HubDb {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
         check_lease(conn, lease).await?;
+        check_running(conn, lease).await?;
         let run = active_run(conn, lease, run_id).await?;
         exec(
             conn,
@@ -396,6 +378,7 @@ impl SessionStore for HubDb {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
         check_lease(conn, lease).await?;
+        check_running(conn, lease).await?;
         let run = active_run(conn, lease, run_id).await?;
         exec(
             conn,
@@ -478,6 +461,7 @@ impl SessionStore for HubDb {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
         check_lease(conn, lease).await?;
+        check_running(conn, lease).await?;
         active_run(conn, lease, key.run_id).await?;
         let existing = query_opt(
             conn,
@@ -637,5 +621,89 @@ impl SessionStore for HubDb {
             decode_run,
         )
         .await
+    }
+}
+
+impl HubDb {
+    /// Records an interrupted run and restores its claimed events without charging attempts.
+    pub async fn stop_run(&self, lease: &Lease, run_id: RunId, now: Timestamp) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        check_lease(conn, lease).await?;
+        active_run(conn, lease, run_id).await?;
+        match check_running(conn, lease).await {
+            Err(StoreError::Stopped) => {}
+            Err(error) => return Err(error),
+            Ok(()) => {
+                return Err(StoreError::Invalid(
+                    "run was not stopped by the user".to_owned(),
+                ));
+            }
+        }
+        reclaim_lane(conn, lease.lane_id, now).await?;
+        tx.commit().await
+    }
+}
+
+async fn claim_events(
+    conn: &Connection,
+    lane_id: LaneId,
+    run_id: RunId,
+    events: &[EventId],
+) -> StoreResult<()> {
+    for event in events {
+        let changed = exec(
+            conn,
+            "UPDATE events SET status = 'claimed', claimed_by_run = ?1
+                 WHERE id = ?2 AND lane_id = ?3 AND status = 'pending'",
+            params![run_id.get(), event.get(), lane_id.get()],
+        )
+        .await?;
+        if changed != 1 {
+            return Err(StoreError::Conflict(format!(
+                "event {event} is not pending in lane {}",
+                lane_id
+            )));
+        }
+        exec(
+            conn,
+            "INSERT INTO run_events (run_id, event_id) VALUES (?1, ?2)",
+            params![run_id.get(), event.get()],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+impl HubDb {
+    /// Claims user events accepted during a run under its current, uninterrupted lease.
+    pub async fn fold_in(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        events: &[EventId],
+    ) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        check_lease(conn, lease).await?;
+        check_running(conn, lease).await?;
+        let run = active_run(conn, lease, run_id).await?;
+        for id in events {
+            let eligible = query_one(
+                conn,
+                "SELECT EXISTS (SELECT 1 FROM events WHERE id = ?1 AND kind = 'user_message'
+                 AND trust = 'user' AND (session_ref IS NULL OR session_ref = ?2))",
+                params![id.get(), run.session_id.get()],
+                |row| Cols(row).bool(0),
+            )
+            .await?;
+            if !eligible {
+                return Err(StoreError::Invalid(format!(
+                    "event {id} cannot be folded into run {run_id}"
+                )));
+            }
+        }
+        claim_events(conn, lease.lane_id, run_id, events).await?;
+        tx.commit().await
     }
 }

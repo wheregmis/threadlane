@@ -19,7 +19,7 @@ pub struct HubSettings {
     /// A session older than this is closed and a fresh one started, from
     /// the task's progress file for a task (Plan.md §8.6).
     pub session_max_age: Duration,
-    /// Events reaching this many failed attempts die (Plan.md §4.9).
+    /// Events and outbox deliveries die after this many failed attempts.
     pub max_attempts: u32,
     /// First retry backoff, doubled per attempt.
     pub retry_backoff_base: Duration,

@@ -57,6 +57,7 @@ impl ToolEndpoint for LaneTools {
         match self.lane.current() {
             Some(Stop::Killed(killed)) => return Err(ToolError::Killed(killed)),
             Some(Stop::LeaseLost) => return Err(ToolError::LeaseLost),
+            Some(Stop::User) => return Err(ToolError::Blocked("stopped by the user".to_owned())),
             Some(Stop::Shutdown) | None => {}
         }
         // Nothing more happens in a run that waits on you (Plan.md §9.4).

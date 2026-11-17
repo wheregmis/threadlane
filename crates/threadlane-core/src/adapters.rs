@@ -86,6 +86,7 @@ pub enum DeliveryError {
 #[async_trait]
 pub trait ChannelAdapter: Send + Sync + fmt::Debug {
     fn name(&self) -> &str;
+    /// Delivers using the message's stable delivery key for idempotency.
     async fn deliver(&self, message: &OutboxMessage) -> Result<Delivered, DeliveryError>;
 }
 

@@ -182,3 +182,127 @@ async fn info_and_projects_describe_the_space() {
     assert_eq!(projects[0].name, "General");
     assert!(projects[0].is_general);
 }
+
+#[tokio::test]
+async fn the_pacing_handler_validates_saves_and_clears_the_space_settings() {
+    use threadlane_core::client::{OrgReply, OrgRequest};
+    use threadlane_core::model::{Pacing, QuietHours};
+
+    let hub = TestHub::start().await;
+    let off = OrgReply::Pacing {
+        pacing: Pacing::default(),
+    };
+    assert_eq!(hub.api.org(OrgRequest::Pacing).await.unwrap(), off);
+    let pacing = Pacing {
+        rate: Some(4),
+        quiet: Some(QuietHours {
+            start_minute: 22 * 60,
+            end_minute: 7 * 60,
+            time_zone: "America/Toronto".to_owned(),
+        }),
+        digest_minutes: Some(15),
+    };
+    let reply = OrgReply::Pacing {
+        pacing: pacing.clone(),
+    };
+    assert_eq!(
+        hub.api
+            .org(OrgRequest::SetPacing {
+                pacing: pacing.clone()
+            })
+            .await
+            .unwrap(),
+        reply
+    );
+    for invalid in [
+        Pacing {
+            rate: Some(0),
+            ..pacing.clone()
+        },
+        Pacing {
+            digest_minutes: Some(0),
+            ..pacing.clone()
+        },
+        Pacing {
+            quiet: Some(QuietHours {
+                start_minute: 60,
+                end_minute: 120,
+                time_zone: "Mars/Olympus".to_owned(),
+            }),
+            ..pacing.clone()
+        },
+    ] {
+        assert!(matches!(
+            hub.api.org(OrgRequest::SetPacing { pacing: invalid }).await,
+            Err(ApiError::Invalid(_))
+        ));
+    }
+    let hub = hub.restart(Arc::new(NoHooks)).await;
+    assert_eq!(hub.api.org(OrgRequest::Pacing).await.unwrap(), reply);
+    assert_eq!(
+        hub.api
+            .org(OrgRequest::SetPacing {
+                pacing: Pacing::default()
+            })
+            .await
+            .unwrap(),
+        off
+    );
+    assert_eq!(hub.api.org(OrgRequest::Pacing).await.unwrap(), off);
+}
+
+#[tokio::test]
+async fn the_stop_handler_fences_the_chosen_lead_epoch_and_deduplicates_retries() {
+    use threadlane_core::client::{LaneTarget, OrgReply, OrgRequest};
+    use threadlane_core::ids::TaskId;
+
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let message = hub.send("m", "Begin work.").await;
+    assert_eq!(hub.link.next_message().await, Some(HubMessage::Nudge));
+    let lease = hub.link.request_work().await.unwrap().unwrap();
+    let request = OrgRequest::Stop {
+        target: LaneTarget::Lead { project: None },
+        client_request_id: "stop".to_owned(),
+    };
+    assert_eq!(
+        hub.api.org(request.clone()).await.unwrap(),
+        OrgReply::LaneUpdated
+    );
+    assert_eq!(
+        hub.link.next_message().await,
+        Some(HubMessage::Cancel {
+            lane_id: lease.lane_id,
+            epoch: lease.epoch,
+        })
+    );
+    hub.link.release(&lease).await.unwrap();
+    assert!(hub.link.request_work().await.unwrap().is_none());
+    assert_eq!(
+        hub.event(message.event_id).await.status,
+        EventStatus::Pending
+    );
+    assert_eq!(
+        hub.api
+            .org(OrgRequest::ResumeLane {
+                target: LaneTarget::Lead { project: None }
+            })
+            .await
+            .unwrap(),
+        OrgReply::LaneUpdated
+    );
+    assert_eq!(hub.api.org(request).await.unwrap(), OrgReply::LaneUpdated);
+    assert!(
+        hub.link.request_work().await.unwrap().is_some(),
+        "replaying the stop does not stop a resumed lane"
+    );
+    assert!(matches!(
+        hub.api
+            .org(OrgRequest::Stop {
+                target: LaneTarget::Task { task: TaskId(709) },
+                client_request_id: "new".to_owned(),
+            })
+            .await,
+        Err(ApiError::NotFound(_))
+    ));
+}

@@ -1746,3 +1746,71 @@ pub use tasks::NewTaskSpec;
 
 #[cfg(test)]
 mod tests;
+
+impl ClientCore {
+    /// Reads the space's delivery pacing settings.
+    pub async fn pacing(
+        &self,
+        space: Option<&str>,
+    ) -> Result<threadlane_core::model::Pacing, ClientError> {
+        self.pacing_request(space, OrgRequest::Pacing).await
+    }
+
+    /// Replaces the space's delivery pacing settings.
+    pub async fn set_pacing(
+        &self,
+        space: Option<&str>,
+        pacing: threadlane_core::model::Pacing,
+    ) -> Result<threadlane_core::model::Pacing, ClientError> {
+        self.pacing_request(space, OrgRequest::SetPacing { pacing })
+            .await
+    }
+
+    async fn pacing_request(
+        &self,
+        space: Option<&str>,
+        request: OrgRequest,
+    ) -> Result<threadlane_core::model::Pacing, ClientError> {
+        match self.org(space, request).await? {
+            (_, OrgReply::Pacing { pacing }) => Ok(pacing),
+            (space, _) => Err(wrong_reply(&space, "pacing")),
+        }
+    }
+
+    /// Stops a lead lane or task, retaining its pending work.
+    pub async fn stop(
+        &self,
+        space: Option<&str>,
+        target: threadlane_core::client::LaneTarget,
+    ) -> Result<(), ClientError> {
+        self.lane_request(
+            space,
+            OrgRequest::Stop {
+                target,
+                client_request_id: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .await
+    }
+
+    /// Resumes a lead lane or task that was stopped.
+    pub async fn resume_lane(
+        &self,
+        space: Option<&str>,
+        target: threadlane_core::client::LaneTarget,
+    ) -> Result<(), ClientError> {
+        self.lane_request(space, OrgRequest::ResumeLane { target })
+            .await
+    }
+
+    async fn lane_request(
+        &self,
+        space: Option<&str>,
+        request: OrgRequest,
+    ) -> Result<(), ClientError> {
+        match self.org(space, request).await? {
+            (_, OrgReply::LaneUpdated) => Ok(()),
+            (space, _) => Err(wrong_reply(&space, "lane update")),
+        }
+    }
+}

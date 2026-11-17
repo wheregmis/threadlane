@@ -54,8 +54,11 @@ impl LocalLink {
         let inner = &self.core.inner;
         let db = &inner.db;
         self.check_lease(lease).await?;
-        let run = self.active_run(lease, run_id).await?;
         let now = inner.clock.now();
+        if *failure == RunFailure::Stopped {
+            return db.stop_run(lease, run_id, now).await.map_err(link_error);
+        }
+        let run = self.active_run(lease, run_id).await?;
         let (error, retry) = match failure {
             RunFailure::SessionMissing => {
                 db.close_session(run.session_id).await.map_err(link_error)?;

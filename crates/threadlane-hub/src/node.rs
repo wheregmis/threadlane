@@ -483,7 +483,7 @@ case "$1" in
   --version) echo "2.1.325 (Claude Code)"; exit 0 ;;
   auth) echo '{"loggedIn": true}'; exit 0 ;;
 esac
-cat > /dev/null
+IFS= read -r prompt
 echo '{"type":"system","subtype":"init","session_id":"fake-session","tools":[],"mcp_servers":[{"name":"threadlane","status":"connected"}]}'
 echo '{"type":"result","subtype":"success","is_error":false,"result":"Nothing needs saying.","session_id":"fake-session","num_turns":1,"total_cost_usd":0,"usage":{}}'
 "#;

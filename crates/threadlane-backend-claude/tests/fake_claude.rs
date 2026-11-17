@@ -148,6 +148,7 @@ async fn collect(run: &mut dyn BackendRun) -> Vec<BackendEvent> {
             .await
             .expect("the run produces events without hanging");
         match event {
+            Some(BackendEvent::TurnBoundary) => {}
             Some(event) => events.push(event),
             None => break,
         }
@@ -348,7 +349,8 @@ done
 pwd -P > @DIR@/cwd
 printf '%s' "$CLAUDE_CONFIG_DIR" > @DIR@/config-dir
 printf '%s' "$CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" > @DIR@/no-background
-cat > @DIR@/stdin
+IFS= read -r prompt
+printf '%s\n' "$prompt" > @DIR@/stdin
 {}"#,
         prints(&[init("connected"), success("ok")])
     ))
@@ -382,6 +384,8 @@ async fn start_passes_every_option() {
         "-p",
         "--output-format",
         "stream-json",
+        "--input-format",
+        "stream-json",
         "--verbose",
         "--permission-mode",
         "bypassPermissions",
@@ -407,8 +411,8 @@ async fn start_passes_every_option() {
     assert_eq!(fake.invocations(), vec![expected]);
 
     assert_eq!(
-        fake.record("stdin"),
-        "Reply to the message.\nIt says: hello."
+        recorded_prompts(&fake),
+        ["Reply to the message.\nIt says: hello."]
     );
     let work = fake.work.path().canonicalize().expect("canonical work dir");
     assert_eq!(fake.record("cwd").trim(), work.display().to_string());
@@ -494,6 +498,8 @@ async fn resume_passes_only_what_was_asked_for() {
         "-p",
         "--output-format",
         "stream-json",
+        "--input-format",
+        "stream-json",
         "--verbose",
         "--permission-mode",
         "bypassPermissions",
@@ -503,7 +509,7 @@ async fn resume_passes_only_what_was_asked_for() {
     .map(str::to_owned)
     .to_vec();
     assert_eq!(fake.invocations(), vec![expected]);
-    assert_eq!(fake.record("stdin"), "Say hello.");
+    assert_eq!(recorded_prompts(&fake), ["Say hello."]);
     assert_eq!(fake.record("config-dir"), "");
     assert_eq!(fake.record("no-background"), "1");
 }
@@ -512,7 +518,8 @@ async fn resume_passes_only_what_was_asked_for() {
 async fn start_on_an_existing_session_resumes_it_once() {
     let fake = Fake::new(&format!(
         r#"{RECORD_ARGV}
-cat >> @DIR@/stdin
+IFS= read -r prompt
+printf '%s\n' "$prompt" >> @DIR@/stdin
 for arg in "$@"; do
   if [ "$arg" = "--session-id" ]; then
     echo "Error: Session ID {SESSION} is already in use." >&2
@@ -535,9 +542,9 @@ done
     );
     let invocations = fake.invocations();
     assert_eq!(invocations.len(), 2);
-    assert_eq!(invocations[0][6..8], ["--session-id", SESSION]);
-    assert_eq!(invocations[1][6..8], ["--resume", SESSION]);
-    assert_eq!(fake.record("stdin"), "Say hello.Say hello.");
+    assert_eq!(invocations[0][8..10], ["--session-id", SESSION]);
+    assert_eq!(invocations[1][8..10], ["--resume", SESSION]);
+    assert_eq!(recorded_prompts(&fake), ["Say hello.", "Say hello."]);
 }
 
 #[tokio::test]
@@ -767,5 +774,57 @@ async fn a_missing_program_is_not_installed() {
     assert_eq!(
         backend.run(request).await.map(drop),
         Err(BackendError::NotInstalled)
+    );
+}
+
+fn recorded_prompts(fake: &Fake) -> Vec<String> {
+    fake.record("stdin")
+        .lines()
+        .map(|line| {
+            let input: Json = serde_json::from_str(line).unwrap();
+            assert_eq!(input["type"], "user");
+            assert_eq!(input["message"]["role"], "user");
+            input["message"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_streaming_run_accepts_another_user_message_after_a_result() {
+    let fake = Fake::new(&format!(
+        r#"IFS= read -r first
+printf '%s\n' "$first" > @DIR@/stdin
+{}
+IFS= read -r second
+printf '%s\n' "$second" >> @DIR@/stdin
+{}
+IFS= read -r unexpected && exit 1
+exit 0"#,
+        prints(&[init("connected"), success("first answer")]),
+        prints(&[success("second answer")]),
+    ));
+    let mut run = fake
+        .backend()
+        .run(fake.request(NativeSession::Start {
+            id: SESSION.to_owned(),
+        }))
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        assert_eq!(run.next_event().await, Some(started()));
+        assert_eq!(run.next_event().await, Some(BackendEvent::TurnBoundary));
+        assert!(run.fold_in("One more question.").await.unwrap());
+        assert_eq!(run.next_event().await, Some(BackendEvent::TurnBoundary));
+        collect(run.as_mut()).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(events, vec![finished("second answer")]);
+    assert_eq!(
+        recorded_prompts(&fake),
+        ["Say hello.", "One more question."]
     );
 }

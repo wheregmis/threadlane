@@ -107,8 +107,12 @@ pub mod steps {
         pub const AFTER_RECHECK: Step = Step("runner.after_recheck");
         /// The lease was released.
         pub const AFTER_RELEASE: Step = Step("runner.after_release");
+        /// An interrupted run was recorded after its checkpoint.
+        pub const AFTER_STOP: Step = Step("runner.after_stop");
+        /// User messages accepted by the backend were claimed for this run.
+        pub const AFTER_FOLD_IN: Step = Step("runner.after_fold_in");
 
-        /// Every runner boundary, in cycle order.
+        /// Every boundary in the ordinary runner cycle.
         pub const ALL: &[Step] = &[
             AFTER_CLAIM,
             AFTER_DEBOUNCE,
@@ -233,6 +237,14 @@ pub mod steps {
         pub const ALL: &[Step] = &[AFTER_FETCH, AFTER_INSERT, AFTER_CURSOR, AFTER_WAKE];
     }
 
+    /// Client stop, before the cancel hint leaves the hub.
+    pub mod stop {
+        use super::Step;
+
+        /// The stop event and lease epoch were recorded.
+        pub const AFTER_RECORD: Step = Step("stop.after_record");
+    }
+
     /// Dispatcher pass, Plan.md §10.2.
     pub mod dispatcher {
         use super::Step;
@@ -240,8 +252,14 @@ pub mod steps {
         pub const AFTER_READ: Step = Step("dispatcher.after_read");
         pub const AFTER_DELIVER: Step = Step("dispatcher.after_deliver");
         pub const AFTER_MARK_SENT: Step = Step("dispatcher.after_mark_sent");
+        /// A pacing hold was saved.
+        pub const AFTER_HOLD: Step = Step("dispatcher.after_hold");
+        /// A digest and its links to the originals were saved together.
+        pub const AFTER_DIGEST: Step = Step("dispatcher.after_digest");
+        /// A retry or a dead delivery and its event were saved.
+        pub const AFTER_FAILURE: Step = Step("dispatcher.after_failure");
 
-        /// Every dispatcher boundary, in pass order.
+        /// Every boundary of an immediate, successful delivery.
         pub const ALL: &[Step] = &[AFTER_READ, AFTER_DELIVER, AFTER_MARK_SENT];
     }
 

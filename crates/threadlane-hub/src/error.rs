@@ -25,6 +25,7 @@ pub enum HubError {
 /// anything else a rejection with the store's message.
 pub(crate) fn link_error(error: StoreError) -> LinkError {
     match error {
+        StoreError::Stopped => LinkError::Stopped,
         StoreError::StaleLease { lane_id, .. } => LinkError::StaleLease { lane_id },
         other => LinkError::Rejected(other.to_string()),
     }

@@ -168,6 +168,28 @@ pub enum OrgRequest {
     /// §2.3): lowering it lowers what every binding acts at, and raising it
     /// lets projects without a stricter ceiling of their own go higher.
     SetSpaceCeiling { mode: Mode },
+    /// Reads the space's delivery pacing.
+    Pacing,
+    /// Replaces delivery pacing for the space.
+    SetPacing { pacing: crate::model::Pacing },
+    /// Stops the target lane, retaining its work and pending events.
+    Stop {
+        target: LaneTarget,
+        /// Stable identifier for a retried client request.
+        client_request_id: String,
+    },
+    /// Makes a stopped lane eligible again.
+    ResumeLane { target: LaneTarget },
+}
+
+/// The lane targeted by a stop or resume request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaneTarget {
+    /// The named project's lead, or General when omitted.
+    Lead { project: Option<String> },
+    /// A task's lane.
+    Task { task: TaskId },
 }
 
 /// The answer to an [`OrgRequest`].
@@ -215,6 +237,12 @@ pub enum OrgReply {
     SpaceCeiling {
         ceiling: Mode,
     },
+    /// The current pacing settings.
+    Pacing {
+        pacing: crate::model::Pacing,
+    },
+    /// A stop or resume was recorded.
+    LaneUpdated,
 }
 
 /// The Decisions capability (Plan.md §9.4, §11.2): what waits on you, and

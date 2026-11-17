@@ -448,6 +448,7 @@ impl BackendRun for CodexRun {
         }
     }
 
+    // exec reads stdin for its initial prompt only, so fold_in uses the default.
     async fn stop(&mut self) -> Result<(), BackendError> {
         self.end();
         self.pending.clear();

@@ -37,6 +37,9 @@ pub enum StoreError {
         held: i64,
         current: i64,
     },
+    /// The user interrupted the run under this lease.
+    #[error("lane stopped by the user")]
+    Stopped,
     /// A referenced row does not exist.
     #[error("{kind} {id} not found")]
     NotFound { kind: &'static str, id: String },

@@ -47,6 +47,7 @@ struct Shared {
     changed: watch::Sender<u64>,
     sent: Mutex<Vec<UserMessage>>,
     org: Mutex<Vec<OrgRequest>>,
+    pacing: Mutex<threadlane_core::model::Pacing>,
     /// D-0007, pending until it is answered.
     decision: Mutex<Decision>,
     timers: Mutex<Vec<TimerRequest>>,
@@ -99,6 +100,7 @@ impl FakeHub {
             changed: watch::channel(0).0,
             sent: Mutex::new(Vec::new()),
             org: Mutex::new(Vec::new()),
+            pacing: Mutex::default(),
             decision: Mutex::new(pending_decision()),
             timers: Mutex::new(Vec::new()),
         }))
@@ -273,6 +275,14 @@ impl HubApi for FakeHub {
                     overrides: Default::default(),
                 },
             },
+            OrgRequest::Pacing => OrgReply::Pacing {
+                pacing: self.0.pacing.lock().unwrap().clone(),
+            },
+            OrgRequest::SetPacing { pacing } => {
+                *self.0.pacing.lock().unwrap() = pacing.clone();
+                OrgReply::Pacing { pacing }
+            }
+            OrgRequest::Stop { .. } | OrgRequest::ResumeLane { .. } => OrgReply::LaneUpdated,
             other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         })
     }
@@ -1356,4 +1366,123 @@ async fn the_cli_pauses_and_resumes_projects_and_cancels_tasks() {
         ]
     );
     hub.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_pacing_reads_updates_and_turns_off_the_space_settings() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().unwrap();
+    let dir = client.path();
+    expect_success(
+        dir,
+        &["hub", "add", "work", hub.data_dir().to_str().unwrap()],
+        &format!("paired work: {}\n", hub.socket().display()),
+    )
+    .await;
+    let off = "Rate: off\nQuiet hours: off\nDigest: off\n";
+    expect_success(dir, &["pacing"], off).await;
+    expect_success(
+        dir,
+        &[
+            "pacing",
+            "--rate",
+            "2",
+            "--quiet",
+            "21:30-07:00",
+            "--zone",
+            "America/Toronto",
+            "--digest",
+            "15",
+        ],
+        "Rate: 2/hour\nQuiet hours: 21:30-07:00 (America/Toronto)\nDigest: 15 minutes\n",
+    )
+    .await;
+    expect_success(
+        dir,
+        &["pacing", "--rate", "3"],
+        "Rate: 3/hour\nQuiet hours: 21:30-07:00 (America/Toronto)\nDigest: 15 minutes\n",
+    )
+    .await;
+    expect_success(dir, &["pacing", "--off"], off).await;
+    expect_success(dir, &["pacing"], off).await;
+    assert!(hub.fake.0.org.lock().unwrap().iter().any(|request| matches!(request, OrgRequest::SetPacing { pacing }
+        if pacing.rate == Some(2) && pacing.quiet.as_ref().unwrap().start_minute == 1290 && pacing.digest_minutes == Some(15))));
+    hub.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_stop_targets_the_default_lead_a_named_project_or_a_task() {
+    use threadlane_core::client::LaneTarget;
+    use threadlane_core::ids::TaskId;
+
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().unwrap();
+    let dir = client.path();
+    expect_success(
+        dir,
+        &["hub", "add", "work", hub.data_dir().to_str().unwrap()],
+        &format!("paired work: {}\n", hub.socket().display()),
+    )
+    .await;
+    expect_success(dir, &["stop"], "Stop requested.\n").await;
+    expect_success(dir, &["stop", "-p", "Web"], "Stop requested.\n").await;
+    expect_success(dir, &["stop", "--task", "T-0001"], "Stop requested.\n").await;
+    expect_success(dir, &["resume", "--task", "T-0001"], "Lane resumed.\n").await;
+    {
+        let org = hub.fake.0.org.lock().unwrap();
+        let targets: Vec<_> = org
+            .iter()
+            .filter_map(|request| match request {
+                OrgRequest::Stop {
+                    target,
+                    client_request_id,
+                } => {
+                    assert!(uuid::Uuid::parse_str(client_request_id).is_ok());
+                    Some(target.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                LaneTarget::Lead { project: None },
+                LaneTarget::Lead {
+                    project: Some("Web".to_owned())
+                },
+                LaneTarget::Task { task: TaskId(1) }
+            ]
+        );
+        assert_eq!(
+            org.last(),
+            Some(&OrgRequest::ResumeLane {
+                target: LaneTarget::Task { task: TaskId(1) }
+            })
+        );
+    }
+    hub.stop().await;
+}
+
+#[tokio::test]
+async fn cli_rejects_conflicting_lane_targets_and_incomplete_quiet_hours() {
+    let client = tempfile::tempdir().unwrap();
+    for (args, expected) in [
+        (
+            &["stop", "-p", "Web", "--task", "T-0001"][..],
+            "cannot be used with",
+        ),
+        (&["pacing", "--quiet", "21:30-07:00"][..], "--zone"),
+        (
+            &["pacing", "--off", "--rate", "2"][..],
+            "cannot be used with",
+        ),
+    ] {
+        let output = threadlane(client.path(), args).await;
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains(expected),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
 }

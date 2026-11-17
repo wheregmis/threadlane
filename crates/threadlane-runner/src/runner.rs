@@ -111,6 +111,7 @@ impl Runner {
             return Ok(false);
         };
         let registration = Registration::new(&self.inner, lease);
+        let _messages = MessagePump::start(Arc::clone(&self.inner));
         self.inner.work_lane(&registration.lane).await?;
         Ok(true)
     }
@@ -132,7 +133,7 @@ impl Runner {
         let clock = &self.inner.clock;
         let config = &self.inner.config;
         let mut shutdown = pin!(shutdown);
-        let mut messages = MessagePump::start(Arc::clone(&self.inner.link));
+        let mut messages = MessagePump::start(Arc::clone(&self.inner));
         let mut heartbeat = clock.sleep(config.heartbeat);
         let mut poll = clock.sleep(config.poll);
         let mut lanes = JoinSet::new();
@@ -281,7 +282,7 @@ impl Inner {
                 warn!(lane = %lane_id, "lease lost; abandoning the lane");
                 Ok(())
             }
-            Err(LaneExit::Shutdown) => self.release(lane).await,
+            Err(LaneExit::Shutdown | LaneExit::UserStopped) => self.release(lane).await,
             Err(LaneExit::Link(error) | LaneExit::Release(error)) => {
                 warn!(lane = %lane_id, %error, "hub request failed; releasing the lane");
                 self.release(lane).await
@@ -334,6 +335,19 @@ impl Inner {
         assignment: &RunAssignment,
     ) -> Result<AfterRun, LaneExit> {
         match self.attempt(lane, assignment).await {
+            Err(LaneExit::UserStopped) => {
+                if assignment.lane_kind == LaneKind::Task {
+                    if let Err(error) = self.checkpoint(assignment).await {
+                        warn!(run = %assignment.run_id, %error, "could not checkpoint the stopped run");
+                    }
+                    self.reach(AFTER_CHECKPOINT)?;
+                }
+                self.link
+                    .fail(&lane.lease(), assignment.run_id, &RunFailure::Stopped)
+                    .await?;
+                self.reach(threadlane_core::runtime::steps::runner::AFTER_STOP)?;
+                Ok(AfterRun::Release)
+            }
             Err(LaneExit::Link(error)) => {
                 let message = format!("hub request failed during the run: {error}");
                 self.fail(lane, assignment.run_id, RunFailure::Error { message })
@@ -366,6 +380,7 @@ impl Inner {
             self.reach(AFTER_PREPARE_WORKSPACE)?;
         }
         lane.check()?;
+        self.link.check_running(&lane.lease()).await?;
         let performed = self.perform(lane, assignment).await?;
 
         let deadline = self.clock.now() + assignment.wall_time_limit;
@@ -557,6 +572,10 @@ impl Inner {
             // A tool call made while producing this event may have been
             // killed or lost the lease; the backend only saw a tool error.
             lane.check()?;
+            match self.link.check_running(&lane.lease()).await {
+                Ok(()) | Err(LinkError::Unreachable) => {}
+                Err(error) => return Err(error.into()),
+            }
             let Some(event) = event else {
                 mirror
                     .flush(self.link.as_ref(), &lane.lease(), Flush::Required)
@@ -579,10 +598,61 @@ impl Inner {
             if event.is_terminal() {
                 return Ok(Ended::Terminal(event));
             }
+            if !lane.deferred() && event == BackendEvent::TurnBoundary {
+                self.fold_in(lane, assignment, run).await?;
+            }
             if lane.deferred() && matches!(event, BackendEvent::ToolUse { .. }) {
                 return Ok(Ended::Deferred);
             }
         }
+    }
+
+    async fn fold_in(
+        &self,
+        lane: &LaneState,
+        assignment: &RunAssignment,
+        run: &mut dyn BackendRun,
+    ) -> Result<(), LaneExit> {
+        let lease = lane.lease();
+        let pending = match self.link.pending(&lease).await {
+            Ok(pending) => pending,
+            Err(LinkError::Unreachable) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut events = Vec::new();
+        let mut messages = Vec::new();
+        for event in &pending {
+            if event.kind == EventKind::UserMessage
+                && event.trust == threadlane_core::model::Trust::User
+                && event
+                    .session_ref
+                    .is_none_or(|id| id == assignment.session_id)
+                && let Some(text) = event.payload["text"].as_str()
+            {
+                events.push(event.id);
+                messages.push(text);
+            }
+        }
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let input = messages.join("\n\n");
+        let accepted = tokio::select! {
+            biased;
+            stop = lane.stopped() => return Err(stop.into()),
+            result = run.fold_in(&input) => result,
+        };
+        match accepted {
+            Ok(true) => {
+                self.link
+                    .folded_in(&lease, assignment.run_id, &events)
+                    .await?;
+                self.reach(threadlane_core::runtime::steps::runner::AFTER_FOLD_IN)?;
+            }
+            Ok(false) => {}
+            Err(error) => warn!(%error, "backend could not accept user input"),
+        }
+        Ok(())
     }
 
     /// Whether the hub says the task would be left with nothing to wake it.
@@ -1024,12 +1094,20 @@ struct MessagePump {
 }
 
 impl MessagePump {
-    fn start(link: Arc<dyn HubLink>) -> Self {
+    fn start(inner: Arc<Inner>) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let mut task = JoinSet::new();
         task.spawn(async move {
-            while let Some(message) = link.next_message().await {
-                if sender.send(message).is_err() {
+            while let Some(message) = inner.link.next_message().await {
+                if let HubMessage::Cancel { lane_id, epoch } = message {
+                    let running = inner.lanes.lock().expect("running lanes lock poisoned");
+                    for lane in running.lanes.values() {
+                        let lease = lane.lease();
+                        if lease.lane_id == lane_id && lease.epoch == epoch {
+                            lane.signal(Stop::User);
+                        }
+                    }
+                } else if sender.send(message).is_err() {
                     break;
                 }
             }

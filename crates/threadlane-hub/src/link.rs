@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
-use threadlane_core::ids::{DecisionId, MachineId, RunId, SessionId};
+use threadlane_core::ids::{DecisionId, EventId, MachineId, RunId, SessionId};
 use threadlane_core::link::{Begin, HubLink, HubMessage, LinkError, Perform, RunFailure};
 use threadlane_core::model::{
     BackendKind, Event, JournalEntry, Lane, Lease, MachineReport, RunOutcome,
@@ -129,6 +129,31 @@ impl HubLink for LocalLink {
 
     async fn begin_run(&self, lease: &Lease) -> Result<Begin, LinkError> {
         self.begin(lease).await
+    }
+
+    async fn check_running(&self, lease: &Lease) -> Result<(), LinkError> {
+        self.check_lease(lease).await?;
+        self.core
+            .inner
+            .db
+            .check_running(lease)
+            .await
+            .map_err(link_error)
+    }
+
+    async fn folded_in(
+        &self,
+        lease: &Lease,
+        run_id: RunId,
+        events: &[EventId],
+    ) -> Result<(), LinkError> {
+        self.check_lease(lease).await?;
+        self.core
+            .inner
+            .db
+            .fold_in(lease, run_id, events)
+            .await
+            .map_err(link_error)
     }
 
     async fn native_session(

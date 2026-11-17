@@ -14,6 +14,8 @@ use tokio::sync::watch;
 pub(crate) enum Stop {
     /// The runner is shutting down: stop the backend and release the lease.
     Shutdown,
+    /// The user stopped this lane.
+    User,
     /// The lease is gone: stop the backend and write nothing more.
     LeaseLost,
     /// The process died (crash injection): stop at once, touch nothing.
@@ -25,8 +27,9 @@ impl Stop {
     fn strength(self) -> u8 {
         match self {
             Self::Shutdown => 0,
-            Self::LeaseLost => 1,
-            Self::Killed(_) => 2,
+            Self::User => 1,
+            Self::LeaseLost => 2,
+            Self::Killed(_) => 3,
         }
     }
 }
@@ -37,6 +40,7 @@ pub(crate) enum LaneExit {
     Killed(Killed),
     LeaseLost,
     Shutdown,
+    UserStopped,
     /// A hub call failed mid-run: the run must still be failed, then released.
     Link(LinkError),
     /// A hub call failed after the run was dealt with: release the lane.
@@ -53,6 +57,7 @@ impl From<Stop> for LaneExit {
     fn from(stop: Stop) -> Self {
         match stop {
             Stop::Shutdown => Self::Shutdown,
+            Stop::User => Self::UserStopped,
             Stop::LeaseLost => Self::LeaseLost,
             Stop::Killed(killed) => Self::Killed(killed),
         }
@@ -63,6 +68,7 @@ impl From<LinkError> for LaneExit {
     fn from(error: LinkError) -> Self {
         match error {
             LinkError::Killed(killed) => Self::Killed(killed),
+            LinkError::Stopped => Self::UserStopped,
             LinkError::StaleLease { .. } => Self::LeaseLost,
             other => Self::Link(other),
         }

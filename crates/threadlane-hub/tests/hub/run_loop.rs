@@ -94,3 +94,46 @@ async fn the_dispatcher_delivers_on_a_wake_without_waiting_for_the_interval() {
     stop.send(()).unwrap();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn the_dispatcher_wakes_at_a_delivery_deadline_before_its_poll() {
+    use serde_json::json;
+    use threadlane_core::model::{NewOutboxMessage, OutboxKind, OutboxStatus, Urgency};
+
+    let hub = TestHub::start().await;
+    let due = hub.clock.now() + Duration::from_secs(7);
+    let row = hub
+        .db
+        .enqueue(&NewOutboxMessage {
+            project_id: None,
+            lane_id: None,
+            session_id: None,
+            run_id: None,
+            tool_call_id: None,
+            kind: OutboxKind::Message,
+            decision_id: None,
+            channel: CLIENT_CHANNEL.to_owned(),
+            body: json!({"text": "Deliver at seven seconds"}),
+            urgency: Urgency::Normal,
+            not_before: Some(due),
+            created_at: hub.clock.now(),
+        })
+        .await
+        .unwrap();
+    let (stop, task) = start(&hub);
+    both_loops_parked(&hub.clock).await;
+    assert!(hub.feed().await.is_empty());
+    hub.clock.set(due);
+    let db = hub.db.clone();
+    eventually("the dispatcher delivers at the deadline", || {
+        let db = db.clone();
+        async move { db.message(row.id).await.unwrap().unwrap().status == OutboxStatus::Sent }
+    })
+    .await;
+    assert_eq!(
+        hub.db.message(row.id).await.unwrap().unwrap().sent_at,
+        Some(due)
+    );
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}

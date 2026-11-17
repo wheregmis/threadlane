@@ -11,7 +11,7 @@ use threadlane_core::time::Timestamp;
 const LOOKAHEAD_DAYS: u32 = 400;
 
 /// The time zone of this name, from the compiled-in database.
-fn zone(name: &str) -> Result<TimeZone, String> {
+pub(crate) fn zone(name: &str) -> Result<TimeZone, String> {
     jiff::tz::db()
         .get(name.trim())
         .map_err(|_| format!("{name:?} is not a time zone; use a name like Europe/Berlin"))
@@ -100,10 +100,21 @@ fn matches(rule: &Rule, date: Date) -> bool {
 
 /// The instant of a local time in `tz`, by the rules of [`next_occurrence`].
 fn instant(tz: &TimeZone, local: DateTime) -> Result<jiff::Timestamp, String> {
+    boundary(tz, local, false)
+}
+
+/// Resolves a civil boundary, with a choice of occurrence during a fold.
+pub(crate) fn boundary(
+    tz: &TimeZone,
+    local: DateTime,
+    late: bool,
+) -> Result<jiff::Timestamp, String> {
     let fail = |error: jiff::Error| error.to_string();
     match tz.to_ambiguous_timestamp(local).offset() {
         AmbiguousOffset::Unambiguous { offset } => offset.to_timestamp(local).map_err(fail),
-        AmbiguousOffset::Fold { before, .. } => before.to_timestamp(local).map_err(fail),
+        AmbiguousOffset::Fold { before, after } => if late { after } else { before }
+            .to_timestamp(local)
+            .map_err(fail),
         AmbiguousOffset::Gap { after, .. } => {
             // Read with the later offset, the time is before the jump; the
             // next transition is the jump itself.

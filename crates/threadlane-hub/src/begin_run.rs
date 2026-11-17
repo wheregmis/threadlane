@@ -52,6 +52,7 @@ impl LocalLink {
         let inner = &self.core.inner;
         let db = &inner.db;
         let lane = self.check_lease(lease).await?;
+        db.check_running(lease).await.map_err(link_error)?;
         let now = inner.clock.now();
 
         // 1. Pending events.

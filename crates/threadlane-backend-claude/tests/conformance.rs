@@ -16,7 +16,7 @@ use threadlane_backend_claude::{ClaudeBackend, ClaudeConfig};
 use threadlane_testkit::conformance::Conformance;
 
 const FAKE: &str = r#"#!/bin/sh
-prompt=$(cat)
+IFS= read -r prompt
 dir=@DIR@
 session=""; flag=""; mcp=""; mode=""; denied=""; in_denied=0; prev=""
 for arg in "$@"; do

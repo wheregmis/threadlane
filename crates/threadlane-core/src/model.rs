@@ -123,6 +123,8 @@ str_enum! {
         TaskResult => "task_result",
         JobResult => "job_result",
         DeliveryFailure => "delivery_failure",
+        /// A recorded user interruption, consumed by the hub.
+        Stop => "stop",
         System => "system",
     }
 }
@@ -162,6 +164,8 @@ str_enum! {
         Committed => "committed",
         Failed => "failed",
         Abandoned => "abandoned",
+        /// Interrupted by a user stop request.
+        Stopped => "stopped",
     }
 }
 
@@ -1104,6 +1108,17 @@ pub enum Answered {
     Ignored,
 }
 
+/// Delivery pacing for one space. Missing settings disable their respective limits.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pacing {
+    /// Maximum non-urgent deliveries in a rolling hour.
+    pub rate: Option<u32>,
+    /// Local hours during which non-urgent deliveries wait.
+    pub quiet: Option<QuietHours>,
+    /// Minutes to collect low-urgency messages into a digest.
+    pub digest_minutes: Option<u32>,
+}
+
 /// An outgoing message (Plan.md §10.1 `outbox`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutboxMessage {
@@ -1128,6 +1143,22 @@ pub struct OutboxMessage {
     /// client's feed cursor; ids are not used because pacing can deliver a
     /// later message first.
     pub delivery_seq: Option<i64>,
+}
+
+impl OutboxMessage {
+    /// Whether this message is subject to delivery pacing.
+    #[must_use]
+    pub fn is_paced(&self) -> bool {
+        self.kind == OutboxKind::Message && self.urgency != Urgency::High
+    }
+
+    /// Stable key for adapters to use when a delivery is repeated.
+    #[must_use]
+    pub fn delivery_key(&self) -> String {
+        self.tool_call_id
+            .clone()
+            .unwrap_or_else(|| format!("outbox:{}", self.id))
+    }
 }
 
 /// Input for [`crate::store::OutboxStore::enqueue`].

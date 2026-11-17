@@ -1,15 +1,19 @@
 //! [`OutboxStore`] on the hub database (Plan.md §10).
 
 use async_trait::async_trait;
-use serde_json::Value as Json;
-use threadlane_core::ids::{OutboxId, ProjectId, RunId};
-use threadlane_core::model::{NewOutboxMessage, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
+use serde_json::{Value as Json, json};
+use threadlane_core::ids::{LaneId, OutboxId, ProjectId, RunId};
+use threadlane_core::model::{
+    EventKind, NewEvent, NewOutboxMessage, OutboxKind, OutboxMessage, OutboxStatus, Pacing, Trust,
+    Urgency,
+};
 use threadlane_core::store::{OutboxStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
 use turso::{Connection, Row};
 
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
+use crate::inbox::insert_event_in;
 use crate::row::{Cols, json_text, opt_raw, opt_ts, params};
 use crate::session::NOTICE_CHANNEL;
 
@@ -175,7 +179,7 @@ impl OutboxStore for HubDb {
         let changed = exec(
             tx.conn(),
             "UPDATE outbox SET status = ?1, channel_message_id = ?2, sent_at = ?3,
-                 attempts = attempts + 1, delivery_seq = ?4
+                 attempts = attempts + 1, delivery_seq = ?4, pacing_hold = NULL
              WHERE id = ?5 AND status = 'pending'",
             params![
                 OutboxStatus::Sent.as_str(),
@@ -204,7 +208,11 @@ impl OutboxStore for HubDb {
             &conn,
             &format!(
                 "SELECT {OUTBOX_FIELDS} FROM outbox
-                 WHERE project_id = ?1 AND status = 'sent' AND kind = 'message'
+                 WHERE project_id = ?1 AND kind = 'message' AND (status = 'sent' OR (
+                     status = 'suppressed' AND EXISTS (
+                         SELECT 1 FROM outbox digest WHERE digest.id = outbox.digest_id AND digest.status = 'sent'
+                     )
+                 ))
                  ORDER BY id DESC LIMIT ?2"
             ),
             params![project_id.get(), i64::from(limit)],
@@ -321,5 +329,235 @@ impl OutboxStore for HubDb {
             decode_message,
         )
         .await
+    }
+}
+
+impl HubDb {
+    /// Reads the space's delivery pacing.
+    pub async fn pacing(&self) -> StoreResult<Pacing> {
+        let conn = self.db.reader()?;
+        query_one(
+            &conn,
+            "SELECT delivery_rate, quiet_hours, digest_minutes FROM space WHERE id = 1",
+            (),
+            |row| {
+                let c = Cols(row);
+                let positive = |index| {
+                    c.opt_i64(index)?
+                        .map(|value| {
+                            u32::try_from(value)
+                                .ok()
+                                .filter(|value| *value > 0)
+                                .ok_or_else(|| {
+                                    StoreError::Corrupt(format!("invalid pacing setting {value}"))
+                                })
+                        })
+                        .transpose()
+                };
+                Ok(Pacing {
+                    rate: positive(0)?,
+                    quiet: c.opt_de(1)?,
+                    digest_minutes: positive(2)?,
+                })
+            },
+        )
+        .await
+    }
+
+    /// Saves hub-validated pacing settings and releases holds made under the old settings.
+    pub async fn set_pacing(&self, pacing: &Pacing) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        exec(
+            tx.conn(),
+            "UPDATE space SET delivery_rate = ?1, quiet_hours = ?2, digest_minutes = ?3 WHERE id = 1",
+            params![
+                pacing.rate.map(i64::from),
+                pacing.quiet.as_ref().map(json_text).transpose()?,
+                pacing.digest_minutes.map(i64::from),
+            ],
+        )
+        .await?;
+        exec(
+            tx.conn(),
+            "UPDATE outbox SET not_before = NULL, pacing_hold = NULL
+             WHERE status = 'pending' AND pacing_hold IS NOT NULL",
+            (),
+        )
+        .await?;
+        tx.commit().await
+    }
+
+    /// Reads due messages with their current pacing hold, oldest first.
+    pub async fn dispatchable(
+        &self,
+        now: Timestamp,
+        limit: u32,
+    ) -> StoreResult<Vec<(OutboxMessage, Option<String>)>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {OUTBOX_FIELDS}, pacing_hold FROM outbox
+                 WHERE status = 'pending' AND (not_before IS NULL OR not_before <= ?1 OR pacing_hold = 'digest')
+                 ORDER BY COALESCE((SELECT MIN(original.id) FROM outbox original
+                                    WHERE original.digest_id = outbox.id), outbox.id)
+                 LIMIT ?2"
+            ),
+            params![now.as_millis(), i64::from(limit)],
+            |row| Ok((decode_message(row)?, Cols(row).opt_text(18)?)),
+        )
+        .await
+    }
+
+    /// Earliest future time when a retry or a pacing hold is due.
+    pub async fn next_delivery_after(&self, now: Timestamp) -> StoreResult<Option<Timestamp>> {
+        let conn = self.db.reader()?;
+        query_one(
+            &conn,
+            "SELECT MIN(not_before) FROM outbox WHERE status = 'pending' AND not_before > ?1",
+            params![now.as_millis()],
+            |row| Cols(row).opt_ts(0),
+        )
+        .await
+    }
+
+    /// Holds a due message until the next pacing boundary.
+    pub async fn hold_delivery(
+        &self,
+        id: OutboxId,
+        until: Timestamp,
+        reason: &str,
+    ) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        exec(
+            tx.conn(),
+            "UPDATE outbox SET not_before = ?1, pacing_hold = ?2 WHERE id = ?3 AND status = 'pending'",
+            params![until.as_millis(), reason, id.get()],
+        )
+        .await?;
+        tx.commit().await
+    }
+
+    /// Returns the delivery time of the Nth most recent paced message in the window.
+    pub async fn rate_boundary(
+        &self,
+        since: Timestamp,
+        rate: u32,
+    ) -> StoreResult<Option<Timestamp>> {
+        let conn = self.db.reader()?;
+        query_opt(
+            &conn,
+            "SELECT sent_at FROM outbox WHERE status = 'sent' AND kind = 'message'
+             AND urgency != 'high' AND sent_at > ?1
+             ORDER BY sent_at DESC, delivery_seq DESC LIMIT 1 OFFSET ?2",
+            params![since.as_millis(), i64::from(rate.saturating_sub(1))],
+            |row| Cols(row).ts(0),
+        )
+        .await
+    }
+
+    /// Creates a digest and suppresses every original in one transaction.
+    pub async fn queue_digest(
+        &self,
+        digest: &NewOutboxMessage,
+        originals: &[OutboxId],
+    ) -> StoreResult<OutboxMessage> {
+        let tx = self.db.begin().await?;
+        let digest = enqueue_in(tx.conn(), digest).await?;
+        for id in originals {
+            let changed = exec(
+                tx.conn(),
+                "UPDATE outbox SET status = 'suppressed', digest_id = ?1, pacing_hold = NULL
+                 WHERE id = ?2 AND status = 'pending' AND attempts = 0",
+                params![digest.id.get(), id.get()],
+            )
+            .await?;
+            if changed != 1 {
+                return Err(StoreError::Conflict(format!(
+                    "outbox message {id} cannot join a digest"
+                )));
+            }
+        }
+        tx.commit().await?;
+        Ok(digest)
+    }
+
+    /// Finds the digest that replaced a suppressed original.
+    pub async fn digest_for(&self, id: OutboxId) -> StoreResult<Option<OutboxId>> {
+        let conn = self.db.reader()?;
+        Ok(query_opt(
+            &conn,
+            "SELECT digest_id FROM outbox WHERE id = ?1",
+            params![id.get()],
+            |row| Cols(row).opt_id(0),
+        )
+        .await?
+        .flatten())
+    }
+
+    /// Records a failed attempt and returns the lane notified when delivery dies.
+    pub async fn delivery_failed(
+        &self,
+        message: &OutboxMessage,
+        error: &str,
+        now: Timestamp,
+        retry_at: Option<Timestamp>,
+    ) -> StoreResult<Option<LaneId>> {
+        let tx = self.db.begin().await?;
+        let changed = exec(
+            tx.conn(),
+            "UPDATE outbox SET status = ?1, attempts = attempts + 1, not_before = ?2, pacing_hold = NULL
+             WHERE id = ?3 AND status = 'pending' AND attempts = ?4",
+            params![
+                if retry_at.is_some() { "pending" } else { "dead" },
+                opt_ts(retry_at),
+                message.id.get(),
+                i64::from(message.attempts),
+            ],
+        )
+        .await?;
+        if changed == 0 || retry_at.is_some() {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let origin = match (message.project_id, message.lane_id) {
+            (Some(project), Some(lane)) => Some((project, lane, message.session_id)),
+            // A space digest reports failure to its oldest original's lane.
+            _ => {
+                query_opt(
+                    tx.conn(),
+                    "SELECT project_id, lane_id, session_id FROM outbox
+                 WHERE digest_id = ?1 AND project_id IS NOT NULL AND lane_id IS NOT NULL
+                 ORDER BY id LIMIT 1",
+                    params![message.id.get()],
+                    |row| {
+                        let c = Cols(row);
+                        Ok((c.id(0)?, c.id(1)?, c.opt_id(2)?))
+                    },
+                )
+                .await?
+            }
+        };
+        if let Some((project_id, lane_id, session_ref)) = origin {
+            insert_event_in(tx.conn(), &NewEvent {
+                project_id,
+                lane_id,
+                source: "dispatcher".to_owned(),
+                source_event_id: message.id.to_string(),
+                kind: EventKind::DeliveryFailure,
+                payload: json!({
+                    "outbox_id": message.id,
+                    "text": format!("Delivery of message {} to {} failed: {error}", message.id, message.channel),
+                }),
+                trust: Trust::System,
+                requested: false,
+                session_ref,
+                decision_ref: None,
+                reply_to_ref: None,
+                received_at: now,
+            }).await?;
+        }
+        tx.commit().await?;
+        Ok(origin.map(|(_, lane, _)| lane))
     }
 }

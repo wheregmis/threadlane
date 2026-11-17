@@ -672,10 +672,50 @@ impl HubApi for ClientApi {
                 })
             }
             OrgRequest::SetSpaceCeiling { mode } => {
+                let _dispatch = self.core.inner.dispatch.lock().await;
                 let mut space = db.space().await.map_err(api_error)?;
                 space.mode_ceiling = mode;
                 db.update_space(&space).await.map_err(api_error)?;
                 Ok(OrgReply::SpaceCeiling { ceiling: mode })
+            }
+            OrgRequest::Pacing => Ok(OrgReply::Pacing {
+                pacing: db.pacing().await.map_err(api_error)?,
+            }),
+            OrgRequest::SetPacing { pacing } => {
+                crate::pacing::check(&pacing).map_err(ApiError::Invalid)?;
+                let inner = &self.core.inner;
+                let _dispatch = inner.dispatch.lock().await;
+                db.set_pacing(&pacing).await.map_err(api_error)?;
+                inner.wake.wake(WakeTarget::Dispatcher);
+                Ok(OrgReply::Pacing { pacing })
+            }
+            OrgRequest::Stop {
+                target,
+                client_request_id,
+            } => {
+                let request_id = required("client request id", &client_request_id)?;
+                let lane_id = self.target_lane(target).await?;
+                let inner = &self.core.inner;
+                let epoch = db
+                    .stop_lane(lane_id, request_id.to_owned(), inner.clock.now())
+                    .await
+                    .map_err(api_error)?;
+                inner
+                    .hook
+                    .reach(threadlane_core::runtime::steps::stop::AFTER_RECORD)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?;
+                if let Some(epoch) = epoch {
+                    inner
+                        .wake
+                        .push(threadlane_core::link::HubMessage::Cancel { lane_id, epoch });
+                }
+                Ok(OrgReply::LaneUpdated)
+            }
+            OrgRequest::ResumeLane { target } => {
+                let lane_id = self.target_lane(target).await?;
+                db.resume_lane(lane_id).await.map_err(api_error)?;
+                self.core.inner.wake.wake(WakeTarget::Lane(lane_id));
+                Ok(OrgReply::LaneUpdated)
             }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
@@ -795,5 +835,36 @@ fn taken(error: StoreError, kind: &str, name: &str) -> ApiError {
             ApiError::Invalid(format!("a {kind} named {name:?} already exists"))
         }
         other => api_error(other),
+    }
+}
+
+impl ClientApi {
+    async fn target_lane(
+        &self,
+        target: threadlane_core::client::LaneTarget,
+    ) -> Result<threadlane_core::ids::LaneId, ApiError> {
+        use threadlane_core::client::LaneTarget;
+        match target {
+            LaneTarget::Lead { project } => {
+                Ok(self.project_named(project.as_deref()).await?.lead_lane_id)
+            }
+            LaneTarget::Task { task } => {
+                let task = self
+                    .core
+                    .inner
+                    .db
+                    .task(task)
+                    .await
+                    .map_err(api_error)?
+                    .ok_or_else(|| ApiError::NotFound(format!("task {task}")))?;
+                if task.status.is_terminal() {
+                    return Err(ApiError::Invalid(format!(
+                        "task {} has ended ({})",
+                        task.id, task.status
+                    )));
+                }
+                Ok(task.lane_id)
+            }
+        }
     }
 }
