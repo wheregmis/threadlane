@@ -129,6 +129,12 @@ threadlane bindings -p web
 threadlane mode Lead off -p web   # off, on_request, assisted, autonomous
 ```
 
+**Upgrading an existing hub.** Earlier versions saved the default Lead as Claude-only.
+To let that Lead fall back to Codex when Claude is unavailable, run
+`threadlane agent edit Lead --backend claude,codex`. Use its current name if
+you renamed it. Set `--backend codex` for a Codex-only Lead. Upgrades preserve
+saved backend preferences because older hubs stored defaults and explicit choices identically.
+
 Starter agents (docs/agent-templates.md) come compiled into the hub: Chief of
 Staff, Engineer, Fullstack Developer, Backend Developer, Frontend Developer,
 Reviewer, Reporter and Architect. Adding one creates an

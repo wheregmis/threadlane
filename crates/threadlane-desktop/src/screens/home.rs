@@ -206,17 +206,25 @@ impl Desktop {
             );
         }
 
-        let quiet = !show_needs && !show_running && attention.is_none() && banners.is_empty();
+        let task_gaps = state.gaps(Part::Tasks);
+        let quiet = task_gaps.is_empty()
+            && !show_needs
+            && !show_running
+            && attention.is_none()
+            && banners.is_empty();
         let history = button("home-history")
             .small()
             .ghost()
             .tab_stop(true)
             .label(if self.show_home_history {
                 "Hide conversation history"
+            } else if state.home_has_new_replies() {
+                "Show conversation history · New reply"
             } else {
                 "Show conversation history"
             })
             .on_click(cx.listener(|this, _, _, cx| {
+                this.state.saw_home_replies();
                 this.show_home_history = !this.show_home_history;
                 cx.notify();
             }));
@@ -236,16 +244,21 @@ impl Desktop {
             .children(banners)
             .when(show_needs, |view| view.child(needs))
             .children(attention)
+            .children(
+                task_gaps
+                    .iter()
+                    .map(|(space, gap)| gap_line(gap, "tasks", space, cx)),
+            )
             .when(show_running, |view| view.child(table))
             .when(quiet, |view| {
                 view.child(meta("No work needs your attention.", cx))
             })
             .when(!state.spaces().is_empty(), |view| {
-                view.child(self.home_composer(cx))
-                    .child(h_flex().child(history))
+                view.child(h_flex().child(history))
                     .when(self.show_home_history, |view| {
                         view.child(self.timeline(when, cx))
                     })
+                    .child(self.home_composer(cx))
             });
         decision_scroller("home", content, &self.decision_scroll)
             .w_full()

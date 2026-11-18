@@ -990,6 +990,7 @@ pub struct AppState {
     /// `(space, seq)` of every item taken from the feed, so a replay
     /// notifies once.
     notified: HashSet<InSpace<i64>>,
+    new_home_replies: HashSet<String>,
     /// Your messages, by space and event id.
     said: BTreeMap<InSpace<EventId>, Said>,
     failures: BTreeMap<InSpace<EventId>, Said>,
@@ -1543,6 +1544,7 @@ impl AppState {
     pub fn space_removed(&mut self, name: &str) {
         self.unpairing = None;
         self.forgotten.insert(name.to_owned());
+        self.new_home_replies.remove(name);
         self.spaces.retain(|space| space.name != name);
         self.queue.retain(|queued| queued.space != name);
         self.decision_records.retain(|key, _| key.space != name);
@@ -2358,6 +2360,18 @@ impl AppState {
         }
     }
 
+    /// Whether the selected spaces received a Lead message since Home history was viewed.
+    pub fn home_has_new_replies(&self) -> bool {
+        self.new_home_replies.iter().any(|space| self.shown(space))
+    }
+
+    /// Acknowledge only replies in the current Home filter.
+    pub fn saw_home_replies(&mut self) {
+        let filter = self.filter.as_deref();
+        self.new_home_replies
+            .retain(|space| filter.is_some_and(|only| only != space));
+    }
+
     /// Takes one item from the feed. Returns what it should raise a system
     /// notification for: a decision or a system notice seen for the first
     /// time. An ordinary message, or an item already taken (a feed replayed
@@ -2369,7 +2383,10 @@ impl AppState {
             return None;
         }
         let alert = match item.kind() {
-            OutboxKind::Message => None,
+            OutboxKind::Message => {
+                self.new_home_replies.insert(item.space.clone());
+                None
+            }
             OutboxKind::Decision => Card::of(&item).map(|mut card| {
                 if card.kind.is_none() {
                     card.kind = self
