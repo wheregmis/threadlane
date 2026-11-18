@@ -664,8 +664,12 @@ impl Desktop {
         let agents = v_flex()
             .gap(SM)
             .child(
-                h_flex().justify_between().child(section("Agents")).child(
+                section("Agents").child(
                     link("setup-edit-agents", "Edit agents in Team".to_owned())
+                        .w_auto()
+                        .flex_none()
+                        .text_size(TYPE_BODY)
+                        .font_weight(FontWeight::NORMAL)
                         .on_click(cx.listener(move |this, _, _, cx| this.go(team.clone(), cx))),
                 ),
             )
