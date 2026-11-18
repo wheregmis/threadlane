@@ -12,11 +12,15 @@
 //!
 //! A task's work is what was performed for it: the outcome of each
 //! approved `publish_branch` or `open_pull_request` names the repository,
-//! the branch and the pull request's URL (`crate::publish`).
+//! the branch and the pull request's URL (`crate::publish`), and the
+//! arguments of each approved `comment` on a pull request or `merge` name
+//! the repository and the pull request's number, whose branch the source
+//! looks up.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use threadlane_core::forge::{COMMENT, MERGE};
 use threadlane_core::github::{
     DEFAULT_POLL_INTERVAL, GITHUB_SOURCE, GithubItem, PullTarget, normalize_remote,
     pull_request_number,
@@ -58,8 +62,8 @@ struct Registered {
     lead_lane: LaneId,
 }
 
-/// One active task's branch, and pull request once opened, in one
-/// repository.
+/// One active task's branch, and pull request once opened or acted on, in
+/// one repository.
 #[derive(Debug)]
 struct Work {
     project: ProjectId,
@@ -102,13 +106,32 @@ impl Routes {
                     let Some(outcome) = decision.outcome.as_ref() else {
                         continue;
                     };
-                    let (true, Some(name), Some(branch)) = (
-                        outcome["performed"] == true,
-                        outcome["repository"].as_str(),
-                        outcome["branch"].as_str(),
-                    ) else {
+                    if outcome["performed"] != true {
                         continue;
-                    };
+                    }
+                    let arguments = &decision.arguments;
+                    let names_pull_request = decision.tool == MERGE
+                        || (decision.tool == COMMENT && arguments["target"] == "pull_request");
+                    let (name, branch, number) =
+                        match (outcome["repository"].as_str(), outcome["branch"].as_str()) {
+                            (Some(name), Some(branch)) => (
+                                name,
+                                branch,
+                                outcome["pull_request"]
+                                    .as_str()
+                                    .and_then(pull_request_number),
+                            ),
+                            _ if names_pull_request => {
+                                let (Some(name), Some(number)) = (
+                                    arguments["repository"].as_str(),
+                                    arguments["number"].as_u64(),
+                                ) else {
+                                    continue;
+                                };
+                                (name, "", Some(number))
+                            }
+                            _ => continue,
+                        };
                     let Some(repository) = repositories
                         .iter()
                         .find(|repository| {
@@ -119,15 +142,18 @@ impl Routes {
                     else {
                         continue;
                     };
-                    let number = outcome["pull_request"]
-                        .as_str()
-                        .and_then(pull_request_number);
                     match routes.work.iter_mut().find(|work| {
                         work.lane == task.lane_id
                             && work.target.repository == repository
-                            && work.target.branch == branch
+                            && ((!branch.is_empty() && work.target.branch == branch)
+                                || (number.is_some() && work.target.number == number))
                     }) {
-                        Some(work) => work.target.number = work.target.number.or(number),
+                        Some(work) => {
+                            work.target.number = work.target.number.or(number);
+                            if work.target.branch.is_empty() {
+                                branch.clone_into(&mut work.target.branch);
+                            }
+                        }
                         None => routes.work.push(Work {
                             project: project.id,
                             lane: task.lane_id,
@@ -221,7 +247,10 @@ impl HubCore {
         }
 
         for work in &routes.work {
-            let key = format!("github:{}@{}", work.target.repository, work.target.branch);
+            let key = match (work.target.branch.as_str(), work.target.number) {
+                ("", Some(number)) => format!("github:{}#{number}", work.target.repository),
+                (branch, _) => format!("github:{}@{branch}", work.target.repository),
+            };
             let since = inner.db.source_cursor(&key).await?;
             let items = match source.pull_request(&work.target, since.as_deref()).await {
                 Ok(items) => items,

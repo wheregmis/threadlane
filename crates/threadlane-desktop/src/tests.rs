@@ -847,6 +847,19 @@ impl HubApi for FakeHub {
                     task: summary.task.clone(),
                 })
             }
+            TaskRequest::Retry { task: id } => {
+                let summary = tasks
+                    .iter_mut()
+                    .find(|summary| summary.task.id == id)
+                    .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+                if summary.task.status != TaskStatus::Failed {
+                    return Err(ApiError::Invalid(format!("task {id} has not failed")));
+                }
+                summary.task.status = TaskStatus::Queued;
+                Ok(TaskReply::Task {
+                    task: summary.task.clone(),
+                })
+            }
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -2979,6 +2992,7 @@ async fn a_new_task_goes_to_an_agent_that_is_on_and_waits_for_open_tasks() {
     );
     state.task_form_mut().agent = Some("Engineer".to_owned());
     state.task_form_mut().toggle_dependency(TaskId(1));
+    state.task_form_mut().draft_pr = true;
     assert_eq!(
         state.task_spec("work", "api", "  ", "Make it pass"),
         Err("Give the task a title and a goal.".to_owned())
@@ -2989,7 +3003,14 @@ async fn a_new_task_goes_to_an_agent_that_is_on_and_waits_for_open_tasks() {
     assert_eq!(spec.title, "Fix it");
     assert_eq!(spec.depends_on, [TaskId(1)]);
     assert_eq!(spec.project.as_deref(), Some("api"));
+    assert!(spec.draft_pr);
     let created = core.create_task(Some("work"), spec).await.expect("created");
+    assert!(
+        created.goal.starts_with("Make it pass")
+            && created.goal.ends_with(threadlane_client::DRAFT_PR_GOAL),
+        "{}",
+        created.goal
+    );
     state.task_created("work", "api");
     assert!(state.task_form("work", "api").is_none());
     state.apply_project(load_project(&core, "work", "api").await);
@@ -3031,6 +3052,28 @@ async fn cancelling_a_task_asks_first_then_shows_it_ended() {
         .expect("cancelled");
     state.task_cancelled("work", cancelled);
     assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Ended);
+}
+
+#[tokio::test]
+async fn a_failed_task_offers_retry_and_is_queued_again() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.tasks
+        .lock()
+        .expect("lock")
+        .push(task(1, TaskStatus::Failed, None));
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Retry);
+
+    let retried = core
+        .retry_task(Some("work"), "T-0001")
+        .await
+        .expect("retried");
+    assert_eq!(retried.status, TaskStatus::Queued);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Cancel);
 }
 
 #[tokio::test]
@@ -3113,6 +3156,46 @@ async fn events_nobody_asked_for_are_a_collapsed_section_and_a_count_on_home() {
     assert!(!state.retry_soon());
 }
 
+#[tokio::test]
+async fn a_decision_waiting_ten_minutes_is_reminded_about_once() {
+    let minute = 60_000;
+    let work = FakeHub::new("Work", vec![decision(1, 0), decision(2, 9 * minute)]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let at = |millis| Timestamp::from_millis(millis);
+
+    assert!(
+        state.reminders(at(9 * minute)).is_empty(),
+        "nothing is old yet"
+    );
+    let first = state.reminders(at(10 * minute));
+    assert_eq!(first.len(), 1, "only D-0001 has waited ten minutes");
+    assert_eq!(
+        first[0].tag(),
+        "work/D-0001",
+        "its buttons answer the decision"
+    );
+    assert_eq!(decision_of_tag(&first[0].tag()), Some(("work", "D-0001")));
+    assert!(first[0].title().starts_with("Still waiting: "));
+    assert_eq!(first[0].options(), ["approve", "decline"]);
+    state.apply(refresh(&core).await);
+    assert!(
+        state.reminders(at(11 * minute)).is_empty(),
+        "one reminder only"
+    );
+
+    let answer = core
+        .answer(Some("work"), "D-0002", "approve", None)
+        .await
+        .expect("answer");
+    state.answered(&answer);
+    assert!(
+        state.reminders(at(30 * minute)).is_empty(),
+        "an answered decision gets none"
+    );
+}
+
 #[test]
 fn notification_settings_are_kept_in_the_client_directory_and_applied() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -3130,6 +3213,7 @@ fn notification_settings_are_kept_in_the_client_directory_and_applied() {
             context: None,
             recommended: None,
         },
+        reminder: false,
     };
     let notice = Alert::Notice {
         label: "work".to_owned(),

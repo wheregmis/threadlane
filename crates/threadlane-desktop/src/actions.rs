@@ -324,6 +324,35 @@ impl Desktop {
         cx.notify();
     }
 
+    /// Queues failed task `task` of `space` again.
+    pub(crate) fn retry_task(&mut self, space: String, task: TaskId, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        self.state
+            .report(Activity::Working(format!("Retrying {space} / {task}…")));
+        self.run(
+            async move {
+                let retried = core
+                    .read()
+                    .await
+                    .retry_task(Some(&space), &task.to_string())
+                    .await;
+                (space, retried)
+            },
+            |this, (space, retried), cx| match retried {
+                Ok(task) => {
+                    this.state.report(Activity::Done(format!(
+                        "Queued {space} / {} again.",
+                        task.id
+                    )));
+                    this.load_screen(cx);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
     /// Pauses `project` of `space`, or resumes it.
     pub(crate) fn set_paused(
         &mut self,

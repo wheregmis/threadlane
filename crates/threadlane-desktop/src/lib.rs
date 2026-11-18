@@ -619,6 +619,10 @@ impl Card {
     }
 }
 
+/// How long a decision waits before its one reminder notification.
+// shortcut: fixed 10 minutes, make it a notification setting if people ask.
+pub const REMIND_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// Something on the feed that raises a system notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Alert {
@@ -630,6 +634,8 @@ pub enum Alert {
         label: String,
         /// The decision card.
         card: Card,
+        /// Whether this is the one reminder for a decision still waiting.
+        reminder: bool,
     },
     /// A system notice.
     Notice {
@@ -657,8 +663,18 @@ impl Alert {
     #[must_use]
     pub fn title(&self) -> String {
         match self {
-            Self::Decision { label, card, .. } => {
-                format!("{label}: {} {}", card.label().to_ascii_lowercase(), card.id)
+            Self::Decision {
+                label,
+                card,
+                reminder,
+                ..
+            } => {
+                let still = if *reminder { "Still waiting: " } else { "" };
+                format!(
+                    "{still}{label}: {} {}",
+                    card.label().to_ascii_lowercase(),
+                    card.id
+                )
             }
             Self::Notice { label, .. } => format!("{label}: notice"),
         }
@@ -988,6 +1004,8 @@ pub struct AppState {
     /// `(space, seq)` of every item taken from the feed, so a replay
     /// notifies once.
     notified: HashSet<InSpace<i64>>,
+    /// Decisions already reminded about, so each gets one reminder.
+    reminded: HashSet<DecisionKey>,
     new_home_replies: HashSet<String>,
     /// Your messages, by space and event id.
     said: BTreeMap<InSpace<EventId>, Said>,
@@ -1222,6 +1240,53 @@ impl AppState {
             .iter()
             .filter(|queued| queued.space == space && queued.decision.project_id == id)
             .count()
+    }
+
+    /// One reminder notification for each decision that has waited
+    /// [`REMIND_AFTER`] or longer and was not reminded about yet.
+    pub fn reminders(&mut self, now: Timestamp) -> Vec<Alert> {
+        let due: Vec<&Queued> = self
+            .queue
+            .iter()
+            .filter(|queued| {
+                let key = DecisionKey::from(*queued);
+                now.saturating_since(queued.decision.created_at) >= REMIND_AFTER
+                    && !self.answering.contains(&key)
+                    && !self.reminded.contains(&key)
+            })
+            .collect();
+        let alerts: Vec<Alert> = due
+            .iter()
+            .map(|queued| {
+                let decision = &queued.decision;
+                let label = self
+                    .project_name(&queued.space, decision.project_id)
+                    .map_or_else(
+                        || queued.space.clone(),
+                        |project| format!("{}/{project}", queued.space),
+                    );
+                Alert::Decision {
+                    space: queued.space.clone(),
+                    label,
+                    card: Card {
+                        id: decision.id.to_string(),
+                        question: decision.question.clone(),
+                        options: decision
+                            .options
+                            .iter()
+                            .map(|option| option.label.clone())
+                            .collect(),
+                        kind: Some(decision.kind),
+                        context: None,
+                        recommended: None,
+                    },
+                    reminder: true,
+                }
+            })
+            .collect();
+        let keys: Vec<DecisionKey> = due.into_iter().map(DecisionKey::from).collect();
+        self.reminded.extend(keys);
+        alerts
     }
 
     /// The pending decision that goes with a delivered card, if it still waits.
@@ -2496,6 +2561,7 @@ impl AppState {
                     space: item.space.clone(),
                     label: item.label(),
                     card,
+                    reminder: false,
                 }
             }),
             OutboxKind::SystemNotice => Some(Alert::Notice {

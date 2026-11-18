@@ -1,5 +1,5 @@
 //! What you start and stop yourself through [`ClientCore`]: a task created
-//! skipping the lead, cancelling a task, pausing a project, and the events
+//! skipping the lead, cancelling or retrying a task, pausing a project, and the events
 //! recorded but acted on by nobody.
 
 use threadlane_core::client::{
@@ -24,7 +24,14 @@ pub struct NewTaskSpec {
     pub repositories: Vec<String>,
     /// Tasks of the project it waits for.
     pub depends_on: Vec<TaskId>,
+    /// Whether the task ends by opening a draft pull request.
+    pub draft_pr: bool,
 }
+
+/// Added to the goal of a task that ends with a draft pull request, so the
+/// work does not stop at an unpublished branch.
+pub const DRAFT_PR_GOAL: &str = "When the work is done and checked, open a draft pull \
+request for it with open_pull_request before you call finish_task.";
 
 impl ClientCore {
     /// Creates a task of yours in one space, skipping the lead, with a
@@ -42,7 +49,11 @@ impl ClientCore {
         let request = TaskRequest::Create {
             project: spec.project,
             title: spec.title,
-            goal: spec.goal,
+            goal: if spec.draft_pr {
+                format!("{}\n\n{DRAFT_PR_GOAL}", spec.goal)
+            } else {
+                spec.goal
+            },
             agent: spec.agent,
             repositories: spec.repositories,
             depends_on: spec.depends_on,
@@ -59,14 +70,30 @@ impl ClientCore {
     /// No such hub, several hubs and none named, an id that is not a
     /// task's, or the hub's error.
     pub async fn cancel_task(&self, space: Option<&str>, task: &str) -> Result<Task, ClientError> {
+        let id = self.task_id(space, task)?;
+        self.one_task(space, TaskRequest::Cancel { task: id }).await
+    }
+
+    /// Queues failed task `task` (`T-0142`) of one space again, telling its
+    /// agent the last error. `None` means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, an id that is not a
+    /// task's, or the hub's error, for example a task that has not failed.
+    pub async fn retry_task(&self, space: Option<&str>, task: &str) -> Result<Task, ClientError> {
+        let id = self.task_id(space, task)?;
+        self.one_task(space, TaskRequest::Retry { task: id }).await
+    }
+
+    fn task_id(&self, space: Option<&str>, task: &str) -> Result<TaskId, ClientError> {
         let (name, _api) = self.target(space)?;
-        let id = TaskId::parse(task).ok_or_else(|| {
+        TaskId::parse(task).ok_or_else(|| {
             api_error(
                 &name,
                 ApiError::Invalid(format!("{task:?} is not a task id like T-0142")),
             )
-        })?;
-        self.one_task(space, TaskRequest::Cancel { task: id }).await
+        })
     }
 
     async fn one_task(
