@@ -1,5 +1,6 @@
 //! Home (wireframe 1): everything that needs you across every space, then
-//! what is running, then what finished, and a composer to any project.
+//! what is running, then every conversation as one timeline, and a
+//! composer to any project (General by default).
 
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::ButtonVariants as _;
@@ -7,7 +8,8 @@ use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMen
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use threadlane_desktop::{EmptyRegion, Part, When, running_elapsed};
+use threadlane_core::model::OutboxKind;
+use threadlane_desktop::{EmptyRegion, Part, Spoken, When, running_elapsed};
 
 use super::{empty, gap_line, menu_item};
 use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
@@ -28,6 +30,7 @@ impl Desktop {
                 .selected(state.filter().is_none())
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.set_filter(None);
+                    this.load_screen(cx);
                     cx.notify();
                 })),
         );
@@ -39,6 +42,7 @@ impl Desktop {
                     .selected(state.filter() == Some(name.as_str()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.set_filter(Some(&name));
+                        this.load_screen(cx);
                         cx.notify();
                     })),
             );
@@ -203,85 +207,7 @@ impl Desktop {
             );
         }
 
-        let mut recent = v_flex().gap(XS).child(section("Recent results"));
-        let results = state.recent();
-        let gaps = state.gaps(Part::Recent);
-        for (space, gap) in &gaps {
-            recent = recent.child(gap_line(gap, "recent results", space, cx));
-        }
-        if results.is_empty() && gaps.is_empty() {
-            recent = recent.child(empty(EmptyRegion::Results, cx));
-        }
-        for item in results {
-            let digest = state
-                .digest(item)
-                .map(|digest| self.digest_entry(&item.space, digest, cx));
-            let excerpt = digest.is_none().then(|| {
-                let seq = item.item.seq;
-                self.prose(
-                    format!("result-{}-{seq}", item.space),
-                    &item.space,
-                    item.text(),
-                    cx,
-                )
-                .result(seq, state.result_expanded(&item.space, seq))
-            });
-            let view = cx.entity().downgrade();
-            let text = item.text().to_owned();
-            let reply = item
-                .item
-                .project_name
-                .as_ref()
-                .filter(|_| item.kind() == threadlane_core::model::OutboxKind::Message)
-                .map(|project| Screen::Project {
-                    space: item.space.clone(),
-                    project: project.clone(),
-                    tab: crate::Tab::Conversation,
-                });
-            recent = recent.child(
-                h_flex()
-                    .id(SharedString::from(format!(
-                        "result-menu-{}-{}",
-                        item.space, item.item.seq
-                    )))
-                    .items_start()
-                    .gap(SM)
-                    .child(
-                        meta(when.moment(item.item.delivered_at), cx)
-                            .w(TIMESTAMP_WIDTH)
-                            .flex_none()
-                            .text_right(),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .items_start()
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(item.label().replace('/', " / ")),
-                            )
-                            .children(digest)
-                            .children(excerpt),
-                    )
-                    .context_menu(move |menu, _, _| {
-                        let copy = text.clone();
-                        let mut menu =
-                            menu.item(menu_item(&view, "Copy text", move |this, _, cx| {
-                                this.copy(copy.clone(), cx)
-                            }));
-                        if let Some(screen) = &reply {
-                            let (screen, quote) = (screen.clone(), text.clone());
-                            menu = menu.item(menu_item(&view, "Reply", move |this, window, cx| {
-                                this.go(screen.clone(), cx);
-                                this.reply_to(&quote, window, cx);
-                            }));
-                        }
-                        menu
-                    }),
-            );
-        }
+        let recent = self.timeline(when, cx);
 
         let content = v_flex()
             .gap(XL)
@@ -305,6 +231,129 @@ impl Desktop {
             .max_w(READING_WIDTH)
             .self_center()
             .into_any_element()
+    }
+
+    /// Home's timeline (docs/one-place-to-talk.md): every conversation in
+    /// the spaces shown, newest first; each entry names its space and
+    /// project and opens that conversation.
+    fn timeline(&self, when: &When, cx: &mut Context<Self>) -> Div {
+        let state = &self.state;
+        let mut list = v_flex().gap(SM).child(section("Conversations"));
+        let entries = state.timeline();
+        let gaps = state.gaps(Part::Recent);
+        for (space, gap) in &gaps {
+            list = list.child(gap_line(gap, "recent results", space, cx));
+        }
+        if entries.is_empty() && gaps.is_empty() {
+            list = list.child(empty(EmptyRegion::Results, cx));
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            let space = entry.space.to_owned();
+            let (who, body) = match entry.spoken {
+                Spoken::You(text) => (
+                    "You",
+                    div()
+                        .text_size(TYPE_BODY)
+                        .whitespace_normal()
+                        .child(text.to_owned())
+                        .into_any_element(),
+                ),
+                Spoken::Delivered(item) => {
+                    let who = if item.kind() == OutboxKind::SystemNotice {
+                        "Notice"
+                    } else {
+                        "Lead"
+                    };
+                    let body = match state.digest(item) {
+                        Some(digest) => self.digest_entry(&space, digest, cx).into_any_element(),
+                        None => {
+                            let seq = item.item.seq;
+                            self.prose(format!("result-{space}-{seq}"), &space, item.text(), cx)
+                                .result(seq, state.result_expanded(&space, seq))
+                                .into_any_element()
+                        }
+                    };
+                    (who, body)
+                }
+            };
+            let place = entry
+                .project
+                .map_or_else(|| space.clone(), |project| format!("{space} / {project}"));
+            let screen = entry.project.map(|project| Screen::Project {
+                space: space.clone(),
+                project: project.to_owned(),
+                tab: crate::Tab::Conversation,
+            });
+            let title = h_flex()
+                .gap(SM)
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(place.clone()))
+                .child(meta(who, cx));
+            let header = match &screen {
+                Some(screen) => {
+                    let screen = screen.clone();
+                    button(SharedString::from(format!("timeline-{index}")))
+                        .text()
+                        .accessibility_label(format!("Open the conversation in {place}"))
+                        .child(title)
+                        .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
+                        .into_any_element()
+                }
+                None => title.into_any_element(),
+            };
+            let view = cx.entity().downgrade();
+            let text = entry.text();
+            let reply = screen.filter(|_| who != "Notice");
+            list = list.child(
+                h_flex()
+                    .id(SharedString::from(format!("timeline-menu-{index}")))
+                    .items_start()
+                    .gap(SM)
+                    .child(
+                        meta(when.moment(entry.at), cx)
+                            .w(TIMESTAMP_WIDTH)
+                            .flex_none()
+                            .text_right(),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_start()
+                            .child(header)
+                            .child(body),
+                    )
+                    .context_menu(move |menu, _, _| {
+                        let copy = text.clone();
+                        let mut menu =
+                            menu.item(menu_item(&view, "Copy text", move |this, _, cx| {
+                                this.copy(copy.clone(), cx)
+                            }));
+                        if let Some(screen) = &reply {
+                            let (screen, quote) = (screen.clone(), text.clone());
+                            menu = menu.item(menu_item(&view, "Reply", move |this, window, cx| {
+                                this.go(screen.clone(), cx);
+                                this.reply_to(&quote, window, cx);
+                            }));
+                        }
+                        menu
+                    }),
+            );
+        }
+        if state.timeline_has_earlier() {
+            list = list.child(
+                button("timeline-earlier")
+                    .small()
+                    .tab_stop(true)
+                    .label("Show earlier")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        for (space, project, before) in this.state.show_earlier_timeline() {
+                            this.earlier(space, project, before, cx);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        list
     }
 
     /// The composer with its project picker (Plan.md §2.1: every message

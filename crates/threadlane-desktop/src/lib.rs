@@ -42,6 +42,7 @@ mod prose;
 mod routines;
 mod settings;
 mod tasks;
+mod timeline;
 
 pub use attention::{AttentionRow, needs_you};
 pub use clock::{When, duration};
@@ -87,6 +88,7 @@ pub use tasks::{
     changes, chips, merge_state, running_elapsed, status_label, task_header, timeline, usage,
     work_elapsed,
 };
+pub use timeline::{Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, load_timeline};
 
 /// How many of the newest delivered items Home asks each hub for.
 const RECENT: u32 = 50;
@@ -1020,6 +1022,8 @@ pub struct AppState {
     expanded_quiet: HashSet<InSpace<RunId>>,
     /// The ceiling you asked to set a space to, until you confirm or keep it.
     space_ceiling_asked: Option<InSpace<Mode>>,
+    /// The pages of Home's timeline shown beyond the first.
+    timeline_pages: usize,
 }
 
 impl AppState {
@@ -1872,7 +1876,7 @@ impl AppState {
         let entries = take(&mut view.answers, Part::Conversation, history);
         self.remember_decisions(&space, decision_records);
         if listed {
-            self.take_history(&space, &project, entries, true);
+            self.take_history(&space, &project, entries, true, PAGE);
         }
     }
 
@@ -1924,20 +1928,21 @@ impl AppState {
     pub fn apply_earlier(&mut self, load: EarlierLoad) {
         self.remember_decisions(&load.space, load.decision_records);
         if let Ok(entries) = load.history {
-            self.take_history(&load.space, &load.project, entries, false);
+            self.take_history(&load.space, &load.project, entries, false, PAGE);
         }
     }
 
     /// Takes a page of history. The newest page leaves how far back is
     /// loaded alone once an earlier page was taken.
-    fn take_history(
+    pub(crate) fn take_history(
         &mut self,
         space: &str,
         project: &str,
         entries: Vec<ConversationEntry>,
         newest: bool,
+        limit: u32,
     ) {
-        let full = entries.len() >= usize::try_from(PAGE).unwrap_or(usize::MAX);
+        let full = entries.len() >= usize::try_from(limit).unwrap_or(usize::MAX);
         let mut oldest = None;
         for entry in entries {
             let at = match entry {
@@ -2232,7 +2237,6 @@ impl AppState {
                 text: text.to_owned(),
                 at,
             });
-        self.remember_target(space, project);
         if let Some(view) = self
             .projects
             .get_mut(&(space.to_owned(), project.to_owned()))

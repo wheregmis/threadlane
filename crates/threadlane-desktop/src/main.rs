@@ -25,7 +25,7 @@ use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
     Activity, AppState, Appearance, DecisionKey, RoutineText, Tab, When, change_memory,
     decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project, load_routines,
-    load_task, pump, refresh,
+    load_task, load_timeline, pump, refresh,
 };
 use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
 use tokio::runtime::Runtime;
@@ -746,7 +746,15 @@ impl Desktop {
                     cx,
                 );
             }
-            Screen::Home | Screen::Machines | Screen::NewProject { .. } | Screen::AddSpace => {}
+            Screen::Home => {
+                let projects = self.state.timeline_projects();
+                self.run(
+                    async move { load_timeline(&*core.read().await, projects).await },
+                    |this, loaded, _| this.state.apply_timeline(loaded),
+                    cx,
+                );
+            }
+            Screen::Machines | Screen::NewProject { .. } | Screen::AddSpace => {}
         }
     }
 
