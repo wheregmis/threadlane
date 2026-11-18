@@ -129,6 +129,7 @@ timeline and opened the project conversation from a timeline entry.
 | # | Finding | State |
 |---|---|---|
 | 37 | A project lead's final text reached the owner without waking the space Lead. An interruption could also separate an explicit message from its routed reply. | fixed in the PR batch. The outbox message and routed reply are queued together. The hub exit tests cover both forms of reply. |
-| 38 | A refresh while editing an agent could revert fields changed by another client. The completion of an earlier save could close a reopened draft. | fixed in the PR batch and covered by the desktop regression. |
+| 38 | A refresh while editing an agent could revert fields changed by another client. The completion of an earlier save could close a reopened draft. Simultaneous saves could also overwrite unrelated fields on the hub. | fixed in the PR batch. Desktop and hub tests cover the drafts and concurrent saves. |
 | 39 | Rebasing a published task branch could make its next regular push fail. | fixed in the PR batch. A local Git regression pushes, advances the base, and then pushes the task's next commit. |
-| 40 | Space-lead asks still need durable correlation through clarification decisions and follow-up timers, especially when several asks reach the same project. | open |
+| 40 | Clarification decisions and follow-up timers could lose the link to a space Lead request. Replies could mix when several requests reached the same project. | fixed in the PR batch. A hub test sends two overlapping requests and checks that each reply keeps its original request. |
+| 41 | A slow Git operation in one repository held a shared lock and delayed tasks in other repositories. | fixed in the PR batch. Git workspace operations acquire a lock for the repository they touch. An interrupted run checks its stop state again before starting the backend. An in-flight Git command can still take until its timeout to finish. |
