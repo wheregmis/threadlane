@@ -11,7 +11,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use threadlane_core::model::Mode;
-use threadlane_desktop::{PACING_FIELDS, mode_label};
+use threadlane_desktop::{Consequence, PACING_FIELDS};
+
+use super::gap_line;
 
 use super::project::mode_name;
 use crate::Desktop;
@@ -60,12 +62,12 @@ impl Desktop {
                 Ok(rows) => {
                     metrics.children(rows.into_iter().map(|(label, value)| line(label, value)))
                 }
-                Err(status) => metrics.child(
-                    div()
-                        .text_size(TYPE_BODY)
-                        .text_color(muted)
-                        .child(status.to_owned()),
-                ),
+                Err(_) => metrics.child(gap_line(
+                    &self.state.metrics_gap(&row.paired_as),
+                    "metrics",
+                    &row.paired_as,
+                    cx,
+                )),
             };
             screen = screen.child(
                 card(cx)
@@ -168,13 +170,16 @@ impl Desktop {
                 .accessibility_label(format!("Set the ceiling of {space} to {}", choice.label))
                 .selected(choice.selected)
             }))
-            .on_click(cx.listener(move |this, clicked: &Vec<usize>, _, cx| {
+            .on_click(cx.listener(move |this, clicked: &Vec<usize>, window, cx| {
                 if let Some(mode) = clicked.first().and_then(|index| modes.get(*index)) {
-                    this.state.ask_space_ceiling(&named, *mode);
-                    cx.notify();
+                    this.confirm_action(
+                        Consequence::SetCeiling(named.clone(), None, *mode),
+                        window,
+                        cx,
+                    );
                 }
             }));
-        let mut part = v_flex().gap(XS).pt(SM).child(
+        v_flex().gap(XS).pt(SM).child(
             h_flex()
                 .gap(MD)
                 .text_size(TYPE_BODY)
@@ -186,35 +191,7 @@ impl Desktop {
                         .child("Space ceiling"),
                 )
                 .child(control),
-        );
-        if let Some((mode, question)) = self.state.space_ceiling_confirm(space) {
-            let named = space.to_owned();
-            part = part
-                .child(div().text_size(TYPE_BODY).child(question))
-                .child(
-                    h_flex()
-                        .gap(SM)
-                        .child(
-                            button(SharedString::from(format!("space-ceiling-set-{space}")))
-                                .primary()
-                                .small()
-                                .label(format!("Set to {}", mode_label(mode)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_space_ceiling(named.clone(), mode, cx);
-                                })),
-                        )
-                        .child(
-                            button(SharedString::from(format!("space-ceiling-keep-{space}")))
-                                .small()
-                                .label("Keep it")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.keep_space_ceiling();
-                                    cx.notify();
-                                })),
-                        ),
-                );
-        }
-        part
+        )
     }
 }
 
@@ -229,13 +206,13 @@ impl Desktop {
         let editing = self.state.pacing_editor(space);
         let values = match self.state.pacing_values(space) {
             Ok(values) => values,
-            Err(why) => {
-                panel = panel.child(
-                    div()
-                        .text_size(TYPE_BODY)
-                        .text_color(muted)
-                        .child(why.to_owned()),
-                );
+            Err(_) => {
+                panel = panel.child(gap_line(
+                    &self.state.pacing_gap(space),
+                    "delivery pacing",
+                    space,
+                    cx,
+                ));
                 if editing.is_none() {
                     return panel;
                 }

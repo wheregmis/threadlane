@@ -7,7 +7,7 @@ use threadlane_core::ids::RunId;
 use threadlane_core::model::{Mode, OutboxKind, Run, RunOutcome, RunStatus};
 use threadlane_core::time::Timestamp;
 
-use crate::{AppState, Card, DecisionScope, Destination, Moment, ProseLimit, When};
+use crate::{AppState, Card, DecisionScope, Destination, Moment, ProseLimit, When, count_form};
 
 /// One line of a conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,9 +160,11 @@ impl AppState {
         let seq = item.item.seq;
         let open = self.expanded.contains(&(item.space.clone(), seq));
         let verb = if open { "Hide" } else { "Show" };
+        let count = results.len();
+        let noun = count_form(count, "result", "results");
         Some(Digest {
             seq,
-            toggle: format!("{verb} digest · {} results", results.len()),
+            toggle: format!("{verb} digest · {count} {noun}"),
             results: if open { results.clone() } else { Vec::new() },
         })
     }
@@ -331,6 +333,7 @@ impl AppState {
                             id: id.to_string(),
                             time: times[0].clone(),
                             text: reason(&first.run).to_owned(),
+                            message: None,
                         });
                     }
                     while let Some((at, _, Entry::Run(next))) = lines.next_if(|(at, _, entry)| {
@@ -343,6 +346,7 @@ impl AppState {
                                 id: next.run.id.to_string(),
                                 time: time.clone(),
                                 text: reason(&next.run).to_owned(),
+                                message: None,
                             });
                         }
                         times.push(time);

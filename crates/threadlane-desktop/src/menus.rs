@@ -30,6 +30,7 @@ actions!(
         OpenSettings,
         ShowShortcuts,
         OpenShortcutsMenu,
+        OpenDocumentation,
         Dismiss,
     ]
 );
@@ -41,6 +42,11 @@ pub(crate) struct SidebarShortcut(pub(crate) usize);
 #[derive(Action, Clone, PartialEq)]
 #[action(namespace = threadlane, no_json)]
 pub(crate) struct DecisionShortcut(pub(crate) DecisionCommand);
+
+fn documentation_url() -> Option<String> {
+    let repository = env!("CARGO_PKG_REPOSITORY").trim_end_matches('/');
+    (!repository.is_empty()).then(|| format!("{repository}#readme"))
+}
 
 pub(crate) const KEY_CONTEXT: &str = "Threadlane";
 const OUTSIDE_INPUT: &str = "Threadlane && !Input && !Dialog";
@@ -247,6 +253,11 @@ pub(crate) fn install(
     change_appearance: impl Fn(Appearance, &mut Window, &mut App) + Clone + 'static,
 ) {
     cx.bind_keys(app_bindings());
+    cx.on_action(|_: &OpenDocumentation, cx| {
+        if let Some(url) = documentation_url() {
+            cx.open_url(&url);
+        }
+    });
     desktop_action(cx, &desktop, |this, _: &FocusComposer, window, cx| {
         this.focus_composer(window, cx);
     });
@@ -368,6 +379,13 @@ pub(crate) fn set(full_screen: bool, appearance: Appearance, cx: &App) {
     } else {
         "Enter Full Screen"
     };
+    let mut help = vec![MenuItem::action("Keyboard Shortcuts", OpenShortcutsMenu)];
+    if documentation_url().is_some() {
+        help.push(MenuItem::action(
+            "Threadlane Documentation",
+            OpenDocumentation,
+        ));
+    }
     cx.set_menus([
         Menu::new("Threadlane").items([
             MenuItem::action("About Threadlane", About),
@@ -408,7 +426,7 @@ pub(crate) fn set(full_screen: bool, appearance: Appearance, cx: &App) {
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
         ]),
-        Menu::new("Help").items([MenuItem::action("Keyboard Shortcuts", OpenShortcutsMenu)]),
+        Menu::new("Help").items(help),
     ]);
 }
 

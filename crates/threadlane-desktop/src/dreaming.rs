@@ -35,10 +35,14 @@ pub struct DreamingCard {
     pub disabled: bool,
     /// The active cadence or the reason it is unavailable.
     pub cadence: String,
+    /// The reason cadence is unavailable.
+    pub cadence_gap: Option<crate::Gap>,
     /// The last completed dream and the versions it wrote.
     pub last: Vec<String>,
     /// Checker findings or a status message.
     pub findings: Vec<String>,
+    /// The reason the memory checker is unavailable.
+    pub findings_gap: Option<crate::Gap>,
 }
 
 /// Replies for the project open in the Memory tab.
@@ -192,12 +196,15 @@ impl AppState {
             enabled: false,
             disabled: true,
             cadence: "Loading dreaming settings…".to_owned(),
+            cadence_gap: Some(crate::Gap::Loading),
             last: Vec::new(),
             findings: vec!["Checking memory…".to_owned()],
+            findings_gap: Some(crate::Gap::Loading),
         };
         if let Some(view) = view {
             match &view.status {
                 Some(Ok(status)) => {
+                    card.cadence_gap = None;
                     card.enabled = status.cadence.is_some();
                     card.disabled = view.saving;
                     card.cadence = if view.saving {
@@ -225,17 +232,19 @@ impl AppState {
                         card.last.push("No dreams yet.".to_owned());
                     }
                 }
-                Some(Err(error)) => card.cadence.clone_from(error),
+                Some(Err(error)) => card.cadence_gap = Some(crate::Gap::Failed(error.clone())),
                 None => {}
             }
             match &view.findings {
                 Some(Ok(findings)) if findings.is_empty() => {
+                    card.findings_gap = None;
                     card.findings = vec!["No duplicate notes or stale references found.".to_owned()]
                 }
                 Some(Ok(findings)) => {
+                    card.findings_gap = None;
                     card.findings = findings.iter().map(ToString::to_string).collect()
                 }
-                Some(Err(error)) => card.findings = vec![error.clone()],
+                Some(Err(error)) => card.findings_gap = Some(crate::Gap::Failed(error.clone())),
                 None => {}
             }
         }

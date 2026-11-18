@@ -138,7 +138,7 @@ impl AppState {
     }
 
     /// Adds a Markdown quotation of the chosen message to the draft.
-    pub fn reply_to_message(&mut self, text: &str) {
+    pub fn reply_to_message(&mut self, composer: Draft, text: &str) {
         let quote = text
             .lines()
             .map(|line| {
@@ -151,9 +151,9 @@ impl AppState {
         let draft = format!(
             "{quote}
 {}",
-            self.draft(Draft::Lead)
+            self.draft(composer)
         );
-        self.edit_draft(Draft::Lead, &draft);
+        self.edit_draft(composer, &draft);
     }
 
     /// The failure associated with the draft, if any.

@@ -3,20 +3,22 @@
 //! Cancel. Tasks have no paused state in the hub, so there is no Pause.
 
 use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::TaskId;
-use threadlane_desktop::{Queued, TaskControl, When, changes, chips, status_label, usage};
-
-use super::{gap_line, link};
-use crate::components::{
-    button, card, decision_scroller, empty_state, heading, meta, page_header, section, status_badge,
+use threadlane_desktop::{
+    Consequence, EmptyRegion, Queued, TaskControl, When, activity_runs, changes, status_label,
+    task_header, usage,
 };
+
+use super::{empty, gap_line, link, menu_item};
+use crate::components::{button, card, decision_scroller, heading, meta, section, status_badge};
 use crate::icons::AppIcon;
 use crate::tokens::{
     BADGE_RADIUS, LG, MD, PANEL_WIDTH, READING_WIDTH, SM, Status, TASK_TIMELINE_BASIS,
-    TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XL, XS,
+    TIMESTAMP_WIDTH, TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -28,7 +30,6 @@ impl Desktop {
         when: &When,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
         let Some(detail) = self.state.task(space, task) else {
             let gap = self
                 .state
@@ -42,7 +43,7 @@ impl Desktop {
             let content = v_flex()
                 .gap(MD)
                 .child(heading(format!("{space} {task}")))
-                .child(gap_line(&gap, "this task", cx))
+                .child(gap_line(&gap, "the task", space, cx))
                 .children(pending);
             return decision_scroller("task", content, &self.decision_scroll)
                 .w_full()
@@ -58,24 +59,45 @@ impl Desktop {
         };
 
         let mut moments = v_flex().gap(SM).child(section("Timeline"));
-        for moment in self.state.task_timeline(space, detail, when) {
-            moments = moments.child(
-                h_flex()
-                    .gap(MD)
-                    .items_start()
-                    .child(
-                        meta(moment.time, cx)
-                            .w(TIMESTAMP_WIDTH)
-                            .flex_none()
-                            .text_right(),
-                    )
-                    .child(div().flex_1().min_w_0().child(self.prose(
-                        format!("task-{space}-{task}-{}", moment.id),
-                        space,
-                        moment.text,
-                        cx,
-                    ))),
-            );
+        let timeline = self.state.task_timeline(space, detail, when);
+        if timeline.is_empty() {
+            moments = moments.child(empty(EmptyRegion::Timeline, cx));
+        }
+        for moment in timeline {
+            let id = format!("task-{space}-{task}-{}", moment.id);
+            let row = h_flex()
+                .gap(MD)
+                .items_start()
+                .id(SharedString::from(id.clone()))
+                .child(
+                    meta(moment.time, cx)
+                        .w(TIMESTAMP_WIDTH)
+                        .flex_none()
+                        .text_right(),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(self.prose(id, space, moment.text, cx)),
+                );
+            moments = if let Some(text) = moment.message {
+                let view = cx.entity().downgrade();
+                moments.child(row.context_menu(move |menu, _, _| {
+                    let copy = text.clone();
+                    let quote = text.clone();
+                    menu.item(menu_item(&view, "Copy text", move |this, _, cx| {
+                        this.copy(copy.clone(), cx)
+                    }))
+                    .item(menu_item(
+                        &view,
+                        "Reply",
+                        move |this, window, cx| this.reply_to(&quote, window, cx),
+                    ))
+                }))
+            } else {
+                moments.child(row)
+            };
         }
         let mut decisions: Vec<_> = detail
             .decisions
@@ -130,7 +152,7 @@ impl Desktop {
             .child(published)
             .child(section("Related"));
         if detail.related.is_empty() {
-            related = related.child(empty_state("None.", None, cx));
+            related = related.child(empty(EmptyRegion::Related, cx));
         }
         for other in &detail.related {
             let relation = if summary.task.depends_on.contains(&other.task.id) {
@@ -158,7 +180,11 @@ impl Desktop {
                             .gap(XS)
                             .flex_wrap()
                             .child(status_badge(status, Status::task(status), cx))
-                            .child(meta(relation, cx)),
+                            .child(meta(relation, cx).flex_1())
+                            .children(
+                                threadlane_desktop::work_elapsed(other, when)
+                                    .map(|elapsed| meta(elapsed, cx).text_right()),
+                            ),
                     ),
             );
         }
@@ -175,57 +201,50 @@ impl Desktop {
             .state
             .task_stop(space, task)
             .map(|target| self.stop_button(space, target, format!("Stop {task}"), cx));
-        let control =
-            match self.state.task_control(space, task) {
-                TaskControl::Ended => None,
-                TaskControl::Cancel => {
-                    let in_space = space.to_owned();
-                    Some(
-                        h_flex().child(
-                            button("task-cancel")
-                                .small()
-                                .ghost()
-                                .icon(AppIcon::X)
-                                .label("Cancel")
-                                .accessibility_label(format!("Cancel {task}"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.state.ask_cancel_task(&in_space, task);
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                }
-                TaskControl::Confirm(text) => {
-                    let in_space = space.to_owned();
-                    Some(
-                        h_flex()
-                            .gap(SM)
-                            .flex_wrap()
-                            .child(div().text_size(TYPE_BODY).child(text))
-                            .child(
-                                button("task-cancel-confirm")
-                                    .small()
-                                    .danger()
-                                    .icon(AppIcon::X)
-                                    .label(format!("Cancel {task}"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.cancel_task(in_space.clone(), task, cx);
-                                    })),
-                            )
-                            .child(button("task-keep").small().label("Keep it").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state.keep_task();
-                                    cx.notify();
-                                }),
-                            )),
-                    )
-                }
-            };
-        let mut chips = chips(detail, when);
-        let status_chip = chips.pop().map(|label| {
-            let status = Status::task(&label);
-            status_badge(label, status, cx)
+        let in_space = space.to_owned();
+        let control = (self.state.task_control(space, task) != TaskControl::Ended).then(|| {
+            button("task-cancel")
+                .small()
+                .ghost()
+                .icon(AppIcon::X)
+                .label("Cancel…")
+                .accessibility_label(format!("Cancel {task}"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.confirm_action(
+                        Consequence::CancelTask(in_space.clone(), task),
+                        window,
+                        cx,
+                    );
+                }))
         });
+        let header = task_header(detail, when);
+        let in_space = space.to_owned();
+        let expanded = self.state.activity_open(space, task);
+        let mut activity = v_flex().gap(XS).items_start().child(
+            button("task-activity")
+                .small()
+                .ghost()
+                .label(if expanded {
+                    "Hide activity"
+                } else {
+                    "Activity"
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.toggle_activity(&in_space, task);
+                    cx.notify();
+                })),
+        );
+        if expanded {
+            let runs = activity_runs(detail, when);
+            if runs.is_empty() {
+                activity = activity.child(empty(EmptyRegion::Activity, cx));
+            }
+            for (run, steps) in runs {
+                activity = activity
+                    .child(section(run))
+                    .children(steps.into_iter().map(|step| meta(step, cx)));
+            }
+        }
         let actions = h_flex()
             .gap(SM)
             .flex_wrap()
@@ -240,22 +259,50 @@ impl Desktop {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.go(project.clone(), cx))),
             )
-            .child(page_header(
-                summary.task.title.clone(),
-                Some(
-                    h_flex()
-                        .gap(XS)
-                        .flex_wrap()
-                        .child(self.copyable("copy-task", task.to_string(), cx))
-                        .children(status_chip),
-                ),
-                Some(actions),
-            ))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_start()
+                    .gap(SM)
+                    .flex_wrap()
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .gap(XS)
+                            .child(
+                                h_flex()
+                                    .gap(XS)
+                                    .child(status_badge(
+                                        header.status,
+                                        Status::task(header.status),
+                                        cx,
+                                    ))
+                                    .child(
+                                        self.copyable("copy-task", task.to_string(), cx)
+                                            .font_family(cx.theme().mono_font_family.clone()),
+                                    ),
+                            )
+                            .child(heading(summary.task.title.clone()))
+                            .child(meta(header.meta, cx)),
+                    )
+                    .child(actions),
+            )
+            .children(
+                header
+                    .latest
+                    .map(|latest| crate::components::live_step(latest, cx)),
+            )
+            .children(
+                self.state
+                    .waiting_task(space, summary)
+                    .map(|why| meta(why, cx)),
+            )
             .child(
                 h_flex()
                     .gap(SM)
                     .flex_wrap()
-                    .children(chips.into_iter().map(|chip| {
+                    .children(header.context.into_iter().map(|chip| {
                         Tag::secondary()
                             .small()
                             .rounded(BADGE_RADIUS)
@@ -263,13 +310,7 @@ impl Desktop {
                             .child(chip)
                     })),
             )
-            .children(
-                summary
-                    .task
-                    .waiting_reason
-                    .clone()
-                    .map(|why| div().text_size(TYPE_BODY).text_color(muted).child(why)),
-            )
+            .child(activity)
             .child(
                 h_flex()
                     .items_start()

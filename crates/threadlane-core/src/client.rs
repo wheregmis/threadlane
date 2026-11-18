@@ -379,16 +379,47 @@ pub struct TaskSummary {
     pub machine: Option<String>,
     /// When its active run started; `None` while no run is active.
     pub running_since: Option<Timestamp>,
+    /// The latest journal step in the active run, if recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_step: Option<RunStep>,
     /// When the task completed, if it is done and its result event is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<Timestamp>,
 }
 
-/// One run of a task, with the name of the machine it ran on.
+/// A one-line description of a backend journal entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunStep {
+    /// The backend event kind.
+    pub kind: String,
+    /// A compact description without tool arguments or output.
+    pub description: String,
+    /// When the runner saw the step.
+    pub at: Timestamp,
+}
+
+/// Usage reported by the backend for a finished run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunUsage {
+    /// Input tokens as counted by the backend.
+    pub input_tokens: Option<u64>,
+    /// Output tokens as counted by the backend.
+    pub output_tokens: Option<u64>,
+    /// Cost in US dollars, if reported.
+    pub cost_usd: Option<f64>,
+}
+
+/// One run of a task, with the name of the machine it ran on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunSummary {
     pub run: Run,
     pub machine: String,
+    /// The run's journal steps, in the order reported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<RunStep>,
+    /// The finished run's reported usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RunUsage>,
 }
 
 /// Everything the task screen shows (Plan.md §11.1 "Task").
@@ -523,6 +554,9 @@ pub enum OverviewReply {
     /// When the lead's run in progress started; `None` while it is idle.
     Lead {
         running_since: Option<Timestamp>,
+        /// The latest journal step in the active lead run, if recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        latest_step: Option<RunStep>,
         /// Whether a new message or a resume is needed before another run.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         stopped: bool,
@@ -550,12 +584,18 @@ pub enum OverviewReply {
 }
 
 /// A lead run with whether it put an ordinary message in the outbox.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LeadRun {
     /// Its status, outcome, timestamps, and recorded rationale.
     pub run: Run,
     /// Whether it queued an ordinary message, including ones yet to be delivered.
     pub sent_message: bool,
+    /// The latest journal step while the run is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_step: Option<RunStep>,
+    /// The finished run's reported usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RunUsage>,
 }
 
 /// The Memory capability (Plan.md §8.3, §11.1 "Memory"): the files a

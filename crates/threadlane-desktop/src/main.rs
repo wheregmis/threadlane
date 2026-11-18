@@ -248,6 +248,11 @@ enum Screen {
     },
     /// The spaces and their machines.
     Machines,
+    /// One machine in a space.
+    Machine {
+        space: String,
+        machine: threadlane_core::ids::MachineId,
+    },
     /// The routines of every space, by space and project.
     Routines,
     /// What each hub reports about itself, and this app's own settings.
@@ -310,6 +315,7 @@ struct Desktop {
     keyboard_focus: FocusHandle,
     sidebar_collapsed: bool,
     decision_scroll: ScrollHandle,
+    board_scroll: ScrollHandle,
     reveal_linked_decision: Option<DecisionKey>,
     conversation_at_bottom: bool,
     conversation_follow: Rc<Cell<bool>>,
@@ -467,18 +473,9 @@ impl Desktop {
                 cx.background_executor().timer(CLOCK_EVERY).await;
                 if this
                     .update(cx, |this, cx| {
-                        let running = match &this.screen {
-                            Screen::Home => !this.state.running().is_empty(),
-                            Screen::Task { space, task } => {
-                                this.state.task(space, *task).is_some_and(|detail| {
-                                    detail.runs.iter().any(|row| {
-                                        row.run.status == threadlane_core::model::RunStatus::Active
-                                    }) || detail.summary.running_since.is_some()
-                                })
-                            }
-                            _ => false,
-                        };
-                        if running || this.state.visible_decisions().next().is_some() {
+                        if this.state.has_ticking_work()
+                            || this.state.visible_decisions().next().is_some()
+                        {
                             cx.notify();
                         }
                     })
@@ -515,6 +512,7 @@ impl Desktop {
             keyboard_focus,
             sidebar_collapsed: false,
             decision_scroll: ScrollHandle::default(),
+            board_scroll: ScrollHandle::default(),
             reveal_linked_decision: None,
             conversation_at_bottom: true,
             conversation_follow: Rc::new(Cell::new(conversation)),
@@ -588,6 +586,8 @@ impl Desktop {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.state.checking_connections();
+        cx.notify();
         let core = Arc::clone(&self.core);
         // The open screen loads once the refresh is in: the Agents screen
         // needs the projects it lists.
@@ -674,6 +674,18 @@ impl Desktop {
                 );
             }
             Screen::Settings => {
+                let projects = self
+                    .state
+                    .targets()
+                    .into_iter()
+                    .map(|(space, project)| (space.to_owned(), project.to_owned()))
+                    .collect();
+                let for_modes = Arc::clone(&core);
+                self.run(
+                    async move { load_modes(&*for_modes.read().await, projects).await },
+                    |this, modes, _| this.state.apply_modes(modes),
+                    cx,
+                );
                 let spaces: Vec<_> = self
                     .state
                     .spaces()
@@ -699,6 +711,17 @@ impl Desktop {
                             this.state.apply_metrics(space, metrics);
                         }
                     },
+                    cx,
+                );
+            }
+            Screen::Machine { space, .. } => {
+                let when = self.when();
+                self.run(
+                    async move {
+                        threadlane_desktop::load_machine_history(&*core.read().await, &space, &when)
+                            .await
+                    },
+                    |this, loaded, _| this.state.apply_machine_history(loaded),
                     cx,
                 );
             }
@@ -812,6 +835,7 @@ impl Desktop {
                 DecisionScroll::Card
             }));
             self.decision_scroll = ScrollHandle::default();
+            self.board_scroll = ScrollHandle::default();
         }
         self.screen = screen;
         self.load_screen(cx);
@@ -1016,8 +1040,23 @@ impl Desktop {
             return;
         };
         let content = save.then(|| self.memory_editor.read(cx).value().to_string());
+        self.write_memory(space, project, path, content, cx);
+    }
+
+    fn write_memory(
+        &mut self,
+        space: String,
+        project: String,
+        path: String,
+        content: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let core = Arc::clone(&self.core);
-        let verb = if save { "Saving" } else { "Deleting" };
+        let verb = if content.is_some() {
+            "Saving"
+        } else {
+            "Deleting"
+        };
         self.state.report(Activity::Working(format!(
             "{verb} {path} in {space} / {project}…"
         )));
@@ -1365,6 +1404,7 @@ impl Render for Desktop {
             Screen::Agents => self.agents(cx),
             Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),
+            Screen::Machine { space, machine } => self.machine(&space, machine, &when, cx),
             Screen::Routines => self.routines_screen(&when, cx),
             Screen::Settings => self.settings(&when, cx),
         };
@@ -1390,7 +1430,7 @@ impl Render for Desktop {
             .text_size(TYPE_BODY)
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .children((!self.sidebar_collapsed).then(|| self.sidebar(cx)))
+            .children((!self.sidebar_collapsed).then(|| self.sidebar(&when, cx)))
             .child(
                 v_flex()
                     .flex_1()
@@ -1398,6 +1438,12 @@ impl Render for Desktop {
                     .min_w_0()
                     .p(LG)
                     .gap(MD)
+                    .children(
+                        self.state.connection_banner().map(|text| {
+                            component::alert::Alert::warning("unreachable-spaces", text)
+                        }),
+                    )
+                    .children(self.page_connections(&when, cx))
                     .child(body)
                     .children(self.activity(cx)),
             )

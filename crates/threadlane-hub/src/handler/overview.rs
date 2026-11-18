@@ -5,10 +5,12 @@ use std::collections::HashMap;
 
 use threadlane_core::client::{
     ApiError, ConversationEntry, DigestResult, FeedItem, LeadRun, OverviewReply, OverviewRequest,
-    RecordedEvent, RunSummary, TaskDetail, TaskSummary,
+    RecordedEvent, RunStep, RunSummary, RunUsage, TaskDetail, TaskSummary,
 };
 use threadlane_core::ids::{AgentId, MachineId, ProjectId};
-use threadlane_core::model::{Event, OutboxMessage, RunOutcome, RunStatus, Task, TaskStatus};
+use threadlane_core::model::{
+    Event, JournalEntry, OutboxMessage, Run, RunOutcome, RunStatus, Task, TaskStatus,
+};
 use threadlane_core::store::{
     DecisionStore, InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore, TaskStore,
 };
@@ -68,9 +70,90 @@ impl Names {
     }
 }
 
+fn one_line(text: &str) -> String {
+    const LIMIT: usize = 160;
+    let mut chars = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .trim()
+        .chars();
+    let mut line: String = chars.by_ref().take(LIMIT).collect();
+    if chars.next().is_some() {
+        line.push('…');
+    }
+    line
+}
+
+fn step(entry: &JournalEntry) -> Option<RunStep> {
+    let kind = entry.entry["type"].as_str()?;
+    let description = match kind {
+        "tool_use" => entry.entry["name"].as_str().map_or_else(
+            || "Called a tool".to_owned(),
+            |name| format!("Called {}", one_line(name)),
+        ),
+        "text" => {
+            let text = one_line(entry.entry["text"].as_str().unwrap_or_default());
+            if text.is_empty() {
+                "Message".to_owned()
+            } else {
+                text
+            }
+        }
+        "thinking" | "reasoning" => "Thinking".to_owned(),
+        "session_started" => "Started the session".to_owned(),
+        "session_missing" => "Session unavailable".to_owned(),
+        "tool_result" if entry.entry["is_error"].as_bool() == Some(true) => {
+            "Tool failed".to_owned()
+        }
+        "tool_result" => "Tool returned".to_owned(),
+        "usage_limit" => "Reached the account limit".to_owned(),
+        "turn_boundary" => "Finished a turn".to_owned(),
+        "finished" => "Finished the run".to_owned(),
+        "failed" => "Run failed".to_owned(),
+        _ => "Run activity".to_owned(),
+    };
+    Some(RunStep {
+        kind: kind.to_owned(),
+        description,
+        at: entry.at,
+    })
+}
+
+fn usage(result: &JournalEntry) -> Option<RunUsage> {
+    let reported = &result.entry["usage"];
+    let input_tokens = reported["usage"]["input_tokens"].as_u64();
+    let output_tokens = reported["usage"]["output_tokens"].as_u64();
+    let cost_usd = reported["total_cost_usd"].as_f64();
+    (input_tokens.is_some() || output_tokens.is_some() || cost_usd.is_some()).then_some(RunUsage {
+        input_tokens,
+        output_tokens,
+        cost_usd,
+    })
+}
+
+async fn latest(db: &HubDb, run: Option<&Run>) -> Result<Option<RunStep>, ApiError> {
+    let Some(run) = run else { return Ok(None) };
+    Ok(db
+        .latest_journal_entry(run.id, None)
+        .await
+        .map_err(api_error)?
+        .as_ref()
+        .and_then(step))
+}
+
 /// `task` with its names, and its active run's machine and start.
-async fn summary(db: &HubDb, names: &Names, task: Task) -> Result<TaskSummary, ApiError> {
-    let active = if task.status == TaskStatus::Running {
+async fn summary(
+    db: &HubDb,
+    names: &Names,
+    task: Task,
+    runs: Option<&[RunSummary]>,
+) -> Result<TaskSummary, ApiError> {
+    let active = if let Some(runs) = runs {
+        runs.iter()
+            .rfind(|row| row.run.status == RunStatus::Active)
+            .map(|row| row.run.clone())
+    } else if task.status == TaskStatus::Running {
         db.lane_runs(task.lane_id)
             .await
             .map_err(api_error)?
@@ -84,6 +167,13 @@ async fn summary(db: &HubDb, names: &Names, task: Task) -> Result<TaskSummary, A
         .map(|run| run.machine_id)
         .or(task.last_machine_id)
         .map(|id| names.machine(id));
+    let latest_step = if let Some(runs) = runs {
+        runs.iter()
+            .rfind(|row| row.run.status == RunStatus::Active)
+            .and_then(|row| row.steps.last().cloned())
+    } else {
+        latest(db, active.as_ref()).await?
+    };
     Ok(TaskSummary {
         project: names
             .projects
@@ -97,6 +187,7 @@ async fn summary(db: &HubDb, names: &Names, task: Task) -> Result<TaskSummary, A
             .unwrap_or_else(|| task.agent_id.to_string()),
         machine,
         running_since: active.map(|run| run.started_at),
+        latest_step,
         completed_at: if task.status == TaskStatus::Done {
             db.task_completed_at(task.id).await.map_err(api_error)?
         } else {
@@ -113,7 +204,7 @@ async fn summaries(
 ) -> Result<Vec<TaskSummary>, ApiError> {
     let mut summaries = Vec::with_capacity(tasks.len());
     for task in tasks {
-        summaries.push(summary(db, names, task).await?);
+        summaries.push(summary(db, names, task, None).await?);
     }
     Ok(summaries)
 }
@@ -219,16 +310,25 @@ pub(super) async fn handle(
                 .filter(|repository| task.repositories.contains(&repository.id))
                 .map(|repository| repository.name)
                 .collect();
-            let runs = db
-                .lane_runs(task.lane_id)
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .map(|run| RunSummary {
+            let mut runs = Vec::new();
+            for run in db.lane_runs(task.lane_id).await.map_err(api_error)? {
+                let journal = db.journal(run.id).await.map_err(api_error)?;
+                runs.push(RunSummary {
                     machine: names.machine(run.machine_id),
+                    usage: if run.status == RunStatus::Active {
+                        None
+                    } else {
+                        journal
+                            .iter()
+                            .rev()
+                            .find(|entry| entry.entry["type"] == "finished")
+                            .and_then(usage)
+                    },
+                    steps: journal.iter().filter_map(step).collect(),
                     run,
-                })
-                .collect();
+                });
+            }
+            let summary = summary(db, &names, task.clone(), Some(&runs)).await?;
             let decisions = db.lane_decisions(task.lane_id).await.map_err(api_error)?;
             let related = db
                 .tasks(task.project_id)
@@ -260,7 +360,7 @@ pub(super) async fn handle(
                     decisions,
                     related,
                     messages,
-                    summary: summary(db, &names, task).await?,
+                    summary,
                     stopped,
                     proposed_by,
                 }),
@@ -329,19 +429,19 @@ pub(super) async fn handle(
         }),
         OverviewRequest::Lead { project } => {
             let project = api.project_named(project.as_deref()).await?;
-            let running_since = db
+            let active = db
                 .lane_runs(project.lead_lane_id)
                 .await
                 .map_err(api_error)?
                 .into_iter()
-                .rfind(|run| run.status == RunStatus::Active)
-                .map(|run| run.started_at);
+                .rfind(|run| run.status == RunStatus::Active);
             let stopped = db
                 .lane_stopped(project.lead_lane_id)
                 .await
                 .map_err(api_error)?;
             Ok(OverviewReply::Lead {
-                running_since,
+                latest_step: latest(db, active.as_ref()).await?,
+                running_since: active.map(|run| run.started_at),
                 stopped,
             })
         }
@@ -384,7 +484,21 @@ pub(super) async fn handle(
                     Some(outcome) => outcome == RunOutcome::Sent,
                     None => db.count_for_run(run.id).await.map_err(api_error)? > 0,
                 };
-                listed.push(LeadRun { run, sent_message });
+                let (latest_step, usage) = if run.status == RunStatus::Active {
+                    (latest(db, Some(&run)).await?, None)
+                } else {
+                    let result = db
+                        .latest_journal_entry(run.id, Some("finished"))
+                        .await
+                        .map_err(api_error)?;
+                    (None, result.as_ref().and_then(usage))
+                };
+                listed.push(LeadRun {
+                    usage,
+                    latest_step,
+                    run,
+                    sent_message,
+                });
             }
             Ok(OverviewReply::LeadRuns { runs: listed })
         }

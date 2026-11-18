@@ -10,8 +10,8 @@ use threadlane_core::client::{
 };
 use threadlane_core::ids::{LaneId, ProjectId, TaskId};
 use threadlane_core::model::{
-    LaneKind, Mode, NewAgent, NewBinding, NewOutboxMessage, NewProject, NewTask, OutboxKind,
-    OutboxMessage, RunOutcome, RunStatus, TaskOrigin, TaskStatus, Urgency,
+    JournalEntry, LaneKind, Mode, NewAgent, NewBinding, NewOutboxMessage, NewProject, NewTask,
+    OutboxKind, OutboxMessage, RunOutcome, RunStatus, TaskOrigin, TaskStatus, Urgency,
 };
 use threadlane_core::store::{MachineStore, OrgStore, OutboxStore, TaskStore};
 use threadlane_core::time::Clock;
@@ -62,9 +62,15 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
         .create_task(None, &new("Docs", vec![fix.id]))
         .await
         .unwrap();
-    let (_lease, run) = begin(&*hub.link).await;
+    let (lease, run) = begin(&*hub.link).await;
     assert_eq!(run.lane_kind, LaneKind::Task);
     let started = hub.clock.now();
+    hub.clock.advance(Duration::from_secs(5));
+    let step_at = hub.clock.now();
+    hub.link.append(&lease, &[
+        JournalEntry { run_id: run.run_id, seq: 1, at: started, entry: json!({"type": "text", "text": "Checking the build.\nSecond line."}) },
+        JournalEntry { run_id: run.run_id, seq: 2, at: step_at, entry: json!({"type": "tool_use", "name": "Bash", "input": {"command": "do work"}}) },
+    ]).await.unwrap();
     let machine = hub.db.machines().await.unwrap()[0].name.clone();
 
     let OverviewReply::Tasks { tasks } =
@@ -98,6 +104,11 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
         ]
     );
     assert_eq!(tasks[0].project, "General");
+    assert!(tasks[1].latest_step.is_none());
+    let latest = tasks[0].latest_step.as_ref().unwrap();
+    assert_eq!(latest.kind, "tool_use");
+    assert_eq!(latest.description, "Called Bash");
+    assert_eq!(latest.at, step_at);
 
     let OverviewReply::Tasks { tasks: running } = overview(&hub, OverviewRequest::Running).await
     else {
@@ -107,6 +118,7 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
         running.iter().map(|t| t.task.id).collect::<Vec<_>>(),
         [fix.id]
     );
+    assert_eq!(running[0].latest_step.as_ref(), Some(latest));
 
     let OverviewReply::Task { task } = overview(&hub, OverviewRequest::Task { task: fix.id }).await
     else {
@@ -117,6 +129,9 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
     assert_eq!(task.runs.len(), 1);
     assert_eq!(task.runs[0].run.status, RunStatus::Active);
     assert_eq!(task.runs[0].machine, machine);
+    assert_eq!(task.summary.latest_step.as_ref(), Some(latest));
+    assert_eq!(task.runs[0].steps[0].description, "Checking the build.");
+    assert!(task.runs[0].usage.is_none());
     assert!(task.decisions.is_empty());
     assert!(!task.stopped);
     hub.api
@@ -245,6 +260,7 @@ async fn lead_says_since_when_the_lead_is_working() {
     assert_eq!(
         lead(None).await.unwrap(),
         OverviewReply::Lead {
+            latest_step: None,
             running_since: None,
             stopped: false,
         },
@@ -257,6 +273,7 @@ async fn lead_says_since_when_the_lead_is_working() {
     assert_eq!(
         lead(None).await.unwrap(),
         OverviewReply::Lead {
+            latest_step: None,
             running_since: Some(hub.clock.now()),
             stopped: false,
         },
@@ -606,4 +623,61 @@ async fn stage_b_conversations_share_the_digest_and_route_a_dead_delivery_to_its
         matches!(&entries[..], [item, ConversationEntry::DeliveryFailure { text, .. }]
         if *item == delivered && text.ends_with("Adapter rejected the result"))
     );
+}
+
+#[tokio::test]
+async fn overview_lead_exposes_the_latest_step_then_backend_usage_after_completion() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    hub.send("usage-1", "Check the code").await;
+    let (lease, run) = begin(&*hub.link).await;
+    let at = hub.clock.now();
+    hub.link
+        .append(
+            &lease,
+            &[JournalEntry {
+                run_id: run.run_id,
+                seq: 1,
+                at,
+                entry: json!({"type": "thinking"}),
+            }],
+        )
+        .await
+        .unwrap();
+    let OverviewReply::Lead {
+        latest_step: Some(step),
+        ..
+    } = overview(&hub, OverviewRequest::Lead { project: None }).await
+    else {
+        panic!("active lead")
+    };
+    assert_eq!(
+        (step.kind.as_str(), step.description.as_str(), step.at),
+        ("thinking", "Thinking", at)
+    );
+    hub.link
+        .append(
+            &lease,
+            &[JournalEntry {
+                run_id: run.run_id,
+                seq: 2,
+                at,
+                entry: json!({"type": "finished", "usage": {
+                    "usage": {"input_tokens": 21, "output_tokens": 13}, "total_cost_usd": 0.0123,
+                }}),
+            }],
+        )
+        .await
+        .unwrap();
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    let OverviewReply::LeadRuns { runs } =
+        overview(&hub, OverviewRequest::LeadRuns { project: None }).await
+    else {
+        panic!("lead runs")
+    };
+    assert!(runs[0].latest_step.is_none());
+    let usage = runs[0].usage.as_ref().expect("reported usage");
+    assert_eq!(usage.input_tokens, Some(21));
+    assert_eq!(usage.output_tokens, Some(13));
+    assert_eq!(usage.cost_usd, Some(0.0123));
 }
