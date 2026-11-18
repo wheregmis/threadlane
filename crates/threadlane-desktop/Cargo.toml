@@ -11,7 +11,7 @@ name = "threadlane-desktop"
 path = "src/main.rs"
 
 [dependencies]
-image.workspace = true
+image = { workspace = true, features = ["bmp", "tiff"] }
 gpui-kit.workspace = true
 serde_json.workspace = true
 threadlane-client.workspace = true
