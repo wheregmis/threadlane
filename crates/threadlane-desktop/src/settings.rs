@@ -12,6 +12,36 @@ use crate::{Alert, AppState, describe};
 /// The file in the client directory that holds this app's own settings.
 pub const SETTINGS_FILE: &str = "desktop.json";
 
+/// How the desktop chooses its light or dark theme.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Appearance {
+    /// Follow the window's system appearance.
+    #[default]
+    System,
+    /// Always use the light theme.
+    Light,
+    /// Always use the dark theme.
+    Dark,
+}
+
+impl Appearance {
+    fn from_saved(saved: &Json) -> Self {
+        match saved["appearance"].as_str() {
+            Some("light") => Self::Light,
+            Some("dark") => Self::Dark,
+            _ => Self::System,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
 /// Which system notifications the app raises. Both are on until you turn
 /// them off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,13 +126,36 @@ impl AppState {
         self.client_dir.as_deref()
     }
 
-    /// Takes where this app keeps its files, and the notification settings
-    /// saved there.
+    /// Sets the client directory and reads its saved desktop preferences.
     pub fn set_client_dir(&mut self, dir: PathBuf) {
         self.notifications = Notifications::load(&dir);
+        let saved = read(&dir);
         self.last_targets =
-            serde_json::from_value(read(&dir)["last_projects"].clone()).unwrap_or_default();
+            serde_json::from_value(saved["last_projects"].clone()).unwrap_or_default();
+        self.appearance = Appearance::from_saved(&saved);
         self.client_dir = Some(dir);
+    }
+
+    /// Which appearance the desktop should use.
+    #[must_use]
+    pub fn appearance(&self) -> Appearance {
+        self.appearance
+    }
+
+    /// Applies the chosen appearance and saves it alongside the other preferences.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the preference could not be saved. It still applies this session.
+    pub fn set_appearance(&mut self, appearance: Appearance) -> Result<(), String> {
+        self.appearance = appearance;
+        let Some(dir) = &self.client_dir else {
+            return Ok(());
+        };
+        let mut saved = read(dir);
+        saved["appearance"] = json!(appearance.key());
+        write(dir, &saved)
+            .map_err(|error| format!("Could not save {SETTINGS_FILE}: {}", describe(&error)))
     }
 
     /// Which system notifications the app raises.

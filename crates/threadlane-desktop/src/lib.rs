@@ -59,7 +59,8 @@ pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
 };
 pub use settings::{
-    Notifications, PACING_FIELDS, PacingField, SETTINGS_FILE, SpaceRow, load_metrics, parse_pacing,
+    Appearance, Notifications, PACING_FIELDS, PacingField, SETTINGS_FILE, SpaceRow, load_metrics,
+    parse_pacing,
 };
 pub use tasks::{
     BoardCard, Changes, Column, Moment, changes, chips, running_elapsed, status_label, timeline,
@@ -951,6 +952,7 @@ pub struct AppState {
     recorded_open: HashSet<InSpace<String>>,
     /// Which system notifications the app raises.
     notifications: Notifications,
+    appearance: Appearance,
     /// Where this app keeps its files.
     client_dir: Option<PathBuf>,
     /// The agent row expanded on a project's Agents tab: space, project,

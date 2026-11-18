@@ -3,49 +3,45 @@
 //! hub admitted, a join code for another app, unpairing this app, and
 //! pairing it with another space.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_desktop::{Part, Reach, When, machine_row};
 
-use super::{gap_line, heading, section};
+use super::gap_line;
 use crate::Desktop;
+use crate::components::{button, card, empty_state, field, heading, meta, section, status_badge};
+use crate::icons::AppIcon;
+use crate::tokens::{
+    JOIN_NAME_WIDTH, KEY_RADIUS, READING_WIDTH, ROW_RADIUS, SM, SPACE_NAME_WIDTH, Status,
+    TYPE_BODY, TYPE_META, XL, XS,
+};
 
 impl Desktop {
     pub(crate) fn machines(&self, when: &When, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let mut screen = v_flex()
-            .id("machines")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .gap_5()
+            .overflow_y_scrollbar()
+            .id("machines")
+            .gap(XL)
             .child(heading("Spaces and machines"));
         if self.state.spaces().is_empty() {
-            screen = screen.child(div().text_color(muted).child("No hub is paired."));
+            screen = screen.child(empty_state("No hub is paired.", None, cx));
         }
         for space in self.state.spaces() {
-            let reach = match &space.reach {
-                Reach::Unknown => "asking…".to_owned(),
-                Reach::Reachable => "reachable".to_owned(),
-                Reach::Unreachable(why) => format!("out of reach: {why}"),
+            let (reach, status) = match &space.reach {
+                Reach::Unknown => ("asking…".to_owned(), Status::Idle),
+                Reach::Reachable => ("reachable".to_owned(), Status::Done),
+                Reach::Unreachable(why) => (format!("out of reach: {why}"), Status::Failed),
             };
-            let mut part = v_flex()
-                .gap_2()
-                .p_3()
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded(cx.theme().radius)
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(section(space.name.clone()))
-                        .child(div().text_sm().text_color(muted).child(reach)),
-                )
+            let mut part = card(cx)
+                .child(section(space.name.clone()).child(status_badge(reach, status, cx).min_w_0()))
                 .child(match space.gap(Part::Machines) {
                     Some(gap) => gap_line(&gap, "the machines", cx),
-                    None => div().text_sm().text_color(muted).child(format!(
+                    None => div().text_size(TYPE_BODY).text_color(muted).child(format!(
                         "{} machines joined · {} running",
                         space.machines.len(),
                         space.running.len()
@@ -56,27 +52,24 @@ impl Desktop {
                 let row = machine_row(machine, when);
                 part = part.child(
                     v_flex()
-                        .gap_1()
-                        .pt_2()
+                        .gap(XS)
+                        .pt(SM)
                         .border_t_1()
                         .border_color(cx.theme().border)
                         .child(
                             h_flex()
-                                .gap_2()
+                                .gap(SM)
                                 .child(div().font_weight(FontWeight::SEMIBOLD).child(row.name))
-                                .child(div().text_sm().text_color(muted).child(row.state)),
+                                .flex_wrap()
+                                .justify_between()
+                                .child(status_badge(row.state, machine.status.into(), cx)),
                         )
-                        .child(div().text_sm().child(format!(
+                        .child(div().text_size(TYPE_BODY).child(format!(
                             "Tools: {} · {}",
                             row.backends.join(" · "),
                             row.gh
                         )))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(format!("Load: {}", row.load)),
-                        ),
+                        .child(meta(format!("Load: {}", row.load), cx).text_right()),
                 );
             }
 
@@ -93,7 +86,7 @@ impl Desktop {
                     );
                 part = part.child(
                     div()
-                        .text_sm()
+                        .text_size(TYPE_BODY)
                         .child(format!("{} · {} · {limit}", account.label, account.backend)),
                 );
             }
@@ -104,7 +97,7 @@ impl Desktop {
             } else if space.clients.is_empty() {
                 part = part.child(
                     div()
-                        .text_sm()
+                        .text_size(TYPE_BODY)
                         .text_color(muted)
                         .child("None over the network; this app reaches it on this computer."),
                 );
@@ -115,19 +108,36 @@ impl Desktop {
                 } else {
                     "revoked"
                 };
-                part = part.child(div().text_sm().child(format!(
-                    "{} · {state} {}",
-                    client.name,
-                    when.moment(client.admitted_at)
-                )));
+                part = part.child(
+                    h_flex()
+                        .gap(SM)
+                        .flex_wrap()
+                        .justify_between()
+                        .child(client.name.clone())
+                        .child(
+                            h_flex()
+                                .gap(SM)
+                                .child(status_badge(
+                                    state,
+                                    if client.is_active() {
+                                        Status::Done
+                                    } else {
+                                        Status::Failed
+                                    },
+                                    cx,
+                                ))
+                                .child(meta(when.moment(client.admitted_at), cx).text_right()),
+                        ),
+                );
             }
 
             let name = space.name.clone();
             part = part.child(
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .child(
-                        Button::new(SharedString::from(format!("code-{name}")))
+                        button(SharedString::from(format!("code-{name}")))
+                            .icon(AppIcon::KeyRound)
                             .label("New join code")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.issue_code(name.clone(), cx);
@@ -135,7 +145,7 @@ impl Desktop {
                     )
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(TYPE_BODY)
                             .text_color(muted)
                             .child("Pairs another app with this space. It works once."),
                     ),
@@ -143,9 +153,10 @@ impl Desktop {
             if let Some(code) = self.state.code(&space.name) {
                 part = part.child(
                     v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(code.code.clone()))
-                        .child(div().text_xs().text_color(muted).child(format!(
+                        .gap(XS)
+                        .child(div().self_start().px(SM).py(XS).rounded(KEY_RADIUS)
+                            .bg(cx.theme().muted).text_size(TYPE_BODY).child(code.code.clone()))
+                        .child(div().text_size(TYPE_META).text_color(muted).child(format!(
                             "Run `threadlane hub join <name> <code>` on the other computer before {}.",
                             when.time(code.expires_at)
                         ))),
@@ -153,7 +164,7 @@ impl Desktop {
             }
             let name = space.name.clone();
             part = if self.state.unpairing() == Some(space.name.as_str()) {
-                let cancel = Button::new(SharedString::from(format!("unpair-cancel-{name}")))
+                let cancel = button(SharedString::from(format!("unpair-cancel-{name}")))
                     .label("Keep it")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.state.cancel_unpair();
@@ -161,22 +172,22 @@ impl Desktop {
                     }));
                 part.child(
                     v_flex()
-                        .gap_2()
-                        .pt_2()
+                        .gap(SM)
+                        .pt(SM)
                         .border_t_1()
                         .border_color(cx.theme().border)
-                        .child(div().text_sm().child(format!(
+                        .child(div().text_size(TYPE_BODY).child(format!(
                             "Unpair this app from {name}? It forgets the hub and its key here;                              the hub keeps its projects and memory. Pairing again needs a new                              join code."
                         )))
                         .child(
                             h_flex()
-                                .gap_2()
+                                .gap(SM)
                                 .child(
-                                    Button::new(SharedString::from(format!(
+                                    button(SharedString::from(format!(
                                         "unpair-confirm-{name}"
                                     )))
                                     .danger()
-                                    .label(format!("Unpair {name}"))
+                                    .icon(AppIcon::Unlink).label(format!("Unpair {name}"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.unpair_space(name.clone(), cx);
                                     })),
@@ -186,8 +197,9 @@ impl Desktop {
                 )
             } else {
                 part.child(
-                    Button::new(SharedString::from(format!("unpair-{name}")))
+                    button(SharedString::from(format!("unpair-{name}")))
                         .ghost()
+                        .icon(AppIcon::Unlink)
                         .label("Unpair this app")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.ask_unpair(&name);
@@ -199,16 +211,11 @@ impl Desktop {
         }
         screen
             .child(
-                v_flex()
-                    .gap_2()
-                    .p_3()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(cx.theme().radius)
+                card(cx)
                     .child(section("+ Add space"))
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(TYPE_BODY)
                             .text_color(muted)
                             .child("Pair this app with another hub using its join code."),
                     )
@@ -220,12 +227,18 @@ impl Desktop {
     /// The name and join code of a space to pair, and Pair.
     fn join_form(&self, cx: &mut Context<Self>) -> Div {
         h_flex()
-            .gap_2()
-            .child(div().w(px(180.)).child(Input::new(&self.space_name)))
-            .child(div().flex_1().child(Input::new(&self.join_code)))
+            .gap(SM)
             .child(
-                Button::new("pair-space")
+                div()
+                    .w_full()
+                    .max_w(JOIN_NAME_WIDTH)
+                    .child(field(&self.space_name)),
+            )
+            .child(div().flex_1().child(field(&self.join_code)))
+            .child(
+                button("pair-space")
                     .primary()
+                    .icon(AppIcon::Link)
                     .label("Pair")
                     .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
             )
@@ -236,18 +249,14 @@ impl Desktop {
     pub(crate) fn first_run(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let step = |title: &'static str, text: &'static str| {
-            v_flex()
-                .gap_1()
-                .child(section(title))
-                .child(div().text_sm().text_color(muted).child(text))
+            card(cx).child(section(title)).child(meta(text, cx))
         };
         v_flex()
-            .id("first-run")
             .flex_1()
             .min_h_0()
-            .max_w(px(720.))
-            .overflow_y_scroll()
-            .gap_5()
+            .w_full().max_w(READING_WIDTH).self_center()
+            .overflow_y_scrollbar().id("first-run")
+            .gap(XL)
             .child(heading("Pair this app with a hub"))
             .child(div().text_color(muted).child(
                 "A hub keeps one space's projects, agents and memory. This app shows every \
@@ -261,10 +270,10 @@ impl Desktop {
                 )
                 .child(
                     div()
-                        .p_2()
-                        .text_sm()
+                        .p(SM)
+                        .text_size(TYPE_BODY)
                         .bg(cx.theme().muted)
-                        .rounded(cx.theme().radius)
+                        .rounded(ROW_RADIUS)
                         .child("threadlane-hub --data-dir ~/threadlane/work run"),
                 ),
             )
@@ -274,26 +283,26 @@ impl Desktop {
                     "Name the space, then give the hub's data directory if it runs on this \
                      computer, or a join code from `threadlane pair-code` on a computer already paired.",
                 )
-                .child(div().w(px(240.)).child(Input::new(&self.space_name)))
+                .child(div().w_full().max_w(SPACE_NAME_WIDTH).child(field(&self.space_name)))
                 .child(
                     h_flex()
-                        .gap_2()
-                        .child(div().flex_1().child(Input::new(&self.hub_dir)))
+                        .gap(SM)
+                        .child(div().flex_1().child(field(&self.hub_dir)))
                         .child(
-                            Button::new("pair-directory")
+                            button("pair-directory")
                                 .primary()
-                                .label("Pair by directory")
+                                .icon(AppIcon::FolderOpen).label("Pair by directory")
                                 .on_click(cx.listener(|this, _, _, cx| this.pair_directory(cx))),
                         ),
                 )
                 .child(
                     h_flex()
-                        .gap_2()
-                        .child(div().flex_1().child(Input::new(&self.join_code)))
+                        .gap(SM)
+                        .child(div().flex_1().child(field(&self.join_code)))
                         .child(
-                            Button::new("pair-code")
+                            button("pair-code")
                                 .primary()
-                                .label("Pair by join code")
+                                .icon(AppIcon::Link).label("Pair by join code")
                                 .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
                         ),
                 ),

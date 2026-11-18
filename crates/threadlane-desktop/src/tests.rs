@@ -4035,3 +4035,33 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
             .contains("metrics unavailable")
     );
 }
+
+#[test]
+fn desktop_appearance_round_trips_with_existing_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(SETTINGS_FILE);
+    std::fs::write(
+        &path,
+        r#"{"notifications":{"decisions":false},"last_projects":{"work":"general"}}"#,
+    )
+    .unwrap();
+    let mut state = AppState::default();
+    state.set_client_dir(dir.path().to_owned());
+    assert_eq!(state.appearance(), Appearance::System);
+
+    for chosen in [Appearance::Dark, Appearance::Light, Appearance::System] {
+        state.set_appearance(chosen).unwrap();
+        let mut reloaded = AppState::default();
+        reloaded.set_client_dir(dir.path().to_owned());
+        assert_eq!(reloaded.appearance(), chosen);
+        assert!(!reloaded.notifications().decisions);
+        assert_eq!(
+            reloaded.last_targets.get("work").map(String::as_str),
+            Some("general")
+        );
+    }
+
+    std::fs::write(&path, r#"{"appearance":"unknown"}"#).unwrap();
+    state.set_client_dir(dir.path().to_owned());
+    assert_eq!(state.appearance(), Appearance::System);
+}

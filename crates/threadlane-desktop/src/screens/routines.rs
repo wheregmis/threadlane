@@ -2,15 +2,21 @@
 //! each routine and follow-up with what it does, when, who set it, and
 //! Pause, Resume and Cancel; the tab also has "+ New routine".
 
-use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
+use gpui_kit::component::group_box::GroupBox;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::TimerId;
 use threadlane_core::model::Weekday;
 use threadlane_desktop::{Cadence, RoutineRow, When};
 
-use super::{gap_line, heading, link, section};
+use super::{gap_line, link};
+use crate::components::{button, card, empty_state, field, heading, meta, section, status_badge};
+use crate::icons::AppIcon;
+use crate::tokens::{
+    INLINE_LABEL_WIDTH, MD, SHORT_FIELD_WIDTH, SM, Status, TYPE_BODY, TYPE_META, XL, ZONE_WIDTH,
+};
 use crate::{Desktop, Screen, Tab, TimerChange};
 
 impl Desktop {
@@ -22,24 +28,22 @@ impl Desktop {
         when: &When,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
         let mut list = v_flex()
-            .id("routines")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .gap_3()
+            .overflow_y_scrollbar()
+            .id("routines")
+            .gap(MD)
             .child(section("Routines and follow-ups"));
         let rows = self.state.routine_rows(space, project, when);
         match self.state.routines_gap(space, project) {
             Some(gap) => list = list.child(gap_line(&gap, "the routines", cx)),
             None if rows.is_empty() => {
-                list = list.child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child("No routines yet. Add one, or an agent may set a follow-up."),
-                );
+                list = list.child(empty_state(
+                    "No routines yet.",
+                    Some("Add one, or an agent may set a follow-up."),
+                    cx,
+                ));
             }
             None => {}
         }
@@ -52,24 +56,25 @@ impl Desktop {
 
     /// Every space's routines, by space and project.
     pub(crate) fn routines_screen(&self, when: &When, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
         let mut screen = v_flex()
-            .id("routines-all")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .gap_3()
+            .overflow_y_scrollbar()
+            .id("routines-all")
+            .gap(XL)
             .child(heading("Routines"));
         let groups = self.state.routine_groups(when);
         if groups.is_empty() {
-            screen = screen.child(div().text_color(muted).child(
-                "No routines or follow-ups in any project. Add one from a project's Routines tab.",
+            screen = screen.child(empty_state(
+                "No routines or follow-ups in any project.",
+                Some("Add one from a project's Routines tab."),
+                cx,
             ));
         }
         let mut last_space = None;
         for group in groups {
             if last_space.as_deref() != Some(group.space.as_str()) {
-                screen = screen.child(heading(group.space.clone()).pt_2());
+                screen = screen.child(section(group.space.clone()).pt(SM));
                 last_space = Some(group.space.clone());
             }
             let open = Screen::Project {
@@ -99,25 +104,32 @@ impl Desktop {
     }
 
     /// One routine: what, when, who, and its actions.
-    fn routine(&self, space: &str, project: &str, row: RoutineRow, cx: &mut Context<Self>) -> Div {
+    fn routine(
+        &self,
+        space: &str,
+        project: &str,
+        row: RoutineRow,
+        cx: &mut Context<Self>,
+    ) -> GroupBox {
         let muted = cx.theme().muted_foreground;
         let key = format!("{space}-{project}-{}", row.id);
         let id = row.id;
-        let mut actions = h_flex().gap_2();
+        let mut actions = h_flex().gap(SM);
         if row.confirming {
             actions = actions
-                .child(div().text_sm().child(format!(
+                .child(div().text_size(TYPE_BODY).child(format!(
                     "Cancel routine {id} for good? It cannot be resumed."
                 )))
                 .child(
-                    Button::new(SharedString::from(format!("timer-cancel-confirm-{key}")))
+                    button(SharedString::from(format!("timer-cancel-confirm-{key}")))
                         .small()
                         .danger()
+                        .icon(AppIcon::X)
                         .label(format!("Cancel routine {id}"))
                         .on_click(on_timer(space, project, id, TimerChange::Cancel, cx)),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("timer-keep-{key}")))
+                    button(SharedString::from(format!("timer-keep-{key}")))
                         .small()
                         .label("Keep it")
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -134,16 +146,22 @@ impl Desktop {
             let in_space = space.to_owned();
             actions = actions
                 .child(
-                    Button::new(SharedString::from(format!("timer-{label}-{key}")))
+                    button(SharedString::from(format!("timer-{label}-{key}")))
                         .small()
+                        .icon(if row.paused {
+                            AppIcon::Play
+                        } else {
+                            AppIcon::Pause
+                        })
                         .label(label)
                         .accessibility_label(format!("{label} routine {id}"))
                         .on_click(on_timer(space, project, id, change, cx)),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("timer-cancel-{key}")))
+                    button(SharedString::from(format!("timer-cancel-{key}")))
                         .small()
                         .ghost()
+                        .icon(AppIcon::X)
                         .label("Cancel")
                         .accessibility_label(format!("Cancel routine {id}"))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -156,16 +174,16 @@ impl Desktop {
             Some(zone) => format!("{} · {zone} · {}", row.cadence, row.next),
             None => format!("{} · {}", row.cadence, row.next),
         };
-        v_flex()
-            .gap_1()
-            .p_3()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded(cx.theme().radius)
+        card(cx)
             .child(
                 h_flex()
-                    .gap_2()
-                    .child(div().text_sm().text_color(muted).child(format!("#{id}")))
+                    .gap(SM)
+                    .child(
+                        div()
+                            .text_size(TYPE_BODY)
+                            .text_color(muted)
+                            .child(format!("#{id}")),
+                    )
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -173,13 +191,23 @@ impl Desktop {
                             .child(row.instruction),
                     ),
             )
-            .child(div().text_sm().child(when_line))
             .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(format!("{} · {} · {}", row.by, row.fired, row.status)),
+                h_flex()
+                    .gap(SM)
+                    .flex_wrap()
+                    .justify_between()
+                    .child(status_badge(
+                        row.status,
+                        if row.paused {
+                            Status::Waiting
+                        } else {
+                            Status::Done
+                        },
+                        cx,
+                    ))
+                    .child(meta(when_line, cx).text_right()),
             )
+            .child(meta(format!("{} · {}", row.by, row.fired), cx).text_right())
             .child(actions)
     }
 
@@ -187,8 +215,9 @@ impl Desktop {
     fn routine_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let form = self.state.routine_form();
         if !form.open {
-            return Button::new("new-routine")
-                .label("+ New routine")
+            return button("new-routine")
+                .icon(AppIcon::CalendarPlus)
+                .label("New routine")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.routine_form_mut().open = true;
                     cx.notify();
@@ -196,12 +225,18 @@ impl Desktop {
                 .into_any_element();
         }
         let muted = cx.theme().muted_foreground;
-        let label = |text: &'static str| div().w(px(60.)).text_sm().text_color(muted).child(text);
+        let label = |text: &'static str| {
+            div()
+                .w(INLINE_LABEL_WIDTH)
+                .text_size(TYPE_BODY)
+                .text_color(muted)
+                .child(text)
+        };
         let cadence = ButtonGroup::new("routine-cadence")
             .outline()
             .compact()
             .children(Cadence::ALL.iter().map(|(cadence, name)| {
-                Button::new(SharedString::from(format!("cadence-{name}")))
+                button(SharedString::from(format!("cadence-{name}")))
                     .label(*name)
                     .selected(form.cadence == *cadence)
             }))
@@ -212,28 +247,24 @@ impl Desktop {
                 }
             }));
         let at = h_flex()
-            .gap_2()
+            .gap(SM)
             .child(label("At"))
-            .child(div().w(px(90.)).child(Input::new(&self.routine_at)));
+            .child(div().w(SHORT_FIELD_WIDTH).child(field(&self.routine_at)));
         let detail = match form.cadence {
             Cadence::Every => h_flex()
-                .gap_2()
+                .gap(SM)
                 .child(label("Every"))
-                .child(div().w(px(90.)).child(Input::new(&self.routine_every)))
+                .child(div().w(SHORT_FIELD_WIDTH).child(field(&self.routine_every)))
                 .child(
                     ButtonGroup::new("routine-unit")
                         .outline()
                         .compact()
                         .child(
-                            Button::new("unit-minutes")
+                            button("unit-minutes")
                                 .label("minutes")
                                 .selected(!form.hours),
                         )
-                        .child(
-                            Button::new("unit-hours")
-                                .label("hours")
-                                .selected(form.hours),
-                        )
+                        .child(button("unit-hours").label("hours").selected(form.hours))
                         .on_click(cx.listener(|this, clicked: &Vec<usize>, _, cx| {
                             this.state.routine_form_mut().hours = clicked.first() == Some(&1);
                             cx.notify();
@@ -245,7 +276,7 @@ impl Desktop {
                     let day = *day;
                     let name = day.as_str();
                     let shown = format!("{}{}", name[..1].to_uppercase(), &name[1..]);
-                    Button::new(SharedString::from(format!("day-{name}")))
+                    button(SharedString::from(format!("day-{name}")))
                         .small()
                         .label(shown)
                         .selected(form.days.contains(&day))
@@ -255,54 +286,51 @@ impl Desktop {
                         }))
                 });
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .flex_wrap()
                     .child(label("On"))
                     .children(days)
                     .child(at)
             }
             Cadence::Monthly => h_flex()
-                .gap_2()
+                .gap(SM)
                 .child(label("Day"))
-                .child(div().w(px(60.)).child(Input::new(&self.routine_day)))
+                .child(div().w(INLINE_LABEL_WIDTH).child(field(&self.routine_day)))
                 .child(at),
         };
         let (in_space, named) = (space.to_owned(), project.to_owned());
-        v_flex()
-            .gap_2()
-            .p_3()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded(cx.theme().radius)
+        card(cx)
             .child(section("New routine"))
-            .child(Input::new(&self.routine_instruction))
+            .child(field(&self.routine_instruction))
             .child(cadence)
             .child(detail)
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .child(label("Zone"))
-                    .child(div().w(px(260.)).child(Input::new(&self.routine_zone))),
+                    .child(div().w(ZONE_WIDTH).child(field(&self.routine_zone))),
             )
             .child(
                 div()
-                    .text_xs()
+                    .text_size(TYPE_META)
                     .text_color(muted)
                     .child("It is yours: what it starts counts as work you requested."),
             )
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .child(
-                        Button::new("routine-add")
+                        button("routine-add")
                             .primary()
+                            .icon(AppIcon::CalendarPlus)
                             .label("Add routine")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_routine(in_space.clone(), named.clone(), cx);
                             })),
                     )
                     .child(
-                        Button::new("routine-close")
+                        button("routine-close")
+                            .icon(AppIcon::X)
                             .label("Cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.routine_form_mut().open = false;

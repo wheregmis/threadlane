@@ -4,14 +4,31 @@
 
 use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
 use gpui_kit::*;
+use threadlane_desktop::Appearance;
 
 actions!(
     threadlane,
-    [About, Hide, Quit, ToggleFullScreen, Reload, Minimize, Zoom]
+    [
+        About,
+        Hide,
+        Quit,
+        ToggleFullScreen,
+        Reload,
+        Minimize,
+        Zoom,
+        SystemAppearance,
+        LightAppearance,
+        DarkAppearance
+    ]
 );
 
 /// Binds the shortcuts and the app-wide actions; `reload` refreshes now.
-pub(crate) fn install(cx: &mut App, reload: impl Fn(&mut App) + 'static) {
+pub(crate) fn install(
+    appearance: Appearance,
+    cx: &mut App,
+    reload: impl Fn(&mut App) + 'static,
+    change_appearance: impl Fn(Appearance, &mut Window, &mut App) + Clone + 'static,
+) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", Hide, None),
@@ -34,7 +51,21 @@ pub(crate) fn install(cx: &mut App, reload: impl Fn(&mut App) + 'static) {
                 window.prompt(PromptLevel::Info, "Threadlane", Some(&detail), &["OK"], cx);
         });
     });
-    set(false, cx);
+    let system = change_appearance.clone();
+    let light = change_appearance.clone();
+    cx.on_action(move |_: &SystemAppearance, cx| {
+        let change = system.clone();
+        on_window(cx, move |window, cx| change(Appearance::System, window, cx));
+    });
+    cx.on_action(move |_: &LightAppearance, cx| {
+        let change = light.clone();
+        on_window(cx, move |window, cx| change(Appearance::Light, window, cx));
+    });
+    cx.on_action(move |_: &DarkAppearance, cx| {
+        let change = change_appearance.clone();
+        on_window(cx, move |window, cx| change(Appearance::Dark, window, cx));
+    });
+    set(false, appearance, cx);
 }
 
 /// Runs `act` on the active window once the current update is done.
@@ -47,7 +78,7 @@ fn on_window(cx: &mut App, act: impl FnOnce(&mut Window, &mut App) + 'static) {
 }
 
 /// Sets the menu bar; View says "Exit Full Screen" while `full_screen`.
-pub(crate) fn set(full_screen: bool, cx: &App) {
+pub(crate) fn set(full_screen: bool, appearance: Appearance, cx: &App) {
     let full_screen = if full_screen {
         "Exit Full Screen"
     } else {
@@ -74,6 +105,16 @@ pub(crate) fn set(full_screen: bool, cx: &App) {
             MenuItem::action(full_screen, ToggleFullScreen),
             MenuItem::separator(),
             MenuItem::action("Reload", Reload),
+            MenuItem::submenu(
+                Menu::new("Appearance").items([
+                    MenuItem::action("System", SystemAppearance)
+                        .checked(appearance == Appearance::System),
+                    MenuItem::action("Light", LightAppearance)
+                        .checked(appearance == Appearance::Light),
+                    MenuItem::action("Dark", DarkAppearance)
+                        .checked(appearance == Appearance::Dark),
+                ]),
+            ),
         ]),
         Menu::new("Window").items([
             MenuItem::action("Minimize", Minimize),

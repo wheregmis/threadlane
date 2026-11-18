@@ -2,8 +2,8 @@
 //! this app reaches it, this app's client directory, which system
 //! notifications it raises, and its version.
 
-use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
@@ -13,8 +13,10 @@ use threadlane_core::model::Mode;
 use threadlane_desktop::{PACING_FIELDS, mode_label};
 
 use super::project::mode_name;
-use super::{heading, section};
 use crate::Desktop;
+use crate::components::{button, card, field, heading, meta, section};
+use crate::icons::AppIcon;
+use crate::tokens::{LABEL_WIDTH, MD, READING_WIDTH, SM, TYPE_BODY, XL, XS};
 
 impl Desktop {
     pub(crate) fn settings(
@@ -25,45 +27,48 @@ impl Desktop {
         let muted = cx.theme().muted_foreground;
         let line = |label: &'static str, value: String| {
             h_flex()
-                .gap_3()
-                .text_sm()
-                .child(div().w(px(150.)).flex_none().text_color(muted).child(label))
-                .child(div().min_w_0().child(value))
+                .gap(MD)
+                .items_start()
+                .text_size(TYPE_BODY)
+                .child(
+                    div()
+                        .w(LABEL_WIDTH)
+                        .flex_none()
+                        .text_color(muted)
+                        .child(label),
+                )
+                .child(div().flex_1().min_w_0().text_left().child(value))
         };
         let unknown = || "not reported yet".to_owned();
         let mut screen = v_flex()
-            .id("settings")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .gap_3()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
+            .overflow_y_scrollbar()
+            .id("settings")
+            .gap(XL)
             .child(heading("Settings"))
             .child(section("Spaces"));
         for row in self.state.settings_rows() {
             let ceiling = self.space_ceiling(&row.paired_as, cx);
             let pacing = self.space_pacing(&row.paired_as, cx);
-            let mut metrics = v_flex().gap_1().pt_2().child(section("Metrics"));
+            let mut metrics = v_flex().gap(XS).pt(SM).child(section("Metrics"));
             metrics = match self.state.metrics_rows(&row.paired_as, when) {
                 Ok(rows) => {
                     metrics.children(rows.into_iter().map(|(label, value)| line(label, value)))
                 }
-                Err(status) => {
-                    metrics.child(div().text_sm().text_color(muted).child(status.to_owned()))
-                }
+                Err(status) => metrics.child(
+                    div()
+                        .text_size(TYPE_BODY)
+                        .text_color(muted)
+                        .child(status.to_owned()),
+                ),
             };
             screen = screen.child(
-                v_flex()
-                    .gap_1()
-                    .p_3()
-                    .max_w(px(640.))
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(cx.theme().radius)
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(row.paired_as.clone()),
-                    )
+                card(cx)
+                    .child(section(row.paired_as.clone()))
                     .child(line("Space", row.space.unwrap_or_else(unknown)))
                     .child(line(
                         "Ceiling",
@@ -104,26 +109,32 @@ impl Desktop {
             .client_dir()
             .map_or_else(unknown, |dir| dir.display().to_string());
         screen
-            .child(section("Notifications").pt_2())
-            .child(toggle(
-                "notify-decisions",
-                "Notify me of new decisions",
-                notifications.decisions,
-                true,
-            ))
-            .child(toggle(
-                "notify-notices",
-                "Notify me of system notices",
-                notifications.notices,
-                false,
-            ))
-            .child(div().text_xs().text_color(muted).child(format!(
-                "Kept in {dir}/{}.",
-                threadlane_desktop::SETTINGS_FILE
-            )))
-            .child(section("This app").pt_2())
-            .child(line("Client directory", dir))
-            .child(line("Version", env!("CARGO_PKG_VERSION").to_owned()))
+            .child(
+                card(cx)
+                    .child(section("Notifications"))
+                    .child(toggle(
+                        "notify-decisions",
+                        "Notify me of new decisions",
+                        notifications.decisions,
+                        true,
+                    ))
+                    .child(toggle(
+                        "notify-notices",
+                        "Notify me of system notices",
+                        notifications.notices,
+                        false,
+                    ))
+                    .child(meta(
+                        format!("Kept in {dir}/{}.", threadlane_desktop::SETTINGS_FILE),
+                        cx,
+                    )),
+            )
+            .child(
+                card(cx)
+                    .child(section("This app"))
+                    .child(line("Client directory", dir))
+                    .child(line("Version", env!("CARGO_PKG_VERSION").to_owned())),
+            )
             .into_any_element()
     }
 }
@@ -140,7 +151,7 @@ impl Desktop {
             .outline()
             .compact()
             .children(choices.iter().map(|choice| {
-                Button::new(SharedString::from(format!(
+                button(SharedString::from(format!(
                     "space-ceiling-{space}-{}",
                     choice.mode
                 )))
@@ -154,13 +165,13 @@ impl Desktop {
                     cx.notify();
                 }
             }));
-        let mut part = v_flex().gap_1().pt_2().child(
+        let mut part = v_flex().gap(XS).pt(SM).child(
             h_flex()
-                .gap_3()
-                .text_sm()
+                .gap(MD)
+                .text_size(TYPE_BODY)
                 .child(
                     div()
-                        .w(px(150.))
+                        .w(LABEL_WIDTH)
                         .flex_none()
                         .text_color(muted)
                         .child("Space ceiling"),
@@ -169,28 +180,30 @@ impl Desktop {
         );
         if let Some((mode, question)) = self.state.space_ceiling_confirm(space) {
             let named = space.to_owned();
-            part = part.child(div().text_sm().child(question)).child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new(SharedString::from(format!("space-ceiling-set-{space}")))
-                            .primary()
-                            .small()
-                            .label(format!("Set to {}", mode_label(mode)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_space_ceiling(named.clone(), mode, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("space-ceiling-keep-{space}")))
-                            .small()
-                            .label("Keep it")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.state.keep_space_ceiling();
-                                cx.notify();
-                            })),
-                    ),
-            );
+            part = part
+                .child(div().text_size(TYPE_BODY).child(question))
+                .child(
+                    h_flex()
+                        .gap(SM)
+                        .child(
+                            button(SharedString::from(format!("space-ceiling-set-{space}")))
+                                .primary()
+                                .small()
+                                .label(format!("Set to {}", mode_label(mode)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_space_ceiling(named.clone(), mode, cx);
+                                })),
+                        )
+                        .child(
+                            button(SharedString::from(format!("space-ceiling-keep-{space}")))
+                                .small()
+                                .label("Keep it")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.state.keep_space_ceiling();
+                                    cx.notify();
+                                })),
+                        ),
+                );
         }
         part
     }
@@ -200,52 +213,63 @@ impl Desktop {
     fn space_pacing(&self, space: &str, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
         let mut panel = v_flex()
-            .gap_2()
-            .pt_3()
+            .gap(SM)
+            .pt(MD)
             .items_start()
             .child(section("Delivery pacing"));
         let editing = self.state.pacing_editor(space);
         let values = match self.state.pacing_values(space) {
             Ok(values) => values,
             Err(why) => {
-                panel = panel.child(div().text_sm().text_color(muted).child(why.to_owned()));
+                panel = panel.child(
+                    div()
+                        .text_size(TYPE_BODY)
+                        .text_color(muted)
+                        .child(why.to_owned()),
+                );
                 if editing.is_none() {
                     return panel;
                 }
                 Default::default()
             }
         };
-        for (index, (field, value)) in PACING_FIELDS.iter().zip(values).enumerate() {
+        for (index, (spec, value)) in PACING_FIELDS.iter().zip(values).enumerate() {
             if editing.is_none() && value.is_empty() {
                 continue;
             }
             let label = div()
-                .text_sm()
+                .text_size(TYPE_BODY)
                 .font_weight(FontWeight::MEDIUM)
-                .child(field.label);
-            let mut row = v_flex().gap_1().w_full().child(label);
-            if !field.explanation.is_empty() {
-                row = row.child(div().text_sm().text_color(muted).child(field.explanation));
+                .child(spec.label);
+            let mut row = v_flex().gap(XS).w_full().child(label);
+            if !spec.explanation.is_empty() {
+                row = row.child(
+                    div()
+                        .text_size(TYPE_BODY)
+                        .text_color(muted)
+                        .child(spec.explanation),
+                );
             }
             panel = panel.child(match editing {
                 Some(saving) => row.child(
-                    Input::new(&self.pacing_inputs[index])
-                        .aria_label(format!("{} for {space}", field.label))
+                    field(&self.pacing_inputs[index])
+                        .aria_label(format!("{} for {space}", spec.label))
                         .disabled(saving),
                 ),
-                None => row.child(div().text_sm().child(value)),
+                None => row.child(div().text_size(TYPE_BODY).child(value)),
             });
         }
         let space = space.to_owned();
         let controls = match editing {
             Some(saving) => h_flex()
-                .gap_2()
+                .gap(SM)
                 .child(
-                    Button::new(SharedString::from(format!("save-pacing-{space}")))
+                    button(SharedString::from(format!("save-pacing-{space}")))
                         .small()
                         .primary()
                         .tab_stop(true)
                         .disabled(saving)
+                        .icon(AppIcon::Save)
                         .label(if saving { "Saving…" } else { "Save pacing" })
                         .accessibility_label(format!("Save delivery pacing for {space}"))
                         .on_click(
@@ -253,11 +277,12 @@ impl Desktop {
                         ),
                 )
                 .child(
-                    Button::new("keep-pacing")
+                    button("keep-pacing")
                         .small()
                         .ghost()
                         .tab_stop(true)
                         .disabled(saving)
+                        .icon(AppIcon::X)
                         .label("Cancel")
                         .accessibility_label("Cancel delivery pacing edit")
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -266,10 +291,11 @@ impl Desktop {
                         })),
                 ),
             None => h_flex().child(
-                Button::new(SharedString::from(format!("edit-pacing-{space}")))
+                button(SharedString::from(format!("edit-pacing-{space}")))
                     .small()
                     .outline()
                     .tab_stop(true)
+                    .icon(AppIcon::Pencil)
                     .label("Edit pacing")
                     .disabled(!self.state.can_edit_pacing())
                     .accessibility_label(format!("Edit delivery pacing for {space}"))

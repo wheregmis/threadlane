@@ -3,18 +3,31 @@
 //! its header "Pause project" and "+ New task", which skips the lead.
 
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
-use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::separator::Separator;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tab::TabBar;
+use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::Mode;
 use threadlane_desktop::{Line, ModeChoice, Part, When};
 
-use super::{gap_line, heading, link, section};
+use super::{gap_line, link};
+use crate::components::{
+    button, card, composer, count, count_badge, empty_state, field, icon_button, meta, page_header,
+    section, status_badge,
+};
+use crate::icons::AppIcon;
+use crate::tokens::{
+    BOARD_COLUMN_MIN, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, MODE_WIDTH, READING_WIDTH,
+    ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, STEPPER_WIDTH, Status,
+    TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XS,
+};
 use crate::{Desktop, Screen, Tab};
 
 /// The four positions of the mode control (Plan.md §2.3).
@@ -52,7 +65,22 @@ impl Desktop {
                     cx,
                 );
             }))
-            .children(Tab::ALL.map(Tab::label));
+            .children(Tab::ALL.map(|tab| {
+                let icon = match tab {
+                    Tab::Tasks => AppIcon::Columns3,
+                    Tab::Conversation => AppIcon::MessagesSquare,
+                    Tab::Agents => AppIcon::Bot,
+                    Tab::Routines => AppIcon::CalendarClock,
+                    Tab::Memory => AppIcon::BookOpen,
+                };
+                KitTab::new().aria_label(tab.label()).child(
+                    h_flex()
+                        .gap(XS)
+                        .flex_none()
+                        .child(Icon::new(icon).size(TYPE_BODY))
+                        .child(tab.label()),
+                )
+            }));
         let paused = self.state.is_paused(space, project);
         let lead = self.state.lead_line(space, project, when);
         let stop = (tab == Tab::Conversation)
@@ -75,10 +103,15 @@ impl Desktop {
         let (task_space, task_project) = (space.to_owned(), project.to_owned());
         let form_open = self.state.task_form(space, project).is_some();
         let actions = h_flex()
-            .gap_2()
+            .gap(SM)
             .child(
-                Button::new("pause-project")
+                button("pause-project")
                     .small()
+                    .icon(if paused {
+                        AppIcon::Play
+                    } else {
+                        AppIcon::Pause
+                    })
                     .label(if paused {
                         "Resume project"
                     } else {
@@ -89,9 +122,10 @@ impl Desktop {
                     })),
             )
             .child(
-                Button::new("new-task")
+                button("new-task")
                     .small()
                     .primary()
+                    .icon(AppIcon::ListPlus)
                     .label("+ New task")
                     .accessibility_label("New task, skipping the lead")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -101,45 +135,37 @@ impl Desktop {
                     })),
             );
         let form = form_open.then(|| self.task_form(space, project, cx));
+        let context = h_flex()
+            .gap(SM)
+            .flex_wrap()
+            .child(meta(space.to_owned(), cx))
+            .child(meta(format!("Ceiling · {}", mode_name(ceiling)), cx))
+            .children(paused.then(|| status_badge("Paused", Status::Waiting, cx)));
         v_flex()
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .gap_2()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(heading(project.to_owned()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if paused {
-                                format!("{space} · paused")
-                            } else {
-                                space.to_owned()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("Ceiling · {}", mode_name(ceiling))),
-                    )
-                    .child(div().flex_1())
-                    .child(actions),
-            )
+            .w_full()
+            .when(tab == Tab::Conversation, |page| {
+                page.max_w(READING_WIDTH).self_center()
+            })
+            .gap(MD)
+            .child(page_header(
+                project.to_owned(),
+                Some(context),
+                Some(actions),
+            ))
             .children(lead_mode.filter(|_| tab == Tab::Conversation).map(|mode| {
                 div()
-                    .text_sm()
+                    .text_size(TYPE_BODY)
                     .text_color(muted)
                     .child(format!("Lead mode · {}", mode_name(mode)))
             }))
             .children(lead.map(|line| {
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .flex_wrap()
-                    .child(div().text_sm().text_color(muted).child(line))
+                    .child(div().text_size(TYPE_BODY).text_color(muted).child(line))
                     .children(stop)
             }))
             .children(form)
@@ -163,21 +189,18 @@ impl Desktop {
             .board(space, project, when)
             .into_iter()
             .map(|column| {
-                let title = format!("{} {}", column.title, column.count);
+                let status = Status::task(column.title);
                 let proposals = column.proposals.into_iter().map(|proposal| {
                     let id = proposal.id;
                     let button = |label, option: Option<String>| {
                         option.map(|option| {
                             let space = space.to_owned();
-                            Button::new(SharedString::from(format!(
-                                "proposal-{space}-{id}-{label}"
-                            )))
-                            .small()
-                            .tab_stop(true)
-                            .label(label)
-                            .accessibility_label(format!("{label} proposal {id}"))
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
+                            button(SharedString::from(format!("proposal-{space}-{id}-{label}")))
+                                .small()
+                                .tab_stop(true)
+                                .label(label)
+                                .accessibility_label(format!("{label} proposal {id}"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
                                     this.answer(
                                         space.clone(),
                                         id.to_string(),
@@ -185,39 +208,32 @@ impl Desktop {
                                         None,
                                         cx,
                                     );
-                                },
-                            ))
+                                }))
                         })
                     };
-                    v_flex()
-                        .gap_1()
-                        .p_2()
-                        .min_w_0()
-                        .bg(cx.theme().background)
-                        .border_1()
+                    card(cx)
+                        .p(SM)
                         .border_dashed()
-                        .border_color(cx.theme().border)
-                        .rounded(cx.theme().radius)
                         .child(div().whitespace_normal().child(proposal.title))
-                        .child(div().text_xs().text_color(muted).child(proposal.meta))
+                        .child(meta(proposal.meta, cx).text_right())
                         .child(
                             h_flex()
-                                .gap_1()
+                                .gap(XS)
                                 .flex_wrap()
                                 .children(button("Start", proposal.start))
                                 .children(button("Decline", proposal.decline).map(Button::ghost)),
                         )
                 });
-                let cards = column.cards.into_iter().map(|card| {
+                let cards = column.cards.into_iter().map(|task_card| {
                     let screen = Screen::Task {
                         space: space.to_owned(),
-                        task: card.id,
+                        task: task_card.id,
                     };
-                    let answer = card.decision.map(|decision| {
+                    let answer = task_card.decision.map(|decision| {
                         let (space, id, view) =
                             (space.to_owned(), decision.to_string(), view.clone());
-                        let options = card.options.clone();
-                        Button::new(SharedString::from(format!("answer-task-{}", card.id)))
+                        let options = task_card.options.clone();
+                        button(SharedString::from(format!("answer-task-{}", task_card.id)))
                             .small()
                             .primary()
                             .label("Answer")
@@ -242,18 +258,12 @@ impl Desktop {
                                 menu
                             })
                     });
-                    v_flex()
-                        .gap_1()
-                        .p_2()
-                        .min_w_0()
-                        .bg(cx.theme().background)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded(cx.theme().radius)
+                    card(cx)
+                        .p(SM)
                         .child(
                             link(
-                                format!("card-{}", card.id),
-                                format!("{} {}", card.id, card.title),
+                                format!("card-{}", task_card.id),
+                                format!("{} {}", task_card.id, task_card.title),
                             )
                             .min_w_0()
                             .tab_stop(true)
@@ -261,23 +271,29 @@ impl Desktop {
                                 cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
                             ),
                         )
-                        .child(div().text_xs().text_color(muted).child(card.meta))
+                        .child(meta(task_card.meta, cx).text_right())
                         .children(answer)
                 });
                 v_flex()
                     .flex_1()
-                    .min_w(px(120.))
-                    .gap_2()
-                    .p_2()
+                    .min_w(BOARD_COLUMN_MIN)
+                    .gap(SM)
+                    .p(SM)
                     .bg(cx.theme().muted)
-                    .rounded(cx.theme().radius)
-                    .child(div().text_xs().text_color(muted).child(title))
+                    .rounded(ROW_RADIUS)
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .gap(XS)
+                            .child(status_badge(column.title, status, cx))
+                            .child(count_badge(column.count.to_string(), cx)),
+                    )
                     .children(proposals)
                     .children(cards)
                     .children(
                         column
                             .more
-                            .map(|label| div().text_xs().text_color(muted).child(label)),
+                            .map(|label| div().text_size(TYPE_META).text_color(muted).child(label)),
                     )
             });
         let board = match self.state.project_gap(space, project, Part::Tasks) {
@@ -287,33 +303,40 @@ impl Desktop {
                 .child(gap_line(&gap, "the tasks", cx))
                 .into_any_element(),
             None => h_flex()
-                .id("board")
                 .flex_1()
                 .min_w_0()
+                .min_h_0()
                 .items_start()
-                .gap_2()
-                .overflow_x_scroll()
+                .gap(SM)
+                .overflow_scrollbar()
+                .id("board")
                 .children(columns)
                 .into_any_element(),
         };
 
         let view = self.state.project(space, project);
-        let mut side = v_flex().w(px(220.)).flex_none().gap_2();
+        let mut side = v_flex()
+            .w(SIDEBAR_WIDTH)
+            .h_full()
+            .flex_none()
+            .gap(SM)
+            .overflow_y_scrollbar()
+            .id("board-sidebar");
         let repositories = view
             .map(|view| view.repositories.as_slice())
             .unwrap_or_default();
-        side = side.child(section(format!("Repositories ({})", repositories.len())));
+        side = side.child(section("Repositories").children(count(repositories.len(), cx)));
         let gap = self.state.project_gap(space, project, Part::Repositories);
         if let Some(gap) = &gap {
             side = side.child(gap_line(gap, "the repositories", cx));
         } else if repositories.is_empty() {
-            side = side.child(div().text_sm().text_color(muted).child("None yet."));
+            side = side.child(empty_state("None yet.", None, cx));
         }
         for repository in repositories {
             side = side.child(
                 h_flex()
                     .justify_between()
-                    .text_sm()
+                    .text_size(TYPE_BODY)
                     .child(repository.name.clone())
                     .child(
                         div()
@@ -334,7 +357,7 @@ impl Desktop {
             side = side.child(
                 h_flex()
                     .justify_between()
-                    .text_sm()
+                    .text_size(TYPE_BODY)
                     .child(binding.agent.clone())
                     .child(div().text_color(muted).child(mode_name(binding.mode))),
             );
@@ -357,9 +380,13 @@ impl Desktop {
             side = side.child(
                 h_flex()
                     .justify_between()
-                    .text_sm()
+                    .text_size(TYPE_BODY)
                     .child(format!("{}{hub}", machine.name))
-                    .child(div().text_color(muted).child(machine.status.to_string())),
+                    .child(status_badge(
+                        machine.status.to_string(),
+                        machine.status.into(),
+                        cx,
+                    )),
             );
         }
 
@@ -369,29 +396,33 @@ impl Desktop {
             .min_h_0()
             .min_w_0()
             .items_start()
-            .gap_4()
+            .gap(LG)
             .child(
                 v_flex()
                     .flex_1()
+                    .h_full()
+                    .min_h_0()
                     .min_w_0()
-                    .gap_3()
+                    .gap(MD)
                     .child(board)
-                    .child(self.project_composer(project, cx)),
+                    .child(self.project_composer(project, cx).flex_none()),
             )
             .child(side)
             .into_any_element()
     }
 
     fn project_composer(&self, project: &str, cx: &mut Context<Self>) -> Div {
-        h_flex()
-            .gap_2()
-            .child(div().flex_1().child(
-                Input::new(&self.composer).aria_label(format!("Message the lead of {project}")),
-            ))
+        composer(cx)
             .child(
-                Button::new("send")
+                div().flex_1().min_w_0().child(
+                    field(&self.composer).aria_label(format!("Message the lead of {project}")),
+                ),
+            )
+            .child(
+                button("send")
                     .primary()
                     .tab_stop(true)
+                    .icon(AppIcon::Send)
                     .label("Send")
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             )
@@ -409,21 +440,19 @@ impl Desktop {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let mut lines = v_flex()
-            .id("conversation")
             .flex_1()
+            .min_w_0()
             .min_h_0()
-            .overflow_y_scroll()
-            .gap_2();
+            .overflow_y_scrollbar()
+            .id("conversation")
+            .gap(SM);
         if let Some(before) = self.state.earlier(space, project) {
             let (space, project) = (space.to_owned(), project.to_owned());
-            lines = lines.child(
-                Button::new("earlier")
-                    .small()
-                    .label("Show earlier")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.earlier(space.clone(), project.clone(), before, cx);
-                    })),
-            );
+            lines = lines.child(button("earlier").small().label("Show earlier").on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.earlier(space.clone(), project.clone(), before, cx);
+                }),
+            ));
         }
         if let Some(gap) = self.state.project_gap(space, project, Part::Conversation) {
             lines = lines.child(gap_line(&gap, "the conversation", cx));
@@ -435,31 +464,33 @@ impl Desktop {
                 .project_gap(space, project, Part::Conversation)
                 .is_none()
         {
-            lines = lines.child(
-                div()
-                    .text_color(muted)
-                    .child("Nothing here yet. Give the lead a goal below."),
-            );
+            lines = lines.child(empty_state(
+                "Nothing here yet.",
+                Some("Give the lead a goal below."),
+                cx,
+            ));
         }
         let recorded = self.state.recorded(space, project, when);
         for line in conversation {
             let said = |who: &str, time: String, text: String| {
                 v_flex()
-                    .gap_1()
+                    .gap(XS)
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap(SM)
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
+                                    .min_w_0()
                                     .child(who.to_owned()),
                             )
-                            .child(div().text_xs().text_color(muted).child(time)),
+                            .child(div().flex_1())
+                            .child(meta(time, cx).text_right()),
                     )
                     .child(text)
             };
             lines = match line {
-                Line::Day(day) => lines.child(div().pt_2().text_xs().text_color(muted).child(day)),
+                Line::Day(day) => lines.child(Separator::horizontal().label(day)),
                 Line::You { text, time } => lines.child(said("You", time, text)),
                 Line::Lead { text, time } => lines.child(said("Lead", time, text)),
                 Line::Notice { text, time } => lines.child(said("Notice", time, text)),
@@ -471,8 +502,8 @@ impl Desktop {
                 }
                 Line::Digest { digest, time } => lines.child(
                     v_flex()
-                        .gap_1()
-                        .child(div().text_xs().text_color(muted).child(time))
+                        .gap(XS)
+                        .child(meta(time, cx).text_right())
                         .child(self.digest_entry(space, digest, cx)),
                 ),
                 Line::Quiet {
@@ -482,7 +513,7 @@ impl Desktop {
                     reasons,
                 } => {
                     let space = space.to_owned();
-                    let button = Button::new(SharedString::from(format!("quiet-{space}-{id}")))
+                    let button = button(SharedString::from(format!("quiet-{space}-{id}")))
                         .small()
                         .ghost()
                         .tab_stop(true)
@@ -494,17 +525,23 @@ impl Desktop {
                         }));
                     lines.child(
                         v_flex()
-                            .gap_1()
+                            .gap(XS)
                             .child(
                                 h_flex()
-                                    .gap_2()
+                                    .gap(SM)
                                     .flex_wrap()
-                                    .child(div().text_sm().text_color(muted).min_w_0().child(text))
+                                    .child(
+                                        div()
+                                            .text_size(TYPE_BODY)
+                                            .text_color(muted)
+                                            .min_w_0()
+                                            .child(text),
+                                    )
                                     .child(button),
                             )
                             .children(reasons.into_iter().map(|reason| {
                                 div()
-                                    .text_sm()
+                                    .text_size(TYPE_BODY)
                                     .child(format!("{} · {}", reason.time, reason.text))
                             })),
                     )
@@ -527,7 +564,13 @@ impl Desktop {
             lines = lines.child(self.recorded_section(space, project, recorded, cx));
         }
 
-        let mut side = v_flex().w(px(220.)).flex_none().gap_2();
+        let mut side = v_flex()
+            .w(SIDEBAR_WIDTH)
+            .h_full()
+            .flex_none()
+            .gap(SM)
+            .overflow_y_scrollbar()
+            .id("conversation-sidebar");
         side = side.child(section("From this conversation"));
         // The hub does not record which message made a task, so the tasks
         // are listed here rather than under the message.
@@ -545,7 +588,12 @@ impl Desktop {
                 .project_gap(space, project, Part::Tasks)
                 .is_none()
         {
-            side = side.child(div().text_sm().text_color(muted).child("No tasks yet."));
+            side = side.child(
+                div()
+                    .text_size(TYPE_BODY)
+                    .text_color(muted)
+                    .child("No tasks yet."),
+            );
         }
         for summary in tasks {
             let screen = Screen::Task {
@@ -556,13 +604,19 @@ impl Desktop {
                 summary.task.status,
                 summary.task.waiting_reason.as_deref(),
             );
-            side = side.child(
-                link(
-                    format!("from-{}", summary.task.id),
-                    format!("{} {} · {status}", summary.task.id, summary.task.title),
+            side = side
+                .child(
+                    link(
+                        format!("from-{}", summary.task.id),
+                        format!("{} {}", summary.task.id, summary.task.title),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
-            );
+                .child(
+                    div()
+                        .self_start()
+                        .child(status_badge(status, Status::task(status), cx)),
+                );
         }
         side = side.child(section("Open decisions"));
         let open: Vec<_> = self
@@ -575,21 +629,22 @@ impl Desktop {
             })
             .collect();
         if open.is_empty() {
-            side = side.child(div().text_sm().text_color(muted).child("None."));
+            side = side.child(div().text_size(TYPE_BODY).text_color(muted).child("None."));
         }
         for queued in open {
             side = side.child(
                 v_flex()
-                    .text_sm()
+                    .text_size(TYPE_BODY)
                     .child(format!(
                         "{} {}",
                         queued.decision.id, queued.decision.question
                     ))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("Asked {}", when.moment(queued.decision.created_at))),
+                        meta(
+                            format!("Asked {}", when.moment(queued.decision.created_at)),
+                            cx,
+                        )
+                        .text_right(),
                     ),
             );
         }
@@ -597,7 +652,7 @@ impl Desktop {
         match self.state.lead_knows(space, project) {
             Some(knows) => {
                 for line in knows.lines() {
-                    side = side.child(div().text_sm().child(line));
+                    side = side.child(div().text_size(TYPE_BODY).child(line));
                 }
             }
             None => {
@@ -614,8 +669,9 @@ impl Desktop {
             tab: Tab::Memory,
         };
         side = side.child(
-            Button::new("open-memory")
+            button("open-memory")
                 .small()
+                .icon(AppIcon::BookOpen)
                 .label("Open memory")
                 .on_click(cx.listener(move |this, _, _, cx| this.go(memory.clone(), cx))),
         );
@@ -624,15 +680,15 @@ impl Desktop {
             .flex_1()
             .min_h_0()
             .items_start()
-            .gap_4()
+            .gap(LG)
             .child(
                 v_flex()
                     .flex_1()
                     .h_full()
                     .min_w_0()
-                    .gap_2()
+                    .gap(SM)
                     .child(lines)
-                    .child(self.project_composer(project, cx)),
+                    .child(self.project_composer(project, cx).flex_none()),
             )
             .child(side)
             .into_any_element()
@@ -649,23 +705,18 @@ impl Desktop {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let mut list = v_flex()
-            .id("memory-list")
-            .w(px(300.))
+            .w(MEMORY_LIST_WIDTH)
             .flex_none()
             .h_full()
-            .overflow_y_scroll()
-            .gap_2();
+            .overflow_y_scrollbar()
+            .id("memory-list")
+            .gap(SM);
         if let Some(gap) = self.state.memory_gap(space, project) {
             list = list.child(gap_line(&gap, "the memory", cx));
         }
         let groups = self.state.memory_groups(space, project);
         if groups.is_empty() && self.state.memory_gap(space, project).is_none() {
-            list = list.child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("Nothing remembered yet."),
-            );
+            list = list.child(empty_state("Nothing remembered yet.", None, cx));
         }
         for group in groups {
             list = list.child(section(group.title));
@@ -675,30 +726,38 @@ impl Desktop {
                 list = list.child(
                     v_flex()
                         .child(
-                            link(format!("memory-{path}"), row.title)
-                                .selected(row.selected)
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            crate::components::row(
+                                format!("memory-{path}"),
+                                AppIcon::FileText,
+                                row.title,
+                                None,
+                                row.selected,
+                                cx,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
                                     this.select_memory(&in_space, &named, &path, cx);
-                                })),
+                                },
+                            )),
                         )
-                        .child(div().text_xs().text_color(muted).child(shown)),
+                        .child(meta(shown, cx).px(MD)),
                 );
             }
         }
 
         let mut detail = v_flex()
-            .id("memory-file")
             .flex_1()
             .min_w_0()
             .h_full()
-            .overflow_y_scroll()
-            .gap_2();
+            .overflow_y_scrollbar()
+            .id("memory-file")
+            .gap(SM);
         detail = detail.child(self.dreaming_settings(space, project, when, cx));
         match self.state.memory_selected(space, project) {
             None => {
                 detail = detail.child(
                     div()
-                        .text_sm()
+                        .text_size(TYPE_BODY)
                         .text_color(muted)
                         .child("Choose a file to see what it says and who wrote it."),
                 );
@@ -707,54 +766,64 @@ impl Desktop {
                 let file = self.state.memory_file(space, project);
                 let editing = self.state.memory_editing(space, project);
                 detail = detail.child(section(path.to_owned()));
-                let mut actions = h_flex().gap_2();
+                let mut actions = h_flex().gap(SM);
                 if self.state.memory_can_edit(space, project) {
                     let (in_space, named) = (space.to_owned(), project.to_owned());
                     if editing {
                         let (save_space, save_project) = (in_space.clone(), named.clone());
                         actions = actions
-                            .child(Button::new("memory-save").primary().label("Save").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.change_memory(
-                                        save_space.clone(),
-                                        save_project.clone(),
-                                        true,
-                                        cx,
-                                    );
-                                }),
-                            ))
-                            .child(Button::new("memory-cancel").label("Cancel").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.edit_memory(&in_space, &named, false, cx);
-                                }),
-                            ));
+                            .child(
+                                button("memory-save")
+                                    .primary()
+                                    .icon(AppIcon::Save)
+                                    .label("Save")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.change_memory(
+                                            save_space.clone(),
+                                            save_project.clone(),
+                                            true,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                button("memory-cancel")
+                                    .icon(AppIcon::X)
+                                    .label("Cancel")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.edit_memory(&in_space, &named, false, cx);
+                                    })),
+                            );
                     } else {
                         let (delete_space, delete_project) = (in_space.clone(), named.clone());
-                        actions =
-                            actions
-                                .child(Button::new("memory-edit").label("Edit").on_click(
-                                    cx.listener(move |this, _, _, cx| {
+                        actions = actions
+                            .child(
+                                button("memory-edit")
+                                    .icon(AppIcon::Pencil)
+                                    .label("Edit")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
                                         this.edit_memory(&in_space, &named, true, cx);
-                                    }),
-                                ))
-                                .child(
-                                    Button::new("memory-delete")
-                                        .ghost()
-                                        .label("Delete")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.change_memory(
-                                                delete_space.clone(),
-                                                delete_project.clone(),
-                                                false,
-                                                cx,
-                                            );
-                                        })),
-                                );
+                                    })),
+                            )
+                            .child(
+                                button("memory-delete")
+                                    .ghost()
+                                    .icon(AppIcon::Trash)
+                                    .label("Delete")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.change_memory(
+                                            delete_space.clone(),
+                                            delete_project.clone(),
+                                            false,
+                                            cx,
+                                        );
+                                    })),
+                            );
                     }
                 } else if file.is_some() {
                     actions = actions.child(
                         div()
-                            .text_sm()
+                            .text_size(TYPE_BODY)
                             .text_color(muted)
                             .child("Written by the hub from the files next to it."),
                     );
@@ -763,33 +832,37 @@ impl Desktop {
                 if let Some(why) = self.state.memory_refused(space, project) {
                     detail = detail.child(
                         div()
-                            .text_sm()
+                            .text_size(TYPE_BODY)
                             .text_color(cx.theme().danger)
                             .child(why.to_owned()),
                     );
                 }
                 detail = match (file, editing) {
-                    (_, true) => detail.child(Textarea::new(&self.memory_editor)),
+                    (_, true) => {
+                        detail.child(Textarea::new(&self.memory_editor).rounded(FIELD_RADIUS))
+                    }
                     (Some(file), false) => detail.child(
                         div()
-                            .p_2()
-                            .text_sm()
+                            .p(SM)
+                            .text_size(TYPE_BODY)
                             .bg(cx.theme().muted)
-                            .rounded(cx.theme().radius)
+                            .rounded(ROW_RADIUS)
                             .whitespace_normal()
                             .child(file.content.clone()),
                     ),
-                    (None, false) => detail.child(div().text_sm().text_color(muted).child(
-                        if self.state.memory_can_edit(space, project) {
-                            "Not written yet. Instructions are loaded into every run."
-                        } else {
-                            "This file is deleted."
-                        },
-                    )),
+                    (None, false) => {
+                        detail.child(div().text_size(TYPE_BODY).text_color(muted).child(
+                            if self.state.memory_can_edit(space, project) {
+                                "Not written yet. Instructions are loaded into every run."
+                            } else {
+                                "This file is deleted."
+                            },
+                        ))
+                    }
                 };
                 detail = detail.child(section("Versions"));
                 for line in self.state.memory_versions(space, project, when) {
-                    detail = detail.child(div().text_sm().text_color(muted).child(line));
+                    detail = detail.child(meta(line, cx));
                 }
             }
         }
@@ -797,7 +870,7 @@ impl Desktop {
             .flex_1()
             .min_h_0()
             .items_start()
-            .gap_4()
+            .gap(LG)
             .child(list)
             .child(detail)
             .into_any_element()
@@ -814,9 +887,9 @@ impl Desktop {
         let muted = cx.theme().muted_foreground;
         let (in_space, named) = (space.to_owned(), project.to_owned());
         let mut panel = v_flex()
-            .gap_2()
-            .p_3()
-            .rounded(cx.theme().radius)
+            .gap(SM)
+            .p(MD)
+            .rounded(ROW_RADIUS)
             .border_1()
             .border_color(cx.theme().border)
             .child(
@@ -829,19 +902,25 @@ impl Desktop {
                         this.toggle_dreaming(in_space.clone(), named.clone(), *checked, cx);
                     })),
             )
-            .child(div().text_sm().text_color(muted).child(card.cadence));
+            .child(
+                div()
+                    .text_size(TYPE_BODY)
+                    .text_color(muted)
+                    .child(card.cadence),
+            );
         if card.enabled {
             let (in_space, named) = (space.to_owned(), project.to_owned());
             panel = panel.child(
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .child(
                         div()
                             .flex_1()
-                            .child(Input::new(&self.dream_cadence).disabled(card.disabled)),
+                            .child(field(&self.dream_cadence).disabled(card.disabled)),
                     )
                     .child(
-                        Button::new("save-dream-cadence")
+                        button("save-dream-cadence")
+                            .icon(AppIcon::Save)
                             .label("Save cadence")
                             .disabled(card.disabled)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -854,13 +933,13 @@ impl Desktop {
             .children(
                 card.last
                     .into_iter()
-                    .map(|line| div().text_sm().child(line)),
+                    .map(|line| div().text_size(TYPE_BODY).child(line)),
             )
             .child(section("Memory check"))
             .children(
                 card.findings
                     .into_iter()
-                    .map(|line| div().text_sm().text_color(muted).child(line)),
+                    .map(|line| div().text_size(TYPE_BODY).text_color(muted).child(line)),
             )
     }
 
@@ -881,23 +960,26 @@ impl Desktop {
             }),
         );
         let mut rows = v_flex()
-            .id("agents-tab")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .gap_3()
+            .overflow_y_scrollbar()
+            .id("agents-tab")
+            .gap(MD)
             .child(
                 h_flex()
-                    .gap_4()
-                    .p_3()
+                    .gap(LG)
+                    .p(MD)
                     .justify_between()
+                    .flex_wrap()
                     .bg(cx.theme().muted)
-                    .rounded(cx.theme().radius)
+                    .rounded(ROW_RADIUS)
                     .child(
-                        v_flex()
-                            .min_w_0()
-                            .child(section("Project ceiling"))
-                            .child(div().text_sm().text_color(muted).child(card.note.clone())),
+                        v_flex().min_w_0().child(section("Project ceiling")).child(
+                            div()
+                                .text_size(TYPE_BODY)
+                                .text_color(muted)
+                                .child(card.note.clone()),
+                        ),
                     )
                     .child(ceiling),
             )
@@ -931,12 +1013,9 @@ impl Desktop {
                     }
                 }),
             );
-            let step = |id: &str, label: &'static str, name: String, to: Option<u32>| {
+            let step = |id: &str, icon, name: String, to: Option<u32>| {
                 let (space, project, agent) = (space.to_owned(), project.to_owned(), agent.clone());
-                Button::new(SharedString::from(format!("{id}-{agent}")))
-                    .xsmall()
-                    .label(label)
-                    .accessibility_label(name)
+                icon_button(format!("{id}-{agent}"), icon, name)
                     .disabled(to.is_none())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(to) = to {
@@ -951,58 +1030,74 @@ impl Desktop {
                     }))
             };
             let at_once = h_flex()
-                .gap_1()
+                .gap(XS)
                 .items_center()
-                .child(div().text_sm().text_color(muted).child("At once"))
+                .child(
+                    div()
+                        .text_size(TYPE_BODY)
+                        .text_color(muted)
+                        .child("At once"),
+                )
                 .child(step(
                     "fewer",
-                    "−",
+                    AppIcon::Minus,
                     format!("Fewer of {agent}'s tasks at once"),
                     row.at_once.fewer,
                 ))
                 .child(
                     div()
-                        .text_sm()
-                        .min_w(px(56.))
+                        .text_size(TYPE_BODY)
+                        .min_w(STEPPER_WIDTH)
+                        .text_right()
                         .child(row.at_once.label.clone()),
                 )
                 .child(step(
                     "more",
-                    "+",
+                    AppIcon::Plus,
                     format!("More of {agent}'s tasks at once"),
                     row.at_once.more,
                 ));
             let (toggle_space, toggle_project, toggle_agent) =
                 (space.to_owned(), project.to_owned(), agent.clone());
-            let expand = Button::new(SharedString::from(format!("expand-{agent}")))
-                .ghost()
-                .xsmall()
-                .label(if row.open { "▾" } else { "▸" })
-                .accessibility_label(if row.open {
+            let expand = icon_button(
+                format!("expand-{agent}"),
+                if row.open {
+                    AppIcon::ChevronDown
+                } else {
+                    AppIcon::ChevronRight
+                },
+                if row.open {
                     format!("Hide what {agent} may do here")
                 } else {
                     format!("Show what {agent} may do here")
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.state
-                        .toggle_agent(&toggle_space, &toggle_project, &toggle_agent);
-                    cx.notify();
-                }));
+                },
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.state
+                    .toggle_agent(&toggle_space, &toggle_project, &toggle_agent);
+                cx.notify();
+            }));
             let lead = if row.is_lead { " · lead" } else { "" };
             rows = rows.child(
                 h_flex()
-                    .gap_4()
+                    .gap(LG)
                     .items_center()
+                    .flex_wrap()
                     .child(
                         v_flex()
-                            .w(px(200.))
+                            .w(MODE_WIDTH)
                             .flex_none()
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(format!("{agent}{lead}")),
                             )
-                            .child(div().text_sm().text_color(muted).child(row.role.clone())),
+                            .child(
+                                div()
+                                    .text_size(TYPE_BODY)
+                                    .text_color(muted)
+                                    .child(row.role.clone()),
+                            ),
                     )
                     .child(control)
                     .child(at_once)
@@ -1029,7 +1124,7 @@ impl Desktop {
         let may = self.state.may_do(space, project, agent)?;
         let view = cx.entity().downgrade();
         let mut statements = v_flex()
-            .gap_1()
+            .gap(XS)
             .flex_1()
             .min_w_0()
             .child(section(may.title.clone()));
@@ -1043,8 +1138,8 @@ impl Desktop {
                         view.clone(),
                     );
                     let choices = statement.choices.clone();
-                    Button::new(SharedString::from(format!("cell-{agent}-{index}")))
-                        .xsmall()
+                    button(SharedString::from(format!("cell-{agent}-{index}")))
+                        .small()
                         .label(format!("{} ▾", statement.cell))
                         .accessibility_label(format!(
                             "{}: {}. Change it",
@@ -1081,26 +1176,32 @@ impl Desktop {
                         .into_any_element()
                 }
                 _ => div()
-                    .text_sm()
+                    .text_size(TYPE_BODY)
                     .child(statement.cell.clone())
                     .into_any_element(),
             };
             statements = statements.child(
                 h_flex()
-                    .gap_3()
+                    .gap(MD)
                     .justify_between()
                     .child(
                         v_flex()
                             .min_w_0()
-                            .child(div().text_sm().child(statement.what))
-                            .child(div().text_xs().text_color(muted).child(statement.examples)),
+                            .child(div().text_size(TYPE_BODY).child(statement.what))
+                            .child(
+                                div()
+                                    .text_size(TYPE_META)
+                                    .text_color(muted)
+                                    .child(statement.examples),
+                            ),
                     )
                     .child(cell),
             );
         }
         let mut rules = v_flex()
-            .gap_1()
-            .w(px(320.))
+            .gap(XS)
+            .w(RULES_WIDTH)
+            .max_w_full()
             .flex_none()
             .child(section(may.rules_title.clone()));
         match may.rules {
@@ -1108,7 +1209,7 @@ impl Desktop {
             Ok(listed) if listed.is_empty() => {
                 rules = rules.child(
                     div()
-                        .text_sm()
+                        .text_size(TYPE_BODY)
                         .text_color(muted)
                         .child("None yet. Answering a decision with \"Always allow\" makes one."),
                 );
@@ -1118,9 +1219,10 @@ impl Desktop {
                     let (space_revoke, id) = (space.to_owned(), rule.id);
                     let actions = match &rule.confirm {
                         None => h_flex().child(
-                            Button::new(SharedString::from(format!("revoke-{}", rule.id)))
+                            button(SharedString::from(format!("revoke-{}", rule.id)))
                                 .ghost()
-                                .xsmall()
+                                .small()
+                                .icon(AppIcon::ShieldOff)
                                 .label("Revoke")
                                 .accessibility_label(format!("Revoke {}", rule.allows))
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1129,11 +1231,12 @@ impl Desktop {
                                 })),
                         ),
                         Some(_) => h_flex()
-                            .gap_1()
+                            .gap(XS)
                             .child(
-                                Button::new(SharedString::from(format!("revoke-yes-{}", rule.id)))
+                                button(SharedString::from(format!("revoke-yes-{}", rule.id)))
                                     .danger()
-                                    .xsmall()
+                                    .small()
+                                    .icon(AppIcon::ShieldOff)
                                     .label("Revoke")
                                     .accessibility_label(format!(
                                         "Confirm revoking {}",
@@ -1144,8 +1247,8 @@ impl Desktop {
                                     })),
                             )
                             .child(
-                                Button::new(SharedString::from(format!("revoke-keep-{}", rule.id)))
-                                    .xsmall()
+                                button(SharedString::from(format!("revoke-keep-{}", rule.id)))
+                                    .small()
                                     .label("Keep")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.state.keep_rule();
@@ -1155,31 +1258,51 @@ impl Desktop {
                     };
                     rules = rules.child(
                         v_flex()
-                            .gap_1()
-                            .p_2()
+                            .gap(XS)
+                            .p(SM)
                             .bg(cx.theme().background)
-                            .rounded(cx.theme().radius)
+                            .rounded(ROW_RADIUS)
                             .child(
                                 h_flex()
-                                    .gap_2()
+                                    .gap(SM)
                                     .justify_between()
-                                    .child(div().min_w_0().text_sm().child(rule.allows.clone()))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_size(TYPE_BODY)
+                                            .child(rule.allows.clone()),
+                                    )
                                     .child(actions),
                             )
-                            .child(div().text_xs().text_color(muted).child(rule.from.clone()))
-                            .children(rule.confirm.map(|question| div().text_sm().child(question))),
+                            .child(
+                                div()
+                                    .text_size(TYPE_META)
+                                    .text_color(muted)
+                                    .child(rule.from.clone()),
+                            )
+                            .children(
+                                rule.confirm
+                                    .map(|question| div().text_size(TYPE_BODY).child(question)),
+                            ),
                     );
                 }
             }
         }
-        rules = rules.child(div().pt_2().text_sm().text_color(muted).child(may.tainted));
+        rules = rules.child(
+            div()
+                .pt(SM)
+                .text_size(TYPE_BODY)
+                .text_color(muted)
+                .child(may.tainted),
+        );
         Some(
             h_flex()
                 .items_start()
-                .gap_4()
-                .p_3()
+                .flex_wrap()
+                .gap(LG)
+                .p(MD)
                 .bg(cx.theme().muted)
-                .rounded(cx.theme().radius)
+                .rounded(ROW_RADIUS)
                 .child(statements)
                 .child(rules),
         )
@@ -1193,7 +1316,7 @@ fn mode_control(id: String, choices: &[ModeChoice]) -> ButtonGroup {
         .outline()
         .compact()
         .children(choices.iter().map(|choice| {
-            let button = Button::new(SharedString::from(format!("{id}-{}", choice.mode)))
+            let button = button(SharedString::from(format!("{id}-{}", choice.mode)))
                 .selected(choice.selected);
             match &choice.locked {
                 None => button.label(choice.label),
@@ -1220,7 +1343,7 @@ fn locked_note(choices: &[ModeChoice], muted: Hsla) -> Option<Div> {
     let why = locked.first()?.locked.clone()?;
     let names: Vec<&str> = locked.iter().map(|choice| choice.label).collect();
     let verb = if names.len() == 1 { "is" } else { "are" };
-    Some(div().text_xs().text_color(muted).child(
+    Some(div().text_size(TYPE_META).text_color(muted).child(
         match locked.iter().find(|choice| choice.selected) {
             Some(set) => format!(
                 "Set to {}, which is above the ceiling, so it acts at the ceiling. {} {verb} \
@@ -1249,20 +1372,26 @@ impl Desktop {
         let Some(form) = self.state.task_form(space, project) else {
             return div();
         };
-        let label = |text: &'static str| div().w(px(100.)).text_sm().text_color(muted).child(text);
+        let label = |text: &'static str| {
+            div()
+                .w(SHORT_LABEL_WIDTH)
+                .text_size(TYPE_BODY)
+                .text_color(muted)
+                .child(text)
+        };
         let agents = self.state.task_agents(space, project);
         let agent_row = if agents.is_empty() {
             div()
-                .text_sm()
+                .text_size(TYPE_BODY)
                 .text_color(muted)
                 .child("No agent here is on. Turn one on in the Agents tab.")
         } else {
-            let mut row = h_flex().gap_1().flex_wrap();
+            let mut row = h_flex().gap(XS).flex_wrap();
             for agent in agents {
                 let picked = form.agent.as_deref() == Some(agent.as_str());
                 let chosen = agent.clone();
                 row = row.child(
-                    Button::new(SharedString::from(format!("task-agent-{agent}")))
+                    button(SharedString::from(format!("task-agent-{agent}")))
                         .small()
                         .label(agent)
                         .selected(picked)
@@ -1274,12 +1403,12 @@ impl Desktop {
             }
             row
         };
-        let mut repositories = h_flex().gap_1().flex_wrap();
+        let mut repositories = h_flex().gap(XS).flex_wrap();
         let names = self.state.task_repositories(space, project);
         if names.is_empty() {
             repositories = repositories.child(
                 div()
-                    .text_sm()
+                    .text_size(TYPE_BODY)
                     .text_color(muted)
                     .child("None registered; it works without one."),
             );
@@ -1288,7 +1417,7 @@ impl Desktop {
             let picked = form.repositories.contains(&name);
             let toggled = name.clone();
             repositories = repositories.child(
-                Button::new(SharedString::from(format!("task-repository-{name}")))
+                button(SharedString::from(format!("task-repository-{name}")))
                     .small()
                     .label(name)
                     .selected(picked)
@@ -1298,15 +1427,20 @@ impl Desktop {
                     })),
             );
         }
-        let mut waits = h_flex().gap_1().flex_wrap();
+        let mut waits = h_flex().gap(XS).flex_wrap();
         let open = self.state.task_dependencies(space, project);
         if open.is_empty() {
-            waits = waits.child(div().text_sm().text_color(muted).child("No open tasks."));
+            waits = waits.child(
+                div()
+                    .text_size(TYPE_BODY)
+                    .text_color(muted)
+                    .child("No open tasks."),
+            );
         }
         for (id, name) in open {
             let picked = form.depends_on.contains(&id);
             waits = waits.child(
-                Button::new(SharedString::from(format!("task-waits-{id}")))
+                button(SharedString::from(format!("task-waits-{id}")))
                     .small()
                     .label(name)
                     .selected(picked)
@@ -1319,41 +1453,43 @@ impl Desktop {
         let (in_space, named) = (space.to_owned(), project.to_owned());
         let (close_space, close_project) = (space.to_owned(), project.to_owned());
         v_flex()
-            .gap_2()
-            .p_3()
+            .gap(SM)
+            .p(MD)
             .border_1()
             .border_color(cx.theme().border)
-            .rounded(cx.theme().radius)
+            .rounded(ROW_RADIUS)
             .child(section("New task"))
-            .child(Input::new(&self.task_title))
-            .child(Input::new(&self.task_goal))
-            .child(h_flex().gap_2().child(label("Agent")).child(agent_row))
+            .child(field(&self.task_title))
+            .child(field(&self.task_goal))
+            .child(h_flex().gap(SM).child(label("Agent")).child(agent_row))
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .child(label("Repositories"))
                     .child(repositories),
             )
-            .child(h_flex().gap_2().child(label("Waits for")).child(waits))
+            .child(h_flex().gap(SM).child(label("Waits for")).child(waits))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(TYPE_META)
                     .text_color(muted)
                     .child("It skips the lead and is yours: work you requested."),
             )
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .child(
-                        Button::new("task-create")
+                        button("task-create")
                             .primary()
+                            .icon(AppIcon::ListPlus)
                             .label("Create task")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.create_task(in_space.clone(), named.clone(), cx);
                             })),
                     )
                     .child(
-                        Button::new("task-close")
+                        button("task-close")
+                            .icon(AppIcon::X)
                             .label("Cancel")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.state
@@ -1369,12 +1505,13 @@ impl Desktop {
     fn repository_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let (in_space, named) = (space.to_owned(), project.to_owned());
         if !self.state.repository_form_open(space, project) {
-            return Button::new("add-repository")
+            return button("add-repository")
                 .small()
                 .ghost()
                 .self_start()
                 .tab_stop(true)
-                .label("+ Add repository")
+                .icon(AppIcon::GitFork)
+                .label("Add repository")
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.open_repository_form(&in_space, &named, true);
                     cx.notify();
@@ -1383,13 +1520,13 @@ impl Desktop {
         }
         let (close_space, close_project) = (space.to_owned(), project.to_owned());
         v_flex()
-            .gap_2()
-            .child(Input::new(&self.repository_name))
-            .child(Input::new(&self.repository_remote))
-            .child(Input::new(&self.repository_branch))
+            .gap(SM)
+            .child(field(&self.repository_name))
+            .child(field(&self.repository_remote))
+            .child(field(&self.repository_branch))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(TYPE_META)
                     .text_color(cx.theme().muted_foreground)
                     .child(
                         "Every other paired space is checked first: a repository belongs to one.",
@@ -1397,11 +1534,12 @@ impl Desktop {
             )
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .child(
-                        Button::new("repository-add")
+                        button("repository-add")
                             .small()
                             .primary()
+                            .icon(AppIcon::GitFork)
                             .label("Add")
                             .accessibility_label("Add repository")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1409,8 +1547,9 @@ impl Desktop {
                             })),
                     )
                     .child(
-                        Button::new("repository-close")
+                        button("repository-close")
                             .small()
+                            .icon(AppIcon::X)
                             .label("Cancel")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.state.open_repository_form(
@@ -1437,7 +1576,7 @@ impl Desktop {
         let muted = cx.theme().muted_foreground;
         let (in_space, named) = (space.to_owned(), project.to_owned());
         let mark = if recorded.open { "▾" } else { "▸" };
-        let mut part = v_flex().gap_1().pt_2().child(
+        let mut part = v_flex().gap(XS).pt(SM).child(
             link("recorded-toggle", format!("{mark} {}", recorded.title)).on_click(cx.listener(
                 move |this, _, _, cx| {
                     this.state.toggle_recorded(&in_space, &named);
@@ -1448,20 +1587,21 @@ impl Desktop {
         if recorded.open {
             part = part.child(
                 div()
-                    .text_xs()
+                    .text_size(TYPE_META)
                     .text_color(muted)
                     .child("These arrived, but no one asked for the work, so no run started."),
             );
             for row in recorded.rows {
                 part = part.child(
                     h_flex()
-                        .gap_2()
+                        .gap(SM)
                         .items_start()
-                        .text_sm()
+                        .text_size(TYPE_BODY)
                         .child(
                             div()
-                                .w(px(110.))
+                                .w(TIMESTAMP_WIDTH)
                                 .flex_none()
+                                .text_right()
                                 .text_color(muted)
                                 .child(format!("{} · {}", row.time, row.source)),
                         )
@@ -1469,7 +1609,7 @@ impl Desktop {
                 );
             }
             if let Some(more) = recorded.more {
-                part = part.child(div().text_xs().text_color(muted).child(more));
+                part = part.child(div().text_size(TYPE_META).text_color(muted).child(more));
             }
         }
         part
