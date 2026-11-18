@@ -111,7 +111,7 @@ impl Desktop {
                         .children(self.main_chat_screen(space).map(|screen| {
                             button("space-open-chat")
                                 .outline()
-                                .label("Open Main Chat")
+                                .label("Open space chat")
                                 .on_click(
                                     cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
                                 )
@@ -173,7 +173,7 @@ impl Desktop {
                 .max_w(READING_WIDTH)
                 .self_center()
                 .gap(MD)
-                .child(page_header("Main Chat", Some(context), actions))
+                .child(page_header("Chat", Some(context), actions))
                 .child(self.conversation_tab(space, project, when, cx))
                 .into_any_element();
         }
@@ -244,7 +244,7 @@ impl Desktop {
                     .small()
                     .ghost()
                     .icon(AppIcon::MessagesSquare)
-                    .label("Main Chat")
+                    .label("Space chat")
                     .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
             }));
         if archived {
@@ -776,7 +776,7 @@ impl Desktop {
                         button("history-main-chat")
                             .self_start()
                             .outline()
-                            .label(format!("Open {space} Main Chat"))
+                            .label(format!("Open {space} space chat"))
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
                             )
