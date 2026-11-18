@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use serde_json::{Value as Json, json};
+use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
 use threadlane_core::ids::{DecisionId, RunId, StandingRuleId};
 use threadlane_core::link::{LinkError, Perform};
 use threadlane_core::model::{
@@ -90,7 +91,7 @@ impl LocalLink {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
             _ if dream.is_some() && memory::protected(tool, arguments) => Some(Asked::Dream),
             Verdict::Allow { rule: None } if dream.is_some() => None,
-            _ if dream.is_some() => {
+            _ if dream.is_some() && tool != REPORT_LIMITATION => {
                 return Err(ToolError::Blocked(format!(
                     "{tool} needs authorization outside a dream"
                 )));
@@ -273,7 +274,30 @@ impl LocalLink {
         let inner = &self.core.inner;
         // Checks the call, so a refused one is refused before any ask
         // (invariant 19).
-        let mut proposal = crate::publish::proposal(&inner.db, lane, tool, arguments).await?;
+        let mut proposal = if tool == REPORT_LIMITATION {
+            let (title, body) = dreaming::report_issue(arguments)?;
+            let existing = inner.db.lane_decisions(lane.id).await.map_err(tool_error)?;
+            if existing.iter().any(|d| {
+                d.tool == tool
+                    && d.arguments["title"]
+                        .as_str()
+                        .is_some_and(|prior| prior.trim().eq_ignore_ascii_case(&title))
+                    && !d
+                        .outcome
+                        .as_ref()
+                        .is_some_and(|outcome| outcome["performed"] == false)
+            }) {
+                return Err(ToolError::Blocked(
+                    "This limitation has already been reported or considered.".into(),
+                ));
+            }
+            crate::publish::Proposal {
+                question: format!("Open issue “{title}” in wheregmis/threadlane?"),
+                context: body,
+            }
+        } else {
+            crate::publish::proposal(&inner.db, lane, tool, arguments).await?
+        };
         if matches!(asked, Asked::Dream) {
             let details = proposal
                 .context
@@ -434,22 +458,34 @@ impl LocalLink {
         }
         if matches!(
             decision.tool.as_str(),
-            crate::COMMENT | crate::CREATE_ISSUE | crate::MERGE
+            crate::COMMENT | crate::CREATE_ISSUE | crate::MERGE | REPORT_LIMITATION
         ) {
-            let action = crate::publish::repository_action(&decision.tool, &decision.arguments)
-                .map_err(|e| LinkError::Rejected(e.to_string()))?;
-            if lane.kind != threadlane_core::model::LaneKind::Task {
-                return Err(LinkError::Rejected(
-                    "repository actions require a task lane".into(),
-                ));
-            }
-            let repo = db
-                .repositories(lane.project_id)
-                .await
-                .map_err(link_error)?
-                .into_iter()
-                .find(|r| decision.arguments["repository"] == r.name)
-                .ok_or_else(|| LinkError::Rejected("repository is no longer registered".into()))?;
+            let (remote, action) = if decision.tool == REPORT_LIMITATION {
+                let (title, body) = dreaming::report_issue(&decision.arguments)
+                    .map_err(|e| LinkError::Rejected(e.to_string()))?;
+                (
+                    dreaming::UPSTREAM.to_owned(),
+                    RepositoryAction::CreateIssue { title, body },
+                )
+            } else {
+                let action = crate::publish::repository_action(&decision.tool, &decision.arguments)
+                    .map_err(|e| LinkError::Rejected(e.to_string()))?;
+                if lane.kind != threadlane_core::model::LaneKind::Task {
+                    return Err(LinkError::Rejected(
+                        "repository actions require a task lane".into(),
+                    ));
+                }
+                let repo = db
+                    .repositories(lane.project_id)
+                    .await
+                    .map_err(link_error)?
+                    .into_iter()
+                    .find(|r| decision.arguments["repository"] == r.name)
+                    .ok_or_else(|| {
+                        LinkError::Rejected("repository is no longer registered".into())
+                    })?;
+                (repo.remote_url, action)
+            };
             // shortcut: a lost forge response stays unknown until these writes have a remote idempotency key.
             if !db
                 .claim_forge_dispatch(lease, id)
@@ -461,10 +497,7 @@ impl LocalLink {
                 self.finish_perform(lease, run_id, id, &outcome).await?;
                 return Ok(Perform::Recorded { outcome });
             }
-            return Ok(Perform::Repository {
-                remote: repo.remote_url,
-                action,
-            });
+            return Ok(Perform::Repository { remote, action });
         }
         Ok(Perform::Call {
             tool: decision.tool,

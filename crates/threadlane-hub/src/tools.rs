@@ -57,7 +57,9 @@ const MAX_LABEL: usize = 80;
 #[must_use]
 pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
     match tool {
-        crate::dreaming::PROJECT_SESSIONS | FINISH_REVIEW => false,
+        threadlane_core::forge::REPORT_LIMITATION
+        | crate::dreaming::PROJECT_SESSIONS
+        | FINISH_REVIEW => false,
         // ask_project_lead is offered to the General lead only (begin_run).
         SEND_MESSAGE
         | UPDATE_TASK
@@ -726,7 +728,7 @@ pub(crate) async fn named_repositories(
 }
 
 /// A task as the agent sees it, with ids in their short form.
-fn task_json(task: &Task) -> Json {
+pub(crate) fn task_json(task: &Task) -> Json {
     json!({
         "task_id": task.id.to_string(),
         "title": task.title,

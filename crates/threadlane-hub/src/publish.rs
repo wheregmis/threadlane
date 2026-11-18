@@ -147,12 +147,9 @@ pub(crate) fn repository_action(
         }
         CREATE_ISSUE => {
             fields(a, &["repository", "title", "body"])?;
-            let title = a["title"]
-                .as_str()
-                .filter(|s| plain_line(s))
-                .ok_or_else(|| invalid("title must be one plain line of at most 200 characters"))?;
+            let title = issue_title(a)?;
             Ok(RepositoryAction::CreateIssue {
-                title: title.trim().to_owned(),
+                title,
                 body: body()?,
             })
         }
@@ -287,6 +284,14 @@ pub(crate) async fn proposal(
     })
 }
 
+pub(crate) fn issue_title(args: &Json) -> Result<String, ToolError> {
+    args["title"]
+        .as_str()
+        .filter(|s| plain_line(s))
+        .map(|s| s.trim().to_owned())
+        .ok_or_else(|| invalid("title must be one plain line of at most 200 characters"))
+}
+
 /// One line of text that a command line cannot read as an option.
 fn plain_line(text: &str) -> bool {
     let text = text.trim();
@@ -297,7 +302,7 @@ fn plain_line(text: &str) -> bool {
 }
 
 /// Text with no control characters but line breaks and tabs.
-fn plain_text(text: &str) -> bool {
+pub(crate) fn plain_text(text: &str) -> bool {
     text.chars().count() <= MAX_BODY
         && !text
             .chars()

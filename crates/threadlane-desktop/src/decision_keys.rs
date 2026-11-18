@@ -295,6 +295,7 @@ fn confirms_number(decision: &Decision) -> bool {
     !matches!(
         decision.tool.as_str(),
         COMMENT
+            | threadlane_core::forge::REPORT_LIMITATION
             | CREATE_ISSUE
             | OPEN_PULL_REQUEST
             | PUBLISH_BRANCH
