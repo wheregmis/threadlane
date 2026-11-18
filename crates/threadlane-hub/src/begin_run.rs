@@ -296,6 +296,21 @@ impl LocalLink {
                 events: &events,
             })
         };
+        if !dreaming && lane.kind == LaneKind::Lead {
+            let bindings = db.bindings(project.id).await.map_err(link_error)?;
+            let agents = db.agents().await.map_err(link_error)?;
+            let roster: Vec<_> = agents
+                .iter()
+                .filter(|member| {
+                    bindings
+                        .iter()
+                        .any(|b| b.agent_id == member.id && !b.is_lead && b.mode != Mode::Off)
+                })
+                .map(|member| serde_json::json!({ "name": member.name, "role": member.role }))
+                .collect();
+            prompt.push_str("\nWhen delegating in this project, choose the enabled agent whose role fits the goal. Pass its exact name to create_task. Split work across specialties when useful and record dependencies. If no specialist fits, keep the task yourself or ask for the missing capability.\nEnabled project agents: ");
+            prompt.push_str(&Json::Array(roster).to_string());
+        }
         if let Some(review) = &review {
             use std::fmt::Write as _;
             let _ = write!(

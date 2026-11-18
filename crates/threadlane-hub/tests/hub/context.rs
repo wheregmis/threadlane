@@ -283,7 +283,7 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
     hub.hello().await;
     let engineer = hub
         .db
-        .create_agent(&NewAgent::named("Engineer", "engineer"))
+        .create_agent(&NewAgent::named("Iris", "frontend developer"))
         .await
         .unwrap();
     hub.db
@@ -297,24 +297,30 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
         .await
         .unwrap();
     hub.send("m-1", "Build the page").await;
-    run_with(
+    let lead = run_with(
         &*hub.link,
         &[
             write("space/instructions.md", "The space's rule."),
             write("project/notes/build.md", "# Build\nHow to build."),
             (
                 CREATE_TASK,
-                json!({ "title": "page", "goal": "the page is up", "agent": "Engineer" }),
+                json!({ "title": "page", "goal": "the page is up", "agent": "Iris" }),
             ),
         ],
     )
     .await;
+
+    assert!(
+        lead.prompt
+            .contains(r#"{"name":"Iris","role":"frontend developer"}"#)
+    );
 
     // The first run: the instructions loaded in every run, no task index,
     // and no progress file yet. It leaves one.
     let progress = "# Page\nHalf done: the layout is in.\n\nNext: the footer.";
     let first = run_with(&*hub.link, &[write("project/tasks/T-0001.md", progress)]).await;
     consume_notice(&*hub.link).await;
+    assert_eq!(first.agent_name, "Iris");
     assert!(fresh(&first));
     let task = hub.db.task(first.task_id.unwrap()).await.unwrap().unwrap();
     let appended = &first.appended_instructions;

@@ -3,7 +3,7 @@
 use threadlane_core::client::AgentTemplate;
 
 /// Each template's id and its file under `templates/agents/`.
-const FILES: [(&str, &str); 5] = [
+const FILES: [(&str, &str); 8] = [
     (
         "chief-of-staff",
         include_str!("../../../templates/agents/chief-of-staff.md"),
@@ -11,6 +11,18 @@ const FILES: [(&str, &str); 5] = [
     (
         "engineer",
         include_str!("../../../templates/agents/engineer.md"),
+    ),
+    (
+        "fullstack-developer",
+        include_str!("../../../templates/agents/fullstack-developer.md"),
+    ),
+    (
+        "backend-developer",
+        include_str!("../../../templates/agents/backend-developer.md"),
+    ),
+    (
+        "frontend-developer",
+        include_str!("../../../templates/agents/frontend-developer.md"),
     ),
     (
         "reviewer",

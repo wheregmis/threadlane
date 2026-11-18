@@ -529,6 +529,9 @@ async fn templates_lists_the_starter_agents_compiled_into_the_hub() {
         [
             "chief-of-staff",
             "engineer",
+            "fullstack-developer",
+            "backend-developer",
+            "frontend-developer",
             "reviewer",
             "reporter",
             "architect"
