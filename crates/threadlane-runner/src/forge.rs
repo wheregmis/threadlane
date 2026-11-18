@@ -11,12 +11,14 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use threadlane_core::forge::{CommentTarget, Forge, ForgeError, RepositoryAction};
 use threadlane_core::workspace::valid_branch_name;
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 
 use crate::workspace::{git, run};
 
@@ -27,6 +29,8 @@ const GH_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 #[derive(Debug, Clone)]
 pub struct GitForge {
     gh: PathBuf,
+    /// The `gh` user's login, looked up once; `None` if that failed.
+    login: Arc<OnceCell<Option<String>>>,
 }
 
 impl Default for GitForge {
@@ -40,7 +44,27 @@ impl GitForge {
     /// Runs `gh` from `program`.
     #[must_use]
     pub fn with_gh(program: impl Into<PathBuf>) -> Self {
-        Self { gh: program.into() }
+        Self {
+            gh: program.into(),
+            login: Arc::default(),
+        }
+    }
+
+    /// The `gh` user's login, from `gh api user` on first use. A failed or
+    /// odd-looking lookup gives `None` and is not retried.
+    async fn login(&self, worktree: &Path) -> Option<String> {
+        self.login
+            .get_or_init(|| async {
+                let login = self
+                    .gh(worktree, args(&["api", "user", "--jq", ".login"]))
+                    .await
+                    .ok()?;
+                let login = login.trim();
+                (!login.is_empty() && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                    .then(|| login.to_owned())
+            })
+            .await
+            .clone()
     }
 
     /// `gh <args>` in `worktree`, kept from prompting.
@@ -94,11 +118,18 @@ impl Forge for GitForge {
         base: &str,
         title: &str,
         body: &str,
+        opened_by: &str,
     ) -> Result<String, ForgeError> {
         check_branch(base)?;
         self.push(worktree, branch).await?;
         let title = format!("--title={title}");
-        let body = format!("--body={body}");
+        let body = match self.login(worktree).await {
+            Some(login) => format!(
+                "--body={}\n\n🤖 Opened by Threadlane ({opened_by}) acting for @{login}",
+                body.trim_end()
+            ),
+            None => format!("--body={body}"),
+        };
         let output = self
             .gh(
                 worktree,
@@ -243,7 +274,14 @@ mod tests {
             );
         }
         let opened = forge
-            .open_draft_pull_request(worktree, "threadlane/T-0001", "--force", "t", "b")
+            .open_draft_pull_request(
+                worktree,
+                "threadlane/T-0001",
+                "--force",
+                "t",
+                "b",
+                "A, T-0001",
+            )
             .await;
         assert!(opened.unwrap_err().0.contains("not a valid branch name"));
     }

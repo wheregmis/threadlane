@@ -336,6 +336,7 @@ pub enum ForgeCall {
         base: String,
         title: String,
         body: String,
+        opened_by: String,
     },
     Find {
         branch: String,
@@ -418,6 +419,7 @@ impl Forge for FakeForge {
         base: &str,
         title: &str,
         body: &str,
+        opened_by: &str,
     ) -> Result<String, ForgeError> {
         self.push(worktree, branch).await?;
         lock(&self.calls).push(ForgeCall::Open {
@@ -426,6 +428,7 @@ impl Forge for FakeForge {
             base: base.to_owned(),
             title: title.to_owned(),
             body: body.to_owned(),
+            opened_by: opened_by.to_owned(),
         });
         let mut opened = lock(&self.opened);
         let url = format!("https://forge.test/pull/{}", opened.len() + 1);

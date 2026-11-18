@@ -58,7 +58,8 @@ pub trait Forge: Send + Sync + fmt::Debug {
     /// Pushes `branch`, then opens a draft pull request from it onto `base`.
     /// Returns the pull request's URL. Not safe to repeat: a second call may
     /// open a second pull request, so after an interruption ask
-    /// [`Forge::find_pull_request`] first.
+    /// [`Forge::find_pull_request`] first. `opened_by` names who opens it,
+    /// as `<agent name>, <task id>`, for the body's attribution line.
     async fn open_draft_pull_request(
         &self,
         worktree: &Path,
@@ -66,6 +67,7 @@ pub trait Forge: Send + Sync + fmt::Debug {
         base: &str,
         title: &str,
         body: &str,
+        opened_by: &str,
     ) -> Result<String, ForgeError>;
 
     /// Performs an approved repository action against the registered remote.
