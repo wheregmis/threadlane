@@ -677,7 +677,7 @@ pub fn merge_state(result: Option<&Json>) -> Option<String> {
     let lines: Vec<String> = checks
         .iter()
         .map(|check| {
-            let line = if check.clean() {
+            let mut line = if check.clean() {
                 let short = check.base.get(..7).unwrap_or(&check.base);
                 format!("Merges cleanly into {} at {short}", check.branch)
             } else {
@@ -687,6 +687,10 @@ pub fn merge_state(result: Option<&Json>) -> Option<String> {
                     check.conflicts.join(", ")
                 )
             };
+            if let Some(revision) = check.revision.as_deref() {
+                let short = revision.get(..7).unwrap_or(revision);
+                line.push_str(&format!(" (checked {short})"));
+            }
             if several {
                 format!("{}: {line}", check.repository)
             } else {

@@ -382,6 +382,10 @@ impl Inner {
         }
         lane.check()?;
         self.link.check_running(&lane.lease()).await?;
+        if assignment.review_revisions.is_some() && !assignment.perform.is_empty() {
+            let message = "review runs cannot perform approved repository actions".to_owned();
+            return self.fail(lane, run_id, RunFailure::Error { message }).await;
+        }
         let mut performed = self.perform(lane, assignment).await?;
         performed.push_str(&self.bring_in_base(assignment).await);
         lane.check()?;
@@ -903,6 +907,7 @@ impl Inner {
             Arc::clone(&self.workspaces),
             assignment
                 .task_id
+                .filter(|_| assignment.review_revisions.is_none())
                 .map(|task| (task, assignment.repositories.clone())),
         );
         RunRequest {
@@ -923,6 +928,9 @@ impl Inner {
     /// task branch. Nothing to do for a lead, or a task without
     /// repositories.
     async fn checkpoint(&self, assignment: &RunAssignment) -> Result<(), String> {
+        if assignment.review_revisions.is_some() {
+            return Ok(());
+        }
         let Some(task) = assignment.task_id else {
             return Ok(());
         };
@@ -938,6 +946,9 @@ impl Inner {
     /// tell the session about those it left as they were. A failure costs
     /// only the rebase: the run starts anyway.
     async fn bring_in_base(&self, assignment: &RunAssignment) -> String {
+        if assignment.review_revisions.is_some() {
+            return String::new();
+        }
         let Some(task) = assignment.task_id else {
             return String::new();
         };
@@ -988,18 +999,27 @@ impl Inner {
         lane: &LaneState,
         assignment: &RunAssignment,
     ) -> Result<PathBuf, String> {
-        if let Some(task) = assignment.task_id
-            && !assignment.repositories.is_empty()
-        {
-            let paths = self
-                .workspaces
-                .prepare(task, &assignment.repositories)
-                .await
-                .map_err(|error| format!("could not set up the task's worktrees: {error}"))?;
-            return paths
-                .into_iter()
-                .next()
-                .ok_or_else(|| "no worktree was set up".to_owned());
+        if let Some(task) = assignment.task_id {
+            let paths = match &assignment.review_revisions {
+                Some(revisions) => {
+                    self.workspaces
+                        .prepare_review(task, &assignment.repositories, revisions)
+                        .await
+                }
+                None if assignment.repositories.is_empty() => Ok(Vec::new()),
+                None => {
+                    self.workspaces
+                        .prepare(task, &assignment.repositories)
+                        .await
+                }
+            }
+            .map_err(|error| format!("could not set up the task's worktrees: {error}"))?;
+            if !assignment.repositories.is_empty() {
+                return paths
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "no worktree was set up".to_owned());
+            }
         }
         let dir = self.config.lanes_dir.join(lane.lease().lane_id.to_string());
         tokio::fs::create_dir_all(&dir).await.map_err(|error| {

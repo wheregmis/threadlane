@@ -310,6 +310,7 @@ impl LocalLink {
             task_id: task.as_ref().map(|task| task.id),
             agent_name: agent.name.clone(),
             repositories,
+            review_revisions: None,
             events: events.iter().map(|event| event.id).collect(),
             perform,
             backend,

@@ -49,8 +49,18 @@ pub struct MergeCheck {
     pub branch: String,
     /// The commit of the default branch it was checked against.
     pub base: String,
+    /// The full commit from the task branch that was checked. Older results omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     /// The files that conflict; empty when it merges cleanly.
     pub conflicts: Vec<String>,
+}
+
+/// An implementation commit for a review, keyed by the project's repository ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRevision {
+    pub repository: RepositoryId,
+    pub commit: String,
 }
 
 impl MergeCheck {
@@ -72,6 +82,14 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
         &self,
         task: TaskId,
         repositories: &[Repository],
+    ) -> Result<Vec<PathBuf>, WorkspaceError>;
+
+    /// Checks out the submitted commits in separate worktrees for the review's task ID.
+    async fn prepare_review(
+        &self,
+        review: TaskId,
+        repositories: &[Repository],
+        revisions: &[ReviewRevision],
     ) -> Result<Vec<PathBuf>, WorkspaceError>;
 
     /// Commits whatever is uncommitted in the task's worktrees on the task
