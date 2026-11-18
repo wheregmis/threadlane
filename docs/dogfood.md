@@ -68,3 +68,15 @@ Each stage is built by Codex, which cannot see the app, and then looked at again
 | 19 | Task page on T-0004 shows real usage from the hub: 3 runs, 9 min, 17042 output tokens, $1.1052. Confirm dialogs, right-click menus and the machine page were not opened. | to check by hand |
 
 What only a person at the keyboard can check, in one list: J and K and the number keys on a real decision; typing, sending and undoing a send; a failed send keeping its text; right-click menus; each confirm dialog; a notification and answering from it; a narrow window.
+
+## Run 4, 2026-11-17: starter agents (T-0005, T-0006), built by Threadlane
+
+Goal: `docs/agent-templates.md` as two dependent tasks for the Engineer. Both finished without help; the work is in v2 as 92240a27.
+
+| # | Finding | State |
+|---|---|---|
+| 20 | The lead acknowledged the tasks it created, said the second waits for the first, and when it would report. The fix for findings 3 and 6 holds on the real `claude`. | checked |
+| 21 | The dependency worked: T-0006 started after T-0005 finished, and its branch contains T-0005's commit. Each took one run. | checked |
+| 22 | Neither run ended early or with work in the background; both ran the three checks in the foreground. The run-ending fix holds. | checked |
+| 23 | Merging T-0006 into v2 conflicted in four files with archive and delete, which had landed meanwhile and added requests in the same places. Resolved by hand; 674 tests pass. Parallel work on the client interface will keep doing this. | open: nothing in the system helps with it |
+| 24 | The lead's final report did not reach `threadlane feed` when I looked (it had been read by an earlier watcher); the owner had to tell me the tasks were done. | open: check whether the lead reported, in the app |
