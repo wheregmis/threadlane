@@ -46,6 +46,11 @@ conversation; the composer defaulting to General; state-layer tests.
 
 ## After the current tasks land
 
+Use [Noop](https://github.com/huacnlee/noop) as a reference for the
+interaction: give the team a goal in chat, see what it accomplished, and
+get a clear decision when the team needs you. Threadlane uses a space
+switcher to keep each team's work and conversation together.
+
 Each space has one Main Chat with its Lead. Open the space to pick up that
 conversation and give the Lead work for any project in the space. The
 composer sends to the Lead without a project picker. The Lead routes work
@@ -63,3 +68,24 @@ Verify with two spaces and at least two projects in one space. A request
 from Main Chat should reach the right project, appear in the space's task
 list, and report back to the same chat. Switching spaces should open that
 space's own conversation, agents, routines, and tasks.
+
+### One task, more than one agent
+
+The Engineer owns implementation. The Reviewer owns the independent
+review. Today each task has one assignee, and the Reviewer template
+expects a separate task. Keep one card for the owner's request, with
+implementation and review shown as distinct steps in its timeline.
+
+The space selects its review agent. When implementation is ready, the
+Lead sends that exact result for review. The Reviewer uses a separate
+checkout for repository work and returns findings with file and line.
+The Engineer addresses findings on the original task. Review checks the
+new revision before the task is shown as done. If a space expects review
+and the Reviewer is unavailable, the task shows that it is waiting for
+review. Existing publishing approvals still apply.
+
+Verify the whole path from Main Chat: an Engineer produces a change, the
+Reviewer requests a fix, the Engineer updates the same task, and the
+Reviewer approves the updated revision. The Lead reports the outcome in
+the originating space's chat. The task timeline should identify each
+agent and the revision reviewed.

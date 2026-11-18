@@ -41,6 +41,50 @@ pub(super) const MODES: [(Mode, &str); 4] = [
 ];
 
 impl Desktop {
+    pub(crate) fn space_tasks(&self, space: &str, cx: &mut Context<Self>) -> AnyElement {
+        let mut list = v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap(SM)
+            .overflow_y_scrollbar()
+            .id("space-tasks")
+            .child(page_header("Tasks", Some(meta(space.to_owned(), cx)), None));
+        if let Some(known) = self.state.space(space) {
+            if let Some(gap) = known.gap(Part::Tasks) {
+                list = list.child(gap_line(&gap, "tasks", space, cx));
+            } else if known.tasks.is_empty() {
+                list = list.child(empty(EmptyRegion::Board, cx));
+            }
+            for summary in &known.tasks {
+                let task = &summary.task;
+                let screen = Screen::Task {
+                    space: space.to_owned(),
+                    task: task.id,
+                };
+                let status =
+                    threadlane_desktop::status_label(task.status, task.waiting_reason.as_deref());
+                list = list.child(
+                    h_flex()
+                        .gap(MD)
+                        .child(
+                            link(
+                                format!("space-task-{}", task.id),
+                                format!("{} {}", task.id, task.title),
+                            )
+                            .flex_1()
+                            .min_w_0()
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                            ),
+                        )
+                        .child(meta(summary.project.clone(), cx))
+                        .child(status_badge(status, Status::task(status), cx)),
+                );
+            }
+        }
+        list.into_any_element()
+    }
+
     pub(crate) fn project(
         &self,
         space: &str,
@@ -49,6 +93,27 @@ impl Desktop {
         when: &When,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if tab == Tab::Conversation && self.is_main_chat(space, project) {
+            let context = h_flex().gap(SM).child(meta(space.to_owned(), cx)).children(
+                self.state
+                    .lead_line(space, project, when)
+                    .map(|line| meta(line, cx)),
+            );
+            let actions = self.state.lead_stop(space, project).map(|target| {
+                h_flex().child(self.stop_button(space, target, "Stop the space Lead".into(), cx))
+            });
+            return v_flex()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .max_w(READING_WIDTH)
+                .self_center()
+                .gap(MD)
+                .child(page_header("Main Chat", Some(context), actions))
+                .child(self.conversation_tab(space, project, when, cx))
+                .into_any_element();
+        }
         let (in_space, named) = (space.to_owned(), project.to_owned());
         // Keyed by the tab shown, so the bar's sliding indicator starts fresh
         // under it instead of carrying a half-finished slide from another tab.
@@ -554,7 +619,9 @@ impl Desktop {
                     .gap(MD)
                     .children(is_empty.then(|| empty(EmptyRegion::Board, cx)))
                     .child(board)
-                    .children((!archived).then(|| self.project_composer(project, cx).flex_none())),
+                    .children(
+                        (!archived).then(|| self.project_composer(space, project, cx).flex_none()),
+                    ),
             )
             .child(
                 decision_scroller("board-sidebar", side, &self.decision_scroll)
@@ -565,13 +632,20 @@ impl Desktop {
             .into_any_element()
     }
 
-    fn project_composer(&self, project: &str, cx: &mut Context<Self>) -> Div {
-        self.render_composer(
-            threadlane_desktop::Draft::Lead,
-            format!("Message the lead of {project}"),
-            None,
-            cx,
-        )
+    fn is_main_chat(&self, space: &str, project: &str) -> bool {
+        self.state
+            .space(space)
+            .and_then(threadlane_desktop::Space::main_chat_project)
+            == Some(project)
+    }
+
+    fn project_composer(&self, space: &str, project: &str, cx: &mut Context<Self>) -> Div {
+        let placeholder = if self.is_main_chat(space, project) {
+            "Message the space Lead".to_owned()
+        } else {
+            format!("Message the lead of {project}")
+        };
+        self.render_composer(threadlane_desktop::Draft::Lead, placeholder, None, cx)
     }
 
     /// The conversation with the lead, then the tasks and open decisions of
@@ -822,6 +896,35 @@ impl Desktop {
             lines = lines.child(self.recorded_section(space, project, recorded, cx));
         }
 
+        let side = (!self.is_main_chat(space, project))
+            .then(|| self.conversation_sidebar(space, project, when, cx));
+        h_flex()
+            .flex_1()
+            .min_h_0()
+            .items_start()
+            .gap(LG)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .gap(SM)
+                    .child(self.conversation_scroller(space, project, lines, cx))
+                    .children(
+                        (!archived).then(|| self.project_composer(space, project, cx).flex_none()),
+                    ),
+            )
+            .children(side)
+            .into_any_element()
+    }
+
+    fn conversation_sidebar(
+        &self,
+        space: &str,
+        project: &str,
+        when: &When,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut side = v_flex()
             .w(SIDEBAR_WIDTH)
             .h_full()
@@ -933,30 +1036,14 @@ impl Desktop {
             project: project.to_owned(),
             tab: Tab::Memory,
         };
-        side = side.child(
+        side.child(
             button("open-memory")
                 .small()
                 .icon(AppIcon::BookOpen)
                 .label("Open memory")
                 .on_click(cx.listener(move |this, _, _, cx| this.go(memory.clone(), cx))),
-        );
-
-        h_flex()
-            .flex_1()
-            .min_h_0()
-            .items_start()
-            .gap(LG)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .h_full()
-                    .min_w_0()
-                    .gap(SM)
-                    .child(self.conversation_scroller(space, project, lines, cx))
-                    .children((!archived).then(|| self.project_composer(project, cx).flex_none())),
-            )
-            .child(side)
-            .into_any_element()
+        )
+        .into_any_element()
     }
 
     /// The files this project's runs can see, by group, and the one selected

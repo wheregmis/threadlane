@@ -24,6 +24,7 @@ use crate::tokens::{LABEL_WIDTH, MD, READING_WIDTH, SM, TYPE_BODY, XL, XS};
 impl Desktop {
     pub(crate) fn settings(
         &self,
+        scope: Option<&str>,
         when: &threadlane_desktop::When,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -52,9 +53,17 @@ impl Desktop {
             .overflow_y_scrollbar()
             .id("settings")
             .gap(XL)
-            .child(heading("Settings"))
-            .child(section("Spaces"));
-        for row in self.state.settings_rows() {
+            .child(heading(if scope.is_some() {
+                "Space settings"
+            } else {
+                "App settings"
+            }));
+        for row in self
+            .state
+            .settings_rows()
+            .into_iter()
+            .filter(|row| scope == Some(row.paired_as.as_str()))
+        {
             let ceiling = self.space_ceiling(&row.paired_as, cx);
             let pacing = self.space_pacing(&row.paired_as, cx);
             let mut metrics = v_flex().gap(XS).pt(SM).child(section("Metrics"));
@@ -96,6 +105,9 @@ impl Desktop {
                     .child(pacing)
                     .child(metrics),
             );
+        }
+        if scope.is_some() {
+            return screen.into_any_element();
         }
         let notifications = self.state.notifications();
         let toggle = |id: &'static str, label: &'static str, on: bool, decisions: bool| {

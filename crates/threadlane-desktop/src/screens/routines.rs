@@ -54,7 +54,12 @@ impl Desktop {
     }
 
     /// Every space's routines, by space and project.
-    pub(crate) fn routines_screen(&self, when: &When, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn routines_screen(
+        &self,
+        scope: Option<&str>,
+        when: &When,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut screen = v_flex()
             .flex_1()
             .min_h_0()
@@ -62,8 +67,10 @@ impl Desktop {
             .id("routines-all")
             .gap(XL)
             .child(heading("Routines"));
-        let groups = self.state.routine_groups(when);
-        let gaps = self.state.routines_space_gaps();
+        let mut groups = self.state.routine_groups(when);
+        groups.retain(|group| scope.is_none_or(|name| group.space == name));
+        let mut gaps = self.state.routines_space_gaps();
+        gaps.retain(|(space, _)| scope.is_none_or(|name| *space == name));
         if groups.is_empty() && gaps.is_empty() {
             screen = screen.child(empty(EmptyRegion::AllRoutines, cx));
         }

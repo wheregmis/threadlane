@@ -38,8 +38,14 @@ pub(crate) fn subscribe(
         window,
         move |this, input, event: &InputEvent, window, cx| match event {
             InputEvent::Change => {
-                this.state.edit_draft(draft, &input.read(cx).value());
-                cx.notify();
+                if let Some(destination) = this
+                    .composer_destination()
+                    .filter(|target| target.draft() == draft)
+                    && this.composer_shown.as_ref() == Some(&destination)
+                {
+                    this.state.edit_draft(&destination, &input.read(cx).value());
+                    cx.notify();
+                }
             }
             InputEvent::PressEnter { secondary, shift }
                 if sends_on_enter(*secondary, *shift) && this.visible_draft() == Some(draft) =>
@@ -53,18 +59,28 @@ pub(crate) fn subscribe(
 
 impl Desktop {
     pub(crate) fn visible_draft(&self) -> Option<Draft> {
+        self.composer_destination()
+            .map(|destination| destination.draft())
+    }
+
+    fn composer_destination(&self) -> Option<Destination> {
         match &self.screen {
-            Screen::Home => Some(Draft::Lead),
+            Screen::Home => self.state.target().and_then(|(space, _)| {
+                let project = self.state.space(space)?.main_chat_project()?;
+                Some(Destination::Lead(space.to_owned(), project.to_owned()))
+            }),
             Screen::Project {
                 space,
                 project,
                 tab: Tab::Tasks | Tab::Conversation,
-            } if !self.state.is_archived(space, project) => Some(Draft::Lead),
+            } if !self.state.is_archived(space, project) => {
+                Some(Destination::Lead(space.clone(), project.clone()))
+            }
             Screen::Task { space, task }
                 if self.state.task(space, *task).is_some()
                     && !self.state.task_is_archived(space, *task) =>
             {
-                Some(Draft::Task)
+                Some(Destination::Task(space.clone(), *task))
             }
             _ => None,
         }
@@ -77,17 +93,23 @@ impl Desktop {
         }
     }
 
-    pub(crate) fn sync_drafts(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn sync_drafts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let destination = self.composer_destination();
+        let switched = self.composer_shown != destination;
         for draft in [Draft::Lead, Draft::Task] {
             let input = self.draft_input(draft);
-            let text = self.state.draft(draft);
-            if input.read(cx).value().as_str() != text {
+            let text = destination
+                .as_ref()
+                .filter(|target| target.draft() == draft)
+                .map_or("", |destination| self.state.draft(destination));
+            if switched || input.read(cx).value().as_str() != text {
                 input.update(cx, |input, cx| {
                     input.set_value(text.to_owned(), window, cx);
                     input.set_selected_range(text.len()..text.len(), cx);
                 });
             }
         }
+        self.composer_shown = destination;
     }
 
     pub(crate) fn render_composer(
@@ -97,10 +119,17 @@ impl Desktop {
         picker: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> Div {
-        let held = self.state.held_seconds(draft);
-        let sending = held.is_none() && self.state.is_sending(draft);
-        let enabled = self.state.is_send_enabled(draft)
-            && (!matches!(self.screen, Screen::Home) || self.state.target().is_some());
+        let destination = self.composer_destination();
+        let held = destination
+            .as_ref()
+            .and_then(|destination| self.state.held_seconds(destination));
+        let sending = held.is_none()
+            && destination
+                .as_ref()
+                .is_some_and(|destination| self.state.is_sending(destination));
+        let enabled = destination
+            .as_ref()
+            .is_some_and(|destination| self.state.is_send_enabled(destination));
         v_flex()
             .gap(XS)
             .child(
@@ -147,36 +176,21 @@ impl Desktop {
                             })),
                     )
             }))
-            .children(self.state.send_error(draft).map(|why| {
-                div()
-                    .text_size(TYPE_BODY)
-                    .text_color(cx.theme().danger)
-                    .child(why.to_owned())
-            }))
+            .children(
+                destination
+                    .as_ref()
+                    .and_then(|destination| self.state.send_error(destination))
+                    .map(|why| {
+                        div()
+                            .text_size(TYPE_BODY)
+                            .text_color(cx.theme().danger)
+                            .child(why.to_owned())
+                    }),
+            )
     }
 
     fn submit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let destination = match &self.screen {
-            Screen::Home => self
-                .state
-                .target()
-                .map(|(space, project)| Destination::Lead(space.to_owned(), project.to_owned())),
-            Screen::Project {
-                space,
-                project,
-                tab: Tab::Tasks | Tab::Conversation,
-            } => Some(Destination::Lead(space.clone(), project.clone())),
-            Screen::Task { space, task } => Some(Destination::Task(space.clone(), *task)),
-            _ => None,
-        };
-        let Some(destination) = destination else {
-            if matches!(self.screen, Screen::Home) && self.state.is_send_enabled(Draft::Lead) {
-                self.state.fail_send(
-                    Draft::Lead,
-                    "No project to send to: pair a hub first.".to_owned(),
-                );
-                cx.notify();
-            }
+        let Some(destination) = self.composer_destination() else {
             return;
         };
         let request = self.state.request_send(destination, SystemClock.now());
@@ -227,25 +241,29 @@ impl Desktop {
     }
 
     pub(crate) fn undo_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(draft) = self.visible_draft() else {
+        let Some(destination) = self.composer_destination() else {
             return false;
         };
-        if !self.state.undo_send(draft) {
+        if !self.state.undo_send(&destination) {
             return false;
         }
         self.sync_drafts(window, cx);
-        self.draft_input(draft).focus_handle(cx).focus(window, cx);
+        self.draft_input(destination.draft())
+            .focus_handle(cx)
+            .focus(window, cx);
         cx.notify();
         true
     }
 
     pub(crate) fn reply_to(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(draft) = self.visible_draft() else {
+        let Some(destination) = self.composer_destination() else {
             return;
         };
-        self.state.reply_to_message(draft, text);
+        self.state.reply_to_message(&destination, text);
         self.sync_drafts(window, cx);
-        self.draft_input(draft).focus_handle(cx).focus(window, cx);
+        self.draft_input(destination.draft())
+            .focus_handle(cx)
+            .focus(window, cx);
         cx.notify();
     }
 

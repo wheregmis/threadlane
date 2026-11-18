@@ -240,8 +240,12 @@ enum Screen {
         space: String,
         task: TaskId,
     },
-    /// The agents of every space.
-    Agents,
+    /// Agents in the selected space, or all spaces from the debug route.
+    Agents(Option<String>),
+    /// Work across the projects in one space.
+    SpaceTasks {
+        space: String,
+    },
     /// A form for a new project in one space.
     NewProject {
         space: String,
@@ -253,10 +257,10 @@ enum Screen {
         space: String,
         machine: threadlane_core::ids::MachineId,
     },
-    /// The routines of every space, by space and project.
-    Routines,
-    /// What each hub reports about itself, and this app's own settings.
-    Settings,
+    /// Routines in the selected space, or all spaces from the debug route.
+    Routines(Option<String>),
+    /// One space's settings, or preferences for this app.
+    Settings(Option<String>),
     /// Pair another space with this app.
     AddSpace,
 }
@@ -270,10 +274,10 @@ impl Screen {
         let parts: Vec<&str> = open.split('/').collect();
         Some(match parts.as_slice() {
             ["home"] => Self::Home,
-            ["agents"] => Self::Agents,
+            ["agents"] => Self::Agents(None),
             ["machines"] => Self::Machines,
-            ["routines"] => Self::Routines,
-            ["settings"] => Self::Settings,
+            ["routines"] => Self::Routines(None),
+            ["settings"] => Self::Settings(None),
             [space, task] if TaskId::parse(task).is_some() && task.starts_with(['T', 't']) => {
                 Self::Task {
                     space: (*space).to_owned(),
@@ -324,6 +328,7 @@ struct Desktop {
     scroll_to_decision: Rc<Cell<DecisionScroll>>,
     decision_inputs: HashMap<DecisionKey, (Entity<InputState>, Subscription)>,
     composer: Entity<TextareaState>,
+    composer_shown: Option<threadlane_desktop::Destination>,
     pacing_inputs: [Entity<InputState>; 4],
     /// The task screen's composer (wireframe 5).
     task_composer: Entity<TextareaState>,
@@ -538,6 +543,7 @@ impl Desktop {
             })),
             decision_inputs: HashMap::new(),
             composer,
+            composer_shown: None,
             pacing_inputs,
             task_composer,
             memory_editor,
@@ -643,11 +649,12 @@ impl Desktop {
     fn load_screen(&mut self, cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
         match self.screen.clone() {
-            Screen::Routines => {
+            Screen::Routines(scope) => {
                 let projects = self
                     .state
                     .targets()
                     .into_iter()
+                    .filter(|(space, _)| scope.as_deref().is_none_or(|scope| *space == scope))
                     .map(|(space, project)| (space.to_owned(), project.to_owned()))
                     .collect();
                 self.load_routines(projects, cx);
@@ -698,11 +705,12 @@ impl Desktop {
                 |this, loaded, _| this.state.apply_task(loaded),
                 cx,
             ),
-            Screen::Agents => {
+            Screen::Agents(scope) => {
                 let projects = self
                     .state
                     .targets()
                     .into_iter()
+                    .filter(|(space, _)| scope.as_deref().is_none_or(|scope| *space == scope))
                     .map(|(space, project)| (space.to_owned(), project.to_owned()))
                     .collect();
                 self.run(
@@ -711,11 +719,12 @@ impl Desktop {
                     cx,
                 );
             }
-            Screen::Settings => {
+            Screen::Settings(Some(scope)) => {
                 let projects = self
                     .state
                     .targets()
                     .into_iter()
+                    .filter(|(space, _)| *space == scope)
                     .map(|(space, project)| (space.to_owned(), project.to_owned()))
                     .collect();
                 let for_modes = Arc::clone(&core);
@@ -724,30 +733,16 @@ impl Desktop {
                     |this, modes, _| this.state.apply_modes(modes),
                     cx,
                 );
-                let spaces: Vec<_> = self
-                    .state
-                    .spaces()
-                    .iter()
-                    .map(|space| space.name.clone())
-                    .collect();
                 self.run(
                     async move {
                         let core = core.read().await;
-                        let mut settings = Vec::new();
-                        for space in spaces {
-                            let (pacing, metrics) = tokio::join!(
-                                core.pacing(Some(&space)),
-                                load_metrics(&core, &space)
-                            );
-                            settings.push((space, pacing, metrics));
-                        }
-                        settings
+                        let (pacing, metrics) =
+                            tokio::join!(core.pacing(Some(&scope)), load_metrics(&core, &scope));
+                        (scope, pacing, metrics)
                     },
-                    |this, settings, _| {
-                        for (space, pacing, metrics) in settings {
-                            this.state.apply_pacing(space.clone(), pacing);
-                            this.state.apply_metrics(space, metrics);
-                        }
+                    |this, (space, pacing, metrics), _| {
+                        this.state.apply_pacing(space.clone(), pacing);
+                        this.state.apply_metrics(space, metrics);
                     },
                     cx,
                 );
@@ -771,7 +766,11 @@ impl Desktop {
                     cx,
                 );
             }
-            Screen::Machines | Screen::NewProject { .. } | Screen::AddSpace => {}
+            Screen::Machines
+            | Screen::NewProject { .. }
+            | Screen::SpaceTasks { .. }
+            | Screen::Settings(None)
+            | Screen::AddSpace => {}
         }
     }
 
@@ -1393,6 +1392,10 @@ impl Desktop {
                     let gone = match &this.screen {
                         Screen::Project { space, .. }
                         | Screen::Task { space, .. }
+                        | Screen::SpaceTasks { space }
+                        | Screen::Agents(Some(space))
+                        | Screen::Routines(Some(space))
+                        | Screen::Settings(Some(space))
                         | Screen::NewProject { space } => *space == name,
                         _ => false,
                     };
@@ -1445,12 +1448,13 @@ impl Render for Desktop {
                 tab,
             } => self.project(&space, &project, tab, &when, cx),
             Screen::Task { space, task } => self.task(&space, task, &when, cx),
-            Screen::Agents => self.agents(cx),
+            Screen::Agents(scope) => self.agents(scope.as_deref(), cx),
+            Screen::SpaceTasks { space } => self.space_tasks(&space, cx),
             Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),
             Screen::Machine { space, machine } => self.machine(&space, machine, &when, cx),
-            Screen::Routines => self.routines_screen(&when, cx),
-            Screen::Settings => self.settings(&when, cx),
+            Screen::Routines(scope) => self.routines_screen(scope.as_deref(), &when, cx),
+            Screen::Settings(scope) => self.settings(scope.as_deref(), &when, cx),
             Screen::AddSpace => self.add_space(cx),
         };
         // With no hub paired, every screen but Machines explains pairing.

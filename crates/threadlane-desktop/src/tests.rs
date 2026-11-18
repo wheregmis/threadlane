@@ -1035,6 +1035,24 @@ async fn decisions_from_two_hubs_merge_oldest_first() {
 }
 
 #[tokio::test]
+async fn each_space_uses_its_own_general_project_for_main_chat() {
+    let work = FakeHub::new("Work", vec![]);
+    let home = FakeHub::new("Home", vec![]);
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.set_target("work", "api");
+
+    for space in ["work", "home"] {
+        assert_eq!(
+            state.space(space).unwrap().main_chat_project(),
+            Some("General")
+        );
+    }
+    assert_eq!(state.target(), Some(("work", "api")));
+}
+
+#[tokio::test]
 async fn an_unreachable_hub_does_not_hide_the_others() {
     let work = FakeHub::new("Work", vec![decision(1, 1_000)]);
     work.tasks
@@ -4696,6 +4714,35 @@ T-0002
     assert_eq!(Reference::from_link("javascript:alert(1)"), None);
 }
 
+#[test]
+fn switching_spaces_keeps_drafts_and_failed_sends_with_their_original_chat() {
+    let mut state = AppState::default();
+    let work = Destination::Lead("work".into(), "General".into());
+    let home = Destination::Lead("home".into(), "General".into());
+    let at = Timestamp::from_millis(2_000);
+    state.edit_draft(&work, "Work plan");
+    let first = state.request_send(work.clone(), at).held.unwrap();
+
+    assert!(state.draft(&home).is_empty());
+    assert!(state.held_seconds(&home).is_none());
+    assert!(!state.undo_send(&home));
+    state.edit_draft(&home, "Home plan");
+    let send = state.request_send(home.clone(), at).flushed.unwrap();
+    assert_eq!(send.id, first);
+    state.finish_send(
+        send,
+        Err(ClientError::Unreachable {
+            space: "work".into(),
+            reason: "offline".into(),
+        }),
+    );
+    assert_eq!(state.draft(&work), "Work plan");
+    assert!(state.send_error(&work).is_some());
+    assert_eq!(state.draft(&home), "Home plan");
+    assert!(state.send_error(&home).is_none());
+    assert_eq!(state.held_seconds(&home), Some(3));
+}
+
 #[tokio::test]
 async fn stage_three_hold_undo_flush_and_confirmation_use_the_original_recipient() {
     let work = FakeHub::new("Work", Vec::new());
@@ -4709,21 +4756,21 @@ async fn stage_three_hold_undo_flush_and_confirmation_use_the_original_recipient
     assert!(!sends_on_enter(false, true));
     assert!(sends_on_enter(true, false));
     assert!(sends_on_enter(true, true));
-    state.edit_draft(Draft::Lead, "  \n ");
-    assert!(!state.is_send_enabled(Draft::Lead));
+    state.edit_draft(&to, "  \n ");
+    assert!(!state.is_send_enabled(&to));
     assert!(state.request_send(to.clone(), at).held.is_none());
 
-    state.edit_draft(Draft::Lead, "Write the docs");
+    state.edit_draft(&to, "Write the docs");
     let hold = state.request_send(to.clone(), at).held.unwrap();
-    assert_eq!(state.held_seconds(Draft::Lead), Some(3));
+    assert_eq!(state.held_seconds(&to), Some(3));
     assert!(
         matches!(state.conversation("work", "api", &when()).as_slice(),
         [Line::Day(_), Line::Sending { text, .. }] if text == "Write the docs")
     );
     assert!(state.tick_send(hold).is_none());
-    assert_eq!(state.held_seconds(Draft::Lead), Some(2));
-    assert!(state.undo_send(Draft::Lead));
-    assert_eq!(state.draft(Draft::Lead), "Write the docs");
+    assert_eq!(state.held_seconds(&to), Some(2));
+    assert!(state.undo_send(&to));
+    assert_eq!(state.draft(&to), "Write the docs");
     assert!(state.tick_send(hold).is_none());
     assert!(state.conversation("work", "api", &when()).is_empty());
 
@@ -4737,8 +4784,8 @@ async fn stage_three_hold_undo_flush_and_confirmation_use_the_original_recipient
     assert_eq!(flushed.id, hold);
     assert_eq!(flushed.destination, to);
     assert!(state.tick_send(hold).is_none());
-    assert!(state.is_sending(Draft::Lead));
-    assert_eq!(state.draft(Draft::Lead), "Write the docs");
+    assert!(state.is_sending(&to));
+    assert_eq!(state.draft(&to), "Write the docs");
 
     let result = flushed.deliver(&core).await;
     let event_id = result.as_ref().unwrap().accepted.event_id;
@@ -4758,8 +4805,8 @@ async fn stage_three_hold_undo_flush_and_confirmation_use_the_original_recipient
         said(&state.conversation("work", "api", &when())),
         ["-- Today", "you: Write the docs"]
     );
-    assert_eq!(state.draft(Draft::Lead), "");
-    assert!(!state.is_sending(Draft::Lead));
+    assert_eq!(state.draft(&to), "");
+    assert!(!state.is_sending(&to));
 }
 
 #[tokio::test]
@@ -4775,19 +4822,19 @@ async fn stage_three_countdown_flushes_an_edited_second_send_and_keeps_failed_ta
     state.apply_task(load_task(&core, "work", TaskId(7)).await);
     let to = Destination::Task("work".into(), TaskId(7));
     let at = Timestamp::from_millis(2_000);
-    state.edit_draft(Draft::Task, "First");
+    state.edit_draft(&to, "First");
     let first = state.request_send(to.clone(), at).held.unwrap();
-    state.edit_draft(Draft::Task, "Second");
+    state.edit_draft(&to, "Second");
     let next = state.request_send(to.clone(), at);
     let flushed = next.flushed.unwrap();
     assert_eq!(flushed.id, first);
     assert_eq!(flushed.text, "First");
     state.finish_send(flushed.clone(), flushed.deliver(&core).await);
-    assert_eq!(state.draft(Draft::Task), "Second");
+    assert_eq!(state.draft(&to), "Second");
     let second = next.held.unwrap();
     assert!(state.tick_send(second).is_none());
     assert!(state.tick_send(second).is_none());
-    assert_eq!(state.held_seconds(Draft::Task), Some(1));
+    assert_eq!(state.held_seconds(&to), Some(1));
     assert!(
         state
             .task_timeline("work", state.task("work", TaskId(7)).unwrap(), &when())
@@ -4798,24 +4845,24 @@ async fn stage_three_countdown_flushes_an_edited_second_send_and_keeps_failed_ta
     assert!(state.tick_send(second).is_none());
     work.down.store(true, Ordering::SeqCst);
     state.finish_send(outgoing.clone(), outgoing.deliver(&core).await);
-    assert_eq!(state.draft(Draft::Task), "Second");
+    assert_eq!(state.draft(&to), "Second");
     assert!(
         state
-            .send_error(Draft::Task)
+            .send_error(&to)
             .unwrap()
             .contains("connection refused")
     );
-    assert!(state.is_send_enabled(Draft::Task));
+    assert!(state.is_send_enabled(&to));
 
     state.set_hold_messages(false).unwrap();
     let mut restarted = AppState::default();
     restarted.set_client_dir(dir.path().to_owned());
     assert!(!restarted.hold_messages());
     work.down.store(false, Ordering::SeqCst);
-    let send = state.request_send(to, at).immediate.unwrap();
+    let send = state.request_send(to.clone(), at).immediate.unwrap();
     state.finish_send(send.clone(), send.deliver(&core).await);
-    assert_eq!(state.draft(Draft::Task), "");
-    assert!(state.send_error(Draft::Task).is_none());
+    assert_eq!(state.draft(&to), "");
+    assert!(state.send_error(&to).is_none());
     let moments = state.task_timeline("work", state.task("work", TaskId(7)).unwrap(), &when());
     assert_eq!(
         moments
@@ -4924,12 +4971,10 @@ async fn stage_three_new_divider_tracks_each_visit_and_the_newest_body_stays_ope
             .conversation("work", "api", &when())
             .contains(&Line::New)
     );
-    state.edit_draft(Draft::Lead, "I agree.");
-    state.reply_to_message(Draft::Lead, "First line\nSecond line");
-    assert_eq!(
-        state.draft(Draft::Lead),
-        "> First line\n> Second line\n\nI agree."
-    );
+    let to = Destination::Lead("work".into(), "api".into());
+    state.edit_draft(&to, "I agree.");
+    state.reply_to_message(&to, "First line\nSecond line");
+    assert_eq!(state.draft(&to), "> First line\n> Second line\n\nI agree.");
 }
 
 #[tokio::test]
@@ -5461,7 +5506,8 @@ async fn archived_projects_leave_work_surfaces_and_restore_the_same_history() {
     state.apply(refresh(&core).await);
     state.set_target("work", "api");
     state.apply_project(load_project(&core, "work", "api").await);
-    state.edit_draft(Draft::Lead, "Keep this draft");
+    let to = Destination::Lead("work".into(), "api".into());
+    state.edit_draft(&to, "Keep this draft");
     let conversation = state.conversation("work", "api", &when());
     assert!(!conversation.is_empty());
     assert!(state.offers_archive("work", "api"));
@@ -5519,7 +5565,7 @@ async fn archived_projects_leave_work_surfaces_and_restore_the_same_history() {
     assert_eq!(state.project("work", "api").unwrap().tasks.len(), 1);
     let send = state.request_send(Destination::Lead("work".into(), "api".into()), when().now);
     assert!(send.held.is_none() && send.immediate.is_none() && send.flushed.is_none());
-    assert_eq!(state.draft(Draft::Lead), "Keep this draft");
+    assert_eq!(state.draft(&to), "Keep this draft");
 
     let project = core.set_archived(Some("work"), "api", false).await.unwrap();
     state.project_updated("work", project);
