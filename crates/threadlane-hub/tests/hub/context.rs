@@ -43,6 +43,16 @@ async fn consume_notice(link: &dyn HubLink) {
     assert_eq!(lead.lane_kind, LaneKind::Lead, "{}", lead.prompt);
 }
 
+/// General's appended instructions without the space summary, which ends
+/// them (docs/one-place-to-talk.md stage 1).
+fn without_space(run: &RunAssignment) -> String {
+    let text = &run.appended_instructions;
+    let at = text
+        .find("\n\nProjects in this space:\n")
+        .unwrap_or_else(|| panic!("General's lead sees the space: {text}"));
+    format!("{}\n", &text[..at])
+}
+
 fn fresh(run: &RunAssignment) -> bool {
     matches!(run.native_session, NativeSession::Start { .. })
 }
@@ -175,7 +185,7 @@ async fn appended_instructions_change_only_when_memory_does() {
          Project instructions, project/instructions.md:\nUse British spelling.\n\n\
          Project notes, listed in project/notes/INDEX.md:\n- [Build](build.md): How to build.\n"
     );
-    assert_eq!(first.appended_instructions, expected);
+    assert_eq!(without_space(&first), expected);
     assert_eq!(
         first.appended_instructions.as_bytes(),
         second.appended_instructions.as_bytes()
@@ -192,7 +202,7 @@ async fn appended_instructions_change_only_when_memory_does() {
     hub.send("m-4", "fourth").await;
     let third = run_with(&*hub.link, &[]).await;
     assert_ne!(third.appended_instructions, second.appended_instructions);
-    assert!(third.appended_instructions.ends_with(
+    assert!(without_space(&third).ends_with(
         "Space notes, listed in space/notes/INDEX.md:\n- [Style](style.md): Short sentences.\n\n\
          Project notes, listed in project/notes/INDEX.md:\n- [Build](build.md): How to build.\n"
     ));
@@ -346,7 +356,7 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
     // The lead is given the task index.
     hub.send("m-2", "How is the page?").await;
     let lead = run_with(&*hub.link, &[]).await;
-    assert!(lead.appended_instructions.ends_with(
+    assert!(without_space(&lead).ends_with(
         "Task progress files, listed in project/tasks/INDEX.md:\n\
          - [Page](T-0001.md): Half done: the layout is in.\n"
     ));

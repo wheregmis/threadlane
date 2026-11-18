@@ -9,7 +9,9 @@ use threadlane_core::model::RunOutcome;
 use threadlane_core::store::OutboxStore;
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError, ToolRegistry};
-use threadlane_hub::{ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
+use threadlane_hub::{
+    ASK_PROJECT_LEAD, ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP,
+};
 use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, CombinedTools, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT,
     MEMORY_RENAME, MEMORY_VIEW, SEND_MESSAGE, UPDATE_TASK,
@@ -209,6 +211,7 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
             LIST_TIMERS,
             CANCEL_TIMER,
             ASK_USER,
+            ASK_PROJECT_LEAD,
             "read_notes",
             "merge_pull_request",
             "delete_repository"
