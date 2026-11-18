@@ -9,6 +9,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
+use threadlane_core::model::BackendKind;
 use threadlane_desktop::{EmptyRegion, Part};
 
 use super::agent_edit::backend_picker;
@@ -31,7 +32,7 @@ impl Desktop {
             .overflow_y_scrollbar()
             .id("agents")
             .gap(LG)
-            .child(heading("Agents"));
+            .child(heading("Team"));
         for space in self
             .state
             .spaces()
@@ -251,6 +252,8 @@ impl Desktop {
             "agent-backends",
             self.state.agent_form().backends,
             None,
+            BackendKind::ALL,
+            &self.agent_models,
             |this, index| this.state.agent_form_mut().backends = index,
             cx,
         );
@@ -314,12 +317,6 @@ impl Desktop {
             .child(field(&self.agent_name))
             .child(field(&self.agent_role))
             .child(field(&self.agent_instructions))
-            .child(
-                div()
-                    .text_size(TYPE_BODY)
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Backends, in order of preference"),
-            )
             .child(backends)
             .child(
                 div()

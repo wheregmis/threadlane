@@ -423,6 +423,9 @@ enum AgentCommand {
         /// claude,codex,antigravity; any if left out.
         #[arg(long = "backend", value_delimiter = ',')]
         backends: Vec<BackendKind>,
+        /// A model for one backend. May be repeated.
+        #[arg(long = "model", value_name = "BACKEND=MODEL", value_parser = backend_model)]
+        models: Vec<(String, String)>,
     },
     /// Change an agent; options left out keep their value. It applies from
     /// the agent's next run.
@@ -740,6 +743,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     role,
                     instructions,
                     mut backends,
+                    models,
                 },
         } => {
             let mut name = named.or(name);
@@ -758,12 +762,13 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 }
             }
             let agent = core
-                .create_agent(
+                .create_agent_with_models(
                     space.as_deref(),
                     &name.unwrap_or_default(),
                     &role.unwrap_or_default(),
                     &instructions.unwrap_or_default(),
                     &backends,
+                    models.into_iter().collect(),
                 )
                 .await?;
             println!("created agent {} ({})", agent.name, agent.role);

@@ -216,6 +216,12 @@ impl HubApi for FakeHub {
                 role,
                 instructions,
                 ..
+            }
+            | OrgRequest::CreateAgentWithModels {
+                name,
+                role,
+                instructions,
+                ..
             } => OrgReply::Agent {
                 agent: agent(&name, &role, &instructions),
             },
@@ -827,6 +833,10 @@ async fn the_cli_manages_projects_agents_and_modes() {
             "reviewer",
             "--backend",
             "codex,claude",
+            "--model",
+            "codex=custom",
+            "--model",
+            "claude=opus",
         ],
         "created agent Reviewer (reviewer)\n",
     )
@@ -859,11 +869,16 @@ async fn the_cli_manages_projects_agents_and_modes() {
                 name: "web".to_owned(),
                 description: "the site".to_owned(),
             },
-            OrgRequest::CreateAgent {
+            OrgRequest::CreateAgentWithModels {
                 name: "Reviewer".to_owned(),
                 role: "reviewer".to_owned(),
                 instructions: String::new(),
                 backends: vec![BackendKind::Codex, BackendKind::Claude],
+                models: [
+                    ("codex".into(), "custom".into()),
+                    ("claude".into(), "opus".into())
+                ]
+                .into(),
             },
             OrgRequest::Agents,
             OrgRequest::Bindings {

@@ -1,4 +1,4 @@
-//! Routines (wireframe sidebar "Routines" and a project's "Routines" tab):
+//! Routines (wireframe sidebar "Routines" and a project's "Setup" tab):
 //! each routine and follow-up with what it does, when, who set it, and
 //! Pause, Resume and Cancel; the tab also has "+ New routine".
 
@@ -28,13 +28,7 @@ impl Desktop {
         when: &When,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut list = v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .id("routines")
-            .gap(MD)
-            .child(section("Routines and follow-ups"));
+        let mut list = v_flex().gap(MD).child(section("Routines and follow-ups"));
         let rows = self.state.routine_rows(space, project, when);
         match self.state.routines_gap(space, project) {
             Some(gap) => list = list.child(gap_line(&gap, "routines", space, cx)),
@@ -86,7 +80,7 @@ impl Desktop {
             let open = Screen::Project {
                 space: group.space.clone(),
                 project: group.project.clone(),
-                tab: Tab::Routines,
+                tab: Tab::Setup,
             };
             screen = screen.child(
                 div().child(

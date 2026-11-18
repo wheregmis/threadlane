@@ -94,7 +94,7 @@ fn shortcuts() -> Vec<Shortcut> {
         ),
         shortcut(
             "Navigate",
-            "Go Home",
+            "Go to Inbox",
             [KeyBinding::new("g h", GoHome, Some(OUTSIDE_INPUT))],
         ),
         shortcut(
@@ -419,7 +419,7 @@ pub(crate) fn set(full_screen: bool, appearance: Appearance, cx: &App) {
             MenuItem::action(full_screen, ToggleFullScreen),
             MenuItem::separator(),
             MenuItem::action("Reload", Reload),
-            MenuItem::action("Go Home", GoHome),
+            MenuItem::action("Go to Inbox", GoHome),
             MenuItem::action("Focus Composer", FocusComposer),
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
             MenuItem::submenu(

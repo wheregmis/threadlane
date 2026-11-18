@@ -1,7 +1,7 @@
-//! Spaces and machines (wireframe 7): which spaces this app is paired with,
-//! which machines help in each and what each can run, the client keys each
-//! hub admitted, a join code for another app, unpairing this app, and
-//! pairing it with another space.
+//! Machines (wireframe 7): which spaces this app is paired with, which
+//! machines help in each and what each can run, the client keys each hub
+//! admitted, a join code for another app, and unpairing this app. Pairing
+//! another space has its own screen.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::progress::Progress;
@@ -42,7 +42,7 @@ impl Desktop {
             .overflow_y_scrollbar()
             .id("machine-detail")
             .child(
-                link("back-to-machines", "Spaces and machines".to_owned())
+                link("back-to-machines", "Machines".to_owned())
                     .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx))),
             );
         let Some(detail) = self.state.machine_detail(space, id, when) else {
@@ -189,7 +189,7 @@ impl Desktop {
             .overflow_y_scrollbar()
             .id("machines")
             .gap(XL)
-            .child(heading("Spaces and machines"));
+            .child(heading("Machines"));
         if self.state.spaces().is_empty() {
             screen = screen.child(empty(EmptyRegion::Pairing, cx));
         }
@@ -353,16 +353,10 @@ impl Desktop {
             );
             screen = screen.child(part);
         }
-        screen
-            .child(
-                card(cx)
-                    .child(section("+ Add space"))
-                    .child(self.join_form(cx)),
-            )
-            .into_any_element()
+        screen.into_any_element()
     }
 
-    /// The sidebar's focused pairing screen.
+    /// The pairing screen the space switcher opens.
     pub(crate) fn add_space(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .flex_1()

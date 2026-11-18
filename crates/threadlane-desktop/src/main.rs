@@ -266,14 +266,29 @@ enum Screen {
 }
 
 impl Screen {
-    /// The screen `THREADLANE_DESKTOP_OPEN` names: `home`, `agents`,
-    /// `machines`, `<space>/<project>[/tasks|conversation|agents|memory]`
+    /// The space this screen belongs to, if it belongs to one.
+    fn space(&self) -> Option<&str> {
+        match self {
+            Self::Project { space, .. }
+            | Self::Task { space, .. }
+            | Self::SpaceTasks { space }
+            | Self::NewProject { space }
+            | Self::Machine { space, .. }
+            | Self::Agents(Some(space))
+            | Self::Routines(Some(space))
+            | Self::Settings(Some(space)) => Some(space),
+            _ => None,
+        }
+    }
+
+    /// The screen `THREADLANE_DESKTOP_OPEN` names: `home` or `inbox`, `agents`,
+    /// `machines`, `<space>/<project>[/chat|tasks|memory|setup]`
     /// (`agents/<agent>` expands that agent's row), or
     /// `<space>/T-0001`. For looking at a screen without clicking to it.
     fn named(open: &str) -> Option<Self> {
         let parts: Vec<&str> = open.split('/').collect();
         Some(match parts.as_slice() {
-            ["home"] => Self::Home,
+            ["home" | "inbox"] => Self::Home,
             ["agents"] => Self::Agents(None),
             ["machines"] => Self::Machines,
             ["routines"] => Self::Routines(None),
@@ -288,8 +303,8 @@ impl Screen {
                 space: (*space).to_owned(),
                 project: (*project).to_owned(),
                 tab: match rest {
-                    [name, ..] => Tab::named(name).unwrap_or(Tab::Tasks),
-                    _ => Tab::Tasks,
+                    [name, ..] => Tab::named(name).unwrap_or(Tab::Conversation),
+                    _ => Tab::Conversation,
                 },
             },
             _ => return None,
@@ -321,7 +336,6 @@ struct Desktop {
     keyboard_focus: FocusHandle,
     sidebar_collapsed: bool,
     decision_scroll: ScrollHandle,
-    show_home_history: bool,
     board_scroll: ScrollHandle,
     reveal_linked_decision: Option<DecisionKey>,
     conversation_at_bottom: bool,
@@ -336,14 +350,14 @@ struct Desktop {
     /// The Memory tab's editor.
     memory_editor: Entity<TextareaState>,
     dream_cadence: Entity<InputState>,
-    /// The "+ Add space" form's name and join code.
+    /// The Add space form's name and join code.
     space_name: Entity<InputState>,
     join_code: Entity<InputState>,
     /// Where a newly paired space's feed goes.
     shown: mpsc::UnboundedSender<SpaceFeedItem>,
     /// Text to put in the memory editor at the next render.
     fill_editor: Option<String>,
-    /// Empty the "+ Add space" form at the next render.
+    /// Empty the Add space form at the next render.
     clear_join: bool,
     /// The new project form's name and description.
     project_name: Entity<InputState>,
@@ -373,6 +387,7 @@ struct Desktop {
     agent_edit_name: Entity<InputState>,
     agent_edit_role: Entity<InputState>,
     agent_edit_instructions: Entity<TextareaState>,
+    agent_models: Vec<Entity<InputState>>,
     agent_edit_models: Vec<Entity<InputState>>,
     /// The "+ Add repository" form's name, remote and default branch.
     repository_name: Entity<InputState>,
@@ -448,10 +463,14 @@ impl Desktop {
         let agent_instructions = field("Instructions (optional)", cx);
         let agent_edit_name = field("Name", cx);
         let agent_edit_role = field("Role, for example reviewer", cx);
-        let agent_edit_models = threadlane_core::model::BackendKind::ALL
-            .iter()
-            .map(|_| field("Model (the backend's default if empty)", cx))
-            .collect();
+        let mut model_fields = || {
+            threadlane_core::model::BackendKind::ALL
+                .iter()
+                .map(|_| field("Default model", cx))
+                .collect()
+        };
+        let agent_models = model_fields();
+        let agent_edit_models = model_fields();
         let repository_name = field("Name in the project", cx);
         let repository_remote = field("Remote, git@github.com:you/repo.git", cx);
         let repository_branch = field("Default branch (main)", cx);
@@ -515,6 +534,7 @@ impl Desktop {
             }
         });
         let screen = start.unwrap_or(Screen::Home);
+        screens::shell::follow_screen(&mut state, &screen);
         state.set_decision_scope(screen.decision_scope());
         let conversation = if let Screen::Project {
             space,
@@ -541,7 +561,6 @@ impl Desktop {
             keyboard_focus,
             sidebar_collapsed: false,
             decision_scroll: ScrollHandle::default(),
-            show_home_history: false,
             board_scroll: ScrollHandle::default(),
             reveal_linked_decision: None,
             conversation_at_bottom: true,
@@ -581,6 +600,7 @@ impl Desktop {
             agent_edit_name,
             agent_edit_role,
             agent_edit_instructions,
+            agent_models,
             agent_edit_models,
             repository_name,
             repository_remote,
@@ -676,7 +696,7 @@ impl Desktop {
                 project,
                 tab,
             } => {
-                if tab == Tab::Routines {
+                if tab == Tab::Setup {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }
                 if tab == Tab::Memory {
@@ -873,6 +893,7 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.state.reset_chat_target();
             self.project_name_missing = false;
             self.reveal_linked_decision = None;
             self.conversation_at_bottom = true;
@@ -895,6 +916,7 @@ impl Desktop {
             self.decision_scroll = ScrollHandle::default();
             self.board_scroll = ScrollHandle::default();
         }
+        screens::shell::follow_screen(&mut self.state, &screen);
         self.screen = screen;
         self.load_screen(cx);
         cx.notify();
@@ -1273,6 +1295,7 @@ impl Desktop {
 
     fn space_paired(&mut self, name: &str, cx: &mut Context<Self>) {
         self.state.open_paired_space(name);
+        self.state.select_space(name);
         self.state.report(Activity::Done(format!("Paired {name}.")));
         self.clear_join = true;
         self.go(Screen::Home, cx);
@@ -1508,7 +1531,8 @@ impl Render for Desktop {
                         }),
                     )
                     .children(self.page_connections(&when, cx))
-                    .child(body)
+                    // The body takes the spare height so the activity line stays at the bottom.
+                    .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
                     .children(self.activity(cx)),
             )
     }
