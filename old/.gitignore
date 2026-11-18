@@ -1,0 +1,13 @@
+/target
+**/target
+/temp
+.DS_Store
+.threadlane
+.pi-subagents
+/threadlane-updater.key
+/threadlane-updater.key.pub
+theadline_private_key_password
+.tokensave
+/needle/
+.worktrees/
+/mobile/ios/ThreadlaneMobile.xcodeproj/

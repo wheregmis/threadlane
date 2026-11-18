@@ -1,0 +1,17 @@
+[package]
+name = "threadlane-core"
+description = "Domain vocabulary and component interfaces shared by every Threadlane process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true

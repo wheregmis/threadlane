@@ -1,0 +1,25 @@
+[package]
+name = "threadlane-desktop"
+description = "The thin desktop app: Home, the conversation with a project's lead, and answering decisions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "threadlane-desktop"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit.workspace = true
+serde_json.workspace = true
+threadlane-client.workspace = true
+threadlane-core.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,97 @@
+HTTP/2.0 200 OK
+Access-Control-Allow-Origin: *
+Cache-Control: private, max-age=60, s-maxage=60
+Content-Type: application/json; charset=utf-8
+Date: Tue, 17 Nov 2026 09:00:00 GMT
+Last-Modified: Tue, 17 Nov 2026 08:58:12 GMT
+X-Github-Api-Version-Selected: 2022-11-28
+X-Poll-Interval: 60
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4987
+
+[
+  {
+    "id": "12000000001",
+    "unread": true,
+    "reason": "review_requested",
+    "updated_at": "2026-11-17T08:58:12Z",
+    "last_read_at": null,
+    "subject": {
+      "title": "Add the settings page",
+      "url": "https://api.github.com/repos/acme/widgets/pulls/42",
+      "latest_comment_url": "https://api.github.com/repos/acme/widgets/pulls/42",
+      "type": "PullRequest"
+    },
+    "repository": {
+      "id": 1296269,
+      "node_id": "MDEwOlJlcG9zaXRvcnkxMjk2MjY5",
+      "name": "widgets",
+      "full_name": "acme/widgets",
+      "private": false,
+      "owner": { "login": "acme", "id": 1, "type": "Organization" },
+      "html_url": "https://github.com/acme/widgets"
+    },
+    "url": "https://api.github.com/notifications/threads/12000000001",
+    "subscription_url": "https://api.github.com/notifications/threads/12000000001/subscription"
+  },
+  {
+    "id": "12000000002",
+    "unread": true,
+    "reason": "mention",
+    "updated_at": "2026-11-17T08:41:00Z",
+    "last_read_at": null,
+    "subject": {
+      "title": "Crash when the list is empty",
+      "url": "https://api.github.com/repos/acme/widgets/issues/40",
+      "latest_comment_url": "https://api.github.com/repos/acme/widgets/issues/comments/2001",
+      "type": "Issue"
+    },
+    "repository": { "id": 1296269, "name": "widgets", "full_name": "acme/widgets", "private": false },
+    "url": "https://api.github.com/notifications/threads/12000000002"
+  },
+  {
+    "id": "12000000003",
+    "unread": false,
+    "reason": "ci_activity",
+    "updated_at": "2026-11-17T08:30:45Z",
+    "last_read_at": "2026-11-17T08:31:00Z",
+    "subject": {
+      "title": "CI workflow run failed for threadlane/T-0001 branch",
+      "url": null,
+      "latest_comment_url": null,
+      "type": "CheckSuite"
+    },
+    "repository": { "id": 1296269, "name": "widgets", "full_name": "acme/widgets", "private": false },
+    "url": "https://api.github.com/notifications/threads/12000000003"
+  },
+  {
+    "id": "12000000004",
+    "unread": true,
+    "reason": "comment",
+    "updated_at": "2026-11-17T08:20:00Z",
+    "last_read_at": null,
+    "subject": {
+      "title": "Faster startup",
+      "url": "https://api.github.com/repos/other/thing/pulls/7",
+      "latest_comment_url": "https://api.github.com/repos/other/thing/issues/comments/9",
+      "type": "PullRequest"
+    },
+    "repository": { "id": 77, "name": "thing", "full_name": "other/thing", "private": true },
+    "url": "https://api.github.com/notifications/threads/12000000004"
+  },
+  {
+    "id": "12000000005",
+    "unread": true,
+    "reason": "assign",
+    "updated_at": "2026-11-17T08:10:00Z",
+    "last_read_at": null,
+    "subject": {
+      "title": "Document the API",
+      "url": "https://api.github.com/repos/acme/widgets/issues/38",
+      "latest_comment_url": null,
+      "type": "Issue"
+    },
+    "repository": { "id": 1296269, "name": "widgets", "full_name": "acme/widgets", "private": false },
+    "url": "https://api.github.com/notifications/threads/12000000005"
+  }
+]

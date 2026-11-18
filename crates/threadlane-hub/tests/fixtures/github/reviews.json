@@ -1,0 +1,24 @@
+[
+  {
+    "id": 80,
+    "node_id": "MDE3OlB1bGxSZXF1ZXN0UmV2aWV3ODA=",
+    "user": { "login": "octocat", "id": 1, "type": "User", "site_admin": false },
+    "body": "Please keep the old setting working too.",
+    "state": "CHANGES_REQUESTED",
+    "html_url": "https://github.com/acme/widgets/pull/42#pullrequestreview-80",
+    "pull_request_url": "https://api.github.com/repos/acme/widgets/pulls/42",
+    "author_association": "COLLABORATOR",
+    "submitted_at": "2026-11-17T08:45:00Z",
+    "commit_id": "ce587453ced02b1526dfb4cb910479d431683101"
+  },
+  {
+    "id": 81,
+    "user": { "login": "hubot", "id": 2, "type": "User", "site_admin": false },
+    "body": "",
+    "state": "PENDING",
+    "html_url": "https://github.com/acme/widgets/pull/42#pullrequestreview-81",
+    "pull_request_url": "https://api.github.com/repos/acme/widgets/pulls/42",
+    "author_association": "MEMBER",
+    "commit_id": "ce587453ced02b1526dfb4cb910479d431683101"
+  }
+]

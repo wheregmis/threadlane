@@ -1,0 +1,23 @@
+[package]
+name = "threadlane-runner"
+description = "Claims lanes from a hub and executes their runs on a backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+threadlane-core.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time", "fs"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+threadlane-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

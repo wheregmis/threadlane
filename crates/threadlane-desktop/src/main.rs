@@ -1,0 +1,1473 @@
+//! `threadlane-desktop`: the desktop app (Plan.md §11.1).
+//!
+//! The shell and its screens over [`AppState`]: Home, a project with its
+//! tasks, conversation and agents, a task, the agents of each space, and the
+//! machines. Decisions are answered from Home, a project, a task, or a
+//! system notification. Tokio runs on its own threads beside GPUI's executor
+//! (Plan.md §18.4 item 3): every hub call is spawned there and its result
+//! handed back to the view. The screens live in `screens/`.
+
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::future::Future;
+use std::process::{Command, ExitCode};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
+
+use gpui_kit::component::input::{InputState, TextareaState, Undo};
+use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
+use gpui_kit::*;
+use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
+use threadlane_core::ids::{DecisionId, TaskId};
+use threadlane_core::model::Mode;
+use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
+use threadlane_desktop::{
+    Activity, AppState, Appearance, DecisionKey, RoutineText, Tab, When, change_memory,
+    decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project, load_routines,
+    load_task, pump, refresh,
+};
+use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
+use tokio::runtime::Runtime;
+use tokio::sync::{RwLock, mpsc};
+
+mod actions;
+mod components;
+mod icons;
+mod keyboard;
+mod menus;
+mod screens;
+mod tokens;
+
+use icons::DesktopAssets;
+use keyboard::DecisionScroll;
+use tokens::{LG, MD, TABULAR, TYPE_BODY};
+
+/// How often the app asks every hub again, so reachability, what runs, and
+/// the open screen stay current.
+const REFRESH_EVERY: Duration = Duration::from_secs(30);
+
+/// How soon the app asks again while a hub is away or refused a part.
+const RETRY_EVERY: Duration = Duration::from_secs(5);
+
+/// Repaint visible elapsed times without waiting for a hub refresh.
+const CLOCK_EVERY: Duration = Duration::from_secs(1);
+
+fn main() -> ExitCode {
+    let runtime = match Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("threadlane-desktop: cannot start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let dirs = match ClientDirs::from_env() {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            eprintln!("threadlane-desktop: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let client_dir = dirs.root.clone();
+    let core = match ClientCore::load(dirs) {
+        Ok(core) => core,
+        Err(error) => {
+            eprintln!("threadlane-desktop: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // The paired hubs are known without asking them: the first frame lists them.
+    let mut state = AppState::paired(core.hubs().iter().map(|hub| hub.name.as_str()));
+    state.set_client_dir(client_dir);
+    let appearance = state.appearance();
+    let (shown, feed) = mpsc::unbounded_channel();
+    // With no hub paired there is no feed; Home says so.
+    let stream = {
+        let _inside = runtime.enter();
+        core.follow_all().ok()
+    };
+    let core = Arc::new(RwLock::new(core));
+    if let Some(stream) = stream {
+        runtime.spawn(pump(Arc::clone(&core), stream, shown.clone()));
+    }
+    let tokio = runtime.handle().clone();
+    let open = std::env::var("THREADLANE_DESKTOP_OPEN").ok();
+    let start = open.as_deref().and_then(Screen::named);
+    // `<space>/<project>/agents/<agent>` also expands that agent's row.
+    if let Some([space, project, "agents", agent]) = open
+        .as_deref()
+        .map(|open| open.split('/').collect::<Vec<_>>())
+        .as_deref()
+    {
+        state.toggle_agent(space, project, agent);
+    }
+
+    application().with_assets(DesktopAssets).run(move |cx| {
+        cx.set_app_identity("dev.threadlane.desktop", "Threadlane");
+        init(cx);
+        cx.set_window_appearance(appearance_override(appearance));
+        cx.on_window_closed(|cx, _window| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(780.)), cx)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Threadlane".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let opened = open_window(options, cx, |window, cx| {
+            cx.new(|cx| {
+                let feed = Feed {
+                    shown,
+                    received: feed,
+                };
+                Desktop::new(state, core, tokio, feed, start, window, cx)
+            })
+        });
+        match opened {
+            Ok((_window, view)) => {
+                let view = view.downgrade();
+                let reload = view.clone();
+                let appearance_view = view.clone();
+                menus::install(
+                    appearance,
+                    view.clone(),
+                    cx,
+                    move |cx| {
+                        let _gone = reload.update(cx, |this, cx| this.refresh(cx));
+                    },
+                    move |appearance, window, cx| {
+                        let _gone = appearance_view.update(cx, |this, cx| {
+                            if let Err(why) = this.state.set_appearance(appearance) {
+                                this.state.report(Activity::Failed(why));
+                            }
+                            cx.set_window_appearance(appearance_override(appearance));
+                            apply_appearance(appearance, window, cx);
+                            menus::set(this.full_screen, appearance, cx);
+                            cx.notify();
+                        });
+                    },
+                );
+                cx.on_system_notification_response(move |response, cx| {
+                    let Some((space, id)) = decision_of_tag(&response.tag) else {
+                        return;
+                    };
+                    let (space, id) = (space.to_owned(), id.to_owned());
+                    let option = response.action_id.map(|option| option.to_string());
+                    let _gone = view.update(cx, |this, cx| match option {
+                        Some(option) => this.answer(space, id, option, None, cx),
+                        None => this.go(Screen::Home, cx),
+                    });
+                });
+            }
+            Err(error) => {
+                eprintln!("threadlane-desktop: cannot open the window: {error}");
+                cx.quit();
+            }
+        }
+    });
+    drop(runtime);
+    ExitCode::SUCCESS
+}
+
+fn appearance_override(appearance: Appearance) -> Option<WindowAppearance> {
+    match appearance {
+        Appearance::System => None,
+        Appearance::Light => Some(WindowAppearance::Light),
+        Appearance::Dark => Some(WindowAppearance::Dark),
+    }
+}
+
+fn apply_appearance(appearance: Appearance, window: &mut Window, cx: &mut App) {
+    if let Some(appearance) = appearance_override(appearance) {
+        Theme::change(appearance, Some(window), cx);
+    } else {
+        Theme::sync_system_appearance(Some(window), cx);
+    }
+}
+
+/// Local time minus UTC in minutes, as `date +%z` says; UTC if it cannot.
+fn local_offset_minutes() -> i64 {
+    let Ok(output) = Command::new("date").arg("+%z").output() else {
+        return 0;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    let (sign, digits) = match text.split_at_checked(1) {
+        Some(("-", digits)) => (-1, digits),
+        Some(("+", digits)) => (1, digits),
+        _ => return 0,
+    };
+    let (Some(hours), Some(minutes)) = (
+        digits.get(..2).and_then(|h| h.parse::<i64>().ok()),
+        digits.get(2..4).and_then(|m| m.parse::<i64>().ok()),
+    ) else {
+        return 0;
+    };
+    sign * (hours * 60 + minutes)
+}
+
+/// This computer's time zone name, as `threadlane routine add` finds it:
+/// `TZ`, else where `/etc/localtime` points.
+fn local_zone() -> Option<String> {
+    if let Ok(zone) = std::env::var("TZ")
+        && !zone.trim().is_empty()
+    {
+        return Some(zone.trim().trim_start_matches(':').to_owned());
+    }
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let (_, zone) = target.to_str()?.split_once("zoneinfo/")?;
+    Some(zone.to_owned())
+}
+
+/// Which screen the window shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Screen {
+    Home,
+    /// One project of one space, on one of its tabs.
+    Project {
+        space: String,
+        project: String,
+        tab: Tab,
+    },
+    /// One task of one space.
+    Task {
+        space: String,
+        task: TaskId,
+    },
+    /// The agents of every space.
+    Agents,
+    /// A form for a new project in one space.
+    NewProject {
+        space: String,
+    },
+    /// The spaces and their machines.
+    Machines,
+    /// One machine in a space.
+    Machine {
+        space: String,
+        machine: threadlane_core::ids::MachineId,
+    },
+    /// The routines of every space, by space and project.
+    Routines,
+    /// What each hub reports about itself, and this app's own settings.
+    Settings,
+    /// Pair another space with this app.
+    AddSpace,
+}
+
+impl Screen {
+    /// The screen `THREADLANE_DESKTOP_OPEN` names: `home`, `agents`,
+    /// `machines`, `<space>/<project>[/tasks|conversation|agents|memory]`
+    /// (`agents/<agent>` expands that agent's row), or
+    /// `<space>/T-0001`. For looking at a screen without clicking to it.
+    fn named(open: &str) -> Option<Self> {
+        let parts: Vec<&str> = open.split('/').collect();
+        Some(match parts.as_slice() {
+            ["home"] => Self::Home,
+            ["agents"] => Self::Agents,
+            ["machines"] => Self::Machines,
+            ["routines"] => Self::Routines,
+            ["settings"] => Self::Settings,
+            [space, task] if TaskId::parse(task).is_some() && task.starts_with(['T', 't']) => {
+                Self::Task {
+                    space: (*space).to_owned(),
+                    task: TaskId::parse(task)?,
+                }
+            }
+            [space, project, rest @ ..] => Self::Project {
+                space: (*space).to_owned(),
+                project: (*project).to_owned(),
+                tab: match rest {
+                    [name, ..] => Tab::named(name).unwrap_or(Tab::Tasks),
+                    _ => Tab::Tasks,
+                },
+            },
+            _ => return None,
+        })
+    }
+}
+
+/// What a click asks of a routine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimerChange {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+/// The feed as the window takes it: what the pumps hand over, and the
+/// sender a newly paired space's pump hands its items to.
+struct Feed {
+    shown: mpsc::UnboundedSender<SpaceFeedItem>,
+    received: mpsc::UnboundedReceiver<SpaceFeedItem>,
+}
+
+/// The window's one view: the shell and its screens over [`AppState`].
+struct Desktop {
+    state: AppState,
+    core: Arc<RwLock<ClientCore>>,
+    tokio: tokio::runtime::Handle,
+    screen: Screen,
+    keyboard_focus: FocusHandle,
+    sidebar_collapsed: bool,
+    decision_scroll: ScrollHandle,
+    board_scroll: ScrollHandle,
+    reveal_linked_decision: Option<DecisionKey>,
+    conversation_at_bottom: bool,
+    conversation_follow: Rc<Cell<bool>>,
+    scroll_to_decision: Rc<Cell<DecisionScroll>>,
+    decision_inputs: HashMap<DecisionKey, (Entity<InputState>, Subscription)>,
+    composer: Entity<TextareaState>,
+    pacing_inputs: [Entity<InputState>; 4],
+    /// The task screen's composer (wireframe 5).
+    task_composer: Entity<TextareaState>,
+    /// The Memory tab's editor.
+    memory_editor: Entity<TextareaState>,
+    dream_cadence: Entity<InputState>,
+    /// The "+ Add space" form's name and join code.
+    space_name: Entity<InputState>,
+    join_code: Entity<InputState>,
+    /// Where a newly paired space's feed goes.
+    shown: mpsc::UnboundedSender<SpaceFeedItem>,
+    /// Text to put in the memory editor at the next render.
+    fill_editor: Option<String>,
+    /// Empty the "+ Add space" form at the next render.
+    clear_join: bool,
+    /// The new project form's name and description.
+    project_name: Entity<InputState>,
+    project_description: Entity<InputState>,
+    /// Empty the note at the next render, which has the window it needs.
+    /// Empty the new project form at the next render.
+    clear_project_form: bool,
+    /// The "+ New routine" form's instruction, N, time, day of the month
+    /// and zone.
+    routine_instruction: Entity<InputState>,
+    routine_every: Entity<InputState>,
+    routine_at: Entity<InputState>,
+    routine_day: Entity<InputState>,
+    routine_zone: Entity<InputState>,
+    /// Empty the "+ New routine" instruction at the next render.
+    clear_routine: bool,
+    /// The first-run screen's hub data directory.
+    hub_dir: Entity<InputState>,
+    /// The "+ New agent" form's name, role and instructions.
+    agent_name: Entity<InputState>,
+    agent_role: Entity<InputState>,
+    agent_instructions: Entity<InputState>,
+    /// The "+ Add repository" form's name, remote and default branch.
+    repository_name: Entity<InputState>,
+    repository_remote: Entity<InputState>,
+    repository_branch: Entity<InputState>,
+    /// The "+ New task" form's title and goal.
+    task_title: Entity<InputState>,
+    task_goal: Entity<InputState>,
+    /// Empty these fields at the next render, which has the window it needs.
+    clear_fields: Vec<Entity<InputState>>,
+    /// Whether the window was full screen at the last render, which the
+    /// View menu's label follows.
+    full_screen: bool,
+    offset_minutes: i64,
+    _tasks: Vec<Task<()>>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl Desktop {
+    fn new(
+        mut state: AppState,
+        core: Arc<RwLock<ClientCore>>,
+        tokio: tokio::runtime::Handle,
+        feed: Feed,
+        start: Option<Screen>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        apply_appearance(state.appearance(), window, cx);
+        cx.observe_window_appearance(window, |this, window, cx| {
+            if this.state.appearance() == Appearance::System {
+                apply_appearance(Appearance::System, window, cx);
+            }
+        })
+        .detach();
+        let composer = components::composer::input("Tell your team what you need…", window, cx);
+        let task_composer = components::composer::input("Add to this task…", window, cx);
+        let memory_editor = cx.new(|cx| TextareaState::new(window, cx).rows(16));
+        let dream_cadence =
+            cx.new(|cx| InputState::new(window, cx).placeholder("daily 02:00 or every 6h"));
+        let space_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name for the space"));
+        let join_code = cx.new(|cx| InputState::new(window, cx).placeholder("Join code"));
+        let Feed {
+            shown,
+            received: mut feed,
+        } = feed;
+        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
+        let project_description =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Description (optional)"));
+        let routine_instruction = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("What should the lead do each time?")
+        });
+        let routine_every = cx.new(|cx| InputState::new(window, cx).default_value("60"));
+        let routine_at = cx.new(|cx| InputState::new(window, cx).default_value("09:00"));
+        let routine_day = cx.new(|cx| InputState::new(window, cx).default_value("1"));
+        let zone = local_zone().unwrap_or_default();
+        let routine_zone = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Time zone, for example Europe/Berlin")
+                .default_value(zone)
+        });
+        let hub_dir = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("The hub's data directory, ~/threadlane/work")
+        });
+        let mut field = |placeholder: &'static str, cx: &mut Context<Self>| {
+            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+        };
+        let pacing_inputs =
+            threadlane_desktop::PACING_FIELDS.map(|setting| field(setting.placeholder, cx));
+        let agent_name = field("Name", cx);
+        let agent_role = field("Role, for example reviewer", cx);
+        let agent_instructions = field("Instructions (optional)", cx);
+        let repository_name = field("Name in the project", cx);
+        let repository_remote = field("Remote, git@github.com:you/repo.git", cx);
+        let repository_branch = field("Default branch (main)", cx);
+        let task_title = field("Title", cx);
+        let task_goal = field("Goal: what done looks like", cx);
+        let subscriptions = vec![
+            components::composer::subscribe(threadlane_desktop::Draft::Lead, &composer, window, cx),
+            components::composer::subscribe(
+                threadlane_desktop::Draft::Task,
+                &task_composer,
+                window,
+                cx,
+            ),
+        ];
+        let follow = cx.spawn(async move |this, cx| {
+            while let Some(item) = feed.recv().await {
+                if this.update(cx, |this, cx| this.receive(item, cx)).is_err() {
+                    return;
+                }
+            }
+        });
+        let refresh_loop = cx.spawn(async move |this, cx| {
+            loop {
+                if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                    return;
+                }
+                // By then the refresh has answered: ask again soon if it left gaps.
+                cx.background_executor().timer(RETRY_EVERY).await;
+                match this.update(cx, |this, _| this.state.retry_soon()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        cx.background_executor()
+                            .timer(REFRESH_EVERY.saturating_sub(RETRY_EVERY))
+                            .await;
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        let clock = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CLOCK_EVERY).await;
+                if this
+                    .update(cx, |this, cx| {
+                        if this.state.has_ticking_work()
+                            || this.state.visible_decisions().next().is_some()
+                        {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let screen = start.unwrap_or(Screen::Home);
+        state.set_decision_scope(screen.decision_scope());
+        let conversation = if let Screen::Project {
+            space,
+            project,
+            tab: Tab::Conversation,
+        } = &screen
+        {
+            state.visit_conversation(space, project);
+            true
+        } else {
+            false
+        };
+        let keyboard_focus = cx.focus_handle();
+        keyboard_focus.focus(window, cx);
+        cx.on_focus_lost(window, |this, window, cx| {
+            this.keyboard_focus.focus(window, cx);
+        })
+        .detach();
+        Self {
+            state,
+            core,
+            tokio,
+            screen,
+            keyboard_focus,
+            sidebar_collapsed: false,
+            decision_scroll: ScrollHandle::default(),
+            board_scroll: ScrollHandle::default(),
+            reveal_linked_decision: None,
+            conversation_at_bottom: true,
+            conversation_follow: Rc::new(Cell::new(conversation)),
+            scroll_to_decision: Rc::new(Cell::new(if conversation {
+                DecisionScroll::None
+            } else {
+                DecisionScroll::Card
+            })),
+            decision_inputs: HashMap::new(),
+            composer,
+            pacing_inputs,
+            task_composer,
+            memory_editor,
+            dream_cadence,
+            space_name,
+            join_code,
+            shown,
+            fill_editor: None,
+            clear_join: false,
+            project_name,
+            project_description,
+            clear_project_form: false,
+            routine_instruction,
+            routine_every,
+            routine_at,
+            routine_day,
+            routine_zone,
+            clear_routine: false,
+            hub_dir,
+            agent_name,
+            agent_role,
+            agent_instructions,
+            repository_name,
+            repository_remote,
+            repository_branch,
+            task_title,
+            task_goal,
+            clear_fields: Vec::new(),
+            full_screen: false,
+            offset_minutes: local_offset_minutes(),
+            _tasks: vec![follow, refresh_loop, clock],
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Now, in local time.
+    fn when(&self) -> When {
+        When {
+            now: SystemClock.now(),
+            offset_minutes: self.offset_minutes,
+        }
+    }
+
+    /// Runs `job` on the Tokio threads and hands its result to `then`.
+    fn run<T: Send + 'static>(
+        &self,
+        job: impl Future<Output = T> + Send + 'static,
+        then: impl FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let job = self.tokio.spawn(job);
+        cx.spawn(async move |this, cx| {
+            if let Ok(result) = job.await {
+                let _gone = this.update(cx, |this, cx| {
+                    then(this, result, cx);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.state.checking_connections();
+        cx.notify();
+        let core = Arc::clone(&self.core);
+        // The open screen loads once the refresh is in: the Agents screen
+        // needs the projects it lists.
+        self.run(
+            async move { refresh(&*core.read().await).await },
+            |this, refreshed, cx| {
+                let open_project = match &this.screen {
+                    Screen::Project { space, project, .. } => {
+                        Some((space.clone(), project.clone()))
+                    }
+                    Screen::Task { space, task } => this
+                        .state
+                        .task(space, *task)
+                        .map(|detail| (space.clone(), detail.summary.project.clone())),
+                    _ => None,
+                };
+                this.state.apply(refreshed);
+                if let Some((space, project)) = open_project
+                    && this.state.project_absent(&space, &project)
+                {
+                    this.state.report(Activity::Failed(format!(
+                        "No project {project:?} in {space}."
+                    )));
+                    this.go(Screen::Home, cx);
+                } else {
+                    this.load_screen(cx);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Loads what the open screen shows beyond what a refresh brings.
+    fn load_screen(&mut self, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        match self.screen.clone() {
+            Screen::Routines => {
+                let projects = self
+                    .state
+                    .targets()
+                    .into_iter()
+                    .map(|(space, project)| (space.to_owned(), project.to_owned()))
+                    .collect();
+                self.load_routines(projects, cx);
+            }
+            Screen::Project {
+                space,
+                project,
+                tab,
+            } => {
+                if tab == Tab::Routines {
+                    self.load_routines(vec![(space.clone(), project.clone())], cx);
+                }
+                if tab == Tab::Memory {
+                    let (in_space, named) = (space.clone(), project.clone());
+                    let for_dreaming = Arc::clone(&core);
+                    let revision = self.state.dreaming_revision(&space, &project);
+                    self.run(
+                        async move {
+                            load_dreaming(&*for_dreaming.read().await, &in_space, &named, revision)
+                                .await
+                        },
+                        |this, loaded, _| this.state.apply_dreaming(loaded),
+                        cx,
+                    );
+                }
+                // The Conversation tab's card and the Memory tab need the memory.
+                let selected = self
+                    .state
+                    .memory_selected(&space, &project)
+                    .map(str::to_owned);
+                let (in_space, named) = (space.clone(), project.clone());
+                let for_memory = Arc::clone(&core);
+                self.run(
+                    async move { load_project(&*core.read().await, &space, &project).await },
+                    |this, loaded, _| this.state.apply_project(loaded),
+                    cx,
+                );
+                self.run(
+                    async move {
+                        load_memory(&*for_memory.read().await, &in_space, &named, selected).await
+                    },
+                    |this, loaded, _| this.state.apply_memory(loaded),
+                    cx,
+                );
+            }
+            Screen::Task { space, task } => self.run(
+                async move { load_task(&*core.read().await, &space, task).await },
+                |this, loaded, _| this.state.apply_task(loaded),
+                cx,
+            ),
+            Screen::Agents => {
+                let projects = self
+                    .state
+                    .targets()
+                    .into_iter()
+                    .map(|(space, project)| (space.to_owned(), project.to_owned()))
+                    .collect();
+                self.run(
+                    async move { load_modes(&*core.read().await, projects).await },
+                    |this, loaded, _| this.state.apply_modes(loaded),
+                    cx,
+                );
+            }
+            Screen::Settings => {
+                let projects = self
+                    .state
+                    .targets()
+                    .into_iter()
+                    .map(|(space, project)| (space.to_owned(), project.to_owned()))
+                    .collect();
+                let for_modes = Arc::clone(&core);
+                self.run(
+                    async move { load_modes(&*for_modes.read().await, projects).await },
+                    |this, modes, _| this.state.apply_modes(modes),
+                    cx,
+                );
+                let spaces: Vec<_> = self
+                    .state
+                    .spaces()
+                    .iter()
+                    .map(|space| space.name.clone())
+                    .collect();
+                self.run(
+                    async move {
+                        let core = core.read().await;
+                        let mut settings = Vec::new();
+                        for space in spaces {
+                            let (pacing, metrics) = tokio::join!(
+                                core.pacing(Some(&space)),
+                                load_metrics(&core, &space)
+                            );
+                            settings.push((space, pacing, metrics));
+                        }
+                        settings
+                    },
+                    |this, settings, _| {
+                        for (space, pacing, metrics) in settings {
+                            this.state.apply_pacing(space.clone(), pacing);
+                            this.state.apply_metrics(space, metrics);
+                        }
+                    },
+                    cx,
+                );
+            }
+            Screen::Machine { space, .. } => {
+                let when = self.when();
+                self.run(
+                    async move {
+                        threadlane_desktop::load_machine_history(&*core.read().await, &space, &when)
+                            .await
+                    },
+                    |this, loaded, _| this.state.apply_machine_history(loaded),
+                    cx,
+                );
+            }
+            Screen::Home | Screen::Machines | Screen::NewProject { .. } | Screen::AddSpace => {}
+        }
+    }
+
+    /// Asks for the routines of each `(space, project)`.
+    fn load_routines(&mut self, projects: Vec<(String, String)>, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move { load_routines(&*core.read().await, projects).await },
+            |this, loaded, _| this.state.apply_routines(loaded),
+            cx,
+        );
+    }
+
+    fn receive(&mut self, item: SpaceFeedItem, cx: &mut Context<Self>) {
+        // An item from a hub that was away or refused a part: it is back.
+        let back = self
+            .state
+            .space(&item.space)
+            .is_some_and(threadlane_desktop::Space::stale);
+        let for_open_project = matches!(
+            &self.screen,
+            Screen::Project { space, project, .. }
+                if threadlane_desktop::belongs_in_conversation(&item, space, project)
+        );
+        let conversation_arrival = match &self.screen {
+            Screen::Project {
+                space,
+                project,
+                tab: Tab::Conversation,
+            } if for_open_project => Some((
+                space.clone(),
+                project.clone(),
+                self.state.conversation_latest(space, project),
+            )),
+            _ => None,
+        };
+        if let Some(alert) = self.state.receive(item) {
+            let decision = matches!(alert, threadlane_desktop::Alert::Decision { .. });
+            if self.state.notifies(&alert) {
+                self.notify(&alert, cx);
+            }
+            // The card carries no creation time or context: ask its hub.
+            if decision && !back {
+                self.refresh(cx);
+            }
+        }
+        if back {
+            self.refresh(cx);
+        }
+        if let Some((space, project, previous)) = conversation_arrival
+            && self.state.conversation_latest(&space, &project) > previous
+        {
+            self.state.conversation_arrived(&space, &project, previous);
+        }
+        // What the lead says often comes with tasks it made or finished.
+        if for_open_project {
+            self.load_screen(cx);
+        }
+        cx.notify();
+    }
+
+    /// Raises the system notification for `alert`.
+    fn notify(&self, alert: &threadlane_desktop::Alert, cx: &mut Context<Self>) {
+        cx.show_system_notification(SystemNotification {
+            tag: alert.tag().into(),
+            title: alert.title().into(),
+            body: alert.body().into(),
+            actions: alert
+                .options()
+                .iter()
+                .map(|label| SystemNotificationAction {
+                    id: label.clone().into(),
+                    label: label.clone().into(),
+                })
+                .collect(),
+        });
+    }
+
+    fn go(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        if matches!(
+            self.screen,
+            Screen::Project {
+                tab: Tab::Memory,
+                ..
+            }
+        ) && self.screen != screen
+        {
+            self.clear_fields.push(self.dream_cadence.clone());
+        }
+        if self.screen != screen {
+            self.reveal_linked_decision = None;
+            self.conversation_at_bottom = true;
+            self.conversation_follow = Rc::new(Cell::new(false));
+            if let Screen::Project {
+                space,
+                project,
+                tab: Tab::Conversation,
+            } = &screen
+            {
+                self.state.visit_conversation(space, project);
+                self.conversation_follow.set(true);
+            }
+            self.state.set_decision_scope(screen.decision_scope());
+            self.scroll_to_decision = Rc::new(Cell::new(if self.conversation_follow.get() {
+                DecisionScroll::None
+            } else {
+                DecisionScroll::Card
+            }));
+            self.decision_scroll = ScrollHandle::default();
+            self.board_scroll = ScrollHandle::default();
+        }
+        self.screen = screen;
+        self.load_screen(cx);
+        cx.notify();
+    }
+
+    fn answer(
+        &mut self,
+        space: String,
+        id: String,
+        option: String,
+        note: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(decision_id) = DecisionId::parse(&id) else {
+            return;
+        };
+        let key = DecisionKey {
+            space: space.clone(),
+            id: decision_id,
+        };
+        if !self.state.begin_decision_answer(key.clone()) {
+            return;
+        }
+        let always = self.state.answers_always(&space, &id, &option);
+        let core = Arc::clone(&self.core);
+        self.state
+            .report(Activity::Working(format!("Answering {space} {id}…")));
+        self.run(
+            async move {
+                let core = core.read().await;
+                if always {
+                    core.answer_always(Some(&space), &id, &option, note.as_deref())
+                        .await
+                } else {
+                    core.answer(Some(&space), &id, &option, note.as_deref())
+                        .await
+                }
+            },
+            move |this, answered, cx| {
+                this.state.finish_decision_answer(&key);
+                match answered {
+                    Ok(answer) => {
+                        if this
+                            .state
+                            .current_decision()
+                            .is_some_and(|current| DecisionKey::from(current) == key)
+                        {
+                            this.scroll_to_decision.set(DecisionScroll::Card);
+                        }
+                        this.state.answered(&answer);
+                        cx.dismiss_system_notification(&format!(
+                            "{}/{}",
+                            answer.space, answer.decision.id
+                        ));
+                        let chosen = answer
+                            .decision
+                            .chosen()
+                            .map_or_else(String::new, |option| format!(": {}", option.label));
+                        this.state.report(Activity::Done(format!(
+                            "Answered {} / {}{chosen}.",
+                            answer.space, answer.decision.id
+                        )));
+                        this.load_screen(cx);
+                    }
+                    Err(error) => this.state.report(Activity::Failed(describe(&error))),
+                }
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn set_mode(
+        &mut self,
+        space: String,
+        project: String,
+        agent: String,
+        mode: Mode,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let set = core
+                    .read()
+                    .await
+                    .set_mode(Some(&space), Some(&project), &agent, mode)
+                    .await;
+                (space, project, set)
+            },
+            |this, (space, project, set), _| match set {
+                Ok(binding) => {
+                    this.state.report(Activity::Done(format!(
+                        "{} is now {} in {space} / {project}.",
+                        binding.agent, binding.mode
+                    )));
+                    this.state.mode_set(&space, &project, binding);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+    }
+
+    /// Creates the project the new project form describes, then opens it.
+    fn create_project(&mut self, space: String, cx: &mut Context<Self>) {
+        let name = self.project_name.read(cx).value().trim().to_owned();
+        let description = self.project_description.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            self.state
+                .report(Activity::Failed("Give the project a name.".to_owned()));
+            cx.notify();
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        self.state
+            .report(Activity::Working(format!("Creating {name} in {space}…")));
+        self.run(
+            async move {
+                let created = core
+                    .read()
+                    .await
+                    .create_project(Some(&space), &name, &description)
+                    .await;
+                (space, created)
+            },
+            |this, (space, created), cx| match created {
+                Ok(project) => {
+                    let screen = Screen::Project {
+                        space: space.clone(),
+                        project: project.name.clone(),
+                        tab: Tab::Conversation,
+                    };
+                    this.state.project_created(&space, project);
+                    this.clear_project_form = true;
+                    this.go(screen, cx);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn earlier(
+        &mut self,
+        space: String,
+        project: String,
+        before: Timestamp,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move { load_earlier(&*core.read().await, &space, &project, before).await },
+            |this, loaded, _| this.state.apply_earlier(loaded),
+            cx,
+        );
+    }
+
+    fn issue_code(&mut self, space: String, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move { core.read().await.pair_code(Some(&space)).await },
+            |this, issued, _| match issued {
+                Ok(code) => this.state.issued(code),
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+    }
+}
+
+impl Desktop {
+    /// Shows a memory file on the right, with its versions.
+    fn select_memory(&mut self, space: &str, project: &str, path: &str, cx: &mut Context<Self>) {
+        self.state.select_memory(space, project, path);
+        self.load_screen(cx);
+        cx.notify();
+    }
+
+    /// Opens the selected memory file for editing, or closes it.
+    fn edit_memory(&mut self, space: &str, project: &str, open: bool, cx: &mut Context<Self>) {
+        self.fill_editor = self.state.edit_memory(space, project, open);
+        cx.notify();
+    }
+
+    /// Saves the editor's text as the selected file, or deletes the file
+    /// with `save` false, as you.
+    fn change_memory(
+        &mut self,
+        space: String,
+        project: String,
+        save: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self
+            .state
+            .memory_selected(&space, &project)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let content = save.then(|| self.memory_editor.read(cx).value().to_string());
+        self.write_memory(space, project, path, content, cx);
+    }
+
+    fn write_memory(
+        &mut self,
+        space: String,
+        project: String,
+        path: String,
+        content: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        let verb = if content.is_some() {
+            "Saving"
+        } else {
+            "Deleting"
+        };
+        self.state.report(Activity::Working(format!(
+            "{verb} {path} in {space} / {project}…"
+        )));
+        self.run(
+            async move {
+                change_memory(&*core.read().await, &space, &project, &path, content).await
+            },
+            |this, changed, cx| {
+                let report = match this.state.apply_change(changed) {
+                    Ok(done) => Activity::Done(done),
+                    Err(why) => Activity::Failed(why),
+                };
+                this.state.report(report);
+                this.load_screen(cx);
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn toggle_dreaming(
+        &mut self,
+        space: String,
+        project: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_dreaming(space, project, DreamingAction::Toggle(enabled), cx);
+    }
+
+    fn save_dream_cadence(&mut self, space: String, project: String, cx: &mut Context<Self>) {
+        let text = self.dream_cadence.read(cx).value();
+        self.set_dreaming(space, project, DreamingAction::Cadence(&text), cx);
+    }
+
+    fn set_dreaming(
+        &mut self,
+        space: String,
+        project: String,
+        action: DreamingAction<'_>,
+        cx: &mut Context<Self>,
+    ) {
+        let zone = local_zone().unwrap_or_else(|| "UTC".to_owned());
+        let request = match self.state.dreaming_request(&space, &project, action, &zone) {
+            Ok(Some(request)) => request,
+            Ok(None) => return,
+            Err(error) => {
+                self.state.report(Activity::Failed(error));
+                cx.notify();
+                return;
+            }
+        };
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let result = change_dreaming(&*core.read().await, &space, request).await;
+                (space, project, result)
+            },
+            |this, (space, project, result), cx| {
+                match &result {
+                    Ok(_) => {
+                        this.clear_fields.push(this.dream_cadence.clone());
+                        this.state
+                            .report(Activity::Done("Dreaming settings saved.".to_owned()));
+                    }
+                    Err(error) => this.state.report(Activity::Failed(error.clone())),
+                }
+                this.state.dreaming_saved(&space, &project, result);
+                this.load_screen(cx);
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Pairs this app with the hub of the join code under the name given,
+    /// as `threadlane hub join <name> <code>` does; its feed follows.
+    fn join_space(&mut self, cx: &mut Context<Self>) {
+        let name = self.space_name.read(cx).value().trim().to_owned();
+        let code = self.join_code.read(cx).value().trim().to_owned();
+        if name.is_empty() || code.is_empty() {
+            self.state.report(Activity::Failed(
+                "Give the space a name and paste its join code.".to_owned(),
+            ));
+            cx.notify();
+            return;
+        }
+        let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
+        self.state
+            .report(Activity::Working(format!("Pairing {name}…")));
+        self.run(
+            async move {
+                let joined = {
+                    let mut client = core.write().await;
+                    client
+                        .join(&name, &code)
+                        .await
+                        .and_then(|()| client.follow(Some(&name)))
+                };
+                let joined = joined.map(|stream| {
+                    tokio::spawn(pump(Arc::clone(&core), stream, shown));
+                });
+                (name, joined)
+            },
+            |this, (name, joined), cx| match joined {
+                Ok(()) => this.space_paired(&name, cx),
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Pairs this app with the hub whose data directory the first-run
+    /// screen names, as `threadlane hub add <name> <dir>` does; its feed
+    /// follows.
+    fn pair_directory(&mut self, cx: &mut Context<Self>) {
+        let name = self.space_name.read(cx).value().trim().to_owned();
+        let dir = self.hub_dir.read(cx).value().trim().to_owned();
+        if name.is_empty() || dir.is_empty() {
+            self.state.report(Activity::Failed(
+                "Give the space a name and the hub's data directory.".to_owned(),
+            ));
+            cx.notify();
+            return;
+        }
+        // `~` is the shell's; expand it here as the shell would have.
+        let dir = match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
+            _ => std::path::PathBuf::from(dir),
+        };
+        let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
+        self.state
+            .report(Activity::Working(format!("Pairing {name}…")));
+        self.run(
+            async move {
+                let paired = {
+                    let mut client = core.write().await;
+                    client
+                        .pair(&name, dir)
+                        .and_then(|()| client.follow(Some(&name)))
+                };
+                let paired = paired.map(|stream| {
+                    tokio::spawn(pump(Arc::clone(&core), stream, shown));
+                });
+                (name, paired)
+            },
+            |this, (name, paired), cx| match paired {
+                Ok(()) => this.space_paired(&name, cx),
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn space_paired(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.state.open_paired_space(name);
+        self.state.report(Activity::Done(format!("Paired {name}.")));
+        self.clear_join = true;
+        self.go(Screen::Home, cx);
+        self.refresh(cx);
+    }
+
+    /// Puts `text` on the clipboard; the status area says so.
+    fn copy(&mut self, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        self.state.copied(&text);
+        cx.notify();
+    }
+
+    /// Creates the routine the "+ New routine" form describes in `project`
+    /// of `space`, as yours.
+    fn add_routine(&mut self, space: String, project: String, cx: &mut Context<Self>) {
+        let instruction = self.routine_instruction.read(cx).value().trim().to_owned();
+        let (every, at, day, zone) = (
+            self.routine_every.read(cx).value(),
+            self.routine_at.read(cx).value(),
+            self.routine_day.read(cx).value(),
+            self.routine_zone.read(cx).value(),
+        );
+        let recurrence = self.state.routine_form().recurrence(RoutineText {
+            every: &every,
+            at: &at,
+            day: &day,
+            zone: &zone,
+        });
+        let recurrence = match (instruction.is_empty(), recurrence) {
+            (true, _) => Err("Say what the routine should do.".to_owned()),
+            (false, recurrence) => recurrence,
+        };
+        let recurrence = match recurrence {
+            Ok(recurrence) => recurrence,
+            Err(why) => {
+                self.state.report(Activity::Failed(why));
+                cx.notify();
+                return;
+            }
+        };
+        let core = Arc::clone(&self.core);
+        self.state.report(Activity::Working(format!(
+            "Adding a routine to {space} / {project}…"
+        )));
+        self.run(
+            async move {
+                let added = core
+                    .read()
+                    .await
+                    .add_routine(Some(&space), Some(&project), &instruction, recurrence)
+                    .await;
+                (space, project, added)
+            },
+            |this, (space, project, added), _| match added {
+                Ok(timer) => {
+                    this.state.report(Activity::Done(format!(
+                        "Added routine {} to {space} / {project}.",
+                        timer.id
+                    )));
+                    this.state.timer_changed(&space, &project, timer);
+                    this.state.routine_form_mut().open = false;
+                    this.clear_routine = true;
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Pauses, resumes or cancels timer `id` of `project` in `space`.
+    fn change_timer(
+        &mut self,
+        space: String,
+        project: String,
+        id: threadlane_core::ids::TimerId,
+        change: TimerChange,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        let (doing, done) = match change {
+            TimerChange::Pause => ("Pausing", "Paused"),
+            TimerChange::Resume => ("Resuming", "Resumed"),
+            TimerChange::Cancel => ("Cancelling", "Cancelled"),
+        };
+        self.state.report(Activity::Working(format!(
+            "{doing} routine {id} in {space} / {project}…"
+        )));
+        self.run(
+            async move {
+                let core = core.read().await;
+                let (in_space, number) = (Some(space.as_str()), id.to_string());
+                let changed = match change {
+                    TimerChange::Pause => core.pause_timer(in_space, &number).await,
+                    TimerChange::Resume => core.resume_timer(in_space, &number).await,
+                    TimerChange::Cancel => core.cancel_timer(in_space, &number).await,
+                };
+                (space, project, changed)
+            },
+            move |this, (space, project, changed), _| match changed {
+                Ok(timer) => {
+                    this.state.report(Activity::Done(format!(
+                        "{done} routine {} in {space} / {project}.",
+                        timer.id
+                    )));
+                    this.state.timer_changed(&space, &project, timer);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Unpairs this app from a space once you confirmed, as `threadlane hub
+    /// remove` does: the hub keeps its data and this app forgets its key.
+    fn unpair_space(&mut self, name: String, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let unpaired = core.write().await.unpair(&name);
+                (name, unpaired)
+            },
+            |this, (name, unpaired), cx| match unpaired {
+                Ok(()) => {
+                    this.state.space_removed(&name);
+                    this.state
+                        .report(Activity::Done(format!("Unpaired {name}.")));
+                    let gone = match &this.screen {
+                        Screen::Project { space, .. }
+                        | Screen::Task { space, .. }
+                        | Screen::NewProject { space } => *space == name,
+                        _ => false,
+                    };
+                    if gone {
+                        this.go(Screen::Machines, cx);
+                    }
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+    }
+}
+
+impl Render for Desktop {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(text) = self.fill_editor.take() {
+            self.memory_editor
+                .update(cx, |editor, cx| editor.set_value(text, window, cx));
+        }
+        if std::mem::take(&mut self.clear_join) {
+            for field in [&self.space_name, &self.join_code, &self.hub_dir] {
+                field.update(cx, |field, cx| field.set_value("", window, cx));
+            }
+        }
+        for field in std::mem::take(&mut self.clear_fields) {
+            field.update(cx, |field, cx| field.set_value("", window, cx));
+        }
+        if std::mem::take(&mut self.clear_routine) {
+            self.routine_instruction
+                .update(cx, |field, cx| field.set_value("", window, cx));
+        }
+        if window.is_fullscreen() != self.full_screen {
+            self.full_screen = window.is_fullscreen();
+            menus::set(self.full_screen, self.state.appearance(), cx);
+        }
+        if std::mem::take(&mut self.clear_project_form) {
+            for field in [&self.project_name, &self.project_description] {
+                field.update(cx, |field, cx| field.set_value("", window, cx));
+            }
+        }
+        self.sync_drafts(window, cx);
+        self.prepare_decision_inputs(window, cx);
+        let when = self.when();
+        let body = match self.screen.clone() {
+            Screen::Home => self.home(&when, cx),
+            Screen::Project {
+                space,
+                project,
+                tab,
+            } => self.project(&space, &project, tab, &when, cx),
+            Screen::Task { space, task } => self.task(&space, task, &when, cx),
+            Screen::Agents => self.agents(cx),
+            Screen::NewProject { space } => self.new_project(&space, cx),
+            Screen::Machines => self.machines(&when, cx),
+            Screen::Machine { space, machine } => self.machine(&space, machine, &when, cx),
+            Screen::Routines => self.routines_screen(&when, cx),
+            Screen::Settings => self.settings(&when, cx),
+            Screen::AddSpace => self.add_space(cx),
+        };
+        // With no hub paired, every screen but Machines explains pairing.
+        let body = if self.state.first_run()
+            && !matches!(self.screen, Screen::Machines | Screen::AddSpace)
+        {
+            self.first_run(cx)
+        } else {
+            body
+        };
+        h_flex()
+            .id("desktop")
+            .track_focus(&self.keyboard_focus)
+            .key_context(menus::KEY_CONTEXT)
+            .capture_action(cx.listener(|this, _: &Undo, window, cx| {
+                use gpui_kit::component::WindowExt as _;
+                if !window.has_active_dialog(cx) && this.undo_draft(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .size_full()
+            .items_stretch()
+            .font_features(TABULAR.clone())
+            .text_size(TYPE_BODY)
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .children((!self.sidebar_collapsed).then(|| self.sidebar(&when, cx)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .p(LG)
+                    .gap(MD)
+                    .children(
+                        self.state.connection_banner().map(|text| {
+                            component::alert::Alert::warning("unreachable-spaces", text)
+                        }),
+                    )
+                    .children(self.page_connections(&when, cx))
+                    .child(body)
+                    .children(self.activity(cx)),
+            )
+    }
+}

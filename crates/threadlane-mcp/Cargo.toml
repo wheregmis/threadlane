@@ -1,15 +1,24 @@
 [package]
 name = "threadlane-mcp"
-version = "0.1.0"
-edition = "2021"
-description = "Model Context Protocol (MCP) client engine for threadlane agent"
-
+description = "Serves the system's tools to a running backend over MCP on loopback HTTP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
-tokio = { workspace = true, features = ["full"] }
+async-trait.workspace = true
+axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-futures.workspace = true
+thiserror.workspace = true
+threadlane-core.workspace = true
+tokio = { workspace = true, features = ["net", "sync", "rt", "time"] }
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
+
+[lints]
+workspace = true

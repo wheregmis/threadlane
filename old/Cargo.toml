@@ -1,0 +1,172 @@
+[workspace]
+members = [
+    "crates/*",
+    "extensions/*",
+    "crates/threadlane-ui-kit/examples/preview",
+]
+resolver = "2"
+exclude = ["vendor/vt100"]
+
+[workspace.package]
+version = "0.1.53"
+edition = "2021"
+
+[workspace.dependencies]
+# Internal workspace crates
+threadlane-acp = { version = "0.1.0", path = "crates/threadlane-acp" }
+threadlane-acp-engine = { version = "0.1.0", path = "crates/threadlane-acp-engine" }
+threadlane-auth = { version = "0.1.0", path = "crates/threadlane-auth" }
+threadlane-automation = { version = "0.1.0", path = "crates/threadlane-automation" }
+threadlane-benchmarks = { version = "0.0.0", path = "crates/threadlane-benchmarks" }
+threadlane-browser = { version = "0.1.0", path = "crates/threadlane-browser" }
+threadlane-client = { version = "0.1.0", path = "crates/threadlane-client" }
+threadlane-coding-agent = { version = "0.1.0", path = "crates/threadlane-coding-agent" }
+threadlane-compaction = { version = "0.1.0", path = "crates/threadlane-compaction" }
+threadlane-computer = { version = "0.1.0", path = "crates/threadlane-computer" }
+threadlane-context = { version = "0.1.0", path = "crates/threadlane-context" }
+threadlane-git = { version = "0.1.0", path = "crates/threadlane-git" }
+threadlane-gpui = { version = "0.1.16", path = "crates/threadlane-gpui" }
+threadlane-hashline = { version = "0.1.0", path = "crates/threadlane-hashline" }
+threadlane-loop = { version = "0.1.0", path = "crates/threadlane-loop" }
+threadlane-mcp = { version = "0.1.0", path = "crates/threadlane-mcp" }
+threadlane-orchestrator = { version = "0.1.0", path = "crates/threadlane-orchestrator" }
+threadlane-permission = { version = "0.1.0", path = "crates/threadlane-permission" }
+threadlane-plan = { version = "0.1.0", path = "crates/threadlane-plan" }
+threadlane-project = { version = "0.1.0", path = "crates/threadlane-project" }
+threadlane-prompt = { version = "0.1.0", path = "crates/threadlane-prompt" }
+threadlane-question = { version = "0.1.0", path = "crates/threadlane-question" }
+threadlane-protocol = { version = "0.1.0", path = "crates/threadlane-protocol" }
+threadlane-provider = { version = "0.1.0", path = "crates/threadlane-provider" }
+threadlane-runtime = { version = "0.1.0", path = "crates/threadlane-runtime" }
+threadlane-skills = { version = "0.1.0", path = "crates/threadlane-skills" }
+threadlane-tools = { version = "0.1.0", path = "crates/threadlane-tools" }
+threadlane-daemon = { version = "0.1.0", path = "crates/threadlane-daemon" }
+threadlane-ui-automation = { version = "0.1.0", path = "crates/threadlane-ui-automation" }
+threadlane-ui-chat = { version = "0.1.0", path = "crates/threadlane-ui-chat" }
+threadlane-ui-editor = { version = "0.1.0", path = "crates/threadlane-ui-editor" }
+threadlane-ui-github = { version = "0.1.0", path = "crates/threadlane-ui-github" }
+threadlane-ui-mirror = { version = "0.1.0", path = "crates/threadlane-ui-mirror" }
+threadlane-ui-pairing = { version = "0.1.0", path = "crates/threadlane-ui-pairing" }
+threadlane-ui-right-panel = { version = "0.1.0", path = "crates/threadlane-ui-right-panel" }
+threadlane-ui-settings = { version = "0.1.0", path = "crates/threadlane-ui-settings" }
+threadlane-ui-sidebar = { version = "0.1.0", path = "crates/threadlane-ui-sidebar" }
+threadlane-ui-kit = { version = "0.1.0", path = "crates/threadlane-ui-kit" }
+threadlane-ui-state = { version = "0.1.0", path = "crates/threadlane-ui-state" }
+threadlane-ui-terminal = { version = "0.1.0", path = "crates/threadlane-ui-terminal" }
+threadlane-ui-theme = { version = "0.1.0", path = "crates/threadlane-ui-theme" }
+threadlane-ui-workspace = { version = "0.1.0", path = "crates/threadlane-ui-workspace" }
+threadlane-updater = { version = ">=0.1.0, <1.0.0", path = "crates/threadlane-updater" }
+threadlane-wasi = { version = "0.1.0", path = "crates/threadlane-wasi" }
+
+# External dependencies
+async-trait = "0.1"
+base64 = "0.22"
+cargo-packager-updater = "=0.2.3"
+chrono = "0.4"
+directories = "6.0"
+futures = "0.3"
+gpui = { package = "gpui-pre", version = "0.3.3" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.3", features = ["font-kit"] }
+# Pinned so the mobile client (mobile/rust) can share the same gpui-kit
+# rev — rev-qualified and bare git specs are distinct Cargo sources and
+# would otherwise duplicate the crates in the mobile graph.
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "134ddaa0906fbfc688255b33daef0e803a039050" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "134ddaa0906fbfc688255b33daef0e803a039050" }
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "134ddaa0906fbfc688255b33daef0e803a039050" }
+hotpath = "0.30"
+image = "0.25"
+notify = "8.2"
+portable-pty = "0.9"
+qrcode = { version = "0.14", default-features = false }
+regex = "1.10"
+reqwest = { version = "0.12", default-features = false }
+rfd = "0.17.2"
+robius-open = { git = "https://github.com/project-robius/robius.git" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tempfile = "3.10"
+thiserror = "2.0"
+tokio = { version = "1.38", default-features = false }
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+url = "2.5"
+vt100 = "0.16"
+wasmi = "2.0"
+
+# Keep GPUI Kit's snapshot facades on one gpui-fast runtime. This snapshot
+# includes #35's retained-text measurement fix and the matching 0.3.8 facades.
+[patch.crates-io]
+# Preserve terminal rows when Find or pane resizing changes its height.
+vt100 = { path = "vendor/vt100" }
+gpui-pre = { git = "https://github.com/longbridge/gpui-fast", rev = "5c31c703937ecc406b8bdd369c630e6afc31cb86" }
+gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast", rev = "5c31c703937ecc406b8bdd369c630e6afc31cb86" }
+gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast", rev = "5c31c703937ecc406b8bdd369c630e6afc31cb86" }
+gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast", rev = "5c31c703937ecc406b8bdd369c630e6afc31cb86" }
+gpui-pre-web = { git = "https://github.com/longbridge/gpui-fast", rev = "5c31c703937ecc406b8bdd369c630e6afc31cb86" }
+
+[profile.dev]
+opt-level = 0
+debug = 0
+strip = "none"
+debug-assertions = true
+overflow-checks = true
+lto = false
+panic = 'unwind'
+incremental = true
+codegen-units = 256
+rpath = false
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# wasmi 2.0 defaults to `auto-dispatch`: its build script selects the
+# tail-call interpreter backend whenever the crate is compiled at opt-level 2
+# or higher, on the assumption that LLVM turns every handler-to-handler
+# `return handler(...)` into a sibling call. The dev profile's
+# `debug-assertions = true` breaks that assumption: `core::ub_checks` inside
+# the handlers take the address of a stack slot, so LLVM keeps a real call and
+# every executed Wasm instruction nests one native frame. Loading any real
+# extension then overflows GPUI's 512 KiB GCD worker stacks in ~6k
+# instructions (SIGBUS at startup). Compiling wasmi without debug assertions
+# restores the sibling calls its backend depends on; release builds already
+# run this way. `threadlane-wasi` has a regression test for the stack bound.
+[profile.dev.package.wasmi]
+debug-assertions = false
+
+[profile.dev.package.threadlane-gpui]
+opt-level = 2
+
+# Optimize the implementation crates, not the gpui-pre compatibility facades.
+[profile.dev.package.gpui]
+opt-level = 3
+
+[profile.dev.package.gpui_platform]
+opt-level = 3
+
+[profile.dev.package.gpui_macros]
+opt-level = 3
+
+[profile.dev.package.gpui-component]
+opt-level = 3
+
+[profile.dev.package.gpui-kit]
+opt-level = 3
+
+[profile.dev.package.gpui-kit-assets]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+debug = false
+split-debuginfo = "packed"
+strip = "none"
+debug-assertions = false
+overflow-checks = false
+lto = false
+panic = 'unwind'
+incremental = false
+codegen-units = 16
+rpath = false

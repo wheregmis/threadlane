@@ -1,0 +1,23 @@
+{
+  "name": "routine checks stay quiet",
+  "events": [
+    {
+      "id": 1, "project_id": 1, "lane_id": 1,
+      "source": "observable", "source_event_id": "quiet-1",
+      "kind": "system", "payload": {"text": "Health checks are green. There is no pending work or change to report."},
+      "trust": "system", "requested": false, "status": "done",
+      "attempts": 0, "received_at": 1767225600000
+    },
+    {
+      "id": 2, "project_id": 1, "lane_id": 1,
+      "source": "observable", "source_event_id": "quiet-2",
+      "kind": "system", "payload": {"text": "Another scheduled verification passed. No action is needed."},
+      "trust": "system", "requested": false, "status": "done",
+      "attempts": 0, "received_at": 1767229200000
+    }
+  ],
+  "expected": {
+    "messages": 0, "lead_commits": 2, "tasks": 0,
+    "task_proposals": 0, "approvals_requested": 0, "forge_writes": 0
+  }
+}
