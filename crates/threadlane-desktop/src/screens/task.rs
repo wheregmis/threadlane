@@ -7,14 +7,11 @@ use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::TaskId;
-use threadlane_desktop::{
-    Queued, TaskControl, When, changes, chips, status_label, timeline, usage,
-};
+use threadlane_desktop::{Queued, TaskControl, When, changes, chips, status_label, usage};
 
 use super::{gap_line, link};
 use crate::components::{
-    button, card, composer, decision_scroller, empty_state, field, heading, meta, page_header,
-    section, status_badge,
+    button, card, decision_scroller, empty_state, heading, meta, page_header, section, status_badge,
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
@@ -61,7 +58,7 @@ impl Desktop {
         };
 
         let mut moments = v_flex().gap(SM).child(section("Timeline"));
-        for moment in timeline(detail, when) {
+        for moment in self.state.task_timeline(space, detail, when) {
             moments = moments.child(
                 h_flex()
                     .gap(MD)
@@ -72,7 +69,12 @@ impl Desktop {
                             .flex_none()
                             .text_right(),
                     )
-                    .child(div().text_size(TYPE_BODY).min_w_0().child(moment.text)),
+                    .child(div().flex_1().min_w_0().child(self.prose(
+                        format!("task-{space}-{task}-{}", moment.id),
+                        space,
+                        moment.text,
+                        cx,
+                    ))),
             );
         }
         let mut decisions: Vec<_> = detail
@@ -287,20 +289,12 @@ impl Desktop {
             .child(
                 v_flex()
                     .gap(XS)
-                    .child(
-                        composer(cx)
-                            .child(div().flex_1().min_w_0().child(field(&self.task_composer)))
-                            .child(
-                                button("send-task")
-                                    .primary()
-                                    .icon(AppIcon::Send)
-                                    .label("Send")
-                                    .tooltip(crate::keyboard::send_hint(cx))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.send_to_task(window, cx)
-                                    })),
-                            ),
-                    )
+                    .child(self.render_composer(
+                        threadlane_desktop::Draft::Task,
+                        "Add to this task",
+                        None,
+                        cx,
+                    ))
                     .child(meta(self.state.task_hint(space, task), cx)),
             );
         decision_scroller("task", content, &self.decision_scroll)

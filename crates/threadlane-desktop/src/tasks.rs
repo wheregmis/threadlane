@@ -9,7 +9,7 @@ use threadlane_core::model::{
 };
 use threadlane_core::time::Timestamp;
 
-use crate::{AppState, When, duration, proposed_assignee};
+use crate::{AppState, Destination, When, duration, proposed_assignee};
 
 /// The start of a `waiting_reason` that says no model account is free
 /// (`threadlane-store`'s `BLOCKED_REASON`, Plan.md §5.3).
@@ -412,6 +412,8 @@ pub fn changes(detail: &TaskDetail) -> Changes {
 /// One entry of a task's timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Moment {
+    /// Stable identity within the timeline.
+    pub id: String,
     /// When, as the app shows it.
     pub time: String,
     /// What happened.
@@ -423,10 +425,42 @@ pub struct Moment {
 /// asked and answered, and its result.
 #[must_use]
 pub fn timeline(detail: &TaskDetail, when: &When) -> Vec<Moment> {
+    task_moments(detail, when, |_, _| true, std::iter::empty())
+}
+
+impl AppState {
+    /// The visible task timeline including local sends that are still pending.
+    #[must_use]
+    pub fn task_timeline(&self, space: &str, detail: &TaskDetail, when: &When) -> Vec<Moment> {
+        let destination = Destination::Task(space.to_owned(), detail.summary.task.id);
+        task_moments(
+            detail,
+            when,
+            |text, at| !self.has_optimistic_copy(&destination, text, at),
+            self.outgoing()
+                .filter(|send| send.destination == destination)
+                .map(|send| {
+                    (
+                        send.at,
+                        format!("sending-{}", send.id),
+                        format!("You · Sending…\n\n{}", send.text),
+                    )
+                }),
+        )
+    }
+}
+
+fn task_moments(
+    detail: &TaskDetail,
+    when: &When,
+    show_owner: impl Fn(&str, Timestamp) -> bool,
+    sending: impl Iterator<Item = (Timestamp, String, String)>,
+) -> Vec<Moment> {
     let summary = &detail.summary;
     let task = &summary.task;
-    let mut moments: Vec<(Timestamp, String)> = vec![(
+    let mut moments = vec![(
         task.created_at,
+        "created".to_owned(),
         format!("Created: {}. {}.", task.title, origin(detail)),
     )];
     for run in &detail.runs {
@@ -458,11 +492,16 @@ pub fn timeline(detail: &TaskDetail, when: &When) -> Vec<Moment> {
                 format!("{on}: worked for {took}, {outcome}")
             }
         };
-        moments.push((run_summary.started_at, text));
+        moments.push((
+            run_summary.started_at,
+            format!("run-{}", run_summary.id),
+            text,
+        ));
     }
     for decision in &detail.decisions {
         moments.push((
             decision.created_at,
+            format!("asked-{}", decision.id),
             format!("Asked {}: {}", decision.id, decision.question),
         ));
         let answered_at = decision
@@ -482,20 +521,32 @@ pub fn timeline(detail: &TaskDetail, when: &When) -> Vec<Moment> {
                     .and_then(|answer| answer.get("note"))
                     .and_then(Json::as_str)
                     .map_or_else(String::new, |note| format!(" with the note \"{note}\""));
-                moments.push((at, format!("You answered {}: {label}{note}", decision.id)));
+                moments.push((
+                    at,
+                    format!("ended-{}", decision.id),
+                    format!("You answered {}: {label}{note}", decision.id),
+                ));
             }
             (DecisionStatus::Expired, _) => moments.push((
                 decision.expires_at.unwrap_or(decision.created_at),
+                format!("ended-{}", decision.id),
                 format!("{} expired unanswered", decision.id),
             )),
             _ => {}
         }
     }
     for entry in &detail.messages {
-        if let ConversationEntry::You { text, at, .. } = entry {
-            moments.push((*at, format!("You wrote: {text}")));
+        if let ConversationEntry::You { event_id, text, at } = entry
+            && show_owner(text, *at)
+        {
+            moments.push((
+                *at,
+                format!("you-{event_id}"),
+                format!("You wrote:\n\n{text}"),
+            ));
         }
     }
+    moments.extend(sending);
     if task.status.is_terminal() {
         let ended = detail
             .runs
@@ -508,14 +559,15 @@ pub fn timeline(detail: &TaskDetail, when: &When) -> Vec<Moment> {
             .as_ref()
             .and_then(|result| result.get("summary"))
             .and_then(Json::as_str)
-            .map_or_else(String::new, |summary| format!(": {summary}"));
+            .map_or_else(String::new, |summary| format!(":\n\n{summary}"));
         let status = status_label(task.status, None);
-        moments.push((ended, format!("{status}{result}")));
+        moments.push((ended, "result".to_owned(), format!("{status}{result}")));
     }
-    moments.sort_by_key(|(at, _)| *at);
+    moments.sort_by_key(|(at, _, _)| *at);
     moments
         .into_iter()
-        .map(|(at, text)| Moment {
+        .map(|(at, id, text)| Moment {
+            id,
             time: when.moment(at),
             text,
         })

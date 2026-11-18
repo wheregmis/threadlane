@@ -4,7 +4,8 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::input::{Enter, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::{Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_desktop::{
     DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope,
@@ -117,6 +118,8 @@ impl Desktop {
             .decision_command(command, window.has_focused_input(cx))
         {
             Some(DecisionEffect::Scroll) => {
+                self.reveal_linked_decision = None;
+                self.conversation_follow.set(false);
                 self.scroll_to_decision.set(DecisionScroll::Card);
                 cx.notify();
             }
@@ -194,6 +197,97 @@ impl Desktop {
         self.scroll_to_decision.set(DecisionScroll::None);
         field.focus_handle(cx).focus(window, cx);
         cx.notify();
+    }
+
+    pub(crate) fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.screen,
+            Screen::Project {
+                tab: Tab::Conversation,
+                ..
+            }
+        ) {
+            self.reveal_linked_decision = None;
+            self.scroll_to_decision.set(DecisionScroll::None);
+            self.conversation_follow.set(true);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn conversation_scroller(
+        &self,
+        space: &str,
+        project: &str,
+        lines: Div,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let scroll = self.decision_scroll.clone();
+        let previous_max = scroll.max_offset().y;
+        let was_at_bottom = self.conversation_at_bottom;
+        let follow_growth = self.reveal_linked_decision.is_none()
+            && previous_max + scroll.offset().y <= crate::tokens::SCROLL_END_TOLERANCE;
+        let unread = self.state.conversation_has_newer(space, project, false);
+        let follow = self.conversation_follow.clone();
+        let current_visit = follow.clone();
+        let desktop = cx.entity().downgrade();
+        let (in_space, named) = (space.to_owned(), project.to_owned());
+        let lines = lines.on_children_prepainted(move |_, window, _| {
+            let max = scroll.max_offset().y;
+            let at_bottom = max + scroll.offset().y <= crate::tokens::SCROLL_END_TOLERANCE;
+            let jump = threadlane_desktop::follow_latest(
+                follow.replace(false),
+                follow_growth,
+                max > previous_max,
+            );
+            if jump && !at_bottom || at_bottom != was_at_bottom || at_bottom && unread {
+                let scroll = scroll.clone();
+                let desktop = desktop.clone();
+                let visit = current_visit.clone();
+                let (space, project) = (in_space.clone(), named.clone());
+                window.on_next_frame(move |window, cx| {
+                    let _gone = desktop.update(cx, |this, cx| {
+                        if !std::rc::Rc::ptr_eq(&this.conversation_follow, &visit) {
+                            return;
+                        }
+                        if jump && !at_bottom {
+                            scroll.scroll_to_bottom();
+                            window.refresh();
+                        }
+                        if !jump && this.conversation_at_bottom != at_bottom {
+                            this.conversation_at_bottom = at_bottom;
+                            cx.notify();
+                        }
+                        if at_bottom {
+                            this.state.saw_conversation_latest(&space, &project);
+                        }
+                    });
+                });
+            }
+        });
+        let show_jump =
+            self.state
+                .conversation_has_newer(space, project, self.conversation_at_bottom);
+        crate::components::decision_scroller("conversation", lines, &self.decision_scroll).when(
+            show_jump,
+            |viewport| {
+                viewport.child(
+                    div()
+                        .absolute()
+                        .bottom(MD)
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            crate::components::button("jump-latest")
+                                .small()
+                                .rounded_full()
+                                .tab_stop(true)
+                                .label("Jump to latest")
+                                .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx))),
+                        ),
+                )
+            },
+        )
     }
 
     pub(super) fn show_shortcuts(&self, window: &mut Window, cx: &mut Context<Self>) {

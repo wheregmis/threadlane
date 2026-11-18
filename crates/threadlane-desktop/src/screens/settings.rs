@@ -3,6 +3,7 @@
 //! notifications it raises, and its version.
 
 use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
@@ -132,6 +133,14 @@ impl Desktop {
             .child(
                 card(cx)
                     .child(section("This app"))
+                    .child(
+                        Checkbox::new("hold-messages")
+                            .checked(self.state.hold_messages())
+                            .label("Hold messages for 3 seconds so a send can be undone")
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_hold_messages(*checked, cx);
+                            })),
+                    )
                     .child(line("Client directory", dir))
                     .child(line("Version", env!("CARGO_PKG_VERSION").to_owned())),
             )

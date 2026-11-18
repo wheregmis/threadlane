@@ -15,12 +15,12 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::Mode;
-use threadlane_desktop::{Line, ModeChoice, Part, When};
+use threadlane_desktop::{Line, ModeChoice, Part, When, message_limit, newest_message};
 
 use super::{gap_line, link};
 use crate::components::{
-    button, card, composer, count, count_badge, decision_scroller, empty_state, field, icon_button,
-    meta, page_header, section, status_badge,
+    button, card, count, count_badge, decision_scroller, empty_state, field, icon_button, meta,
+    page_header, section, status_badge,
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
@@ -418,21 +418,12 @@ impl Desktop {
     }
 
     fn project_composer(&self, project: &str, cx: &mut Context<Self>) -> Div {
-        composer(cx)
-            .child(
-                div().flex_1().min_w_0().child(
-                    field(&self.composer).aria_label(format!("Message the lead of {project}")),
-                ),
-            )
-            .child(
-                button("send")
-                    .primary()
-                    .tab_stop(true)
-                    .icon(AppIcon::Send)
-                    .label("Send")
-                    .tooltip(crate::keyboard::send_hint(cx))
-                    .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-            )
+        self.render_composer(
+            threadlane_desktop::Draft::Lead,
+            format!("Message the lead of {project}"),
+            None,
+            cx,
+        )
     }
 
     /// The conversation with the lead, then the tasks and open decisions of
@@ -471,8 +462,12 @@ impl Desktop {
             ));
         }
         let recorded = self.state.recorded(space, project, when);
-        for line in conversation {
-            let said = |who: &str, time: String, text: String| {
+        let newest = newest_message(&conversation);
+        for (index, line) in conversation.iter().enumerate() {
+            let limit = message_limit(newest, index);
+            let said = |id: String, who: &str, time: &str, text: &str, reply: bool| {
+                let id = format!("conversation-{space}-{project}-{id}");
+                let quote = text.to_owned();
                 v_flex()
                     .gap(XS)
                     .child(
@@ -485,26 +480,57 @@ impl Desktop {
                                     .child(who.to_owned()),
                             )
                             .child(div().flex_1())
-                            .child(meta(time, cx).text_right()),
+                            .children(reply.then(|| {
+                                button(SharedString::from(format!("reply-{id}")))
+                                    .ghost()
+                                    .small()
+                                    .tab_stop(true)
+                                    .label("Reply")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.reply_to(&quote, window, cx)
+                                    }))
+                            }))
+                            .child(meta(time.to_owned(), cx).text_right()),
                     )
-                    .child(text)
+                    .children(
+                        (!text.is_empty())
+                            .then(|| self.prose(id, space, text.to_owned(), cx).limit(limit)),
+                    )
             };
             lines = match line {
-                Line::Day(day) => lines.child(Separator::horizontal().label(day)),
-                Line::You { text, time } => lines.child(said("You", time, text)),
-                Line::Lead { text, time } => lines.child(said("Lead", time, text)),
-                Line::Notice { text, time } => lines.child(said("Notice", time, text)),
+                Line::Day(day) => lines.child(Separator::horizontal().label(day.clone())),
+                Line::New => lines.child(Separator::horizontal().label("New")),
+                Line::You { id, text, time } => {
+                    lines.child(said(format!("you-{id}"), "You", time, text, true))
+                }
+                Line::Lead { seq, text, time } => {
+                    lines.child(said(format!("lead-{seq}"), "Lead", time, text, true))
+                }
+                Line::Notice { seq, text, time } => {
+                    lines.child(said(format!("notice-{seq}"), "Notice", time, text, false))
+                }
+                Line::Sending { id, text, time } => lines.child(said(
+                    format!("sending-{id}"),
+                    "You · Sending…",
+                    time,
+                    text,
+                    false,
+                )),
                 Line::Stopped { time } => {
-                    lines.child(said("Lead run stopped", time, String::new()))
+                    lines.child(said(String::new(), "Lead run stopped", time, "", false))
                 }
-                Line::DeliveryFailure { text, time } => {
-                    lines.child(said("Delivery failed", time, text))
-                }
+                Line::DeliveryFailure { id, text, time } => lines.child(said(
+                    format!("failed-{id}"),
+                    "Delivery failed",
+                    time,
+                    text,
+                    false,
+                )),
                 Line::Digest { digest, time } => lines.child(
                     v_flex()
                         .gap(XS)
-                        .child(meta(time, cx).text_right())
-                        .child(self.digest_entry(space, digest, cx)),
+                        .child(meta(time.clone(), cx).text_right())
+                        .child(self.digest_entry(space, digest.clone(), cx)),
                 ),
                 Line::Quiet {
                     id,
@@ -513,14 +539,16 @@ impl Desktop {
                     reasons,
                 } => {
                     let space = space.to_owned();
+                    let id = *id;
+                    let in_space = space.clone();
                     let button = button(SharedString::from(format!("quiet-{space}-{id}")))
                         .small()
                         .ghost()
                         .tab_stop(true)
-                        .label(toggle)
+                        .label(*toggle)
                         .accessibility_label(format!("{toggle}: {text}"))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.toggle_quiet(&space, id);
+                            this.state.toggle_quiet(&in_space, id);
                             cx.notify();
                         }));
                     lines.child(
@@ -535,31 +563,53 @@ impl Desktop {
                                             .text_size(TYPE_BODY)
                                             .text_color(muted)
                                             .min_w_0()
-                                            .child(text),
+                                            .child(text.clone()),
                                     )
                                     .child(button),
                             )
-                            .children(reasons.into_iter().map(|reason| {
-                                div()
-                                    .text_size(TYPE_BODY)
-                                    .child(format!("{} · {}", reason.time, reason.text))
+                            .children(reasons.iter().map(|reason| {
+                                self.prose(
+                                    format!("quiet-{space}-{id}-{}", reason.id),
+                                    &space,
+                                    format!("{} · {}", reason.time, reason.text),
+                                    cx,
+                                )
                             })),
                     )
                 }
                 Line::Decision { card, time, .. } => {
                     match self
                         .state
-                        .present_feed_decision(space, project, &card, &time, when)
+                        .present_feed_decision(space, project, card, time, when)
                     {
                         Some(display) => lines.child(self.decision_display(display, cx)),
                         None => lines.child(said(
+                            format!("decision-{}", card.id),
                             card.label(),
                             time,
-                            format!("{}: {}", card.id, card.question),
+                            &format!("{}: {}", card.id, card.question),
+                            false,
                         )),
                     }
                 }
             };
+        }
+        if let Some(key) = self
+            .reveal_linked_decision
+            .as_ref()
+            .filter(|key| key.space == space)
+            && !conversation.iter().any(
+                |line| matches!(line, Line::Decision { card, .. } if card.id == key.id.to_string()),
+            )
+            && let Some(decision) = self.state.linked_decision(space, key.id)
+        {
+            let queued = threadlane_desktop::Queued {
+                space: space.to_owned(),
+                decision: decision.clone(),
+            };
+            lines = lines.child(
+                self.decision_display(self.state.present_decision(&queued, project, when), cx),
+            );
         }
         if let Some(recorded) = recorded {
             lines = lines.child(self.recorded_section(space, project, recorded, cx));
@@ -688,11 +738,7 @@ impl Desktop {
                     .h_full()
                     .min_w_0()
                     .gap(SM)
-                    .child(decision_scroller(
-                        "conversation",
-                        lines,
-                        &self.decision_scroll,
-                    ))
+                    .child(self.conversation_scroller(space, project, lines, cx))
                     .child(self.project_composer(project, cx).flex_none()),
             )
             .child(side)
@@ -853,7 +899,12 @@ impl Desktop {
                             .bg(cx.theme().muted)
                             .rounded(ROW_RADIUS)
                             .whitespace_normal()
-                            .child(file.content.clone()),
+                            .child(self.prose(
+                                format!("memory-body-{space}-{project}-{path}"),
+                                space,
+                                file.content.clone(),
+                                cx,
+                            )),
                     ),
                     (None, false) => {
                         detail.child(div().text_size(TYPE_BODY).text_color(muted).child(
