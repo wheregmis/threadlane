@@ -1,0 +1,57 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release:
+    name: Prepare or publish release
+    runs-on: ubuntu-24.04
+    if: ${{ github.repository_owner == 'wheregmis' && github.ref == 'refs/heads/main' }}
+    concurrency:
+      group: release-please-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release-please.outputs.release_created }}
+      release_tag: ${{ steps.release-please.outputs.tag_name }}
+    steps:
+      - name: Create or update release
+        id: release-please
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+
+      - name: Check out release tooling
+        if: ${{ steps.release-please.outputs.prs_created == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test release note cleanup
+        if: ${{ steps.release-please.outputs.prs_created == 'true' }}
+        run: node scripts/clean-release-notes.test.cjs
+      - name: Remove verified duplicate merge entries
+        if: ${{ steps.release-please.outputs.prs_created == 'true' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_PRS: ${{ steps.release-please.outputs.prs }}
+        with:
+          script: |
+            const clean = require('./scripts/clean-release-notes.cjs');
+            await clean({github, context, core});
+
+  package-release:
+    name: Build release packages
+    needs: release
+    if: ${{ needs.release.outputs.release_created == 'true' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      release_tag: ${{ needs.release.outputs.release_tag }}

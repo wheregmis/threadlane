@@ -1,0 +1,25 @@
+name: hotpath relay
+
+on:
+  workflow_run:
+    workflows: ["hotpath benchmark"] # the `name:` of the benchmark workflow
+    types: [completed]
+
+jobs:
+  relay:
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [run_protocol, session_reads]
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read # download the artifact of the benchmark run
+      id-token: write # authenticate the upload
+      pull-requests: read # find the pull request the run belongs to
+    steps:
+      - uses: hotpath-rs/hotpath-relay@d40b0e465fa852b0c1f4e33989140d11d7b2742c # v1.0.0
+        with:
+          benchmark: ${{ matrix.suite }}
+          artifact_name: hotpath-report-${{ matrix.suite }}

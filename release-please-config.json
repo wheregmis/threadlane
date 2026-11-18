@@ -1,0 +1,34 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "versioning": "always-bump-patch",
+  "changelog-sections": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance Improvements" },
+    { "type": "refactor", "section": "Code Refactoring" },
+    { "type": "build", "section": "Build System" },
+    { "type": "ci", "section": "CI" },
+    { "type": "chore", "section": "Maintenance" },
+    { "type": "revert", "section": "Reverts" }
+  ],
+  "include-component-in-tag": false,
+  "bump-patch-for-minor-pre-major": true,
+  "packages": {
+    ".": {
+      "package-name": "threadlane-desktop",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value == 'threadlane-backend-claude' || @.name.value == 'threadlane-backend-codex' || @.name.value == 'threadlane-client' || @.name.value == 'threadlane-core' || @.name.value == 'threadlane-desktop' || @.name.value == 'threadlane-hub' || @.name.value == 'threadlane-mcp' || @.name.value == 'threadlane-runner' || @.name.value == 'threadlane-store' || @.name.value == 'threadlane-testkit' || @.name.value == 'threadlane-transport-iroh' || @.name.value == 'threadlane-transport-local')].version"
+        }
+      ]
+    }
+  }
+}

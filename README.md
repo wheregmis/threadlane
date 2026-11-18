@@ -35,6 +35,25 @@ cargo fmt --all -- --check
 in `crates/threadlane-hub/tests/exit/` and run the real hub and runner on an
 in-memory database, a fake clock, and a scripted backend.
 
+### Hotpath benchmarks
+
+Run either fixed workload locally with allocation and timing measurements:
+
+```sh
+HOTPATH_METRICS_SERVER_OFF=1 cargo run --locked --release -p threadlane-benchmarks --bin run_protocol --features hotpath,hotpath-alloc
+HOTPATH_METRICS_SERVER_OFF=1 cargo run --locked --release -p threadlane-benchmarks --bin session_reads --features hotpath,hotpath-alloc
+```
+
+The suites measure run assignment JSON encoding and decoding, and reads from a
+1,000-entry in-memory run journal. CI adds Callgrind instruction counts. Pushes
+to main establish baselines, and pull requests produce reports for the Hotpath relay.
+
+### Releases
+
+Use Conventional Commit titles for squash merges. Release Please maintains a
+release PR on main. Merging it tags the workspace and attaches the desktop app,
+CLI and hub for Apple Silicon and Linux (x86_64 and aarch64), with SHA-256 checksums.
+
 ## Run a hub
 
 ```sh
