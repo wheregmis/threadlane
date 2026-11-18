@@ -58,7 +58,7 @@ async fn a_message_produces_one_sent_reply_in_the_feed() {
             ASK_PROJECT_LEAD,
         ]
     );
-    assert_eq!(assignment.max_turns, Some(40));
+    assert_eq!(assignment.max_turns, Some(150));
 
     assert_eq!(hub.event(accepted.event_id).await.status, EventStatus::Done);
     let run = hub.db.run(assignment.run_id).await.unwrap().unwrap();

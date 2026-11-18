@@ -1883,7 +1883,7 @@ mod tasks;
 mod timers;
 
 mod permissions;
-pub use tasks::NewTaskSpec;
+pub use tasks::{DRAFT_PR_GOAL, NewTaskSpec};
 
 #[cfg(test)]
 mod tests;

@@ -155,6 +155,9 @@ pub enum RunFailure {
     UsageLimit,
     /// The user stopped the lane. The runner has checkpointed its work.
     Stopped,
+    /// The backend refused the run's setup, such as a model the account
+    /// cannot use. Retrying cannot help, so the events die at once.
+    Rejected { message: String },
 }
 
 /// Messages the hub pushes to a runner.

@@ -211,8 +211,21 @@ impl Desktop {
             .task_stop(space, task)
             .map(|target| self.stop_button(space, target, format!("Stop {task}"), cx));
         let in_space = space.to_owned();
-        let control = (!archived && self.state.task_control(space, task) != TaskControl::Ended)
-            .then(|| {
+        let retry_space = space.to_owned();
+        let control = match self.state.task_control(space, task) {
+            _ if archived => None,
+            TaskControl::Ended => None,
+            TaskControl::Retry => Some(
+                button("task-retry")
+                    .small()
+                    .ghost()
+                    .label("Retry")
+                    .accessibility_label(format!("Retry {task}"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.retry_task(retry_space.clone(), task, cx);
+                    })),
+            ),
+            TaskControl::Cancel | TaskControl::Confirm(_) => Some(
                 button("task-cancel")
                     .small()
                     .ghost()
@@ -225,8 +238,9 @@ impl Desktop {
                             window,
                             cx,
                         );
-                    }))
-            });
+                    })),
+            ),
+        };
         let header = task_header(detail, when);
         let in_space = space.to_owned();
         let expanded = self.state.activity_open(space, task);

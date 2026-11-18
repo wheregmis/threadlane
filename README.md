@@ -80,6 +80,7 @@ key is optional; unknown keys are errors. For example:
 ```toml
 [space]
 name = "Work"
+# reviewer = "Reviewer"  # an agent that reviews every finished task before it is done
 
 [runner]
 max_parallel = 2      # shared slots on this machine across agents and projects; excess work stays queued

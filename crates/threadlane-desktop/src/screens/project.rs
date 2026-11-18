@@ -526,6 +526,12 @@ impl Desktop {
                                 },
                             ));
                         }
+                        if task_card.can_retry && !archived {
+                            let space = menu_space.clone();
+                            menu = menu.item(menu_item(&menu_view, "Retry", move |this, _, cx| {
+                                this.retry_task(space.clone(), id, cx);
+                            }));
+                        }
                         menu
                     })
             });
@@ -1914,6 +1920,19 @@ impl Desktop {
                     .child(repositories),
             )
             .child(h_flex().gap(SM).child(label("Waits for")).child(waits))
+            .child(
+                h_flex().gap(SM).child(label("When done")).child(
+                    button("task-draft-pr")
+                        .small()
+                        .label("Open a draft pull request")
+                        .selected(form.draft_pr)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let form = this.state.task_form_mut();
+                            form.draft_pr = !form.draft_pr;
+                            cx.notify();
+                        })),
+                ),
+            )
             .child(
                 div()
                     .text_size(TYPE_META)

@@ -1,5 +1,5 @@
 //! The Tasks capability (Plan.md §5.2): a task you create directly,
-//! skipping the lead, and cancelling a task. Both go through the same
+//! skipping the lead, cancelling a task, and retrying a failed one. Both go through the same
 //! store calls as the lead's `create_task` and `cancel_task` tools.
 
 use threadlane_core::client::{ApiError, TaskReply, TaskRequest};
@@ -122,6 +122,25 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                 inner.wake.wake(WakeTarget::Lane(project.lead_lane_id));
             }
             Ok(TaskReply::Task { task: cancelled })
+        }
+        TaskRequest::Retry { task: id } => {
+            let task = db
+                .task(id)
+                .await
+                .map_err(api_error)?
+                .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+            if task.status != TaskStatus::Failed {
+                return Err(ApiError::Invalid(format!(
+                    "task {id} is {}; only a failed task can be retried",
+                    task.status
+                )));
+            }
+            let retried = db
+                .retry_task(task.id, inner.clock.now())
+                .await
+                .map_err(api_error)?;
+            inner.wake.wake(WakeTarget::Lane(retried.lane_id));
+            Ok(TaskReply::Task { task: retried })
         }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }
