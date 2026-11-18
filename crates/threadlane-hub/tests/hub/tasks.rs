@@ -57,6 +57,17 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         .set_binding_mode(engineer_binding.id, Mode::Assisted)
         .await
         .unwrap();
+    let widgets = hub
+        .db
+        .create_repository(&threadlane_core::model::NewRepository {
+            project_id: project.id,
+            name: "widgets".into(),
+            remote_url: "https://github.com/acme/widgets.git".into(),
+            default_branch: "main".into(),
+            protected_branches: vec![],
+        })
+        .await
+        .unwrap();
     let created = hub
         .db
         .create_task(
@@ -66,7 +77,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
                 agent_id: engineer,
                 title: "Draft report".into(),
                 goal: "Draft a report with totals".into(),
-                repositories: vec![],
+                repositories: vec![widgets.id],
                 parent_task_id: None,
                 depends_on: vec![],
                 origin: TaskOrigin::Agent,
@@ -92,6 +103,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         .await
         .is_err()
     );
+    super::github::record_pull_request(&hub, &created, &lease).await;
     write_progress(&hub, &lease, &implementation, &id.to_string()).await;
     call(
         &hub,
@@ -99,7 +111,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         &implementation,
         "submit",
         FINISH_TASK,
-        json!({"summary":"First draft"}),
+        json!({"summary":"First draft","merge":[{"repository":"widgets","branch":"main","base":"main","conflicts":[],"revision":"a".repeat(40)}]}),
     )
     .await
     .unwrap();
@@ -157,7 +169,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         &fix,
         "submit",
         FINISH_TASK,
-        json!({"summary":"Includes the totals"}),
+        json!({"summary":"Includes the totals","merge":[{"repository":"widgets","branch":"main","base":"main","conflicts":[],"revision":"b".repeat(40)}]}),
     )
     .await
     .unwrap();
@@ -189,6 +201,21 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         "Totals match"
     );
     assert_eq!(task_results(&hub).await.len(), 1);
+    let deliveries = hub.db.pending_github_reviews().await.unwrap();
+    assert_eq!(deliveries.len(), 2);
+    for (delivery, (sha, verdict, feedback)) in deliveries.iter().zip([
+        ("a", "Changes requested", "Include the totals"),
+        ("b", "Approved", "Totals match"),
+    ]) {
+        assert_eq!(delivery.pull_url, "https://github.com/acme/widgets/pull/42");
+        assert_eq!(delivery.revision, sha.repeat(40));
+        assert_eq!(
+            delivery.body,
+            format!("**{verdict}**\n\n{feedback}\n\n🤖 Reviewed by Threadlane (Reviewer, {id})")
+        );
+        hub.db.delivered_github_review(delivery).await.unwrap();
+    }
+    assert!(hub.db.pending_github_reviews().await.unwrap().is_empty());
     let history = hub.db.task_reviews(id).await.unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].reviewer, reviewer.id);

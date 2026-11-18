@@ -96,6 +96,8 @@ impl FakeGh {
                echo 'https://github.test/me/app/pull/7'\n\
              elif [ \"$1 $2\" = \"pr list\" ] && [ -f {record}/created ]; then\n\
                echo 'https://github.test/me/app/pull/7'\n\
+             elif [ \"$3\" = \"--paginate\" ] && [ -f {record}/reviews ]; then\n\
+               cat {record}/reviews\n\
              elif [ \"$1 $2\" = \"api user\" ]; then\n\
                {api_user}\n\
              fi\n"
@@ -213,7 +215,7 @@ async fn a_draft_pull_request_is_opened_with_exact_arguments_after_the_push() {
 }
 
 #[tokio::test]
-async fn a_failed_login_lookup_leaves_the_attribution_out_and_is_not_repeated() {
+async fn a_failed_login_lookup_keeps_the_agent_attribution_and_is_not_repeated() {
     let dir = tempfile::tempdir().unwrap();
     let (worktree, _remote) = worktree_with_work(dir.path()).await;
     let gh = FakeGh::with_login(false);
@@ -234,7 +236,44 @@ async fn a_failed_login_lookup_leaves_the_attribution_out_and_is_not_repeated() 
         .filter_map(|call| call.last())
         .filter(|arg| arg.starts_with("--body="))
         .collect();
-    assert_eq!(bodies, ["--body=Body", "--body=Body"]);
+    assert_eq!(
+        bodies,
+        ["--body=Body\n\n🤖 Opened by Threadlane (Engineer, T-0001)"; 2]
+    );
+}
+
+#[tokio::test]
+async fn a_retried_review_is_published_once_on_its_commit() {
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let marker = "<!-- threadlane-review-test -->";
+    let body = "Feedback\n\n🤖 Reviewed by Threadlane (Reviewer, T-0001)";
+    for _ in 0..2 {
+        forge
+            .publish_review("https://github.test/me/app/pull/7", "abcd", body, "test")
+            .await
+            .unwrap();
+        std::fs::write(gh.dir.path().join("reviews"), marker).unwrap();
+    }
+    let calls = gh.invocations();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0], calls[2]);
+    assert_eq!(
+        calls[1],
+        [
+            "api",
+            "--hostname=github.test",
+            "--method",
+            "POST",
+            "repos/me/app/pulls/7/reviews",
+            "-f",
+            "event=COMMENT",
+            "-f",
+            "commit_id=abcd",
+            "-f",
+            &format!("body={body}\n\n{marker}")
+        ]
+    );
 }
 
 /// A fake `gh` whose `auth status` prints token-like lines and exits with

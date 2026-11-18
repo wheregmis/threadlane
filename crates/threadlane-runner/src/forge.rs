@@ -50,6 +50,68 @@ impl GitForge {
         }
     }
 
+    /// Posts a comment-only GitHub review on the submitted commit. The marker
+    /// lets delivery resume after GitHub accepted a review but before local acknowledgement.
+    pub async fn publish_review(
+        &self,
+        pull_url: &str,
+        commit: &str,
+        body: &str,
+        delivery_key: &str,
+    ) -> Result<(), ForgeError> {
+        let (repo, number) = pull_url
+            .strip_prefix("https://")
+            .and_then(|path| path.rsplit_once("/pull/"))
+            .ok_or_else(|| ForgeError("invalid pull request URL".into()))?;
+        let (host, repository) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("missing repository".into()))?;
+        let number: std::num::NonZeroU64 = number
+            .parse()
+            .map_err(|_| ForgeError("invalid pull request number".into()))?;
+        if repository.split('/').count() != 2
+            || !repo.split('/').all(|part| {
+                !part.is_empty()
+                    && !part.starts_with('.')
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+            })
+        {
+            return Err(ForgeError("invalid review repository".into()));
+        }
+        let endpoint = format!("repos/{repository}/pulls/{number}/reviews");
+        let host = format!("--hostname={host}");
+        let marker = format!("<!-- threadlane-review-{delivery_key} -->");
+        let existing = self
+            .gh(
+                Path::new("."),
+                args(&["api", &host, "--paginate", &endpoint, "--jq", ".[].body"]),
+            )
+            .await?;
+        if existing.lines().any(|line| line == marker) {
+            return Ok(());
+        }
+        self.gh(
+            Path::new("."),
+            args(&[
+                "api",
+                &host,
+                "--method",
+                "POST",
+                &endpoint,
+                "-f",
+                "event=COMMENT",
+                "-f",
+                &format!("commit_id={commit}"),
+                "-f",
+                &format!("body={body}\n\n{marker}"),
+            ]),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// The `gh` user's login, from `gh api user` on first use. A failed or
     /// odd-looking lookup gives `None` and is not retried.
     async fn login(&self, worktree: &Path) -> Option<String> {
@@ -128,7 +190,10 @@ impl Forge for GitForge {
                 "--body={}\n\n🤖 Opened by Threadlane ({opened_by}) acting for @{login}",
                 body.trim_end()
             ),
-            None => format!("--body={body}"),
+            None => format!(
+                "--body={}\n\n🤖 Opened by Threadlane ({opened_by})",
+                body.trim_end()
+            ),
         };
         let output = self
             .gh(
