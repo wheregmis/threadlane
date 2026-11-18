@@ -263,6 +263,7 @@ str_enum! {
     pub enum BackendKind {
         Claude => "claude",
         Codex => "codex",
+        Antigravity => "antigravity",
     }
 }
 

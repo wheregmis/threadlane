@@ -15,6 +15,7 @@ the crates below.
 | `threadlane-testkit` | `FakeClock`, `ScriptedBackend`, `CrashPlan`, in-memory fakes |
 | `threadlane-mcp` | `McpServer`: serves a run's tools to a backend over loopback HTTP |
 | `threadlane-backend-claude` | `ClaudeBackend`: drives `claude -p` |
+| `threadlane-backend-antigravity` | Drives Google Antigravity CLI (`agy`) |
 | `threadlane-backend-codex` | `CodexBackend`: drives `codex exec --json` |
 | `threadlane-transport-local` | `LocalClient` and `serve`: the client interface over a Unix socket |
 | `threadlane-transport-iroh` | `IrohClient`, `serve`, join codes: the client interface over iroh |
@@ -64,7 +65,7 @@ The data directory defaults to `$THREADLANE_HUB_DIR`, then
 `./.threadlane-dev/hub`. It holds `hub.db`, the socket `hub.sock`, the hub's
 iroh key `hub.key` (created on first start, readable only by you), and
 `lanes/` (one working directory per lane). The hub serves its socket, runs
-your messages through the logged-in `claude` or `codex`, and stops on Ctrl-C.
+your messages through the selected CLI (`claude`, `codex`, or `agy`), and stops on Ctrl-C.
 A run uses the first of its agent's backends (by default Claude, then Codex)
 that is installed, logged in, and on an account not at its usage limit.
 `threadlane-hub --data-dir DIR check` checks the database and exits.
@@ -93,6 +94,10 @@ model = "haiku"       # when the agent names no model; unset means Claude's defa
 program = "codex"     # path or name on PATH
 # home = "/Users/me/.codex-work"         # CODEX_HOME, a separate Codex login
 # model = "..."       # unset means Codex's default
+
+[backends.antigravity]
+program = "agy"
+# model = "..."       # use a slug from agy models
 
 [timing]
 session_max_age_secs = 86400   # a session older than this is closed and a fresh one started
@@ -158,6 +163,12 @@ To let that Lead fall back to Codex when Claude is unavailable, run
 you renamed it. Set `--backend codex` for a Codex-only Lead. Upgrades preserve
 saved backend preferences because older hubs stored defaults and explicit choices identically.
 
+To use Antigravity, sign in with `agy` on the runner machine, then select it
+with `threadlane agent edit Lead --backend antigravity`. The runner needs `sh`
+and `curl` on its PATH for Threadlane tool calls. Antigravity accepts text
+input. Image attachments require another backend. Threadlane enforces the wall-time
+limit for Antigravity runs. The CLI has no model-turn limit flag.
+
 Starter agents (docs/agent-templates.md) come compiled into the hub: Chief of
 Staff, Engineer, Fullstack Developer, Backend Developer, Frontend Developer,
 Reviewer, Reporter and Architect. Adding one creates an
@@ -210,6 +221,7 @@ committed there when it ends. Task agents are refused `git push`, `gh pr
 create`, `gh pr merge`, `gh release`, and `gh repo delete`: Claude through
 `--disallowedTools`, Codex through execution policy rules the runner writes to
 `.codex/rules/threadlane-deny.rules` in the worktree for the length of a run.
+Antigravity applies the command prefixes as session-scoped deny rules.
 Tasks that work in repositories run only on a machine where `gh auth status`
 succeeds; elsewhere they wait, and say why.
 
@@ -296,6 +308,7 @@ tools, resume by id, each deny rule refusing its command, and the usage limit.
 
 ```sh
 cargo test -p threadlane-backend-claude --test live -- --ignored real_claude_passes_the_conformance_suite
+cargo test -p threadlane-backend-antigravity --test live -- --ignored
 THREADLANE_CODEX_MODEL=<model> cargo test -p threadlane-backend-codex --test live -- --ignored real_codex_conforms
 cargo test -p threadlane-backend-codex --test live -- --ignored the_deny_rules   # codex execpolicy check only; no model
 ```

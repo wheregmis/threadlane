@@ -13,8 +13,8 @@ use crate::{AppState, InSpace, Part, When, describe};
 
 /// The backends a new agent may use, in order of preference, as the
 /// "+ New agent" form offers them.
-pub const BACKENDS: [(&str, &[BackendKind]); 5] = [
-    ("Either", &[]),
+pub const BACKENDS: [(&str, &[BackendKind]); 6] = [
+    ("Any backend", &[]),
     (
         "Claude, then Codex",
         &[BackendKind::Claude, BackendKind::Codex],
@@ -25,6 +25,7 @@ pub const BACKENDS: [(&str, &[BackendKind]); 5] = [
     ),
     ("Claude only", &[BackendKind::Claude]),
     ("Codex only", &[BackendKind::Codex]),
+    ("Antigravity only", &[BackendKind::Antigravity]),
 ];
 
 /// How many recorded events a project's Conversation tab lists.
@@ -75,7 +76,7 @@ impl AgentForm {
             .ok()?
             .iter()
             .find(|template| template.id == id)?;
-        // shortcut: backends no BACKENDS entry matches fall back to "Either".
+        // shortcut: backends no BACKENDS entry matches fall back to "Any backend".
         self.backends = BACKENDS
             .iter()
             .position(|(_, kinds)| *kinds == template.backends.as_slice())

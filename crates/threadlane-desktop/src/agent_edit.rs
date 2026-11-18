@@ -88,7 +88,6 @@ impl AppState {
     /// its text fields. `None` for an agent the app does not know.
     pub fn open_agent_edit(&mut self, space: &str, agent: &str) -> Option<AgentFields> {
         let known = self.known_agent(space, agent)?;
-        // Every order of the two backends has a BACKENDS entry.
         let picked = BACKENDS
             .iter()
             .position(|(_, kinds)| *kinds == known.backends.as_slice())

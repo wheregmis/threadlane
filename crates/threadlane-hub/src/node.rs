@@ -5,6 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::Context;
+use threadlane_backend_antigravity::AntigravityBackend;
 use threadlane_backend_claude::ClaudeBackend;
 use threadlane_backend_codex::CodexBackend;
 use threadlane_core::admission::AdmissionStore;
@@ -101,6 +102,9 @@ impl Hub {
                         self.config.backends.claude.claude_config(),
                     )),
                     Arc::new(CodexBackend::new(self.config.backends.codex.codex_config())),
+                    Arc::new(AntigravityBackend::new(
+                        self.config.backends.antigravity.program.clone(),
+                    )),
                 ])
         })
         .context("starting the hub's roles")
@@ -283,6 +287,7 @@ async fn start_embedded_runner(
     tracing::info!(
         claude = %claude.program.display(),
         codex = %codex.program.display(),
+        antigravity = %config.backends.antigravity.program.display(),
         lanes_dir = %runner_config.lanes_dir.display(),
         max_parallel = runner_config.max_parallel,
         "starting the embedded runner"
@@ -325,7 +330,7 @@ mod tests {
         HubConfig::parse(&format!(
             "[iroh]\nbind = \"127.0.0.1:0\"\nlocal_discovery = false\n\
              [github]\ngh = \"/nonexistent/gh\"\n\
-             [runner]\ndebounce_secs = 0\n[backends.claude]\nprogram = {:?}\n[backends.codex]\nprogram = {:?}",
+             [runner]\ndebounce_secs = 0\n[backends.claude]\nprogram = {:?}\n[backends.codex]\nprogram = {:?}\n[backends.antigravity]\nprogram = \"/nonexistent/agy\"",
             program.display().to_string(),
             codex.display().to_string()
         ))

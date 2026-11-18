@@ -41,7 +41,7 @@ impl Desktop {
             let mut cards = h_flex().gap(SM).flex_wrap().items_start();
             for agent in &space.agents {
                 let backends = if agent.backends.is_empty() {
-                    "Either backend".to_owned()
+                    "Any backend".to_owned()
                 } else {
                     agent
                         .backends

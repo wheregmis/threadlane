@@ -258,12 +258,30 @@ impl CodexTable {
     }
 }
 
+/// Settings for the Antigravity CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AntigravityTable {
+    pub program: PathBuf,
+    pub model: Option<String>,
+}
+
+impl Default for AntigravityTable {
+    fn default() -> Self {
+        Self {
+            program: "agy".into(),
+            model: None,
+        }
+    }
+}
+
 /// The `[backends]` table: one sub-table per backend.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BackendsConfig {
     pub claude: ClaudeTable,
     pub codex: CodexTable,
+    pub antigravity: AntigravityTable,
 }
 
 /// The `[iroh]` table: the client interface over iroh (Plan.md §3.5).
@@ -414,6 +432,13 @@ impl HubConfig {
                 "config_dir",
                 &claude.model,
             ),
+            (
+                "antigravity",
+                &self.backends.antigravity.program,
+                &None,
+                "",
+                &self.backends.antigravity.model,
+            ),
             ("codex", &codex.program, &codex.home, "home", &codex.model),
         ] {
             anyhow::ensure!(
@@ -471,6 +496,7 @@ impl HubConfig {
             default_models: [
                 (BackendKind::Claude, &self.backends.claude.model),
                 (BackendKind::Codex, &self.backends.codex.model),
+                (BackendKind::Antigravity, &self.backends.antigravity.model),
             ]
             .into_iter()
             .filter_map(|(kind, model)| Some((kind, model.clone()?)))
@@ -725,6 +751,8 @@ mod tests {
             "[backends.claude]\nmodel = \"\"",
             "[backends.claude]\nmodel = \" haiku\"",
             "[backends.claude]\nmodle = \"haiku\"",
+            "[backends.antigravity]\nprogram = \"\"",
+            "[backends.antigravity]\nmodel = \" bad\"",
             "[backends.codex]\nprogram = \"\"",
             "[backends.codex]\nhome = \"\"",
             "[backends.codex]\nmodel = \" gpt\"",

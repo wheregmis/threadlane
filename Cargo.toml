@@ -10,6 +10,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+threadlane-backend-antigravity = { path = "crates/threadlane-backend-antigravity" }
 threadlane-backend-claude = { path = "crates/threadlane-backend-claude" }
 threadlane-backend-codex = { path = "crates/threadlane-backend-codex" }
 threadlane-client = { path = "crates/threadlane-client" }
