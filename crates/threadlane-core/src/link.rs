@@ -43,6 +43,9 @@ pub struct RunAssignment {
     /// A project memory pass, isolated from user turns.
     #[serde(default)]
     pub dreaming: bool,
+    /// An ask from the space Lead. Keep unrelated user input for the next run.
+    #[serde(default)]
+    pub space_lead_ask: Option<EventId>,
     pub run_id: RunId,
     pub session_id: SessionId,
     pub project_id: ProjectId,

@@ -384,6 +384,8 @@ impl Inner {
         self.link.check_running(&lane.lease()).await?;
         let mut performed = self.perform(lane, assignment).await?;
         performed.push_str(&self.bring_in_base(assignment).await);
+        lane.check()?;
+        self.link.check_running(&lane.lease()).await?;
 
         let deadline = self.clock.now() + assignment.wall_time_limit;
         let request = self.request(lane, assignment, working_dir, performed);
@@ -600,7 +602,11 @@ impl Inner {
             if event.is_terminal() {
                 return Ok(Ended::Terminal(event));
             }
-            if !assignment.dreaming && !lane.deferred() && event == BackendEvent::TurnBoundary {
+            if !assignment.dreaming
+                && assignment.space_lead_ask.is_none()
+                && !lane.deferred()
+                && event == BackendEvent::TurnBoundary
+            {
                 self.fold_in(lane, assignment, run).await?;
             }
             if lane.deferred() && matches!(event, BackendEvent::ToolUse { .. }) {

@@ -288,11 +288,20 @@ impl LocalLink {
             appended_instructions(&agent, lane.kind, &memory)
         };
         let repositories = self.task_repositories(task.as_ref()).await?;
+        let space_lead_ask = if lane.kind == LaneKind::Lead {
+            crate::space_lead::answered_ask(db, &events)
+                .await
+                .map_err(link_error)?
+                .map(|ask| ask.id)
+        } else {
+            None
+        };
         inner.hook.reach(step::AFTER_ASSEMBLE_CONTEXT)?;
 
         // 8. The assignment.
         Ok(Begin::Run(Box::new(RunAssignment {
             dreaming,
+            space_lead_ask,
             run_id: run.id,
             trace_id: run.trace_id,
             session_id: run.session_id,
@@ -409,6 +418,23 @@ impl LocalLink {
         let isolate = self.core.inner.settings.isolate_after_attempts;
         if events.iter().any(|event| event.attempts >= isolate) {
             events.truncate(1);
+        }
+        if lane.kind == LaneKind::Lead && events.len() > 1 {
+            let db = &self.core.inner.db;
+            let mut scoped = Vec::with_capacity(events.len());
+            let mut first_ask = None;
+            for event in events {
+                let ask = crate::space_lead::answered_ask(db, std::slice::from_ref(&event))
+                    .await
+                    .map_err(link_error)?
+                    .map(|ask| ask.id);
+                if !scoped.is_empty() && ask != first_ask {
+                    break;
+                }
+                first_ask = ask;
+                scoped.push(event);
+            }
+            events = scoped;
         }
         Ok((session, events))
     }

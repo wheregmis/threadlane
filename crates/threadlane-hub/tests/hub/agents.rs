@@ -115,6 +115,38 @@ async fn an_update_changes_only_the_fields_it_names() {
 }
 
 #[tokio::test]
+async fn simultaneous_edits_keep_fields_saved_by_both_clients() {
+    let hub = TestHub::start().await;
+    create(&hub, "Reviewer").await;
+    let role = hub.api.org(edit(
+        "Reviewer",
+        Changes {
+            role: Some("quality".into()),
+            ..Changes::default()
+        },
+    ));
+    let instructions = hub.api.org(edit(
+        "Reviewer",
+        Changes {
+            instructions: Some("Check the entire patch.".into()),
+            ..Changes::default()
+        },
+    ));
+    let (role, instructions) = tokio::join!(role, instructions);
+    role.unwrap();
+    instructions.unwrap();
+    let OrgReply::Agents { agents } = hub.api.org(OrgRequest::Agents).await.unwrap() else {
+        panic!("expected agents");
+    };
+    let agent = agents
+        .iter()
+        .find(|agent| agent.name == "Reviewer")
+        .unwrap();
+    assert_eq!(agent.role, "quality");
+    assert_eq!(agent.instructions, "Check the entire patch.");
+}
+
+#[tokio::test]
 async fn an_update_refuses_bad_fields() {
     let hub = TestHub::start().await;
     create(&hub, "Reviewer").await;

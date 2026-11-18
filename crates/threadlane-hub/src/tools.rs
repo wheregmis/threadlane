@@ -290,9 +290,9 @@ impl HubTools {
             None => {
                 let events = self.db.run_events(run.id).await.map_err(tool_error)?;
                 let requested = events.iter().any(|event| event.requested);
-                space_lead_ask = events
-                    .iter()
-                    .find(|event| event.source == crate::space_lead::SPACE_LEAD_SOURCE)
+                space_lead_ask = crate::space_lead::answered_ask(&self.db, &events)
+                    .await
+                    .map_err(tool_error)?
                     .map(|event| event.id);
                 (
                     None,
@@ -318,7 +318,7 @@ impl HubTools {
         };
         let task = self
             .db
-            .create_task(
+            .create_task_for_ask(
                 Some(&context.lease),
                 &NewTask {
                     project_id: context.project_id,
@@ -334,12 +334,10 @@ impl HubTools {
                     created_by_call: Some(created_by_call),
                     created_at: self.clock.now(),
                 },
+                space_lead_ask,
             )
             .await
             .map_err(tool_error)?;
-        if let Some(ask) = space_lead_ask {
-            crate::space_lead::mark_task(&self.db, task.id, ask).await?;
-        }
         self.waker.wake(WakeTarget::Lane(task.lane_id));
         Ok(task_json(&task))
     }
