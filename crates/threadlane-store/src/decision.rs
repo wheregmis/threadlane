@@ -894,7 +894,7 @@ impl DecisionStore for HubDb {
         let tx = self.db.begin().await?;
         let claimed = exec(
             tx.conn(),
-            "UPDATE decisions SET reminded_at = ?1 WHERE id = ?2 AND reminded_at IS NULL",
+            "UPDATE decisions SET reminded_at = ?1 WHERE id = ?2 AND reminded_at IS NULL AND status = 'pending'",
             params![now.as_millis(), id.get()],
         )
         .await?;

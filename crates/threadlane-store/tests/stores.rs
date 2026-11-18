@@ -195,6 +195,54 @@ async fn a_decision_reminder_is_claimed_once_across_a_restart() {
         assert!(!hub.claim_reminder(decision.id, T0).await.unwrap());
         decision.id
     };
+    let hub = HubDb::open(&path, &Bootstrap::default(), clock.clone())
+        .await
+        .unwrap();
+    let general = hub.general_project().await.unwrap();
+    let answered = hub
+        .open_decision(
+            None,
+            &NewDecision {
+                project_id: general.id,
+                lane_id: general.lead_lane_id,
+                task_id: None,
+                session_id: None,
+                run_id: Some(RunId(9)),
+                tool_call_id: Some("call-2".into()),
+                tool: "publish_branch".into(),
+                arguments: json!({ "repository": "app" }),
+                arguments_hash: "publish_branch:def".into(),
+                kind: DecisionKind::Approval,
+                question: "Push again?".into(),
+                context: String::new(),
+                options: vec![DecisionOption {
+                    label: "approve".into(),
+                    effect: json!({ "approve": true }),
+                }],
+                recommended: None,
+                offers_standing_rule: false,
+                expires_at: None,
+                created_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    hub.answer(
+        answered.id,
+        &DecisionAnswer {
+            option: 0,
+            note: None,
+            standing_rule: false,
+            answered_at: T0,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !hub.claim_reminder(answered.id, T0).await.unwrap(),
+        "an answered decision gets no reminder"
+    );
+    drop(hub);
     let hub = HubDb::open(&path, &Bootstrap::default(), clock)
         .await
         .unwrap();
