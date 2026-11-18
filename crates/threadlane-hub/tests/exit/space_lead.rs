@@ -21,6 +21,15 @@ const GENERAL_REPORT: &str = "API's lead reports the docs are written.";
 
 #[tokio::test]
 async fn the_owner_asks_general_for_a_projects_goal_its_lead_does_it_and_general_reports_back() {
+    ask_and_report(true).await;
+}
+
+#[tokio::test]
+async fn a_project_leads_final_text_reaches_the_space_lead() {
+    ask_and_report(false).await;
+}
+
+async fn ask_and_report(explicit_message: bool) {
     let world = World::new().await;
     let sim = world.boot(CrashPlan::new()).await;
     let OrgReply::Project { project } = sim
@@ -59,12 +68,14 @@ async fn the_owner_asks_general_for_a_projects_goal_its_lead_does_it_and_general
             .finish("Reported back."),
     );
     // The API lead, on its task's result.
-    backend.route(
-        "task_result",
+    let report = if explicit_message {
         Script::new()
             .call("toolu_a2", SEND_MESSAGE, json!({ "text": API_REPORT }))
-            .finish("Reported."),
-    );
+            .finish("Reported.")
+    } else {
+        Script::new().finish(API_REPORT)
+    };
+    backend.route("task_result", report);
     // The API lead, on the space lead's ask.
     backend.route(
         "The space lead, the General project's lead, asks you",
@@ -74,7 +85,7 @@ async fn the_owner_asks_general_for_a_projects_goal_its_lead_does_it_and_general
                 CREATE_TASK,
                 json!({ "title": "Write the docs", "goal": "The docs exist", "agent": ENGINEER }),
             )
-            .finish("Started a task."),
+            .finish("No response requested."),
     );
     backend.route("Your task, ", finish_after(Duration::ZERO));
     // General, on the owner's message.
@@ -110,10 +121,11 @@ async fn the_owner_asks_general_for_a_projects_goal_its_lead_does_it_and_general
     assert_eq!(ask.lane_id, lead_lane);
     assert!(ask.requested, "the owner asked, so the ask is requested");
     let general = sim.db().general_project().await.unwrap();
-    let reply = events
+    let mut replies = events
         .iter()
-        .find(|event| event.source == PROJECT_LEAD_SOURCE)
-        .expect("the reply reached General");
+        .filter(|event| event.source == PROJECT_LEAD_SOURCE);
+    let reply = replies.next().expect("the reply reached General");
+    assert!(replies.next().is_none(), "one routed event per reply");
     assert_eq!(reply.lane_id, general.lead_lane_id);
     assert_eq!(reply.kind, EventKind::System);
     assert!(reply.requested);

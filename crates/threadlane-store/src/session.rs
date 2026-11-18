@@ -18,7 +18,7 @@ use turso::{Connection, Row};
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
 use crate::inbox::{EVENT_FIELDS, check_lease, check_running, decode_event, reclaim_lane};
-use crate::outbox::enqueue_in;
+use crate::outbox::{enqueue_in, enqueue_lead_reply_in};
 use crate::row::{Cols, json_text, opt_raw, params};
 use crate::task;
 
@@ -369,7 +369,7 @@ impl SessionStore for HubDb {
         run_id: RunId,
         outcome: RunOutcome,
         rationale: Option<&str>,
-        reply: Option<&NewOutboxMessage>,
+        reply: Option<&threadlane_core::store::LeadReply>,
         ended_at: Timestamp,
     ) -> StoreResult<()> {
         let tx = self.db.begin().await?;
@@ -378,7 +378,7 @@ impl SessionStore for HubDb {
         check_running(conn, lease).await?;
         let run = active_run(conn, lease, run_id).await?;
         if let Some(reply) = reply {
-            enqueue_in(conn, reply).await?;
+            enqueue_lead_reply_in(conn, reply).await?;
         }
         exec(
             conn,

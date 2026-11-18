@@ -3,6 +3,7 @@
 //! app shows once the hub answers.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::Value as Json;
 use threadlane_core::client::{BindingSummary, OrgRequest};
@@ -21,6 +22,7 @@ pub struct AgentEdit {
     pub backends: usize,
     /// The index it opened with: Save sends backends only when it moved.
     opened_with: usize,
+    opened_fields: Arc<AgentFields>,
     /// Whether the instructions show rendered as Markdown.
     pub preview: bool,
 }
@@ -105,6 +107,7 @@ impl AppState {
             agent: agent.to_owned(),
             backends: picked,
             opened_with: picked,
+            opened_fields: Arc::new(fields.clone()),
             preview: false,
         });
         Some(fields)
@@ -116,7 +119,7 @@ impl AppState {
     }
 
     /// What Save asks the hub: only the fields that differ from the agent
-    /// as the app knows it. `Ok(None)` when nothing changed; `Err` says what
+    /// when the editor opened. `Ok(None)` when nothing changed; `Err` says what
     /// to fix first.
     ///
     /// # Errors
@@ -127,9 +130,10 @@ impl AppState {
             .agent_edit
             .as_ref()
             .ok_or("No agent is being edited.")?;
-        let known = self
-            .known_agent(&edit.space, &edit.agent)
-            .ok_or_else(|| format!("{} is no longer in {}.", edit.agent, edit.space))?;
+        if self.known_agent(&edit.space, &edit.agent).is_none() {
+            return Err(format!("{} is no longer in {}.", edit.agent, edit.space));
+        }
+        let opened = &edit.opened_fields;
         let (name, role) = (fields.name.trim(), fields.role.trim());
         if name.is_empty() || role.is_empty() {
             return Err("Give the agent a name and a role.".to_owned());
@@ -144,14 +148,17 @@ impl AppState {
         let models: BTreeMap<String, String> = fields
             .models
             .iter()
-            .filter(|(backend, value)| value.trim() != model(&known.models, *backend))
+            .filter(|(backend, value)| {
+                let initial = opened.models.iter().find(|(kind, _)| kind == backend);
+                value.trim() != initial.map_or("", |(_, initial)| initial.as_str())
+            })
             .map(|(backend, value)| (backend.as_str().to_owned(), value.trim().to_owned()))
             .collect();
         let request = OrgRequest::UpdateAgent {
             agent: edit.agent.clone(),
-            name: changed(name, &known.name),
-            role: changed(role, &known.role),
-            instructions: changed(&fields.instructions, &known.instructions),
+            name: changed(name, &opened.name),
+            role: changed(role, &opened.role),
+            instructions: changed(&fields.instructions, &opened.instructions),
             backends,
             models: (!models.is_empty()).then_some(models),
         };
@@ -171,13 +178,14 @@ impl AppState {
 
     /// Takes an agent its hub changed: its card and bindings show it at
     /// once, and the edit view closes.
-    pub fn agent_updated(&mut self, space: &str, from: &str, agent: Agent) {
-        if self
-            .agent_edit
-            .as_ref()
-            .is_some_and(|edit| edit.space == space && edit.agent == from)
-        {
-            self.agent_edit = None;
+    pub fn agent_updated(&mut self, saved_from: &AgentEdit, agent: Agent) {
+        let (space, from) = (saved_from.space.as_str(), saved_from.agent.as_str());
+        if let Some(edit) = &mut self.agent_edit {
+            if Arc::ptr_eq(&edit.opened_fields, &saved_from.opened_fields) {
+                self.agent_edit = None;
+            } else if edit.space == space && edit.agent == from {
+                edit.agent.clone_from(&agent.name);
+            }
         }
         for ((at, _), view) in &mut self.projects {
             if at == space {

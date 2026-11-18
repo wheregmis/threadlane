@@ -121,7 +121,7 @@ impl Desktop {
                         "Saved {}. It applies from its next run.",
                         agent.name
                     )));
-                    this.state.agent_updated(&edit.space, &edit.agent, agent);
+                    this.state.agent_updated(&edit, agent);
                     this.refresh(cx);
                 }
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),

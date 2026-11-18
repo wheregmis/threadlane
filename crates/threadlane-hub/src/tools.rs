@@ -14,7 +14,7 @@ use threadlane_core::model::{
     Task, TaskOrigin, TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{OrgStore, OutboxStore, SessionStore, StoreError, TaskStore};
+use threadlane_core::store::{LeadReply, OrgStore, SessionStore, StoreError, TaskStore};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry};
 use threadlane_core::workspace::MergeCheck;
@@ -169,39 +169,39 @@ impl HubTools {
         let (text, urgency) = parse_send_message(arguments)?;
         let run = self.run(context).await?;
         let key = effect_key(context, &run, SEND_MESSAGE, arguments);
+        let message = NewOutboxMessage {
+            project_id: Some(context.project_id),
+            lane_id: Some(run.lane_id),
+            session_id: Some(run.session_id),
+            run_id: Some(run.id),
+            tool_call_id: Some(key),
+            kind: OutboxKind::Message,
+            decision_id: None,
+            channel: CLIENT_CHANNEL.to_owned(),
+            body: json!({ "text": text }),
+            urgency,
+            not_before: None,
+            created_at: self.clock.now(),
+        };
+        let events = self.db.run_events(run.id).await.map_err(tool_error)?;
+        let route = crate::space_lead::reply_route(
+            &self.db,
+            message.created_at,
+            &events,
+            context.project_id,
+            &text,
+        )
+        .await
+        .map_err(tool_error)?;
+        let reply = LeadReply { message, route };
         let message = self
             .db
-            .enqueue(&NewOutboxMessage {
-                project_id: Some(context.project_id),
-                lane_id: Some(run.lane_id),
-                session_id: Some(run.session_id),
-                run_id: Some(run.id),
-                tool_call_id: Some(key),
-                kind: OutboxKind::Message,
-                decision_id: None,
-                channel: CLIENT_CHANNEL.to_owned(),
-                body: json!({ "text": text }),
-                urgency,
-                not_before: None,
-                created_at: self.clock.now(),
-            })
+            .enqueue_lead_reply(&reply)
             .await
             .map_err(tool_error)?;
         self.waker.wake(WakeTarget::Dispatcher);
-        // shortcut: not in the enqueue's transaction, so a crash between the
-        // two loses the reply to the space lead; move into the store if seen.
-        let events = self.db.run_events(run.id).await.map_err(tool_error)?;
-        if let Some(ask) = crate::space_lead::answered_ask(&self.db, &events).await? {
-            crate::space_lead::route_reply(
-                &self.db,
-                self.waker.as_ref(),
-                self.clock.now(),
-                &ask,
-                context.project_id,
-                message.id,
-                &text,
-            )
-            .await?;
+        if let Some(route) = reply.route {
+            self.waker.wake(WakeTarget::Lane(route.lane_id));
         }
         Ok(json!({ "outbox_id": message.id }))
     }

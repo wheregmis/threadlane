@@ -18,10 +18,10 @@ files. Nothing told anyone until the merge.
    commit, and the agent is told to rebase onto the base, resolve, run
    the checks again, and finish.
 3. **Bring the base in at the start of a run.** Before a task run starts
-   on an existing worktree, the runner fetches the default branch and
-   rebases the task branch onto it when that rebases cleanly; when it
-   would conflict it leaves the branch as it is and the run's prompt
-   says so (the agent resolves it during the run).
+   on an existing worktree, the runner fetches the default branch. It
+   rebases an unpublished task branch when the rebase is clean. A published
+   task branch keeps its history so new commits can still be pushed. If the
+   check finds conflicts, the run's prompt names them for the agent to resolve.
 4. **The result says where it stands.** The task's result records the
    base commit it was last checked against and whether it merged
    cleanly. The board card and task page show "Merges cleanly into
