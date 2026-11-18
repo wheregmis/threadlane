@@ -2120,6 +2120,10 @@ impl AppState {
     /// Takes a project its hub created: the sidebar and the composer list
     /// it at once.
     pub fn project_created(&mut self, space: &str, project: ProjectSummary) {
+        self.report(Activity::Done(format!(
+            "Created {} in {space}.",
+            project.name
+        )));
         if let Some(known) = self.spaces.iter_mut().find(|known| known.name == space)
             && !known.projects.iter().any(|other| other.id == project.id)
         {

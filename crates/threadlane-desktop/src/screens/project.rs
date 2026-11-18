@@ -53,7 +53,70 @@ impl Desktop {
             if let Some(gap) = known.gap(Part::Tasks) {
                 list = list.child(gap_line(&gap, "tasks", space, cx));
             } else if known.tasks.is_empty() {
-                list = list.child(empty(EmptyRegion::Board, cx));
+                list = list.child(meta("No tasks in this space yet.", cx));
+            }
+            let projects: Vec<_> = known
+                .active_projects()
+                .filter(|p| !p.is_general)
+                .map(|p| p.name.clone())
+                .collect();
+            let in_space = space.to_owned();
+            if !projects.is_empty() {
+                let view = cx.entity().downgrade();
+                list = list.child(
+                    button("space-new-task")
+                        .primary()
+                        .self_start()
+                        .label("New task")
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for project in &projects {
+                                let (space, project, view) =
+                                    (in_space.clone(), project.clone(), view.clone());
+                                menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
+                                    move |_, _, cx| {
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.state.open_task_form(&space, &project, true);
+                                            this.go(
+                                                Screen::Project {
+                                                    space: space.clone(),
+                                                    project: project.clone(),
+                                                    tab: Tab::Tasks,
+                                                },
+                                                cx,
+                                            );
+                                        });
+                                    },
+                                ));
+                            }
+                            menu
+                        }),
+                );
+            } else if known.tasks.is_empty() && known.gap(Part::Projects).is_none() {
+                list = list.child(
+                    h_flex()
+                        .gap(SM)
+                        .child(
+                            button("space-create-project")
+                                .primary()
+                                .label("Create a project")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.go(
+                                        Screen::NewProject {
+                                            space: in_space.clone(),
+                                        },
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .children(self.main_chat_screen(space).map(|screen| {
+                            button("space-open-chat")
+                                .outline()
+                                .label("Open Main Chat")
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                                )
+                        })),
+                );
             }
             for summary in &known.tasks {
                 let task = &summary.task;
@@ -238,7 +301,7 @@ impl Desktop {
                         .primary()
                         .icon(AppIcon::ListPlus)
                         .label("New task")
-                        .accessibility_label("New task, skipping the lead")
+                        .accessibility_label("Create a task directly")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state
                                 .open_task_form(&task_space, &task_project, !form_open);
@@ -690,7 +753,21 @@ impl Desktop {
                 .project_gap(space, project, Part::Conversation)
                 .is_none()
         {
-            lines = lines.child(empty(EmptyRegion::Conversation, cx));
+            if main_chat {
+                lines = lines.child(empty(EmptyRegion::Conversation, cx));
+            } else {
+                lines = lines
+                    .child(meta(format!("No messages for {project} yet."), cx))
+                    .children(self.main_chat_screen(space).map(|screen| {
+                        button("history-main-chat")
+                            .self_start()
+                            .outline()
+                            .label(format!("Open {space} Main Chat"))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                            )
+                    }));
+            }
         }
         let recorded = self.state.recorded(space, project, when);
         let newest = newest_message(&conversation);
@@ -1785,7 +1862,12 @@ impl Desktop {
             .child(section("New task"))
             .child(field(&self.task_title))
             .child(field(&self.task_goal))
-            .child(h_flex().gap(SM).child(label("Agent")).child(agent_row))
+            .child(
+                h_flex()
+                    .gap(SM)
+                    .child(label("Assigned agent"))
+                    .child(agent_row),
+            )
             .child(
                 h_flex()
                     .gap(SM)
@@ -1797,7 +1879,7 @@ impl Desktop {
                 div()
                     .text_size(TYPE_META)
                     .text_color(muted)
-                    .child("It skips the lead and is yours: work you requested."),
+                    .child("Creates a task directly and assigns it to the selected agent."),
             )
             .child(
                 h_flex()
