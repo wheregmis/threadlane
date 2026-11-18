@@ -83,6 +83,8 @@ impl Desktop {
             .gap(SM)
             .child(section("Needs you").children(count(state.needs_you().count(), cx)));
         let gaps = state.gaps(Part::Decisions);
+        let show_needs =
+            state.spaces().is_empty() || state.needs_you().next().is_some() || !gaps.is_empty();
         for (space, gap) in &gaps {
             needs = needs.child(gap_line(gap, "decisions", space, cx));
         }
@@ -91,8 +93,6 @@ impl Desktop {
                 "No hub is paired. Pair one with `threadlane hub add <name> <data-dir>` or \
                  `threadlane hub join <name> <code>`, then reopen the app.",
             ));
-        } else if state.needs_you().count() == 0 && gaps.is_empty() {
-            needs = needs.child(empty(EmptyRegion::Decisions, cx));
         }
         for queued in state.needs_you() {
             needs = needs.child(self.decision(queued, when, cx));
@@ -147,9 +147,8 @@ impl Desktop {
         for (space, gap) in &gaps {
             table = table.child(gap_line(gap, "running tasks", space, cx));
         }
-        if running_count == 0 && gaps.is_empty() {
-            table = table.child(empty(EmptyRegion::Running, cx));
-        } else if running_count != 0 {
+        let show_running = running_count != 0 || !gaps.is_empty();
+        if running_count != 0 {
             table = table.child(
                 running_row(["Task", "Project", "Agent", "Machine", "Running"], div())
                     .text_size(TYPE_META)
@@ -207,13 +206,35 @@ impl Desktop {
             );
         }
 
-        let recent = self.timeline(when, cx);
+        let task_gaps = state.gaps(Part::Tasks);
+        let quiet = task_gaps.is_empty()
+            && !show_needs
+            && !show_running
+            && attention.is_none()
+            && banners.is_empty();
+        let history = button("home-history")
+            .small()
+            .ghost()
+            .tab_stop(true)
+            .label(if self.show_home_history {
+                "Hide conversation history"
+            } else if state.home_has_new_replies() {
+                "Show conversation history · New reply"
+            } else {
+                "Show conversation history"
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.state.saw_home_replies();
+                this.show_home_history = !this.show_home_history;
+                cx.notify();
+            }));
 
         let content = v_flex()
             .gap(XL)
             .child(heading("Home"))
-            .child(chips.w_full().min_h(CONTROL_HEIGHT).flex_none())
-            .child(meta(state.status_line(), cx))
+            .when(state.spaces().len() > 1, |view| {
+                view.child(chips.w_full().min_h(CONTROL_HEIGHT).flex_none())
+            })
             .children(
                 state
                     .held_lines(when)
@@ -221,11 +242,24 @@ impl Desktop {
                     .map(|line| div().text_size(TYPE_BODY).text_color(muted).child(line)),
             )
             .children(banners)
-            .child(needs)
+            .when(show_needs, |view| view.child(needs))
             .children(attention)
-            .child(table)
-            .child(recent)
-            .child(self.home_composer(cx));
+            .children(
+                task_gaps
+                    .iter()
+                    .map(|(space, gap)| gap_line(gap, "tasks", space, cx)),
+            )
+            .when(show_running, |view| view.child(table))
+            .when(quiet, |view| {
+                view.child(meta("No work needs your attention.", cx))
+            })
+            .when(!state.spaces().is_empty(), |view| {
+                view.child(h_flex().child(history))
+                    .when(self.show_home_history, |view| {
+                        view.child(self.timeline(when, cx))
+                    })
+                    .child(self.home_composer(cx))
+            });
         decision_scroller("home", content, &self.decision_scroll)
             .w_full()
             .max_w(READING_WIDTH)
@@ -414,8 +448,8 @@ impl Desktop {
             });
         self.render_composer(
             threadlane_desktop::Draft::Lead,
-            "Message the selected space Lead",
-            Some(picker.into_any_element()),
+            "Message the space Lead",
+            (self.state.spaces().len() > 1).then(|| picker.into_any_element()),
             cx,
         )
     }
