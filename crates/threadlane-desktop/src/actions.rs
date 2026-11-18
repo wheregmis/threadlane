@@ -286,7 +286,49 @@ impl Desktop {
                         "{space} / {}: {done}",
                         project.name
                     )));
-                    this.state.project_paused(&space, project);
+                    this.state.project_updated(&space, project);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Archives or restores a project and updates the visible state.
+    pub(crate) fn set_archived(
+        &mut self,
+        space: String,
+        project: String,
+        archived: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        let doing = if archived { "Archiving" } else { "Unarchiving" };
+        self.state
+            .report(Activity::Working(format!("{doing} {space} / {project}…")));
+        self.run(
+            async move {
+                let set = core
+                    .read()
+                    .await
+                    .set_archived(Some(&space), &project, archived)
+                    .await;
+                (space, set)
+            },
+            |this, (space, set), cx| match set {
+                Ok(project) => {
+                    let done = if project.archived {
+                        "Archived"
+                    } else {
+                        "Unarchived"
+                    };
+                    this.state.report(Activity::Done(format!(
+                        "{done} {space} / {}.",
+                        project.name
+                    )));
+                    this.state.project_updated(&space, project);
+                    this.refresh(cx);
                 }
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },

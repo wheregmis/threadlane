@@ -41,6 +41,9 @@ pub struct ProjectSummary {
     /// Its own ceiling, if set; the space's still caps it (Plan.md §2.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_ceiling: Option<Mode>,
+    /// Whether this project is archived.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// A message from you to a project's lead, or to one of its tasks.
@@ -205,6 +208,111 @@ pub enum OrgRequest {
     },
     /// Makes a stopped lane eligible again.
     ResumeLane { target: LaneTarget },
+    /// Archives or restores a project. Answered with its updated summary.
+    SetArchived {
+        project: Option<String>,
+        archived: bool,
+    },
+    /// Permanently deletes the project if the exact name was confirmed.
+    DeleteProject {
+        project: String,
+        confirm_name: String,
+    },
+    /// Counts a project's data and local workspaces before deletion.
+    DeletePreview { project: String },
+}
+
+/// What deleting one project removes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletePreview {
+    /// Task records of every status.
+    pub tasks: u64,
+    /// Tasks still queued.
+    pub queued_tasks: u64,
+    /// Inbox records.
+    pub events: u64,
+    /// Outbox records.
+    pub outbox: u64,
+    /// Decisions of every status.
+    pub decisions: u64,
+    /// Decisions still awaiting an answer.
+    pub open_decisions: u64,
+    /// Current project memory records, including generated indexes.
+    pub memory_files: u64,
+    /// Historical versions of project memory.
+    pub memory_versions: u64,
+    /// Routine records, including ended routines.
+    pub routines: u64,
+    /// Follow-up records, including ended follow-ups.
+    pub follow_ups: u64,
+    /// System dreaming timer records.
+    pub dreaming_timers: u64,
+    /// Standing rules, including revoked ones.
+    pub standing_rules: u64,
+    /// Agent bindings.
+    pub bindings: u64,
+    /// Registered repositories.
+    pub repositories: u64,
+    /// Local task worktree directories.
+    pub worktrees: u64,
+    /// Local clone and partial clone directories.
+    pub clones: u64,
+}
+
+impl DeletePreview {
+    /// A compact inventory for the confirmation and deletion result.
+    #[must_use]
+    pub fn inventory(&self) -> String {
+        let count = |n, noun| format!("{n} {noun}{}", if n == 1 { "" } else { "s" });
+        [
+            format!(
+                "{} ({} queued)",
+                count(self.tasks, "task"),
+                self.queued_tasks
+            ),
+            format!(
+                "{} ({} and {} outbox rows)",
+                count(self.events.saturating_add(self.outbox), "message"),
+                count(self.events, "event"),
+                self.outbox
+            ),
+            format!(
+                "{} ({} open)",
+                count(self.decisions, "decision"),
+                self.open_decisions
+            ),
+            format!(
+                "{} and {}",
+                count(self.memory_files, "memory file"),
+                count(self.memory_versions, "version")
+            ),
+            count(self.routines, "routine"),
+            count(self.follow_ups, "follow-up"),
+            count(self.dreaming_timers, "dreaming timer"),
+            count(self.standing_rules, "standing rule"),
+            count(self.bindings, "agent binding"),
+            format!(
+                "{} {}",
+                self.repositories,
+                if self.repositories == 1 {
+                    "repository"
+                } else {
+                    "repositories"
+                }
+            ),
+            count(self.worktrees, "worktree"),
+            format!(
+                "and {} {}",
+                self.clones,
+                if self.clones == 1 {
+                    "clone directory"
+                } else {
+                    "clone directories"
+                }
+            ),
+        ]
+        .join(", ")
+    }
 }
 
 /// The lane targeted by a stop or resume request.
@@ -268,6 +376,16 @@ pub enum OrgReply {
     },
     /// A stop or resume was recorded.
     LaneUpdated,
+    /// The project and local directories a deletion would remove.
+    DeletePreview {
+        preview: DeletePreview,
+    },
+    /// The committed deletion and directories that still need cleanup.
+    ProjectDeleted {
+        project: String,
+        deleted: DeletePreview,
+        leftovers: Vec<String>,
+    },
 }
 
 /// The Decisions capability (Plan.md §9.4, §11.2): what waits on you, and
@@ -506,8 +624,8 @@ pub enum OverviewRequest {
     /// lead lane started. `None` as the project means the General project.
     Lead { project: Option<String> },
     /// The newest `limit` events of a project that were recorded and acted
-    /// on by nobody, because no one asked for the work (Plan.md §2.3),
-    /// newest first. `None` means the General project.
+    /// on by nobody, because the work was unrequested (Plan.md §2.3)
+    /// or the project was archived, newest first. `None` means the General project.
     Recorded { project: Option<String>, limit: u32 },
     /// How many such events the whole space has.
     RecordedCount,
@@ -517,8 +635,8 @@ pub enum OverviewRequest {
     HeldResults,
 }
 
-/// An event that arrived but started no run, because no one asked for the
-/// work: for example a GitHub review request that belongs to no task.
+/// An event that arrived but started no run, for example a GitHub review
+/// request for an archived project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedEvent {
     pub id: EventId,
@@ -684,6 +802,10 @@ pub enum ApiError {
 pub trait HubApi: Send + Sync + fmt::Debug {
     async fn info(&self) -> Result<HubInfo, ApiError>;
     async fn projects(&self) -> Result<Vec<ProjectSummary>, ApiError>;
+    /// Lists active projects and, when requested, archived ones as well.
+    async fn project_list(&self, _include_archived: bool) -> Result<Vec<ProjectSummary>, ApiError> {
+        self.projects().await
+    }
     /// Accepts a message: route, insert with deduplication, wake, acknowledge
     /// (Plan.md §6.3). Returns as soon as the event is durable.
     async fn send_message(&self, message: &UserMessage) -> Result<Accepted, ApiError>;
@@ -724,17 +846,42 @@ pub trait HubApi: Send + Sync + fmt::Debug {
 #[non_exhaustive]
 pub enum ClientRequest {
     Info,
-    Projects,
-    SendMessage { message: UserMessage },
-    Feed { after: i64, wait_ms: u64 },
-    Org { request: OrgRequest },
-    Decisions { request: DecisionRequest },
-    Pairing { request: PairingRequest },
-    Overview { request: OverviewRequest },
-    Timers { request: TimerRequest },
-    Memory { request: MemoryRequest },
-    Tasks { request: TaskRequest },
-    Operations { request: OperationsRequest },
+    /// Lists projects, omitting archived projects by default.
+    Projects {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_archived: bool,
+    },
+    SendMessage {
+        message: UserMessage,
+    },
+    Feed {
+        after: i64,
+        wait_ms: u64,
+    },
+    Org {
+        request: OrgRequest,
+    },
+    Decisions {
+        request: DecisionRequest,
+    },
+    Pairing {
+        request: PairingRequest,
+    },
+    Overview {
+        request: OverviewRequest,
+    },
+    Timers {
+        request: TimerRequest,
+    },
+    Memory {
+        request: MemoryRequest,
+    },
+    Tasks {
+        request: TaskRequest,
+    },
+    Operations {
+        request: OperationsRequest,
+    },
 }
 
 /// The answer to a [`ClientRequest`].
@@ -765,8 +912,8 @@ pub enum ClientResponse {
 pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientResponse {
     let result = match request {
         ClientRequest::Info => api.info().await.map(|info| ClientResponse::Info { info }),
-        ClientRequest::Projects => api
-            .projects()
+        ClientRequest::Projects { include_archived } => api
+            .project_list(include_archived)
             .await
             .map(|projects| ClientResponse::Projects { projects }),
         ClientRequest::SendMessage { message } => api

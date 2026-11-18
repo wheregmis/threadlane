@@ -4,12 +4,12 @@
 //! pausing a project, and the events recorded but acted on by nobody.
 
 use threadlane_client::{ClientCore, ClientError, NewTaskSpec};
-use threadlane_core::client::{ProjectSummary, RecordedEvent};
+use threadlane_core::client::{DeletePreview, ProjectSummary, RecordedEvent};
 use threadlane_core::github::normalize_remote;
 use threadlane_core::ids::TaskId;
 use threadlane_core::model::{Agent, BackendKind, Mode, Repository, Task};
 
-use crate::{AppState, InSpace, When, describe};
+use crate::{AppState, InSpace, Part, When, describe};
 
 /// The backends a new agent may use, in order of preference, as the
 /// "+ New agent" form offers them.
@@ -168,7 +168,7 @@ pub async fn add_repository(
             )
         };
         let projects = core
-            .projects(Some(&other))
+            .project_list(Some(&other), true)
             .await
             .map_err(|error| unchecked(&error))?;
         for listed in projects.projects {
@@ -467,13 +467,40 @@ impl AppState {
     /// Whether `project` of `space` is paused, as its hub last listed it.
     #[must_use]
     pub fn is_paused(&self, space: &str, project: &str) -> bool {
-        self.space(space)
-            .and_then(|known| known.projects.iter().find(|known| known.name == project))
+        self.project_summary(space, project)
             .is_some_and(|summary| summary.paused)
     }
 
-    /// Takes a project its hub paused or resumed.
-    pub fn project_paused(&mut self, space: &str, project: ProjectSummary) {
+    fn project_summary(&self, space: &str, project: &str) -> Option<&ProjectSummary> {
+        self.space(space)?
+            .projects
+            .iter()
+            .find(|known| known.name == project)
+    }
+
+    /// Whether the project should be shown read-only.
+    #[must_use]
+    pub fn is_archived(&self, space: &str, project: &str) -> bool {
+        self.project_summary(space, project)
+            .is_some_and(|summary| summary.archived)
+    }
+
+    /// Whether a known project can offer the archive action.
+    #[must_use]
+    pub fn offers_archive(&self, space: &str, project: &str) -> bool {
+        self.project_summary(space, project)
+            .is_some_and(|summary| !summary.is_general && !summary.archived)
+    }
+
+    /// Whether a task belongs to an archived project.
+    #[must_use]
+    pub fn task_is_archived(&self, space: &str, task: TaskId) -> bool {
+        self.task(space, task)
+            .is_some_and(|detail| self.is_archived(space, &detail.summary.project))
+    }
+
+    /// Takes a project its hub paused, resumed, archived or restored.
+    pub fn project_updated(&mut self, space: &str, project: ProjectSummary) {
         if let Some(known) = self
             .spaces
             .iter_mut()
@@ -526,5 +553,53 @@ impl AppState {
         if !self.recorded_open.remove(&key) {
             self.recorded_open.insert(key);
         }
+    }
+}
+
+/// Whether the deletion dialog has a preview and the owner typed the exact name.
+#[must_use]
+pub fn can_confirm_deletion(project: &str, typed: &str, preview: Option<&DeletePreview>) -> bool {
+    preview.is_some() && project == typed
+}
+
+impl AppState {
+    /// Whether this project can offer permanent deletion.
+    #[must_use]
+    pub fn offers_delete(&self, space: &str, project: &str) -> bool {
+        self.project_summary(space, project)
+            .is_some_and(|summary| !summary.is_general)
+    }
+
+    /// Whether the latest successful project listing confirms the project is gone.
+    #[must_use]
+    pub fn project_absent(&self, space: &str, project: &str) -> bool {
+        self.space(space).is_some_and(|space| {
+            space.gap(Part::Projects).is_none()
+                && space.projects.iter().all(|known| known.name != project)
+        })
+    }
+
+    /// Drops a deleted project's state and reports the durable result.
+    pub fn project_deleted(
+        &mut self,
+        space: &str,
+        project: &str,
+        deleted: &DeletePreview,
+        leftovers: &[String],
+    ) {
+        if let Some(id) = self
+            .project_summary(space, project)
+            .map(|project| project.id)
+        {
+            self.forget_project(space, project, id);
+        }
+        let mut text = format!("Deleted {project:?} and {}.", deleted.inventory());
+        if !leftovers.is_empty() {
+            text.push_str(&format!(
+                " Workspace cleanup still needed for {}.",
+                leftovers.join(", ")
+            ));
+        }
+        self.report(crate::Activity::Done(text));
     }
 }

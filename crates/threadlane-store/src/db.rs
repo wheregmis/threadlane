@@ -171,3 +171,17 @@ pub(crate) async fn query_one<T>(
         .await?
         .ok_or_else(|| StoreError::Database(format!("query returned no row: {sql}")))
 }
+
+// Explicit keys keep stale handles from reaching a different row after a deletion.
+macro_rules! next_id_sql {
+    ($table:literal) => {
+        concat!(
+            "(SELECT MAX(COALESCE((SELECT MAX(id) FROM ",
+            $table,
+            "), 0), COALESCE((SELECT value FROM deletion_floors WHERE name = '",
+            $table,
+            "'), 0)) + 1)"
+        )
+    };
+}
+pub(crate) use next_id_sql;

@@ -760,6 +760,7 @@ impl TaskStore for HubDb {
         {
             return Ok(existing);
         }
+        crate::org::require_active_project(conn, task.project_id).await?;
         for other in task.depends_on.iter().chain(&task.parent_task_id) {
             let project = query_opt(
                 conn,
@@ -777,16 +778,24 @@ impl TaskStore for HubDb {
         }
         let lane_id: LaneId = query_one(
             conn,
-            "INSERT INTO lanes (project_id, kind) VALUES (?1, ?2) RETURNING id",
+            concat!(
+                "INSERT INTO lanes (id, project_id, kind) VALUES (",
+                crate::db::next_id_sql!("lanes"),
+                ", ?1, ?2) RETURNING id"
+            ),
             params![task.project_id.get(), LaneKind::Task.as_str()],
             |row| Cols(row).id(0),
         )
         .await?;
         let id: TaskId = query_one(
             conn,
-            "INSERT INTO tasks (project_id, lane_id, agent_id, title, goal, repositories,
+            concat!(
+                "INSERT INTO tasks (id, project_id, lane_id, agent_id, title, goal, repositories,
                  parent_task_id, origin, status, priority, created_by_call, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) RETURNING id",
+             VALUES (",
+                crate::db::next_id_sql!("tasks"),
+                ", ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) RETURNING id"
+            ),
             params![
                 task.project_id.get(),
                 lane_id.get(),
@@ -981,6 +990,7 @@ impl TaskStore for HubDb {
         if status.is_terminal() {
             end_task(conn, &task, status, None, self.now()).await?;
         } else {
+            crate::org::require_active_project(conn, task.project_id).await?;
             transition(conn, &task, status).await?;
         }
         exec(

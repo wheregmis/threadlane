@@ -175,7 +175,7 @@ pub async fn load_machine_history(core: &ClientCore, space: &str, when: &When) -
         // shortcut: overview can only list runs by lane; fetch once per task
         // until overview can return a machine-scoped history.
         let mut listed_tasks = std::collections::HashSet::new();
-        for project in core.projects(in_space).await?.projects {
+        for project in core.project_list(in_space, true).await?.projects {
             let named = Some(project.name.as_str());
             for row in core.lead_runs(in_space, named).await? {
                 if !seen.insert(row.run.id) {

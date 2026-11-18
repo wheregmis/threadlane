@@ -7,7 +7,7 @@ use threadlane_core::model::{Mode, NewTask, TaskOrigin, TaskStatus};
 use threadlane_core::runtime::{WakeTarget, Waker as _};
 use threadlane_core::store::{OrgStore, TaskStore};
 
-use super::{ClientApi, required};
+use super::{ClientApi, active_project, project_error, required};
 use crate::error::api_error;
 
 /// Answers a [`TaskRequest`].
@@ -28,6 +28,7 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
             let goal = required("goal", &goal)?;
             let client_request_id = required("client request id", &client_request_id)?;
             let project = api.project_named(project.as_deref()).await?;
+            active_project(&project)?;
             let agent = api.agent_named(&agent).await?;
             let binding = db
                 .bindings(project.id)
@@ -100,7 +101,7 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                     },
                 )
                 .await
-                .map_err(api_error)?;
+                .map_err(project_error)?;
             inner.wake.wake(WakeTarget::Lane(task.lane_id));
             Ok(TaskReply::Task { task })
         }

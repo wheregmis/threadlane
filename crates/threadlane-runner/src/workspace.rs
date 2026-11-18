@@ -27,7 +27,8 @@ use async_trait::async_trait;
 use threadlane_core::ids::TaskId;
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{
-    WorkspaceError, Workspaces, task_branch, valid_branch_name, valid_repository_name,
+    WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces, task_branch, valid_branch_name,
+    valid_repository_name,
 };
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -225,6 +226,172 @@ impl Workspaces for GitWorkspaces {
         }
         Ok(())
     }
+    async fn removal_counts(&self, removal: &WorkspaceRemoval) -> WorkspaceCounts {
+        let _setup = self.setup.lock().await;
+        let mut counts = WorkspaceCounts::default();
+        let Ok(root) = tokio::fs::canonicalize(&self.root).await else {
+            return counts;
+        };
+        for task in &removal.tasks {
+            for (_, name) in &removal.repositories {
+                if valid_repository_name(name)
+                    && matches!(
+                        checked_dir(
+                            &root,
+                            &root.join("worktrees").join(task.to_string()).join(name)
+                        )
+                        .await,
+                        Ok(true)
+                    )
+                {
+                    counts.worktrees += 1;
+                }
+            }
+        }
+        for path in clone_paths(&root, removal) {
+            if matches!(checked_dir(&root, &path).await, Ok(true)) {
+                counts.clones += 1;
+            }
+        }
+        counts
+    }
+
+    async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String> {
+        let _setup = self.setup.lock().await;
+        let root = match tokio::fs::canonicalize(&self.root).await {
+            Ok(root) => root,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                tracing::warn!(%error, path = %self.root.display(), "workspace cleanup failed");
+                return vec![self.root.display().to_string()];
+            }
+        };
+        let mut leftovers = Vec::new();
+        for task in &removal.tasks {
+            let task_dir = root.join("worktrees").join(task.to_string());
+            let result = remove_task_dir(&root, &task_dir, removal).await;
+            report_leftover(&mut leftovers, &task_dir, result);
+        }
+        // Keep clones available so a later sweep can unregister any failed worktree.
+        let task_failed = !leftovers.is_empty();
+        for path in clone_paths(&root, removal) {
+            let result = match checked_dir(&root, &path).await {
+                Ok(false) => Ok(()),
+                Ok(true) if !task_failed => remove_dir(&path).await,
+                Ok(true) => Err(WorkspaceError("waiting for task worktree cleanup".into())),
+                Err(error) => Err(error),
+            };
+            report_leftover(&mut leftovers, &path, result);
+        }
+        leftovers
+    }
+}
+
+fn clone_paths<'a>(
+    root: &'a Path,
+    removal: &'a WorkspaceRemoval,
+) -> impl Iterator<Item = PathBuf> + 'a {
+    removal.clones.iter().flat_map(|id| {
+        [
+            root.join("clones").join(id.to_string()),
+            root.join("clones").join(format!("{id}.partial")),
+        ]
+    })
+}
+
+fn report_leftover(paths: &mut Vec<String>, path: &Path, result: Result<(), WorkspaceError>) {
+    if let Err(error) = result {
+        tracing::warn!(%error, path = %path.display(), "workspace cleanup failed");
+        paths.push(path.display().to_string());
+    }
+}
+
+async fn checked_dir(root: &Path, path: &Path) -> Result<bool, WorkspaceError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            let resolved = tokio::fs::canonicalize(path)
+                .await
+                .map_err(|error| io_error("resolving", path, &error))?;
+            if resolved == root
+                || !resolved.starts_with(root)
+                || resolved != path
+                || !metadata.is_dir()
+            {
+                return Err(WorkspaceError(format!(
+                    "Refusing to remove an unsafe workspace path: {}",
+                    path.display()
+                )));
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error("checking", path, &error)),
+    }
+}
+
+async fn remove_task_dir(
+    root: &Path,
+    dir: &Path,
+    removal: &WorkspaceRemoval,
+) -> Result<(), WorkspaceError> {
+    if !checked_dir(root, dir).await? {
+        return Ok(());
+    }
+    for (repo, name) in &removal.repositories {
+        if !valid_repository_name(name) {
+            return Err(WorkspaceError(format!("Invalid worktree name {name:?}")));
+        }
+        let tree = dir.join(name);
+        if !checked_dir(root, &tree).await? {
+            continue;
+        }
+        let git_dir = root.join("clones").join(repo.to_string()).join(".git");
+        if checked_dir(root, &git_dir).await? && tree.join(".git").is_file() {
+            if tokio::fs::try_exists(git_dir.join("commondir"))
+                .await
+                .map_err(|error| {
+                    io_error("checking the common git directory in", &git_dir, &error)
+                })?
+            {
+                return Err(WorkspaceError(format!(
+                    "Refusing a redirected common git directory in {}",
+                    git_dir.display()
+                )));
+            }
+            if checked_dir(root, &git_dir.join("worktrees")).await? {
+                let mut entries = tokio::fs::read_dir(git_dir.join("worktrees"))
+                    .await
+                    .map_err(|error| io_error("reading registrations in", &git_dir, &error))?;
+                while let Some(entry) = entries
+                    .next_entry()
+                    .await
+                    .map_err(|error| io_error("reading registrations in", &git_dir, &error))?
+                {
+                    checked_dir(root, &entry.path()).await?;
+                }
+            }
+            let args: Vec<OsString> = [
+                OsStr::new("--git-dir"),
+                git_dir.as_os_str(),
+                OsStr::new("worktree"),
+                OsStr::new("remove"),
+                OsStr::new("--force"),
+                OsStr::new("--"),
+                tree.as_os_str(),
+            ]
+            .into_iter()
+            .map(OsStr::to_owned)
+            .collect();
+            let mut command = git_command(None, &args);
+            command
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_WORK_TREE");
+            run(command, "git", &args, GIT_TIMEOUT)
+                .await
+                .map_err(WorkspaceError)?;
+        }
+    }
+    remove_dir(dir).await
 }
 
 /// Refuses a repository whose name or default branch `git` could misread.

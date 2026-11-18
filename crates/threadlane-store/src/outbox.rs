@@ -102,10 +102,10 @@ pub(crate) async fn enqueue_in(
     query_one(
         conn,
         &format!(
-            "INSERT INTO outbox (project_id, lane_id, session_id, run_id, tool_call_id, kind,
+            "INSERT INTO outbox (id, project_id, lane_id, session_id, run_id, tool_call_id, kind,
                  decision_id, channel, body, urgency, status, not_before, created_at, trace_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12, (SELECT trace_id FROM runs WHERE id = ?4))
-             RETURNING {OUTBOX_FIELDS}"
+             VALUES ({}, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12, (SELECT trace_id FROM runs WHERE id = ?4))
+             RETURNING {OUTBOX_FIELDS}", crate::db::next_id_sql!("outbox")
         ),
         params![
             opt_raw(message.project_id, |id| id.get()),
@@ -170,7 +170,8 @@ impl OutboxStore for HubDb {
         let tx = self.db.begin().await?;
         let delivery_seq = query_one(
             tx.conn(),
-            "SELECT COALESCE(MAX(delivery_seq), 0) + 1 FROM outbox",
+            "SELECT MAX(COALESCE((SELECT MAX(delivery_seq) FROM outbox), 0),
+                 COALESCE((SELECT value FROM deletion_floors WHERE name = 'delivery_seq'), 0)) + 1",
             (),
             |row| Cols(row).i64(0),
         )

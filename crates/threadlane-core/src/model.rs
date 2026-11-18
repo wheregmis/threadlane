@@ -416,6 +416,9 @@ pub struct Project {
     pub paused: bool,
     /// The project's lead lane, created with the project.
     pub lead_lane_id: LaneId,
+    /// When the project was archived, if it is currently archived.
+    #[serde(default)]
+    pub archived_at: Option<Timestamp>,
 }
 
 /// Input for [`crate::store::OrgStore::create_project`].

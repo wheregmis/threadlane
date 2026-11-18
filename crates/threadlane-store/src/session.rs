@@ -256,9 +256,9 @@ impl SessionStore for HubDb {
         let session_id: SessionId = match start.session {
             SessionChoice::New => query_one(
                 conn,
-                "INSERT INTO sessions (lane_id, agent_id, backend, native_session_id, machine_id,
+                concat!("INSERT INTO sessions (id, lane_id, agent_id, backend, native_session_id, machine_id,
                          status, created_at, last_active_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6) RETURNING id",
+                     VALUES (", crate::db::next_id_sql!("sessions"), ", ?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6) RETURNING id"),
                 params![
                     lease.lane_id.get(),
                     opt_raw(start.agent_id, |id| id.get()),
@@ -290,8 +290,8 @@ impl SessionStore for HubDb {
 
         let run_id: RunId = query_one(
             conn,
-            "INSERT INTO runs (lane_id, session_id, machine_id, lease_epoch, agent_id, backend, status, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7) RETURNING id",
+            concat!("INSERT INTO runs (id, lane_id, session_id, machine_id, lease_epoch, agent_id, backend, status, started_at)
+             VALUES (", crate::db::next_id_sql!("runs"), ", ?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7) RETURNING id"),
             params![
                 lease.lane_id.get(),
                 session_id.get(),
@@ -522,8 +522,8 @@ impl SessionStore for HubDb {
             None => {
                 exec(
                     conn,
-                    "INSERT INTO tool_calls (run_id, call_key, tool, arguments, safe_to_repeat, status, started_at, trace_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'started', ?6, ?7)",
+                    concat!("INSERT INTO tool_calls (id, run_id, call_key, tool, arguments, safe_to_repeat, status, started_at, trace_id)
+                     VALUES (", crate::db::next_id_sql!("tool_calls"), ", ?1, ?2, ?3, ?4, ?5, 'started', ?6, ?7)"),
                     params![
                         key.run_id.get(),
                         key.key.as_str(),

@@ -101,31 +101,40 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
     if let Some(id) = existing {
         return Ok(Inserted::Duplicate(id));
     }
-    let lane: Option<(i64, LaneKind)> = query_opt(
+    let lane: Option<(i64, LaneKind, Option<String>)> = query_opt(
         conn,
-        "SELECT project_id, kind FROM lanes WHERE id = ?1",
+        "SELECT l.project_id, l.kind, CASE WHEN p.archived_at IS NOT NULL THEN p.name END
+         FROM lanes l JOIN projects p ON p.id = l.project_id WHERE l.id = ?1",
         params![event.lane_id.get()],
         |row| {
             let c = Cols(row);
-            Ok((c.i64(0)?, c.parse(1)?))
+            Ok((c.i64(0)?, c.parse(1)?, c.opt_text(2)?))
         },
     )
     .await?;
-    let kind = match lane {
+    let (kind, archived) = match lane {
         None => return Err(StoreError::not_found("lane", event.lane_id)),
-        Some((project, _)) if project != event.project_id.get() => {
+        Some((project, _, _)) if project != event.project_id.get() => {
             return Err(StoreError::Invalid(format!(
                 "lane {} belongs to project {project}, not {}",
                 event.lane_id, event.project_id
             )));
         }
-        Some((_, kind)) => kind,
+        Some((_, kind, archived)) => (kind, archived),
     };
+    if let Some(name) = &archived
+        && event.kind == EventKind::UserMessage
+    {
+        return Err(StoreError::Invalid(format!(
+            "Project {name:?} is archived."
+        )));
+    }
+    let skipped = archived.is_some() && event.kind == EventKind::OutsideEvent;
     let id: EventId = query_one(
         conn,
-        "INSERT INTO events (project_id, lane_id, source, source_event_id, kind, payload, trust,
-             requested, session_ref, decision_ref, reply_to_ref, status, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'pending', ?12) RETURNING id",
+        concat!("INSERT INTO events (id, project_id, lane_id, source, source_event_id, kind, payload, trust,
+             requested, session_ref, decision_ref, reply_to_ref, status, received_at, status_reason)
+         VALUES (", crate::db::next_id_sql!("events"), ", ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) RETURNING id"),
         params![
             event.project_id.get(),
             event.lane_id.get(),
@@ -138,7 +147,9 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
             opt_raw(event.session_ref, |id| id.get()),
             opt_raw(event.decision_ref, |id| id.get()),
             opt_raw(event.reply_to_ref, |id| id.get()),
+            if skipped { "skipped" } else { "pending" },
             event.received_at.as_millis(),
+            skipped.then_some(crate::ARCHIVED_EVENT_REASON),
         ],
         |row| Cols(row).id(0),
     )
@@ -149,6 +160,9 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
         params![id.get()],
     )
     .await?;
+    if skipped {
+        return Ok(Inserted::New(id));
+    }
     if event.kind == EventKind::Stop {
         exec(
             conn,
@@ -416,7 +430,7 @@ impl InboxStore for HubDb {
             "SELECT l.id FROM lanes l
              JOIN projects p ON p.id = l.project_id
              JOIN events e ON e.lane_id = l.id AND e.status = 'pending'
-             WHERE l.stopped = 0 AND (p.paused = 0 OR l.kind = 'task')
+             WHERE p.archived_at IS NULL AND l.stopped = 0 AND (p.paused = 0 OR l.kind = 'task')
                AND (l.lease_owner IS NULL OR l.lease_expires_at <= ?1)
                AND (l.backoff_until IS NULL OR l.backoff_until <= ?1)
                AND NOT (l.kind = 'task' AND EXISTS (
@@ -448,14 +462,15 @@ impl InboxStore for HubDb {
         .ok_or_else(|| StoreError::not_found("lane", lane_id))?;
         let live = lane.lease_owner.is_some()
             && lane.lease_expires_at.is_some_and(|expires| expires > now);
-        let stopped = query_one(
+        let unavailable = query_one(
             tx.conn(),
-            "SELECT stopped FROM lanes WHERE id = ?1",
+            "SELECT l.stopped != 0 OR p.archived_at IS NOT NULL
+             FROM lanes l JOIN projects p ON p.id = l.project_id WHERE l.id = ?1",
             params![lane_id.get()],
             |row| Cols(row).bool(0),
         )
         .await?;
-        if live || stopped {
+        if live || unavailable {
             return Ok(None);
         }
         if !task::check_eligible(tx.conn(), lane_id, machine_id, now).await? {
@@ -606,21 +621,23 @@ impl InboxStore for HubDb {
     async fn skipped_events(
         &self,
         project_id: Option<ProjectId>,
-        reason: &str,
+        [reason, additional_reason]: [&str; 2],
         limit: u32,
     ) -> StoreResult<(Vec<Event>, u64)> {
         let conn = self.db.reader()?;
         let project = opt_raw(project_id, ProjectId::get);
-        let filter = "status = ?1 AND status_reason = ?2 AND (?3 IS NULL OR project_id = ?3)";
+        let filter =
+            "status = ?1 AND status_reason IN (?2, ?3) AND (?4 IS NULL OR project_id = ?4)";
         let events = query_all(
             &conn,
             &format!(
                 "SELECT {EVENT_FIELDS} FROM events WHERE {filter}
-                 ORDER BY received_at DESC, id DESC LIMIT ?4"
+                 ORDER BY received_at DESC, id DESC LIMIT ?5"
             ),
             params![
                 EventStatus::Skipped.as_str(),
                 reason,
+                additional_reason,
                 project.clone(),
                 i64::from(limit)
             ],
@@ -630,7 +647,12 @@ impl InboxStore for HubDb {
         let total = query_one(
             &conn,
             &format!("SELECT COUNT(*) FROM events WHERE {filter}"),
-            params![EventStatus::Skipped.as_str(), reason, project],
+            params![
+                EventStatus::Skipped.as_str(),
+                reason,
+                additional_reason,
+                project
+            ],
             |row| Cols(row).i64(0),
         )
         .await?;

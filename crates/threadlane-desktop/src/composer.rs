@@ -187,7 +187,11 @@ impl AppState {
     /// Takes a nonempty draft, flushing any previous hold first.
     pub fn request_send(&mut self, destination: Destination, at: Timestamp) -> SendRequest {
         let draft = destination.draft();
-        if !self.is_send_enabled(draft) {
+        let archived = match &destination {
+            Destination::Lead(space, project) => self.is_archived(space, project),
+            Destination::Task(space, task) => self.task_is_archived(space, *task),
+        };
+        if archived || !self.is_send_enabled(draft) {
             return SendRequest::default();
         }
         self.composer.errors[draft.index()] = None;

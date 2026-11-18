@@ -7,12 +7,14 @@ use std::sync::Arc;
 use threadlane_core::adapters::ChannelAdapter;
 use threadlane_core::client::HubApi;
 use threadlane_core::github::GithubSource;
-use threadlane_core::ids::{LaneId, MachineId};
+use threadlane_core::ids::{LaneId, MachineId, ProjectId};
 use threadlane_core::link::HubLink;
 use threadlane_core::runtime::{StepHook, WakeTarget, Waker};
 use threadlane_core::store::{InboxStore, MachineStore};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::ToolRegistry;
+use threadlane_core::workspace::{WorkspaceRemoval, Workspaces};
+use threadlane_runner::GitWorkspaces;
 use threadlane_store::HubDb;
 use threadlane_transport_iroh::{EndpointAddr, Gate};
 
@@ -44,6 +46,8 @@ pub(crate) struct Inner {
     /// Where the GitHub poller reads; `None` runs no poller.
     pub(crate) github: Option<Arc<dyn GithubSource>>,
     pub(crate) workspaces: Option<PathBuf>,
+    pub(crate) workspace_files: Option<Arc<dyn Workspaces>>,
+    pub(crate) project_removal: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// The hub of one space: handler, placement, begin-run, tool gateway,
@@ -90,13 +94,37 @@ impl HubCore {
                 iroh: None,
                 github: None,
                 workspaces: None,
+                workspace_files: None,
+                project_removal: Arc::default(),
                 backends: Vec::new(),
             }),
         })
     }
 
-    pub(crate) fn with_workspaces(self, root: PathBuf) -> Self {
-        self.map_inner(|inner| inner.workspaces = Some(root))
+    /// Attaches local workspace files and shares their lock with the embedded runner.
+    #[must_use]
+    pub fn with_workspaces(self, root: PathBuf) -> Self {
+        self.map_inner(|inner| {
+            inner.workspace_files = Some(Arc::new(GitWorkspaces::new(root.clone())));
+            inner.workspaces = Some(root);
+        })
+    }
+
+    pub(crate) async fn cleanup_project(
+        &self,
+        id: ProjectId,
+        removal: &WorkspaceRemoval,
+    ) -> Vec<String> {
+        let leftovers = match &self.inner.workspace_files {
+            Some(files) => files.remove(removal).await,
+            None => Vec::new(),
+        };
+        if leftovers.is_empty()
+            && let Err(error) = self.inner.db.finish_project_cleanup(id).await
+        {
+            tracing::error!(%error, "could not acknowledge project workspace cleanup");
+        }
+        leftovers
     }
 
     /// The same hub with another tool registry. Combine it with
@@ -212,6 +240,13 @@ impl HubCore {
     pub async fn sweep_once(&self) -> Result<Vec<LaneId>, HubError> {
         let now = self.inner.clock.now();
         let expired = self.inner.db.expire_leases(now).await?;
+        // Keep the lease sweep independent of GitHub polling when there is no cleanup.
+        if !self.inner.db.project_cleanups().await?.is_empty() {
+            let _removal = self.inner.project_removal.lock().await;
+            for (id, removal) in self.inner.db.project_cleanups().await? {
+                self.cleanup_project(id, &removal).await;
+            }
+        }
         // A cooldown may have ended, or the space may have run out of
         // accounts without a notice yet (a crash in between).
         self.notice_accounts().await?;

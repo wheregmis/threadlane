@@ -46,8 +46,11 @@ impl Desktop {
         for row in rows {
             list = list.child(self.routine(space, project, row, cx));
         }
-        list.child(self.routine_form(space, project, cx))
-            .into_any_element()
+        list.children(
+            (!self.state.is_archived(space, project))
+                .then(|| self.routine_form(space, project, cx)),
+        )
+        .into_any_element()
     }
 
     /// Every space's routines, by space and project.
@@ -183,7 +186,7 @@ impl Desktop {
                     .child(meta(when_line, cx).text_right()),
             )
             .child(meta(format!("{} · {}", row.by, row.fired), cx).text_right())
-            .child(actions)
+            .children((!self.state.is_archived(space, project)).then_some(actions))
     }
 
     /// "+ New routine", or the form it opens.

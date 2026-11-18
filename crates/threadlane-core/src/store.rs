@@ -87,6 +87,9 @@ pub trait OrgStore: Send + Sync {
     /// Pauses or resumes a project: a paused project's lanes are not granted.
     async fn set_project_paused(&self, id: ProjectId, paused: bool) -> StoreResult<()>;
 
+    /// Archives an idle non-General project or restores it and returns its current state.
+    async fn set_project_archived(&self, id: ProjectId, archived: bool) -> StoreResult<Project>;
+
     /// Registers a repository; its remote URL must be new to this space.
     async fn create_repository(&self, repository: &NewRepository) -> StoreResult<Repository>;
     async fn repositories(&self, project_id: ProjectId) -> StoreResult<Vec<Repository>>;
@@ -182,13 +185,13 @@ pub trait InboxStore: Send + Sync {
         before: Option<Timestamp>,
         limit: u32,
     ) -> StoreResult<Vec<Event>>;
-    /// Events skipped with `reason`, in one project or in the whole space
+    /// Events skipped for either reason, in one project or in the whole space
     /// when `None`: the newest `limit`, newest first, and how many there
     /// are in all.
     async fn skipped_events(
         &self,
         project_id: Option<ProjectId>,
-        reason: &str,
+        reasons: [&str; 2],
         limit: u32,
     ) -> StoreResult<(Vec<Event>, u64)>;
 }

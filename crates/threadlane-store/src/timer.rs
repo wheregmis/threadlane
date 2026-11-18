@@ -121,10 +121,11 @@ pub(crate) async fn insert_timer_in(conn: &Connection, timer: &NewTimer) -> Stor
     query_one(
         conn,
         &format!(
-            "INSERT INTO timers (project_id, lane_id, agent_id, task_ref, category, due_at,
+            "INSERT INTO timers (id, project_id, lane_id, agent_id, task_ref, category, due_at,
                  recurrence, instruction, status, created_by, created_by_call, requested)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11)
-             RETURNING {TIMER_FIELDS}"
+             VALUES ({}, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11)
+             RETURNING {TIMER_FIELDS}",
+            crate::db::next_id_sql!("timers")
         ),
         params![
             timer.project_id.get(),
@@ -164,6 +165,8 @@ impl TimerStore for HubDb {
             &conn,
             &format!(
                 "SELECT {TIMER_FIELDS} FROM timers WHERE status = 'active' AND due_at <= ?1
+                 AND EXISTS (SELECT 1 FROM projects p WHERE p.id = timers.project_id
+                             AND p.archived_at IS NULL)
                  ORDER BY due_at, id"
             ),
             params![now.as_millis()],
@@ -195,6 +198,12 @@ impl TimerStore for HubDb {
         let timer = timer_in(conn, id)
             .await?
             .ok_or_else(|| StoreError::not_found("timer", id))?;
+        if let Err(error) = crate::org::require_active_project(conn, timer.project_id).await {
+            return Err(match error {
+                StoreError::Invalid(message) => StoreError::Conflict(message),
+                other => other,
+            });
+        }
         if timer.status != TimerStatus::Active || timer.due_at != occurrence {
             return Err(StoreError::Conflict(format!(
                 "timer {id} is {} and due at {}, not at {occurrence}",

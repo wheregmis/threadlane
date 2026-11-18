@@ -428,6 +428,7 @@ async fn insert_decision_in(
     {
         return Ok((existing, false));
     }
+    crate::org::require_active_project(conn, decision.project_id).await?;
     if let Some(run) = decision.run_id
         && decision
             .options
@@ -452,12 +453,12 @@ async fn insert_decision_in(
     let created = query_one(
         conn,
         &format!(
-            "INSERT INTO decisions (project_id, lane_id, task_id, session_id, run_id,
+            "INSERT INTO decisions (id, project_id, lane_id, task_id, session_id, run_id,
                  tool_call_id, tool, arguments, arguments_hash, kind, question, context,
                  options, recommended, offers_standing_rule, status, expires_at, created_at, trace_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+             VALUES ({}, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                  'pending', ?16, ?17, (SELECT trace_id FROM runs WHERE id = ?5))
-             RETURNING {DECISION_FIELDS}"
+             RETURNING {DECISION_FIELDS}", crate::db::next_id_sql!("decisions")
         ),
         params![
             decision.project_id.get(),
@@ -724,9 +725,13 @@ impl DecisionStore for HubDb {
         if let Some(rule) = rule {
             exec(
                 conn,
-                "INSERT INTO standing_rules (project_id, agent_id, tool, pattern, tier,
+                concat!(
+                    "INSERT INTO standing_rules (id, project_id, agent_id, tool, pattern, tier,
                      created_from_decision, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 VALUES (",
+                    crate::db::next_id_sql!("standing_rules"),
+                    ", ?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                ),
                 params![
                     rule.project_id.get(),
                     rule.agent_id.get(),

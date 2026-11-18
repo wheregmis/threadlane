@@ -17,8 +17,8 @@ use super::{empty, gap_line, link};
 use crate::components::{button, card, field, heading, meta, section, status_badge, status_dot};
 use crate::icons::AppIcon;
 use crate::tokens::{
-    JOIN_NAME_WIDTH, KEY_RADIUS, READING_WIDTH, ROW_RADIUS, SM, SPACE_NAME_WIDTH, Status,
-    TYPE_BODY, TYPE_META, XL, XS,
+    KEY_RADIUS, READING_WIDTH, ROW_RADIUS, SM, SPACE_NAME_WIDTH, Status, TYPE_BODY, TYPE_META, XL,
+    XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -320,28 +320,60 @@ impl Desktop {
                             .text_color(muted)
                             .child("Pair this app with another hub using its join code."),
                     )
-                    .child(self.join_form(cx)),
+                    .child(self.join_form("Pair", cx)),
             )
             .into_any_element()
     }
 
-    /// The name and join code of a space to pair, and Pair.
-    fn join_form(&self, cx: &mut Context<Self>) -> Div {
-        h_flex()
+    /// The sidebar's focused pairing screen.
+    pub(crate) fn add_space(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
+            .overflow_y_scrollbar()
+            .id("add-space")
+            .gap(SM)
+            .child(heading("Add space"))
+            .child(card(cx).child(self.join_form("Pair by join code", cx)))
+            .into_any_element()
+    }
+
+    /// Names a space and pairs it by join code or by local data directory.
+    fn join_form(&self, code_label: &'static str, cx: &mut Context<Self>) -> Div {
+        v_flex()
             .gap(SM)
             .child(
                 div()
                     .w_full()
-                    .max_w(JOIN_NAME_WIDTH)
+                    .max_w(SPACE_NAME_WIDTH)
                     .child(field(&self.space_name)),
             )
-            .child(div().flex_1().child(field(&self.join_code)))
             .child(
-                button("pair-space")
-                    .primary()
-                    .icon(AppIcon::Link)
-                    .label("Pair")
-                    .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
+                h_flex()
+                    .gap(SM)
+                    .child(div().flex_1().min_w_0().child(field(&self.hub_dir)))
+                    .child(
+                        button("pair-directory")
+                            .primary()
+                            .icon(AppIcon::FolderOpen)
+                            .label("Pair by directory")
+                            .on_click(cx.listener(|this, _, _, cx| this.pair_directory(cx))),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap(SM)
+                    .child(div().flex_1().min_w_0().child(field(&self.join_code)))
+                    .child(
+                        button("pair-code")
+                            .primary()
+                            .icon(AppIcon::Link)
+                            .label(code_label)
+                            .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
+                    ),
             )
     }
 
@@ -385,29 +417,7 @@ impl Desktop {
                     "Name the space, then give the hub's data directory if it runs on this \
                      computer, or a join code from `threadlane pair-code` on a computer already paired.",
                 )
-                .child(div().w_full().max_w(SPACE_NAME_WIDTH).child(field(&self.space_name)))
-                .child(
-                    h_flex()
-                        .gap(SM)
-                        .child(div().flex_1().child(field(&self.hub_dir)))
-                        .child(
-                            button("pair-directory")
-                                .primary()
-                                .icon(AppIcon::FolderOpen).label("Pair by directory")
-                                .on_click(cx.listener(|this, _, _, cx| this.pair_directory(cx))),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap(SM)
-                        .child(div().flex_1().child(field(&self.join_code)))
-                        .child(
-                            button("pair-code")
-                                .primary()
-                                .icon(AppIcon::Link).label("Pair by join code")
-                                .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
-                        ),
-                ),
+                .child(self.join_form("Pair by join code", cx)),
             )
             .into_any_element()
     }

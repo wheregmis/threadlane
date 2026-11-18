@@ -190,6 +190,7 @@ impl HubCore {
         if !logged_in {
             return Ok(pass);
         }
+        let _removal = inner.project_removal.lock().await;
         let routes = Routes::read(&inner.db).await?;
         let mut lanes = BTreeSet::new();
 

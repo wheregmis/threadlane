@@ -688,8 +688,24 @@ impl ClientCore {
     ///
     /// No such hub, several hubs and none named, or the hub's error.
     pub async fn projects(&self, space: Option<&str>) -> Result<SpaceProjects, ClientError> {
+        self.project_list(space, false).await
+    }
+
+    /// Lists the space's projects, including archived ones when requested.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn project_list(
+        &self,
+        space: Option<&str>,
+        include_archived: bool,
+    ) -> Result<SpaceProjects, ClientError> {
         let (space, api) = self.target(space)?;
-        let projects = api.projects().await.map_err(|e| api_error(&space, e))?;
+        let projects = api
+            .project_list(include_archived)
+            .await
+            .map_err(|e| api_error(&space, e))?;
         Ok(SpaceProjects { space, projects })
     }
 

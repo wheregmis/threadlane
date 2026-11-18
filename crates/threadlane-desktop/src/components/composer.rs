@@ -54,12 +54,16 @@ pub(crate) fn subscribe(
 impl Desktop {
     pub(crate) fn visible_draft(&self) -> Option<Draft> {
         match &self.screen {
-            Screen::Home
-            | Screen::Project {
+            Screen::Home => Some(Draft::Lead),
+            Screen::Project {
+                space,
+                project,
                 tab: Tab::Tasks | Tab::Conversation,
-                ..
-            } => Some(Draft::Lead),
-            Screen::Task { space, task } if self.state.task(space, *task).is_some() => {
+            } if !self.state.is_archived(space, project) => Some(Draft::Lead),
+            Screen::Task { space, task }
+                if self.state.task(space, *task).is_some()
+                    && !self.state.task_is_archived(space, *task) =>
+            {
                 Some(Draft::Task)
             }
             _ => None,

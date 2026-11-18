@@ -16,7 +16,7 @@ use crate::db::{exec, query_all, query_one, query_opt};
 use crate::row::{Cols, json_text, params};
 
 const PROJECT_COLUMNS: &str = "p.id, p.name, p.description, p.is_general, p.mode_ceiling,
-     p.max_parallel_tasks, p.paused, l.id
+     p.max_parallel_tasks, p.paused, l.id, p.archived_at
      FROM projects p JOIN lanes l ON l.project_id = p.id AND l.kind = 'lead'";
 
 fn decode_project(row: &Row) -> StoreResult<Project> {
@@ -30,7 +30,28 @@ fn decode_project(row: &Row) -> StoreResult<Project> {
         max_parallel_tasks: c.u32(5)?,
         paused: c.bool(6)?,
         lead_lane_id: c.id(7)?,
+        archived_at: c.opt_ts(8)?,
     })
+}
+
+/// Refuses new work in an archived project inside the caller's transaction.
+pub(crate) async fn require_active_project(
+    conn: &Connection,
+    project: ProjectId,
+) -> StoreResult<()> {
+    if let Some(name) = query_opt(
+        conn,
+        "SELECT name FROM projects WHERE id = ?1 AND archived_at IS NOT NULL",
+        params![project.get()],
+        |row| Cols(row).text(0),
+    )
+    .await?
+    {
+        return Err(StoreError::Invalid(format!(
+            "Project {name:?} is archived."
+        )));
+    }
+    Ok(())
 }
 
 const REPOSITORY_FIELDS: &str =
@@ -94,8 +115,8 @@ pub(crate) async fn insert_project(
 ) -> StoreResult<(ProjectId, LaneId)> {
     let project_id: ProjectId = query_one(
         conn,
-        "INSERT INTO projects (name, description, is_general, mode_ceiling, max_parallel_tasks, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+        concat!("INSERT INTO projects (id, name, description, is_general, mode_ceiling, max_parallel_tasks, created_at)
+         VALUES (", crate::db::next_id_sql!("projects"), ", ?1, ?2, ?3, ?4, ?5, ?6) RETURNING id"),
         params![
             name,
             description,
@@ -109,7 +130,11 @@ pub(crate) async fn insert_project(
     .await?;
     let lane_id: LaneId = query_one(
         conn,
-        "INSERT INTO lanes (project_id, kind) VALUES (?1, ?2) RETURNING id",
+        concat!(
+            "INSERT INTO lanes (id, project_id, kind) VALUES (",
+            crate::db::next_id_sql!("lanes"),
+            ", ?1, ?2) RETURNING id"
+        ),
         params![project_id.get(), LaneKind::Lead.as_str()],
         |row| Cols(row).id(0),
     )
@@ -227,13 +252,73 @@ impl OrgStore for HubDb {
         tx.commit().await
     }
 
+    async fn set_project_archived(&self, id: ProjectId, archived: bool) -> StoreResult<Project> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let sql = format!("SELECT {PROJECT_COLUMNS} WHERE p.id = ?1");
+        let project = query_one(conn, &sql, params![id.get()], decode_project).await?;
+        if archived == project.archived_at.is_some() {
+            return Ok(project);
+        }
+        let now = self.now();
+        if archived {
+            if project.is_general {
+                return Err(StoreError::Invalid(
+                    "The General project cannot be archived.".into(),
+                ));
+            }
+            let (running, queued, decisions, active_lane) = query_one(
+                conn,
+                "SELECT
+                     EXISTS (SELECT 1 FROM tasks WHERE project_id = ?1 AND status = 'running'),
+                     EXISTS (SELECT 1 FROM tasks WHERE project_id = ?1 AND status = 'queued'),
+                     EXISTS (SELECT 1 FROM decisions WHERE project_id = ?1 AND status = 'pending'),
+                     EXISTS (SELECT 1 FROM lanes WHERE project_id = ?1 AND lease_expires_at > ?2)",
+                params![id.get(), now.as_millis()],
+                |row| {
+                    let c = Cols(row);
+                    Ok((c.bool(0)?, c.bool(1)?, c.bool(2)?, c.bool(3)?))
+                },
+            )
+            .await?;
+            let blockers: Vec<_> = [
+                (running, "running tasks"),
+                (queued, "queued tasks"),
+                (decisions, "open decisions"),
+                (active_lane && !running, "an active lane"),
+            ]
+            .into_iter()
+            .filter_map(|(blocked, reason)| blocked.then_some(reason))
+            .collect();
+            if !blockers.is_empty() {
+                return Err(StoreError::Invalid(format!(
+                    "Project {:?} cannot be archived while it has {}.",
+                    project.name,
+                    blockers.join(", ")
+                )));
+            }
+        }
+        let archived_at = archived.then_some(now);
+        exec(
+            conn,
+            "UPDATE projects SET archived_at = ?1 WHERE id = ?2",
+            params![archived_at.map(Timestamp::as_millis), id.get()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Project {
+            archived_at,
+            ..project
+        })
+    }
+
     async fn create_repository(&self, repository: &NewRepository) -> StoreResult<Repository> {
         let tx = self.db.begin().await?;
         let created = query_one(
             tx.conn(),
             &format!(
-                "INSERT INTO repositories (project_id, name, remote_url, default_branch, protected_branches)
-                 VALUES (?1, ?2, ?3, ?4, ?5) RETURNING {REPOSITORY_FIELDS}"
+                "INSERT INTO repositories (id, project_id, name, remote_url, default_branch, protected_branches)
+                 VALUES ({}, ?1, ?2, ?3, ?4, ?5) RETURNING {REPOSITORY_FIELDS}", crate::db::next_id_sql!("repositories")
             ),
             params![
                 repository.project_id.get(),
@@ -328,8 +413,12 @@ impl OrgStore for HubDb {
         let tx = self.db.begin().await?;
         let id: i64 = query_one(
             tx.conn(),
-            "INSERT INTO bindings (project_id, agent_id, mode, is_lead, max_parallel)
-             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+            concat!(
+                "INSERT INTO bindings (id, project_id, agent_id, mode, is_lead, max_parallel)
+             VALUES (",
+                crate::db::next_id_sql!("bindings"),
+                ", ?1, ?2, ?3, ?4, ?5) RETURNING id"
+            ),
             params![
                 binding.project_id.get(),
                 binding.agent_id.get(),

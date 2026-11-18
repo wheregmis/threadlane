@@ -3,8 +3,8 @@
 //! recorded but acted on by nobody.
 
 use threadlane_core::client::{
-    ApiError, OrgReply, OrgRequest, OverviewReply, OverviewRequest, ProjectSummary, RecordedEvent,
-    TaskReply, TaskRequest,
+    ApiError, DeletePreview, OrgReply, OrgRequest, OverviewReply, OverviewRequest, ProjectSummary,
+    RecordedEvent, TaskReply, TaskRequest,
 };
 use threadlane_core::ids::TaskId;
 use threadlane_core::model::Task;
@@ -100,6 +100,72 @@ impl ClientCore {
         match self.org(space, request).await? {
             (_, OrgReply::Project { project }) => Ok(project),
             (space, _) => Err(wrong_reply(&space, "pause")),
+        }
+    }
+
+    /// Archives or restores a project in the selected space.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn set_archived(
+        &self,
+        space: Option<&str>,
+        project: &str,
+        archived: bool,
+    ) -> Result<ProjectSummary, ClientError> {
+        let request = OrgRequest::SetArchived {
+            project: Some(project.to_owned()),
+            archived,
+        };
+        match self.org(space, request).await? {
+            (_, OrgReply::Project { project }) => Ok(project),
+            (space, _) => Err(wrong_reply(&space, "archive")),
+        }
+    }
+
+    /// Reads the permanent deletion inventory for a project.
+    ///
+    /// # Errors
+    ///
+    /// No such hub or project, or the hub's refusal.
+    pub async fn delete_preview(
+        &self,
+        space: Option<&str>,
+        project: &str,
+    ) -> Result<DeletePreview, ClientError> {
+        let request = OrgRequest::DeletePreview {
+            project: project.to_owned(),
+        };
+        match self.org(space, request).await? {
+            (_, OrgReply::DeletePreview { preview }) => Ok(preview),
+            (space, _) => Err(wrong_reply(&space, "deletion preview")),
+        }
+    }
+
+    /// Permanently deletes the project using its exact confirmed name.
+    ///
+    /// # Errors
+    ///
+    /// No such hub or project, or the hub's refusal.
+    pub async fn delete_project(
+        &self,
+        space: Option<&str>,
+        project: &str,
+        confirm_name: &str,
+    ) -> Result<(DeletePreview, Vec<String>), ClientError> {
+        let request = OrgRequest::DeleteProject {
+            project: project.to_owned(),
+            confirm_name: confirm_name.to_owned(),
+        };
+        match self.org(space, request).await? {
+            (
+                _,
+                OrgReply::ProjectDeleted {
+                    deleted, leftovers, ..
+                },
+            ) => Ok((deleted, leftovers)),
+            (space, _) => Err(wrong_reply(&space, "delete project")),
         }
     }
 

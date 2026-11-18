@@ -213,3 +213,72 @@ async fn tasks_set_up_at_the_same_time_share_the_clone_safely() {
     assert_eq!(branch(&first), "threadlane/T-0001");
     assert_eq!(branch(&second), "threadlane/T-0002");
 }
+
+#[tokio::test]
+async fn workspace_deletion_removes_git_worktrees_and_only_requested_clones() {
+    use threadlane_core::workspace::{WorkspaceCounts, WorkspaceRemoval};
+
+    let s = setup();
+    let first = s.prepare(T1).await;
+    let second = s.prepare(T2).await;
+    let clone = s.clones().join(s.repository.id.to_string());
+    let mut removal = WorkspaceRemoval {
+        tasks: vec![T1],
+        repositories: vec![(s.repository.id, s.repository.name.clone())],
+        clones: Vec::new(),
+    };
+    assert_eq!(
+        s.workspaces.removal_counts(&removal).await,
+        WorkspaceCounts {
+            worktrees: 1,
+            clones: 0
+        }
+    );
+    assert!(s.workspaces.remove(&removal).await.is_empty());
+    assert!(!first.exists() && second.is_dir() && clone.is_dir());
+    let registrations = git(&clone, &["worktree", "list", "--porcelain"]);
+    assert!(!registrations.contains(&T1.to_string()));
+    assert!(registrations.contains(&T2.to_string()));
+
+    removal.tasks = vec![T2];
+    removal.clones = vec![s.repository.id];
+    assert_eq!(
+        s.workspaces.removal_counts(&removal).await,
+        WorkspaceCounts {
+            worktrees: 1,
+            clones: 1
+        }
+    );
+    assert!(s.workspaces.remove(&removal).await.is_empty());
+    assert!(!second.exists() && !clone.exists());
+    assert!(s.workspaces.remove(&removal).await.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_deletion_refuses_symlinks_outside_the_root() {
+    use std::os::unix::fs::symlink;
+    use threadlane_core::workspace::WorkspaceRemoval;
+    let s = setup();
+    let root = s.dir.path().join("workspaces");
+    let outside = s.dir.path().join("keep");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), "keep").unwrap();
+    std::fs::create_dir_all(root.join("worktrees")).unwrap();
+    symlink(&outside, root.join("worktrees").join(T1.to_string())).unwrap();
+    symlink(&outside, root.join("clones")).unwrap();
+    std::fs::create_dir(outside.join(s.repository.id.to_string())).unwrap();
+    let removal = WorkspaceRemoval {
+        tasks: vec![T1],
+        clones: vec![s.repository.id],
+        ..WorkspaceRemoval::default()
+    };
+    let leftovers = s.workspaces.remove(&removal).await;
+    assert_eq!(leftovers.len(), 2);
+    assert!(leftovers[0].ends_with(&T1.to_string()));
+    assert!(leftovers[1].ends_with(&s.repository.id.to_string()));
+    assert_eq!(
+        std::fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "keep"
+    );
+}

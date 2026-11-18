@@ -183,6 +183,7 @@ pub enum Consequence {
     Unpair(String),
     DeleteMemory(String, String, String),
     SetCeiling(String, Option<String>, Mode),
+    ArchiveProject(String, String),
 }
 
 /// Copy shown by the kit's confirmation dialog.
@@ -222,6 +223,11 @@ impl AppState {
                 "This app forgets the space and its key, and you will need to pair again to access its projects and memory here.".to_owned(), "Unpair"),
             Consequence::DeleteMemory(_, _, path) => (format!("Delete {path}?"),
                 "Agents will lose access to this file in current memory.".to_owned(), "Delete file"),
+            Consequence::ArchiveProject(_, project) => (
+                format!("Archive {project}?"),
+                "Work and timers stop, and the project's history stays readable under Archived. Its repository remotes stay registered to this project and unavailable to other spaces.".to_owned(),
+                "Archive project",
+            ),
             Consequence::SetCeiling(space, project, mode) => {
                 let current = project.as_ref().map_or_else(|| self.space_ceiling(space),
                     |project| self.project_ceiling(space, project));

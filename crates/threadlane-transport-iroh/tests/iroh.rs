@@ -63,6 +63,7 @@ fn general() -> ProjectSummary {
         is_general: true,
         paused: false,
         mode_ceiling: None,
+        archived: false,
     }
 }
 
