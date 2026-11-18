@@ -16,9 +16,11 @@
 //!   -H "Accept: application/vnd.github+json" notifications?per_page=50`.
 //!   `304` is "not modified", `Last-Modified` the next cursor,
 //!   `X-Poll-Interval` the interval asked for;
-//! - a pull request's head branch, when only its number is known:
-//!   `repos/<owner>/<name>/pulls/<n>`, reading `head.ref`;
-//! - a branch's check runs: `repos/<owner>/<name>/commits/<branch>/check-runs?per_page=100`;
+//! - a pull request's head, when only its number is known:
+//!   `repos/<owner>/<name>/pulls/<n>`, reading `head.ref` and `head.sha`;
+//! - check runs: `repos/<owner>/<name>/commits/<ref>/check-runs?per_page=100`,
+//!   on the head commit when it was looked up (a fork's branch, or one
+//!   deleted after the merge, is not in the base repository), else the branch;
 //! - a pull request's reviews: `repos/<owner>/<name>/pulls/<n>/reviews?per_page=100`;
 //! - its comments: `repos/<owner>/<name>/issues/<n>/comments?per_page=100[&since=<time>]`.
 //!
@@ -116,8 +118,9 @@ impl GhSource {
         Ok(pages)
     }
 
-    /// The head branch of pull request `number`, read from `pulls/<n>`.
-    async fn head_branch(&self, repository: &str, number: u64) -> Result<String, GithubError> {
+    /// The head branch and commit of pull request `number`, read from
+    /// `pulls/<n>`.
+    async fn head(&self, repository: &str, number: u64) -> Result<(String, String), GithubError> {
         let path = format!("repos/{repository}/pulls/{number}");
         let (ok, output) = self.get(&[], &path).await?;
         let answer = parse_answer(&output)?;
@@ -126,9 +129,10 @@ impl GhSource {
         }
         let body: Json = serde_json::from_str(&answer.body)
             .map_err(|error| GithubError(format!("gh api {path} answered: {error}")))?;
-        text(&body, "/head/ref")
-            .filter(|branch| !branch.is_empty())
-            .ok_or_else(|| GithubError(format!("gh api {path} names no head branch")))
+        let field = |pointer| text(&body, pointer).filter(|value| !value.is_empty());
+        field("/head/ref")
+            .zip(field("/head/sha"))
+            .ok_or_else(|| GithubError(format!("gh api {path} names no head branch and commit")))
     }
 
     /// The items of every JSON page of a call that must succeed.
@@ -186,20 +190,21 @@ impl GithubSource for GhSource {
             )));
         }
         let resolved;
-        let target = match target.number {
+        let (target, reference) = match target.number {
             Some(number) if target.branch.is_empty() => {
+                let (branch, sha) = self.head(repository, number).await?;
                 resolved = PullTarget {
-                    branch: self.head_branch(repository, number).await?,
+                    branch,
                     ..target.clone()
                 };
-                &resolved
+                (&resolved, sha)
             }
-            _ => target,
+            _ => (target, target.branch.clone()),
         };
-        let branch = encode(&target.branch);
+        let reference = encode(&reference);
         let mut items = self
             .get_items(
-                &format!("repos/{repository}/commits/{branch}/check-runs?per_page=100"),
+                &format!("repos/{repository}/commits/{reference}/check-runs?per_page=100"),
                 target,
                 parse_check_runs,
             )
@@ -768,7 +773,7 @@ case "$last" in
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_pull_request_known_by_number_is_read_on_its_head_branch() {
+    async fn a_pull_request_known_by_number_is_read_on_its_head_commit() {
         let dir = tempfile::tempdir().unwrap();
         let source = GhSource::with_gh(fake_gh_with(
             dir.path(),
@@ -799,7 +804,7 @@ case "$last" in
             first[..2],
             [
                 "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/pulls/529",
-                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/commits/codex%2Fagent-model-preferences/check-runs?per_page=100",
+                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/commits/6dcb09b5b57875f334f61aebed695e2e4193db5e/check-runs?per_page=100",
             ]
         );
         assert_eq!(first.len(), 4, "one lookup, then the usual three reads");

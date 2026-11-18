@@ -837,6 +837,7 @@ async fn a_failed_task_can_be_retried_with_its_last_error_and_runs_again() {
     }
     let failed = task(&hub, "T-0001").await;
     assert_eq!(failed.status, TaskStatus::Failed);
+    let first_end = hub.db.task_completed_at(failed.id).await.unwrap().unwrap();
 
     let retried = hub
         .api
@@ -890,6 +891,9 @@ async fn a_failed_task_can_be_retried_with_its_last_error_and_runs_again() {
         .filter(|result| result.payload["status"] == "failed")
         .count();
     assert_eq!(failures, 2);
+    // The board dates it by the attempt that ended last.
+    let second_end = hub.db.task_completed_at(failed.id).await.unwrap().unwrap();
+    assert!(second_end > first_end, "{second_end:?} vs {first_end:?}");
 }
 
 #[tokio::test]

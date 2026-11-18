@@ -933,10 +933,12 @@ impl TaskStore for HubDb {
 
     async fn task_completed_at(&self, id: TaskId) -> StoreResult<Option<Timestamp>> {
         let conn = self.db.reader()?;
+        // The current attempt's report: a retried task ends under a new key.
+        let key = result_key(&conn, id).await?;
         query_opt(
             &conn,
             "SELECT received_at FROM events WHERE source = ?1 AND source_event_id = ?2",
-            params![TASK_SOURCE, format!("result:{}", id.get())],
+            params![TASK_SOURCE, key],
             |row| Cols(row).ts(0),
         )
         .await
