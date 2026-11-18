@@ -25,6 +25,7 @@ actions!(
         DarkAppearance,
         FocusComposer,
         GoHome,
+        JumpToLatest,
         ToggleSidebar,
         OpenSettings,
         ShowShortcuts,
@@ -73,6 +74,16 @@ fn shortcuts() -> Vec<Shortcut> {
                 KeyBinding::new("cmd-k", FocusComposer, None),
                 KeyBinding::new("/", FocusComposer, Some(OUTSIDE_INPUT)),
             ],
+        ),
+        shortcut(
+            "Navigate",
+            "Jump to latest message",
+            [KeyBinding::new("g", JumpToLatest, Some(OUTSIDE_INPUT))],
+        ),
+        shortcut(
+            "Editing",
+            "Undo held send",
+            [KeyBinding::new("cmd-z", Undo, Some(OUTSIDE_INPUT))],
         ),
         shortcut(
             "Navigate",
@@ -173,7 +184,7 @@ fn kit_shortcuts() -> [(&'static str, Box<dyn Action>); 9] {
             }),
         ),
         (
-            "Send from the composer",
+            "New line in the composer",
             Box::new(Enter {
                 secondary: false,
                 shift: true,
@@ -238,6 +249,11 @@ pub(crate) fn install(
     cx.bind_keys(app_bindings());
     desktop_action(cx, &desktop, |this, _: &FocusComposer, window, cx| {
         this.focus_composer(window, cx);
+    });
+    desktop_action(cx, &desktop, |this, _: &JumpToLatest, window, cx| {
+        if !window.has_focused_input(cx) && !window.has_active_dialog(cx) {
+            this.jump_to_latest(cx);
+        }
     });
     desktop_action(cx, &desktop, |this, _: &GoHome, window, cx| {
         if !window.has_focused_input(cx) && !window.has_active_dialog(cx) {

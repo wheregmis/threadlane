@@ -10,6 +10,9 @@ use gpui_kit::{
     App, Div, ElementId, Entity, FontWeight, ParentElement as _, SharedString, Styled as _, div,
 };
 
+pub(crate) mod composer;
+mod prose;
+
 use crate::icons::AppIcon;
 use crate::tokens::{
     BADGE_RADIUS, BAR_HEIGHT, BUTTON_RADIUS, COMPOSER_RADIUS, CONTROL_HEIGHT, DOT_SIZE,
@@ -39,8 +42,8 @@ pub(super) fn field(state: &Entity<InputState>) -> Input {
     Input::new(state).rounded(FIELD_RADIUS).text_size(TYPE_BODY)
 }
 
-/// Composer surface. The input entity continues to own editing and sending.
-pub(super) fn composer(cx: &App) -> Div {
+/// Shared composer surface.
+fn composer_surface(cx: &App) -> Div {
     h_flex()
         .gap(SM)
         .p(SM)

@@ -45,6 +45,7 @@ struct FakeHub {
     lead_runs: Mutex<Vec<LeadRun>>,
     task_runs: Mutex<Vec<RunSummary>>,
     now: AtomicI64,
+    sent_count: AtomicI64,
     decisions: Mutex<Vec<Decision>>,
     traced_decisions: Mutex<Vec<Decision>>,
     tasks: Mutex<Vec<TaskSummary>>,
@@ -146,7 +147,7 @@ impl HubApi for FakeHub {
             .unwrap()
             .retain(|stopped| *stopped != target);
         Ok(Accepted {
-            event_id: EventId(99),
+            event_id: EventId(99 + self.sent_count.fetch_add(1, Ordering::SeqCst)),
             project_id: project_id(message.project.as_deref()),
             duplicate: false,
         })
@@ -419,9 +420,19 @@ impl HubApi for FakeHub {
                     .filter(|summary| summary.task.status == TaskStatus::Running)
                     .collect(),
             }),
-            OverviewRequest::Conversation { .. } => Ok(OverviewReply::Conversation {
-                entries: self.history.lock().expect("lock").clone(),
-            }),
+            OverviewRequest::Conversation { before, limit, .. } => {
+                use crate::decision_record::conversation_time;
+                let mut entries = self.history.lock().expect("lock").clone();
+                entries.retain(|entry| {
+                    conversation_time(entry)
+                        .is_some_and(|at| before.is_none_or(|before| at < before))
+                });
+                entries.sort_by_key(conversation_time);
+                let start = entries.len().saturating_sub(limit as usize);
+                Ok(OverviewReply::Conversation {
+                    entries: entries.split_off(start),
+                })
+            }
             OverviewRequest::Recent { .. } => Ok(OverviewReply::Recent {
                 items: self.recent.lock().expect("lock").clone(),
             }),
@@ -1025,6 +1036,8 @@ fn said(lines: &[Line]) -> Vec<String> {
         .iter()
         .map(|line| match line {
             Line::Day(day) => format!("-- {day}"),
+            Line::New => "new".to_owned(),
+            Line::Sending { text, .. } => format!("sending: {text}"),
             Line::You { text, .. } => format!("you: {text}"),
             Line::Lead { text, .. } => format!("lead: {text}"),
             Line::Notice { text, .. } => format!("notice: {text}"),
@@ -1412,9 +1425,9 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
             "00:02 Engineer on linux-box with claude: worked for 29 min, stopped to ask you",
             "00:03 Asked D-0003: Question 3?",
             "00:05 You answered D-0003: approve with the note \"draft\"",
-            "00:05 You wrote: Use the ledger.",
+            "00:05 You wrote:\n\nUse the ledger.",
             "00:06 Engineer on linux-box with claude: worked for 1 min, reported back",
-            "00:31 Done: Refunds are idempotent.",
+            "00:31 Done:\n\nRefunds are idempotent.",
         ]
     );
 }
@@ -1545,63 +1558,20 @@ async fn a_task_that_cannot_be_loaded_says_why_instead_of_loading_forever() {
 }
 
 #[test]
-fn a_long_result_shows_its_first_lines_until_you_ask_for_all_of_it() {
+fn a_home_result_uses_the_rendered_three_line_limit_and_remembers_its_toggle() {
     let mut state = AppState::default();
-    let long = "Line one\nLine two\nLine three\nLine four";
-    state.receive(item(
-        "work",
-        1,
-        OutboxKind::Message,
-        json!({ "text": long }),
-    ));
-    state.receive(item(
-        "work",
-        2,
-        OutboxKind::Message,
-        json!({ "text": "Short." }),
-    ));
-    let wide = "word ".repeat(100);
-    state.receive(item(
-        "home",
-        1,
-        OutboxKind::Message,
-        json!({ "text": wide }),
-    ));
-    let excerpt = |state: &AppState, space: &str, seq| {
-        let item = state
-            .delivered
-            .get(&(space.to_owned(), seq))
-            .expect("delivered");
-        state.excerpt(item)
-    };
-
-    assert_eq!(
-        excerpt(&state, "work", 1),
-        Excerpt {
-            text: "Line one\nLine two\nLine three…".to_owned(),
-            toggle: Some("Show"),
-        }
-    );
-    assert_eq!(excerpt(&state, "work", 2).toggle, None, "fits");
-    let shown = excerpt(&state, "home", 1);
-    assert_eq!(shown.text.chars().count(), 240, "one long line is cut too");
-    assert_eq!(shown.toggle, Some("Show"));
-
+    let limit = ProseLimit::Result;
+    assert_eq!(limit.disclosure(false, false), (Some(3), None));
+    assert_eq!(limit.disclosure(false, true), (Some(3), Some("Show")));
     state.toggle_result("work", 1);
     assert_eq!(
-        excerpt(&state, "work", 1),
-        Excerpt {
-            text: long.to_owned(),
-            toggle: Some("Hide"),
-        }
+        limit.disclosure(state.result_expanded("work", 1), true),
+        (None, Some("Hide"))
     );
-    assert_eq!(
-        excerpt(&state, "home", 1).toggle,
-        Some("Show"),
-        "per result"
-    );
+    assert!(!state.result_expanded("home", 1));
+    assert!(!state.result_expanded("work", 2));
     state.toggle_result("work", 1);
-    assert_eq!(excerpt(&state, "work", 1).toggle, Some("Show"));
+    assert!(!state.result_expanded("work", 1));
 }
 
 #[tokio::test]
@@ -2042,7 +2012,7 @@ async fn your_message_to_a_task_shows_in_its_timeline_once() {
         .map(|moment| moment.text)
         .collect();
     assert!(
-        moments.contains(&"You wrote: Add tests first.".to_owned()),
+        moments.contains(&"You wrote:\n\nAdd tests first.".to_owned()),
         "{moments:?}"
     );
 }
@@ -4335,5 +4305,297 @@ async fn decision_history_recovers_an_answer_from_its_feed_trace() {
             chosen: Some(0),
             note: Some("Ship Tuesday".into()),
         })
+    );
+}
+
+#[test]
+fn stage_three_references_preserve_code_explicit_links_and_render_html_literally() {
+    let text = "Open **T-0001**, D-0012 and https://example.test/pull/4. `T-0002`";
+    let references = segments(text)
+        .into_iter()
+        .filter_map(|segment| match segment {
+            Segment::Link(label, target) => Some((label, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        references,
+        [
+            ("T-0001", Reference::Task(TaskId(1))),
+            ("D-0012", Reference::Decision(DecisionId(12))),
+            (
+                "https://example.test/pull/4",
+                Reference::Web("https://example.test/pull/4")
+            ),
+        ]
+    );
+    assert_eq!(
+        markdown_source(text),
+        "Open **[T-0001](threadlane:T-0001)**, [D-0012](threadlane:D-0012) and https://example.test/pull/4. `T-0002`"
+    );
+    let code = "# Heading
+```rust
+let v = \"D-0001 <div>\";
+```
+
+~~~sh
+T-0002
+~~~
+
+``the ` T-0003 id``";
+    assert_eq!(markdown_source(code), code);
+    assert_eq!(
+        markdown_source("[T-0001](https://example.test) <strong>x</strong>"),
+        "[T-0001](https://example.test) &lt;strong>x&lt;/strong>"
+    );
+    assert_eq!(
+        markdown_source("préT-0001 T-0002_suffix T-0000"),
+        "préT-0001 T-0002_suffix T-0000"
+    );
+    assert_eq!(
+        Reference::from_link("threadlane:D-0012"),
+        Some(Reference::Decision(DecisionId(12)))
+    );
+    assert_eq!(
+        markdown_source("`unclosed\n\n<div>\n\nthen `"),
+        "`unclosed\n\n&lt;div>\n\nthen `",
+    );
+    assert_eq!(Reference::from_link("file:///tmp/file"), None);
+    assert_eq!(Reference::from_link("javascript:alert(1)"), None);
+}
+
+#[tokio::test]
+async fn stage_three_hold_undo_flush_and_confirmation_use_the_original_recipient() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let to = Destination::Lead("work".into(), "api".into());
+    let at = Timestamp::from_millis(2_000);
+
+    assert!(sends_on_enter(false, false));
+    assert!(!sends_on_enter(false, true));
+    assert!(sends_on_enter(true, false));
+    assert!(sends_on_enter(true, true));
+    state.edit_draft(Draft::Lead, "  \n ");
+    assert!(!state.is_send_enabled(Draft::Lead));
+    assert!(state.request_send(to.clone(), at).held.is_none());
+
+    state.edit_draft(Draft::Lead, "Write the docs");
+    let hold = state.request_send(to.clone(), at).held.unwrap();
+    assert_eq!(state.held_seconds(Draft::Lead), Some(3));
+    assert!(
+        matches!(state.conversation("work", "api", &when()).as_slice(),
+        [Line::Day(_), Line::Sending { text, .. }] if text == "Write the docs")
+    );
+    assert!(state.tick_send(hold).is_none());
+    assert_eq!(state.held_seconds(Draft::Lead), Some(2));
+    assert!(state.undo_send(Draft::Lead));
+    assert_eq!(state.draft(Draft::Lead), "Write the docs");
+    assert!(state.tick_send(hold).is_none());
+    assert!(state.conversation("work", "api", &when()).is_empty());
+
+    let hold = state.request_send(to.clone(), at).held.unwrap();
+    let second = state.request_send(to.clone(), at);
+    assert!(
+        second.held.is_none(),
+        "repeating Send expedites the existing draft"
+    );
+    let flushed = second.flushed.unwrap();
+    assert_eq!(flushed.id, hold);
+    assert_eq!(flushed.destination, to);
+    assert!(state.tick_send(hold).is_none());
+    assert!(state.is_sending(Draft::Lead));
+    assert_eq!(state.draft(Draft::Lead), "Write the docs");
+
+    let result = flushed.deliver(&core).await;
+    let event_id = result.as_ref().unwrap().accepted.event_id;
+    work.history.lock().unwrap().push(ConversationEntry::You {
+        event_id,
+        text: flushed.text.clone(),
+        at,
+    });
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert_eq!(
+        said(&state.conversation("work", "api", &when())),
+        ["-- Today", "sending: Write the docs"]
+    );
+    state.finish_send(flushed, result);
+    state.apply_project(load_project(&core, "work", "api").await);
+    assert_eq!(
+        said(&state.conversation("work", "api", &when())),
+        ["-- Today", "you: Write the docs"]
+    );
+    assert_eq!(state.draft(Draft::Lead), "");
+    assert!(!state.is_sending(Draft::Lead));
+}
+
+#[tokio::test]
+async fn stage_three_countdown_flushes_an_edited_second_send_and_keeps_failed_task_text() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.set_client_dir(dir.path().to_owned());
+    work.tasks
+        .lock()
+        .unwrap()
+        .push(task(7, TaskStatus::Running, None));
+    state.apply_task(load_task(&core, "work", TaskId(7)).await);
+    let to = Destination::Task("work".into(), TaskId(7));
+    let at = Timestamp::from_millis(2_000);
+    state.edit_draft(Draft::Task, "First");
+    let first = state.request_send(to.clone(), at).held.unwrap();
+    state.edit_draft(Draft::Task, "Second");
+    let next = state.request_send(to.clone(), at);
+    let flushed = next.flushed.unwrap();
+    assert_eq!(flushed.id, first);
+    assert_eq!(flushed.text, "First");
+    state.finish_send(flushed.clone(), flushed.deliver(&core).await);
+    assert_eq!(state.draft(Draft::Task), "Second");
+    let second = next.held.unwrap();
+    assert!(state.tick_send(second).is_none());
+    assert!(state.tick_send(second).is_none());
+    assert_eq!(state.held_seconds(Draft::Task), Some(1));
+    assert!(
+        state
+            .task_timeline("work", state.task("work", TaskId(7)).unwrap(), &when())
+            .iter()
+            .any(|moment| moment.text == "You · Sending…\n\nSecond")
+    );
+    let outgoing = state.tick_send(second).unwrap();
+    assert!(state.tick_send(second).is_none());
+    work.down.store(true, Ordering::SeqCst);
+    state.finish_send(outgoing.clone(), outgoing.deliver(&core).await);
+    assert_eq!(state.draft(Draft::Task), "Second");
+    assert!(
+        state
+            .send_error(Draft::Task)
+            .unwrap()
+            .contains("connection refused")
+    );
+    assert!(state.is_send_enabled(Draft::Task));
+
+    state.set_hold_messages(false).unwrap();
+    let mut restarted = AppState::default();
+    restarted.set_client_dir(dir.path().to_owned());
+    assert!(!restarted.hold_messages());
+    work.down.store(false, Ordering::SeqCst);
+    let send = state.request_send(to, at).immediate.unwrap();
+    state.finish_send(send.clone(), send.deliver(&core).await);
+    assert_eq!(state.draft(Draft::Task), "");
+    assert!(state.send_error(Draft::Task).is_none());
+    let moments = state.task_timeline("work", state.task("work", TaskId(7)).unwrap(), &when());
+    assert_eq!(
+        moments
+            .iter()
+            .filter(|moment| moment.text == "You wrote:\n\nSecond")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn stage_three_new_divider_tracks_each_visit_and_the_newest_body_stays_open() {
+    let work = FakeHub::new("Work", vec![decision(12, 2_000)]);
+    let (dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.set_client_dir(dir.path().to_owned());
+    state.apply(refresh(&core).await);
+    assert_eq!(state.reference_project("work", DecisionId(12)), Some("api"));
+    work.history
+        .lock()
+        .unwrap()
+        .push(ConversationEntry::Delivered {
+            item: feed_item(
+                10,
+                OutboxKind::Decision,
+                json!({"decision": "D-0050", "question": "Old decision?", "options": ["yes"]}),
+                500,
+            ),
+        });
+    work.history
+        .lock()
+        .unwrap()
+        .extend((0..i64::from(PAGE)).map(|index| ConversationEntry::You {
+            event_id: EventId(1 + index),
+            text: "Newer page".to_owned(),
+            at: Timestamp::from_millis(3_000 + index),
+        }));
+    assert_eq!(state.reference_project("work", DecisionId(50)), None);
+    let link = load_decision_link(&core, "work", vec!["api".to_owned()], DecisionId(50))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut linked = AppState::default();
+    assert_eq!(linked.apply_decision_link(link), "api");
+    assert_eq!(
+        linked.reference_project("work", DecisionId(50)),
+        Some("api")
+    );
+    let first = item("work", 1, OutboxKind::Message, json!({"text": "Earlier"}));
+    let second = item(
+        "work",
+        2,
+        OutboxKind::Message,
+        json!({"text": "New result"}),
+    );
+    *work.history.lock().unwrap() = vec![ConversationEntry::Delivered { item: first.item }];
+    state.apply_project(load_project(&core, "work", "api").await);
+    state.visit_conversation("work", "api");
+    state.saw_conversation_latest("work", "api");
+    assert!(!state.conversation_has_newer("work", "api", false));
+    // Leaving and reopening after restart reads the same saved watermark.
+    let mut reopened = AppState::default();
+    reopened.set_client_dir(dir.path().to_owned());
+    reopened.receive(second.clone());
+    reopened.visit_conversation("work", "api");
+    assert!(
+        reopened
+            .conversation("work", "api", &when())
+            .contains(&Line::New)
+    );
+
+    state.receive(second.clone());
+    state.visit_conversation("work", "api");
+    let lines = state.conversation("work", "api", &when());
+    let mark = lines
+        .iter()
+        .position(|line| matches!(line, Line::New))
+        .unwrap();
+    assert!(matches!(&lines[mark+1], Line::Lead { text, .. } if text == "New result"));
+    assert!(state.conversation_has_newer("work", "api", false));
+    assert!(!state.conversation_has_newer("work", "api", true));
+
+    assert!(!follow_latest(false, false, true));
+    assert!(follow_latest(false, true, true));
+    assert!(follow_latest(true, false, false));
+    let newest = newest_message(&lines);
+    assert_eq!(
+        message_limit(newest, mark - 1).disclosure(false, true),
+        (Some(40), Some("Show more"))
+    );
+    assert_eq!(
+        message_limit(newest, mark + 1).disclosure(false, true),
+        (None, None)
+    );
+    state.toggle_message("earlier");
+    assert_eq!(
+        message_limit(newest, mark - 1).disclosure(state.message_expanded("earlier"), true),
+        (None, Some("Show less"))
+    );
+
+    state.saw_conversation_latest("work", "api");
+    state.receive(second);
+    state.visit_conversation("work", "api");
+    assert!(
+        !state
+            .conversation("work", "api", &when())
+            .contains(&Line::New)
+    );
+    state.edit_draft(Draft::Lead, "I agree.");
+    state.reply_to_message("First line\nSecond line");
+    assert_eq!(
+        state.draft(Draft::Lead),
+        "> First line\n> Second line\n\nI agree."
     );
 }

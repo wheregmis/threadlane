@@ -96,18 +96,20 @@ impl Desktop {
                     .child(meta(asked, cx)),
             )
             .child(decision_title(question))
-            .children(contents.context.map(|line| self.decision_context(line, cx)))
+            .children(contents.context.map(|line| {
+                self.decision_context(format!("context-{prefix}"), &key.space, line, cx)
+            }))
             .children(contents.details.into_iter().map(|line| div().child(line)))
-            .children(
-                contents
-                    .would_run_as
-                    .map(|line| self.decision_context(line, cx)),
-            )
+            .children(contents.would_run_as.map(|line| {
+                self.decision_context(format!("would-run-{prefix}"), &key.space, line, cx)
+            }))
             .child(v_flex().gap(XS).children(option_rows));
         if let Some(record) = record {
-            card = card
-                .child(meta(record.status, cx))
-                .children(record.note.map(|note| div().child(note)));
+            card = card.child(meta(record.status, cx)).children(
+                record
+                    .note
+                    .map(|note| self.prose(format!("note-{prefix}"), &key.space, note, cx)),
+            );
         } else if show_note {
             if let Some((note, _)) = self.decision_inputs.get(&key) {
                 card = card.child(v_flex().gap(XS).child(contents.note_label).child(
@@ -137,6 +139,7 @@ impl Desktop {
                     })),
             );
         }
+        let linked = self.reveal_linked_decision.as_ref() == Some(&key);
         if let Some((label, checked)) = always {
             card = card.child(
                 Checkbox::new(SharedString::from(format!("always-{prefix}")))
@@ -149,7 +152,11 @@ impl Desktop {
                     })),
             );
         }
-        self.reveal_decision_part(card, current, DecisionScroll::Card)
+        self.reveal_decision_part(
+            card,
+            linked || (current && self.reveal_linked_decision.is_none()),
+            DecisionScroll::Card,
+        )
     }
 
     fn reveal_decision_part(
@@ -194,7 +201,9 @@ impl Desktop {
             })
     }
 
-    fn decision_context(&self, line: String, cx: &App) -> Div {
-        div().text_color(cx.theme().muted_foreground).child(line)
+    fn decision_context(&self, id: String, space: &str, line: String, cx: &Context<Self>) -> Div {
+        div()
+            .text_color(cx.theme().muted_foreground)
+            .child(self.prose(id, space, line, cx))
     }
 }

@@ -84,6 +84,7 @@ impl Desktop {
         let space = space.to_owned();
         let in_space = space.clone();
         v_flex()
+            .w_full()
             .gap(XS)
             .items_start()
             .child(
@@ -120,7 +121,12 @@ impl Desktop {
                 } else {
                     row = row.child(div().text_size(TYPE_BODY).child(space.clone()));
                 }
-                row.child(div().text_size(TYPE_BODY).child(result.text))
+                row.w_full().child(self.prose(
+                    format!("digest-body-{space}-{seq}-{}", result.id),
+                    &space,
+                    result.text,
+                    cx,
+                ))
             }))
     }
 }

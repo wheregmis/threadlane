@@ -2,6 +2,7 @@
 //! it is reached, this app's client directory and version, and which
 //! system notifications it raises, kept in the client directory.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value as Json, json};
@@ -133,6 +134,22 @@ impl AppState {
         self.last_targets =
             serde_json::from_value(saved["last_projects"].clone()).unwrap_or_default();
         self.appearance = Appearance::from_saved(&saved);
+        self.skip_send_hold = saved["hold_messages"].as_bool() == Some(false);
+        let seen = serde_json::from_value::<BTreeMap<String, BTreeMap<String, i64>>>(
+            saved["conversation_seen"].clone(),
+        )
+        .unwrap_or_default();
+        self.conversation_read = seen
+            .into_iter()
+            .flat_map(|(space, projects)| {
+                projects.into_iter().map(move |(project, seq)| {
+                    (
+                        (space.clone(), project),
+                        crate::conversation::ConversationRead::saved(seq),
+                    )
+                })
+            })
+            .collect();
         self.client_dir = Some(dir);
     }
 
@@ -154,6 +171,46 @@ impl AppState {
         };
         let mut saved = read(dir);
         saved["appearance"] = json!(appearance.key());
+        write(dir, &saved)
+            .map_err(|error| format!("Could not save {SETTINGS_FILE}: {}", describe(&error)))
+    }
+
+    pub(crate) fn save_conversation_seen(&mut self) {
+        let Some(dir) = &self.client_dir else { return };
+        let mut seen: BTreeMap<&str, BTreeMap<&str, i64>> = BTreeMap::new();
+        for ((space, project), position) in &self.conversation_read {
+            seen.entry(space)
+                .or_default()
+                .insert(project, position.seen);
+        }
+        let mut saved = read(dir);
+        saved["conversation_seen"] = json!(seen);
+        if let Err(error) = write(dir, &saved) {
+            self.report(crate::Activity::Failed(format!(
+                "Could not save conversation read positions: {}",
+                describe(&error)
+            )));
+        }
+    }
+
+    /// Whether a send can be undone during the first three seconds.
+    #[must_use]
+    pub fn hold_messages(&self) -> bool {
+        !self.skip_send_hold
+    }
+
+    /// Applies and saves the send hold preference.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the preference could not be saved. It still applies this session.
+    pub fn set_hold_messages(&mut self, on: bool) -> Result<(), String> {
+        self.skip_send_hold = !on;
+        let Some(dir) = &self.client_dir else {
+            return Ok(());
+        };
+        let mut saved = read(dir);
+        saved["hold_messages"] = json!(on);
         write(dir, &saved)
             .map_err(|error| format!("Could not save {SETTINGS_FILE}: {}", describe(&error)))
     }

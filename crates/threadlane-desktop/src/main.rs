@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::component::input::{InputState, TextareaState, Undo};
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
@@ -310,12 +310,15 @@ struct Desktop {
     keyboard_focus: FocusHandle,
     sidebar_collapsed: bool,
     decision_scroll: ScrollHandle,
+    reveal_linked_decision: Option<DecisionKey>,
+    conversation_at_bottom: bool,
+    conversation_follow: Rc<Cell<bool>>,
     scroll_to_decision: Rc<Cell<DecisionScroll>>,
     decision_inputs: HashMap<DecisionKey, (Entity<InputState>, Subscription)>,
-    composer: Entity<InputState>,
+    composer: Entity<TextareaState>,
     pacing_inputs: [Entity<InputState>; 4],
     /// The task screen's composer (wireframe 5).
-    task_composer: Entity<InputState>,
+    task_composer: Entity<TextareaState>,
     /// The Memory tab's editor.
     memory_editor: Entity<TextareaState>,
     dream_cadence: Entity<InputState>,
@@ -383,10 +386,8 @@ impl Desktop {
             }
         })
         .detach();
-        let composer =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Tell your team what you need…"));
-        let task_composer =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Add to this task…"));
+        let composer = components::composer::input("Tell your team what you need…", window, cx);
+        let task_composer = components::composer::input("Add to this task…", window, cx);
         let memory_editor = cx.new(|cx| TextareaState::new(window, cx).rows(16));
         let dream_cadence =
             cx.new(|cx| InputState::new(window, cx).placeholder("daily 02:00 or every 6h"));
@@ -428,23 +429,12 @@ impl Desktop {
         let task_title = field("Title", cx);
         let task_goal = field("Goal: what done looks like", cx);
         let subscriptions = vec![
-            cx.subscribe_in(
-                &composer,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.send(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
+            components::composer::subscribe(threadlane_desktop::Draft::Lead, &composer, window, cx),
+            components::composer::subscribe(
+                threadlane_desktop::Draft::Task,
                 &task_composer,
                 window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.send_to_task(window, cx);
-                    }
-                },
+                cx,
             ),
         ];
         let follow = cx.spawn(async move |this, cx| {
@@ -500,6 +490,17 @@ impl Desktop {
         });
         let screen = start.unwrap_or(Screen::Home);
         state.set_decision_scope(screen.decision_scope());
+        let conversation = if let Screen::Project {
+            space,
+            project,
+            tab: Tab::Conversation,
+        } = &screen
+        {
+            state.visit_conversation(space, project);
+            true
+        } else {
+            false
+        };
         let keyboard_focus = cx.focus_handle();
         keyboard_focus.focus(window, cx);
         cx.on_focus_lost(window, |this, window, cx| {
@@ -514,7 +515,14 @@ impl Desktop {
             keyboard_focus,
             sidebar_collapsed: false,
             decision_scroll: ScrollHandle::default(),
-            scroll_to_decision: Rc::new(Cell::new(DecisionScroll::Card)),
+            reveal_linked_decision: None,
+            conversation_at_bottom: true,
+            conversation_follow: Rc::new(Cell::new(conversation)),
+            scroll_to_decision: Rc::new(Cell::new(if conversation {
+                DecisionScroll::None
+            } else {
+                DecisionScroll::Card
+            })),
             decision_inputs: HashMap::new(),
             composer,
             pacing_inputs,
@@ -719,6 +727,18 @@ impl Desktop {
             Screen::Project { space, project, .. }
                 if threadlane_desktop::belongs_in_conversation(&item, space, project)
         );
+        let conversation_arrival = match &self.screen {
+            Screen::Project {
+                space,
+                project,
+                tab: Tab::Conversation,
+            } if for_open_project => Some((
+                space.clone(),
+                project.clone(),
+                self.state.conversation_latest(space, project),
+            )),
+            _ => None,
+        };
         if let Some(alert) = self.state.receive(item) {
             let decision = matches!(alert, threadlane_desktop::Alert::Decision { .. });
             if self.state.notifies(&alert) {
@@ -731,6 +751,11 @@ impl Desktop {
         }
         if back {
             self.refresh(cx);
+        }
+        if let Some((space, project, previous)) = conversation_arrival
+            && self.state.conversation_latest(&space, &project) > previous
+        {
+            self.state.conversation_arrived(&space, &project, previous);
         }
         // What the lead says often comes with tasks it made or finished.
         if for_open_project {
@@ -768,8 +793,24 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.reveal_linked_decision = None;
+            self.conversation_at_bottom = true;
+            self.conversation_follow = Rc::new(Cell::new(false));
+            if let Screen::Project {
+                space,
+                project,
+                tab: Tab::Conversation,
+            } = &screen
+            {
+                self.state.visit_conversation(space, project);
+                self.conversation_follow.set(true);
+            }
             self.state.set_decision_scope(screen.decision_scope());
-            self.scroll_to_decision = Rc::new(Cell::new(DecisionScroll::Card));
+            self.scroll_to_decision = Rc::new(Cell::new(if self.conversation_follow.get() {
+                DecisionScroll::None
+            } else {
+                DecisionScroll::Card
+            }));
             self.decision_scroll = ScrollHandle::default();
         }
         self.screen = screen;
@@ -838,59 +879,6 @@ impl Desktop {
                     }
                     Err(error) => this.state.report(Activity::Failed(describe(&error))),
                 }
-            },
-            cx,
-        );
-        cx.notify();
-    }
-
-    /// Sends the composer's text to the open project's lead, or from Home
-    /// to the project the picker names.
-    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = match &self.screen {
-            Screen::Project { space, project, .. } => Some((space.clone(), project.clone())),
-            _ => self
-                .state
-                .target()
-                .map(|(space, project)| (space.to_owned(), project.to_owned())),
-        };
-        let Some((space, project)) = target else {
-            self.state.report(Activity::Failed(
-                "No project to send to: pair a hub first.".to_owned(),
-            ));
-            cx.notify();
-            return;
-        };
-        let text = self.composer.read(cx).value().trim().to_owned();
-        if text.is_empty() {
-            return;
-        }
-        self.composer
-            .update(cx, |composer, cx| composer.set_value("", window, cx));
-        let core = Arc::clone(&self.core);
-        self.state.report(Activity::Working(format!(
-            "Sending to the lead of {space} / {project}…"
-        )));
-        self.run(
-            async move {
-                let sent = core
-                    .read()
-                    .await
-                    .send(Some(&space), Some(&project), &text)
-                    .await;
-                (space, project, text, sent)
-            },
-            |this, (space, project, text, sent), cx| match sent {
-                Ok(sent) => {
-                    let at = SystemClock.now();
-                    this.state
-                        .sent(&space, &project, &text, sent.accepted.event_id, at);
-                    this.state.report(Activity::Done(format!(
-                        "Sent to the lead of {space} / {project}."
-                    )));
-                    this.load_screen(cx);
-                }
-                Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
         );
@@ -998,48 +986,6 @@ impl Desktop {
 }
 
 impl Desktop {
-    /// Sends the task composer's text to the open task's lane (wireframe 5,
-    /// note 5): while a decision is open there, it declines it with the
-    /// text as the note.
-    fn send_to_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Screen::Task { space, task } = self.screen.clone() else {
-            return;
-        };
-        let text = self.task_composer.read(cx).value().trim().to_owned();
-        if text.is_empty() {
-            return;
-        }
-        self.task_composer
-            .update(cx, |composer, cx| composer.set_value("", window, cx));
-        let core = Arc::clone(&self.core);
-        self.state
-            .report(Activity::Working(format!("Sending to {space} / {task}…")));
-        self.run(
-            async move {
-                let sent = core
-                    .read()
-                    .await
-                    .send_to_task(Some(&space), &task.to_string(), &text)
-                    .await;
-                (space, task, text, sent)
-            },
-            |this, (space, task, text, sent), cx| match sent {
-                Ok(sent) => {
-                    let at = SystemClock.now();
-                    this.state
-                        .sent_to_task(&space, task, &text, sent.accepted.event_id, at);
-                    this.state
-                        .report(Activity::Done(format!("Sent to {space} / {task}.")));
-                    // A decision it declined, and the task's new state.
-                    this.refresh(cx);
-                }
-                Err(error) => this.state.report(Activity::Failed(describe(&error))),
-            },
-            cx,
-        );
-        cx.notify();
-    }
-
     /// Shows a memory file on the right, with its versions.
     fn select_memory(&mut self, space: &str, project: &str, path: &str, cx: &mut Context<Self>) {
         self.state.select_memory(space, project, path);
@@ -1405,6 +1351,7 @@ impl Render for Desktop {
                 field.update(cx, |field, cx| field.set_value("", window, cx));
             }
         }
+        self.sync_drafts(window, cx);
         self.prepare_decision_inputs(window, cx);
         let when = self.when();
         let body = match self.screen.clone() {
@@ -1431,6 +1378,12 @@ impl Render for Desktop {
             .id("desktop")
             .track_focus(&self.keyboard_focus)
             .key_context(menus::KEY_CONTEXT)
+            .capture_action(cx.listener(|this, _: &Undo, window, cx| {
+                use gpui_kit::component::WindowExt as _;
+                if !window.has_active_dialog(cx) && this.undo_draft(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .size_full()
             .items_stretch()
             .font_features(TABULAR.clone())

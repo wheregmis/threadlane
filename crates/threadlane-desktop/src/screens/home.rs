@@ -11,10 +11,8 @@ use threadlane_desktop::{Part, When, running_elapsed};
 
 use super::gap_line;
 use crate::components::{
-    button, composer, count, decision_scroller, empty_state, field, heading, meta, section,
-    status_dot,
+    button, count, decision_scroller, empty_state, heading, meta, section, status_dot,
 };
-use crate::icons::AppIcon;
 use crate::tokens::{
     CONTROL_HEIGHT, LG, READING_WIDTH, ROW_HEIGHT, SM, Status, TIMESTAMP_WIDTH, TYPE_BODY,
     TYPE_META, XL, XS,
@@ -190,21 +188,16 @@ impl Desktop {
             let digest = state
                 .digest(item)
                 .map(|digest| self.digest_entry(&item.space, digest, cx));
-            let excerpt = digest.is_none().then(|| state.excerpt(item));
-            let (space, seq) = (item.space.clone(), item.item.seq);
-            let toggle = excerpt
-                .as_ref()
-                .and_then(|excerpt| excerpt.toggle)
-                .map(|label| {
-                    button(SharedString::from(format!("result-{space}-{seq}")))
-                        .link()
-                        .small()
-                        .label(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.toggle_result(&space, seq);
-                            cx.notify();
-                        }))
-                });
+            let excerpt = digest.is_none().then(|| {
+                let seq = item.item.seq;
+                self.prose(
+                    format!("result-{}-{seq}", item.space),
+                    &item.space,
+                    item.text(),
+                    cx,
+                )
+                .result(seq, state.result_expanded(&item.space, seq))
+            });
             recent = recent.child(
                 h_flex()
                     .items_start()
@@ -226,11 +219,7 @@ impl Desktop {
                                     .child(item.label().replace('/', " / ")),
                             )
                             .children(digest)
-                            .children(
-                                excerpt
-                                    .map(|excerpt| div().text_size(TYPE_BODY).child(excerpt.text)),
-                            )
-                            .children(toggle),
+                            .children(excerpt),
                     ),
             );
         }
@@ -292,17 +281,12 @@ impl Desktop {
                 }
                 menu
             });
-        composer(cx)
-            .child(picker)
-            .child(div().flex_1().min_w_0().child(field(&self.composer)))
-            .child(
-                button("send")
-                    .primary()
-                    .icon(AppIcon::Send)
-                    .label("Send")
-                    .tooltip(crate::keyboard::send_hint(cx))
-                    .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-            )
+        self.render_composer(
+            threadlane_desktop::Draft::Lead,
+            "Message the selected project's lead",
+            Some(picker.into_any_element()),
+            cx,
+        )
     }
 }
 

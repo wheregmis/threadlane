@@ -28,6 +28,7 @@ use tokio::sync::{RwLock, mpsc};
 
 mod attention;
 mod clock;
+mod composer;
 mod control;
 mod conversation;
 mod decision_keys;
@@ -36,21 +37,25 @@ mod dreaming;
 mod machines;
 mod memory;
 mod permissions;
+mod prose;
 mod routines;
 mod settings;
 mod tasks;
 
 pub use attention::{AttentionRow, needs_you};
 pub use clock::{When, duration};
+pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
 pub use control::{
     AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository, copy_agent,
     same_remote,
 };
-pub use conversation::{Digest, Line, belongs_in_conversation};
+pub use conversation::{
+    Digest, Line, belongs_in_conversation, follow_latest, message_limit, newest_message,
+};
 pub use decision_keys::{
     DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope,
 };
-pub use decision_record::{DecisionDisplay, DecisionRecord};
+pub use decision_record::{DecisionDisplay, DecisionLink, DecisionRecord, load_decision_link};
 pub use dreaming::{DreamingAction, DreamingCard, DreamingLoad, change_dreaming, load_dreaming};
 pub use machines::{MachineRow, machine_row};
 pub use memory::{
@@ -61,6 +66,7 @@ pub use permissions::{
     AgentRow, AtOnce, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement,
     allows, applied, at_once, cell_label, matrix, mode_label,
 };
+pub use prose::{ProseLimit, Reference, Segment, markdown_source, segments};
 pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
 };
@@ -85,12 +91,6 @@ const RECENT_SHOWN: usize = 8;
 /// The key prefix of the hub's account notices, which end in `:blocked`
 /// or `:resumed` (`threadlane-store`, Plan.md §5.3).
 const ACCOUNT_NOTICE: &str = "system:account:";
-
-/// How many characters of a result Home shows before its "Show" toggle.
-const EXCERPT_CHARS: usize = 240;
-
-/// How many lines of a result Home shows before its "Show" toggle.
-const EXCERPT_LINES: usize = 3;
 
 /// An error with its causes, as the app shows it: `hub work refused the
 /// request: not found: task T-0001`.
@@ -301,36 +301,6 @@ fn machine_count<'a>(spaces: impl Iterator<Item = &'a Space>) -> Option<(usize, 
         count = (count.0 + space.online(), count.1 + space.machines.len());
     }
     Some(count)
-}
-
-/// The start of a long result, as Home shows it until you ask for all of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Excerpt {
-    /// The text shown.
-    pub text: String,
-    /// The toggle's label: `Show` when text is hidden, `Hide` once shown,
-    /// `None` when the whole result fits.
-    pub toggle: Option<&'static str>,
-}
-
-/// The first [`EXCERPT_LINES`] lines of `text`, at most [`EXCERPT_CHARS`]
-/// characters, and whether that cut anything.
-fn excerpt_of(text: &str) -> (String, bool) {
-    let mut lines = text.trim().lines();
-    let mut shown: String = lines
-        .by_ref()
-        .take(EXCERPT_LINES)
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut cut = lines.next().is_some();
-    if let Some((at, _)) = shown.char_indices().nth(EXCERPT_CHARS) {
-        shown.truncate(at);
-        cut = true;
-    }
-    if cut {
-        shown = format!("{}…", shown.trim_end());
-    }
-    (shown, cut)
 }
 
 /// How many characters of an argument a decision card shows.
@@ -985,6 +955,10 @@ pub struct AppState {
     /// Which system notifications the app raises.
     notifications: Notifications,
     appearance: Appearance,
+    skip_send_hold: bool,
+    composer: composer::Composer,
+    conversation_read: HashMap<InSpace<String>, conversation::ConversationRead>,
+    expanded_messages: HashSet<String>,
     /// Where this app keeps its files.
     client_dir: Option<PathBuf>,
     /// The agent row expanded on a project's Agents tab: space, project,
@@ -1455,6 +1429,8 @@ impl AppState {
         self.decision_records.retain(|key, _| key.space != name);
         self.decision_notes.retain(|key| key.space != name);
         self.delivered.retain(|(space, _), _| space != name);
+        self.conversation_read.retain(|(space, _), _| space != name);
+        self.save_conversation_seen();
         self.said.retain(|(space, _), _| space != name);
         self.loaded.retain(|(space, _), _| space != name);
         self.projects.retain(|(space, _), _| space != name);
@@ -1872,22 +1848,22 @@ impl AppState {
         }
     }
 
-    /// The start of a Home result, and its toggle.
+    /// Whether a Home result is explicitly expanded.
     #[must_use]
-    pub fn excerpt(&self, item: &SpaceFeedItem) -> Excerpt {
-        let text = item.text();
-        let (start, cut) = excerpt_of(&text);
-        let open = self.expanded.contains(&(item.space.clone(), item.item.seq));
-        match (cut, open) {
-            (false, _) => Excerpt { text, toggle: None },
-            (true, true) => Excerpt {
-                text,
-                toggle: Some("Hide"),
-            },
-            (true, false) => Excerpt {
-                text: start,
-                toggle: Some("Show"),
-            },
+    pub fn result_expanded(&self, space: &str, seq: i64) -> bool {
+        self.expanded.contains(&(space.to_owned(), seq))
+    }
+
+    /// Whether an older message is explicitly expanded.
+    #[must_use]
+    pub fn message_expanded(&self, key: &str) -> bool {
+        self.expanded_messages.contains(key)
+    }
+
+    /// Expands or collapses an older message.
+    pub fn toggle_message(&mut self, key: &str) {
+        if !self.expanded_messages.remove(key) {
+            self.expanded_messages.insert(key.to_owned());
         }
     }
 

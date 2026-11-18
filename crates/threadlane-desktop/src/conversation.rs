@@ -7,15 +7,28 @@ use threadlane_core::ids::RunId;
 use threadlane_core::model::{Mode, OutboxKind, Run, RunOutcome, RunStatus};
 use threadlane_core::time::Timestamp;
 
-use crate::{AppState, Card, DecisionScope, Moment, When};
+use crate::{AppState, Card, DecisionScope, Destination, Moment, ProseLimit, When};
 
 /// One line of a conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
     /// The first line of a day: `Today`, `Yesterday`, or a date.
     Day(String),
+    /// The first delivery since the previous visit.
+    New,
+    /// A local submission awaiting confirmation.
+    Sending {
+        /// Local message identity.
+        id: u64,
+        /// What you wrote.
+        text: String,
+        /// When you submitted it.
+        time: String,
+    },
     /// A message you sent.
     You {
+        /// Stable owner event identity.
+        id: threadlane_core::ids::EventId,
         /// What you wrote.
         text: String,
         /// When, as `14:20`.
@@ -23,6 +36,8 @@ pub enum Line {
     },
     /// A message from the lead.
     Lead {
+        /// Feed sequence within this space.
+        seq: i64,
         /// What it said.
         text: String,
         /// When it was delivered.
@@ -35,6 +50,8 @@ pub enum Line {
     },
     /// A delivery that failed permanently.
     DeliveryFailure {
+        /// Stable event identity.
+        id: threadlane_core::ids::EventId,
         /// What failed.
         text: String,
         /// When it failed.
@@ -49,6 +66,8 @@ pub enum Line {
     },
     /// A system notice.
     Notice {
+        /// Feed sequence within this space.
+        seq: i64,
         /// What it said.
         text: String,
         /// When it was delivered.
@@ -89,6 +108,7 @@ pub struct Digest {
 
 enum Entry<'a> {
     Visible(Line),
+    Delivered(Line),
     Run(&'a LeadRun),
 }
 
@@ -153,26 +173,45 @@ impl AppState {
     pub fn conversation(&self, space: &str, project: &str, when: &When) -> Vec<Line> {
         // `order` keeps what was delivered at the same time in feed order.
         let mut lines: Vec<(Timestamp, i64, Entry<'_>)> = Vec::new();
-        for ((in_space, _), said) in &self.said {
-            if in_space == space && said.project == project {
+        let destination = Destination::Lead(space.to_owned(), project.to_owned());
+        for ((in_space, id), said) in &self.said {
+            if in_space == space
+                && said.project == project
+                && !self.has_optimistic_copy(&destination, &said.text, said.at)
+            {
                 lines.push((
                     said.at,
                     i64::MIN,
                     Entry::Visible(Line::You {
+                        id: *id,
                         text: said.text.clone(),
                         time: when.time(said.at),
                     }),
                 ));
             }
         }
-        for ((in_space, _), failure) in &self.failures {
+        for ((in_space, id), failure) in &self.failures {
             if in_space == space && failure.project == project {
                 lines.push((
                     failure.at,
                     i64::MAX,
                     Entry::Visible(Line::DeliveryFailure {
+                        id: *id,
                         text: failure.text.clone(),
                         time: when.time(failure.at),
+                    }),
+                ));
+            }
+        }
+        for send in self.outgoing() {
+            if send.destination == destination {
+                lines.push((
+                    send.at,
+                    i64::MAX,
+                    Entry::Visible(Line::Sending {
+                        id: send.id,
+                        text: send.text.clone(),
+                        time: when.time(send.at),
                     }),
                 ));
             }
@@ -188,11 +227,13 @@ impl AppState {
                 OutboxKind::Message => match self.digest(item) {
                     Some(digest) => Line::Digest { digest, time },
                     None => Line::Lead {
+                        seq: item.item.seq,
                         text: item.text(),
                         time,
                     },
                 },
                 OutboxKind::SystemNotice => Line::Notice {
+                    seq: item.item.seq,
                     text: item.text(),
                     time,
                 },
@@ -210,7 +251,7 @@ impl AppState {
                     None => continue,
                 },
             };
-            lines.push((at, item.item.seq, Entry::Visible(line)));
+            lines.push((at, item.item.seq, Entry::Delivered(line)));
         }
         let scope = DecisionScope::Project(space.to_owned(), project.to_owned());
         let pending = self
@@ -265,10 +306,18 @@ impl AppState {
         let mut shown = Vec::with_capacity(lines.len());
         let mut today = None;
         let mut lines = lines.into_iter().peekable();
-        while let Some((at, _, entry)) = lines.next() {
+        let unread = self
+            .conversation_read
+            .get(&(space.to_owned(), project.to_owned()))
+            .and_then(|read| read.new_after);
+        let mut marked = false;
+        while let Some((at, seq, entry)) = lines.next() {
+            let first_new = !marked
+                && unread.is_some_and(|after| seq > after)
+                && matches!(entry, Entry::Delivered(_));
             let day = when.day(at);
             let line = match entry {
-                Entry::Visible(line) => line,
+                Entry::Visible(line) | Entry::Delivered(line) => line,
                 Entry::Run(run) if run.run.status == RunStatus::Stopped => Line::Stopped {
                     time: when.time(at),
                 },
@@ -279,6 +328,7 @@ impl AppState {
                     let mut reasons = Vec::new();
                     if expanded {
                         reasons.push(Moment {
+                            id: id.to_string(),
                             time: times[0].clone(),
                             text: reason(&first.run).to_owned(),
                         });
@@ -290,6 +340,7 @@ impl AppState {
                         let time = when.time(at);
                         if expanded {
                             reasons.push(Moment {
+                                id: next.run.id.to_string(),
                                 time: time.clone(),
                                 text: reason(&next.run).to_owned(),
                             });
@@ -314,6 +365,10 @@ impl AppState {
                 shown.push(Line::Day(day.clone()));
                 today = Some(day);
             }
+            if first_new {
+                shown.push(Line::New);
+                marked = true;
+            }
             shown.push(line);
         }
         shown
@@ -325,5 +380,156 @@ impl AppState {
         if !self.expanded_quiet.remove(&key) {
             self.expanded_quiet.insert(key);
         }
+    }
+}
+
+/// Read position for one project.
+#[derive(Debug)]
+pub(crate) struct ConversationRead {
+    pub(crate) seen: i64,
+    new_after: Option<i64>,
+}
+
+impl ConversationRead {
+    pub(crate) fn saved(seen: i64) -> Self {
+        Self {
+            seen,
+            new_after: None,
+        }
+    }
+}
+
+impl AppState {
+    /// The newest delivery belonging to a conversation.
+    #[must_use]
+    pub fn conversation_latest(&self, space: &str, project: &str) -> i64 {
+        self.delivered
+            .values()
+            .rev()
+            .find(|item| belongs_in_conversation(item, space, project))
+            .map_or(0, |item| item.item.seq)
+    }
+
+    /// Sets the New divider baseline when entering a conversation.
+    pub fn visit_conversation(&mut self, space: &str, project: &str) {
+        use std::collections::hash_map::Entry;
+        match self
+            .conversation_read
+            .entry((space.to_owned(), project.to_owned()))
+        {
+            Entry::Occupied(mut entry) => {
+                let read = entry.get_mut();
+                read.new_after = Some(read.seen);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(ConversationRead::saved(0));
+            }
+        }
+    }
+
+    /// Records a new live arrival before advancing the seen position.
+    pub fn conversation_arrived(&mut self, space: &str, project: &str, previous: i64) {
+        if let Some(read) = self
+            .conversation_read
+            .get_mut(&(space.to_owned(), project.to_owned()))
+        {
+            read.new_after.get_or_insert(previous);
+        }
+    }
+
+    /// Records that the newest message is in view, leaving the divider for this visit.
+    pub fn saw_conversation_latest(&mut self, space: &str, project: &str) {
+        let latest = self.conversation_latest(space, project);
+        if let Some(read) = self
+            .conversation_read
+            .get_mut(&(space.to_owned(), project.to_owned()))
+            && latest > read.seen
+        {
+            read.seen = latest;
+            self.save_conversation_seen();
+        }
+    }
+
+    /// Whether arrivals warrant a jump control while the viewport is away from the bottom.
+    #[must_use]
+    pub fn conversation_has_newer(&self, space: &str, project: &str, at_bottom: bool) -> bool {
+        !at_bottom
+            && self
+                .conversation_read
+                .get(&(space.to_owned(), project.to_owned()))
+                .is_some_and(|read| self.conversation_latest(space, project) > read.seen)
+    }
+
+    /// The known decision in the queue, project history, or a loaded task.
+    #[must_use]
+    pub fn linked_decision(
+        &self,
+        space: &str,
+        id: threadlane_core::ids::DecisionId,
+    ) -> Option<&threadlane_core::model::Decision> {
+        let key = crate::DecisionKey {
+            space: space.to_owned(),
+            id,
+        };
+        self.queue
+            .iter()
+            .find(|item| item.space == space && item.decision.id == id)
+            .map(|item| &item.decision)
+            .or_else(|| self.decision_records.get(&key))
+            .or_else(|| {
+                self.tasks.iter().find_map(|((name, _), task)| {
+                    if name == space {
+                        task.decisions.iter().find(|decision| decision.id == id)
+                    } else {
+                        None
+                    }
+                })
+            })
+    }
+
+    /// A decision's project in the given space, from the queue, task, or history.
+    #[must_use]
+    pub fn reference_project(
+        &self,
+        space: &str,
+        id: threadlane_core::ids::DecisionId,
+    ) -> Option<&str> {
+        let label = id.to_string();
+        self.linked_decision(space, id)
+            .and_then(|decision| self.project_name(space, decision.project_id))
+            .or_else(|| {
+                self.delivered.values().find_map(|item| {
+                    (item.space == space && Card::of(item).is_some_and(|card| card.id == label))
+                        .then_some(item.item.project_name.as_deref())
+                        .flatten()
+                })
+            })
+    }
+}
+
+/// Whether the viewport should follow growing content or an explicit jump.
+#[must_use]
+pub fn follow_latest(requested: bool, at_bottom: bool, grew: bool) -> bool {
+    requested || (at_bottom && grew)
+}
+
+/// Finds the newest message, which should remain expanded at any length.
+#[must_use]
+pub fn newest_message(lines: &[Line]) -> Option<usize> {
+    lines.iter().rposition(|line| {
+        matches!(
+            line,
+            Line::You { .. } | Line::Lead { .. } | Line::Sending { .. } | Line::Digest { .. }
+        )
+    })
+}
+
+/// Older message bodies can be collapsed after layout.
+#[must_use]
+pub fn message_limit(newest: Option<usize>, index: usize) -> ProseLimit {
+    if newest.is_some_and(|latest| index < latest) {
+        ProseLimit::Message
+    } else {
+        ProseLimit::Full
     }
 }

@@ -23,6 +23,10 @@ pub(super) const XXL: Pixels = px(32.);
 /// Dot size in logical pixels.
 pub(super) const DOT_SIZE: Pixels = px(6.);
 
+/// Distance from the bottom that still counts as the latest position.
+pub(super) const SCROLL_END_TOLERANCE: Pixels = px(4.);
+/// Visible rows before the composer starts scrolling internally.
+pub(super) const COMPOSER_MAX_ROWS: usize = 8;
 /// Composer radius in logical pixels.
 pub(super) const COMPOSER_RADIUS: Pixels = px(24.);
 /// Field radius in logical pixels.

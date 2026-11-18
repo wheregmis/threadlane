@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use threadlane_client::ClientCore;
+use threadlane_client::{ClientCore, SpaceFeedItem};
 use threadlane_core::client::{ConversationEntry, OperationsReply, OperationsRequest};
 use threadlane_core::ids::DecisionId;
 use threadlane_core::model::{Decision, DecisionKind, DecisionStatus, OutboxKind};
@@ -233,4 +233,91 @@ pub(crate) async fn load_records(
         }
     }
     records
+}
+
+/// A referenced decision located in conversation history.
+#[derive(Debug)]
+pub struct DecisionLink {
+    project: String,
+    item: SpaceFeedItem,
+    records: Vec<Decision>,
+}
+
+/// Looks up a decision whose card is outside the desktop's loaded history.
+///
+/// # Errors
+///
+/// Returns the first project history error if no available project contains the decision.
+pub async fn load_decision_link(
+    core: &ClientCore,
+    space: &str,
+    projects: Vec<String>,
+    id: DecisionId,
+) -> Result<Option<DecisionLink>, threadlane_client::ClientError> {
+    let label = id.to_string();
+    let mut failure = None;
+    for project in projects {
+        let mut before = None;
+        loop {
+            let page = match core
+                .conversation(Some(space), Some(&project), before, crate::PAGE)
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    failure.get_or_insert(error);
+                    break;
+                }
+            };
+            for entry in &page {
+                if let ConversationEntry::Delivered { item } = entry
+                    && item.message.kind == OutboxKind::Decision
+                {
+                    let mut item = SpaceFeedItem {
+                        space: space.to_owned(),
+                        item: item.clone(),
+                    };
+                    if Card::of(&item).is_some_and(|card| card.id == label) {
+                        item.item
+                            .project_name
+                            .get_or_insert_with(|| project.clone());
+                        let records = load_records(core, space, std::slice::from_ref(entry)).await;
+                        return Ok(Some(DecisionLink {
+                            project,
+                            item,
+                            records,
+                        }));
+                    }
+                }
+            }
+            if page.len() < crate::PAGE as usize {
+                break;
+            }
+            let oldest = page.iter().filter_map(conversation_time).min();
+            if oldest.is_none() || oldest == before {
+                break;
+            }
+            before = oldest;
+        }
+    }
+    failure.map_or(Ok(None), Err)
+}
+
+impl AppState {
+    /// Retains a linked decision and returns the project to open.
+    pub fn apply_decision_link(&mut self, link: DecisionLink) -> String {
+        self.remember_decisions(&link.item.space, link.records);
+        self.deliver(link.item);
+        link.project
+    }
+}
+
+pub(crate) fn conversation_time(entry: &ConversationEntry) -> Option<Timestamp> {
+    match entry {
+        ConversationEntry::You { at, .. } | ConversationEntry::DeliveryFailure { at, .. } => {
+            Some(*at)
+        }
+        ConversationEntry::Delivered { item } => Some(item.delivered_at),
+        _ => None,
+    }
 }
