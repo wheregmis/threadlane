@@ -1028,11 +1028,19 @@ impl Desktop {
                     .min_w_0()
                     .gap(SM)
                     .child(self.conversation_scroller(space, project, lines, cx))
-                    .children(main_chat.then(|| {
+                    .children((!self.state.is_archived(space, project)).then(|| {
+                        let page = (space.to_owned(), project.to_owned());
+                        let picker = self.to_picker(
+                            self.state.chat_target(space, project),
+                            move |state, space, project| {
+                                state.set_chat_target((&page.0, &page.1), (space, project));
+                            },
+                            cx,
+                        );
                         self.render_composer(
                             threadlane_desktop::Draft::Lead,
-                            "Message the space Lead",
-                            None,
+                            "Message the lead",
+                            Some(picker),
                             cx,
                         )
                         .flex_none()

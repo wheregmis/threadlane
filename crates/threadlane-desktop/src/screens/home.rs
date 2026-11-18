@@ -4,7 +4,7 @@
 
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::ButtonVariants as _;
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -327,41 +327,19 @@ impl Desktop {
         list
     }
 
-    /// The Inbox composer sends to the chosen space's Main Chat.
+    /// The Inbox composer sends to the lead chosen in its "To:" picker.
     fn home_composer(&self, cx: &mut Context<Self>) -> Div {
-        let label = self
-            .state
-            .target()
-            .map_or_else(|| "No space".to_owned(), |(space, _)| format!("{space} ▾"));
-        let view = cx.entity().downgrade();
-        let targets: Vec<(String, String)> = self
-            .state
-            .spaces()
-            .iter()
-            .filter_map(|space| Some((space.name.clone(), space.main_chat_project()?.to_owned())))
-            .collect();
-        let accessibility = format!("Choose a space · {label}");
-        let picker = button("target")
-            .label(label)
-            .tab_stop(true)
-            .accessibility_label(accessibility)
-            .dropdown_menu(move |mut menu, _, _| {
-                for (space, project) in &targets {
-                    let (space, project, view) = (space.clone(), project.clone(), view.clone());
-                    menu =
-                        menu.item(PopupMenuItem::new(space.clone()).on_click(move |_, _, cx| {
-                            let _gone = view.update(cx, |this, cx| {
-                                this.state.set_target(&space, &project);
-                                cx.notify();
-                            });
-                        }));
-                }
-                menu
-            });
+        let picker = self.state.target().map(|current| {
+            self.to_picker(
+                current,
+                |state, space, project| state.set_target(space, project),
+                cx,
+            )
+        });
         self.render_composer(
             threadlane_desktop::Draft::Lead,
-            "Message the space Lead",
-            (self.state.spaces().len() > 1).then(|| picker.into_any_element()),
+            "Message the lead",
+            picker,
             cx,
         )
     }

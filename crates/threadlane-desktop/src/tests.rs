@@ -1036,6 +1036,81 @@ async fn decisions_from_two_hubs_merge_oldest_first() {
 }
 
 #[tokio::test]
+async fn the_to_picker_lists_each_space_lead_first_and_names_spaces_only_when_several() {
+    let work = FakeHub::new("Work", vec![]);
+    let (_one, single) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&single).await);
+    assert_eq!(state.lead_targets(), [("work", "General"), ("work", "api")]);
+    assert_eq!(state.lead_name("work", "General"), "Space lead");
+    assert_eq!(state.to_label("work", "General"), "To: Space lead");
+    assert_eq!(state.to_label("work", "api"), "To: api lead");
+
+    let home = FakeHub::new("Home", vec![]);
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.lead_targets(),
+        [
+            ("work", "General"),
+            ("work", "api"),
+            ("home", "General"),
+            ("home", "api")
+        ]
+    );
+    assert_eq!(state.to_label("home", "api"), "To: home · api lead");
+}
+
+#[tokio::test]
+async fn a_chat_tab_sends_to_its_own_lead_until_another_is_picked_there() {
+    let work = FakeHub::new("Work", vec![]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(state.chat_target("work", "api"), ("work", "api"));
+
+    state.set_chat_target(("work", "api"), ("work", "General"));
+    assert_eq!(state.chat_target("work", "api"), ("work", "General"));
+    assert_eq!(
+        state.chat_target("work", "General"),
+        ("work", "General"),
+        "another page keeps its own lead"
+    );
+    state.set_chat_target(("work", "api"), ("work", "gone"));
+    assert_eq!(
+        state.chat_target("work", "api"),
+        ("work", "api"),
+        "unknown lead"
+    );
+
+    state.set_chat_target(("work", "api"), ("work", "General"));
+    state.reset_chat_target();
+    assert_eq!(
+        state.chat_target("work", "api"),
+        ("work", "api"),
+        "after navigating"
+    );
+}
+
+#[test]
+fn choosing_another_recipient_carries_the_draft_being_typed() {
+    let mut state = AppState::default();
+    let api = Destination::Lead("work".into(), "api".into());
+    let general = Destination::Lead("work".into(), "General".into());
+    state.edit_draft(&api, "Ship it");
+    state.move_draft(&api, &general);
+    assert_eq!(state.draft(&general), "Ship it");
+    assert!(
+        state.draft(&api).is_empty(),
+        "no copy left on the page's own lead"
+    );
+
+    state.edit_draft(&api, "Second");
+    state.move_draft(&api, &general);
+    assert_eq!(state.draft(&general), "Second\n\nShip it");
+}
+
+#[tokio::test]
 async fn each_space_uses_its_own_general_project_for_main_chat() {
     let work = FakeHub::new("Work", vec![]);
     let home = FakeHub::new("Home", vec![]);

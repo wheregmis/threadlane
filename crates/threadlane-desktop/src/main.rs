@@ -871,6 +871,7 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.state.reset_chat_target();
             self.project_name_missing = false;
             self.reveal_linked_decision = None;
             self.conversation_at_bottom = true;

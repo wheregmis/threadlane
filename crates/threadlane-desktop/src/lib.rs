@@ -1005,6 +1005,8 @@ pub struct AppState {
     /// Where the Home composer sends: space and project.
     target_space: Option<String>,
     last_targets: BTreeMap<String, String>,
+    /// A lead picked on a project Chat tab: the page, then who it sends to.
+    chat_target: Option<((String, String), (String, String))>,
     pacing: HashMap<String, Result<Pacing, String>>,
     pacing_edit: Option<String>,
     pacing_saving: bool,
@@ -1424,6 +1426,68 @@ impl AppState {
     pub fn set_target(&mut self, space: &str, project: &str) {
         self.target_space = Some(space.to_owned());
         self.remember_target(space, project);
+    }
+
+    /// Every lead a composer can send to, by space: the space lead (its
+    /// General project) first, then each other active project's lead.
+    #[must_use]
+    pub fn lead_targets(&self) -> Vec<(&str, &str)> {
+        self.spaces
+            .iter()
+            .flat_map(|space| {
+                let general = space.active_projects().filter(|project| project.is_general);
+                let rest = space
+                    .active_projects()
+                    .filter(|project| !project.is_general);
+                general
+                    .chain(rest)
+                    .map(move |project| (space.name.as_str(), project.name.as_str()))
+            })
+            .collect()
+    }
+
+    /// `Space lead` for a space's General project, else `<project> lead`.
+    #[must_use]
+    pub fn lead_name(&self, space: &str, project: &str) -> String {
+        if self.space(space).and_then(Space::main_chat_project) == Some(project) {
+            "Space lead".to_owned()
+        } else {
+            format!("{project} lead")
+        }
+    }
+
+    /// The composer's "To:" button, naming the space only when more than one is paired.
+    #[must_use]
+    pub fn to_label(&self, space: &str, project: &str) -> String {
+        let lead = self.lead_name(space, project);
+        if self.spaces.len() > 1 {
+            format!("To: {space} · {lead}")
+        } else {
+            format!("To: {lead}")
+        }
+    }
+
+    /// Where the Chat tab of `project` sends: its own lead unless another
+    /// lead was picked on that page and can still be reached.
+    #[must_use]
+    pub fn chat_target<'a>(&'a self, space: &'a str, project: &'a str) -> (&'a str, &'a str) {
+        self.chat_target
+            .as_ref()
+            .filter(|(page, _)| page.0 == space && page.1 == project)
+            .map(|(_, (space, project))| (space.as_str(), project.as_str()))
+            .filter(|target| self.lead_targets().contains(target))
+            .unwrap_or((space, project))
+    }
+
+    /// Makes the Chat tab of `page` send to `target` until you leave it.
+    pub fn set_chat_target(&mut self, page: (&str, &str), target: (&str, &str)) {
+        let owned = |(space, project): (&str, &str)| (space.to_owned(), project.to_owned());
+        self.chat_target = Some((owned(page), owned(target)));
+    }
+
+    /// Returns every Chat tab to its own lead, as when you navigate away.
+    pub fn reset_chat_target(&mut self) {
+        self.chat_target = None;
     }
 
     /// Pacing notices for the spaces Home shows, using the display clock.
