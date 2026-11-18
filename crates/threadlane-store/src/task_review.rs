@@ -80,7 +80,7 @@ impl HubDb {
             .ok_or_else(|| StoreError::Invalid("only a task can submit for review".into()))?;
         if task.status != TaskStatus::Running || run.agent_id != Some(task.agent_id) {
             return Err(StoreError::Conflict(
-                "only the running Engineer can submit work for review".into(),
+                "only the running task assignee can submit work for review".into(),
             ));
         }
         if reviewer == task.agent_id {
