@@ -2,14 +2,23 @@
 //! what is running, then what finished, and a composer to any project.
 
 use gpui_kit::component::alert::Alert;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_desktop::{Part, When, running_elapsed};
 
-use super::{gap_line, heading, section};
+use super::gap_line;
+use crate::components::{
+    button, composer, count, empty_state, field, heading, meta, section, status_dot,
+};
+use crate::icons::AppIcon;
+use crate::tokens::{
+    CONTROL_HEIGHT, LG, READING_WIDTH, ROW_HEIGHT, SM, Status, TIMESTAMP_WIDTH, TYPE_BODY,
+    TYPE_META, XL, XS,
+};
 use crate::{Desktop, Screen};
 
 impl Desktop {
@@ -22,8 +31,8 @@ impl Desktop {
         let muted = cx.theme().muted_foreground;
         let state = &self.state;
 
-        let mut chips = h_flex().gap_2().child(
-            Button::new("filter-all")
+        let mut chips = h_flex().gap(XS).flex_wrap().child(
+            button("filter-all")
                 .label("All")
                 .selected(state.filter().is_none())
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -34,7 +43,7 @@ impl Desktop {
         for space in state.spaces() {
             let name = space.name.clone();
             chips = chips.child(
-                Button::new(SharedString::from(format!("filter-{name}")))
+                button(SharedString::from(format!("filter-{name}")))
                     .label(name.clone())
                     .selected(state.filter() == Some(name.as_str()))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -52,7 +61,7 @@ impl Desktop {
                 let text = state.blocked(&space.name)?;
                 Some(
                     v_flex()
-                        .gap_1()
+                        .gap(XS)
                         .items_start()
                         .child(
                             Alert::warning(
@@ -62,7 +71,7 @@ impl Desktop {
                             .title(format!("System · {} is blocked", space.name)),
                         )
                         .child(
-                            Button::new(SharedString::from(format!("accounts-{}", space.name)))
+                            button(SharedString::from(format!("accounts-{}", space.name)))
                                 .small()
                                 .ghost()
                                 .tab_stop(true)
@@ -75,10 +84,9 @@ impl Desktop {
             })
             .collect();
 
-        let mut needs = v_flex().gap_2().child(section(format!(
-            "Needs you ({})",
-            state.needs_you().count()
-        )));
+        let mut needs = v_flex()
+            .gap(SM)
+            .child(section("Needs you").children(count(state.needs_you().count(), cx)));
         let gaps = state.gaps(Part::Decisions);
         for (space, gap) in &gaps {
             needs = needs.child(gap_line(gap, &format!("the decisions of {space}"), cx));
@@ -89,7 +97,7 @@ impl Desktop {
                  `threadlane hub join <name> <code>`, then reopen the app.",
             ));
         } else if state.needs_you().count() == 0 && gaps.is_empty() {
-            needs = needs.child(div().text_color(muted).child("Nothing waits on you."));
+            needs = needs.child(empty_state("Nothing waits on you.", None, cx));
         }
         for queued in state.needs_you() {
             needs = needs.child(self.decision(queued, window, cx));
@@ -100,15 +108,15 @@ impl Desktop {
         let attention = state.needs_attention();
         let attention = (!attention.is_empty()).then(|| {
             let mut list = v_flex()
-                .gap_1()
-                .child(section(format!("Needs attention ({})", attention.len())));
+                .gap(XS)
+                .child(section("Needs attention").children(count(attention.len(), cx)));
             for row in attention {
                 let screen = Screen::Task {
                     space: row.space.clone(),
                     task: row.task,
                 };
                 list = list.child(
-                    Button::new(SharedString::from(format!(
+                    button(SharedString::from(format!(
                         "attention-{}-{}",
                         row.space, row.task
                     )))
@@ -119,10 +127,10 @@ impl Desktop {
                         v_flex()
                             .w_full()
                             .items_start()
-                            .child(div().text_sm().child(row.title.clone()))
+                            .child(div().text_size(TYPE_BODY).child(row.title.clone()))
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(TYPE_META)
                                     .text_color(muted)
                                     .whitespace_normal()
                                     .child(format!("{} / {}", row.space, row.why)),
@@ -136,18 +144,18 @@ impl Desktop {
 
         let running = state.running();
         let mut table = v_flex()
-            .gap_1()
-            .child(section(format!("Running now ({})", running.len())));
+            .gap(XS)
+            .child(section("Running now").children(count(running.len(), cx)));
         let gaps = state.gaps(Part::Running);
         for (space, gap) in &gaps {
             table = table.child(gap_line(gap, &format!("what runs in {space}"), cx));
         }
         if running.is_empty() && gaps.is_empty() {
-            table = table.child(div().text_color(muted).child("Nothing is running."));
+            table = table.child(empty_state("Nothing is running.", None, cx));
         } else if !running.is_empty() {
             table = table.child(
-                row(["Task", "Project", "Agent", "Machine", "Running"])
-                    .text_xs()
+                running_row(["Task", "Project", "Agent", "Machine", "Running"], div())
+                    .text_size(TYPE_META)
                     .text_color(muted),
             );
         }
@@ -165,23 +173,23 @@ impl Desktop {
                 running_elapsed(summary, when).unwrap_or_default(),
             ];
             table = table.child(
-                Button::new(SharedString::from(format!("running-{space}-{}", task.id)))
+                button(SharedString::from(format!("running-{space}-{}", task.id)))
                     .text()
                     .w_full()
                     .accessibility_label(format!("Open {} {}", task.id, task.title))
-                    .child(row(cells))
+                    .child(running_row(cells, status_dot(Status::Running, cx)))
                     .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
             );
         }
 
-        let mut recent = v_flex().gap_1().child(section("Recent results"));
+        let mut recent = v_flex().gap(XS).child(section("Recent results"));
         let results = state.recent();
         let gaps = state.gaps(Part::Recent);
         for (space, gap) in &gaps {
             recent = recent.child(gap_line(gap, &format!("the results of {space}"), cx));
         }
         if results.is_empty() && gaps.is_empty() {
-            recent = recent.child(div().text_color(muted).child("Nothing yet."));
+            recent = recent.child(empty_state("Nothing yet.", None, cx));
         }
         for item in results {
             let digest = state
@@ -193,7 +201,7 @@ impl Desktop {
                 .as_ref()
                 .and_then(|excerpt| excerpt.toggle)
                 .map(|label| {
-                    Button::new(SharedString::from(format!("result-{space}-{seq}")))
+                    button(SharedString::from(format!("result-{space}-{seq}")))
                         .link()
                         .small()
                         .label(label)
@@ -205,48 +213,50 @@ impl Desktop {
             recent = recent.child(
                 h_flex()
                     .items_start()
-                    .gap_2()
+                    .gap(SM)
                     .child(
-                        div()
-                            .w(px(110.))
+                        meta(when.moment(item.item.delivered_at), cx)
+                            .w(TIMESTAMP_WIDTH)
                             .flex_none()
-                            .text_sm()
-                            .text_color(muted)
-                            .child(when.moment(item.item.delivered_at)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(item.label().replace('/', " / ")),
+                            .text_right(),
                     )
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
                             .items_start()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(item.label().replace('/', " / ")),
+                            )
                             .children(digest)
-                            .children(excerpt.map(|excerpt| div().text_sm().child(excerpt.text)))
+                            .children(
+                                excerpt
+                                    .map(|excerpt| div().text_size(TYPE_BODY).child(excerpt.text)),
+                            )
                             .children(toggle),
                     ),
             );
         }
 
         v_flex()
-            .id("home")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .gap_5()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
+            .overflow_y_scrollbar()
+            .id("home")
+            .gap(XL)
             .child(heading("Home"))
-            .child(chips)
-            .child(div().text_sm().text_color(muted).child(state.status_line()))
+            .child(chips.w_full().min_h(CONTROL_HEIGHT).flex_none())
+            .child(meta(state.status_line(), cx))
             .children(
                 state
                     .held_lines(when)
                     .into_iter()
-                    .map(|line| div().text_sm().text_color(muted).child(line)),
+                    .map(|line| div().text_size(TYPE_BODY).text_color(muted).child(line)),
             )
             .children(banners)
             .child(needs)
@@ -272,7 +282,7 @@ impl Desktop {
             .map(|(space, project)| (space.to_owned(), project.to_owned()))
             .collect();
         let accessibility = format!("Choose a project · {label}");
-        let picker = Button::new("target")
+        let picker = button("target")
             .label(label)
             .tab_stop(true)
             .accessibility_label(accessibility)
@@ -290,36 +300,38 @@ impl Desktop {
                 }
                 menu
             });
-        h_flex()
-            .gap_2()
-            .pt_2()
-            .border_t_1()
-            .border_color(cx.theme().border)
+        composer(cx)
             .child(picker)
-            .child(div().flex_1().child(Input::new(&self.composer)))
+            .child(div().flex_1().min_w_0().child(field(&self.composer)))
             .child(
-                Button::new("send")
+                button("send")
                     .primary()
+                    .icon(AppIcon::Send)
                     .label("Send")
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             )
     }
 }
 
-/// One row of the running table, its cells at fixed widths.
-fn row(cells: [impl Into<SharedString>; 5]) -> Div {
-    let widths = [320., 140., 110., 110., 110.];
+/// The task title gets the most space, and elapsed time aligns at the trailing edge.
+fn running_row(cells: [impl Into<SharedString>; 5], marker: impl IntoElement) -> Div {
     h_flex()
-        .gap_2()
-        .py_1()
-        .children(cells.into_iter().zip(widths).map(|(cell, width)| {
+        .w_full()
+        .gap(SM)
+        .min_h(ROW_HEIGHT)
+        .child(h_flex().size(LG).flex_none().child(marker))
+        .children(cells.into_iter().enumerate().map(|(index, cell)| {
             div()
-                .w(px(width))
-                .flex_none()
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .text_sm()
+                .map(|cell| {
+                    if index == 0 {
+                        cell.flex_1().flex_grow(2.)
+                    } else {
+                        cell.flex_1()
+                    }
+                })
+                .min_w_0()
+                .truncate()
+                .when(index == 4, |cell| cell.text_right())
                 .child(cell.into())
         }))
 }

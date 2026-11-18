@@ -1,46 +1,68 @@
-//! The shell's sidebar (wireframe "Home", left): Home with what needs you,
-//! each paired space with its reachability and projects, Agents, Routines,
-//! Machines, Settings.
-//! Every row is a GPUI Kit button, so assistive technology names it and
-//! can press it.
+//! Navigation, space reachability, and the last action.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, h_flex, v_flex};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::separator::Separator;
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_desktop::{Activity, Part, Reach};
 
-use super::{gap_line, section};
+use super::gap_line;
+use crate::components::{meta, row, status_dot};
+use crate::icons::AppIcon;
+use crate::tokens::{BAR_HEIGHT, LG, MD, SIDEBAR_WIDTH, SM, Status, TYPE_EMPHASIS, XS};
 use crate::{Desktop, Screen, Tab};
 
 impl Desktop {
     pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let needs_you = self.state.queue().len();
         let mut bar = v_flex()
-            .id("sidebar")
-            .w(px(220.))
+            .w(SIDEBAR_WIDTH)
             .flex_none()
             .h_full()
-            .overflow_y_scroll()
-            .gap_1()
-            .p_2()
+            .gap(XS)
+            .p(SM)
+            .pt(LG)
             .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
-            .child(section("Threadlane"))
-            .child(row(
-                "go-home",
-                count("Home", needs_you),
-                self.screen == Screen::Home,
-                cx.listener(|this, _, _, cx| this.go(Screen::Home, cx)),
-            ));
+            .overflow_y_scrollbar()
+            .id("sidebar")
+            .child(
+                h_flex()
+                    .h(BAR_HEIGHT)
+                    .px(MD)
+                    .text_size(TYPE_EMPHASIS)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Threadlane"),
+            )
+            .child(
+                row(
+                    "go-home",
+                    AppIcon::House,
+                    "Home",
+                    positive_count(needs_you),
+                    self.screen == Screen::Home,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Home, cx))),
+            );
 
         for space in self.state.spaces() {
-            let reach = match space.reach {
-                Reach::Unknown => "◌ asking…",
-                Reach::Reachable => "● reachable",
-                Reach::Unreachable(_) => "○ out of reach",
+            let (status, label) = match space.reach {
+                Reach::Unknown => (Status::Idle, "Asking…"),
+                Reach::Reachable => (Status::Done, "Reachable"),
+                Reach::Unreachable(_) => (Status::Failed, "Out of reach"),
             };
-            bar = bar.child(section(format!("{} {reach}", space.name)).pt_3());
+            bar = bar.child(
+                h_flex()
+                    .px(MD)
+                    .pt(MD)
+                    .gap(XS)
+                    .child(meta(space.name.clone(), cx).truncate())
+                    .child(status_dot(status, cx))
+                    .child(meta(label, cx).flex_none()),
+            );
             if let Some(gap) = space.gap(Part::Projects) {
                 bar = bar.child(gap_line(&gap, "projects", cx));
             }
@@ -57,103 +79,96 @@ impl Desktop {
                 );
                 let open = self.state.open_in(&space.name, project.id)
                     + self.state.attention_in(&space.name, &project.name);
-                bar = bar.child(row(
-                    format!("go-{}-{}", space.name, project.name),
-                    count(&project.name, open),
-                    active,
-                    cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
-                ));
+                bar = bar.child(
+                    row(
+                        format!("go-{}-{}", space.name, project.name),
+                        AppIcon::Folder,
+                        project.name.clone(),
+                        positive_count(open),
+                        active,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+                );
             }
             let screen = Screen::NewProject {
                 space: space.name.clone(),
             };
-            bar = bar.child(row(
-                format!("new-project-{}", space.name),
-                "+ New project".to_owned(),
-                self.screen == screen,
-                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
-            ));
+            bar = bar.child(
+                row(
+                    format!("new-project-{}", space.name),
+                    AppIcon::FolderPlus,
+                    "New project",
+                    None,
+                    self.screen == screen,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+            );
         }
 
-        let machines = match self.state.machine_count() {
-            Some((online, all)) => format!("Machines  {online} / {all}"),
-            None => "Machines".to_owned(),
-        };
-        bar.child(section("Team").pt_3())
-            .child(row(
-                "go-agents",
-                "Agents".to_owned(),
-                self.screen == Screen::Agents,
-                cx.listener(|this, _, _, cx| this.go(Screen::Agents, cx)),
-            ))
-            .child(row(
-                "go-routines",
-                "Routines".to_owned(),
-                self.screen == Screen::Routines,
-                cx.listener(|this, _, _, cx| this.go(Screen::Routines, cx)),
-            ))
-            .child(row(
-                "go-machines",
-                machines,
-                self.screen == Screen::Machines,
-                cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx)),
-            ))
-            .child(row(
-                "go-settings",
-                "Settings".to_owned(),
-                self.screen == Screen::Settings,
-                cx.listener(|this, _, _, cx| this.go(Screen::Settings, cx)),
-            ))
+        let machines = self
+            .state
+            .machine_count()
+            .filter(|&(_, all)| all != 0)
+            .map(|(online, all)| format!("{online} / {all}").into());
+        bar.child(meta("TEAM", cx).px(MD).pt(MD)).children(
+            [
+                ("go-agents", AppIcon::Bot, "Agents", None, Screen::Agents),
+                (
+                    "go-routines",
+                    AppIcon::CalendarClock,
+                    "Routines",
+                    None,
+                    Screen::Routines,
+                ),
+                (
+                    "go-machines",
+                    AppIcon::Monitor,
+                    "Machines",
+                    machines,
+                    Screen::Machines,
+                ),
+                (
+                    "go-settings",
+                    AppIcon::Settings,
+                    "Settings",
+                    None,
+                    Screen::Settings,
+                ),
+            ]
+            .into_iter()
+            .map(|(id, icon, label, count, screen)| {
+                row(id, icon, label, count, self.screen == screen, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
+            })
+            .collect::<Vec<_>>(),
+        )
     }
-}
 
-impl Desktop {
-    /// The status area under every screen: the last action and where it
-    /// stands, until the next one.
+    /// The last action and where it stands, until the next one.
     pub(crate) fn activity(&self, cx: &App) -> Option<Div> {
         let activity = self.state.activity()?;
-        let (mark, color) = match activity {
-            Activity::Working(_) => ("…", cx.theme().muted_foreground),
-            Activity::Done(_) => ("✓", cx.theme().foreground),
-            Activity::Failed(_) => ("!", cx.theme().danger),
+        let status = match activity {
+            Activity::Working(_) => Status::Running,
+            Activity::Done(_) => Status::Done,
+            Activity::Failed(_) => Status::Failed,
         };
         Some(
-            h_flex()
+            v_flex()
                 .flex_none()
-                .gap_2()
-                .pt_2()
-                .border_t_1()
-                .border_color(cx.theme().border)
-                .text_sm()
-                .text_color(color)
-                .child(mark)
-                .child(div().min_w_0().child(activity.text().to_owned())),
+                .gap(SM)
+                .child(Separator::horizontal())
+                .child(
+                    h_flex()
+                        .gap(SM)
+                        .child(status_dot(status, cx))
+                        .child(meta(activity.text().to_owned(), cx)),
+                ),
         )
     }
 }
 
-/// One sidebar row: a full-width ghost button named by its label.
-fn row(
-    id: impl Into<SharedString>,
-    label: String,
-    active: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> Button {
-    Button::new(id.into())
-        .ghost()
-        .w_full()
-        .selected(active)
-        .accessibility_label(label.clone())
-        // A child rather than a label, which the button would center.
-        .child(div().w_full().child(label))
-        .on_click(on_click)
-}
-
-/// `Payments API  1`, or just the label when nothing waits.
-fn count(label: &str, count: usize) -> String {
-    if count == 0 {
-        label.to_owned()
-    } else {
-        format!("{label}  {count}")
-    }
+fn positive_count(count: usize) -> Option<SharedString> {
+    (count > 0).then(|| count.to_string().into())
 }

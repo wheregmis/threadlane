@@ -13,23 +13,30 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
 use threadlane_core::ids::TaskId;
 use threadlane_core::model::Mode;
 use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
-    Activity, AppState, RoutineText, Tab, When, change_memory, decision_of_tag, describe,
-    load_earlier, load_memory, load_modes, load_project, load_routines, load_task, pump, refresh,
+    Activity, AppState, Appearance, RoutineText, Tab, When, change_memory, decision_of_tag,
+    describe, load_earlier, load_memory, load_modes, load_project, load_routines, load_task, pump,
+    refresh,
 };
 use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
 use tokio::runtime::Runtime;
 use tokio::sync::{RwLock, mpsc};
 
 mod actions;
+mod components;
+mod icons;
 mod menus;
 mod screens;
+mod tokens;
+
+use icons::DesktopAssets;
+use tokens::{LG, MD, TABULAR, TYPE_BODY};
 
 /// How often the app asks every hub again, so reachability, what runs, and
 /// the open screen stay current.
@@ -67,6 +74,7 @@ fn main() -> ExitCode {
     // The paired hubs are known without asking them: the first frame lists them.
     let mut state = AppState::paired(core.hubs().iter().map(|hub| hub.name.as_str()));
     state.set_client_dir(client_dir);
+    let appearance = state.appearance();
     let (shown, feed) = mpsc::unbounded_channel();
     // With no hub paired there is no feed; Home says so.
     let stream = {
@@ -89,9 +97,10 @@ fn main() -> ExitCode {
         state.toggle_agent(space, project, agent);
     }
 
-    application().with_assets(assets::Assets).run(move |cx| {
+    application().with_assets(DesktopAssets).run(move |cx| {
         cx.set_app_identity("dev.threadlane.desktop", "Threadlane");
         init(cx);
+        cx.set_window_appearance(appearance_override(appearance));
         cx.on_window_closed(|cx, _window| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -119,9 +128,25 @@ fn main() -> ExitCode {
             Ok((_window, view)) => {
                 let view = view.downgrade();
                 let reload = view.clone();
-                menus::install(cx, move |cx| {
-                    let _gone = reload.update(cx, |this, cx| this.refresh(cx));
-                });
+                let appearance_view = view.clone();
+                menus::install(
+                    appearance,
+                    cx,
+                    move |cx| {
+                        let _gone = reload.update(cx, |this, cx| this.refresh(cx));
+                    },
+                    move |appearance, window, cx| {
+                        let _gone = appearance_view.update(cx, |this, cx| {
+                            if let Err(why) = this.state.set_appearance(appearance) {
+                                this.state.report(Activity::Failed(why));
+                            }
+                            cx.set_window_appearance(appearance_override(appearance));
+                            apply_appearance(appearance, window, cx);
+                            menus::set(this.full_screen, appearance, cx);
+                            cx.notify();
+                        });
+                    },
+                );
                 cx.on_system_notification_response(move |response, cx| {
                     let Some((space, id)) = decision_of_tag(&response.tag) else {
                         return;
@@ -142,6 +167,22 @@ fn main() -> ExitCode {
     });
     drop(runtime);
     ExitCode::SUCCESS
+}
+
+fn appearance_override(appearance: Appearance) -> Option<WindowAppearance> {
+    match appearance {
+        Appearance::System => None,
+        Appearance::Light => Some(WindowAppearance::Light),
+        Appearance::Dark => Some(WindowAppearance::Dark),
+    }
+}
+
+fn apply_appearance(appearance: Appearance, window: &mut Window, cx: &mut App) {
+    if let Some(appearance) = appearance_override(appearance) {
+        Theme::change(appearance, Some(window), cx);
+    } else {
+        Theme::sync_system_appearance(Some(window), cx);
+    }
 }
 
 /// Local time minus UTC in minutes, as `date +%z` says; UTC if it cannot.
@@ -324,6 +365,13 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        apply_appearance(state.appearance(), window, cx);
+        cx.observe_window_appearance(window, |this, window, cx| {
+            if this.state.appearance() == Appearance::System {
+                apply_appearance(Appearance::System, window, cx);
+            }
+        })
+        .detach();
         let composer =
             cx.new(|cx| InputState::new(window, cx).placeholder("Tell your team what you need…"));
         let task_composer =
@@ -1301,7 +1349,7 @@ impl Render for Desktop {
         }
         if window.is_fullscreen() != self.full_screen {
             self.full_screen = window.is_fullscreen();
-            menus::set(self.full_screen, cx);
+            menus::set(self.full_screen, self.state.appearance(), cx);
         }
         if std::mem::take(&mut self.clear_project_form) {
             for field in [&self.project_name, &self.project_description] {
@@ -1331,6 +1379,9 @@ impl Render for Desktop {
         };
         h_flex()
             .size_full()
+            .items_stretch()
+            .font_features(TABULAR.clone())
+            .text_size(TYPE_BODY)
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.sidebar(cx))
@@ -1339,8 +1390,8 @@ impl Render for Desktop {
                     .flex_1()
                     .h_full()
                     .min_w_0()
-                    .p_4()
-                    .gap_3()
+                    .p(LG)
+                    .gap(MD)
                     .child(body)
                     .children(self.activity(cx)),
             )

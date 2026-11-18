@@ -3,41 +3,39 @@
 //! row per project and one cell per agent. A cell changes that agent's mode
 //! in that project, binding it there from "—".
 
-use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
+use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
 use threadlane_desktop::{BACKENDS, Part};
 
+use super::gap_line;
 use super::project::{MODES, mode_name};
-use super::{gap_line, heading, section};
 use crate::Desktop;
-
-/// The width of one grid column.
-const CELL: f32 = 130.;
+use crate::components::{button, card, empty_state, field, heading, meta, section};
+use crate::icons::AppIcon;
+use crate::tokens::{
+    AGENT_CARD_WIDTH, FORM_WIDTH, GRID_CELL_WIDTH, LG, SM, TYPE_BODY, TYPE_META, XS,
+};
 
 impl Desktop {
     pub(crate) fn agents(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let view = cx.entity().downgrade();
         let mut screen = v_flex()
-            .id("agents")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .gap_4()
+            .overflow_y_scrollbar()
+            .id("agents")
+            .gap(LG)
             .child(heading("Agents"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("Agents are defined per space."),
-            );
+            .child(meta("Agents are defined per space.", cx));
         for space in self.state.spaces() {
-            let mut cards = h_flex().gap_2().flex_wrap().items_start();
+            let mut cards = h_flex().gap(SM).flex_wrap().items_start();
             for agent in &space.agents {
                 let backends = if agent.backends.is_empty() {
                     "Either backend".to_owned()
@@ -49,48 +47,41 @@ impl Desktop {
                         .collect::<Vec<_>>()
                         .join(" then ")
                 };
-                cards = cards.child(
-                    v_flex()
-                        .w(px(220.))
-                        .gap_1()
-                        .p_3()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded(cx.theme().radius)
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(agent.name.clone()),
-                        )
-                        .child(div().text_sm().child(agent.role.clone()))
-                        .child(div().text_sm().text_color(muted).child(backends))
-                        .children(
-                            self.state
-                                .agent_runs_on(&space.name, agent)
-                                .map(|line| div().text_sm().text_color(muted).child(line)),
-                        ),
-                );
+                cards =
+                    cards.child(
+                        card(cx)
+                            .w(AGENT_CARD_WIDTH)
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(agent.name.clone()),
+                            )
+                            .child(div().text_size(TYPE_BODY).child(agent.role.clone()))
+                            .child(div().text_size(TYPE_BODY).text_color(muted).child(backends))
+                            .children(self.state.agent_runs_on(&space.name, agent).map(|line| {
+                                div().text_size(TYPE_BODY).text_color(muted).child(line)
+                            })),
+                    );
             }
 
             let grid = self.state.modes(&space.name);
-            let mut table = v_flex().gap_1().child(
-                h_flex()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(div().w(px(CELL)).flex_none().child("Project"))
-                    .children(
-                        grid.agents
-                            .iter()
-                            .map(|agent| div().w(px(CELL)).flex_none().child(agent.clone())),
-                    ),
-            );
+            let mut table =
+                v_flex().gap(XS).child(
+                    h_flex()
+                        .gap(SM)
+                        .text_size(TYPE_META)
+                        .text_color(muted)
+                        .child(div().w(GRID_CELL_WIDTH).flex_none().child("Project"))
+                        .children(grid.agents.iter().map(|agent| {
+                            div().w(GRID_CELL_WIDTH).flex_none().child(agent.clone())
+                        })),
+                );
             for row in grid.rows {
-                let mut line = h_flex().gap_2().child(
+                let mut line = h_flex().gap(SM).child(
                     div()
-                        .w(px(CELL))
+                        .w(GRID_CELL_WIDTH)
                         .flex_none()
-                        .text_sm()
+                        .text_size(TYPE_BODY)
                         .child(row.project.clone()),
                 );
                 match row.modes {
@@ -102,9 +93,9 @@ impl Desktop {
                             let view = view.clone();
                             let id = format!("mode-{space}-{project}-{agent}");
                             let label = mode.map_or("—", mode_name);
-                            let cell = Button::new(SharedString::from(id))
+                            let cell = button(SharedString::from(id))
                                 .small()
-                                .w(px(CELL))
+                                .w(GRID_CELL_WIDTH)
                                 .label(label)
                                 .accessibility_label(format!("{agent} in {project}: {label}"))
                                 .dropdown_menu(move |mut menu, _, _| {
@@ -138,11 +129,12 @@ impl Desktop {
                 table = table.child(line);
             }
 
-            let mut actions = h_flex().gap_2().flex_wrap().child(
-                Button::new(SharedString::from(format!("new-agent-{}", space.name)))
+            let mut actions = h_flex().gap(SM).flex_wrap().child(
+                button(SharedString::from(format!("new-agent-{}", space.name)))
                     .small()
                     .primary()
-                    .label("+ New agent")
+                    .icon(AppIcon::UserPlus)
+                    .label("New agent")
                     .accessibility_label(format!("New agent in {}", space.name))
                     .on_click({
                         let space = space.name.clone();
@@ -155,11 +147,12 @@ impl Desktop {
             for (to, agents) in self.state.copy_targets(&space.name) {
                 let label = format!("Copy an agent to {to}…");
                 let view = view.clone();
-                let button = Button::new(SharedString::from(format!(
+                let button = button(SharedString::from(format!(
                     "copy-agents-{}-{to}",
                     space.name
                 )))
                 .small()
+                .icon(AppIcon::Copy)
                 .label(label.clone())
                 .accessibility_label(label)
                 .disabled(agents.is_empty())
@@ -178,10 +171,10 @@ impl Desktop {
                 });
                 actions = actions.child(button);
             }
-            let mut part = v_flex().gap_2().child(
+            let mut part = v_flex().gap(SM).child(
                 h_flex()
                     .justify_between()
-                    .gap_2()
+                    .gap(SM)
                     .child(section(format!("Definitions in {}", space.name)))
                     .child(actions),
             );
@@ -190,14 +183,26 @@ impl Desktop {
             }
             if let Some(gap) = space.gap(Part::Agents) {
                 part = part.child(gap_line(&gap, "the agents", cx));
+            } else if space.agents.is_empty() {
+                part = part.child(empty_state(
+                    "There are no agents in this space yet.",
+                    None,
+                    cx,
+                ));
             }
             part = part
                 .child(cards)
-                .child(section(format!("Modes by project in {}", space.name)).pt_2());
+                .child(section(format!("Modes by project in {}", space.name)).pt(SM));
             if let Some(gap) = space.gap(Part::Projects) {
                 part = part.child(gap_line(&gap, "the projects", cx));
             }
-            screen = screen.child(part.child(table));
+            screen = screen.child(
+                part.child(
+                    table
+                        .overflow_x_scrollbar()
+                        .id(SharedString::from(format!("mode-grid-{}", space.name))),
+                ),
+            );
         }
         screen.into_any_element()
     }
@@ -206,13 +211,13 @@ impl Desktop {
 impl Desktop {
     /// The "+ New agent" form: name, role, instructions, and the backends
     /// in order of preference.
-    fn agent_form(&self, space: &str, cx: &mut Context<Self>) -> Div {
+    fn agent_form(&self, space: &str, cx: &mut Context<Self>) -> GroupBox {
         let picked = self.state.agent_form().backends;
         let backends = ButtonGroup::new("agent-backends")
             .outline()
             .compact()
             .children(BACKENDS.iter().enumerate().map(|(index, (label, _))| {
-                Button::new(SharedString::from(format!("agent-backends-{index}")))
+                button(SharedString::from(format!("agent-backends-{index}")))
                     .label(*label)
                     .selected(picked == index)
             }))
@@ -223,43 +228,40 @@ impl Desktop {
                 }
             }));
         let space = space.to_owned();
-        v_flex()
-            .gap_2()
-            .p_3()
-            .max_w(px(560.))
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded(cx.theme().radius)
+        card(cx)
+            .max_w(FORM_WIDTH)
             .child(section(format!("New agent in {space}")))
-            .child(Input::new(&self.agent_name))
-            .child(Input::new(&self.agent_role))
-            .child(Input::new(&self.agent_instructions))
+            .child(field(&self.agent_name))
+            .child(field(&self.agent_role))
+            .child(field(&self.agent_instructions))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(TYPE_BODY)
                     .text_color(cx.theme().muted_foreground)
                     .child("Backends, in order of preference"),
             )
             .child(backends)
             .child(
                 div()
-                    .text_xs()
+                    .text_size(TYPE_META)
                     .text_color(cx.theme().muted_foreground)
                     .child("It is bound to no project yet: pick its mode in a — cell below."),
             )
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap(SM)
                     .child(
-                        Button::new("agent-create")
+                        button("agent-create")
                             .primary()
+                            .icon(AppIcon::UserPlus)
                             .label("Create agent")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.create_agent(space.clone(), cx);
                             })),
                     )
                     .child(
-                        Button::new("agent-close")
+                        button("agent-close")
+                            .icon(AppIcon::X)
                             .label("Cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.agent_form_mut().space = None;
