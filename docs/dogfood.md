@@ -61,5 +61,10 @@ Each stage is built by Codex, which cannot see the app, and then looked at again
 | # | Finding | State |
 |---|---|---|
 | 14 | Stage 1 as delivered: icons with no asset drew gaps, tabs lost their labels, "Pause project", "+ New task" and Home's space filter were gone, settings rows unreadable. None of it visible to tests. | fixed in debcf967 after one round; a test now fails when an icon has no asset |
-| 15 | The project header shifts between tabs (the column narrows on Conversation and a "Lead mode" line pushes the tabs down); "+ New task" has a plus icon and a "+". | open |
-| 16 | Stage 2: nothing regressed, the View menu items and the Settings menu item work, tooltips show shortcuts. Letter and digit keys could not be sent to the app in the background, and the hub has no pending decision, so J/K, 1 to 9, `?` and the new decision card are unseen. There is no menu item that opens the shortcuts dialog. | to check by hand: press `?` in the app |
+| 15 | The project header shifts between tabs (the column narrows on Conversation and a "Lead mode" line pushes the tabs down); "+ New task" has a plus icon and a "+". | fixed in stages 4 and 5 |
+| 16 | Stage 2: nothing regressed, the View menu items and the Settings menu item work, tooltips show shortcuts. Letter and digit keys could not be sent to the app in the background, and the hub has no pending decision, so J/K, 1 to 9, `?` and the new decision card are unseen. There is no menu item that opens the shortcuts dialog. | `?` confirmed by the owner; Help > Keyboard Shortcuts added in stages 4 and 5; J/K, number keys and a live decision card still unseen |
+| 17 | Stage 3 on screen: markdown, id links, the quiet-run line and opening at the latest message all work on the real conversation. Sending, the held send and undo, and code blocks were not exercised. | to check by hand |
+| 18 | Stages 4 and 5 as delivered lost the board's Done column (columns no longer fit and the last one fell off), the machine's online badge, and showed "1 machines". | fixed after one round; a test pins the board's columns |
+| 19 | Task page on T-0004 shows real usage from the hub: 3 runs, 9 min, 17042 output tokens, $1.1052. Confirm dialogs, right-click menus and the machine page were not opened. | to check by hand |
+
+What only a person at the keyboard can check, in one list: J and K and the number keys on a real decision; typing, sending and undoing a send; a failed send keeping its text; right-click menus; each confirm dialog; a notification and answering from it; a narrow window.
