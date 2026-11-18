@@ -153,6 +153,11 @@ impl From<MachineStatus> for Status {
     }
 }
 
+/// Emphasis of unchosen options in an answered decision.
+pub(super) const UNCHOSEN_OPACITY: f32 = 0.64;
+/// Maximum share of the window height for the shortcuts dialog's list.
+pub(super) const SHORTCUTS_HEIGHT_FRACTION: f32 = 0.63;
+
 #[cfg(test)]
 mod tests {
     use super::Status;

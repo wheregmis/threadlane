@@ -46,6 +46,7 @@ struct FakeHub {
     task_runs: Mutex<Vec<RunSummary>>,
     now: AtomicI64,
     decisions: Mutex<Vec<Decision>>,
+    traced_decisions: Mutex<Vec<Decision>>,
     tasks: Mutex<Vec<TaskSummary>>,
     history: Mutex<Vec<ConversationEntry>>,
     recent: Mutex<Vec<FeedItem>>,
@@ -373,7 +374,9 @@ impl HubApi for FakeHub {
                     .iter()
                     .position(|choice| choice.label == option)
                     .ok_or_else(|| ApiError::Invalid(format!("unknown option {option}")))?;
-                decision.answer = Some(json!({ "option": option, "note": note }));
+                decision.answer = Some(json!({
+                    "option": option, "note": note, "answered_at": self.now.load(Ordering::SeqCst),
+                }));
                 decision.status = DecisionStatus::Answered;
                 Ok(DecisionReply::Answered {
                     decision: Box::new(decision),
@@ -564,10 +567,27 @@ impl HubApi for FakeHub {
         &self,
         request: threadlane_core::client::OperationsRequest,
     ) -> Result<threadlane_core::client::OperationsReply, ApiError> {
-        use threadlane_core::client::{OperationsReply, OperationsRequest};
+        use threadlane_core::client::{OperationsReply, OperationsRequest, TraceInspection};
 
         self.up()?;
         match request {
+            OperationsRequest::Trace { id } => Ok(OperationsReply::Trace {
+                trace: TraceInspection {
+                    decisions: self
+                        .traced_decisions
+                        .lock()
+                        .expect("lock")
+                        .iter()
+                        .filter(|decision| decision.trace_id.as_deref() == Some(&id))
+                        .cloned()
+                        .collect(),
+                    id,
+                    events: Vec::new(),
+                    runs: Vec::new(),
+                    tool_calls: Vec::new(),
+                    outbox: Vec::new(),
+                },
+            }),
             OperationsRequest::Metrics { project: None } => self
                 .metrics
                 .lock()
@@ -2676,6 +2696,8 @@ fn notification_settings_are_kept_in_the_client_directory_and_applied() {
             question: "Merge?".to_owned(),
             options: Vec::new(),
             kind: None,
+            context: None,
+            recommended: None,
         },
     };
     let notice = Alert::Notice {
@@ -4064,4 +4086,254 @@ fn desktop_appearance_round_trips_with_existing_preferences() {
     std::fs::write(&path, r#"{"appearance":"unknown"}"#).unwrap();
     state.set_client_dir(dir.path().to_owned());
     assert_eq!(state.appearance(), Appearance::System);
+}
+
+#[tokio::test]
+async fn decision_keys_step_through_home_and_only_the_open_project() {
+    let mut general = decision(2, 2_000);
+    general.project_id = ProjectId(2);
+    let hub = FakeHub::new(
+        "Work",
+        vec![decision(3, 3_000), general, decision(1, 1_000)],
+    );
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let current = |state: &AppState| state.current_decision().map(|row| row.decision.id);
+    state.set_decision_scope(DecisionScope::Home);
+    assert_eq!(current(&state), Some(DecisionId(1)));
+    assert_eq!(
+        state.decision_command(DecisionCommand::Next, false),
+        Some(DecisionEffect::Scroll)
+    );
+    assert_eq!(current(&state), Some(DecisionId(2)));
+    state.decision_command(DecisionCommand::Previous, false);
+    assert_eq!(current(&state), Some(DecisionId(1)));
+
+    state.set_decision_scope(DecisionScope::Project("work".into(), "api".into()));
+    assert_eq!(current(&state), Some(DecisionId(1)));
+    state.decision_command(DecisionCommand::Next, false);
+    assert_eq!(current(&state), Some(DecisionId(3)));
+    state.decision_command(DecisionCommand::Previous, false);
+    assert_eq!(current(&state), Some(DecisionId(1)));
+    state.clear_current_decision();
+    assert_eq!(current(&state), None);
+    assert_eq!(
+        state.decision_command(DecisionCommand::Pick(0), false),
+        None
+    );
+    state.decision_command(DecisionCommand::Next, false);
+    assert_eq!(current(&state), Some(DecisionId(1)));
+}
+
+#[tokio::test]
+async fn decision_number_answers_current_and_keeps_its_record_in_conversation() {
+    let hub = FakeHub::new("Work", vec![decision(1, 1_000), decision(2, 2_000)]);
+    hub.now.store(5 * 60_000, Ordering::SeqCst);
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.set_decision_scope(DecisionScope::Project("work".into(), "api".into()));
+    let Some(DecisionEffect::Answer(choice)) =
+        state.decision_command(DecisionCommand::Pick(1), false)
+    else {
+        panic!("the tier 2 tool answers immediately")
+    };
+    assert_eq!(choice.key.id, DecisionId(1));
+    assert_eq!(choice.option, "decline");
+    assert!(state.begin_decision_answer(choice.key.clone()));
+    assert_eq!(
+        state.decision_command(DecisionCommand::Pick(0), false),
+        None
+    );
+    let answer = core
+        .answer(
+            Some(&choice.key.space),
+            &choice.key.id.to_string(),
+            &choice.option,
+            Some("Try again tomorrow"),
+        )
+        .await
+        .expect("answer");
+    state.finish_decision_answer(&choice.key);
+    state.answered(&answer);
+
+    assert_eq!(state.current_decision().unwrap().decision.id, DecisionId(2));
+    assert_eq!(state.needs_you().count(), 1);
+    let lines: Vec<_> = state
+        .conversation("work", "api", &when())
+        .into_iter()
+        .filter_map(|line| match line {
+            Line::Decision {
+                card,
+                pending,
+                time,
+            } => Some((card, pending, time)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let (card, pending, time) = &lines[0];
+    assert!(!pending);
+    let shown = state
+        .present_feed_decision("work", "api", card, time, &when())
+        .unwrap();
+    assert_eq!(shown.options, ["approve", "decline"]);
+    assert_eq!(shown.contents.recommended, Some(0));
+    assert!(!shown.current && !shown.show_note && shown.always.is_none());
+    assert_eq!(
+        shown.record,
+        Some(DecisionRecord {
+            status: "Answered · 00:05".into(),
+            chosen: Some(1),
+            note: Some("Try again tomorrow".into()),
+        })
+    );
+}
+
+#[tokio::test]
+async fn decision_shortcuts_yield_to_fields_and_enter_only_submits_a_question_note() {
+    let mut question = decision(2, 2_000);
+    question.kind = DecisionKind::Input;
+    question.tool = "ask_user".into();
+    let mut no_recommendation = question.clone();
+    no_recommendation.id = DecisionId(3);
+    no_recommendation.recommended = None;
+    let hub = FakeHub::new(
+        "Work",
+        vec![decision(1, 1_000), question, no_recommendation],
+    );
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.set_decision_scope(DecisionScope::Home);
+    let approval = DecisionKey::from(state.current_decision().unwrap());
+    for command in [
+        DecisionCommand::Next,
+        DecisionCommand::Previous,
+        DecisionCommand::Pick(0),
+        DecisionCommand::Reply,
+    ] {
+        assert_eq!(state.decision_command(command, true), None);
+    }
+    assert!(!state.shows_decision_note(state.current_decision().unwrap()));
+    assert_eq!(
+        state.decision_command(DecisionCommand::Reply, false),
+        Some(DecisionEffect::FocusNote(approval.clone()))
+    );
+    assert!(state.shows_decision_note(state.current_decision().unwrap()));
+    assert_eq!(state.decision_note_enter(&approval, "do this"), None);
+    state.decision_command(DecisionCommand::Next, false);
+    let question = state.current_decision().unwrap();
+    assert!(state.shows_decision_note(question));
+    let key = DecisionKey::from(question);
+    assert_eq!(state.decision_note_enter(&key, "   "), None);
+    let choice = state.decision_note_enter(&key, "do this").unwrap();
+    assert_eq!(choice.option, "approve");
+    let answer = core
+        .answer(
+            Some("work"),
+            &key.id.to_string(),
+            &choice.option,
+            Some("do this"),
+        )
+        .await
+        .unwrap();
+    state.answered(&answer);
+    let key = DecisionKey::from(state.current_decision().unwrap());
+    assert_eq!(state.decision_note_enter(&key, "do this"), None);
+}
+
+#[tokio::test]
+async fn decision_merge_number_requires_confirmation_of_the_exact_option() {
+    let mut merge = decision(1, 1_000);
+    merge.tool = threadlane_core::forge::MERGE.to_owned();
+    let hub = FakeHub::new("Work", vec![merge]);
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.set_decision_scope(DecisionScope::Home);
+
+    let Some(DecisionEffect::Confirm(shown)) =
+        state.decision_command(DecisionCommand::Pick(0), false)
+    else {
+        panic!("merge needs a separate confirmation")
+    };
+    assert_eq!(
+        state.decision_command(DecisionCommand::Pick(1), false),
+        None
+    );
+    assert_eq!(hub.decisions.lock().unwrap().len(), 1);
+    state.cancel_decision_confirmation();
+    assert_eq!(state.confirm_decision(&shown), None);
+
+    assert_eq!(
+        state.decision_command(DecisionCommand::Pick(0), false),
+        Some(DecisionEffect::Confirm(shown.clone()))
+    );
+    let choice = state.confirm_decision(&shown).unwrap();
+    assert_eq!(choice, shown);
+    let answer = core
+        .answer(Some("work"), "D-0001", &choice.option, None)
+        .await
+        .unwrap();
+    state.answered(&answer);
+    assert!(state.current_decision().is_none());
+}
+
+#[tokio::test]
+async fn decision_history_recovers_an_answer_from_its_feed_trace() {
+    let mut proposal = decision(1, 1_000);
+    proposal.kind = DecisionKind::Proposal;
+    proposal.status = DecisionStatus::Answered;
+    proposal.trace_id = Some("trace-1".into());
+    proposal.answer = Some(json!({"option": 0, "note": "Ship Tuesday", "answered_at": 120_000}));
+    proposal.proposed_by = Some("Engineer".into());
+    let mut item = feed_item(
+        1,
+        OutboxKind::Decision,
+        json!({"decision":"D-0001", "question":"Start?", "kind":"proposal"}),
+        1_000,
+    );
+    item.message.trace_id = proposal.trace_id.clone();
+    item.message.decision_id = Some(proposal.id);
+    let hub = FakeHub::new("Work", Vec::new());
+    hub.history
+        .lock()
+        .unwrap()
+        .push(ConversationEntry::Delivered { item });
+    hub.traced_decisions.lock().unwrap().push(proposal);
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let shown = state
+        .conversation("work", "api", &when())
+        .into_iter()
+        .find_map(|line| {
+            if let Line::Decision { card, time, .. } = line {
+                state.present_feed_decision("work", "api", &card, &time, &when())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert!(shown.contents.dashed);
+    assert!(
+        shown
+            .contents
+            .context
+            .unwrap()
+            .starts_with("You did not ask for this.")
+    );
+    assert!(shown.origin.contains("Engineer"));
+    assert_eq!(
+        shown.record,
+        Some(DecisionRecord {
+            status: "Answered · 00:02".into(),
+            chosen: Some(0),
+            note: Some("Ship Tuesday".into()),
+        })
+    );
 }

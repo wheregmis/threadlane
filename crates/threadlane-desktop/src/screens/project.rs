@@ -19,8 +19,8 @@ use threadlane_desktop::{Line, ModeChoice, Part, When};
 
 use super::{gap_line, link};
 use crate::components::{
-    button, card, composer, count, count_badge, empty_state, field, icon_button, meta, page_header,
-    section, status_badge,
+    button, card, composer, count, count_badge, decision_scroller, empty_state, field, icon_button,
+    meta, page_header, section, status_badge,
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
@@ -45,7 +45,6 @@ impl Desktop {
         project: &str,
         tab: Tab,
         when: &When,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (in_space, named) = (space.to_owned(), project.to_owned());
@@ -94,7 +93,7 @@ impl Desktop {
         let muted = cx.theme().muted_foreground;
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
-            Tab::Conversation => self.conversation_tab(space, project, when, window, cx),
+            Tab::Conversation => self.conversation_tab(space, project, when, cx),
             Tab::Agents => self.agents_tab(space, project, cx),
             Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Memory => self.memory_tab(space, project, when, cx),
@@ -315,13 +314,15 @@ impl Desktop {
         };
 
         let view = self.state.project(space, project);
-        let mut side = v_flex()
-            .w(SIDEBAR_WIDTH)
-            .h_full()
-            .flex_none()
-            .gap(SM)
-            .overflow_y_scrollbar()
-            .id("board-sidebar");
+        let mut side = v_flex().gap(SM);
+        let decisions: Vec<_> = self
+            .state
+            .visible_decisions()
+            .map(|queued| self.decision(queued, when, cx))
+            .collect();
+        if !decisions.is_empty() {
+            side = side.child(section("Open decisions")).children(decisions);
+        }
         let repositories = view
             .map(|view| view.repositories.as_slice())
             .unwrap_or_default();
@@ -407,7 +408,12 @@ impl Desktop {
                     .child(board)
                     .child(self.project_composer(project, cx).flex_none()),
             )
-            .child(side)
+            .child(
+                decision_scroller("board-sidebar", side, &self.decision_scroll)
+                    .w(SIDEBAR_WIDTH)
+                    .h_full()
+                    .flex_none(),
+            )
             .into_any_element()
     }
 
@@ -424,6 +430,7 @@ impl Desktop {
                     .tab_stop(true)
                     .icon(AppIcon::Send)
                     .label("Send")
+                    .tooltip(crate::keyboard::send_hint(cx))
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             )
     }
@@ -435,17 +442,10 @@ impl Desktop {
         space: &str,
         project: &str,
         when: &When,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let mut lines = v_flex()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .id("conversation")
-            .gap(SM);
+        let mut lines = v_flex().gap(SM);
         if let Some(before) = self.state.earlier(space, project) {
             let (space, project) = (space.to_owned(), project.to_owned());
             lines = lines.child(button("earlier").small().label("Show earlier").on_click(
@@ -546,18 +546,19 @@ impl Desktop {
                             })),
                     )
                 }
-                Line::Decision {
-                    card,
-                    time,
-                    pending,
-                } => match self.state.queued_card(space, &card) {
-                    Some(queued) if pending => lines.child(self.decision(queued, window, cx)),
-                    _ => lines.child(said(
-                        card.label(),
-                        time,
-                        format!("{}: {} (answered)", card.id, card.question),
-                    )),
-                },
+                Line::Decision { card, time, .. } => {
+                    match self
+                        .state
+                        .present_feed_decision(space, project, &card, &time, when)
+                    {
+                        Some(display) => lines.child(self.decision_display(display, cx)),
+                        None => lines.child(said(
+                            card.label(),
+                            time,
+                            format!("{}: {}", card.id, card.question),
+                        )),
+                    }
+                }
             };
         }
         if let Some(recorded) = recorded {
@@ -687,7 +688,11 @@ impl Desktop {
                     .h_full()
                     .min_w_0()
                     .gap(SM)
-                    .child(lines)
+                    .child(decision_scroller(
+                        "conversation",
+                        lines,
+                        &self.decision_scroll,
+                    ))
                     .child(self.project_composer(project, cx).flex_none()),
             )
             .child(side)

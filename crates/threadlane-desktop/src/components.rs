@@ -218,3 +218,128 @@ pub(super) fn empty_state(sentence: impl Into<SharedString>, hint: Option<&str>,
         .child(div().text_size(TYPE_BODY).child(sentence.into()))
         .children(hint.map(|hint| meta(hint.to_owned(), cx)))
 }
+
+/// A decision surface with a distinct keyboard selection ring.
+pub(super) fn decision_surface(proposal: bool, current: bool, cx: &App) -> Div {
+    use gpui_kit::prelude::FluentBuilder as _;
+
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .flex_none()
+        .rounded(ROW_RADIUS)
+        .border_1()
+        .border_color(cx.theme().border)
+        .when(proposal, |surface| surface.border_dashed())
+        .bg(cx.theme().group_box)
+        .p(MD)
+        .gap(SM)
+        .map(|surface| {
+            v_flex()
+                .w_full()
+                .flex_none()
+                .p(XXS)
+                .rounded(ROW_RADIUS + XXS)
+                .border_1()
+                .border_color(if current {
+                    cx.theme().ring
+                } else {
+                    cx.theme().ring.opacity(0.)
+                })
+                .child(surface)
+        })
+}
+
+/// A key displayed on an option or in the keyboard shortcuts dialog.
+pub(super) fn key_hint(label: impl Into<SharedString>, cx: &App) -> Div {
+    meta(label, cx)
+        .flex_none()
+        .rounded(crate::tokens::KEY_RADIUS)
+        .bg(cx.theme().muted)
+        .px(XS)
+        .py(XXS)
+        .font_family(cx.theme().mono_font_family.clone())
+}
+
+/// The question is the main text of the decision.
+pub(super) fn decision_title(question: String) -> Div {
+    div()
+        .text_size(crate::tokens::TYPE_EMPHASIS)
+        .font_weight(FontWeight::SEMIBOLD)
+        .min_w_0()
+        .child(question)
+}
+
+/// A full-width option with space for wrapped text and a trailing key.
+pub(super) fn decision_option(
+    id: impl Into<ElementId>,
+    label: String,
+    recommended: bool,
+    chosen: bool,
+    dimmed: bool,
+    key: Option<String>,
+    cx: &App,
+) -> Button {
+    use gpui_kit::prelude::FluentBuilder as _;
+
+    button(id)
+        .outline()
+        .size(CONTROL_HEIGHT)
+        .w_full()
+        .min_h(CONTROL_HEIGHT)
+        .py(XS)
+        .tab_stop(true)
+        .accessibility_label(if recommended {
+            format!("{label}, Recommended")
+        } else {
+            label.clone()
+        })
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap(SM)
+                .when(dimmed, |row| row.opacity(crate::tokens::UNCHOSEN_OPACITY))
+                .when(chosen, |row| row.text_color(cx.theme().foreground))
+                .when(chosen, |row| {
+                    row.child(Icon::new(AppIcon::Check).size(TYPE_BODY).flex_none())
+                })
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .flex_wrap()
+                        .gap(XS)
+                        .child(div().min_w_0().whitespace_normal().child(label))
+                        .when(recommended, |row| row.child(count_badge("Recommended", cx))),
+                )
+                .children(key.map(|label| key_hint(label, cx))),
+        )
+}
+
+/// A decision screen's vertical scrolling region and its matching scrollbar.
+pub(super) fn decision_scroller(
+    id: &'static str,
+    content: Div,
+    handle: &gpui_kit::ScrollHandle,
+) -> Div {
+    use gpui_kit::component::InteractiveElementExt as _;
+    use gpui_kit::component::scroll::ScrollableElement as _;
+    use gpui_kit::{InteractiveElement as _, StatefulInteractiveElement as _};
+
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .child(
+            div()
+                .id(id)
+                .size_full()
+                .overflow_y_scroll()
+                .lock_scroll_axis()
+                .track_scroll(handle)
+                .child(content.w_full().min_h_full()),
+        )
+        .vertical_scrollbar(handle)
+}

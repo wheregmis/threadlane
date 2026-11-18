@@ -4,115 +4,81 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_desktop::{Activity, Part, Reach};
+use threadlane_desktop::{Activity, Part, Reach, Space};
 
 use super::gap_line;
 use crate::components::{meta, row, status_dot};
 use crate::icons::AppIcon;
+use crate::menus::{GoHome, OpenSettings, SidebarShortcut, shortcut_hint};
 use crate::tokens::{BAR_HEIGHT, LG, MD, SIDEBAR_WIDTH, SM, Status, TYPE_EMPHASIS, XS};
 use crate::{Desktop, Screen, Tab};
 
-impl Desktop {
-    pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let needs_you = self.state.queue().len();
-        let mut bar = v_flex()
-            .w(SIDEBAR_WIDTH)
-            .flex_none()
-            .h_full()
-            .gap(XS)
-            .p(SM)
-            .pt(LG)
-            .bg(cx.theme().sidebar)
-            .text_color(cx.theme().sidebar_foreground)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .overflow_y_scrollbar()
-            .id("sidebar")
-            .child(
-                h_flex()
-                    .h(BAR_HEIGHT)
-                    .px(MD)
-                    .text_size(TYPE_EMPHASIS)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Threadlane"),
-            )
-            .child(
-                row(
-                    "go-home",
-                    AppIcon::House,
-                    "Home",
-                    positive_count(needs_you),
-                    self.screen == Screen::Home,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Home, cx))),
-            );
+struct NavigationRow {
+    id: String,
+    icon: AppIcon,
+    label: String,
+    count: Option<SharedString>,
+    screen: Screen,
+}
 
+enum SidebarEntry<'a> {
+    Row(NavigationRow),
+    Space(&'a Space),
+    Team,
+}
+
+impl Desktop {
+    fn sidebar_entries(&self) -> Vec<SidebarEntry<'_>> {
+        let row = |id: String, icon, label: String, count, screen| {
+            SidebarEntry::Row(NavigationRow {
+                id,
+                icon,
+                label,
+                count,
+                screen,
+            })
+        };
+        let mut entries = vec![row(
+            "go-home".into(),
+            AppIcon::House,
+            "Home".into(),
+            positive_count(self.state.queue().len()),
+            Screen::Home,
+        )];
         for space in self.state.spaces() {
-            let (status, label) = match space.reach {
-                Reach::Unknown => (Status::Idle, "Asking…"),
-                Reach::Reachable => (Status::Done, "Reachable"),
-                Reach::Unreachable(_) => (Status::Failed, "Out of reach"),
-            };
-            bar = bar.child(
-                h_flex()
-                    .px(MD)
-                    .pt(MD)
-                    .gap(XS)
-                    .child(meta(space.name.clone(), cx).truncate())
-                    .child(status_dot(status, cx))
-                    .child(meta(label, cx).flex_none()),
-            );
-            if let Some(gap) = space.gap(Part::Projects) {
-                bar = bar.child(gap_line(&gap, "projects", cx));
-            }
-            for project in &space.projects {
-                let screen = Screen::Project {
-                    space: space.name.clone(),
-                    project: project.name.clone(),
-                    tab: Tab::Tasks,
-                };
-                let active = matches!(
-                    &self.screen,
-                    Screen::Project { space: open, project: name, .. }
-                        if *open == space.name && *name == project.name
-                );
+            entries.push(SidebarEntry::Space(space));
+            entries.extend(space.projects.iter().map(|project| {
                 let open = self.state.open_in(&space.name, project.id)
                     + self.state.attention_in(&space.name, &project.name);
-                bar = bar.child(
-                    row(
-                        format!("go-{}-{}", space.name, project.name),
-                        AppIcon::Folder,
-                        project.name.clone(),
-                        positive_count(open),
-                        active,
-                        cx,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
-                );
-            }
-            let screen = Screen::NewProject {
-                space: space.name.clone(),
-            };
-            bar = bar.child(
                 row(
-                    format!("new-project-{}", space.name),
-                    AppIcon::FolderPlus,
-                    "New project",
-                    None,
-                    self.screen == screen,
-                    cx,
+                    format!("go-{}-{}", space.name, project.name),
+                    AppIcon::Folder,
+                    project.name.clone(),
+                    positive_count(open),
+                    Screen::Project {
+                        space: space.name.clone(),
+                        project: project.name.clone(),
+                        tab: Tab::Tasks,
+                    },
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
-            );
+            }));
+            entries.push(row(
+                format!("new-project-{}", space.name),
+                AppIcon::FolderPlus,
+                "New project".into(),
+                None,
+                Screen::NewProject {
+                    space: space.name.clone(),
+                },
+            ));
         }
-
         let machines = self
             .state
             .machine_count()
             .filter(|&(_, all)| all != 0)
             .map(|(online, all)| format!("{online} / {all}").into());
-        bar.child(meta("TEAM", cx).px(MD).pt(MD)).children(
+        entries.push(SidebarEntry::Team);
+        entries.extend(
             [
                 ("go-agents", AppIcon::Bot, "Agents", None, Screen::Agents),
                 (
@@ -137,13 +103,109 @@ impl Desktop {
                     Screen::Settings,
                 ),
             ]
-            .into_iter()
             .map(|(id, icon, label, count, screen)| {
-                row(id, icon, label, count, self.screen == screen, cx)
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
+                row(id.into(), icon, label.into(), count, screen)
+            }),
+        );
+        entries
+    }
+
+    /// Opens the nth actionable row regardless of the sidebar's visibility.
+    pub(crate) fn sidebar_screen(&self, index: usize) -> Option<Screen> {
+        self.sidebar_entries()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                SidebarEntry::Row(row) => Some(row.screen),
+                _ => None,
             })
-            .collect::<Vec<_>>(),
-        )
+            .nth(index)
+    }
+
+    pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut bar = v_flex()
+            .w(SIDEBAR_WIDTH)
+            .flex_none()
+            .h_full()
+            .gap(XS)
+            .p(SM)
+            .pt(LG)
+            .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            .overflow_y_scrollbar()
+            .id("sidebar")
+            .child(
+                h_flex()
+                    .h(BAR_HEIGHT)
+                    .px(MD)
+                    .text_size(TYPE_EMPHASIS)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Threadlane"),
+            );
+        let mut index = 0;
+        for entry in self.sidebar_entries() {
+            match entry {
+                SidebarEntry::Row(NavigationRow {
+                    id,
+                    icon,
+                    label,
+                    count,
+                    screen,
+                }) => {
+                    let active = match (&self.screen, &screen) {
+                        (
+                            Screen::Project { space, project, .. },
+                            Screen::Project {
+                                space: row_space,
+                                project: row_project,
+                                ..
+                            },
+                        ) => space == row_space && project == row_project,
+                        _ => self.screen == screen,
+                    };
+                    let command = match screen {
+                        Screen::Home => shortcut_hint(cx, &GoHome),
+                        Screen::Settings => shortcut_hint(cx, &OpenSettings),
+                        _ => None,
+                    };
+                    let shortcuts: Vec<_> = command
+                        .into_iter()
+                        .chain(shortcut_hint(cx, &SidebarShortcut(index)))
+                        .collect();
+                    index += 1;
+                    let mut button = row(id, icon, label.clone(), count, active, cx);
+                    if !shortcuts.is_empty() {
+                        button = button.tooltip(format!("{label}  {}", shortcuts.join(" / ")));
+                    }
+                    bar =
+                        bar.child(button.on_click(
+                            cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                        ));
+                }
+                SidebarEntry::Space(space) => {
+                    let (status, label) = match space.reach {
+                        Reach::Unknown => (Status::Idle, "Asking…"),
+                        Reach::Reachable => (Status::Done, "Reachable"),
+                        Reach::Unreachable(_) => (Status::Failed, "Out of reach"),
+                    };
+                    bar = bar.child(
+                        h_flex()
+                            .px(MD)
+                            .pt(MD)
+                            .gap(XS)
+                            .child(meta(space.name.clone(), cx).truncate())
+                            .child(status_dot(status, cx))
+                            .child(meta(label, cx).flex_none()),
+                    );
+                    if let Some(gap) = space.gap(Part::Projects) {
+                        bar = bar.child(gap_line(&gap, "projects", cx));
+                    }
+                }
+                SidebarEntry::Team => bar = bar.child(meta("TEAM", cx).px(MD).pt(MD)),
+            }
+        }
+        bar
     }
 
     /// The last action and where it stands, until the next one.

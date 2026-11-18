@@ -3,16 +3,18 @@
 //! Cancel. Tasks have no paused state in the hub, so there is no Pause.
 
 use gpui_kit::component::button::ButtonVariants as _;
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::TaskId;
-use threadlane_desktop::{TaskControl, When, changes, chips, status_label, timeline, usage};
+use threadlane_desktop::{
+    Queued, TaskControl, When, changes, chips, status_label, timeline, usage,
+};
 
 use super::{gap_line, link};
 use crate::components::{
-    button, card, composer, empty_state, field, heading, meta, page_header, section, status_badge,
+    button, card, composer, decision_scroller, empty_state, field, heading, meta, page_header,
+    section, status_badge,
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
@@ -27,7 +29,6 @@ impl Desktop {
         space: &str,
         task: TaskId,
         when: &When,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -36,13 +37,20 @@ impl Desktop {
                 .state
                 .task_gap(space, task)
                 .unwrap_or(threadlane_desktop::Gap::Loading);
-            return v_flex()
-                .w_full()
-                .max_w(READING_WIDTH)
-                .self_center()
+            let pending: Vec<_> = self
+                .state
+                .visible_decisions()
+                .map(|queued| self.decision(queued, when, cx))
+                .collect();
+            let content = v_flex()
                 .gap(MD)
                 .child(heading(format!("{space} {task}")))
                 .child(gap_line(&gap, "this task", cx))
+                .children(pending);
+            return decision_scroller("task", content, &self.decision_scroll)
+                .w_full()
+                .max_w(READING_WIDTH)
+                .self_center()
                 .into_any_element();
         };
         let summary = &detail.summary;
@@ -67,10 +75,26 @@ impl Desktop {
                     .child(div().text_size(TYPE_BODY).min_w_0().child(moment.text)),
             );
         }
-        let open = self
-            .state
-            .open_for(space, task)
-            .map(|queued| self.decision(queued, window, cx));
+        let mut decisions: Vec<_> = detail
+            .decisions
+            .iter()
+            .filter(|decision| !self.state.is_pending(space, &decision.id.to_string()))
+            .map(|decision| Queued {
+                space: space.to_owned(),
+                decision: decision.clone(),
+            })
+            .collect();
+        decisions.extend(self.state.visible_decisions().cloned());
+        decisions.sort_by_key(|queued| (queued.decision.created_at, queued.decision.id));
+        let decision_cards: Vec<_> = decisions
+            .iter()
+            .map(|queued| {
+                self.decision_display(
+                    self.state.present_decision(queued, &summary.project, when),
+                    cx,
+                )
+            })
+            .collect();
 
         let change = changes(detail);
         let mut published = card(cx)
@@ -205,14 +229,7 @@ impl Desktop {
             .flex_wrap()
             .children(stop)
             .children(control);
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .max_w(READING_WIDTH)
-            .self_center()
-            .overflow_y_scrollbar()
-            .id("task")
+        let content = v_flex()
             .gap(XL)
             .child(
                 link(
@@ -263,7 +280,7 @@ impl Desktop {
                             .min_w_0()
                             .gap(LG)
                             .child(moments)
-                            .children(open),
+                            .children(decision_cards),
                     )
                     .child(related),
             )
@@ -278,13 +295,18 @@ impl Desktop {
                                     .primary()
                                     .icon(AppIcon::Send)
                                     .label("Send")
+                                    .tooltip(crate::keyboard::send_hint(cx))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.send_to_task(window, cx)
                                     })),
                             ),
                     )
                     .child(meta(self.state.task_hint(space, task), cx)),
-            )
+            );
+        decision_scroller("task", content, &self.decision_scroll)
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
             .into_any_element()
     }
 }
