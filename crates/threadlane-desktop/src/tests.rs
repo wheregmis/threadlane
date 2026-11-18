@@ -5768,6 +5768,46 @@ fn several_repositories_are_named_in_the_merge_state() {
 }
 
 #[tokio::test]
+async fn a_saved_mixed_backend_order_can_be_kept_or_cleared() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let order = vec![BackendKind::Antigravity, BackendKind::Claude];
+    work.org(OrgRequest::CreateAgent {
+        name: "Reviewer".into(),
+        role: "reviewer".into(),
+        instructions: "Review.".into(),
+        backends: order.clone(),
+    })
+    .await
+    .unwrap();
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    let fields = state.open_agent_edit("work", "Reviewer").unwrap();
+    let edit = state.agent_edit().unwrap();
+    let saved = edit.backends;
+    assert_eq!(
+        edit.saved_backend_label().as_deref(),
+        Some("antigravity, then claude")
+    );
+    assert_eq!(edit.model_backends(), order);
+    assert_eq!(state.agent_update(&fields), Ok(None));
+
+    state.agent_edit_mut().unwrap().backends = 0;
+    assert_eq!(
+        state.agent_edit().unwrap().model_backends(),
+        BackendKind::ALL
+    );
+    assert!(
+        matches!(state.agent_update(&fields), Ok(Some(OrgRequest::UpdateAgent {
+        backends: Some(kinds), ..
+    })) if kinds.is_empty())
+    );
+
+    state.agent_edit_mut().unwrap().backends = saved;
+    assert_eq!(state.agent_update(&fields), Ok(None));
+}
+
+#[tokio::test]
 async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed() {
     let work = FakeHub::new("Work", Vec::new());
     let (_dir, core) = core(&[("work", &work)]);

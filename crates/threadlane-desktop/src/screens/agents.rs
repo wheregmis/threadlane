@@ -250,6 +250,7 @@ impl Desktop {
         let backends = backend_picker(
             "agent-backends",
             self.state.agent_form().backends,
+            None,
             |this, index| this.state.agent_form_mut().backends = index,
             cx,
         );

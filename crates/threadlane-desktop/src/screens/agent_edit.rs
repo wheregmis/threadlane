@@ -25,15 +25,20 @@ use crate::{Desktop, Screen};
 pub(super) fn backend_picker(
     id: &'static str,
     picked: usize,
+    saved_label: Option<String>,
     on_pick: impl Fn(&mut Desktop, usize) + 'static,
     cx: &mut Context<Desktop>,
 ) -> ButtonGroup {
+    let labels = BACKENDS
+        .iter()
+        .map(|(label, _)| SharedString::from(*label))
+        .chain(saved_label.map(SharedString::from));
     ButtonGroup::new(id)
         .outline()
         .compact()
-        .children(BACKENDS.iter().enumerate().map(|(index, (label, _))| {
+        .children(labels.enumerate().map(|(index, label)| {
             button(SharedString::from(format!("{id}-{index}")))
-                .label(*label)
+                .label(label)
                 .selected(picked == index)
         }))
         .on_click(cx.listener(move |this, clicked: &Vec<usize>, _, cx| {
@@ -231,6 +236,7 @@ impl Desktop {
         let backends = backend_picker(
             "agent-edit-backends",
             edit.backends,
+            edit.saved_backend_label(),
             |this, index| {
                 if let Some(edit) = this.state.agent_edit_mut() {
                     edit.backends = index;

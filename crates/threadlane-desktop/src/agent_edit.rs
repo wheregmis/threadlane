@@ -18,10 +18,11 @@ pub struct AgentEdit {
     pub space: String,
     /// The agent's name when the view opened, which Save and Delete name.
     pub agent: String,
-    /// The index in [`BACKENDS`] picked.
+    /// The selected preset, or `BACKENDS.len()` for the saved order.
     pub backends: usize,
     /// The index it opened with: Save sends backends only when it moved.
     opened_with: usize,
+    saved_backends: Vec<BackendKind>,
     opened_fields: Arc<AgentFields>,
     /// Whether the instructions show rendered as Markdown.
     pub preview: bool,
@@ -54,13 +55,30 @@ fn model(models: &Json, backend: BackendKind) -> String {
 }
 
 impl AgentEdit {
-    /// The backends a model can be set for: the ones picked, or both when
-    /// either may run it.
+    /// The extra picker option for a saved order outside the presets.
+    #[must_use]
+    pub fn saved_backend_label(&self) -> Option<String> {
+        (self.opened_with == BACKENDS.len()).then(|| {
+            self.saved_backends
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", then ")
+        })
+    }
+
+    fn selected_backends(&self) -> &[BackendKind] {
+        BACKENDS
+            .get(self.backends)
+            .map_or(&self.saved_backends, |(_, kinds)| *kinds)
+    }
+
+    /// The selected backends in preference order, or all for an unrestricted agent.
     #[must_use]
     pub fn model_backends(&self) -> Vec<BackendKind> {
-        match BACKENDS.get(self.backends) {
-            Some((_, kinds)) if !kinds.is_empty() => kinds.to_vec(),
-            _ => BackendKind::ALL.to_vec(),
+        match self.selected_backends() {
+            [] => BackendKind::ALL.to_vec(),
+            kinds => kinds.to_vec(),
         }
     }
 }
@@ -91,7 +109,7 @@ impl AppState {
         let picked = BACKENDS
             .iter()
             .position(|(_, kinds)| *kinds == known.backends.as_slice())
-            .unwrap_or(0);
+            .unwrap_or(BACKENDS.len());
         let fields = AgentFields {
             name: known.name.clone(),
             role: known.role.clone(),
@@ -106,6 +124,7 @@ impl AppState {
             agent: agent.to_owned(),
             backends: picked,
             opened_with: picked,
+            saved_backends: known.backends.clone(),
             opened_fields: Arc::new(fields.clone()),
             preview: false,
         });
@@ -139,10 +158,10 @@ impl AppState {
         }
         let changed = |new: &str, old: &str| (new != old).then(|| new.to_owned());
         let backends = (edit.backends != edit.opened_with).then(|| {
-            BACKENDS
-                .get(edit.backends)
-                .map(|(_, kinds)| kinds.iter().map(|kind| kind.as_str().to_owned()).collect())
-                .unwrap_or_default()
+            edit.selected_backends()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
         });
         let models: BTreeMap<String, String> = fields
             .models
