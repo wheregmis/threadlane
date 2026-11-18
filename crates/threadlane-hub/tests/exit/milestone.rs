@@ -47,7 +47,7 @@ async fn world() -> World {
     );
     backend.route(
         "task_result",
-        Script::new().finish("Waiting for the other tasks."),
+        Script::new().finish("No response requested."),
     );
     backend.route(
         "decision_answer",
@@ -269,7 +269,7 @@ async fn milestone_3_exit() {
         Some(&json!(opened[0]))
     );
     assert_eq!(
-        sim.task("T-0001").await.result,
+        crate::harness::merged_cleanly(sim.task("T-0001").await.result),
         Some(json!({
             "summary": PUBLISHED,
             "branch": "threadlane/T-0001",

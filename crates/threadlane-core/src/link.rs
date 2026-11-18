@@ -28,12 +28,24 @@ use crate::tools::{ToolDefinition, ToolError};
 /// decision 7).
 pub const PROGRESS_WRITTEN: &str = "progress_written";
 
+/// The tool a task agent reports its task done with.
+pub const FINISH_TASK: &str = "finish_task";
+
+/// The field of a `finish_task` call the runner sets to where the task
+/// branch stands against each repository's default branch, a list of
+/// [`crate::workspace::MergeCheck`] (docs/merge-help.md decision 2). An
+/// agent's own value is replaced or removed.
+pub const MERGE_CHECKS: &str = "merge";
+
 /// Everything a runner needs to execute one run. Built by the hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunAssignment {
     /// A project memory pass, isolated from user turns.
     #[serde(default)]
     pub dreaming: bool,
+    /// An ask from the space Lead. Keep unrelated user input for the next run.
+    #[serde(default)]
+    pub space_lead_ask: Option<EventId>,
     pub run_id: RunId,
     pub session_id: SessionId,
     pub project_id: ProjectId,
@@ -239,8 +251,9 @@ pub trait HubLink: Send + Sync + fmt::Debug {
     ) -> Result<Json, ToolError>;
 
     /// Commits a finished run: events done, run closed (Plan.md §4.3 step
-    /// 5.6). `final_text` is stored as the rationale and never delivered.
-    /// The hub derives the outcome from what the run did.
+    /// 5.6). `final_text` is stored as the rationale. When a lead's run sent
+    /// nothing and left no decision, the hub delivers it as the lead's
+    /// message. The hub derives the outcome from what the run did.
     async fn complete(
         &self,
         lease: &Lease,

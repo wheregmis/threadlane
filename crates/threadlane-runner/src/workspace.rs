@@ -16,6 +16,7 @@
 //! sets no credentials: `git` uses whatever logins this user has
 //! (invariant 8); it is only kept from prompting for one.
 
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -24,14 +25,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use threadlane_core::ids::TaskId;
+use threadlane_core::ids::{RepositoryId, TaskId};
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{
-    WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces, task_branch, valid_branch_name,
-    valid_repository_name,
+    MergeCheck, WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces, task_branch,
+    valid_branch_name, valid_repository_name,
 };
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// The longest any one `git` command may take; a clone of a large
 /// repository is the slow case.
@@ -53,10 +54,7 @@ const COMMITTER: [&str; 6] = [
 #[derive(Debug, Clone)]
 pub struct GitWorkspaces {
     root: PathBuf,
-    /// Lanes run in parallel, and two tasks of one repository share its
-    /// clone. shortcut: one lock for every setup, not one per clone; make it
-    /// per clone if setups ever queue behind slow clones.
-    setup: Arc<Mutex<()>>,
+    repositories: Arc<Mutex<HashMap<RepositoryId, Arc<Mutex<()>>>>>,
 }
 
 impl GitWorkspaces {
@@ -68,8 +66,28 @@ impl GitWorkspaces {
             // Git runs inside a clone (`-C`), where a relative worktree path
             // would land under the clone instead of under `root`.
             root: std::path::absolute(&root).unwrap_or(root),
-            setup: Arc::default(),
+            repositories: Arc::default(),
         }
+    }
+
+    async fn lock_repository(&self, id: RepositoryId) -> OwnedMutexGuard<()> {
+        let lock = Arc::clone(self.repositories.lock().await.entry(id).or_default());
+        lock.lock_owned().await
+    }
+
+    async fn lock_removal(&self, removal: &WorkspaceRemoval) -> Vec<OwnedMutexGuard<()>> {
+        // Cleanup may span multiple clones. Take their locks in the same order.
+        let ids: BTreeSet<_> = removal
+            .repositories
+            .iter()
+            .map(|(id, _)| *id)
+            .chain(removal.clones.iter().copied())
+            .collect();
+        let mut locks = Vec::with_capacity(ids.len());
+        for id in ids {
+            locks.push(self.lock_repository(id).await);
+        }
+        locks
     }
 
     /// Where the task's worktree of `repository` is, set up or not.
@@ -170,6 +188,109 @@ impl GitWorkspaces {
         Ok(path)
     }
 
+    /// Fetches the default branch into the repository's clone and returns
+    /// the commit it is at.
+    async fn fetch_base(&self, repository: &Repository) -> Result<String, WorkspaceError> {
+        let clone = self.clone(repository).await?;
+        git(Some(&clone), ["fetch", "--quiet", "origin"]).await?;
+        let base = format!("origin/{}", repository.default_branch);
+        let commit = git(Some(&clone), ["rev-parse", "--verify", base.as_str()]).await?;
+        Ok(commit.trim().to_owned())
+    }
+
+    /// Whether `branch` merges into `base` cleanly, by `git merge-tree
+    /// --write-tree`, which touches no worktree: the conflicting files.
+    async fn conflicts(
+        &self,
+        repository: &Repository,
+        base: &str,
+        branch: &str,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        let clone = self.clone(repository).await?;
+        let args: Vec<OsString> = [
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            base,
+            branch,
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let mut command = git_command(Some(&clone), &args);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(GIT_TIMEOUT, command.output())
+            .await
+            .map_err(|_| WorkspaceError("git merge-tree timed out".to_owned()))?
+            .map_err(|error| WorkspaceError(format!("could not run git merge-tree: {error}")))?;
+        // 0: merges cleanly; 1: conflicts; anything else: it could not tell.
+        match output.status.code() {
+            Some(0) => Ok(Vec::new()),
+            Some(1) => {
+                let mut files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .skip(1) // the tree it wrote
+                    .take_while(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                files.dedup();
+                Ok(files)
+            }
+            _ => Err(WorkspaceError(format!(
+                "git merge-tree failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))),
+        }
+    }
+
+    /// Rebases an unpublished, clean worktree onto `base` when it can.
+    /// Returns the files that conflict.
+    async fn rebase(
+        &self,
+        repository: &Repository,
+        path: &Path,
+        base: &str,
+        branch: &str,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        if git(Some(path), ["merge-base", "--is-ancestor", base, "HEAD"])
+            .await
+            .is_ok()
+        {
+            return Ok(Vec::new());
+        }
+        let remote = format!("refs/remotes/origin/{branch}");
+        let published = git(Some(path), ["show-ref", "--verify", "--quiet", &remote])
+            .await
+            .is_ok();
+        if published || !git(Some(path), ["status", "--porcelain"]).await?.is_empty() {
+            return self.conflicts(repository, base, branch).await;
+        }
+        let mut args = COMMITTER.to_vec();
+        args.extend(["rebase", "--quiet", base]);
+        if git(Some(path), args).await.is_ok() {
+            return Ok(Vec::new());
+        }
+        // A rebase replays commit by commit, so it can stop where the
+        // merge-tree of the tips would not: the files it stopped on.
+        let mut files: Vec<String> = git(Some(path), ["diff", "--name-only", "--diff-filter=U"])
+            .await
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        git(Some(path), ["rebase", "--abort"]).await?;
+        if files.is_empty() {
+            files = self.conflicts(repository, base, branch).await?;
+        }
+        Ok(files)
+    }
+
     /// Commits what is uncommitted in one worktree on the task branch.
     async fn commit(&self, path: &Path, task: TaskId, message: &str) -> Result<(), WorkspaceError> {
         let branch = task_branch(task);
@@ -202,10 +323,10 @@ impl Workspaces for GitWorkspaces {
         task: TaskId,
         repositories: &[Repository],
     ) -> Result<Vec<PathBuf>, WorkspaceError> {
-        let _setup = self.setup.lock().await;
         let mut paths = Vec::with_capacity(repositories.len());
         for repository in repositories {
             check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
             paths.push(self.worktree_of(task, repository).await?);
         }
         Ok(paths)
@@ -219,6 +340,7 @@ impl Workspaces for GitWorkspaces {
     ) -> Result<(), WorkspaceError> {
         for repository in repositories {
             check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
             if self.is_ready(task, repository) {
                 self.commit(&self.worktree(task, repository), task, message)
                     .await?;
@@ -226,8 +348,57 @@ impl Workspaces for GitWorkspaces {
         }
         Ok(())
     }
+    async fn check_merge(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+    ) -> Result<Vec<MergeCheck>, WorkspaceError> {
+        let branch = task_branch(task);
+        let mut checks = Vec::new();
+        for repository in repositories {
+            check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
+            if !self.is_ready(task, repository) {
+                continue;
+            }
+            let commit = self.fetch_base(repository).await?;
+            checks.push(MergeCheck {
+                repository: repository.name.clone(),
+                branch: repository.default_branch.clone(),
+                conflicts: self.conflicts(repository, &commit, &branch).await?,
+                base: commit,
+            });
+        }
+        Ok(checks)
+    }
+
+    async fn bring_in_base(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+    ) -> Result<Vec<MergeCheck>, WorkspaceError> {
+        let branch = task_branch(task);
+        let mut checks = Vec::new();
+        for repository in repositories {
+            check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
+            if !self.is_ready(task, repository) {
+                continue;
+            }
+            let commit = self.fetch_base(repository).await?;
+            let path = self.worktree(task, repository);
+            checks.push(MergeCheck {
+                repository: repository.name.clone(),
+                branch: repository.default_branch.clone(),
+                conflicts: self.rebase(repository, &path, &commit, &branch).await?,
+                base: commit,
+            });
+        }
+        Ok(checks)
+    }
+
     async fn removal_counts(&self, removal: &WorkspaceRemoval) -> WorkspaceCounts {
-        let _setup = self.setup.lock().await;
+        let _repos = self.lock_removal(removal).await;
         let mut counts = WorkspaceCounts::default();
         let Ok(root) = tokio::fs::canonicalize(&self.root).await else {
             return counts;
@@ -257,7 +428,7 @@ impl Workspaces for GitWorkspaces {
     }
 
     async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String> {
-        let _setup = self.setup.lock().await;
+        let _repos = self.lock_removal(removal).await;
         let root = match tokio::fs::canonicalize(&self.root).await {
             Ok(root) => root,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
@@ -508,5 +679,22 @@ mod tests {
         let workspaces = GitWorkspaces::new("data/workspaces");
         assert!(workspaces.root.is_absolute(), "{:?}", workspaces.root);
         assert!(workspaces.root.ends_with("data/workspaces"));
+    }
+
+    #[tokio::test]
+    async fn locking_one_repository_leaves_other_repositories_available() {
+        let workspaces = GitWorkspaces::new("data/workspaces");
+        let _repo = workspaces.lock_repository(RepositoryId(1)).await;
+        let time = Duration::from_millis(100);
+        assert!(
+            tokio::time::timeout(time, workspaces.lock_repository(RepositoryId(1)))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(time, workspaces.lock_repository(RepositoryId(2)))
+                .await
+                .is_ok()
+        );
     }
 }

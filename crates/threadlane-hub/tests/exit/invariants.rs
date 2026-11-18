@@ -227,7 +227,8 @@ pub async fn assert_one_result_per_ended_task(sim: &Sim, scenario: &str) {
 /// A call is what the mirrored journals show: a call id within a backend
 /// session (a resumed session repeats its ids), or, without an id, each
 /// `tool_use` entry on its own. So a session's message rows must not
-/// outnumber its calls, and no two rows may share an idempotency key.
+/// outnumber its calls, and no two rows may share an idempotency key. A
+/// lead's final text, delivered when the run sent nothing, is not a call.
 pub async fn assert_one_outbox_row_per_send_message_call(sim: &Sim, scenario: &str) {
     let calls = calls_per_session(sim, SEND_MESSAGE).await;
     let mut rows: HashMap<SessionId, u32> = HashMap::new();
@@ -244,7 +245,8 @@ pub async fn assert_one_outbox_row_per_send_message_call(sim: &Sim, scenario: &s
             keys.insert(key.clone()),
             "{scenario}: invariant 6: two rows under key {key}"
         );
-        if row.run_id.is_some() {
+        // A lead's delivered final text is one per run, not a call.
+        if row.run_id.is_some() && !key.starts_with("final_text:") {
             let session = row.session_id.expect("a message from a run has a session");
             *rows.entry(session).or_default() += 1;
         }

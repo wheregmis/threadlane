@@ -22,8 +22,9 @@ use threadlane_hub::{HubCore, HubError, HubSettings, SEND_MESSAGE};
 use threadlane_store::{Bootstrap, HubDb};
 use threadlane_testkit::FakeClock;
 
-/// What the played backend says at the end of every run.
-pub const RATIONALE: &str = "Answered the question.";
+/// What the played backend says at the end of every run: the filler, so a
+/// lead run that sends nothing stays silent.
+pub const RATIONALE: &str = "No response requested.";
 
 /// One past the default lease, to let a lease expire.
 pub const PAST_LEASE: Duration = Duration::from_secs(61);

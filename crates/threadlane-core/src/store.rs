@@ -26,6 +26,14 @@ use crate::model::{
 };
 use crate::time::Timestamp;
 
+/// A delivered lead message and its optional return to the space Lead.
+#[derive(Debug)]
+pub struct LeadReply {
+    pub message: NewOutboxMessage,
+    /// The event's source ID is assigned from the persisted outbox message.
+    pub route: Option<NewEvent>,
+}
+
 /// Why a store operation failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -98,7 +106,17 @@ pub trait OrgStore: Send + Sync {
 
     async fn create_agent(&self, agent: &NewAgent) -> StoreResult<Agent>;
     async fn agent(&self, id: AgentId) -> StoreResult<Option<Agent>>;
+    /// Every agent not deleted.
     async fn agents(&self) -> StoreResult<Vec<Agent>>;
+    /// Every agent, deleted ones included, for naming them in history.
+    async fn all_agents(&self) -> StoreResult<Vec<Agent>>;
+    /// Stores an agent's name, role, instructions, backends and models. A
+    /// name another agent has is a [`StoreError::Conflict`].
+    async fn update_agent(&self, agent: &Agent) -> StoreResult<Agent>;
+    /// Deletes an agent with its bindings and standing rules. Its row stays,
+    /// renamed `<name> (deleted)`, so finished tasks still name it. Refused
+    /// for a lead, and while any of its tasks has not ended.
+    async fn delete_agent(&self, id: AgentId) -> StoreResult<()>;
 
     /// Binds an agent to a project. At most one binding per pair and one lead
     /// per project.
@@ -218,13 +236,15 @@ pub trait SessionStore: Send + Sync {
     /// their current status.
     async fn run_events(&self, run_id: RunId) -> StoreResult<Vec<Event>>;
     /// Closes a run with its outcome and marks its events done, in one
-    /// transaction (Plan.md §4.3 step 5.6).
+    /// transaction (Plan.md §4.3 step 5.6). `reply`, if given, is queued in
+    /// the same transaction: a lead's final text delivered as its message.
     async fn commit_run(
         &self,
         lease: &Lease,
         run_id: RunId,
         outcome: RunOutcome,
         rationale: Option<&str>,
+        reply: Option<&LeadReply>,
         ended_at: Timestamp,
     ) -> StoreResult<()>;
     /// Ends a run as failed, in one transaction (Plan.md §4.9): its events
@@ -365,6 +385,13 @@ pub trait TaskStore: Send + Sync {
     /// [`StoreError::Invalid`] while the task has no progress file
     /// ([`crate::memory::progress_path`]).
     async fn finish_task(&self, lease: &Lease, result: &Json) -> StoreResult<Task>;
+    /// Counts one refusal of `finish_task` for merge conflicts on the
+    /// running task whose lane `lease` holds, unless `limit` were already
+    /// counted (docs/merge-help.md decision 5). Returns whether it counted
+    /// one: `false` means finish anyway.
+    async fn count_merge_refusal(&self, lease: &Lease, limit: i64) -> StoreResult<bool>;
+    /// The space lead's ask task `id` was created for, if any.
+    async fn space_lead_ask(&self, id: TaskId) -> StoreResult<Option<EventId>>;
     /// Moves a task along its lifecycle, refusing a move Plan.md §5.2 does
     /// not allow ([`TaskStatus::can_become`]) with [`StoreError::Conflict`].
     /// `proposed` to `queued` inserts the start event.

@@ -49,13 +49,41 @@ impl DecisionRecord {
     }
 }
 
+/// Longer than this, or on more than one line, a question is split.
+const SHORT_QUESTION: usize = 140;
+
+/// A decision's question as the card's title and, when it is long, the rest
+/// as a Markdown body: the title is its first line, or that line's first
+/// sentence when the line itself is long.
+#[must_use]
+pub fn question_parts(question: &str) -> (String, Option<String>) {
+    let question = question.trim();
+    if !question.contains('\n') && question.chars().count() <= SHORT_QUESTION {
+        return (question.to_owned(), None);
+    }
+    let (first, rest) = question.split_once('\n').unwrap_or((question, ""));
+    let sentence = (first.chars().count() > SHORT_QUESTION)
+        .then(|| {
+            first
+                .match_indices(['.', '?', '!'])
+                .map(|(at, _)| at + 1)
+                .find(|&end| first[end..].starts_with(' '))
+        })
+        .flatten();
+    let (title, head) = first.split_at(sentence.unwrap_or(first.len()));
+    let body = format!("{}\n{rest}", head.trim()).trim().to_owned();
+    (title.trim().to_owned(), (!body.is_empty()).then_some(body))
+}
+
 /// Everything the shared card needs, for any origin or lifecycle state.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DecisionDisplay {
     /// The card's space and decision ID.
     pub key: DecisionKey,
-    /// The title asked by the agent.
+    /// The title: the whole question, or its first line or sentence when it is long.
     pub question: String,
+    /// The rest of a long question, as Markdown.
+    pub body: Option<String>,
     /// Full option labels, in hub order.
     pub options: Vec<String>,
     /// Space, project, agent, and task metadata.
@@ -89,9 +117,11 @@ impl AppState {
             .task_id
             .map_or_else(String::new, |task| format!(" · {task}"));
         let agent = self.asker(queued);
+        let (question, body) = question_parts(&decision.question);
         DecisionDisplay {
             key,
-            question: decision.question.clone(),
+            question,
+            body,
             options: decision
                 .options
                 .iter()
@@ -139,9 +169,11 @@ impl AppState {
             ));
         }
         let dashed = card.kind == Some(DecisionKind::Proposal);
+        let (question, body) = question_parts(&card.question);
         Some(DecisionDisplay {
             key,
-            question: card.question.clone(),
+            question,
+            body,
             options: card.options.clone(),
             origin: format!("{space} / {project}"),
             asked: format!("Asked {time}"),

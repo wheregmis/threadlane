@@ -23,8 +23,10 @@ mod placement;
 mod run_loop;
 mod sessions;
 mod socket;
+mod space_lead;
 mod tasks;
 mod timers;
 mod tools;
 
+mod agents;
 mod archive;

@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{free_backends, usable_backends};
-use threadlane_core::ids::{DecisionId, LaneId, MachineId, ProjectId, RunId, TaskId};
+use threadlane_core::ids::{DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
@@ -742,9 +742,14 @@ pub(crate) async fn check_eligible(
     Ok(reason.is_none())
 }
 
-#[async_trait]
-impl TaskStore for HubDb {
-    async fn create_task(&self, lease: Option<&Lease>, task: &NewTask) -> StoreResult<Task> {
+impl HubDb {
+    /// Creates a task and records the space Lead's ask in the same transaction.
+    pub async fn create_task_for_ask(
+        &self,
+        lease: Option<&Lease>,
+        task: &NewTask,
+        ask: Option<EventId>,
+    ) -> StoreResult<Task> {
         if !matches!(task.status, TaskStatus::Proposed | TaskStatus::Queued) {
             return Err(StoreError::Invalid(format!(
                 "a task starts proposed or queued, not {}",
@@ -791,10 +796,10 @@ impl TaskStore for HubDb {
             conn,
             concat!(
                 "INSERT INTO tasks (id, project_id, lane_id, agent_id, title, goal, repositories,
-                 parent_task_id, origin, status, priority, created_by_call, created_at)
+                 parent_task_id, origin, status, priority, created_by_call, created_at, space_lead_event)
              VALUES (",
                 crate::db::next_id_sql!("tasks"),
-                ", ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) RETURNING id"
+                ", ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) RETURNING id"
             ),
             params![
                 task.project_id.get(),
@@ -809,6 +814,7 @@ impl TaskStore for HubDb {
                 task.priority,
                 task.created_by_call.as_deref(),
                 task.created_at.as_millis(),
+                opt_raw(ask, |id| id.get()),
             ],
             |row| Cols(row).id(0),
         )
@@ -856,6 +862,13 @@ impl TaskStore for HubDb {
         let created = existing_task(conn, id).await?;
         tx.commit().await?;
         Ok(created)
+    }
+}
+
+#[async_trait]
+impl TaskStore for HubDb {
+    async fn create_task(&self, lease: Option<&Lease>, task: &NewTask) -> StoreResult<Task> {
+        self.create_task_for_ask(lease, task, None).await
     }
 
     async fn left_unwoken(&self, lane_id: LaneId) -> StoreResult<bool> {
@@ -976,6 +989,45 @@ impl TaskStore for HubDb {
         let finished = existing_task(conn, task.id).await?;
         tx.commit().await?;
         Ok(finished)
+    }
+
+    async fn count_merge_refusal(&self, lease: &Lease, limit: i64) -> StoreResult<bool> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        check_lease(conn, lease).await?;
+        let task = task_of_lane(conn, lease.lane_id)
+            .await?
+            .ok_or_else(|| StoreError::Invalid(format!("lane {} has no task", lease.lane_id)))?;
+        let counted = query_one(
+            conn,
+            "SELECT merge_refusals FROM tasks WHERE id = ?1",
+            params![task.id.get()],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        if counted >= limit {
+            return Ok(false);
+        }
+        exec(
+            conn,
+            "UPDATE tasks SET merge_refusals = merge_refusals + 1 WHERE id = ?1",
+            params![task.id.get()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    async fn space_lead_ask(&self, id: TaskId) -> StoreResult<Option<EventId>> {
+        let conn = self.db.reader()?;
+        let ask: Option<Option<EventId>> = query_opt(
+            &conn,
+            "SELECT space_lead_event FROM tasks WHERE id = ?1",
+            params![id.get()],
+            |row| Cols(row).opt_id(0),
+        )
+        .await?;
+        Ok(ask.flatten())
     }
 
     async fn set_task_status(

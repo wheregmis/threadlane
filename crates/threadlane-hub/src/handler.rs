@@ -13,10 +13,11 @@ use threadlane_core::client::{
 };
 use threadlane_core::client::{TaskReply, TaskRequest, TimerReply, TimerRequest};
 use threadlane_core::ids::{DecisionId, ProjectId};
+use threadlane_core::memory::INSTRUCTIONS_BUDGET;
 use threadlane_core::model::{
-    Agent, Answered, Binding, Decision, DecisionAnswer, DecisionOption, DecisionStatus, EventKind,
-    Inserted, Mode, NewAgent, NewBinding, NewEvent, NewProject, NewRepository, NewStandingRule,
-    Project, StandingRule, Trust,
+    Agent, Answered, BackendKind, Binding, Decision, DecisionAnswer, DecisionOption,
+    DecisionStatus, EventKind, Inserted, Mode, NewAgent, NewBinding, NewEvent, NewProject,
+    NewRepository, NewStandingRule, Project, StandingRule, Trust,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{
@@ -26,7 +27,7 @@ use threadlane_core::time::Timestamp;
 use threadlane_core::workspace::{valid_branch_name, valid_repository_name};
 
 use crate::core::HubCore;
-use crate::defaults::ensure_defaults;
+use crate::defaults::{LEAD_ROLE, ensure_defaults};
 use crate::error::api_error;
 use crate::gate;
 use crate::tools::CLIENT_CHANNEL;
@@ -518,6 +519,131 @@ impl HubApi for ClientApi {
                     .map_err(|error| taken(error, "agent", name))?;
                 Ok(OrgReply::Agent { agent })
             }
+            OrgRequest::UpdateAgent {
+                agent,
+                name,
+                role,
+                instructions,
+                backends,
+                models,
+            } => {
+                let name = name
+                    .as_deref()
+                    .map(|value| required("agent name", value))
+                    .transpose()?;
+                let role = role
+                    .as_deref()
+                    .map(|value| required("agent role", value))
+                    .transpose()?;
+                if let Some(instructions) = &instructions
+                    && instructions.len() > INSTRUCTIONS_BUDGET
+                {
+                    return Err(ApiError::Invalid(format!(
+                        "the instructions are {} bytes, over their budget of {INSTRUCTIONS_BUDGET}",
+                        instructions.len()
+                    )));
+                }
+                let backends = backends
+                    .map(|backends| {
+                        let mut preferred = Vec::with_capacity(backends.len());
+                        for backend in backends {
+                            let backend = known_backend(&backend)?;
+                            if !preferred.contains(&backend) {
+                                preferred.push(backend);
+                            }
+                        }
+                        Ok::<_, ApiError>(preferred)
+                    })
+                    .transpose()?;
+                let models = models
+                    .map(|models| {
+                        models
+                            .into_iter()
+                            .map(|(backend, model)| {
+                                Ok((known_backend(&backend)?.as_str().to_owned(), model))
+                            })
+                            .collect::<Result<Vec<_>, ApiError>>()
+                    })
+                    .transpose()?;
+                let agent_name = agent.trim();
+                let target_name = name.unwrap_or(agent_name);
+                let agent = db
+                    .patch_agent(agent_name, |current| {
+                        if current.role == LEAD_ROLE {
+                            if role.is_some_and(|role| role != LEAD_ROLE) {
+                                return Err(StoreError::Invalid(format!(
+                                    "the lead's role stays {LEAD_ROLE:?}"
+                                )));
+                            }
+                            // Codex cannot remove its built-in tools (Plan.md §18.4 item 12).
+                            if backends
+                                .as_ref()
+                                .is_some_and(|backends| backends != &[BackendKind::Claude])
+                            {
+                                return Err(StoreError::Invalid(
+                                    "the lead runs on Claude only".into(),
+                                ));
+                            }
+                        }
+                        if let Some(name) = name {
+                            name.clone_into(&mut current.name);
+                        }
+                        if let Some(role) = role {
+                            role.clone_into(&mut current.role);
+                        }
+                        if let Some(instructions) = instructions {
+                            current.instructions = instructions;
+                        }
+                        if let Some(backends) = backends {
+                            current.backends = backends;
+                        }
+                        if let Some(models) = models {
+                            if !current.models.is_object() {
+                                current.models = json!({});
+                            }
+                            if let Some(map) = current.models.as_object_mut() {
+                                for (backend, model) in models {
+                                    let model = model.trim();
+                                    if model.is_empty() {
+                                        map.remove(&backend);
+                                    } else {
+                                        map.insert(backend, json!(model));
+                                    }
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|error| match error {
+                        StoreError::Invalid(message) => ApiError::Invalid(message),
+                        StoreError::NotFound { .. } => {
+                            ApiError::NotFound(format!("agent {agent_name:?}"))
+                        }
+                        other => taken(other, "agent", target_name),
+                    })?;
+                Ok(OrgReply::Agent { agent })
+            }
+            OrgRequest::DeleteAgent {
+                agent,
+                confirm_name,
+            } => {
+                let agent = self.agent_named(&agent).await?;
+                if confirm_name.trim() != agent.name {
+                    return Err(ApiError::Invalid(format!(
+                        "type the agent's name, {:?}, to delete it",
+                        agent.name
+                    )));
+                }
+                if agent.role == LEAD_ROLE {
+                    return Err(ApiError::Invalid(format!(
+                        "{} is the lead and cannot be deleted",
+                        agent.name
+                    )));
+                }
+                db.delete_agent(agent.id).await.map_err(project_error)?;
+                Ok(OrgReply::AgentDeleted { agent: agent.name })
+            }
             OrgRequest::Bindings { project } => {
                 let project = self.project_named(project.as_deref()).await?;
                 let mut bindings = Vec::new();
@@ -908,6 +1034,16 @@ fn binding_summary(agent: Agent, binding: &Binding) -> BindingSummary {
 }
 
 /// `value` trimmed, or an error naming `what` if that leaves nothing.
+fn known_backend(name: &str) -> Result<BackendKind, ApiError> {
+    name.trim().parse().map_err(|_| {
+        let known: Vec<&str> = BackendKind::ALL.iter().map(|b| b.as_str()).collect();
+        ApiError::Invalid(format!(
+            "{name:?} is not a backend; use {}",
+            known.join(" or ")
+        ))
+    })
+}
+
 fn required<'a>(what: &str, value: &'a str) -> Result<&'a str, ApiError> {
     let value = value.trim();
     if value.is_empty() {

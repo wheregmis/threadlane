@@ -270,6 +270,58 @@ impl HubApi for FakeHub {
                 agents.push(agent.clone());
                 Ok(OrgReply::Agent { agent })
             }
+            OrgRequest::UpdateAgent {
+                agent: from,
+                name,
+                role,
+                instructions,
+                backends,
+                models,
+            } => {
+                let mut agents = self.agents.lock().expect("lock");
+                let agent = agents
+                    .iter_mut()
+                    .find(|agent| agent.name == from)
+                    .ok_or_else(|| ApiError::NotFound(format!("agent {from:?}")))?;
+                if let Some(name) = name {
+                    agent.name = name;
+                }
+                if let Some(role) = role {
+                    agent.role = role;
+                }
+                if let Some(instructions) = instructions {
+                    agent.instructions = instructions;
+                }
+                if let Some(backends) = backends {
+                    agent.backends = backends
+                        .iter()
+                        .map(|backend| backend.parse().expect("a backend"))
+                        .collect();
+                }
+                for (backend, model) in models.unwrap_or_default() {
+                    agent.models[backend] = json!(model);
+                }
+                for binding in bindings.iter_mut().filter(|b| b.agent == from) {
+                    binding.agent.clone_from(&agent.name);
+                }
+                Ok(OrgReply::Agent {
+                    agent: agent.clone(),
+                })
+            }
+            OrgRequest::DeleteAgent {
+                agent,
+                confirm_name,
+            } => {
+                if agent != confirm_name {
+                    return Err(ApiError::Invalid("type the agent's name".to_owned()));
+                }
+                self.agents
+                    .lock()
+                    .expect("lock")
+                    .retain(|known| known.name != agent);
+                bindings.retain(|binding| binding.agent != agent);
+                Ok(OrgReply::AgentDeleted { agent })
+            }
             OrgRequest::AddRepository {
                 project,
                 name,
@@ -4350,6 +4402,48 @@ async fn decision_number_answers_current_and_keeps_its_record_in_conversation() 
 }
 
 #[tokio::test]
+async fn a_long_question_splits_into_a_title_and_a_six_line_body_and_a_short_one_stays_whole() {
+    let mut long = decision(1, 1_000);
+    long.kind = DecisionKind::Input;
+    long.tool = "ask_user".into();
+    long.question = "Which of these should the team take on next? I read the progress files \
+        and the dogfood log, and these are the open threads that are worth a task.\n\n\
+        1. Deliver a lead's final text: findings 24 and 8.\n2. Fix the sidebar rows."
+        .into();
+    let hub = FakeHub::new("Work", vec![long, decision(2, 2_000)]);
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let shown: Vec<_> = state
+        .queue()
+        .iter()
+        .map(|queued| state.present_decision(queued, "api", &when()))
+        .collect();
+    assert_eq!(
+        shown[0].question,
+        "Which of these should the team take on next?"
+    );
+    assert_eq!(
+        shown[0].body.as_deref(),
+        Some(
+            "I read the progress files and the dogfood log, and these are the open threads \
+             that are worth a task.\n\n1. Deliver a lead's final text: findings 24 and 8.\n\
+             2. Fix the sidebar rows."
+        )
+    );
+    assert_eq!(shown[1].question, "Question 2?");
+    assert_eq!(shown[1].body, None);
+    assert_eq!(
+        ProseLimit::Question.disclosure(false, true),
+        (Some(6), Some("Show more"))
+    );
+    assert_eq!(
+        question_parts("Pick one:\n- a\n- b"),
+        ("Pick one:".to_owned(), Some("- a\n- b".to_owned()))
+    );
+}
+
+#[tokio::test]
 async fn decision_shortcuts_yield_to_fields_and_enter_only_submits_a_question_note() {
     let mut question = decision(2, 2_000);
     question.kind = DecisionKind::Input;
@@ -4817,6 +4911,8 @@ async fn in_progress_caps_running_leads_and_queued_work_and_uses_the_display_clo
     );
     assert_eq!(work.rows[0].elapsed, "12 min");
     assert_eq!(work.rows[1].title, "api · lead");
+    assert_eq!(work.rows[1].label, "api · lead");
+    assert_eq!(work.rows[0].label, "Task 1");
     assert_eq!(work.rows[1].elapsed, "2 min");
     assert_eq!(state.running_leads().len(), 2);
     assert_eq!(work.rows[3].status, "Queued");
@@ -4827,6 +4923,22 @@ async fn in_progress_caps_running_leads_and_queued_work_and_uses_the_display_clo
     };
     assert_eq!(state.in_progress("dev", &later).rows[3].elapsed, "12 min");
     assert!(state.in_progress("other", &when()).rows.is_empty());
+}
+
+#[tokio::test]
+async fn in_progress_rows_clip_long_titles_to_one_line() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(1, TaskStatus::Running, None);
+    running.task.title = "Deliver a lead's final text to the feed".into();
+    *work.tasks.lock().unwrap() = vec![running];
+    *work.lead.lock().unwrap() = Some(Timestamp::from_millis(600_000));
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    state.apply_at(refresh(&core).await, when().now);
+    let rows = state.in_progress("dev", &when()).rows;
+    assert_eq!(rows[0].title, "Deliver a lead's final text to the feed");
+    assert_eq!(rows[0].label, "Deliver a lead's f…");
+    assert_eq!(rows[0].elapsed, "12 min");
 }
 
 #[tokio::test]
@@ -5472,4 +5584,198 @@ async fn deletion_in_another_client_drops_cached_project_and_history_on_refresh(
     assert!(!state.targets().contains(&("work", "api")));
     assert!(state.project("work", "api").is_none());
     assert!(state.conversation("work", "api", &when()).is_empty());
+}
+
+#[tokio::test]
+async fn the_board_and_task_page_say_whether_a_finished_branch_merges() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut clean = task(1, TaskStatus::Done, None);
+    clean.task.result = Some(json!({
+        "summary": "done",
+        "merge": [{ "repository": "app", "branch": "main",
+                    "base": "1a2b3c4d5e6f", "conflicts": [] }],
+    }));
+    let mut conflicted = task(2, TaskStatus::Done, None);
+    conflicted.task.result = Some(json!({
+        "summary": "done",
+        "merge": [{ "repository": "app", "branch": "main", "base": "9f8e7d6",
+                    "conflicts": ["src/a.rs", "src/b.rs"] }],
+    }));
+    let unchecked = task(3, TaskStatus::Done, None);
+    *work.tasks.lock().expect("lock") = vec![clean, conflicted, unchecked];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let done = state
+        .board("work", "api", &when())
+        .into_iter()
+        .find(|column| column.title == "Done")
+        .unwrap();
+    let merge = |id| {
+        done.cards
+            .iter()
+            .find(|card| card.id == TaskId(id))
+            .unwrap()
+            .merge
+            .clone()
+    };
+    assert_eq!(
+        merge(1).as_deref(),
+        Some("Merges cleanly into main at 1a2b3c4")
+    );
+    assert_eq!(
+        merge(2).as_deref(),
+        Some("Conflicts with main: src/a.rs, src/b.rs")
+    );
+    assert_eq!(merge(3), None, "no check recorded, nothing claimed");
+
+    state.apply_task(load_task(&core, "work", TaskId(2)).await);
+    let detail = state.task("work", TaskId(2)).unwrap();
+    assert_eq!(
+        changes(detail).merge.as_deref(),
+        Some("Conflicts with main: src/a.rs, src/b.rs")
+    );
+}
+
+#[test]
+fn several_repositories_are_named_in_the_merge_state() {
+    let result = json!({ "merge": [
+        { "repository": "app", "branch": "main", "base": "abcdef0123", "conflicts": [] },
+        { "repository": "web", "branch": "trunk", "base": "0123", "conflicts": ["x"] },
+    ]});
+    assert_eq!(
+        merge_state(Some(&result)).as_deref(),
+        Some("app: Merges cleanly into main at abcdef0 · web: Conflicts with trunk: x")
+    );
+}
+
+#[tokio::test]
+async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    for (name, role) in [("Lead", "lead"), ("Reviewer", "reviewer")] {
+        work.org(OrgRequest::CreateAgent {
+            name: name.to_owned(),
+            role: role.to_owned(),
+            instructions: "Review.".to_owned(),
+            backends: vec![BackendKind::Claude],
+        })
+        .await
+        .expect("created");
+    }
+    *work.bindings.lock().expect("lock") = vec![BindingSummary {
+        agent: "Lead".to_owned(),
+        role: "lead".to_owned(),
+        mode: Mode::OnRequest,
+        is_lead: true,
+        max_parallel: 1,
+        overrides: Default::default(),
+    }];
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    let projects = vec![
+        ("work".to_owned(), "api".to_owned()),
+        ("work".to_owned(), "General".to_owned()),
+    ];
+    state.apply_modes(load_modes(&core, projects).await);
+    let binding = core
+        .set_mode(Some("work"), Some("api"), "Reviewer", Mode::Assisted)
+        .await
+        .expect("bound");
+    state.mode_set("work", "api", binding);
+
+    assert!(state.open_agent_edit("work", "Nobody").is_none());
+    let mut fields = state.open_agent_edit("work", "Reviewer").expect("known");
+    assert_eq!(
+        (fields.name.as_str(), fields.instructions.as_str()),
+        ("Reviewer", "Review.")
+    );
+    let edit = state.agent_edit().expect("open").clone();
+    assert_eq!(BACKENDS[edit.backends].1, [BackendKind::Claude]);
+    assert_eq!(edit.model_backends(), [BackendKind::Claude]);
+    let bound: Vec<_> = state
+        .agent_bindings("work", "Reviewer")
+        .into_iter()
+        .map(|bound| (bound.project, bound.binding.mode))
+        .collect();
+    assert_eq!(bound[0], ("api".to_owned(), Mode::Assisted));
+    assert!(state.offers_agent_delete("work", "Reviewer"));
+    assert!(!state.offers_agent_delete("work", "Lead"), "never the lead");
+
+    work.org(OrgRequest::UpdateAgent {
+        agent: "Reviewer".to_owned(),
+        name: None,
+        role: None,
+        instructions: Some("Updated by another client.".to_owned()),
+        backends: None,
+        models: None,
+    })
+    .await
+    .expect("edited from another client");
+    state.apply(refresh(&core).await);
+    assert_eq!(state.agent_update(&fields), Ok(None), "nothing changed");
+    fields.role = " ".to_owned();
+    assert!(state.agent_update(&fields).is_err(), "a role is needed");
+    fields.role = "reviewer".to_owned();
+    fields.name = " Critic ".to_owned();
+    fields.models[0].1 = "opus".to_owned();
+    state.agent_edit_mut().expect("open").backends = 2;
+    assert_eq!(
+        state.agent_edit().expect("open").model_backends(),
+        [BackendKind::Codex, BackendKind::Claude]
+    );
+    let request = state
+        .agent_update(&fields)
+        .expect("valid")
+        .expect("changed");
+    assert_eq!(
+        request,
+        OrgRequest::UpdateAgent {
+            agent: "Reviewer".to_owned(),
+            name: Some("Critic".to_owned()),
+            role: None,
+            instructions: None,
+            backends: Some(vec!["codex".to_owned(), "claude".to_owned()]),
+            models: Some([("claude".to_owned(), "opus".to_owned())].into()),
+        },
+        "only what changed"
+    );
+    let saving = state.agent_edit().expect("open").clone();
+    let agent = core
+        .update_agent(Some("work"), request)
+        .await
+        .expect("updated");
+    assert_eq!(agent.instructions, "Updated by another client.");
+    state.close_agent_edit();
+    let reopened = state.open_agent_edit("work", "Reviewer").expect("reopened");
+    state.agent_updated(&saving, agent);
+    assert_eq!(
+        state.agent_edit().expect("reopened view stays").agent,
+        "Critic"
+    );
+    assert_eq!(state.agent_update(&reopened), Ok(None));
+    assert_eq!(state.modes("work").agents, ["Lead", "Critic"]);
+    assert_eq!(state.agent_bindings("work", "Critic").len(), 1, "renamed");
+    assert_eq!(
+        state.space("work").expect("space").agents[1].models["claude"],
+        "opus"
+    );
+
+    state.open_agent_edit("work", "Critic").expect("known");
+    let deleted = core
+        .delete_agent(Some("work"), "Critic", "Critic")
+        .await
+        .expect("deleted");
+    state.agent_deleted("work", &deleted);
+    assert!(state.agent_edit().is_none());
+    assert_eq!(state.modes("work").agents, ["Lead"]);
+    assert!(state.agent_bindings("work", "Critic").is_empty());
+    assert!(
+        work.agents
+            .lock()
+            .expect("lock")
+            .iter()
+            .all(|a| a.name != "Critic")
+    );
 }

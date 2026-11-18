@@ -25,7 +25,7 @@ use threadlane_core::runtime::steps::runner::{
 };
 use threadlane_core::runtime::{Killed, Step, StepHook};
 use threadlane_core::time::{Clock, Timestamp};
-use threadlane_core::workspace::{Workspaces, task_branch};
+use threadlane_core::workspace::{MergeCheck, Workspaces, task_branch};
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -382,7 +382,10 @@ impl Inner {
         }
         lane.check()?;
         self.link.check_running(&lane.lease()).await?;
-        let performed = self.perform(lane, assignment).await?;
+        let mut performed = self.perform(lane, assignment).await?;
+        performed.push_str(&self.bring_in_base(assignment).await);
+        lane.check()?;
+        self.link.check_running(&lane.lease()).await?;
 
         let deadline = self.clock.now() + assignment.wall_time_limit;
         let request = self.request(lane, assignment, working_dir, performed);
@@ -599,7 +602,11 @@ impl Inner {
             if event.is_terminal() {
                 return Ok(Ended::Terminal(event));
             }
-            if !assignment.dreaming && !lane.deferred() && event == BackendEvent::TurnBoundary {
+            if !assignment.dreaming
+                && assignment.space_lead_ask.is_none()
+                && !lane.deferred()
+                && event == BackendEvent::TurnBoundary
+            {
                 self.fold_in(lane, assignment, run).await?;
             }
             if lane.deferred() && matches!(event, BackendEvent::ToolUse { .. }) {
@@ -892,6 +899,10 @@ impl Inner {
             Arc::clone(lane),
             assignment.run_id,
             assignment.tools.clone(),
+            Arc::clone(&self.workspaces),
+            assignment
+                .task_id
+                .map(|task| (task, assignment.repositories.clone())),
         );
         RunRequest {
             working_dir,
@@ -919,6 +930,30 @@ impl Inner {
             .checkpoint(task, &assignment.repositories, &message)
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// Rebases a task's branches onto their default branches where that
+    /// rebases cleanly (docs/merge-help.md decision 3), and returns what to
+    /// tell the session about those it left as they were. A failure costs
+    /// only the rebase: the run starts anyway.
+    async fn bring_in_base(&self, assignment: &RunAssignment) -> String {
+        let Some(task) = assignment.task_id else {
+            return String::new();
+        };
+        if assignment.repositories.is_empty() {
+            return String::new();
+        }
+        match self
+            .workspaces
+            .bring_in_base(task, &assignment.repositories)
+            .await
+        {
+            Ok(checks) => checks.iter().map(conflict_note).collect(),
+            Err(error) => {
+                warn!(%task, %error, "could not bring the default branch into the task branch");
+                String::new()
+            }
+        }
     }
 
     /// Reports the usage limit to the hub, which cools the account down.
@@ -1215,4 +1250,21 @@ fn capabilities(max_parallel: u32) -> Json {
 
 fn saturating_u32(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// What a run's prompt says about a task branch left conflicting with its
+/// base at the start of the run; nothing for one that merges cleanly.
+fn conflict_note(check: &MergeCheck) -> String {
+    if check.clean() {
+        return String::new();
+    }
+    format!(
+        "\n\nThe task branch in {repository} conflicts with {branch} at {base}, in: {files}. \
+         It was not rebased. Rebase it onto {base} (already fetched as origin/{branch}) and \
+         resolve the conflicts during this run.",
+        repository = check.repository,
+        branch = check.branch,
+        base = check.base,
+        files = check.conflicts.join(", "),
+    )
 }

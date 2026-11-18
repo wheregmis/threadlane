@@ -145,7 +145,7 @@ pub fn plan_tasks_in(repositories: &[&str], tasks: &[(&str, &[&str])]) -> Script
             }),
         );
     }
-    script.finish("Planned the tasks.")
+    script.finish("No response requested.")
 }
 
 /// Binds an engineer to General that may run `max_parallel` tasks at once.
@@ -163,6 +163,23 @@ pub async fn add_engineer(db: &HubDb, max_parallel: u32) {
     })
     .await
     .unwrap();
+}
+
+/// A task's result without its merge record, which it checks says the
+/// branch merged cleanly (docs/merge-help.md decision 4).
+pub fn merged_cleanly(result: Option<Json>) -> Option<Json> {
+    let mut result = result?;
+    let merge = result
+        .as_object_mut()
+        .and_then(|object| object.remove("merge"))
+        .expect("a merge record");
+    assert!(
+        merge
+            .as_array()
+            .is_some_and(|checks| checks.iter().all(|check| check["conflicts"] == json!([]))),
+        "{merge}"
+    );
+    Some(result)
 }
 
 /// How many times `plan` saw `step`.

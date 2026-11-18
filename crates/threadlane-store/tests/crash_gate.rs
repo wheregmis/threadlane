@@ -170,6 +170,12 @@ async fn killed_writers_never_lose_or_tear_transactions() {
     let dir = tempfile::tempdir().expect("temp dir");
     let scratch = tempfile::tempdir().expect("scratch dir");
     let db = dir.path().join("hub.db");
+    // This gate kills transaction writers after the schema is installed.
+    drop(
+        HubDb::open(&db, &Bootstrap::default(), Arc::new(SystemClock))
+            .await
+            .expect("install schema before killing writers"),
+    );
     let iterations = iterations();
     let seed = seed();
     let mut rng = Lcg(seed);

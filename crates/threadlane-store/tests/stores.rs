@@ -461,9 +461,16 @@ async fn run_lifecycle_commits_events_exactly_once() {
     hub.set_native_session(&lease, run.session_id, "claude-abc")
         .await
         .unwrap();
-    hub.commit_run(&lease, run.id, RunOutcome::Sent, Some("told them"), T0)
-        .await
-        .unwrap();
+    hub.commit_run(
+        &lease,
+        run.id,
+        RunOutcome::Sent,
+        Some("told them"),
+        None,
+        T0,
+    )
+    .await
+    .unwrap();
     for id in &events {
         let event = hub.event(*id).await.unwrap().unwrap();
         assert_eq!(event.status, EventStatus::Done);
@@ -471,7 +478,7 @@ async fn run_lifecycle_commits_events_exactly_once() {
     }
     // Invariant 3: a committed run cannot be committed again.
     assert!(matches!(
-        hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+        hub.commit_run(&lease, run.id, RunOutcome::Silent, None, None, T0)
             .await,
         Err(StoreError::Conflict(_))
     ));
@@ -492,7 +499,7 @@ async fn run_lifecycle_commits_events_exactly_once() {
         .await
         .unwrap();
     assert_eq!(resumed.session_id, session.id);
-    hub.commit_run(&lease, resumed.id, RunOutcome::Silent, None, T0)
+    hub.commit_run(&lease, resumed.id, RunOutcome::Silent, None, None, T0)
         .await
         .unwrap();
 }
@@ -609,7 +616,7 @@ async fn expired_leases_return_claimed_events_and_abandon_runs() {
     );
     assert_eq!(hub.pending_events(lane).await.unwrap()[0].id, events[0]);
     assert!(matches!(
-        hub.commit_run(&lease, run.id, RunOutcome::Sent, None, T0)
+        hub.commit_run(&lease, run.id, RunOutcome::Sent, None, None, T0)
             .await,
         Err(StoreError::StaleLease { .. })
     ));
@@ -1096,7 +1103,7 @@ async fn the_run_cycle_takes_a_task_from_queued_to_done_and_reports_it_once() {
     hub.finish_task(&lease, &result).await.unwrap();
     assert!(task_results(&hub, &general).await.is_empty());
 
-    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, None, T0)
         .await
         .unwrap();
     assert_eq!(task(&hub, created.id).await.status, TaskStatus::Done);
@@ -1137,7 +1144,7 @@ async fn a_run_that_does_not_finish_leaves_the_task_sleeping_until_an_event_arri
 
     let (lease, run) = run_pending(&hub, created.lane_id, a, T0).await;
     assert!(hub.left_unwoken(created.lane_id).await.unwrap());
-    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, None, T0)
         .await
         .unwrap();
     // Nothing will wake it: it says so, and the lead is told once.
@@ -1162,7 +1169,7 @@ async fn a_run_that_does_not_finish_leaves_the_task_sleeping_until_an_event_arri
     let (lease, run) = run_pending(&hub, created.lane_id, a, T0).await;
     hub.insert_event(&event_for("meanwhile")).await.unwrap();
     assert_eq!(task(&hub, created.id).await.status, TaskStatus::Running);
-    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, None, T0)
         .await
         .unwrap();
     assert_eq!(task(&hub, created.id).await.status, TaskStatus::Queued);
@@ -1195,7 +1202,7 @@ async fn a_task_has_something_to_wake_it_with_a_timer_event_decision_or_result()
     .await
     .unwrap();
     assert!(!hub.left_unwoken(lane).await.unwrap(), "a pending event");
-    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, None, T0)
         .await
         .unwrap();
     hub.release_lease(&lease).await.unwrap();
@@ -1504,7 +1511,7 @@ async fn a_task_lane_is_granted_only_when_its_task_is_eligible() {
     hub.finish_task(&lease, &json!({ "summary": "a" }))
         .await
         .unwrap();
-    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, None, T0)
         .await
         .unwrap();
     hub.release_lease(&lease).await.unwrap();
@@ -2204,7 +2211,7 @@ async fn a_new_session_records_its_chosen_native_session() {
         .unwrap();
     let session = hub.session(run.session_id).await.unwrap().unwrap();
     assert_eq!(session.native_session_id.as_deref(), Some("uuid-1"));
-    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, T0)
+    hub.commit_run(&lease, run.id, RunOutcome::Silent, None, None, T0)
         .await
         .unwrap();
 
@@ -2568,7 +2575,7 @@ async fn a_repeated_send_is_handed_to_the_run_that_commits() {
     assert_eq!(again.run_id, Some(retried.id));
     assert_eq!(hub.count_for_run(retried.id).await.unwrap(), 1);
     assert_eq!(hub.count_for_run(crashed.id).await.unwrap(), 0);
-    hub.commit_run(&lease, retried.id, RunOutcome::Sent, None, later)
+    hub.commit_run(&lease, retried.id, RunOutcome::Sent, None, None, later)
         .await
         .unwrap();
     hub.release_lease(&lease).await.unwrap();
@@ -2915,7 +2922,7 @@ async fn the_client_history_queries_page_from_the_newest() {
     // Runs and decisions of a lane, in any status, oldest first.
     let machine = machine(&hub, "box").await;
     let (lease, first) = run_pending(&hub, lane, machine, at(100)).await;
-    hub.commit_run(&lease, first.id, RunOutcome::Silent, None, at(101))
+    hub.commit_run(&lease, first.id, RunOutcome::Silent, None, None, at(101))
         .await
         .unwrap();
     hub.release_lease(&lease).await.unwrap();
@@ -2983,5 +2990,104 @@ async fn the_client_history_queries_page_from_the_newest() {
             (asked.id, DecisionStatus::Answered),
             (open.id, DecisionStatus::Pending)
         ]
+    );
+}
+
+#[tokio::test]
+async fn an_agent_can_be_updated_and_its_name_stays_unique() {
+    let hub = hub().await;
+    let first = hub
+        .create_agent(&NewAgent::named("Engineer", "engineer"))
+        .await
+        .unwrap();
+    hub.create_agent(&NewAgent::named("Reviewer", "reviewer"))
+        .await
+        .unwrap();
+    let updated = hub
+        .update_agent(&Agent {
+            name: "Builder".into(),
+            instructions: "Build it.".into(),
+            backends: vec![BackendKind::Codex],
+            models: json!({"codex": "gpt-5"}),
+            ..first.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated.name, "Builder");
+    assert_eq!(updated.models, json!({"codex": "gpt-5"}));
+    assert_eq!(hub.agent(first.id).await.unwrap(), Some(updated.clone()));
+    let clash = hub
+        .update_agent(&Agent {
+            name: "Reviewer".into(),
+            ..updated
+        })
+        .await;
+    assert!(matches!(clash, Err(StoreError::Conflict(_))), "{clash:?}");
+}
+
+#[tokio::test]
+async fn deleting_an_agent_waits_for_its_tasks_and_keeps_its_history() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let lead = hub
+        .create_agent(&NewAgent::named("Lead", "lead"))
+        .await
+        .unwrap();
+    hub.bind(&NewBinding {
+        project_id: general.id,
+        agent_id: lead.id,
+        mode: Mode::OnRequest,
+        is_lead: true,
+        max_parallel: 1,
+    })
+    .await
+    .unwrap();
+    let refused = hub.delete_agent(lead.id).await;
+    assert!(
+        matches!(&refused, Err(StoreError::Invalid(m)) if m.contains("lead")),
+        "{refused:?}"
+    );
+
+    let agent = engineer(&hub, &general, 1).await;
+    let queued = hub
+        .create_task(None, &new_task(&general, agent, "open", vec![]))
+        .await
+        .unwrap();
+    let refused = hub.delete_agent(agent).await;
+    assert!(
+        matches!(&refused, Err(StoreError::Invalid(m)) if m.contains(&queued.id.to_string())),
+        "{refused:?}"
+    );
+
+    hub.cancel_task(None, queued.id, T0).await.unwrap();
+    let name = hub.agent(agent).await.unwrap().unwrap().name;
+    hub.delete_agent(agent).await.unwrap();
+    assert!(hub.agents().await.unwrap().iter().all(|a| a.id != agent));
+    assert!(
+        hub.bindings(general.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|b| b.agent_id != agent)
+    );
+    let kept = hub.agent(agent).await.unwrap().unwrap();
+    assert_eq!(kept.name, format!("{name} (deleted)"));
+    assert!(hub.all_agents().await.unwrap().contains(&kept));
+    assert_eq!(task(&hub, queued.id).await.agent_id, agent);
+
+    // The name is free again, and a second deletion of it still succeeds.
+    let again = hub
+        .create_agent(&NewAgent::named(name.clone(), "engineer"))
+        .await
+        .unwrap();
+    hub.delete_agent(again.id).await.unwrap();
+    assert_eq!(
+        hub.agent(again.id).await.unwrap().unwrap().name,
+        format!("{name} (deleted {})", again.id)
+    );
+    let missing = hub.delete_agent(agent).await;
+    assert!(
+        matches!(missing, Err(StoreError::NotFound { .. })),
+        "{missing:?}"
     );
 }

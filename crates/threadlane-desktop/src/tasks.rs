@@ -4,10 +4,12 @@
 use serde_json::Value as Json;
 use threadlane_core::client::{ConversationEntry, TaskDetail, TaskSummary};
 use threadlane_core::ids::{DecisionId, TaskId};
+use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::model::{
     DecisionKind, DecisionStatus, RunOutcome, RunStatus, TaskOrigin, TaskStatus,
 };
 use threadlane_core::time::Timestamp;
+use threadlane_core::workspace::MergeCheck;
 
 use crate::{AppState, Destination, When, count_form, duration, proposed_assignee};
 
@@ -48,6 +50,8 @@ pub struct BoardCard {
     pub decision: Option<DecisionId>,
     /// That decision's options, which answer it from the card.
     pub options: Vec<String>,
+    /// Whether its branch merges into its base, from [`merge_state`].
+    pub merge: Option<String>,
 }
 
 /// An open proposal on the board with the two in-place answers.
@@ -189,6 +193,7 @@ impl AppState {
                             can_cancel: !task.status.is_terminal(),
                             decision,
                             options,
+                            merge: merge_state(task.result.as_ref()),
                         }
                     })
                     .collect();
@@ -233,6 +238,7 @@ impl AppState {
             .map(|task| WorkRow::task_in(&space.name, task, when))
             .chain(space.leads.iter().map(|(project, since)| WorkRow {
                 destination: Destination::Lead(space.name.clone(), project.clone()),
+                label: format!("{} · lead", clip(project, SIDEBAR_CHARS - 7)),
                 title: format!("{project} · lead"),
                 elapsed: when.since(*since),
                 status: "Running",
@@ -330,6 +336,17 @@ impl AppState {
     }
 }
 
+/// Characters of a title that fit on one sidebar row beside its time.
+const SIDEBAR_CHARS: usize = 18;
+
+/// `text` cut to `chars` characters, ending in "…" when cut.
+fn clip(text: &str, chars: usize) -> String {
+    match text.char_indices().nth(chars) {
+        Some((at, _)) => format!("{}…", text[..at].trim_end()),
+        None => text.to_owned(),
+    }
+}
+
 /// A compact row that opens a task or a lead conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkRow {
@@ -337,6 +354,8 @@ pub struct WorkRow {
     pub destination: Destination,
     /// The task or lead's display title.
     pub title: String,
+    /// The title cut to fit the sidebar's one line.
+    pub label: String,
     /// Time elapsed from the start or enqueue.
     pub elapsed: String,
     /// The display status.
@@ -347,6 +366,7 @@ impl WorkRow {
     fn task_in(space: &str, summary: &TaskSummary, when: &When) -> Self {
         Self {
             destination: Destination::Task(space.to_owned(), summary.task.id),
+            label: clip(&summary.task.title, SIDEBAR_CHARS),
             title: summary.task.title.clone(),
             elapsed: work_elapsed(summary, when).unwrap_or_default(),
             status: status_label(summary.task.status, summary.task.waiting_reason.as_deref()),
@@ -614,6 +634,40 @@ pub struct Changes {
     pub state: String,
     /// The pull request opened for it, if any.
     pub pull_request: Option<String>,
+    /// Whether its branch merges into its base, from [`merge_state`].
+    pub merge: Option<String>,
+}
+
+/// Where a task's branches stood against their bases when it last finished
+/// (docs/merge-help.md decision 4): `Merges cleanly into main at 1a2b3c4`
+/// or `Conflicts with main: src/a.rs, src/b.rs`, one per repository, named
+/// when there are several. `None` before a check was recorded.
+#[must_use]
+pub fn merge_state(result: Option<&Json>) -> Option<String> {
+    let checks: Vec<MergeCheck> =
+        serde_json::from_value(result?.get(MERGE_CHECKS)?.clone()).ok()?;
+    let several = checks.len() > 1;
+    let lines: Vec<String> = checks
+        .iter()
+        .map(|check| {
+            let line = if check.clean() {
+                let short = check.base.get(..7).unwrap_or(&check.base);
+                format!("Merges cleanly into {} at {short}", check.branch)
+            } else {
+                format!(
+                    "Conflicts with {}: {}",
+                    check.branch,
+                    check.conflicts.join(", ")
+                )
+            };
+            if several {
+                format!("{}: {line}", check.repository)
+            } else {
+                line
+            }
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join(" · "))
 }
 
 /// Its branch and publish state, from its result and the outcomes of the
@@ -666,6 +720,7 @@ pub fn changes(detail: &TaskDetail) -> Changes {
         branch: detail.branch.clone(),
         state,
         pull_request,
+        merge: merge_state(result),
     }
 }
 

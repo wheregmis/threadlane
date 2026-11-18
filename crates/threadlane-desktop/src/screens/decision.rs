@@ -8,12 +8,12 @@ use super::menu_item;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use threadlane_desktop::{DecisionChoice, DecisionDisplay, Queued, When};
+use threadlane_desktop::{DecisionChoice, DecisionDisplay, ProseLimit, Queued, When};
 
 use crate::Desktop;
 use crate::components::{
-    button, count_badge, decision_option, decision_surface, decision_title, field, meta,
-    status_badge,
+    button, count_badge, decision_option, decision_ring, decision_surface, decision_title, field,
+    meta, status_badge,
 };
 use crate::keyboard::DecisionScroll;
 use crate::menus::{DecisionShortcut, shortcut_hint};
@@ -33,6 +33,7 @@ impl Desktop {
         let DecisionDisplay {
             key,
             question,
+            body,
             options,
             origin,
             asked,
@@ -85,7 +86,7 @@ impl Desktop {
                 )
             })
             .collect::<Vec<_>>();
-        let mut card = decision_surface(contents.dashed, current, cx)
+        let mut card = decision_surface(contents.dashed, cx)
             .child(
                 h_flex()
                     .gap(XS)
@@ -101,6 +102,10 @@ impl Desktop {
                     .child(meta(asked, cx)),
             )
             .child(decision_title(question))
+            .children(body.map(|body| {
+                self.prose(format!("question-{prefix}"), &key.space, body, cx)
+                    .limit(ProseLimit::Question)
+            }))
             .children(contents.context.map(|line| {
                 self.decision_context(format!("context-{prefix}"), &key.space, line, cx)
             }))
@@ -158,7 +163,8 @@ impl Desktop {
             );
         }
         self.reveal_decision_part(
-            card.id(SharedString::from(format!("decision-menu-{prefix}")))
+            decision_ring(card, current, cx)
+                .id(SharedString::from(format!("decision-menu-{prefix}")))
                 .context_menu(move |menu, _, _| {
                     menu.item(menu_item(&menu_view, "Copy id", move |this, _, cx| {
                         this.copy(menu_id.to_string(), cx)

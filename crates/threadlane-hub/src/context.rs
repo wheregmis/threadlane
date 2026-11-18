@@ -1,8 +1,9 @@
 //! What each run is given (Plan.md §8.5): appended instructions and prompt.
 //!
 //! Appended instructions depend only on the agent, the lane kind and the
-//! memory files loaded into every run, so they are byte-identical between
-//! runs until memory changes and the backend's prompt cache stays warm.
+//! memory files loaded into every run (and, for the General lead, the space
+//! summary of `space_lead`), so they are byte-identical between runs until
+//! these change and the backend's prompt cache stays warm.
 //! Everything that changes per run goes in the prompt.
 
 use std::fmt::Write as _;

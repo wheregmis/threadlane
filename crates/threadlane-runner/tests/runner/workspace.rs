@@ -282,3 +282,130 @@ async fn workspace_deletion_refuses_symlinks_outside_the_root() {
         "keep"
     );
 }
+
+impl Setup {
+    /// Lands a commit writing `file` on the remote's `main`, as another
+    /// task's merged branch would; returns that commit.
+    fn land_on_main(&self, file: &str, content: &str) -> String {
+        let other = self.dir.path().join("other");
+        if !other.exists() {
+            git(
+                self.dir.path(),
+                &["clone", "--quiet", &self.repository.remote_url, "other"],
+            );
+        }
+        git(&other, &["pull", "--quiet", "--ff-only"]);
+        std::fs::write(other.join(file), content).unwrap();
+        git(&other, &["add", "--all"]);
+        git(&other, &["commit", "--quiet", "--no-verify", "-m", "Land"]);
+        git(&other, &["push", "--quiet", "origin", "main"]);
+        git(&other, &["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
+    async fn check_merge(&self, task: TaskId) -> threadlane_core::workspace::MergeCheck {
+        let mut checks = self
+            .workspaces
+            .check_merge(task, std::slice::from_ref(&self.repository))
+            .await
+            .expect("check");
+        assert_eq!(checks.len(), 1);
+        checks.remove(0)
+    }
+
+    async fn bring_in_base(&self, task: TaskId) -> threadlane_core::workspace::MergeCheck {
+        let mut checks = self
+            .workspaces
+            .bring_in_base(task, std::slice::from_ref(&self.repository))
+            .await
+            .expect("bring in base");
+        assert_eq!(checks.len(), 1);
+        checks.remove(0)
+    }
+}
+
+#[tokio::test]
+async fn the_merge_check_names_the_base_and_the_conflicting_files_and_touches_no_worktree() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("README.md"), "# app, by the task\n").unwrap();
+    std::fs::write(path.join("new.txt"), "new").unwrap();
+    s.checkpoint(T1).await;
+
+    let other = s.land_on_main("other.txt", "elsewhere");
+    let clean = s.check_merge(T1).await;
+    assert!(clean.clean(), "{clean:?}");
+    assert_eq!(
+        (clean.branch.as_str(), clean.base.as_str()),
+        ("main", other.as_str())
+    );
+    assert_eq!(clean.repository, "app");
+
+    let conflicting = s.land_on_main("README.md", "# app, by another task\n");
+    let head = git(&path, &["rev-parse", "HEAD"]);
+    let checked = s.check_merge(T1).await;
+    assert_eq!(checked.conflicts, ["README.md"]);
+    assert_eq!(checked.base, conflicting);
+    assert_eq!(
+        git(&path, &["rev-parse", "HEAD"]),
+        head,
+        "the branch is untouched"
+    );
+    assert_eq!(git(&path, &["status", "--porcelain"]), "");
+
+    let unset = s
+        .workspaces
+        .check_merge(T2, std::slice::from_ref(&s.repository))
+        .await
+        .unwrap();
+    assert!(unset.is_empty(), "a worktree never set up is skipped");
+}
+
+#[tokio::test]
+async fn a_run_start_rebases_a_clean_branch_and_leaves_a_conflicting_one() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("work.txt"), "work").unwrap();
+    s.checkpoint(T1).await;
+
+    let landed = s.land_on_main("other.txt", "elsewhere");
+    let rebased = s.bring_in_base(T1).await;
+    assert!(rebased.clean(), "{rebased:?}");
+    assert_eq!(rebased.base, landed);
+    git(&path, &["merge-base", "--is-ancestor", &landed, "HEAD"]);
+    assert!(path.join("other.txt").is_file() && path.join("work.txt").is_file());
+    assert_eq!(branch(&path), "threadlane/T-0001");
+
+    std::fs::write(path.join("README.md"), "# app, by the task\n").unwrap();
+    s.checkpoint(T1).await;
+    let head = git(&path, &["rev-parse", "HEAD"]);
+    s.land_on_main("README.md", "# app, by another task\n");
+    let left = s.bring_in_base(T1).await;
+    assert_eq!(left.conflicts, ["README.md"]);
+    assert_eq!(git(&path, &["rev-parse", "HEAD"]), head, "left as it is");
+    assert_eq!(
+        git(&path, &["status", "--porcelain"]),
+        "",
+        "no rebase left half done"
+    );
+    assert_eq!(branch(&path), "threadlane/T-0001");
+}
+
+#[tokio::test]
+async fn a_published_task_can_push_again_after_the_base_moves() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("work.txt"), "work").unwrap();
+    s.checkpoint(T1).await;
+    git(&path, &["push", "origin", "HEAD"]);
+    let published = git(&path, &["rev-parse", "HEAD"]);
+
+    let landed = s.land_on_main("other.txt", "elsewhere");
+    let check = s.bring_in_base(T1).await;
+    assert!(check.clean(), "{check:?}");
+    assert_eq!(check.base, landed);
+    assert_eq!(git(&path, &["rev-parse", "HEAD"]), published);
+
+    std::fs::write(path.join("work.txt"), "updated").unwrap();
+    s.checkpoint(T1).await;
+    git(&path, &["push", "origin", "HEAD"]);
+}

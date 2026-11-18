@@ -50,7 +50,7 @@ async fn an_agent_sets_a_follow_up_and_wakes_on_time() {
                 SET_FOLLOW_UP,
                 json!({ "instruction": FOLLOW, "in_minutes": 30 }),
             )
-            .finish("Set a follow-up instead of waiting."),
+            .finish("No response requested."),
     );
     sim.backend().route(FOLLOW, reply_script());
     sim.send("m-1", "Tell me when the build is green").await;

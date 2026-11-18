@@ -7,7 +7,7 @@ use threadlane_core::model::{
     EventKind, NewEvent, NewOutboxMessage, OutboxKind, OutboxMessage, OutboxStatus, Pacing, Trust,
     Urgency,
 };
-use threadlane_core::store::{OutboxStore, StoreError, StoreResult};
+use threadlane_core::store::{LeadReply, OutboxStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
 use turso::{Connection, Row};
 
@@ -124,6 +124,31 @@ pub(crate) async fn enqueue_in(
         decode_message,
     )
     .await
+}
+
+pub(crate) async fn enqueue_lead_reply_in(
+    conn: &Connection,
+    reply: &LeadReply,
+) -> StoreResult<OutboxMessage> {
+    let message = enqueue_in(conn, &reply.message).await?;
+    if let Some(route) = &reply.route {
+        let event = NewEvent {
+            source_event_id: format!("reply:{}", message.id),
+            ..route.clone()
+        };
+        insert_event_in(conn, &event).await?;
+    }
+    Ok(message)
+}
+
+impl HubDb {
+    /// Queues the owner's reply and the space Lead's event atomically.
+    pub async fn enqueue_lead_reply(&self, reply: &LeadReply) -> StoreResult<OutboxMessage> {
+        let tx = self.db.begin().await?;
+        let message = enqueue_lead_reply_in(tx.conn(), reply).await?;
+        tx.commit().await?;
+        Ok(message)
+    }
 }
 
 #[async_trait]

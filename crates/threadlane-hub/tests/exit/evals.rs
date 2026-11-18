@@ -757,7 +757,7 @@ async fn eval_replays_recordings_through_the_hub_with_scripted_backends() {
                 .call("reply", "send_message", json!({"text":"pong"}))
                 .finish("Sent the requested reply.")
         } else {
-            Script::new().finish("The routine checks need no reply.")
+            Script::new().finish("No response requested.")
         };
         world.backend.set_default(script);
         let sim = world.boot(CrashPlan::new()).await;
