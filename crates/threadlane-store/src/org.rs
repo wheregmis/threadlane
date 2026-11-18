@@ -86,6 +86,59 @@ fn decode_agent(row: &Row) -> StoreResult<Agent> {
     })
 }
 
+async fn write_agent(conn: &Connection, agent: &Agent) -> StoreResult<Agent> {
+    let changed = exec(
+        conn,
+        "UPDATE agents SET name = ?2, role = ?3, instructions = ?4, backends = ?5, models = ?6
+             WHERE id = ?1 AND deleted_at IS NULL",
+        params![
+            agent.id.get(),
+            agent.name.as_str(),
+            agent.role.as_str(),
+            agent.instructions.as_str(),
+            json_text(&agent.backends)?,
+            json_text(&agent.models)?,
+        ],
+    )
+    .await?;
+    if changed == 0 {
+        return Err(StoreError::NotFound {
+            kind: "agent",
+            id: agent.id.to_string(),
+        });
+    }
+    query_one(
+        conn,
+        &format!("SELECT {AGENT_COLUMNS} WHERE id = ?1"),
+        params![agent.id.get()],
+        decode_agent,
+    )
+    .await
+}
+
+impl HubDb {
+    /// Applies an edit to the current agent under the same transaction as its save.
+    pub async fn patch_agent(
+        &self,
+        name: &str,
+        apply: impl FnOnce(&mut Agent) -> StoreResult<()>,
+    ) -> StoreResult<Agent> {
+        let tx = self.db.begin().await?;
+        let mut current = query_opt(
+            tx.conn(),
+            &format!("SELECT {AGENT_COLUMNS} WHERE name = ?1 AND deleted_at IS NULL"),
+            params![name],
+            decode_agent,
+        )
+        .await?
+        .ok_or_else(|| StoreError::not_found("agent", name))?;
+        apply(&mut current)?;
+        let updated = write_agent(tx.conn(), &current).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+}
+
 const BINDING_COLUMNS: &str =
     "id, project_id, agent_id, mode, is_lead, models, max_parallel, overrides FROM bindings";
 
@@ -422,33 +475,7 @@ impl OrgStore for HubDb {
 
     async fn update_agent(&self, agent: &Agent) -> StoreResult<Agent> {
         let tx = self.db.begin().await?;
-        let changed = exec(
-            tx.conn(),
-            "UPDATE agents SET name = ?2, role = ?3, instructions = ?4, backends = ?5, models = ?6
-             WHERE id = ?1 AND deleted_at IS NULL",
-            params![
-                agent.id.get(),
-                agent.name.as_str(),
-                agent.role.as_str(),
-                agent.instructions.as_str(),
-                json_text(&agent.backends)?,
-                json_text(&agent.models)?,
-            ],
-        )
-        .await?;
-        if changed == 0 {
-            return Err(StoreError::NotFound {
-                kind: "agent",
-                id: agent.id.to_string(),
-            });
-        }
-        let updated = query_one(
-            tx.conn(),
-            &format!("SELECT {AGENT_COLUMNS} WHERE id = ?1"),
-            params![agent.id.get()],
-            decode_agent,
-        )
-        .await?;
+        let updated = write_agent(tx.conn(), agent).await?;
         tx.commit().await?;
         Ok(updated)
     }

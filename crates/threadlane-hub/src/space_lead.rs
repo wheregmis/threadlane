@@ -3,6 +3,7 @@
 //! stage 1). It reads no other project's memory (invariant 12): the summary
 //! comes from the projects, tasks and sent messages only.
 
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 
 use serde_json::{Value as Json, json};
@@ -10,7 +11,7 @@ use threadlane_core::ids::{EventId, ProjectId, TaskId};
 use threadlane_core::model::{Event, EventKind, Inserted, NewEvent, Run, Trust};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{
-    InboxStore, OrgStore, OutboxStore, SessionStore, StoreResult, TaskStore,
+    DecisionStore, InboxStore, OrgStore, OutboxStore, SessionStore, StoreResult, TaskStore,
 };
 use threadlane_core::time::Timestamp;
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
@@ -210,33 +211,44 @@ pub(crate) async fn ask(
     }))
 }
 
-/// The space-lead ask a project lead's run answers, if it answers one: an
-/// ask it consumes, or the result of a task created for one.
-async fn answered_ask(db: &HubDb, events: &[Event]) -> StoreResult<Option<Event>> {
-    if let Some(ask) = events
-        .iter()
-        .find(|event| event.source == SPACE_LEAD_SOURCE)
-    {
-        return Ok(Some(ask.clone()));
-    }
-    for event in events
-        .iter()
-        .filter(|event| event.kind == EventKind::TaskResult)
-    {
-        let Ok(task) = serde_json::from_value::<TaskId>(event.payload["task_id"].clone()) else {
-            continue;
+/// The ask continued by a project lead's input, including durable follow-ups.
+pub(crate) async fn answered_ask(db: &HubDb, events: &[Event]) -> StoreResult<Option<Event>> {
+    let mut inputs = VecDeque::from(events.to_vec());
+    let mut visited_runs = HashSet::new();
+    while let Some(event) = inputs.pop_front() {
+        if event.source == SPACE_LEAD_SOURCE {
+            return Ok(Some(event));
+        }
+        let linked = match event.kind {
+            EventKind::TaskResult => {
+                match serde_json::from_value::<TaskId>(event.payload["task_id"].clone()) {
+                    Ok(task) => db.space_lead_ask(task).await?,
+                    Err(_) => None,
+                }
+            }
+            EventKind::TimerFired if event.source == threadlane_store::TIMER_SOURCE => {
+                serde_json::from_value::<EventId>(event.payload["space_lead_event"].clone()).ok()
+            }
+            _ => None,
         };
-        if let Some(id) = db.space_lead_ask(task).await? {
-            return db.event(id).await;
+        if let Some(id) = linked
+            && let Some(ask) = db.event(id).await?
+            && ask.source == SPACE_LEAD_SOURCE
+            && ask.lane_id == event.lane_id
+        {
+            return Ok(Some(ask));
+        }
+        if event.kind == EventKind::DecisionAnswer
+            && let Some(id) = event.decision_ref
+            && let Some(decision) = db.decision(id).await?
+            && decision.lane_id == event.lane_id
+            && let Some(run) = decision.run_id
+            && visited_runs.insert(run)
+        {
+            inputs.extend(db.run_events(run).await?);
         }
     }
     Ok(None)
-}
-
-/// Marks a task a project lead created for a space-lead ask, so the reply
-/// to its result reaches the space lead too.
-pub(crate) async fn mark_task(db: &HubDb, task: TaskId, ask: EventId) -> Result<(), ToolError> {
-    db.set_space_lead_ask(task, ask).await.map_err(tool_error)
 }
 
 /// Prepares the event to queue with a project lead's reply to the space Lead.

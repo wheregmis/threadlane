@@ -522,6 +522,7 @@ async fn enqueue_card(conn: &Connection, created: &Decision) -> StoreResult<()> 
                 created_by_call: Some(expiry_call(created.id)),
                 requested: false,
             },
+            None,
         )
         .await?;
     }

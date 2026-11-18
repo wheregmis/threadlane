@@ -2,15 +2,18 @@
 //! space summary, `ask_project_lead` and its gate and refusals, replies
 //! routed back, and invariant 12.
 
+use std::time::Duration;
+
 use serde_json::{Value as Json, json};
-use threadlane_core::client::{OrgReply, OrgRequest, UserMessage};
+use threadlane_core::client::{DecisionReply, DecisionRequest, OrgReply, OrgRequest, UserMessage};
 use threadlane_core::link::{Begin, HubLink, RunAssignment};
 use threadlane_core::model::{Event, EventKind, LaneKind, Lease, Mode, Project, Trust};
-use threadlane_core::store::{InboxStore, OrgStore};
+use threadlane_core::store::{InboxStore, OrgStore, TimerStore};
+use threadlane_core::time::Clock as _;
 use threadlane_core::tools::ToolError;
 use threadlane_hub::{
-    ASK_PROJECT_LEAD, CREATE_TASK, MEMORY_CREATE, MEMORY_VIEW, PROJECT_LEAD_SOURCE, SEND_MESSAGE,
-    SPACE_LEAD_SOURCE,
+    ASK_PROJECT_LEAD, ASK_USER, CREATE_TASK, MEMORY_CREATE, MEMORY_VIEW, PROJECT_LEAD_SOURCE,
+    SEND_MESSAGE, SET_FOLLOW_UP, SPACE_LEAD_SOURCE,
 };
 
 use crate::common::{TestHub, begin};
@@ -331,6 +334,117 @@ async fn only_replies_to_an_ask_reach_the_general_lane() {
         text.starts_with("The lead of API replied") && text.contains("On it."),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn overlapping_asks_keep_their_own_clarifications_and_follow_ups() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let api = create(&hub, "API", "").await;
+    let general = hub.general().await;
+    hub.send("owner", "Send two requests to API").await;
+    let lead = Running::start(&hub).await;
+    for (call, message) in [("first", "Check forms"), ("second", "Check docs")] {
+        lead.call(
+            call,
+            ASK_PROJECT_LEAD,
+            json!({ "project": "API", "message": message }),
+        )
+        .await
+        .unwrap();
+    }
+    lead.end().await;
+    let asks = pending(&hub, &api).await;
+    let [first, second] = asks.as_slice() else {
+        panic!("expected two asks")
+    };
+
+    let clarifying = Running::start(&hub).await;
+    assert_eq!(clarifying.run.events, [first.id]);
+    assert_eq!(clarifying.run.space_lead_ask, Some(first.id));
+    assert_eq!(
+        clarifying
+            .call(
+                "clarify",
+                ASK_USER,
+                json!({
+                    "question": "Which forms?", "options": ["Signup", "Checkout"],
+                }),
+            )
+            .await,
+        Err(ToolError::WaitingOnYou)
+    );
+    clarifying
+        .link
+        .complete(&clarifying.lease, clarifying.run.run_id, None)
+        .await
+        .unwrap();
+    clarifying.link.release(&clarifying.lease).await.unwrap();
+
+    let follow = Running::start(&hub).await;
+    assert_eq!(follow.run.events, [second.id]);
+    follow
+        .call(
+            "later",
+            SET_FOLLOW_UP,
+            json!({
+                "in_minutes": 1, "instruction": "Check the docs",
+            }),
+        )
+        .await
+        .unwrap();
+    follow.end().await;
+
+    let DecisionReply::Pending { decisions } =
+        hub.api.decisions(DecisionRequest::Pending).await.unwrap()
+    else {
+        panic!("expected a pending decision")
+    };
+    hub.api
+        .decisions(DecisionRequest::Answer {
+            decision: decisions[0].id,
+            option: "Signup".into(),
+            note: None,
+        })
+        .await
+        .unwrap();
+    let clarified = Running::start(&hub).await;
+    assert_eq!(clarified.run.space_lead_ask, Some(first.id));
+    clarified
+        .call("reply", SEND_MESSAGE, json!({ "text": "Signup it is." }))
+        .await
+        .unwrap();
+    clarified.end().await;
+    let replies = pending(&hub, &general).await;
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].payload["ask_event_id"], json!(first.id));
+    let report = Running::start(&hub).await;
+    assert_eq!(report.run.project_id, general.id);
+    report.end().await;
+
+    hub.clock.advance(Duration::from_secs(60));
+    let now = hub.clock.now();
+    let timers = hub.db.due_timers(now).await.unwrap();
+    assert_eq!(timers.len(), 1);
+    let timer = &timers[0];
+    hub.db
+        .fire(timer.id, timer.due_at, None, now)
+        .await
+        .unwrap();
+    let follow = Running::start(&hub).await;
+    assert_eq!(follow.run.space_lead_ask, Some(second.id));
+    follow
+        .call(
+            "follow-up-reply",
+            SEND_MESSAGE,
+            json!({ "text": "Docs checked." }),
+        )
+        .await
+        .unwrap();
+    follow.end().await;
+    let replies = pending(&hub, &general).await;
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].payload["ask_event_id"], json!(second.id));
 }
 
 #[tokio::test]

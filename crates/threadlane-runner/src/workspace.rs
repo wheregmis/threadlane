@@ -16,6 +16,7 @@
 //! sets no credentials: `git` uses whatever logins this user has
 //! (invariant 8); it is only kept from prompting for one.
 
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -24,14 +25,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use threadlane_core::ids::TaskId;
+use threadlane_core::ids::{RepositoryId, TaskId};
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{
     MergeCheck, WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces, task_branch,
     valid_branch_name, valid_repository_name,
 };
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// The longest any one `git` command may take; a clone of a large
 /// repository is the slow case.
@@ -53,10 +54,7 @@ const COMMITTER: [&str; 6] = [
 #[derive(Debug, Clone)]
 pub struct GitWorkspaces {
     root: PathBuf,
-    /// Lanes run in parallel, and two tasks of one repository share its
-    /// clone. shortcut: one lock for every setup, not one per clone; make it
-    /// per clone if setups ever queue behind slow clones.
-    setup: Arc<Mutex<()>>,
+    repositories: Arc<Mutex<HashMap<RepositoryId, Arc<Mutex<()>>>>>,
 }
 
 impl GitWorkspaces {
@@ -68,8 +66,28 @@ impl GitWorkspaces {
             // Git runs inside a clone (`-C`), where a relative worktree path
             // would land under the clone instead of under `root`.
             root: std::path::absolute(&root).unwrap_or(root),
-            setup: Arc::default(),
+            repositories: Arc::default(),
         }
+    }
+
+    async fn lock_repository(&self, id: RepositoryId) -> OwnedMutexGuard<()> {
+        let lock = Arc::clone(self.repositories.lock().await.entry(id).or_default());
+        lock.lock_owned().await
+    }
+
+    async fn lock_removal(&self, removal: &WorkspaceRemoval) -> Vec<OwnedMutexGuard<()>> {
+        // Cleanup may span multiple clones. Take their locks in the same order.
+        let ids: BTreeSet<_> = removal
+            .repositories
+            .iter()
+            .map(|(id, _)| *id)
+            .chain(removal.clones.iter().copied())
+            .collect();
+        let mut locks = Vec::with_capacity(ids.len());
+        for id in ids {
+            locks.push(self.lock_repository(id).await);
+        }
+        locks
     }
 
     /// Where the task's worktree of `repository` is, set up or not.
@@ -305,10 +323,10 @@ impl Workspaces for GitWorkspaces {
         task: TaskId,
         repositories: &[Repository],
     ) -> Result<Vec<PathBuf>, WorkspaceError> {
-        let _setup = self.setup.lock().await;
         let mut paths = Vec::with_capacity(repositories.len());
         for repository in repositories {
             check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
             paths.push(self.worktree_of(task, repository).await?);
         }
         Ok(paths)
@@ -322,6 +340,7 @@ impl Workspaces for GitWorkspaces {
     ) -> Result<(), WorkspaceError> {
         for repository in repositories {
             check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
             if self.is_ready(task, repository) {
                 self.commit(&self.worktree(task, repository), task, message)
                     .await?;
@@ -334,11 +353,11 @@ impl Workspaces for GitWorkspaces {
         task: TaskId,
         repositories: &[Repository],
     ) -> Result<Vec<MergeCheck>, WorkspaceError> {
-        let _setup = self.setup.lock().await;
         let branch = task_branch(task);
         let mut checks = Vec::new();
         for repository in repositories {
             check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
             if !self.is_ready(task, repository) {
                 continue;
             }
@@ -358,11 +377,11 @@ impl Workspaces for GitWorkspaces {
         task: TaskId,
         repositories: &[Repository],
     ) -> Result<Vec<MergeCheck>, WorkspaceError> {
-        let _setup = self.setup.lock().await;
         let branch = task_branch(task);
         let mut checks = Vec::new();
         for repository in repositories {
             check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
             if !self.is_ready(task, repository) {
                 continue;
             }
@@ -379,7 +398,7 @@ impl Workspaces for GitWorkspaces {
     }
 
     async fn removal_counts(&self, removal: &WorkspaceRemoval) -> WorkspaceCounts {
-        let _setup = self.setup.lock().await;
+        let _repos = self.lock_removal(removal).await;
         let mut counts = WorkspaceCounts::default();
         let Ok(root) = tokio::fs::canonicalize(&self.root).await else {
             return counts;
@@ -409,7 +428,7 @@ impl Workspaces for GitWorkspaces {
     }
 
     async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String> {
-        let _setup = self.setup.lock().await;
+        let _repos = self.lock_removal(removal).await;
         let root = match tokio::fs::canonicalize(&self.root).await {
             Ok(root) => root,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
@@ -660,5 +679,22 @@ mod tests {
         let workspaces = GitWorkspaces::new("data/workspaces");
         assert!(workspaces.root.is_absolute(), "{:?}", workspaces.root);
         assert!(workspaces.root.ends_with("data/workspaces"));
+    }
+
+    #[tokio::test]
+    async fn locking_one_repository_leaves_other_repositories_available() {
+        let workspaces = GitWorkspaces::new("data/workspaces");
+        let _repo = workspaces.lock_repository(RepositoryId(1)).await;
+        let time = Duration::from_millis(100);
+        assert!(
+            tokio::time::timeout(time, workspaces.lock_repository(RepositoryId(1)))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(time, workspaces.lock_repository(RepositoryId(2)))
+                .await
+                .is_ok()
+        );
     }
 }
