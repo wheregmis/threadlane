@@ -209,6 +209,11 @@ async fn agents_are_listed_and_created_with_unique_names_and_a_role() {
         role: role.to_owned(),
         instructions: "Review every change.".to_owned(),
         backends: vec![BackendKind::Codex, BackendKind::Claude, BackendKind::Codex],
+        models: [
+            ("codex".into(), " custom ".into()),
+            ("claude".into(), "opus".into()),
+        ]
+        .into(),
     };
     let reply = org(&hub, create(" Reviewer ", "reviewer")).await.unwrap();
     let OrgReply::Agent { agent } = reply else {
@@ -217,6 +222,10 @@ async fn agents_are_listed_and_created_with_unique_names_and_a_role() {
     assert_eq!(agent.name, "Reviewer");
     assert_eq!(agent.role, "reviewer");
     assert_eq!(agent.instructions, "Review every change.");
+    assert_eq!(
+        agent.models,
+        serde_json::json!({"codex": "custom", "claude": "opus"})
+    );
     assert_eq!(
         agent.backends,
         [BackendKind::Codex, BackendKind::Claude],
@@ -248,6 +257,7 @@ async fn set_mode_changes_a_binding_or_creates_one() {
             role: "reviewer".into(),
             instructions: String::new(),
             backends: Vec::new(),
+            models: Default::default(),
         },
     )
     .await

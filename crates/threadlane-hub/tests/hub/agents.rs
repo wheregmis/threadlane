@@ -21,6 +21,7 @@ async fn create(hub: &TestHub, name: &str) -> Agent {
             role: "reviewer".into(),
             instructions: "Review.".into(),
             backends: vec![BackendKind::Claude],
+            models: Default::default(),
         })
         .await
         .unwrap();

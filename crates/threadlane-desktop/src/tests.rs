@@ -251,7 +251,7 @@ impl HubApi for FakeHub {
                 role,
                 instructions,
                 backends,
-                ..
+                models,
             } => {
                 let mut agents = self.agents.lock().expect("lock");
                 if agents.iter().any(|agent| agent.name == name) {
@@ -265,7 +265,7 @@ impl HubApi for FakeHub {
                     role,
                     instructions,
                     backends,
-                    models: json!({}),
+                    models: json!(models),
                     tools: json!({}),
                     requirements: json!({}),
                 };
@@ -2682,6 +2682,7 @@ async fn copying_an_agent_offers_what_the_other_space_lacks_and_copies_it_whole(
             role: "role".to_owned(),
             instructions: format!("Be {name}."),
             backends: vec![BackendKind::Codex],
+            models: [("codex".into(), "custom".into())].into(),
         })
         .await
         .expect("created");
@@ -2710,6 +2711,7 @@ async fn copying_an_agent_offers_what_the_other_space_lacks_and_copies_it_whole(
         ),
         ("role", "Be Reviewer.", [BackendKind::Codex].as_slice())
     );
+    assert_eq!(copied.models, json!({"codex": "custom"}));
     state.agent_created("home", copied);
     assert!(state.copy_targets("work")[0].1.is_empty());
     assert!(copy_agent(&core, &targets[0].1[0], "home").await.is_err());
@@ -5777,6 +5779,7 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
             role: role.to_owned(),
             instructions: "Review.".to_owned(),
             backends: vec![BackendKind::Claude],
+            models: Default::default(),
         })
         .await
         .expect("created");

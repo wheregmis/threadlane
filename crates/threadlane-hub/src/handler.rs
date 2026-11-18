@@ -520,6 +520,7 @@ impl HubApi for ClientApi {
                 role,
                 instructions,
                 backends,
+                models,
             } => {
                 let name = required("agent name", &name)?;
                 let role = required("agent role", &role)?;
@@ -529,8 +530,16 @@ impl HubApi for ClientApi {
                         preferred.push(backend);
                     }
                 }
+                let mut overrides = serde_json::Map::new();
+                for (backend, model) in models {
+                    let backend = known_backend(&backend)?;
+                    if !model.trim().is_empty() {
+                        overrides.insert(backend.as_str().to_owned(), json!(model.trim()));
+                    }
+                }
                 let agent = db
                     .create_agent(&NewAgent {
+                        models: overrides.into(),
                         instructions,
                         backends: preferred,
                         ..NewAgent::named(name, role)

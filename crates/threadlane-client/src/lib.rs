@@ -820,7 +820,26 @@ impl ClientCore {
         instructions: &str,
         backends: &[BackendKind],
     ) -> Result<Agent, ClientError> {
+        self.create_agent_with_models(space, name, role, instructions, backends, BTreeMap::new())
+            .await
+    }
+
+    /// Creates an agent with model overrides keyed by backend name.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same pairing and hub errors as [`Self::create_agent`].
+    pub async fn create_agent_with_models(
+        &self,
+        space: Option<&str>,
+        name: &str,
+        role: &str,
+        instructions: &str,
+        backends: &[BackendKind],
+        models: BTreeMap<String, String>,
+    ) -> Result<Agent, ClientError> {
         let request = OrgRequest::CreateAgent {
+            models,
             name: name.to_owned(),
             role: role.to_owned(),
             instructions: instructions.to_owned(),

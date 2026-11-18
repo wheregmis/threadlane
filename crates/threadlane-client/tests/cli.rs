@@ -827,6 +827,10 @@ async fn the_cli_manages_projects_agents_and_modes() {
             "reviewer",
             "--backend",
             "codex,claude",
+            "--model",
+            "codex=custom",
+            "--model",
+            "claude=opus",
         ],
         "created agent Reviewer (reviewer)\n",
     )
@@ -864,6 +868,11 @@ async fn the_cli_manages_projects_agents_and_modes() {
                 role: "reviewer".to_owned(),
                 instructions: String::new(),
                 backends: vec![BackendKind::Codex, BackendKind::Claude],
+                models: [
+                    ("codex".into(), "custom".into()),
+                    ("claude".into(), "opus".into())
+                ]
+                .into(),
             },
             OrgRequest::Agents,
             OrgRequest::Bindings {
@@ -925,6 +934,7 @@ async fn the_cli_lists_templates_and_adds_an_agent_from_one() {
         role: "chief-of-staff".to_owned(),
         instructions: "Offer a menu.".to_owned(),
         backends: vec![BackendKind::Claude],
+        models: Default::default(),
     };
     assert_eq!(
         *hub.fake.0.org.lock().expect("lock"),

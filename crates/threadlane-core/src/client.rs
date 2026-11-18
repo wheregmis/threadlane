@@ -158,6 +158,8 @@ pub enum OrgRequest {
         /// either.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         backends: Vec<BackendKind>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        models: BTreeMap<String, String>,
     },
     /// The bindings of a project. `None` means the General project.
     Bindings { project: Option<String> },
