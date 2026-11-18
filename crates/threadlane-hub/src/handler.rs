@@ -704,6 +704,9 @@ impl HubApi for ClientApi {
                 self.core.inner.wake.wake(WakeTarget::Lane(lane_id));
                 Ok(OrgReply::LaneUpdated)
             }
+            OrgRequest::Templates => Ok(OrgReply::Templates {
+                templates: crate::templates::all().map_err(ApiError::Internal)?,
+            }),
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
     }

@@ -205,6 +205,22 @@ pub enum OrgRequest {
     },
     /// Makes a stopped lane eligible again.
     ResumeLane { target: LaneTarget },
+    /// The starter agents compiled into the hub (docs/agent-templates.md).
+    Templates,
+}
+
+/// A starter agent (docs/agent-templates.md §1). Adding one creates an
+/// ordinary agent; later changes to the template do not touch it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTemplate {
+    /// The file name without `.md`, for example `chief-of-staff`.
+    pub id: String,
+    pub name: String,
+    /// The one-line role from the template's first line.
+    pub role: String,
+    /// The backends it may use, in order of preference.
+    pub backends: Vec<BackendKind>,
+    pub instructions: String,
 }
 
 /// The lane targeted by a stop or resume request.
@@ -268,6 +284,9 @@ pub enum OrgReply {
     },
     /// A stop or resume was recorded.
     LaneUpdated,
+    Templates {
+        templates: Vec<AgentTemplate>,
+    },
 }
 
 /// The Decisions capability (Plan.md §9.4, §11.2): what waits on you, and

@@ -512,3 +512,30 @@ async fn set_space_ceiling_raises_and_lowers_what_every_project_allows() {
     let refused = org(&hub, set_mode(None, LEAD_NAME, Mode::Assisted)).await;
     assert!(matches!(refused, Err(ApiError::Invalid(_))), "{refused:?}");
 }
+
+#[tokio::test]
+async fn templates_lists_the_starter_agents_compiled_into_the_hub() {
+    let hub = TestHub::start().await;
+    let reply = org(&hub, OrgRequest::Templates).await.unwrap();
+    let OrgReply::Templates { templates } = reply else {
+        panic!("expected templates, got {reply:?}");
+    };
+    let ids: Vec<_> = templates
+        .iter()
+        .map(|template| template.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "chief-of-staff",
+            "engineer",
+            "reviewer",
+            "reporter",
+            "architect"
+        ]
+    );
+    let chief = &templates[0];
+    assert_eq!(chief.name, "Chief of Staff");
+    assert_eq!(chief.backends, [BackendKind::Claude, BackendKind::Codex]);
+    assert!(chief.instructions.contains("ask_user"));
+}

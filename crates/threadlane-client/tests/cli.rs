@@ -288,6 +288,15 @@ impl HubApi for FakeHub {
                 OrgReply::Pacing { pacing }
             }
             OrgRequest::Stop { .. } | OrgRequest::ResumeLane { .. } => OrgReply::LaneUpdated,
+            OrgRequest::Templates => OrgReply::Templates {
+                templates: vec![threadlane_core::client::AgentTemplate {
+                    id: "chief-of-staff".to_owned(),
+                    name: "Chief of Staff".to_owned(),
+                    role: "offers a menu of next tasks".to_owned(),
+                    backends: vec![BackendKind::Claude],
+                    instructions: "Offer a menu.".to_owned(),
+                }],
+            },
             other => return Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         })
     }
@@ -841,6 +850,67 @@ async fn the_cli_manages_projects_agents_and_modes() {
                 agent: "Reviewer".to_owned(),
                 mode: Mode::Off,
             },
+        ]
+    );
+    hub.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_lists_templates_and_adds_an_agent_from_one() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().expect("tempdir");
+    let client_dir = client.path();
+    let socket = hub.socket().display().to_string();
+    expect_success(
+        client_dir,
+        &["hub", "add", "work", &socket],
+        &format!("paired work: {socket}\n"),
+    )
+    .await;
+
+    expect_success(
+        client_dir,
+        &["agent", "templates"],
+        "chief-of-staff: Chief of Staff, offers a menu of next tasks\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &[
+            "agent",
+            "add",
+            "--template",
+            "chief-of-staff",
+            "--name",
+            "Tudi",
+        ],
+        "created agent Tudi (chief-of-staff)\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["agent", "add", "--template", "chief-of-staff"],
+        "created agent Chief of Staff (chief-of-staff)\n",
+    )
+    .await;
+    let output = threadlane(client_dir, &["agent", "add", "--template", "nobody"]).await;
+    assert!(!output.status.success(), "an unknown template is refused");
+
+    let created = |name: &str| OrgRequest::CreateAgent {
+        name: name.to_owned(),
+        role: "chief-of-staff".to_owned(),
+        instructions: "Offer a menu.".to_owned(),
+        backends: vec![BackendKind::Claude],
+    };
+    assert_eq!(
+        *hub.fake.0.org.lock().expect("lock"),
+        vec![
+            OrgRequest::Templates,
+            OrgRequest::Templates,
+            created("Tudi"),
+            OrgRequest::Templates,
+            created("Chief of Staff"),
+            OrgRequest::Templates,
         ]
     );
     hub.stop().await;

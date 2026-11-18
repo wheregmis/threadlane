@@ -374,23 +374,37 @@ enum RepoCommand {
 
 #[derive(Debug, Subcommand)]
 enum AgentCommand {
-    /// Create an agent.
+    /// Create an agent, from scratch or from a template.
     Add {
         /// The space (paired hub name); may be left out if only one is paired.
         #[arg(short, long)]
         space: Option<String>,
-        /// The agent's name, unique in the space.
-        name: String,
-        /// Its role, for example `reviewer`.
+        /// The agent's name, unique in the space; the template's if left out.
+        #[arg(required_unless_present = "template")]
+        name: Option<String>,
+        /// The agent's name, the same as the positional one.
+        #[arg(long = "name", conflicts_with = "name")]
+        named: Option<String>,
+        /// Start from this template (see `agent templates`); the options
+        /// below replace its values when given.
         #[arg(long)]
-        role: String,
+        template: Option<String>,
+        /// Its role, for example `reviewer`; the template's id if left out.
+        #[arg(long, required_unless_present = "template")]
+        role: Option<String>,
         /// Its instructions.
-        #[arg(long, default_value = "")]
-        instructions: String,
+        #[arg(long)]
+        instructions: Option<String>,
         /// The backends it may use, in order of preference, for example
         /// claude,codex; either if left out.
         #[arg(long = "backend", value_delimiter = ',')]
         backends: Vec<BackendKind>,
+    },
+    /// List the starter agents the hub offers.
+    Templates {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
     },
 }
 
@@ -614,15 +628,45 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 AgentCommand::Add {
                     space,
                     name,
+                    named,
+                    template,
                     role,
                     instructions,
-                    backends,
+                    mut backends,
                 },
         } => {
+            let mut name = named.or(name);
+            let (mut role, mut instructions) = (role, instructions);
+            if let Some(id) = template {
+                let templates = core.agent_templates(space.as_deref()).await?;
+                let Some(template) = templates.into_iter().find(|template| template.id == id)
+                else {
+                    anyhow::bail!("no template {id:?}; see `threadlane agent templates`");
+                };
+                name.get_or_insert(template.name);
+                role.get_or_insert(template.id);
+                instructions.get_or_insert(template.instructions);
+                if backends.is_empty() {
+                    backends = template.backends;
+                }
+            }
             let agent = core
-                .create_agent(space.as_deref(), &name, &role, &instructions, &backends)
+                .create_agent(
+                    space.as_deref(),
+                    &name.unwrap_or_default(),
+                    &role.unwrap_or_default(),
+                    &instructions.unwrap_or_default(),
+                    &backends,
+                )
                 .await?;
             println!("created agent {} ({})", agent.name, agent.role);
+        }
+        Command::Agent {
+            command: AgentCommand::Templates { space },
+        } => {
+            for template in core.agent_templates(space.as_deref()).await? {
+                println!("{}: {}, {}", template.id, template.name, template.role);
+            }
         }
         Command::Bindings { space, project } => {
             for binding in core.bindings(space.as_deref(), project.as_deref()).await? {

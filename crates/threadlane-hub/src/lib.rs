@@ -34,6 +34,7 @@ mod publish;
 mod recurrence;
 mod review;
 mod settings;
+mod templates;
 mod timers;
 mod tools;
 mod wake;

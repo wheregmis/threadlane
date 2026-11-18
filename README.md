@@ -126,6 +126,18 @@ threadlane bindings -p web
 threadlane mode Lead off -p web   # off, on_request, assisted, autonomous
 ```
 
+Starter agents (docs/agent-templates.md) come compiled into the hub: Chief of
+Staff, Engineer, Reviewer, Reporter and Architect. Adding one creates an
+ordinary agent whose instructions you can edit; later changes to a template do
+not touch agents already made from it. `--role`, `--instructions` and
+`--backend` replace the template's values when given.
+
+```sh
+threadlane agent templates
+threadlane agent add --template chief-of-staff --name Tudi
+threadlane mode Tudi on_request -p web
+```
+
 An agent set to `off` never runs in that project, and `send` to a project
 whose lead is off is refused. Until milestone 9 every mode above `off` acts as
 `on_request`.
