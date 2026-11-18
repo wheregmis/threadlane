@@ -3443,71 +3443,55 @@ async fn a_queued_card_says_why_it_waits_from_the_hub_or_from_what_the_app_knows
 }
 
 #[tokio::test]
-async fn home_lists_tasks_that_failed_or_are_stuck_and_the_sidebar_counts_them() {
+async fn recovered_task_failures_stay_on_the_board_and_only_open_decisions_need_you() {
     let work = FakeHub::new("Work", Vec::new());
-    let mut cancelled = task(2, TaskStatus::Cancelled, None);
-    cancelled.task.depends_on = vec![TaskId(1)];
-    let mut chained = task(3, TaskStatus::Cancelled, None);
-    chained.task.depends_on = vec![TaskId(2)];
-    let mut by_you = task(5, TaskStatus::Cancelled, None);
-    by_you.task.depends_on = vec![TaskId(6)];
+    let mut cancelled = task(18, TaskStatus::Cancelled, None);
+    cancelled.task.depends_on = vec![TaskId(16)];
     *work.tasks.lock().expect("lock") = vec![
-        task(1, TaskStatus::Failed, Some("the tests do not build")),
+        task(16, TaskStatus::Failed, Some("the tests do not build")),
         cancelled,
-        chained,
         task(
-            4,
+            19,
             TaskStatus::Sleeping,
             Some("ended a run without finishing; nothing is set to wake it"),
         ),
-        by_you,
-        task(6, TaskStatus::Cancelled, None),
-        task(
-            7,
-            TaskStatus::Sleeping,
-            Some("waiting for a follow-up at 09:00"),
-        ),
-        task(8, TaskStatus::Queued, None),
+        task(17, TaskStatus::Running, None),
     ];
     let (_dir, core) = core(&[("work", &work)]);
     let mut state = AppState::default();
     state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
 
-    let rows: Vec<(TaskId, String)> = state
-        .needs_attention()
-        .into_iter()
-        .map(|row| (row.task, row.why))
-        .collect();
-    assert_eq!(
-        rows,
-        [
-            (
-                TaskId(1),
-                "api · Engineer · failed: the tests do not build".to_owned()
-            ),
-            (
-                TaskId(2),
-                "api · Engineer · cancelled because T-0001, which it depended on, failed"
-                    .to_owned()
-            ),
-            (
-                TaskId(3),
-                "api · Engineer · cancelled because T-0001, which it depended on, failed"
-                    .to_owned()
-            ),
-            (
-                TaskId(4),
-                "api · Engineer · ended a run without finishing; nothing is set to wake it"
-                    .to_owned()
-            ),
-        ]
-    );
-    assert_eq!(state.attention_in("work", "api"), 4);
-    assert_eq!(state.attention_in("work", "General"), 0);
-    assert!(needs_you("Stuck: no run can continue it"));
-    assert!(!needs_you("waiting for T-0002 to be done"));
-    state.set_filter(Some("home"));
-    assert!(state.needs_attention().is_empty());
+    assert_eq!(state.needs_you().count(), 0);
+    assert_eq!(state.open_in("work", ProjectId(1)), 0);
+    assert_eq!(state.running()[0].1.task.id, TaskId(17));
+    let board = state.board("work", "api", &when());
+    for (status, id) in [("Failed", 16), ("Cancelled", 18), ("Sleeping", 19)] {
+        let column = board.iter().find(|column| column.title == status).unwrap();
+        assert_eq!(column.cards[0].id, TaskId(id));
+    }
+
+    work.decisions.lock().expect("lock").push(Decision {
+        tool: "ask_user".to_owned(),
+        kind: DecisionKind::Input,
+        question: "How should I recover T-0016?".to_owned(),
+        ..decision(1, 1_000)
+    });
+    state.apply(refresh(&core).await);
+    let queued = state
+        .needs_you()
+        .next()
+        .expect("Lead's question is on Home");
+    assert_eq!(queued.decision.question, "How should I recover T-0016?");
+    assert_eq!(state.open_in("work", ProjectId(1)), 1);
+
+    let answer = core
+        .answer(Some("work"), "D-0001", "approve", None)
+        .await
+        .expect("answer");
+    state.answered(&answer);
+    assert_eq!(state.needs_you().count(), 0);
+    assert_eq!(state.open_in("work", ProjectId(1)), 0);
 }
 
 #[tokio::test]

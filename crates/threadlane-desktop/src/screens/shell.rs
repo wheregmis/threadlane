@@ -59,8 +59,7 @@ impl Desktop {
                     .active_projects()
                     .filter(|project| !project.is_general)
                     .map(|project| {
-                        let open = self.state.open_in(&space.name, project.id)
-                            + self.state.attention_in(&space.name, &project.name);
+                        let open = self.state.open_in(&space.name, project.id);
                         row(
                             format!("go-{}-{}", space.name, project.name),
                             AppIcon::Folder,
@@ -86,15 +85,15 @@ impl Desktop {
             if space.archived_projects().next().is_some() {
                 entries.push(SidebarEntry::Archived(space));
             }
-            if let Some(project) = space.main_chat_project() {
+            if let Some(project) = space.active_projects().find(|project| project.is_general) {
                 entries.push(row(
                     format!("main-chat-{}", space.name),
                     AppIcon::MessagesSquare,
                     "Main Chat".into(),
-                    positive_count(self.state.attention_in(&space.name, project)),
+                    positive_count(self.state.open_in(&space.name, project.id)),
                     Screen::Project {
                         space: space.name.clone(),
-                        project: project.to_owned(),
+                        project: project.name.clone(),
                         tab: Tab::Conversation,
                     },
                 ));

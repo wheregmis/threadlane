@@ -46,7 +46,6 @@ mod tasks;
 mod timeline;
 
 pub use agent_edit::{AgentBinding, AgentEdit, AgentFields};
-pub use attention::{AttentionRow, needs_you};
 pub use clock::{When, duration};
 pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
 pub use control::{
@@ -249,7 +248,7 @@ pub struct Space {
     /// hub has not said, or cannot (one from before it could).
     pub recorded: Option<u64>,
     held: Option<HeldResults>,
-    /// The tasks of all its projects, for what needs attention on Home.
+    /// The tasks of its active projects.
     pub tasks: Vec<TaskSummary>,
     archived_open: bool,
 }
@@ -756,8 +755,6 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
 
 /// The tasks of every project in `projects` of `space`, each once; the
 /// first refusal if one project's could not be listed.
-// shortcut: one Tasks request per project every refresh; a hub-side listing
-// of what needs attention would be cheaper once spaces hold many tasks.
 async fn all_tasks(
     core: &ClientCore,
     space: &str,

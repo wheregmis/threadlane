@@ -98,45 +98,6 @@ impl Desktop {
             needs = needs.child(self.decision(queued, when, cx));
         }
 
-        // Tasks that failed or are stuck, under "Needs you" (shown only when
-        // there are some, so a quiet Home stays quiet).
-        let attention = state.needs_attention();
-        let attention = (!attention.is_empty()).then(|| {
-            let mut list = v_flex()
-                .gap(XS)
-                .child(section("Needs attention").children(count(attention.len(), cx)));
-            for row in attention {
-                let screen = Screen::Task {
-                    space: row.space.clone(),
-                    task: row.task,
-                };
-                list = list.child(
-                    button(SharedString::from(format!(
-                        "attention-{}-{}",
-                        row.space, row.task
-                    )))
-                    .text()
-                    .w_full()
-                    .accessibility_label(format!("Open {}: {}", row.title, row.why))
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .items_start()
-                            .child(div().text_size(TYPE_BODY).child(row.title.clone()))
-                            .child(
-                                div()
-                                    .text_size(TYPE_META)
-                                    .text_color(muted)
-                                    .whitespace_normal()
-                                    .child(format!("{} / {}", row.space, row.why)),
-                            ),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
-                );
-            }
-            list
-        });
-
         let running = state.running();
         let leads = state.running_leads();
         let running_count = running.len() + leads.len();
@@ -206,12 +167,7 @@ impl Desktop {
             );
         }
 
-        let task_gaps = state.gaps(Part::Tasks);
-        let quiet = task_gaps.is_empty()
-            && !show_needs
-            && !show_running
-            && attention.is_none()
-            && banners.is_empty();
+        let quiet = !show_needs && !show_running && banners.is_empty();
         let history = button("home-history")
             .small()
             .ghost()
@@ -243,12 +199,6 @@ impl Desktop {
             )
             .children(banners)
             .when(show_needs, |view| view.child(needs))
-            .children(attention)
-            .children(
-                task_gaps
-                    .iter()
-                    .map(|(space, gap)| gap_line(gap, "tasks", space, cx)),
-            )
             .when(show_running, |view| view.child(table))
             .when(quiet, |view| {
                 view.child(meta("No work needs your attention.", cx))
