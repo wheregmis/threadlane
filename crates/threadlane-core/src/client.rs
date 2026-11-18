@@ -638,7 +638,7 @@ pub struct TaskReviewActivity {
     pub decided_at: Option<Timestamp>,
 }
 
-/// Maximum chat history page. Full image messages fit within the remote
+/// Maximum chat history page that includes images. Full image messages fit within the remote
 /// transport response limit at this page size.
 pub const CONVERSATION_PAGE: u32 = 20;
 
@@ -707,7 +707,8 @@ pub enum OverviewRequest {
     Task { task: TaskId },
     /// The newest `limit` entries of the conversation with a project's lead
     /// before `before` (the newest of all when `None`), oldest first. `None`
-    /// as the project means the General project.
+    /// as the project means the General project. Requests larger than
+    /// [`CONVERSATION_PAGE`] return text history without image data.
     Conversation {
         project: Option<String>,
         before: Option<Timestamp>,

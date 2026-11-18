@@ -200,15 +200,17 @@ async fn project_images_stay_in_order_and_are_available_on_earlier_pages() {
     assert_eq!(second.images, std::slice::from_ref(&image));
     assert!(second.prompt.contains("Message 1\n") && !second.prompt.contains("Message 2\n"));
 
-    let history = |project, before| {
+    let history = |project, before, limit| {
         hub.api.overview(OverviewRequest::Conversation {
             project,
             before,
-            limit: u32::MAX,
+            limit,
         })
     };
     let OverviewReply::Conversation { entries } =
-        history(Some(project.name.clone()), None).await.unwrap()
+        history(Some(project.name.clone()), None, CONVERSATION_PAGE)
+            .await
+            .unwrap()
     else {
         panic!("expected history");
     };
@@ -224,14 +226,26 @@ async fn project_images_stay_in_order_and_are_available_on_earlier_pages() {
     };
     assert_eq!(*event_id, sent[1]);
     assert_eq!(images, std::slice::from_ref(&image));
-    let earlier = history(Some(project.name), Some(*at)).await.unwrap();
+    let earlier = history(Some(project.name.clone()), Some(*at), CONVERSATION_PAGE)
+        .await
+        .unwrap();
     assert!(matches!(earlier, OverviewReply::Conversation { entries }
         if matches!(entries.as_slice(), [ConversationEntry::You { event_id, images, .. }]
             if *event_id == sent[0] && images.is_empty())));
     assert_eq!(
-        history(None, None).await.unwrap(),
+        history(None, None, CONVERSATION_PAGE).await.unwrap(),
         OverviewReply::Conversation {
             entries: Vec::new()
         }
+    );
+    let OverviewReply::Conversation { entries } =
+        history(Some(project.name), None, 100).await.unwrap()
+    else {
+        panic!("expected legacy history");
+    };
+    assert_eq!(entries.len(), sent.len(), "legacy page retains its size");
+    assert!(
+        matches!(&entries[1], ConversationEntry::You { event_id, images, .. }
+        if *event_id == sent[1] && images.is_empty())
     );
 }
