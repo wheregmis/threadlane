@@ -191,6 +191,27 @@ pub(super) fn row(
         )
 }
 
+/// A compact title and elapsed time, with status kept adjacent to the title.
+pub(super) fn work_label(title: String, elapsed: Option<String>, status: Status, cx: &App) -> Div {
+    h_flex()
+        .w_full()
+        .gap(XS)
+        .min_w_0()
+        .child(status_dot(status, cx))
+        .child(div().flex_1().min_w_0().whitespace_normal().child(title))
+        .children(elapsed.map(|elapsed| meta(elapsed, cx).flex_none().text_right()))
+}
+
+/// The active task's latest step or quiet warning.
+pub(super) fn live_step(step: threadlane_desktop::LatestStep, cx: &App) -> Div {
+    let line = meta(step.text, cx);
+    if step.quiet {
+        line.text_color(Status::Waiting.colors(cx.theme()).0)
+    } else {
+        line
+    }
+}
+
 /// The shared bordered surface for groups and cards.
 pub(super) fn card(cx: &App) -> GroupBox {
     GroupBox::new()

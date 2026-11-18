@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value as Json, json};
 use threadlane_core::model::{Mode, Pacing, QuietHours};
 
-use crate::{Alert, AppState, describe};
+use crate::{Alert, AppState, count_form, describe};
 
 /// The file in the client directory that holds this app's own settings.
 pub const SETTINGS_FILE: &str = "desktop.json";
@@ -415,6 +415,26 @@ impl AppState {
             .insert(space, pacing.map_err(|error| describe(&error)));
     }
 
+    /// The reason pacing is not currently available.
+    #[must_use]
+    pub fn pacing_gap(&self, space: &str) -> crate::Gap {
+        self.pacing
+            .get(space)
+            .and_then(|value| value.as_ref().err())
+            .cloned()
+            .map_or(crate::Gap::Loading, crate::Gap::Failed)
+    }
+
+    /// The reason metrics are not currently available.
+    #[must_use]
+    pub fn metrics_gap(&self, space: &str) -> crate::Gap {
+        self.metrics
+            .get(space)
+            .and_then(|value| value.as_ref().err())
+            .cloned()
+            .map_or(crate::Gap::Loading, crate::Gap::Failed)
+    }
+
     /// The pacing values for this space, or a message about their availability.
     pub fn pacing_values(&self, space: &str) -> Result<[String; 4], &str> {
         match self.pacing.get(space) {
@@ -540,8 +560,9 @@ impl AppState {
         };
         let latency = |latency: &Latency| match (latency.mean_ms, latency.max_ms) {
             (Some(mean), Some(max)) => format!(
-                "{mean:.0} ms avg · {max} ms max · {} observations",
-                latency.count
+                "{mean:.0} ms avg · {max} ms max · {} {}",
+                latency.count,
+                count_form(latency.count, "observation", "observations")
             ),
             _ => "No observations".to_owned(),
         };

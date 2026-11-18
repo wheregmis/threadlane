@@ -9,8 +9,8 @@ use threadlane_client::ClientDirs;
 use threadlane_core::client::{
     Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
     MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
-    PairingRequest, RecordedEvent, RunSummary, StandingRuleSummary, TaskReply, TaskRequest,
-    TimerReply, TimerRequest, UserMessage,
+    PairingRequest, RecordedEvent, RunStep, RunSummary, RunUsage, StandingRuleSummary, TaskReply,
+    TaskRequest, TimerReply, TimerRequest, UserMessage,
 };
 use threadlane_core::ids::{
     AgentId, LaneId, MachineId, OutboxId, RepositoryId, RunId, SessionId, TimerId,
@@ -38,6 +38,7 @@ struct FakeHub {
     projects_fail: AtomicBool,
     created: Mutex<Vec<ProjectSummary>>,
     machines: Mutex<Vec<Machine>>,
+    accounts: Mutex<Vec<Account>>,
     lead: Mutex<Option<Timestamp>>,
     stopped: Mutex<Vec<LaneTarget>>,
     pacing: Mutex<Pacing>,
@@ -438,9 +439,10 @@ impl HubApi for FakeHub {
             }),
             OverviewRequest::Machines => Ok(OverviewReply::Machines {
                 machines: self.machines.lock().expect("lock").clone(),
-                accounts: Vec::new(),
+                accounts: self.accounts.lock().expect("lock").clone(),
             }),
             OverviewRequest::Lead { project } => Ok(OverviewReply::Lead {
+                latest_step: None,
                 running_since: *self.lead.lock().expect("lock"),
                 stopped: self
                     .stopped
@@ -827,6 +829,7 @@ fn account_notice(seq: i64, key: &str, text: &str) -> FeedItem {
 
 fn task(id: i64, status: TaskStatus, waiting_reason: Option<&str>) -> TaskSummary {
     TaskSummary {
+        latest_step: None,
         task: Task {
             id: TaskId(id),
             project_id: ProjectId(1),
@@ -1160,6 +1163,18 @@ async fn the_board_groups_tasks_by_status_and_says_why_one_waits() {
     let mut state = AppState::default();
     state.apply_project(load_project(&core, "work", "api").await);
 
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    let detail = state.task("work", TaskId(1)).unwrap();
+    assert_eq!(
+        state.waiting_task("work", &detail.summary).as_deref(),
+        Some("waiting for T-0002 to be done")
+    );
+    let queued = state
+        .board("work", "api", &when())
+        .into_iter()
+        .find(|column| column.title == "Queued")
+        .unwrap();
+    assert_eq!(queued.cards[0].elapsed.as_deref(), Some("11 min"));
     let board: Vec<(&str, Vec<(TaskId, String)>)> = state
         .board("work", "api", &when())
         .into_iter()
@@ -1189,7 +1204,7 @@ async fn the_board_groups_tasks_by_status_and_says_why_one_waits() {
                 "Blocked",
                 vec![card(3, &format!("Engineer · {BLOCKED_FOR_TEST}"))]
             ),
-            ("Running", vec![card(2, "Engineer · macbook · 12 min")]),
+            ("Running", vec![card(2, "Engineer · macbook")]),
             ("Waiting on you", vec![]),
             ("Done", vec![card(4, "Engineer")]),
         ]
@@ -1200,6 +1215,50 @@ async fn the_board_groups_tasks_by_status_and_says_why_one_waits() {
             .iter()
             .all(|c| c.cards.is_empty())
     );
+}
+
+#[tokio::test]
+async fn a_finished_only_board_keeps_the_four_default_columns_and_all_three_cards() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().expect("lock") =
+        (1..=3).map(|id| task(id, TaskStatus::Done, None)).collect();
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let board = state.board("work", "api", &when());
+    let headers: Vec<_> = board
+        .iter()
+        .map(|column| (column.title, column.count))
+        .collect();
+    assert_eq!(
+        headers,
+        [
+            ("Queued", 0),
+            ("Running", 0),
+            ("Waiting on you", 0),
+            ("Done", 3)
+        ]
+    );
+    let cards: Vec<_> = board[3].cards.iter().map(|card| card.id).collect();
+    assert_eq!(cards, [TaskId(3), TaskId(2), TaskId(1)]);
+}
+
+#[test]
+fn count_forms_use_singular_only_for_one() {
+    for (one, many) in [
+        ("machine", "machines"),
+        ("task", "tasks"),
+        ("result", "results"),
+        ("run", "runs"),
+        ("note", "notes"),
+        ("file", "files"),
+        ("rule", "rules"),
+    ] {
+        assert_eq!(count_form(0_usize, one, many), many);
+        assert_eq!(count_form(1_usize, one, many), one);
+        assert_eq!(count_form(2_usize, one, many), many);
+    }
 }
 
 const BLOCKED_FOR_TEST: &str = "blocked: every model account it can use is at its usage limit";
@@ -1246,7 +1305,7 @@ async fn home_lists_what_runs_and_the_latest_result_per_project_filtered_by_spac
     );
     assert_eq!(
         state.status_line(),
-        "2 spaces reachable · 1 running · 1 need you · 0 of 0 machines online"
+        "2 spaces reachable · 1 running · 1 needs you · 0 of 0 machines online"
     );
     assert_eq!(
         state.target(),
@@ -1337,6 +1396,8 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
     summary.machine = Some("linux-box".to_owned());
     summary.task.result = Some(json!({ "summary": "Refunds are idempotent." }));
     let run = |id, started, ended, status, outcome| RunSummary {
+        steps: Vec::new(),
+        usage: None,
         run: Run {
             trace_id: String::new(),
             id: RunId(id),
@@ -1522,7 +1583,7 @@ async fn a_hub_that_refuses_a_part_shows_its_error_there_and_the_rest_loads() {
     assert!(!state.retry_soon());
     assert_eq!(
         state.status_line(),
-        "1 space reachable · 1 running · 1 need you · 1 of 1 machines online"
+        "1 space reachable · 1 running · 1 needs you · 1 of 1 machine online"
     );
 
     // Refused again: the old count is not shown as if it were current.
@@ -2242,6 +2303,8 @@ fn every_tab_is_selected_where_it_is_shown() {
 #[test]
 fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
     let run = |id, started: i64, ended: Option<i64>| RunSummary {
+        steps: Vec::new(),
+        usage: None,
         run: Run {
             trace_id: String::new(),
             id: RunId(id),
@@ -2975,7 +3038,7 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
     );
 
     // Its standing rules only, in words, and Revoke asks first.
-    assert_eq!(may.rules_title, "Standing rules (1)");
+    assert_eq!(may.rules_title, "Standing rule (1)");
     let rules = may.rules.expect("listed");
     assert_eq!(rules[0].allows, "Open draft pull requests in app");
     assert_eq!(rules[0].from, "Granted from D-0009 · used 6 times");
@@ -2997,7 +3060,7 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
             .may_do("work", "api", "Lead")
             .expect("bound")
             .rules_title,
-        "Standing rules (1)"
+        "Standing rule (1)"
     );
 
     // "At once" goes through the hub and shows at once.
@@ -3387,6 +3450,8 @@ async fn quiet_lead_runs_group_in_chronological_order_and_reveal_why() {
     ]
     .into_iter()
     .map(|(id, minutes, rationale, outcome)| LeadRun {
+        latest_step: None,
+        usage: None,
         sent_message: outcome == Some(RunOutcome::Sent),
         run: Run {
             trace_id: String::new(),
@@ -3482,6 +3547,8 @@ async fn running_elapsed_advances_on_home_and_the_task_without_reloading() {
     running.running_since = Some(started);
     *work.tasks.lock().unwrap() = vec![running.clone()];
     *work.task_runs.lock().unwrap() = vec![RunSummary {
+        steps: Vec::new(),
+        usage: None,
         machine: "hub".to_owned(),
         run: Run {
             trace_id: String::new(),
@@ -3613,10 +3680,14 @@ async fn stage_b_stops_running_lanes_and_sending_a_message_resumes_them() {
     *work.lead.lock().unwrap() = None;
     work.tasks.lock().unwrap()[0].task.status = TaskStatus::Queued;
     work.lead_runs.lock().unwrap().push(LeadRun {
+        latest_step: None,
+        usage: None,
         run: stopped_run.clone(),
         sent_message: true,
     });
     work.task_runs.lock().unwrap().push(RunSummary {
+        steps: Vec::new(),
+        usage: None,
         run: Run {
             lane_id: LaneId(17),
             ..stopped_run
@@ -4017,7 +4088,7 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
     assert_eq!(rows["Oldest lane event"], "53 ms");
     assert_eq!(
         rows["Run duration"],
-        "12 ms avg · 12 ms max · 1 observations"
+        "12 ms avg · 12 ms max · 1 observation"
     );
     assert_eq!(rows["Silent runs"], "25%");
     assert!(
@@ -4593,9 +4664,477 @@ async fn stage_three_new_divider_tracks_each_visit_and_the_newest_body_stays_ope
             .contains(&Line::New)
     );
     state.edit_draft(Draft::Lead, "I agree.");
-    state.reply_to_message("First line\nSecond line");
+    state.reply_to_message(Draft::Lead, "First line\nSecond line");
     assert_eq!(
         state.draft(Draft::Lead),
         "> First line\n> Second line\n\nI agree."
     );
+}
+
+#[tokio::test]
+async fn in_progress_caps_running_leads_and_queued_work_and_uses_the_display_clock() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().unwrap() = (1..=7)
+        .map(|id| {
+            task(
+                id,
+                if id == 1 {
+                    TaskStatus::Running
+                } else {
+                    TaskStatus::Queued
+                },
+                None,
+            )
+        })
+        .collect();
+    *work.lead.lock().unwrap() = Some(Timestamp::from_millis(600_000));
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    state.apply_at(refresh(&core).await, when().now);
+    let work = state.in_progress("dev", &when());
+    assert_eq!(work.rows.len(), 5);
+    assert_eq!(work.more, 4);
+    assert_eq!(
+        work.rows[0].destination,
+        Destination::Task("dev".to_owned(), TaskId(1))
+    );
+    assert_eq!(work.rows[0].elapsed, "12 min");
+    assert_eq!(work.rows[1].title, "api · lead");
+    assert_eq!(work.rows[1].elapsed, "2 min");
+    assert_eq!(state.running_leads().len(), 2);
+    assert_eq!(work.rows[3].status, "Queued");
+    assert_eq!(work.rows[3].elapsed, "11 min");
+    let later = When {
+        now: Timestamp::from_millis(780_000),
+        ..when()
+    };
+    assert_eq!(state.in_progress("dev", &later).rows[3].elapsed, "12 min");
+    assert!(state.in_progress("other", &when()).rows.is_empty());
+}
+
+#[tokio::test]
+async fn task_header_and_activity_use_journal_clock_and_finished_usage() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(1, TaskStatus::Running, None);
+    let started = Timestamp::from_millis(60_000);
+    let step = RunStep {
+        kind: "tool_use".to_owned(),
+        description: "Called Bash".to_owned(),
+        at: Timestamp::from_millis(120_000),
+    };
+    running.running_since = Some(started);
+    running.latest_step = Some(step.clone());
+    *work.tasks.lock().unwrap() = vec![running.clone()];
+    let run = |id, status, started_at, ended_at, usage| RunSummary {
+        steps: vec![step.clone()],
+        usage,
+        machine: "macbook".to_owned(),
+        run: Run {
+            trace_id: String::new(),
+            id: RunId(id),
+            lane_id: running.task.lane_id,
+            session_id: SessionId(1),
+            machine_id: MachineId(1),
+            lease_epoch: 1,
+            agent_id: Some(running.task.agent_id),
+            backend: Some(BackendKind::Claude),
+            status,
+            outcome: None,
+            rationale: None,
+            error: None,
+            started_at,
+            ended_at,
+        },
+    };
+    let reported = RunUsage {
+        input_tokens: Some(12),
+        output_tokens: Some(4),
+        cost_usd: Some(0.0123),
+    };
+    *work.task_runs.lock().unwrap() = vec![
+        run(
+            1,
+            RunStatus::Committed,
+            Timestamp::from_millis(0),
+            Some(started),
+            Some(reported),
+        ),
+        run(2, RunStatus::Active, started, None, None),
+    ];
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::default();
+    state.apply_task(load_task(&core, "dev", TaskId(1)).await);
+    let detail = state.task("dev", TaskId(1)).unwrap();
+    work.now.store(240_000, Ordering::SeqCst);
+    let header = task_header(detail, &work.when());
+    assert_eq!(
+        header.meta,
+        "Engineer · macbook · claude · started 00:01 · running for 3 min"
+    );
+    assert_eq!(
+        header.latest.unwrap(),
+        LatestStep {
+            text: "Latest: Called Bash · 2 min ago".to_owned(),
+            quiet: false
+        }
+    );
+    work.now.store(719_999, Ordering::SeqCst);
+    assert!(!task_header(detail, &work.when()).latest.unwrap().quiet);
+    work.now.store(720_000, Ordering::SeqCst);
+    assert_eq!(
+        task_header(detail, &work.when()).latest.unwrap(),
+        LatestStep {
+            text: "Quiet for 10 min".to_owned(),
+            quiet: true
+        }
+    );
+    assert_eq!(activity_runs(detail, &work.when())[0].0, "Run 2 · 00:01");
+    assert_eq!(
+        usage(detail, &work.when())[1],
+        "Reported usage · 12 input tokens · 4 output tokens · $0.0123"
+    );
+    assert!(!state.activity_open("dev", TaskId(1)));
+    state.toggle_activity("dev", TaskId(1));
+    assert!(state.activity_open("dev", TaskId(1)));
+    work.tasks.lock().unwrap()[0].task.status = TaskStatus::Done;
+    {
+        let mut runs = work.task_runs.lock().unwrap();
+        runs[1].run.status = RunStatus::Committed;
+        runs[1].run.ended_at = Some(work.when().now);
+    }
+    state.apply_task(load_task(&core, "dev", TaskId(1)).await);
+    let header = task_header(state.task("dev", TaskId(1)).unwrap(), &when());
+    assert_eq!(
+        header.meta,
+        "Engineer · macbook · claude · started 00:01 · took 11 min"
+    );
+    assert_eq!(header.latest, None);
+}
+
+#[tokio::test]
+async fn connection_keeps_first_failure_time_and_clears_it_after_recovery() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    assert_eq!(
+        state.connection("dev", &when()).unwrap().status,
+        ConnectionStatus::Reconnecting
+    );
+    assert_eq!(
+        state.connection_warning("dev", &when()).unwrap().status,
+        ConnectionStatus::Reconnecting
+    );
+    state.apply_at(refresh(&core).await, when().now);
+    assert_eq!(state.connection("dev", &when()).unwrap().label, "Live");
+    assert!(state.connection_warning("dev", &when()).is_none());
+    work.down.store(true, Ordering::SeqCst);
+    state.apply_at(refresh(&core).await, when().now);
+    assert_eq!(
+        state.connection("dev", &when()).unwrap().label,
+        "Unreachable since 00:12"
+    );
+    assert_eq!(
+        state.connection_warning("dev", &when()).unwrap().status,
+        ConnectionStatus::Unreachable
+    );
+    assert!(state.connection_banner().unwrap().contains("dev"));
+    state.checking_connections();
+    assert_eq!(
+        state.connection("dev", &when()).unwrap().label,
+        "Reconnecting…"
+    );
+    let later = When {
+        now: Timestamp::from_millis(1_800_000),
+        ..when()
+    };
+    state.apply_at(refresh(&core).await, later.now);
+    assert_eq!(
+        state.connection("dev", &later).unwrap().label,
+        "Unreachable since 00:12"
+    );
+    work.down.store(false, Ordering::SeqCst);
+    state.apply_at(refresh(&core).await, later.now);
+    assert!(state.connection_banner().is_none());
+    assert!(state.connection_warning("dev", &later).is_none());
+    work.down.store(true, Ordering::SeqCst);
+    state.apply_at(refresh(&core).await, later.now);
+    assert_eq!(
+        state.connection("dev", &later).unwrap().label,
+        "Unreachable since 00:30"
+    );
+}
+
+#[tokio::test]
+async fn screen_states_pair_plain_sentences_with_hub_errors_and_retry() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    assert_eq!(
+        state
+            .space("dev")
+            .unwrap()
+            .gap(Part::Machines)
+            .unwrap()
+            .sentence("machines", "dev"),
+        StateSentence {
+            text: "Loading machines from dev.".to_owned(),
+            detail: None
+        }
+    );
+    work.old.store(true, Ordering::SeqCst);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "dev", "api").await);
+    state.apply_task(load_task(&core, "dev", TaskId(1)).await);
+    for (what, gap) in [
+        ("tasks", state.project_gap("dev", "api", Part::Tasks)),
+        (
+            "conversation",
+            state.project_gap("dev", "api", Part::Conversation),
+        ),
+        ("the task", state.task_gap("dev", TaskId(1))),
+        (
+            "running tasks",
+            state.space("dev").unwrap().gap(Part::Running),
+        ),
+        ("machines", state.space("dev").unwrap().gap(Part::Machines)),
+    ] {
+        let sentence = gap.unwrap().sentence(what, "dev");
+        assert_eq!(sentence.text, format!("Could not load {what} from dev."));
+        assert!(sentence.detail.unwrap().contains("unknown variant"));
+    }
+    let projects = vec![("dev".to_owned(), "api".to_owned())];
+    let loading = AppState::paired(["dev"]);
+    for (what, gap) in [
+        ("delivery pacing", Some(loading.pacing_gap("dev"))),
+        ("metrics", Some(loading.metrics_gap("dev"))),
+        ("routines", loading.routines_gap("dev", "api")),
+        ("memory", loading.memory_gap("dev", "api")),
+        ("agents", loading.space("dev").unwrap().gap(Part::Agents)),
+    ] {
+        let sentence = gap.unwrap().sentence(what, "dev");
+        assert_eq!(sentence.text, format!("Loading {what} from dev."));
+        assert!(sentence.detail.is_none());
+    }
+    work.down.store(true, Ordering::SeqCst);
+    let mut down = AppState::paired(["dev"]);
+    down.apply(refresh(&core).await);
+    down.apply_memory(load_memory(&core, "dev", "api", None).await);
+    down.apply_routines(load_routines(&core, projects).await);
+    down.apply_pacing("dev".to_owned(), core.pacing(Some("dev")).await);
+    down.apply_metrics("dev".to_owned(), load_metrics(&core, "dev").await);
+    for (what, gap) in [
+        ("delivery pacing", Some(down.pacing_gap("dev"))),
+        ("metrics", Some(down.metrics_gap("dev"))),
+        ("routines", down.routines_gap("dev", "api")),
+        ("memory", down.memory_gap("dev", "api")),
+        ("agents", down.space("dev").unwrap().gap(Part::Agents)),
+        ("projects", down.space("dev").unwrap().gap(Part::Projects)),
+    ] {
+        let sentence = gap.unwrap().sentence(what, "dev");
+        assert_eq!(sentence.text, format!("Could not load {what} from dev."));
+        assert!(sentence.detail.is_some());
+    }
+    for region in [
+        EmptyRegion::Pairing,
+        EmptyRegion::Projects,
+        EmptyRegion::Decisions,
+        EmptyRegion::Running,
+        EmptyRegion::Results,
+        EmptyRegion::Board,
+        EmptyRegion::Repositories,
+        EmptyRegion::Agents,
+        EmptyRegion::ProjectAgents,
+        EmptyRegion::Conversation,
+        EmptyRegion::Memory,
+        EmptyRegion::MemoryVersions,
+        EmptyRegion::Rules,
+        EmptyRegion::Routines,
+        EmptyRegion::AllRoutines,
+        EmptyRegion::Related,
+        EmptyRegion::Activity,
+        EmptyRegion::Timeline,
+        EmptyRegion::Machines,
+        EmptyRegion::Clients,
+        EmptyRegion::MachineActive,
+        EmptyRegion::MachineRecent,
+        EmptyRegion::Tools,
+    ] {
+        assert!(region.sentence().ends_with('.'), "{region:?}");
+    }
+    assert_eq!(
+        EmptyRegion::Decisions.sentence(),
+        "Nothing waits on you. The team is on it."
+    );
+    assert_eq!(
+        EmptyRegion::Routines.sentence(),
+        "No routines yet. Add one to have the lead check something on a cadence."
+    );
+}
+
+#[tokio::test]
+async fn irreversible_commands_confirm_and_only_a_ceiling_that_caps_work_asks() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.ceiling.lock().unwrap() = Some(Mode::Autonomous);
+    *work.bindings.lock().unwrap() = vec![BindingSummary {
+        agent: "Engineer".to_owned(),
+        role: "engineer".to_owned(),
+        mode: Mode::Assisted,
+        is_lead: false,
+        max_parallel: 1,
+        overrides: BTreeMap::new(),
+    }];
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "dev", "api").await);
+    let named = || "dev".to_owned();
+    for (action, button) in [
+        (Consequence::CancelTask(named(), TaskId(1)), "Cancel task"),
+        (
+            Consequence::CancelRoutine(named(), "api".to_owned(), TimerId(1)),
+            "Cancel routine",
+        ),
+        (
+            Consequence::RevokeRule(named(), threadlane_core::ids::StandingRuleId(1)),
+            "Revoke rule",
+        ),
+        (Consequence::Unpair(named()), "Unpair"),
+        (
+            Consequence::DeleteMemory(
+                named(),
+                "api".to_owned(),
+                "project/notes/build.md".to_owned(),
+            ),
+            "Delete file",
+        ),
+        (
+            Consequence::SetCeiling(named(), Some("api".to_owned()), Mode::OnRequest),
+            "Lower ceiling",
+        ),
+        (
+            Consequence::SetCeiling(named(), None, Mode::OnRequest),
+            "Lower ceiling",
+        ),
+    ] {
+        let confirm = state.confirmation(&action).unwrap();
+        assert_eq!(confirm.button, button);
+        assert!(confirm.title.ends_with('?'));
+        assert!(confirm.sentence.ends_with('.'));
+    }
+    assert_eq!(
+        state.confirmation(&Consequence::SetCeiling(
+            named(),
+            Some("api".to_owned()),
+            Mode::Assisted
+        )),
+        None
+    );
+    assert_eq!(
+        state.confirmation(&Consequence::SetCeiling(named(), None, Mode::Autonomous)),
+        None
+    );
+}
+
+#[tokio::test]
+async fn machine_detail_reads_capabilities_and_filters_active_and_recent_runs_by_machine() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut online = machine(1, MachineStatus::Online);
+    online.capabilities = json!({"os": "macos", "arch": "aarch64"});
+    online.backends = json!({
+        "claude": { "installed": true, "logged_in": true, "version": "2", "account_label": "owner" },
+    });
+    *work.accounts.lock().unwrap() = vec![
+        Account {
+            id: threadlane_core::ids::AccountId(1),
+            label: "owner".to_owned(),
+            backend: BackendKind::Claude,
+            max_parallel: None,
+            cooldown_until: Some(Timestamp::from_millis(900_000)),
+        },
+        Account {
+            id: threadlane_core::ids::AccountId(2),
+            label: "other".to_owned(),
+            backend: BackendKind::Claude,
+            max_parallel: None,
+            cooldown_until: None,
+        },
+    ];
+    online.last_seen = Some(Timestamp::from_millis(600_000));
+    online.max_parallel = 2;
+    online.load = 1;
+    let mut unseen = machine(2, MachineStatus::Offline);
+    unseen.last_seen = None;
+    *work.machines.lock().unwrap() = vec![online, unseen];
+    let summary = task(1, TaskStatus::Running, None);
+    let sample = |id, machine, status, ended_at| Run {
+        trace_id: String::new(),
+        id: RunId(id),
+        lane_id: summary.task.lane_id,
+        session_id: SessionId(1),
+        machine_id: MachineId(machine),
+        lease_epoch: 1,
+        agent_id: Some(summary.task.agent_id),
+        backend: Some(BackendKind::Claude),
+        status,
+        outcome: None,
+        rationale: None,
+        error: None,
+        started_at: Timestamp::from_millis(300_000),
+        ended_at,
+    };
+    let ended = Some(Timestamp::from_millis(480_000));
+    *work.task_runs.lock().unwrap() = [
+        sample(1, 1, RunStatus::Committed, ended),
+        sample(2, 2, RunStatus::Committed, ended),
+        sample(3, 1, RunStatus::Active, None),
+    ]
+    .into_iter()
+    .map(|run| RunSummary {
+        run,
+        machine: "test".to_owned(),
+        steps: vec![],
+        usage: None,
+    })
+    .collect();
+    *work.tasks.lock().unwrap() = vec![summary];
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.machine_runs("dev", MachineId(1)).unwrap_err(),
+        Gap::Loading
+    );
+    state.apply_machine_history(load_machine_history(&core, "dev", &when()).await);
+    let (active, recent) = state.machine_runs("dev", MachineId(1)).unwrap();
+    assert_eq!(
+        active.iter().map(|run| run.id()).collect::<Vec<_>>(),
+        [RunId(3)]
+    );
+    assert_eq!(
+        recent.iter().map(|run| run.id()).collect::<Vec<_>>(),
+        [RunId(1)]
+    );
+    let detail = state.machine_detail("dev", MachineId(1), &when()).unwrap();
+    assert_eq!(detail.platform.as_deref(), Some("macos · aarch64"));
+    assert_eq!(detail.last_seen.as_deref(), Some("00:10"));
+    assert_eq!(detail.occupancy, Some(50.));
+    assert!(
+        detail
+            .report
+            .backends
+            .iter()
+            .any(|probe| probe == "claude 2 logged in")
+    );
+    assert_eq!(detail.accounts, ["owner · claude · cooldown until 00:15"]);
+    let detail = state.machine_detail("dev", MachineId(2), &when()).unwrap();
+    assert_eq!(detail.occupancy, None);
+    assert!(!detail.tools_reported);
+    work.old.store(true, Ordering::SeqCst);
+    state.apply_machine_history(load_machine_history(&core, "dev", &when()).await);
+    let status = state
+        .machine_runs("dev", MachineId(1))
+        .unwrap_err()
+        .sentence("machine runs", "dev");
+    assert_eq!(status.text, "Could not load machine runs from dev.");
+    assert!(status.detail.is_some());
 }

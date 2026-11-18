@@ -347,6 +347,15 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Spaces whose project list is not yet available to list their routines.
+    #[must_use]
+    pub fn routines_space_gaps(&self) -> Vec<(&str, Gap)> {
+        self.spaces
+            .iter()
+            .filter_map(|space| Some((space.name.as_str(), space.gap(Part::Projects)?)))
+            .collect()
+    }
+
     /// The Routines screen: every project of every space that has routines
     /// or could not list them, by space and project.
     #[must_use]

@@ -10,7 +10,7 @@ use threadlane_core::client::{MemoryReply, MemoryRequest};
 use threadlane_core::memory::INDEX_FILE;
 use threadlane_core::model::MemoryFile;
 
-use crate::{Answer, AppState, Gap, When, describe, gap_in, take};
+use crate::{Answer, AppState, Gap, When, count_form, describe, gap_in, take};
 
 /// The groups of the Memory tab, in the order Plan.md §8.3 lays them out:
 /// a path prefix as agents name it, and the group's title.
@@ -73,16 +73,11 @@ impl LeadKnows {
         } else {
             "No instructions for this project"
         };
-        let plural = |count: usize, one: &str, many: &str| {
-            format!("{count} {}", if count == 1 { one } else { many })
-        };
+        let notes = count_form(self.notes, "note", "notes");
+        let files = count_form(self.progress, "task progress file", "task progress files");
         [
             instructions.to_owned(),
-            format!(
-                "{} · {}",
-                plural(self.notes, "note", "notes"),
-                plural(self.progress, "task progress file", "task progress files")
-            ),
+            format!("{} {notes} · {} {files}", self.notes, self.progress),
         ]
     }
 }
@@ -261,7 +256,7 @@ impl AppState {
         if let Some((path, listed)) = load.versions
             && view.selected.as_deref() == Some(path.as_str())
         {
-            view.versions = listed.unwrap_or_default();
+            view.versions = take(&mut view.answers, crate::Part::MemoryVersions, listed);
         }
     }
 
@@ -319,6 +314,7 @@ impl AppState {
         if view.selected.as_deref() != Some(path) {
             view.selected = Some(path.to_owned());
             view.versions.clear();
+            view.answers.remove(&crate::Part::MemoryVersions);
             view.editing = false;
             view.refused = None;
         }
@@ -336,6 +332,13 @@ impl AppState {
         let view = self.memory_view(space, project)?;
         let selected = view.selected.as_deref()?;
         view.files.iter().find(|file| file.path == selected)
+    }
+
+    /// Whether the hub has answered for the selected file's version history.
+    #[must_use]
+    pub fn memory_versions_gap(&self, space: &str, project: &str) -> Option<Gap> {
+        let view = self.memory_view(space, project)?;
+        gap_in(&view.answers, crate::Part::MemoryVersions)
     }
 
     /// The selected file's versions, newest first: `v3 · 09:20 · by you`,

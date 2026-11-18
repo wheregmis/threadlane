@@ -23,7 +23,7 @@ use threadlane_core::model::{
     Account, Agent, Decision, DecisionKind, Machine, MachineStatus, Mode, OutboxKind, Pacing,
     TaskStatus,
 };
-use threadlane_core::time::Timestamp;
+use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use tokio::sync::{RwLock, mpsc};
 
 mod attention;
@@ -34,6 +34,7 @@ mod conversation;
 mod decision_keys;
 mod decision_record;
 mod dreaming;
+mod edges;
 mod machines;
 mod memory;
 mod permissions;
@@ -57,7 +58,12 @@ pub use decision_keys::{
 };
 pub use decision_record::{DecisionDisplay, DecisionLink, DecisionRecord, load_decision_link};
 pub use dreaming::{DreamingAction, DreamingCard, DreamingLoad, change_dreaming, load_dreaming};
-pub use machines::{MachineRow, machine_row};
+pub use edges::{
+    Confirmation, Connection, ConnectionStatus, Consequence, EmptyRegion, StateSentence,
+};
+pub use machines::{
+    MachineDetail, MachineHistory, MachineRow, MachineRun, load_machine_history, machine_row,
+};
 pub use memory::{
     LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, change_memory, editable,
     load_memory,
@@ -75,8 +81,8 @@ pub use settings::{
     parse_pacing,
 };
 pub use tasks::{
-    BoardCard, Changes, Column, Moment, changes, chips, running_elapsed, status_label, timeline,
-    usage,
+    BoardCard, Changes, Column, InProgress, LatestStep, Moment, TaskHeader, WorkRow, activity_runs,
+    changes, chips, running_elapsed, status_label, task_header, timeline, usage, work_elapsed,
 };
 
 /// How many of the newest delivered items Home asks each hub for.
@@ -91,6 +97,12 @@ const RECENT_SHOWN: usize = 8;
 /// The key prefix of the hub's account notices, which end in `:blocked`
 /// or `:resumed` (`threadlane-store`, Plan.md §5.3).
 const ACCOUNT_NOTICE: &str = "system:account:";
+
+/// Selects the singular wording for one item and the plural wording otherwise.
+#[must_use]
+pub fn count_form<'a, T: From<u8> + PartialEq>(count: T, one: &'a str, many: &'a str) -> &'a str {
+    if count == T::from(1) { one } else { many }
+}
 
 /// An error with its causes, as the app shows it: `hub work refused the
 /// request: not found: task T-0001`.
@@ -135,6 +147,8 @@ pub enum Part {
     Lead,
     /// The memory a project's lead can see.
     Memory,
+    /// The selected memory file’s versions.
+    MemoryVersions,
     /// A project's routines and follow-ups.
     Routines,
     /// A project's standing rules.
@@ -205,11 +219,13 @@ pub struct Space {
     pub name: String,
     /// Whether the hub answered the last refresh.
     pub reach: Reach,
+    unreachable_since: Option<Timestamp>,
     answers: BTreeMap<Part, Answer>,
     /// Its projects.
     pub projects: Vec<ProjectSummary>,
     /// Its running tasks, oldest first.
     pub running: Vec<TaskSummary>,
+    leads: Vec<(String, Timestamp)>,
     /// The machines that joined it.
     pub machines: Vec<Machine>,
     /// Its model accounts.
@@ -235,9 +251,11 @@ impl Space {
         Self {
             name: name.to_owned(),
             reach: Reach::Unknown,
+            unreachable_since: None,
             answers: BTreeMap::new(),
             projects: Vec::new(),
             running: Vec::new(),
+            leads: Vec::new(),
             machines: Vec::new(),
             accounts: Vec::new(),
             clients: Vec::new(),
@@ -651,6 +669,7 @@ pub struct Refresh {
     clients: Vec<(String, Result<Vec<AdmittedKey>, ClientError>)>,
     decisions: Vec<SpaceDecisions>,
     running: Vec<SpaceListing<Vec<TaskSummary>>>,
+    leads: Vec<(String, String, Result<Option<Timestamp>, ClientError>)>,
     machines: Vec<SpaceListing<SpaceMachines>>,
     recent: Vec<SpaceListing<Vec<SpaceFeedItem>>>,
     recorded: Vec<SpaceListing<u64>>,
@@ -667,6 +686,7 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
     let mut agents = Vec::new();
     let mut clients = Vec::new();
     let mut tasks = Vec::new();
+    let mut leads = Vec::new();
     for status in statuses.iter().filter(|status| status.is_reachable()) {
         let name = status.name.as_str();
         let listed = core
@@ -675,6 +695,10 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
             .map(|listed| listed.projects);
         if let Ok(listed) = &listed {
             tasks.push((name.to_owned(), all_tasks(core, name, listed).await));
+            for project in listed {
+                let running = core.lead(Some(name), Some(&project.name)).await;
+                leads.push((name.to_owned(), project.name.clone(), running));
+            }
         }
         projects.push((name.to_owned(), listed));
         agents.push((name.to_owned(), core.agents(Some(name)).await));
@@ -683,6 +707,7 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
     // The only error with no space named is "no hub paired": nothing to show.
     Refresh {
         statuses,
+        leads,
         projects,
         agents,
         clients,
@@ -895,6 +920,8 @@ struct Loaded {
 #[derive(Debug, Default)]
 pub struct AppState {
     spaces: Vec<Space>,
+    checking_connections: bool,
+    machine_history: HashMap<String, Result<Vec<MachineRun>, String>>,
     queue: Vec<Queued>,
     decision_keys: decision_keys::DecisionKeys,
     decision_records: HashMap<DecisionKey, Decision>,
@@ -914,6 +941,7 @@ pub struct AppState {
     tasks: HashMap<InSpace<TaskId>, TaskDetail>,
     /// Why a task could not be shown, by space and id.
     task_failures: HashMap<InSpace<TaskId>, String>,
+    task_activity: HashSet<InSpace<TaskId>>,
     /// The Home results shown in full, by space and feed position.
     expanded: HashSet<InSpace<i64>>,
     /// The space Home shows; `None` for all.
@@ -1194,6 +1222,21 @@ impl AppState {
             .collect()
     }
 
+    /// Active leads in the spaces Home is showing.
+    #[must_use]
+    pub fn running_leads(&self) -> Vec<(&str, &str, Timestamp)> {
+        self.spaces
+            .iter()
+            .filter(|space| self.shown(&space.name))
+            .flat_map(|space| {
+                space
+                    .leads
+                    .iter()
+                    .map(|(project, at)| (space.name.as_str(), project.as_str(), *at))
+            })
+            .collect()
+    }
+
     /// Home's recent results: the latest message or notice of each project
     /// (and of each space as a whole) in the spaces it shows, newest first.
     #[must_use]
@@ -1257,7 +1300,7 @@ impl AppState {
             .iter()
             .filter(|space| space.reach == Reach::Reachable)
             .count();
-        let spaces = if reachable == 1 { "space" } else { "spaces" };
+        let spaces = count_form(reachable, "space", "spaces");
         let recorded: u64 = shown.iter().filter_map(|space| space.recorded).sum();
         let recorded = if recorded == 0 {
             String::new()
@@ -1265,12 +1308,16 @@ impl AppState {
             format!(" · {recorded} recorded, not acted on")
         };
         let machines = machine_count(shown.into_iter()).map_or_else(String::new, |(on, all)| {
-            format!(" · {on} of {all} machines online")
+            format!(
+                " · {on} of {all} {} online",
+                count_form(all, "machine", "machines")
+            )
         });
+        let decisions = self.needs_you().count();
+        let need = count_form(decisions, "needs", "need");
         format!(
-            "{reachable} {spaces} reachable · {} running · {} need you{machines}{recorded}",
-            self.running().len(),
-            self.needs_you().count(),
+            "{reachable} {spaces} reachable · {} running · {decisions} {need} you{machines}{recorded}",
+            self.running().len() + self.running_leads().len(),
         )
     }
 
@@ -1330,7 +1377,7 @@ impl AppState {
             .filter_map(|space| {
                 let held = space.held?;
                 let count = held.count;
-                let noun = if count == 1 { "result" } else { "results" };
+                let noun = count_form(count, "result", "results");
                 let release = if held.next == held.latest {
                     "until"
                 } else {
@@ -1438,6 +1485,8 @@ impl AppState {
         self.memory.retain(|(space, _), _| space != name);
         self.dreaming.retain(|(space, _), _| space != name);
         self.metrics.remove(name);
+        self.machine_history.remove(name);
+        self.task_activity.retain(|(space, _)| space != name);
         self.routines.retain(|(space, _), _| space != name);
         if self
             .cancelling
@@ -1494,8 +1543,15 @@ impl AppState {
     /// Takes what a refresh learned. A hub that could not be reached, or
     /// could not list something, keeps what it last reported.
     pub fn apply(&mut self, refresh: Refresh) {
+        self.apply_at(refresh, SystemClock.now());
+    }
+
+    /// Applies a refresh with the timestamp of its connection check.
+    pub fn apply_at(&mut self, refresh: Refresh, now: Timestamp) {
+        self.checking_connections = false;
         let Refresh {
             statuses,
+            leads,
             projects,
             agents,
             clients,
@@ -1524,9 +1580,13 @@ impl AppState {
             space.reach = match status.info {
                 Ok(info) => {
                     space.info = Some(info);
+                    space.unreachable_since = None;
                     Reach::Reachable
                 }
-                Err(error) => Reach::Unreachable(error.to_string()),
+                Err(error) => {
+                    space.unreachable_since.get_or_insert(now);
+                    Reach::Unreachable(describe(&error))
+                }
             };
             spaces.push(space);
         }
@@ -1539,7 +1599,20 @@ impl AppState {
                 && let Some(listed) = spaces[at].take(Part::Projects, listed)
                 && current
             {
+                spaces[at]
+                    .leads
+                    .retain(|(name, _)| listed.iter().any(|project| project.name == *name));
                 spaces[at].projects = listed;
+            }
+        }
+        for (name, project, running) in leads {
+            if let Some(at) = find(&mut spaces, &name)
+                && let Ok(running) = running
+            {
+                spaces[at].leads.retain(|(known, _)| *known != project);
+                if let Some(start) = running {
+                    spaces[at].leads.push((project, start));
+                }
             }
         }
         for (name, listed) in agents {

@@ -11,12 +11,12 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
-use threadlane_desktop::{BACKENDS, Part};
+use threadlane_desktop::{BACKENDS, EmptyRegion, Part};
 
-use super::gap_line;
 use super::project::{MODES, mode_name};
+use super::{empty, gap_line};
 use crate::Desktop;
-use crate::components::{button, card, empty_state, field, heading, meta, section};
+use crate::components::{button, card, field, heading, meta, section};
 use crate::icons::AppIcon;
 use crate::tokens::{
     AGENT_CARD_WIDTH, FORM_WIDTH, GRID_CELL_WIDTH, LG, SM, TYPE_BODY, TYPE_META, XS,
@@ -85,7 +85,7 @@ impl Desktop {
                         .child(row.project.clone()),
                 );
                 match row.modes {
-                    Err(gap) => line = line.child(gap_line(&gap, "the modes", cx)),
+                    Err(gap) => line = line.child(gap_line(&gap, "agent modes", &space.name, cx)),
                     Ok(modes) => {
                         for (agent, mode) in grid.agents.iter().zip(modes) {
                             let (space, project, agent) =
@@ -182,19 +182,15 @@ impl Desktop {
                 part = part.child(self.agent_form(&space.name, cx));
             }
             if let Some(gap) = space.gap(Part::Agents) {
-                part = part.child(gap_line(&gap, "the agents", cx));
+                part = part.child(gap_line(&gap, "agents", &space.name, cx));
             } else if space.agents.is_empty() {
-                part = part.child(empty_state(
-                    "There are no agents in this space yet.",
-                    None,
-                    cx,
-                ));
+                part = part.child(empty(EmptyRegion::Agents, cx));
             }
             part = part
                 .child(cards)
                 .child(section(format!("Modes by project in {}", space.name)).pt(SM));
             if let Some(gap) = space.gap(Part::Projects) {
-                part = part.child(gap_line(&gap, "the projects", cx));
+                part = part.child(gap_line(&gap, "projects", &space.name, cx));
             }
             screen = screen.child(
                 part.child(

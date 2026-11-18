@@ -9,10 +9,10 @@ use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_fle
 use gpui_kit::*;
 use threadlane_core::ids::TimerId;
 use threadlane_core::model::Weekday;
-use threadlane_desktop::{Cadence, RoutineRow, When};
+use threadlane_desktop::{Cadence, Consequence, EmptyRegion, RoutineRow, When};
 
-use super::{gap_line, link};
-use crate::components::{button, card, empty_state, field, heading, meta, section, status_badge};
+use super::{empty, gap_line, link};
+use crate::components::{button, card, field, heading, meta, section, status_badge};
 use crate::icons::AppIcon;
 use crate::tokens::{
     INLINE_LABEL_WIDTH, MD, SHORT_FIELD_WIDTH, SM, Status, TYPE_BODY, TYPE_META, XL, ZONE_WIDTH,
@@ -37,13 +37,9 @@ impl Desktop {
             .child(section("Routines and follow-ups"));
         let rows = self.state.routine_rows(space, project, when);
         match self.state.routines_gap(space, project) {
-            Some(gap) => list = list.child(gap_line(&gap, "the routines", cx)),
+            Some(gap) => list = list.child(gap_line(&gap, "routines", space, cx)),
             None if rows.is_empty() => {
-                list = list.child(empty_state(
-                    "No routines yet.",
-                    Some("Add one, or an agent may set a follow-up."),
-                    cx,
-                ));
+                list = list.child(empty(EmptyRegion::Routines, cx));
             }
             None => {}
         }
@@ -64,12 +60,12 @@ impl Desktop {
             .gap(XL)
             .child(heading("Routines"));
         let groups = self.state.routine_groups(when);
-        if groups.is_empty() {
-            screen = screen.child(empty_state(
-                "No routines or follow-ups in any project.",
-                Some("Add one from a project's Routines tab."),
-                cx,
-            ));
+        let gaps = self.state.routines_space_gaps();
+        if groups.is_empty() && gaps.is_empty() {
+            screen = screen.child(empty(EmptyRegion::AllRoutines, cx));
+        }
+        for (space, gap) in gaps {
+            screen = screen.child(gap_line(&gap, "projects with routines", space, cx));
         }
         let mut last_space = None;
         for group in groups {
@@ -92,7 +88,7 @@ impl Desktop {
                 ),
             );
             match group.rows {
-                Err(gap) => screen = screen.child(gap_line(&gap, "the routines", cx)),
+                Err(gap) => screen = screen.child(gap_line(&gap, "routines", &group.space, cx)),
                 Ok(rows) => {
                     for row in rows {
                         screen = screen.child(self.routine(&group.space, &group.project, row, cx));
@@ -114,62 +110,41 @@ impl Desktop {
         let muted = cx.theme().muted_foreground;
         let key = format!("{space}-{project}-{}", row.id);
         let id = row.id;
-        let mut actions = h_flex().gap(SM);
-        if row.confirming {
-            actions = actions
-                .child(div().text_size(TYPE_BODY).child(format!(
-                    "Cancel routine {id} for good? It cannot be resumed."
-                )))
-                .child(
-                    button(SharedString::from(format!("timer-cancel-confirm-{key}")))
-                        .small()
-                        .danger()
-                        .icon(AppIcon::X)
-                        .label(format!("Cancel routine {id}"))
-                        .on_click(on_timer(space, project, id, TimerChange::Cancel, cx)),
-                )
-                .child(
-                    button(SharedString::from(format!("timer-keep-{key}")))
-                        .small()
-                        .label("Keep it")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.keep_timer();
-                            cx.notify();
-                        })),
-                );
+        let (label, change) = if row.paused {
+            ("Resume", TimerChange::Resume)
         } else {
-            let (label, change) = if row.paused {
-                ("Resume", TimerChange::Resume)
-            } else {
-                ("Pause", TimerChange::Pause)
-            };
-            let in_space = space.to_owned();
-            actions = actions
-                .child(
-                    button(SharedString::from(format!("timer-{label}-{key}")))
-                        .small()
-                        .icon(if row.paused {
-                            AppIcon::Play
-                        } else {
-                            AppIcon::Pause
-                        })
-                        .label(label)
-                        .accessibility_label(format!("{label} routine {id}"))
-                        .on_click(on_timer(space, project, id, change, cx)),
-                )
-                .child(
-                    button(SharedString::from(format!("timer-cancel-{key}")))
-                        .small()
-                        .ghost()
-                        .icon(AppIcon::X)
-                        .label("Cancel")
-                        .accessibility_label(format!("Cancel routine {id}"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.ask_cancel_timer(&in_space, id);
-                            cx.notify();
-                        })),
-                );
-        }
+            ("Pause", TimerChange::Pause)
+        };
+        let (in_space, named) = (space.to_owned(), project.to_owned());
+        let actions = h_flex()
+            .gap(SM)
+            .child(
+                button(SharedString::from(format!("timer-{label}-{key}")))
+                    .small()
+                    .icon(if row.paused {
+                        AppIcon::Play
+                    } else {
+                        AppIcon::Pause
+                    })
+                    .label(label)
+                    .accessibility_label(format!("{label} routine {id}"))
+                    .on_click(on_timer(space, project, id, change, cx)),
+            )
+            .child(
+                button(SharedString::from(format!("timer-cancel-{key}")))
+                    .small()
+                    .ghost()
+                    .icon(AppIcon::X)
+                    .label("Cancel…")
+                    .accessibility_label(format!("Cancel routine {id}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_action(
+                            Consequence::CancelRoutine(in_space.clone(), named.clone(), id),
+                            window,
+                            cx,
+                        );
+                    })),
+            );
         let when_line = match &row.zone {
             Some(zone) => format!("{} · {zone} · {}", row.cadence, row.next),
             None => format!("{} · {}", row.cadence, row.next),

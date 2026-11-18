@@ -175,6 +175,16 @@ async fn claimed_events(conn: &Connection, run_id: RunId) -> StoreResult<Vec<(Ev
     .await
 }
 
+fn decode_journal_entry(row: &Row) -> StoreResult<JournalEntry> {
+    let c = Cols(row);
+    Ok(JournalEntry {
+        run_id: c.id(0)?,
+        seq: c.i64(1)?,
+        at: c.ts(2)?,
+        entry: c.json(3)?,
+    })
+}
+
 #[async_trait]
 impl SessionStore for HubDb {
     async fn session(&self, id: SessionId) -> StoreResult<Option<Session>> {
@@ -627,15 +637,7 @@ impl SessionStore for HubDb {
             &conn,
             "SELECT run_id, seq, at, entry FROM journal WHERE run_id = ?1 ORDER BY seq",
             params![run_id.get()],
-            |row| {
-                let c = Cols(row);
-                Ok(JournalEntry {
-                    run_id: c.id(0)?,
-                    seq: c.i64(1)?,
-                    at: c.ts(2)?,
-                    entry: c.json(3)?,
-                })
-            },
+            decode_journal_entry,
         )
         .await
     }
@@ -653,6 +655,24 @@ impl SessionStore for HubDb {
 }
 
 impl HubDb {
+    /// Reads one journal entry, optionally selecting the newest one of a given backend kind.
+    pub async fn latest_journal_entry(
+        &self,
+        run_id: RunId,
+        kind: Option<&str>,
+    ) -> StoreResult<Option<JournalEntry>> {
+        let conn = self.db.reader()?;
+        query_opt(
+            &conn,
+            "SELECT run_id, seq, at, entry FROM journal
+             WHERE run_id = ?1 AND (?2 IS NULL OR json_extract(entry, '$.type') = ?2)
+             ORDER BY seq DESC LIMIT 1",
+            params![run_id.get(), kind],
+            decode_journal_entry,
+        )
+        .await
+    }
+
     /// Records an interrupted run and restores its claimed events without charging attempts.
     pub async fn stop_run(&self, lease: &Lease, run_id: RunId, now: Timestamp) -> StoreResult<()> {
         let tx = self.db.begin().await?;

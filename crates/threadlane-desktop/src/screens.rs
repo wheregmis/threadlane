@@ -1,12 +1,13 @@
 //! The screens, one file each, and what they share: headings and a
 //! decision with its options.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::{Sizable as _, WindowExt as _, v_flex};
 use gpui_kit::*;
-use threadlane_desktop::Gap;
+use threadlane_desktop::{Consequence, EmptyRegion, Gap};
 
-use crate::components::{button, meta};
+use crate::components::{button, empty_state, meta};
 use crate::icons::AppIcon;
 use crate::tokens::{MD, TYPE_BODY, XS};
 use crate::{Desktop, Screen};
@@ -24,13 +25,84 @@ mod task;
 
 /// What a part shows instead of its contents: that it is loading, or the
 /// hub's error.
-fn gap_line(gap: &Gap, what: &str, cx: &App) -> Div {
-    match gap {
-        Gap::Loading => meta(format!("Loading {what}…"), cx),
-        Gap::Failed(why) => div()
-            .text_size(TYPE_BODY)
-            .text_color(cx.theme().danger)
-            .child(format!("Could not load {what}: {why}")),
+fn gap_line(gap: &Gap, what: &str, space: &str, cx: &mut Context<Desktop>) -> Div {
+    let sentence = gap.sentence(what, space);
+    let retry = sentence.detail.as_ref().map(|_| {
+        button(SharedString::from(format!("retry-{space}-{what}")))
+            .small()
+            .outline()
+            .label("Retry")
+            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)))
+    });
+    empty_state(sentence.text, sentence.detail.as_deref(), cx)
+        .items_start()
+        .children(retry)
+}
+
+fn empty(region: EmptyRegion, cx: &App) -> Div {
+    empty_state(region.sentence(), None, cx)
+}
+
+fn menu_item(
+    view: &WeakEntity<Desktop>,
+    label: &'static str,
+    action: impl Fn(&mut Desktop, &mut Window, &mut Context<Desktop>) + 'static,
+) -> PopupMenuItem {
+    let view = view.clone();
+    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+        let _gone = view.update(cx, |this, cx| action(this, window, cx));
+    })
+}
+
+impl Desktop {
+    fn confirm_action(&mut self, action: Consequence, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let Some(copy) = self.state.confirmation(&action) else {
+            self.perform_consequence(action, cx);
+            return;
+        };
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
+            let confirm = view.clone();
+            let action = action.clone();
+            dialog
+                .confirm()
+                .title(copy.title.clone())
+                .description(
+                    v_flex()
+                        .gap(XS)
+                        .child(copy.sentence.clone())
+                        .child(meta("Press Enter to confirm, or Esc to cancel.", cx)),
+                )
+                .ok_text(copy.button)
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text("Keep it")
+                .on_ok(move |_, _, cx| {
+                    let _gone =
+                        confirm.update(cx, |this, cx| this.perform_consequence(action.clone(), cx));
+                    true
+                })
+        });
+    }
+
+    fn perform_consequence(&mut self, action: Consequence, cx: &mut Context<Self>) {
+        match action {
+            Consequence::CancelTask(space, task) => self.cancel_task(space, task, cx),
+            Consequence::CancelRoutine(space, project, timer) => {
+                self.change_timer(space, project, timer, crate::TimerChange::Cancel, cx)
+            }
+            Consequence::RevokeRule(space, rule) => self.revoke_rule(space, rule, cx),
+            Consequence::Unpair(space) => self.unpair_space(space, cx),
+            Consequence::DeleteMemory(space, project, path) => {
+                self.write_memory(space, project, path, None, cx)
+            }
+            Consequence::SetCeiling(space, Some(project), mode) => {
+                self.set_ceiling(space, project, mode, cx)
+            }
+            Consequence::SetCeiling(space, None, mode) => self.set_space_ceiling(space, mode, cx),
+        }
     }
 }
 

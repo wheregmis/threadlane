@@ -3,16 +3,14 @@
 
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::ButtonVariants as _;
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use threadlane_desktop::{Part, When, running_elapsed};
+use threadlane_desktop::{EmptyRegion, Part, When, running_elapsed};
 
-use super::gap_line;
-use crate::components::{
-    button, count, decision_scroller, empty_state, heading, meta, section, status_dot,
-};
+use super::{empty, gap_line, menu_item};
+use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
 use crate::tokens::{
     CONTROL_HEIGHT, LG, READING_WIDTH, ROW_HEIGHT, SM, Status, TIMESTAMP_WIDTH, TYPE_BODY,
     TYPE_META, XL, XS,
@@ -82,7 +80,7 @@ impl Desktop {
             .child(section("Needs you").children(count(state.needs_you().count(), cx)));
         let gaps = state.gaps(Part::Decisions);
         for (space, gap) in &gaps {
-            needs = needs.child(gap_line(gap, &format!("the decisions of {space}"), cx));
+            needs = needs.child(gap_line(gap, "decisions", space, cx));
         }
         if state.spaces().is_empty() {
             needs = needs.child(div().text_color(muted).child(
@@ -90,7 +88,7 @@ impl Desktop {
                  `threadlane hub join <name> <code>`, then reopen the app.",
             ));
         } else if state.needs_you().count() == 0 && gaps.is_empty() {
-            needs = needs.child(empty_state("Nothing waits on you.", None, cx));
+            needs = needs.child(empty(EmptyRegion::Decisions, cx));
         }
         for queued in state.needs_you() {
             needs = needs.child(self.decision(queued, when, cx));
@@ -136,16 +134,18 @@ impl Desktop {
         });
 
         let running = state.running();
+        let leads = state.running_leads();
+        let running_count = running.len() + leads.len();
         let mut table = v_flex()
             .gap(XS)
-            .child(section("Running now").children(count(running.len(), cx)));
+            .child(section("Running now").children(count(running_count, cx)));
         let gaps = state.gaps(Part::Running);
         for (space, gap) in &gaps {
-            table = table.child(gap_line(gap, &format!("what runs in {space}"), cx));
+            table = table.child(gap_line(gap, "running tasks", space, cx));
         }
-        if running.is_empty() && gaps.is_empty() {
-            table = table.child(empty_state("Nothing is running.", None, cx));
-        } else if !running.is_empty() {
+        if running_count == 0 && gaps.is_empty() {
+            table = table.child(empty(EmptyRegion::Running, cx));
+        } else if running_count != 0 {
             table = table.child(
                 running_row(["Task", "Project", "Agent", "Machine", "Running"], div())
                     .text_size(TYPE_META)
@@ -175,14 +175,42 @@ impl Desktop {
             );
         }
 
+        for (space, project, started) in leads {
+            let screen = Screen::Project {
+                space: space.to_owned(),
+                project: project.to_owned(),
+                tab: crate::Tab::Conversation,
+            };
+            let title = format!("{project} · lead");
+            table = table.child(
+                button(SharedString::from(format!(
+                    "running-lead-{space}-{project}"
+                )))
+                .text()
+                .w_full()
+                .accessibility_label(format!("Open {title} in {space}"))
+                .child(running_row(
+                    [
+                        title,
+                        project.to_owned(),
+                        "Lead".to_owned(),
+                        String::new(),
+                        when.since(started),
+                    ],
+                    status_dot(Status::Running, cx),
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+            );
+        }
+
         let mut recent = v_flex().gap(XS).child(section("Recent results"));
         let results = state.recent();
         let gaps = state.gaps(Part::Recent);
         for (space, gap) in &gaps {
-            recent = recent.child(gap_line(gap, &format!("the results of {space}"), cx));
+            recent = recent.child(gap_line(gap, "recent results", space, cx));
         }
         if results.is_empty() && gaps.is_empty() {
-            recent = recent.child(empty_state("Nothing yet.", None, cx));
+            recent = recent.child(empty(EmptyRegion::Results, cx));
         }
         for item in results {
             let digest = state
@@ -198,8 +226,24 @@ impl Desktop {
                 )
                 .result(seq, state.result_expanded(&item.space, seq))
             });
+            let view = cx.entity().downgrade();
+            let text = item.text().to_owned();
+            let reply = item
+                .item
+                .project_name
+                .as_ref()
+                .filter(|_| item.kind() == threadlane_core::model::OutboxKind::Message)
+                .map(|project| Screen::Project {
+                    space: item.space.clone(),
+                    project: project.clone(),
+                    tab: crate::Tab::Conversation,
+                });
             recent = recent.child(
                 h_flex()
+                    .id(SharedString::from(format!(
+                        "result-menu-{}-{}",
+                        item.space, item.item.seq
+                    )))
                     .items_start()
                     .gap(SM)
                     .child(
@@ -220,7 +264,22 @@ impl Desktop {
                             )
                             .children(digest)
                             .children(excerpt),
-                    ),
+                    )
+                    .context_menu(move |menu, _, _| {
+                        let copy = text.clone();
+                        let mut menu =
+                            menu.item(menu_item(&view, "Copy text", move |this, _, cx| {
+                                this.copy(copy.clone(), cx)
+                            }));
+                        if let Some(screen) = &reply {
+                            let (screen, quote) = (screen.clone(), text.clone());
+                            menu = menu.item(menu_item(&view, "Reply", move |this, window, cx| {
+                                this.go(screen.clone(), cx);
+                                this.reply_to(&quote, window, cx);
+                            }));
+                        }
+                        menu
+                    }),
             );
         }
 

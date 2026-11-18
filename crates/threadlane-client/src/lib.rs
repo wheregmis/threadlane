@@ -1154,6 +1154,7 @@ impl ClientCore {
                 OverviewReply::Lead {
                     running_since,
                     stopped,
+                    ..
                 },
             ) => Ok((running_since, stopped)),
             (space, _) => Err(wrong_reply(&space, "lead")),

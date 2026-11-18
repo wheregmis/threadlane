@@ -1,12 +1,16 @@
 //! Navigation, space reachability, and the last action.
 
+use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_desktop::{Activity, Part, Reach, Space};
+use threadlane_desktop::{
+    Activity, Connection, ConnectionStatus, Destination, EmptyRegion, Part, Space, When,
+};
 
-use super::gap_line;
+use super::{empty, gap_line, menu_item};
 use crate::components::{meta, row, status_dot};
 use crate::icons::AppIcon;
 use crate::menus::{GoHome, OpenSettings, SidebarShortcut, shortcut_hint};
@@ -121,7 +125,7 @@ impl Desktop {
             .nth(index)
     }
 
-    pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn sidebar(&self, when: &When, cx: &mut Context<Self>) -> impl IntoElement {
         let mut bar = v_flex()
             .w(SIDEBAR_WIDTH)
             .flex_none()
@@ -178,28 +182,89 @@ impl Desktop {
                     if !shortcuts.is_empty() {
                         button = button.tooltip(format!("{label}  {}", shortcuts.join(" / ")));
                     }
-                    bar =
-                        bar.child(button.on_click(
-                            cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
-                        ));
+                    let open = screen.clone();
+                    let button = button
+                        .on_click(cx.listener(move |this, _, _, cx| this.go(open.clone(), cx)));
+                    bar = if let Screen::Project { space, project, .. } = &screen {
+                        let paused = self.state.is_paused(space, project);
+                        let (space, project) = (space.clone(), project.clone());
+                        let view = cx.entity().downgrade();
+                        bar.child(button.context_menu(move |menu, _, _| {
+                            let open = screen.clone();
+                            let (space, name, copy) =
+                                (space.clone(), project.clone(), project.clone());
+                            menu.item(menu_item(&view, "Open", move |this, _, cx| {
+                                this.go(open.clone(), cx)
+                            }))
+                            .item(menu_item(
+                                &view,
+                                if paused {
+                                    "Resume project"
+                                } else {
+                                    "Pause project"
+                                },
+                                move |this, _, cx| {
+                                    this.set_paused(space.clone(), name.clone(), !paused, cx);
+                                },
+                            ))
+                            .item(menu_item(
+                                &view,
+                                "Copy name",
+                                move |this, _, cx| this.copy(copy.clone(), cx),
+                            ))
+                        }))
+                    } else {
+                        bar.child(button)
+                    };
                 }
                 SidebarEntry::Space(space) => {
-                    let (status, label) = match space.reach {
-                        Reach::Unknown => (Status::Idle, "Asking…"),
-                        Reach::Reachable => (Status::Done, "Reachable"),
-                        Reach::Unreachable(_) => (Status::Failed, "Out of reach"),
-                    };
-                    bar = bar.child(
-                        h_flex()
-                            .px(MD)
-                            .pt(MD)
-                            .gap(XS)
-                            .child(meta(space.name.clone(), cx).truncate())
-                            .child(status_dot(status, cx))
-                            .child(meta(label, cx).flex_none()),
-                    );
+                    bar = bar.child(h_flex().px(MD).pt(MD).min_w_0().children(
+                        self.state.connection(&space.name, when).map(|connection| {
+                            Self::connection_indicator(&space.name, connection, cx)
+                        }),
+                    ));
                     if let Some(gap) = space.gap(Part::Projects) {
-                        bar = bar.child(gap_line(&gap, "projects", cx));
+                        bar = bar.child(gap_line(&gap, "projects", &space.name, cx));
+                    } else if space.projects.is_empty() {
+                        bar = bar.child(empty(EmptyRegion::Projects, cx));
+                    }
+                    let work = self.state.in_progress(&space.name, when);
+                    if !work.rows.is_empty() {
+                        bar = bar.child(meta("In progress", cx).px(MD));
+                    }
+                    for row in work.rows {
+                        let screen = match row.destination {
+                            Destination::Task(space, task) => Screen::Task { space, task },
+                            Destination::Lead(space, project) => Screen::Project {
+                                space,
+                                project,
+                                tab: Tab::Conversation,
+                            },
+                        };
+                        bar = bar.child(
+                            crate::components::button(SharedString::from(format!(
+                                "in-progress-{screen:?}"
+                            )))
+                            .ghost()
+                            .w_full()
+                            .h(crate::tokens::ROW_HEIGHT)
+                            .accessibility_label(format!(
+                                "{} · {} · {}",
+                                row.status, row.title, row.elapsed
+                            ))
+                            .child(crate::components::work_label(
+                                row.title,
+                                Some(row.elapsed),
+                                Status::task(row.status),
+                                cx,
+                            ))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                            ),
+                        );
+                    }
+                    if work.more != 0 {
+                        bar = bar.child(meta(format!("{} more", work.more), cx).px(MD));
                     }
                 }
                 SidebarEntry::Team => bar = bar.child(meta("TEAM", cx).px(MD).pt(MD)),
@@ -208,9 +273,54 @@ impl Desktop {
         bar
     }
 
+    fn connection_indicator(space: &str, connection: Connection, cx: &App) -> Div {
+        let status = match connection.status {
+            ConnectionStatus::Live => Status::Done,
+            ConnectionStatus::Reconnecting => Status::Waiting,
+            ConnectionStatus::Unreachable => Status::Failed,
+        };
+        h_flex()
+            .gap(XS)
+            .min_w_0()
+            .child(status_dot(status, cx))
+            .child(meta(format!("{space} · {}", connection.label), cx))
+    }
+
+    pub(crate) fn page_connections(&self, when: &When, cx: &App) -> Option<Div> {
+        let relevant = |name: &str| match &self.screen {
+            Screen::Home => self.state.filter().is_none_or(|space| space == name),
+            Screen::Project { space, .. }
+            | Screen::Task { space, .. }
+            | Screen::NewProject { space }
+            | Screen::Machine { space, .. } => space == name,
+            _ => true,
+        };
+        let warnings: Vec<_> = self
+            .state
+            .spaces()
+            .iter()
+            .filter(|space| relevant(&space.name))
+            .filter_map(|space| {
+                let warning = self.state.connection_warning(&space.name, when)?;
+                Some(Self::connection_indicator(&space.name, warning, cx))
+            })
+            .collect();
+        (!warnings.is_empty()).then(|| h_flex().gap(MD).flex_wrap().children(warnings))
+    }
+
     /// The last action and where it stands, until the next one.
     pub(crate) fn activity(&self, cx: &App) -> Option<Div> {
         let activity = self.state.activity()?;
+        if let Activity::Failed(why) = activity {
+            return Some(
+                crate::components::empty_state(
+                    "The last action could not be completed.",
+                    Some(why),
+                    cx,
+                )
+                .flex_none(),
+            );
+        }
         let status = match activity {
             Activity::Working(_) => Status::Running,
             Activity::Done(_) => Status::Done,

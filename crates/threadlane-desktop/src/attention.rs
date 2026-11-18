@@ -152,9 +152,10 @@ impl AppState {
             })
             .map(|other| other.task.id)
             .collect();
+        let holds = crate::count_form(holding.len(), "holds it", "hold them");
         if let Some(reason) = &task.waiting_reason {
             if reason.starts_with(AT_LIMIT) && !holding.is_empty() {
-                return Some(format!("{reason}: {} holds it", listed(&holding)));
+                return Some(format!("{reason}: {} {holds}", listed(&holding)));
             }
             return Some(reason.clone());
         }
@@ -182,7 +183,7 @@ impl AppState {
         let running = u32::try_from(holding.len()).unwrap_or(u32::MAX);
         if limit > 0 && running >= limit {
             return Some(format!(
-                "{} runs at most {limit} at once here: {} holds it",
+                "{} runs at most {limit} at once here: {} {holds}",
                 summary.agent,
                 listed(&holding)
             ));

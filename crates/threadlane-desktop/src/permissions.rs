@@ -10,7 +10,7 @@ use threadlane_core::ids::StandingRuleId;
 use threadlane_core::model::{Cell, Mode};
 use threadlane_core::tools::Tier;
 
-use crate::{AppState, Gap, Part};
+use crate::{AppState, Gap, Part, count_form};
 
 /// The four positions of a mode control, in order (Plan.md §2.3).
 pub const MODES: [(Mode, &str); 4] = [
@@ -432,7 +432,10 @@ impl AppState {
         Some(MayDo {
             title: format!("What {agent} may do here without asking"),
             statements,
-            rules_title: format!("Standing rules ({count})"),
+            rules_title: format!(
+                "{} ({count})",
+                count_form(count, "Standing rule", "Standing rules")
+            ),
             rules,
             tainted: format!(
                 "When a run is triggered by outside content, {agent} works one mode lower \

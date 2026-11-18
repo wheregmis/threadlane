@@ -236,9 +236,12 @@ impl Desktop {
     }
 
     pub(crate) fn reply_to(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.reply_to_message(text);
+        let Some(draft) = self.visible_draft() else {
+            return;
+        };
+        self.state.reply_to_message(draft, text);
         self.sync_drafts(window, cx);
-        self.composer.focus_handle(cx).focus(window, cx);
+        self.draft_input(draft).focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 

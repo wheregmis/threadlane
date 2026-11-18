@@ -2,6 +2,9 @@
 
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::menu::ContextMenuExt as _;
+
+use super::menu_item;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -40,6 +43,8 @@ impl Desktop {
             always,
             answering,
         } = display;
+        let menu_id = key.id;
+        let menu_view = cx.entity().downgrade();
         let prefix = format!("{}-{}", key.space, key.id);
         let copy_id = self
             .copyable(format!("copy-{prefix}"), key.id.to_string(), cx)
@@ -153,7 +158,12 @@ impl Desktop {
             );
         }
         self.reveal_decision_part(
-            card,
+            card.id(SharedString::from(format!("decision-menu-{prefix}")))
+                .context_menu(move |menu, _, _| {
+                    menu.item(menu_item(&menu_view, "Copy id", move |this, _, cx| {
+                        this.copy(menu_id.to_string(), cx)
+                    }))
+                }),
             linked || (current && self.reveal_linked_decision.is_none()),
             DecisionScroll::Card,
         )

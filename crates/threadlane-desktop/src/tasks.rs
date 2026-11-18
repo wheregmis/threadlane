@@ -9,7 +9,7 @@ use threadlane_core::model::{
 };
 use threadlane_core::time::Timestamp;
 
-use crate::{AppState, Destination, When, duration, proposed_assignee};
+use crate::{AppState, Destination, When, count_form, duration, proposed_assignee};
 
 /// The start of a `waiting_reason` that says no model account is free
 /// (`threadlane-store`'s `BLOCKED_REASON`, Plan.md §5.3).
@@ -40,6 +40,10 @@ pub struct BoardCard {
     /// `Engineer · macbook · 12 min`: its agent, and its machine or why it
     /// is not running.
     pub meta: String,
+    /// How long the task has been running or queued.
+    pub elapsed: Option<String>,
+    /// Whether this task still accepts cancellation.
+    pub can_cancel: bool,
     /// The decision waiting on you in it, which the card offers to answer.
     pub decision: Option<DecisionId>,
     /// That decision's options, which answer it from the card.
@@ -142,18 +146,13 @@ impl AppState {
                             })
                             .unwrap_or_default();
                         let detail = match (task.status, decision) {
+                            (TaskStatus::Queued, _) => {
+                                self.waiting_task(space, summary).unwrap_or_default()
+                            }
                             (_, Some(id)) => format!("{id} open"),
-                            (TaskStatus::Running, None) => match summary.running_since {
-                                Some(since) => format!(
-                                    "{} · {}",
-                                    summary.machine.as_deref().unwrap_or("a machine"),
-                                    when.since(since)
-                                ),
-                                None => summary.machine.clone().unwrap_or_default(),
-                            },
-                            (TaskStatus::Queued, None) => self
-                                .queued_reason(space, project, summary)
-                                .unwrap_or_else(|| "waiting for a machine".to_owned()),
+                            (TaskStatus::Running, None) => {
+                                summary.machine.clone().unwrap_or_default()
+                            }
                             // Claim a follow-up only when one is listed.
                             (TaskStatus::Sleeping, None) => task
                                 .waiting_reason
@@ -186,6 +185,8 @@ impl AppState {
                             } else {
                                 format!("{} · {detail}", summary.agent)
                             },
+                            elapsed: work_elapsed(summary, when),
+                            can_cancel: !task.status.is_terminal(),
                             decision,
                             options,
                         }
@@ -206,6 +207,81 @@ impl AppState {
                 })
             })
             .collect()
+    }
+
+    /// The same waiting reason on the board and task page.
+    #[must_use]
+    pub fn waiting_task(&self, space: &str, summary: &TaskSummary) -> Option<String> {
+        if summary.task.status == TaskStatus::Queued {
+            return Some(
+                self.queued_reason(space, &summary.project, summary)
+                    .unwrap_or_else(|| "waiting for a machine".to_owned()),
+            );
+        }
+        summary.task.waiting_reason.clone()
+    }
+
+    /// Running and queued work in this space, with active work first.
+    #[must_use]
+    pub fn in_progress(&self, space: &str, when: &When) -> InProgress {
+        let Some(space) = self.space(space) else {
+            return InProgress::default();
+        };
+        let mut rows: Vec<_> = space
+            .running
+            .iter()
+            .map(|task| WorkRow::task_in(&space.name, task, when))
+            .chain(space.leads.iter().map(|(project, since)| WorkRow {
+                destination: Destination::Lead(space.name.clone(), project.clone()),
+                title: format!("{project} · lead"),
+                elapsed: when.since(*since),
+                status: "Running",
+            }))
+            .collect();
+        rows.extend(
+            space
+                .tasks
+                .iter()
+                .filter(|task| task.task.status == TaskStatus::Queued)
+                .map(|task| WorkRow::task_in(&space.name, task, when)),
+        );
+        let more = rows.len().saturating_sub(5);
+        rows.truncate(5);
+        InProgress { rows, more }
+    }
+
+    /// Whether ticking durations are shown by any work view.
+    #[must_use]
+    pub fn has_ticking_work(&self) -> bool {
+        self.spaces.iter().any(|space| {
+            !space.running.is_empty()
+                || !space.leads.is_empty()
+                || space
+                    .tasks
+                    .iter()
+                    .any(|task| task.task.status == TaskStatus::Queued)
+        }) || self.projects.values().any(|view| {
+            view.tasks
+                .iter()
+                .any(|row| matches!(row.task.status, TaskStatus::Running | TaskStatus::Queued))
+        }) || self
+            .tasks
+            .values()
+            .any(|detail| detail.summary.task.status == TaskStatus::Running)
+    }
+
+    /// Whether this task's journal is expanded.
+    #[must_use]
+    pub fn activity_open(&self, space: &str, task: TaskId) -> bool {
+        self.task_activity.contains(&(space.to_owned(), task))
+    }
+
+    /// Toggles the task's journal.
+    pub fn toggle_activity(&mut self, space: &str, task: TaskId) {
+        let key = (space.to_owned(), task);
+        if !self.task_activity.remove(&key) {
+            self.task_activity.insert(key);
+        }
     }
 
     fn proposals(&self, space: &str, project: &str) -> Vec<ProposalCard> {
@@ -252,6 +328,160 @@ impl AppState {
             })
             .collect()
     }
+}
+
+/// A compact row that opens a task or a lead conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkRow {
+    /// The page to open.
+    pub destination: Destination,
+    /// The task or lead's display title.
+    pub title: String,
+    /// Time elapsed from the start or enqueue.
+    pub elapsed: String,
+    /// The display status.
+    pub status: &'static str,
+}
+
+impl WorkRow {
+    fn task_in(space: &str, summary: &TaskSummary, when: &When) -> Self {
+        Self {
+            destination: Destination::Task(space.to_owned(), summary.task.id),
+            title: summary.task.title.clone(),
+            elapsed: work_elapsed(summary, when).unwrap_or_default(),
+            status: status_label(summary.task.status, summary.task.waiting_reason.as_deref()),
+        }
+    }
+}
+
+/// The sidebar's visible work and count beyond its cap.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct InProgress {
+    /// Up to five rows.
+    pub rows: Vec<WorkRow>,
+    /// Number of remaining rows.
+    pub more: usize,
+}
+
+/// The elapsed time shown for running and queued work.
+#[must_use]
+pub fn work_elapsed(summary: &TaskSummary, when: &When) -> Option<String> {
+    match summary.task.status {
+        TaskStatus::Queued => Some(when.since(summary.task.created_at)),
+        TaskStatus::Running => running_elapsed(summary, when),
+        _ => None,
+    }
+}
+
+/// Display data for the task header.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TaskHeader {
+    /// Badge text.
+    pub status: &'static str,
+    /// Single line with the most recent run's timing and assignment.
+    pub meta: String,
+    /// The task's origin and repositories.
+    pub context: Vec<String>,
+    /// The current progress or quiet warning.
+    pub latest: Option<LatestStep>,
+}
+
+/// A live line with its warning state.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LatestStep {
+    /// Copy for the live line.
+    pub text: String,
+    /// Whether the run has had no step for ten minutes or more.
+    pub quiet: bool,
+}
+
+/// Builds the task header against the display clock.
+#[must_use]
+pub fn task_header(detail: &TaskDetail, when: &When) -> TaskHeader {
+    let summary = &detail.summary;
+    let running = summary.task.status == TaskStatus::Running;
+    let run = if running {
+        detail
+            .runs
+            .iter()
+            .rfind(|row| row.run.status == RunStatus::Active)
+    } else {
+        detail.runs.last()
+    };
+    let status = match (detail.stopped, running) {
+        (true, true) => "Stopping",
+        (true, false) => "Stopped",
+        _ => status_label(summary.task.status, summary.task.waiting_reason.as_deref()),
+    };
+    let machine = run
+        .map(|row| row.machine.as_str())
+        .or(summary.machine.as_deref());
+    let backend = run.and_then(|row| row.run.backend);
+    let mut meta = format!(
+        "{} · {} · {}",
+        summary.agent,
+        machine.unwrap_or("no machine yet"),
+        backend.map_or_else(|| "no backend yet".to_owned(), |kind| kind.to_string())
+    );
+    let start = if running {
+        summary
+            .running_since
+            .or_else(|| run.map(|row| row.run.started_at))
+    } else {
+        run.map(|row| row.run.started_at)
+    };
+    if let Some(start) = start {
+        meta.push_str(&format!(" · started {}", when.time(start)));
+        if running {
+            meta.push_str(&format!(" · running for {}", when.since(start)));
+        } else if let Some(end) = run.and_then(|row| row.run.ended_at) {
+            meta.push_str(&format!(
+                " · took {}",
+                duration(end.saturating_since(start))
+            ));
+        }
+    }
+    let latest = running.then(|| {
+        let step = summary.latest_step.as_ref();
+        let since = step.map(|step| step.at).or(start);
+        let quiet = since.is_some_and(|at| when.now.saturating_since(at).as_secs() >= 600);
+        let text = match (quiet, step, since) {
+            (true, _, Some(at)) => format!("Quiet for {}", when.since(at)),
+            (_, Some(step), _) => {
+                format!("Latest: {} · {} ago", step.description, when.since(step.at))
+            }
+            _ => "Waiting for the first step.".to_owned(),
+        };
+        LatestStep { text, quiet }
+    });
+    let mut context = detail.repositories.clone();
+    context.push(origin(detail));
+    TaskHeader {
+        status,
+        meta,
+        context,
+        latest,
+    }
+}
+
+/// Rows of the task's journal, grouped newest run first.
+#[must_use]
+pub fn activity_runs(detail: &TaskDetail, when: &When) -> Vec<(String, Vec<String>)> {
+    detail
+        .runs
+        .iter()
+        .rev()
+        .filter(|row| !row.steps.is_empty())
+        .map(|row| {
+            let title = format!("Run {} · {}", row.run.id, when.moment(row.run.started_at));
+            let steps = row
+                .steps
+                .iter()
+                .map(|step| format!("{} · {}", when.moment(step.at), step.description))
+                .collect();
+            (title, steps)
+        })
+        .collect()
 }
 
 /// How long the task's active run has been working, if the hub reported a start.
@@ -333,16 +563,46 @@ pub fn usage(detail: &TaskDetail, when: &When) -> [String; 2] {
             ended.saturating_since(run.run.started_at)
         })
         .sum();
-    let runs = match detail.runs.len() {
-        1 => "1 run".to_owned(),
-        count => format!("{count} runs"),
+    let run_count = detail.runs.len();
+    let runs = count_form(run_count, "run", "runs");
+    let reported: Vec<_> = detail
+        .runs
+        .iter()
+        .filter_map(|row| row.usage.as_ref())
+        .collect();
+    let mut fields = Vec::new();
+    for (direction, counts) in [
+        (
+            "input",
+            reported
+                .iter()
+                .filter_map(|u| u.input_tokens)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "output",
+            reported
+                .iter()
+                .filter_map(|u| u.output_tokens)
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        if !counts.is_empty() {
+            let total: u128 = counts.into_iter().map(u128::from).sum();
+            let tokens = count_form(total, "token", "tokens");
+            fields.push(format!("{total} {direction} {tokens}"));
+        }
+    }
+    let mut costs = reported.iter().filter_map(|u| u.cost_usd).peekable();
+    if costs.peek().is_some() {
+        fields.push(format!("${:.4}", costs.sum::<f64>()));
+    }
+    let totals = if fields.is_empty() {
+        "The backend has not reported tokens or cost.".to_owned()
+    } else {
+        format!("Reported usage · {}", fields.join(" · "))
     };
-    [
-        format!("{runs} · {}", duration(took)),
-        // shortcut: the hub keeps no usage per run yet (Plan.md §14.1 "Run
-        // record"); show it here once the run summary carries it.
-        "Tokens and cost: not reported by the hub yet".to_owned(),
-    ]
+    [format!("{run_count} {runs} · {}", duration(took)), totals]
 }
 
 /// The task screen's "Changes" card: its branch and whether it is published.
@@ -418,6 +678,8 @@ pub struct Moment {
     pub time: String,
     /// What happened.
     pub text: String,
+    /// The underlying message, when it can be copied or quoted.
+    pub message: Option<String>,
 }
 
 /// A task's timeline, oldest first, from what its hub has: its creation,
@@ -444,6 +706,7 @@ impl AppState {
                         send.at,
                         format!("sending-{}", send.id),
                         format!("You · Sending…\n\n{}", send.text),
+                        None,
                     )
                 }),
         )
@@ -454,7 +717,7 @@ fn task_moments(
     detail: &TaskDetail,
     when: &When,
     show_owner: impl Fn(&str, Timestamp) -> bool,
-    sending: impl Iterator<Item = (Timestamp, String, String)>,
+    sending: impl Iterator<Item = (Timestamp, String, String, Option<String>)>,
 ) -> Vec<Moment> {
     let summary = &detail.summary;
     let task = &summary.task;
@@ -462,6 +725,7 @@ fn task_moments(
         task.created_at,
         "created".to_owned(),
         format!("Created: {}. {}.", task.title, origin(detail)),
+        None,
     )];
     for run in &detail.runs {
         let run_summary = &run.run;
@@ -496,6 +760,7 @@ fn task_moments(
             run_summary.started_at,
             format!("run-{}", run_summary.id),
             text,
+            None,
         ));
     }
     for decision in &detail.decisions {
@@ -503,6 +768,7 @@ fn task_moments(
             decision.created_at,
             format!("asked-{}", decision.id),
             format!("Asked {}: {}", decision.id, decision.question),
+            None,
         ));
         let answered_at = decision
             .answer
@@ -525,12 +791,14 @@ fn task_moments(
                     at,
                     format!("ended-{}", decision.id),
                     format!("You answered {}: {label}{note}", decision.id),
+                    None,
                 ));
             }
             (DecisionStatus::Expired, _) => moments.push((
                 decision.expires_at.unwrap_or(decision.created_at),
                 format!("ended-{}", decision.id),
                 format!("{} expired unanswered", decision.id),
+                None,
             )),
             _ => {}
         }
@@ -543,6 +811,7 @@ fn task_moments(
                 *at,
                 format!("you-{event_id}"),
                 format!("You wrote:\n\n{text}"),
+                Some(text.clone()),
             ));
         }
     }
@@ -561,15 +830,21 @@ fn task_moments(
             .and_then(Json::as_str)
             .map_or_else(String::new, |summary| format!(":\n\n{summary}"));
         let status = status_label(task.status, None);
-        moments.push((ended, "result".to_owned(), format!("{status}{result}")));
+        moments.push((
+            ended,
+            "result".to_owned(),
+            format!("{status}{result}"),
+            None,
+        ));
     }
-    moments.sort_by_key(|(at, _, _)| *at);
+    moments.sort_by_key(|(at, ..)| *at);
     moments
         .into_iter()
-        .map(|(at, id, text)| Moment {
+        .map(|(at, id, text, message)| Moment {
             id,
             time: when.moment(at),
             text,
+            message,
         })
         .collect()
 }
