@@ -34,6 +34,12 @@ impl LocalLink {
         let db = &inner.db;
         let lane = self.check_lease(lease).await?;
         let mut reply = None;
+        let dreaming = db
+            .run_events(run_id)
+            .await
+            .map_err(link_error)?
+            .iter()
+            .any(crate::dreaming::is_dream);
         let outcome = if db.count_for_run(run_id).await.map_err(link_error)? > 0 {
             RunOutcome::Sent
         } else if db
@@ -46,7 +52,8 @@ impl LocalLink {
             RunOutcome::Deferred
         } else if let Some(text) = final_text
             .map(str::trim)
-            .filter(|text| lane.kind == LaneKind::Lead && deliverable(text))
+            // A dream reviews memory; it has nothing to tell you.
+            .filter(|text| lane.kind == LaneKind::Lead && !dreaming && deliverable(text))
         {
             // A lead that just answers is heard, as if it had sent the text.
             let run = self.active_run(lease, run_id).await?;
@@ -68,12 +75,6 @@ impl LocalLink {
         } else {
             RunOutcome::Silent
         };
-        let dreaming = db
-            .run_events(run_id)
-            .await
-            .map_err(link_error)?
-            .iter()
-            .any(crate::dreaming::is_dream);
         use threadlane_core::runtime::steps::dreaming as step;
         if dreaming {
             inner.hook.reach(step::BEFORE_MARKER)?;
