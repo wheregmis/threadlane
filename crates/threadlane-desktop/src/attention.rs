@@ -264,11 +264,14 @@ impl AppState {
         // The rule matches the target fields of the arguments only.
         let words = allows(&decision.tool, &decision.arguments);
         let ticked = self.always.contains(&(queued.space.clone(), decision.id));
+        // "in threadlane, in threadlane" when the repository shares the project's name.
+        let place = if words.ends_with(&format!(" in {project}")) {
+            String::new()
+        } else {
+            format!(", in {project}")
+        };
         Some((
-            format!(
-                "Always allow {} to {words}, in {project}",
-                self.asker(queued)
-            ),
+            format!("Always allow {} to {words}{place}", self.asker(queued)),
             ticked,
         ))
     }

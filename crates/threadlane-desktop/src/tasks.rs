@@ -231,12 +231,15 @@ impl AppState {
             .running
             .iter()
             .map(|task| WorkRow::task_in(&space.name, task, when))
-            .chain(space.leads.iter().map(|(project, since)| WorkRow {
-                destination: Destination::Lead(space.name.clone(), project.clone()),
-                label: format!("{} · lead", clip(project, SIDEBAR_CHARS - 7)),
-                title: format!("{project} · lead"),
-                elapsed: when.since(*since),
-                status: "Running",
+            .chain(space.leads.iter().map(|(project, since)| {
+                let elapsed = sidebar_time(when.since(*since));
+                WorkRow {
+                    destination: Destination::Lead(space.name.clone(), project.clone()),
+                    label: format!("{} · lead", clip(project, title_chars(&elapsed) - 7)),
+                    title: format!("{project} · lead"),
+                    elapsed,
+                    status: "Running",
+                }
             }))
             .collect();
         rows.extend(
@@ -331,8 +334,28 @@ impl AppState {
     }
 }
 
-/// Characters of a title that fit on one sidebar row beside its time.
+/// Characters of a title that fit on one sidebar row beside a short time.
 const SIDEBAR_CHARS: usize = 18;
+
+/// Characters of title and time together that fit on one sidebar row. The
+/// time keeps its full width, so a longer time leaves less for the title.
+const ROW_CHARS: usize = 24;
+
+/// Characters of a title, its "…" included, that fit beside `elapsed`.
+fn title_chars(elapsed: &str) -> usize {
+    SIDEBAR_CHARS
+        .min(ROW_CHARS.saturating_sub(elapsed.chars().count()))
+        .max(8)
+}
+
+/// `elapsed` in the sidebar's narrow form: "< 1 min" for "less than a minute".
+fn sidebar_time(elapsed: String) -> String {
+    if elapsed == crate::clock::UNDER_A_MINUTE {
+        "< 1 min".to_owned()
+    } else {
+        elapsed
+    }
+}
 
 /// `text` cut to `chars` characters, ending in "…" when cut.
 fn clip(text: &str, chars: usize) -> String {
@@ -359,11 +382,12 @@ pub struct WorkRow {
 
 impl WorkRow {
     fn task_in(space: &str, summary: &TaskSummary, when: &When) -> Self {
+        let elapsed = sidebar_time(work_elapsed(summary, when).unwrap_or_default());
         Self {
             destination: Destination::Task(space.to_owned(), summary.task.id),
-            label: clip(&summary.task.title, SIDEBAR_CHARS),
+            label: clip(&summary.task.title, title_chars(&elapsed)),
             title: summary.task.title.clone(),
-            elapsed: work_elapsed(summary, when).unwrap_or_default(),
+            elapsed,
             status: status_label(summary.task.status, summary.task.waiting_reason.as_deref()),
         }
     }
