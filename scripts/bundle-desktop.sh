@@ -9,10 +9,13 @@ set -eu
 cd "$(dirname "$0")/.."
 profile="${PROFILE:-release}"
 cargo="${CARGO:-cargo}"
+package_id=$("$cargo" pkgid --locked -p threadlane-desktop)
+version=${package_id##*#}
+version=${version##*@}
 if [ "$profile" = release ]; then
-    "$cargo" build --release -p threadlane-desktop
+    "$cargo" build --locked --release -p threadlane-desktop
 else
-    "$cargo" build -p threadlane-desktop
+    "$cargo" build --locked -p threadlane-desktop
 fi
 
 target_dir="${CARGO_TARGET_DIR:-target}"
@@ -21,7 +24,7 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp crates/threadlane-desktop/resources/Threadlane.icns "$app/Contents/Resources/"
 cp "$target_dir/$profile/threadlane-desktop" "$app/Contents/MacOS/threadlane-desktop"
-cat > "$app/Contents/Info.plist" <<'PLIST'
+cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -37,7 +40,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>$version</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
