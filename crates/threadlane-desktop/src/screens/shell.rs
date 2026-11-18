@@ -29,7 +29,6 @@ struct NavigationRow {
 enum SidebarEntry<'a> {
     Row(NavigationRow),
     Space(&'a Space),
-    Projects,
     App,
     Archived(&'a Space),
 }
@@ -54,6 +53,38 @@ impl Desktop {
         )];
         for space in self.state.spaces() {
             entries.push(SidebarEntry::Space(space));
+            entries.extend(
+                space
+                    .active_projects()
+                    .filter(|project| !project.is_general)
+                    .map(|project| {
+                        let open = self.state.open_in(&space.name, project.id)
+                            + self.state.attention_in(&space.name, &project.name);
+                        row(
+                            format!("go-{}-{}", space.name, project.name),
+                            AppIcon::Folder,
+                            project.name.clone(),
+                            positive_count(open),
+                            Screen::Project {
+                                space: space.name.clone(),
+                                project: project.name.clone(),
+                                tab: Tab::Tasks,
+                            },
+                        )
+                    }),
+            );
+            entries.push(row(
+                format!("new-project-{}", space.name),
+                AppIcon::FolderPlus,
+                "New project".into(),
+                None,
+                Screen::NewProject {
+                    space: space.name.clone(),
+                },
+            ));
+            if space.archived_projects().next().is_some() {
+                entries.push(SidebarEntry::Archived(space));
+            }
             if let Some(project) = space.main_chat_project() {
                 entries.push(row(
                     format!("main-chat-{}", space.name),
@@ -106,39 +137,6 @@ impl Desktop {
                     )
                 }),
             );
-            entries.push(SidebarEntry::Projects);
-            entries.extend(
-                space
-                    .active_projects()
-                    .filter(|project| !project.is_general)
-                    .map(|project| {
-                        let open = self.state.open_in(&space.name, project.id)
-                            + self.state.attention_in(&space.name, &project.name);
-                        row(
-                            format!("go-{}-{}", space.name, project.name),
-                            AppIcon::Folder,
-                            project.name.clone(),
-                            positive_count(open),
-                            Screen::Project {
-                                space: space.name.clone(),
-                                project: project.name.clone(),
-                                tab: Tab::Tasks,
-                            },
-                        )
-                    }),
-            );
-            entries.push(row(
-                format!("new-project-{}", space.name),
-                AppIcon::FolderPlus,
-                "New project".into(),
-                None,
-                Screen::NewProject {
-                    space: space.name.clone(),
-                },
-            ));
-            if space.archived_projects().next().is_some() {
-                entries.push(SidebarEntry::Archived(space));
-            }
         }
         entries.push(SidebarEntry::App);
         entries.push(row(
@@ -210,6 +208,7 @@ impl Desktop {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Threadlane"),
             );
+        let mut group = v_flex().gap(XS);
         let mut index = 0;
         for entry in self.sidebar_entries() {
             match entry {
@@ -249,7 +248,7 @@ impl Desktop {
                     let open = screen.clone();
                     let button = button
                         .on_click(cx.listener(move |this, _, _, cx| this.go(open.clone(), cx)));
-                    bar = if let Screen::Project { space, project, .. } = &screen
+                    group = if let Screen::Project { space, project, .. } = &screen
                         && self.state.space(space).and_then(Space::main_chat_project)
                             != Some(project)
                     {
@@ -258,7 +257,7 @@ impl Desktop {
                         let offers_delete = self.state.offers_delete(space, project);
                         let (space, project) = (space.clone(), project.clone());
                         let view = cx.entity().downgrade();
-                        bar.child(button.context_menu(move |menu, _, cx| {
+                        group.child(button.context_menu(move |menu, _, cx| {
                             let open = screen.clone();
                             let (pause_space, pause_name, copy) =
                                 (space.clone(), project.clone(), project.clone());
@@ -307,23 +306,30 @@ impl Desktop {
                             menu
                         }))
                     } else {
-                        bar.child(button)
+                        group.child(button)
                     };
                 }
                 SidebarEntry::Space(space) => {
+                    bar = bar.child(group);
                     bar = bar.child(h_flex().px(MD).pt(MD).min_w_0().children(
                         self.state.connection(&space.name, when).map(|connection| {
                             Self::connection_indicator(&space.name, connection, cx)
                         }),
                     ));
+                    group = v_flex()
+                        .gap(XS)
+                        .ml(MD)
+                        .pl(SM)
+                        .border_l_1()
+                        .border_color(cx.theme().sidebar_border);
                     if let Some(gap) = space.gap(Part::Projects) {
-                        bar = bar.child(gap_line(&gap, "projects", &space.name, cx));
+                        group = group.child(gap_line(&gap, "projects", &space.name, cx));
                     } else if space.active_projects().next().is_none() {
-                        bar = bar.child(empty(EmptyRegion::Projects, cx));
+                        group = group.child(empty(EmptyRegion::Projects, cx));
                     }
                     let work = self.state.in_progress(&space.name, when);
                     if !work.rows.is_empty() {
-                        bar = bar.child(meta("In progress", cx).px(MD));
+                        group = group.child(meta("In progress", cx).px(MD));
                     }
                     for row in work.rows {
                         let screen = match row.destination {
@@ -334,7 +340,7 @@ impl Desktop {
                                 tab: Tab::Conversation,
                             },
                         };
-                        bar = bar.child(
+                        group = group.child(
                             crate::components::button(SharedString::from(format!(
                                 "in-progress-{screen:?}"
                             )))
@@ -359,15 +365,19 @@ impl Desktop {
                         );
                     }
                     if work.more != 0 {
-                        bar = bar.child(meta(format!("{} more", work.more), cx).px(MD));
+                        group = group.child(meta(format!("{} more", work.more), cx).px(MD));
                     }
                 }
-                SidebarEntry::Projects => bar = bar.child(meta("Projects", cx).px(MD).pt(SM)),
-                SidebarEntry::App => bar = bar.child(meta("Application", cx).px(MD).pt(MD)),
+                SidebarEntry::App => {
+                    bar = bar
+                        .child(group)
+                        .child(meta("Application", cx).px(MD).pt(MD));
+                    group = v_flex().gap(XS);
+                }
                 SidebarEntry::Archived(space) => {
                     let name = space.name.clone();
                     let open = space.archived_open();
-                    bar = bar.child(
+                    group = group.child(
                         row(
                             SharedString::from(format!("archived-{name}")),
                             if open {
@@ -402,7 +412,7 @@ impl Desktop {
                             };
                             let view = cx.entity().downgrade();
                             let (at, name) = (space.name.clone(), project.name.clone());
-                            bar = bar.child(
+                            group = group.child(
                                 div().pl(MD).child(
                                     row(
                                         SharedString::from(format!(
@@ -436,7 +446,7 @@ impl Desktop {
                 }
             }
         }
-        bar
+        bar.child(group)
     }
 
     fn connection_indicator(space: &str, connection: Connection, cx: &App) -> Div {
