@@ -28,6 +28,15 @@ use crate::tools::{ToolDefinition, ToolError};
 /// decision 7).
 pub const PROGRESS_WRITTEN: &str = "progress_written";
 
+/// The tool a task agent reports its task done with.
+pub const FINISH_TASK: &str = "finish_task";
+
+/// The field of a `finish_task` call the runner sets to where the task
+/// branch stands against each repository's default branch, a list of
+/// [`crate::workspace::MergeCheck`] (docs/merge-help.md decision 2). An
+/// agent's own value is replaced or removed.
+pub const MERGE_CHECKS: &str = "merge";
+
 /// Everything a runner needs to execute one run. Built by the hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunAssignment {

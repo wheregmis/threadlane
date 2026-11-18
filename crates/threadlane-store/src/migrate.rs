@@ -18,6 +18,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0009_dreaming.sql"),
     include_str!("../migrations/0010_project_archive.sql"),
     include_str!("../migrations/0011_project_deletion.sql"),
+    include_str!("../migrations/0012_merge_refusals.sql"),
 ];
 
 /// The schema version this build expects.

@@ -15,7 +15,9 @@ use threadlane_core::model::{
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{OrgStore, OutboxStore, SessionStore, StoreError, TaskStore};
 use threadlane_core::time::Clock;
+use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry};
+use threadlane_core::workspace::MergeCheck;
 use threadlane_store::HubDb;
 
 use crate::error::tool_error;
@@ -35,7 +37,7 @@ pub const CANCEL_TASK: &str = "cancel_task";
 /// The lead lists the project's tasks.
 pub const LIST_TASKS: &str = "list_tasks";
 /// A task agent reports its task done, with a result.
-pub const FINISH_TASK: &str = "finish_task";
+pub use threadlane_core::link::FINISH_TASK;
 /// Asks you a question with options; your answer resumes the session
 /// (Plan.md §9.4, kind `input`).
 pub const ASK_USER: &str = "ask_user";
@@ -419,11 +421,26 @@ impl HubTools {
         context: &ToolContext,
         arguments: &Json,
     ) -> Result<Json, ToolError> {
-        let object = fields(arguments, &["summary"])?;
+        let object = fields(arguments, &["summary", MERGE_CHECKS])?;
         let summary = text_field(object, "summary")?.ok_or_else(|| missing("summary"))?;
+        let mut result = json!({ "summary": summary });
+        if let Some(merge) = object.get(MERGE_CHECKS) {
+            let checks: Vec<MergeCheck> = serde_json::from_value(merge.clone())
+                .map_err(|error| ToolError::InvalidArguments(format!("merge: {error}")))?;
+            if checks.iter().any(|check| !check.clean())
+                && self
+                    .db
+                    .count_merge_refusal(&context.lease, MAX_MERGE_REFUSALS)
+                    .await
+                    .map_err(tool_error)?
+            {
+                return Err(ToolError::Blocked(merge_refusal(&checks)));
+            }
+            result[MERGE_CHECKS] = merge.clone();
+        }
         let task = self
             .db
-            .finish_task(&context.lease, &json!({ "summary": summary }))
+            .finish_task(&context.lease, &result)
             .await
             .map_err(|error| match error {
                 // No progress file yet: the agent can write it and retry.
@@ -436,6 +453,34 @@ impl HubTools {
             "next": "End your turn now. The task is done, and its result reaches the lead, when this run ends.",
         }))
     }
+}
+
+/// How many times `finish_task` is refused for merge conflicts before it
+/// finishes with the conflict recorded (docs/merge-help.md decision 5).
+const MAX_MERGE_REFUSALS: i64 = 2;
+
+/// Why `finish_task` was refused: what conflicts where, and what to do.
+fn merge_refusal(checks: &[MergeCheck]) -> String {
+    let mut message =
+        "finish_task refused: the task branch does not merge cleanly into its base.".to_owned();
+    for check in checks.iter().filter(|check| !check.clean()) {
+        let _ = write!(
+            message,
+            " In {}, it conflicts with {} at {} in: {}. Rebase onto that commit (git rebase {}, \
+             already fetched as origin/{}), resolve the conflicts, and continue the rebase.",
+            check.repository,
+            check.branch,
+            check.base,
+            check.conflicts.join(", "),
+            check.base,
+            check.branch,
+        );
+    }
+    message.push_str(
+        " Then run the task's checks again, and call finish_task again. After two refusals, \
+         finish_task is accepted with the conflict recorded in the result.",
+    );
+    message
 }
 
 /// What the effect of a call is keyed on, so that repeating the call repeats

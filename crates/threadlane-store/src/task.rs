@@ -978,6 +978,33 @@ impl TaskStore for HubDb {
         Ok(finished)
     }
 
+    async fn count_merge_refusal(&self, lease: &Lease, limit: i64) -> StoreResult<bool> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        check_lease(conn, lease).await?;
+        let task = task_of_lane(conn, lease.lane_id)
+            .await?
+            .ok_or_else(|| StoreError::Invalid(format!("lane {} has no task", lease.lane_id)))?;
+        let counted = query_one(
+            conn,
+            "SELECT merge_refusals FROM tasks WHERE id = ?1",
+            params![task.id.get()],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        if counted >= limit {
+            return Ok(false);
+        }
+        exec(
+            conn,
+            "UPDATE tasks SET merge_refusals = merge_refusals + 1 WHERE id = ?1",
+            params![task.id.get()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     async fn set_task_status(
         &self,
         id: TaskId,
