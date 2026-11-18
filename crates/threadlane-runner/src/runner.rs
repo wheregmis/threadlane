@@ -468,6 +468,11 @@ impl Inner {
                     .await?;
                 return self.commit(lane, assignment, Some(STOPPED_WAITING)).await;
             }
+            Ended::Terminal(BackendEvent::Failed { error })
+                if threadlane_core::backend::rejects_model(&error) =>
+            {
+                RunFailure::Rejected { message: error }
+            }
             Ended::Terminal(BackendEvent::Failed { error }) => RunFailure::Error { message: error },
             Ended::Terminal(BackendEvent::UsageLimit { resets_at }) => {
                 self.usage_limit(lane, assignment.backend, resets_at)
