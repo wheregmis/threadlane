@@ -1,6 +1,4 @@
-//! What needs you besides decisions (wireframe 1 and 2): why a queued task
-//! is not running, the tasks that failed or are stuck, and "always allow"
-//! on a decision card.
+//! Why a queued task is waiting and how decision cards display standing rules.
 
 use threadlane_core::client::TaskSummary;
 use threadlane_core::ids::{DecisionId, TaskId};
@@ -13,38 +11,6 @@ use crate::{AppState, Queued};
 /// once" limit (`threadlane-store`'s `waiting_reason`).
 const AT_LIMIT: &str = "its agent already runs its limit";
 
-/// Whether the hub's `waiting_reason` for a sleeping or queued task says it
-/// needs you or is stuck: it ended a run without finishing and nothing is
-/// set to wake it. The one place that follows the hub's wording.
-#[must_use]
-pub fn needs_you(reason: &str) -> bool {
-    let reason = reason.to_lowercase();
-    [
-        "needs you",
-        "stuck",
-        "without finishing",
-        "nothing will wake",
-        "nothing is set to wake",
-        "nothing set to wake",
-    ]
-    .iter()
-    .any(|words| reason.contains(words))
-}
-
-/// One task on Home's "Needs attention" list.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttentionRow {
-    /// The space it is in.
-    pub space: String,
-    /// Its project's name.
-    pub project: String,
-    pub task: TaskId,
-    /// `T-0003 Title`.
-    pub title: String,
-    /// `api · Engineer · failed: the tests do not build`.
-    pub why: String,
-}
-
 /// `T-0001`, `T-0001 and T-0002`, `T-0001, T-0002 and T-0003`.
 fn listed(ids: &[TaskId]) -> String {
     let names: Vec<String> = ids.iter().map(ToString::to_string).collect();
@@ -55,77 +21,7 @@ fn listed(ids: &[TaskId]) -> String {
     }
 }
 
-/// Why `task` needs you, if it does, given the other tasks of its space.
-fn attention(task: &TaskSummary, all: &[TaskSummary]) -> Option<String> {
-    let status = task.task.status;
-    let reason = task.task.waiting_reason.as_deref();
-    match status {
-        TaskStatus::Failed => {
-            Some(reason.map_or_else(|| "failed".to_owned(), |reason| format!("failed: {reason}")))
-        }
-        TaskStatus::Cancelled => failed_dependency(task, all, 0)
-            .map(|failed| format!("cancelled because {failed}, which it depended on, failed")),
-        TaskStatus::Sleeping | TaskStatus::Queued => {
-            reason.filter(|r| needs_you(r)).map(str::to_owned)
-        }
-        _ => None,
-    }
-}
-
-/// The task whose failure cancelled `task`, through a chain of cancelled
-/// dependencies.
-fn failed_dependency(task: &TaskSummary, all: &[TaskSummary], depth: usize) -> Option<TaskId> {
-    // A cycle cannot be made, but a corrupt listing must not loop.
-    if depth > all.len() {
-        return None;
-    }
-    task.task.depends_on.iter().find_map(|id| {
-        let dependency = all.iter().find(|other| other.task.id == *id)?;
-        match dependency.task.status {
-            TaskStatus::Failed => Some(dependency.task.id),
-            TaskStatus::Cancelled => failed_dependency(dependency, all, depth + 1),
-            _ => None,
-        }
-    })
-}
-
 impl AppState {
-    /// Home's "Needs attention" list: tasks of the spaces it shows that
-    /// failed, were cancelled by a failed dependency, or sleep or wait with
-    /// a reason that says they need you, oldest first.
-    #[must_use]
-    pub fn needs_attention(&self) -> Vec<AttentionRow> {
-        self.spaces
-            .iter()
-            .filter(|space| self.shown(&space.name))
-            .flat_map(|space| {
-                space.tasks.iter().filter_map(|summary| {
-                    let why = attention(summary, &space.tasks)?;
-                    Some(AttentionRow {
-                        space: space.name.clone(),
-                        project: summary.project.clone(),
-                        task: summary.task.id,
-                        title: format!("{} {}", summary.task.id, summary.task.title),
-                        why: format!("{} · {} · {why}", summary.project, summary.agent),
-                    })
-                })
-            })
-            .collect()
-    }
-
-    /// How many tasks of project `project` in `space` need attention.
-    #[must_use]
-    pub fn attention_in(&self, space: &str, project: &str) -> usize {
-        self.space(space).map_or(0, |known| {
-            known
-                .tasks
-                .iter()
-                .filter(|summary| summary.project == project)
-                .filter(|summary| attention(summary, &known.tasks).is_some())
-                .count()
-        })
-    }
-
     /// Why queued task `summary` of `project` in `space` is not running:
     /// the hub's reason, with the tasks that hold its agent's slots named;
     /// or, where the hub gave none, what the app can tell: the project is
