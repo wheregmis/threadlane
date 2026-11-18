@@ -120,3 +120,15 @@ closed it.
 
 The live Cancel task dialog offered “Keep it”, which closed the dialog
 and left T-0015 queued.
+
+## Review before merging to main, 2026-11-18
+
+All 15 Dev tasks reached Done. The combined desktop loaded the live Dev
+timeline and opened the project conversation from a timeline entry.
+
+| # | Finding | State |
+|---|---|---|
+| 37 | A project lead's final text reached the owner without waking the space Lead. An interruption could also separate an explicit message from its routed reply. | fixed in the PR batch. The outbox message and routed reply are queued together. The hub exit tests cover both forms of reply. |
+| 38 | A refresh while editing an agent could revert fields changed by another client. The completion of an earlier save could close a reopened draft. | fixed in the PR batch and covered by the desktop regression. |
+| 39 | Rebasing a published task branch could make its next regular push fail. | fixed in the PR batch. A local Git regression pushes, advances the base, and then pushes the task's next commit. |
+| 40 | Space-lead asks still need durable correlation through clarification decisions and follow-up timers, especially when several asks reach the same project. | open |
