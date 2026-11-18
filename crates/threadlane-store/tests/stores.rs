@@ -3076,12 +3076,18 @@ async fn deleting_an_agent_waits_for_its_tasks_and_keeps_its_history() {
     assert_eq!(task(&hub, queued.id).await.agent_id, agent);
 
     // The name is free again, and a second deletion of it still succeeds.
-    let again = hub.create_agent(&NewAgent::named(name.clone(), "engineer")).await.unwrap();
+    let again = hub
+        .create_agent(&NewAgent::named(name.clone(), "engineer"))
+        .await
+        .unwrap();
     hub.delete_agent(again.id).await.unwrap();
     assert_eq!(
         hub.agent(again.id).await.unwrap().unwrap().name,
         format!("{name} (deleted {})", again.id)
     );
     let missing = hub.delete_agent(agent).await;
-    assert!(matches!(missing, Err(StoreError::NotFound { .. })), "{missing:?}");
+    assert!(
+        matches!(missing, Err(StoreError::NotFound { .. })),
+        "{missing:?}"
+    );
 }

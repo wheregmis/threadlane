@@ -300,7 +300,10 @@ async fn delete_refuses_the_lead_a_wrong_name_and_open_tasks() {
     let OverviewReply::Task { task } = reply else {
         panic!("expected a task, got {reply:?}");
     };
-    assert_eq!(task.summary.agent, "Reviewer (deleted)", "history keeps the name");
+    assert_eq!(
+        task.summary.agent, "Reviewer (deleted)",
+        "history keeps the name"
+    );
     // The name is free for a new agent.
     create(&hub, "Reviewer").await;
 }
