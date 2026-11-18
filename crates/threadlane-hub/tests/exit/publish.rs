@@ -151,19 +151,22 @@ pub async fn assert_published(sim: &Sim, scenario: &str) {
                 base,
                 title,
                 body,
+                opened_by,
                 ..
             } => assert_eq!(
                 (
                     branch.as_str(),
                     base.as_str(),
                     title.as_str(),
-                    body.as_str()
+                    body.as_str(),
+                    opened_by.as_str()
                 ),
                 (
                     "threadlane/T-0001",
                     "main",
                     "Add the page",
-                    "Adds the page."
+                    "Adds the page.",
+                    "Engineer, T-0001"
                 ),
                 "{scenario}"
             ),
