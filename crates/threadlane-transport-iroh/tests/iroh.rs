@@ -342,6 +342,7 @@ async fn every_request_kind_round_trips() {
     let message = UserMessage {
         project: None,
         text: "hello".to_owned(),
+        images: Vec::new(),
         client_message_id: "m-1".to_owned(),
         task: Some(TaskId(4)),
     };
@@ -353,10 +354,22 @@ async fn every_request_kind_round_trips() {
             duplicate: false,
         })
     );
-    assert_eq!(*hub.sent.lock().expect("lock"), vec![message]);
+    let with_image = UserMessage {
+        project: Some("Design".into()),
+        text: String::new(),
+        images: vec![threadlane_core::attachment::ImageAttachment::new(
+            "reference.png".into(),
+            vec![1, 2, 3],
+        )],
+        client_message_id: "m-image".into(),
+        task: None,
+    };
+    assert!(client.send_message(&with_image).await.is_ok());
+    assert_eq!(*hub.sent.lock().expect("lock"), vec![message, with_image]);
     let missing = UserMessage {
         project: Some("missing".to_owned()),
         text: "hello".to_owned(),
+        images: Vec::new(),
         client_message_id: "m-2".to_owned(),
         task: None,
     };

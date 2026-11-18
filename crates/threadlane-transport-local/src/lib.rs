@@ -148,8 +148,14 @@ impl HubApi for LocalClient {
     }
 
     async fn send_message(&self, message: &UserMessage) -> Result<Accepted, ApiError> {
-        let request = ClientRequest::SendMessage {
-            message: message.clone(),
+        let request = if message.images.is_empty() {
+            ClientRequest::SendMessage {
+                message: message.clone(),
+            }
+        } else {
+            ClientRequest::SendMessageWithImages {
+                message: message.clone(),
+            }
         };
         match self.call(&request, REQUEST_TIMEOUT).await? {
             ClientResponse::Accepted { accepted } => Ok(accepted),

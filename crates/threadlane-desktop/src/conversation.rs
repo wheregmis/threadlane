@@ -2,6 +2,7 @@
 //! messages and what the hub delivered, in time order with day marks.
 
 use threadlane_client::SpaceFeedItem;
+use threadlane_core::attachment::ImageAttachment;
 use threadlane_core::client::{DigestResult, LeadRun};
 use threadlane_core::ids::RunId;
 use threadlane_core::model::{Mode, OutboxKind, Run, RunOutcome, RunStatus};
@@ -20,6 +21,8 @@ pub enum Line {
     New,
     /// A local submission awaiting confirmation.
     Sending {
+        /// Image attachments.
+        images: Vec<ImageAttachment>,
         /// Local message identity.
         id: u64,
         /// What you wrote.
@@ -29,6 +32,8 @@ pub enum Line {
     },
     /// A message you sent.
     You {
+        /// Image attachments.
+        images: Vec<ImageAttachment>,
         /// Stable owner event identity.
         id: threadlane_core::ids::EventId,
         /// What you wrote.
@@ -202,13 +207,15 @@ impl AppState {
         for ((in_space, id), said) in &self.said {
             if in_space == space
                 && said.project == project
-                && !self.has_optimistic_copy(&destination, &said.text, said.at)
+                && !(said.by == Author::You
+                    && self.has_optimistic_copy(&destination, &said.text, &said.images, said.at))
             {
                 lines.push((
                     said.at,
                     i64::MIN,
                     Entry::Visible(match &said.by {
                         Author::You => Line::You {
+                            images: said.images.clone(),
                             id: *id,
                             text: said.text.clone(),
                             time: when.time(said.at),
@@ -247,6 +254,7 @@ impl AppState {
                     send.at,
                     i64::MAX,
                     Entry::Visible(Line::Sending {
+                        images: send.images.clone(),
                         id: send.id,
                         text: send.text.clone(),
                         time: when.time(send.at),

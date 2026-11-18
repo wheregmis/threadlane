@@ -251,7 +251,7 @@ pub(super) async fn feed_item(
 
 /// Your message as the conversation and the task screen show it; a
 /// space lead's ask, as its bare message, in a project's conversation.
-fn you(event: Event) -> ConversationEntry {
+fn you(event: Event, include_images: bool) -> ConversationEntry {
     let field = |name: &str| {
         event
             .payload
@@ -270,6 +270,11 @@ fn you(event: Event) -> ConversationEntry {
     ConversationEntry::You {
         event_id: event.id,
         text: field("text"),
+        images: if include_images {
+            threadlane_core::attachment::images_in(&event.payload)
+        } else {
+            Vec::new()
+        },
         at: event.received_at,
     }
 }
@@ -388,6 +393,7 @@ pub(super) async fn handle(
             limit,
         } => {
             let project = api.project_named(project.as_deref()).await?;
+            let include_images = limit <= threadlane_core::client::CONVERSATION_PAGE;
             let limit = limit.min(FEED_PAGE);
             let names = Names::of(db).await?;
             let mut entries: Vec<(Timestamp, ConversationEntry)> = db
@@ -395,7 +401,7 @@ pub(super) async fn handle(
                 .await
                 .map_err(api_error)?
                 .into_iter()
-                .map(|event| (event.received_at, you(event)))
+                .map(|event| (event.received_at, you(event, include_images)))
                 .collect();
             if project.is_general {
                 for event in db

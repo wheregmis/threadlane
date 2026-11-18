@@ -98,6 +98,7 @@ impl CodexBackend {
             home: self.config.home.clone(),
             working_dir,
             prompt,
+            images: Vec::new(),
             model,
             appended_instructions: String::new(),
             mcp_url: None,
@@ -208,14 +209,44 @@ impl AgentBackend for CodexBackend {
                 })?,
             )
         };
+        let scratch = if request.images.is_empty() {
+            None
+        } else {
+            Some(
+                tempfile::Builder::new()
+                    .prefix("threadlane-codex-images-")
+                    .tempdir()
+                    .map_err(|error| {
+                        BackendError::Failed(format!(
+                            "could not create an image directory: {error}"
+                        ))
+                    })?,
+            )
+        };
+        let mut images = Vec::new();
+        if let Some(dir) = &scratch {
+            for (index, image) in request.images.iter().enumerate() {
+                let (_, extension) = image
+                    .format()
+                    .ok_or_else(|| BackendError::Failed("unsupported chat image".into()))?;
+                let path = dir.path().join(format!("{index}.{extension}"));
+                tokio::fs::write(&path, image.bytes())
+                    .await
+                    .map_err(|error| {
+                        BackendError::Failed(format!("could not save a chat image: {error}"))
+                    })?;
+                images.push(path);
+            }
+        }
         let launch = Launch {
+            images,
             appended_instructions: request.appended_instructions,
             mcp_url: server.as_ref().map(|server| server.url().to_owned()),
             read_only: request.remove_builtin_tools,
             trusted: rules.is_some(),
             ..self.launch(working_dir, request.prompt, request.model)
         };
-        start(launch, &request.session, server, rules, None)
+        start(launch, &request.session, server, rules, scratch)
     }
 
     async fn ask(&self, request: AskRequest) -> Result<Json, BackendError> {

@@ -790,7 +790,7 @@ impl AppState {
         task_moments(
             detail,
             when,
-            |text, at| !self.has_optimistic_copy(&destination, text, at),
+            |text, at| !self.has_optimistic_copy(&destination, text, &[], at),
             self.outgoing()
                 .filter(|send| send.destination == destination)
                 .map(|send| {
@@ -937,7 +937,9 @@ fn task_moments(
         }
     }
     for entry in &detail.messages {
-        if let ConversationEntry::You { event_id, text, at } = entry
+        if let ConversationEntry::You {
+            event_id, text, at, ..
+        } = entry
             && show_owner(text, *at)
         {
             moments.push((

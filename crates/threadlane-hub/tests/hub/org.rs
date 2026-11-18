@@ -17,6 +17,7 @@ fn message(project: Option<&str>, id: &str) -> UserMessage {
     UserMessage {
         project: project.map(str::to_owned),
         text: "are you there?".to_owned(),
+        images: Vec::new(),
         client_message_id: id.to_owned(),
         task: None,
     }

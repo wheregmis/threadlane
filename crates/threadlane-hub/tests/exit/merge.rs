@@ -124,6 +124,7 @@ async fn a_conflict_is_refused_with_its_files_and_finishes_after_the_agent_rebas
         .send_message(&UserMessage {
             project: None,
             text: "Go on.".to_owned(),
+            images: Vec::new(),
             client_message_id: "go-on".to_owned(),
             task: Some(task.id),
         })

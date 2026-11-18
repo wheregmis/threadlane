@@ -8975,6 +8975,8 @@ name = "threadlane-core"
 version = "0.1.53"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "image",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -8987,6 +8989,7 @@ version = "0.1.53"
 dependencies = [
  "async-trait",
  "gpui-kit",
+ "image",
  "serde_json",
  "tempfile",
  "threadlane-client",

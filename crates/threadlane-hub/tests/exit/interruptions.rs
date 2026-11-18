@@ -96,6 +96,7 @@ async fn stop_interrupts_the_task_preserves_its_work_and_waits_for_user_input() 
         .send_message(&UserMessage {
             project: None,
             text: "Go on with the page.".to_owned(),
+            images: Vec::new(),
             client_message_id: "go-on".to_owned(),
             task: Some(task.id),
         })

@@ -646,6 +646,7 @@ mod tests {
         RunRequest {
             working_dir: PathBuf::from("/lanes/lane-1"),
             prompt: "hello".into(),
+            images: Vec::new(),
             appended_instructions: "lead rules".into(),
             model: Some("haiku".into()),
             session,

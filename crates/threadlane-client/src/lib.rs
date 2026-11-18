@@ -1349,10 +1349,26 @@ impl ClientCore {
         project: Option<&str>,
         text: &str,
     ) -> Result<Sent, ClientError> {
+        self.send_with_images(space, project, text, Vec::new())
+            .await
+    }
+
+    /// Sends text and images to a project's lead.
+    ///
+    /// # Errors
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn send_with_images(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+        text: &str,
+        images: Vec<threadlane_core::attachment::ImageAttachment>,
+    ) -> Result<Sent, ClientError> {
         let (space, api) = self.target(space)?;
         let message = UserMessage {
             project: project.map(str::to_owned),
             text: text.to_owned(),
+            images,
             client_message_id: uuid::Uuid::new_v4().to_string(),
             task: None,
         };
@@ -1393,6 +1409,7 @@ impl ClientCore {
         let message = UserMessage {
             project: None,
             text: text.to_owned(),
+            images: Vec::new(),
             client_message_id: uuid::Uuid::new_v4().to_string(),
             task: Some(id),
         };

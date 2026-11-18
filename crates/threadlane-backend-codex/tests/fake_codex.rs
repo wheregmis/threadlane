@@ -160,6 +160,7 @@ impl Fake {
         RunRequest {
             working_dir: self.work.path().to_owned(),
             prompt: "Say hello.".to_owned(),
+            images: Vec::new(),
             appended_instructions: String::new(),
             model: None,
             session,
@@ -272,6 +273,7 @@ async fn start_passes_every_option_and_keeps_the_token_off_the_command_line() {
     });
     let request = RunRequest {
         prompt: "Reply to the message.\nIt says: hello.".to_owned(),
+        images: Vec::new(),
         appended_instructions: "You are a task agent.\nUse \"the tools\".".to_owned(),
         model: Some("gpt-test".to_owned()),
         tools: Some(Arc::new(Endpoint)),

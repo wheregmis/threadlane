@@ -467,6 +467,7 @@ async fn a_run_never_reaches_memory_outside_its_project_and_the_spaces_notes() {
         .send_message(&threadlane_core::client::UserMessage {
             project: Some("Alpha".into()),
             text: "Remember the secret".into(),
+            images: Vec::new(),
             client_message_id: "a-1".into(),
             task: None,
         })

@@ -372,6 +372,7 @@ mod tests {
             .send_message(&UserMessage {
                 project: Some("Alpha".into()),
                 text: "hello".into(),
+                images: Vec::new(),
                 client_message_id: "m-1".into(),
                 task: None,
             })
@@ -399,6 +400,7 @@ mod tests {
             .send_message(&UserMessage {
                 project: Some("Alpha".into()),
                 text: "hello".into(),
+                images: Vec::new(),
                 client_message_id: "m-1".into(),
                 task: None,
             })
@@ -519,6 +521,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Nothing ne
                 .send_message(&UserMessage {
                     project: None,
                     text: "Anything new?".into(),
+                    images: Vec::new(),
                     client_message_id: "m-1".into(),
                     task: None,
                 })

@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 use tempfile::TempDir;
+use threadlane_core::attachment::ImageAttachment;
 use threadlane_core::backend::{BackendError, BackendEvent, BackendRun, NativeSession};
 use threadlane_mcp::McpServer;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -48,6 +49,7 @@ pub(crate) struct Launch {
     pub(crate) config_dir: Option<PathBuf>,
     pub(crate) working_dir: PathBuf,
     pub(crate) prompt: String,
+    pub(crate) images: Vec<ImageAttachment>,
     pub(crate) model: Option<String>,
     pub(crate) appended_instructions: String,
     pub(crate) mcp_config: Option<PathBuf>,
@@ -120,6 +122,7 @@ impl Launch {
         if let Some(dir) = &self.config_dir {
             command.env("CLAUDE_CONFIG_DIR", dir);
         }
+        let prompt = user_input(&self.prompt, &self.images)?;
         let mut child = command.spawn()?;
         let (Some(mut stdin), Some(stdout), Some(mut stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -127,7 +130,6 @@ impl Launch {
             return Err(std::io::Error::other("claude's pipes were not set up"));
         };
 
-        let prompt = user_input(&self.prompt);
         let (input, mut extra) = mpsc::channel::<String>(1);
         let stdin_task = tokio::spawn(async move {
             let mut line = prompt;
@@ -208,14 +210,24 @@ impl Tail {
     }
 }
 
-fn user_input(text: &str) -> String {
+fn user_input(text: &str, images: &[ImageAttachment]) -> std::io::Result<String> {
+    let mut content = vec![json!({ "type": "text", "text": text })];
+    for image in images {
+        let (mime, _) = image
+            .format()
+            .ok_or_else(|| std::io::Error::other("unsupported chat image"))?;
+        content.push(json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": mime, "data": image.base64() }
+        }));
+    }
     let message = json!({
         "type": "user",
-        "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+        "message": { "role": "user", "content": content },
         "parent_tool_use_id": null,
         "session_id": "",
     });
-    format!("{message}\n")
+    Ok(format!("{message}\n"))
 }
 
 /// A spawned claude process.
@@ -472,7 +484,10 @@ impl BackendRun for ClaudeRun {
             return Ok(false);
         }
         input
-            .send(user_input(message))
+            .send(
+                user_input(message, &[])
+                    .map_err(|error| BackendError::Failed(error.to_string()))?,
+            )
             .await
             .map_err(|_| BackendError::Failed("claude closed its streaming input".to_owned()))?;
         self.held.take();
@@ -505,6 +520,7 @@ mod tests {
             config_dir: None,
             working_dir: "/tmp".into(),
             prompt: String::new(),
+            images: Vec::new(),
             model: None,
             appended_instructions: String::new(),
             mcp_config: None,
@@ -512,6 +528,24 @@ mod tests {
             deny_rules: Vec::new(),
             max_turns: None,
         }
+    }
+
+    #[test]
+    fn stream_input_carries_image_data_and_mime() {
+        let bytes = b"\x89PNG\r\n\x1a\n";
+        let image = ImageAttachment::new("image.png".into(), bytes.to_vec());
+        let line = user_input("Look at this", std::slice::from_ref(&image)).unwrap();
+        assert!(line.ends_with('\n'));
+        let input: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            input["message"]["content"],
+            json!([
+                { "type": "text", "text": "Look at this" },
+                { "type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": image.base64()
+                }}
+            ])
+        );
     }
 
     #[test]

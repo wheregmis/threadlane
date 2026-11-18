@@ -751,9 +751,15 @@ impl Desktop {
             lines = match line {
                 Line::Day(day) => lines.child(Separator::horizontal().label(day.clone())),
                 Line::New => lines.child(Separator::horizontal().label("New")),
-                Line::You { id, text, time } => {
-                    lines.child(said(format!("you-{id}"), "You", time, text, true))
-                }
+                Line::You {
+                    id,
+                    text,
+                    time,
+                    images,
+                } => lines.child(
+                    said(format!("you-{id}"), "You", time, text, !text.is_empty())
+                        .children(crate::components::chat_images::previews(images, cx)),
+                ),
                 Line::SpaceLead { id, text, time } => lines.child(said(
                     format!("space-lead-{id}"),
                     "General lead",
@@ -802,13 +808,15 @@ impl Desktop {
                 Line::Notice { seq, text, time } => {
                     lines.child(said(format!("notice-{seq}"), "Notice", time, text, false))
                 }
-                Line::Sending { id, text, time } => lines.child(said(
-                    format!("sending-{id}"),
-                    "You · Sending…",
-                    time,
+                Line::Sending {
+                    id,
                     text,
-                    false,
-                )),
+                    time,
+                    images,
+                } => lines.child(
+                    said(format!("sending-{id}"), "You · Sending…", time, text, false)
+                        .children(crate::components::chat_images::previews(images, cx)),
+                ),
                 Line::Stopped { time } => {
                     lines.child(said(String::new(), "Lead run stopped", time, "", false))
                 }

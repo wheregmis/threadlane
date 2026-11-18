@@ -100,6 +100,7 @@ impl TestHub {
             .send_message(&UserMessage {
                 project: None,
                 text: text.to_owned(),
+                images: Vec::new(),
                 client_message_id: id.to_owned(),
                 task: None,
             })

@@ -46,6 +46,7 @@ pub(crate) struct Launch {
     pub(crate) home: Option<PathBuf>,
     pub(crate) working_dir: PathBuf,
     pub(crate) prompt: String,
+    pub(crate) images: Vec<PathBuf>,
     pub(crate) model: Option<String>,
     pub(crate) appended_instructions: String,
     /// The tool server's URL; its token goes in [`TOKEN_ENV`].
@@ -130,6 +131,9 @@ impl Launch {
             ] {
                 args.extend(["--disable".into(), feature.into()]);
             }
+        }
+        for path in &self.images {
+            args.push(format!("--image={}", path.display()));
         }
         if let NativeSession::Resume { id } = session {
             args.push(id.clone());
@@ -483,6 +487,7 @@ mod tests {
             home: None,
             working_dir: "/work/app".into(),
             prompt: String::new(),
+            images: Vec::new(),
             model: None,
             appended_instructions: String::new(),
             mcp_url: None,
@@ -490,6 +495,29 @@ mod tests {
             trusted: false,
             output_schema: None,
             ephemeral: false,
+        }
+    }
+
+    #[test]
+    fn images_are_separate_arguments_on_start_and_resume() {
+        let mut launch = launch();
+        launch.images = vec![
+            "/tmp/images here/0.png".into(),
+            "/tmp/images here/1.jpg".into(),
+        ];
+        for session in [
+            NativeSession::Start {
+                id: "ignored".into(),
+            },
+            NativeSession::Resume { id: "abc".into() },
+        ] {
+            let args = launch.args(&session);
+            let attach: Vec<_> = args
+                .iter()
+                .filter_map(|arg| arg.to_str()?.strip_prefix("--image="))
+                .collect();
+            assert_eq!(attach, ["/tmp/images here/0.png", "/tmp/images here/1.jpg"]);
+            assert_eq!(args.last().unwrap(), "-");
         }
     }
 

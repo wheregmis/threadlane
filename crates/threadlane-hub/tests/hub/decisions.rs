@@ -409,6 +409,7 @@ async fn a_message_from_you_in_a_task_lane_declines_its_open_decision() {
         .send_message(&UserMessage {
             project: Some("ignored for a task".to_owned()),
             text: "Not yet, add tests first.".to_owned(),
+            images: Vec::new(),
             client_message_id: "m-2".to_owned(),
             task: Some(waiting.id),
         })
@@ -431,6 +432,7 @@ async fn a_message_from_you_in_a_task_lane_declines_its_open_decision() {
             [ConversationEntry::You {
                 event_id: accepted.event_id,
                 text: "Not yet, add tests first.".to_owned(),
+                images: Vec::new(),
                 at: event.received_at,
             }]
         ),
@@ -470,6 +472,7 @@ async fn a_message_to_a_task_that_is_unknown_or_has_ended_is_refused() {
     let message = |task: i64| UserMessage {
         project: None,
         text: "hello".to_owned(),
+        images: Vec::new(),
         client_message_id: format!("m-{task}"),
         task: Some(TaskId(task)),
     };

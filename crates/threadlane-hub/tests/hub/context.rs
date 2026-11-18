@@ -261,6 +261,7 @@ async fn project_instructions_stay_in_their_project_and_space_instructions_reach
         .send_message(&threadlane_core::client::UserMessage {
             project: Some("Alpha".into()),
             text: "Hello Alpha".into(),
+            images: Vec::new(),
             client_message_id: "a-1".into(),
             task: None,
         })

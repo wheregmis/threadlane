@@ -1206,6 +1206,7 @@ async fn the_conversation_merges_history_your_messages_and_the_feed_once_each() 
         ConversationEntry::You {
             event_id: EventId(1),
             text: "Fix the refunds".to_owned(),
+            images: Vec::new(),
             at: Timestamp::from_millis(1_000),
         },
         ConversationEntry::Delivered {
@@ -1249,6 +1250,7 @@ async fn the_conversation_merges_history_your_messages_and_the_feed_once_each() 
         .push(ConversationEntry::You {
             event_id: EventId(2),
             text: "Also the changelog".to_owned(),
+            images: Vec::new(),
             at: sent_at,
         });
     state.apply_project(load_project(&core, "work", "api").await);
@@ -1603,6 +1605,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
         messages: vec![ConversationEntry::You {
             event_id: EventId(9),
             text: "Use the ledger.".to_owned(),
+            images: Vec::new(),
             at: Timestamp::from_millis(350_000),
         }],
     };
@@ -2219,6 +2222,7 @@ async fn your_message_to_a_task_shows_in_its_timeline_once() {
     assert_eq!(
         detail.messages,
         [ConversationEntry::You {
+            images: Vec::new(),
             event_id: EventId(4),
             text: "Add tests first.".to_owned(),
             at
@@ -3696,6 +3700,7 @@ async fn quiet_lead_runs_group_in_chronological_order_and_reveal_why() {
         ConversationEntry::You {
             event_id: EventId(1),
             text: "Look at the build".to_owned(),
+            images: Vec::new(),
             at: at(8 * 60 + 41),
         },
         ConversationEntry::Delivered {
@@ -4774,6 +4779,7 @@ async fn stage_three_hold_undo_flush_and_confirmation_use_the_original_recipient
     work.history.lock().unwrap().push(ConversationEntry::You {
         event_id,
         text: flushed.text.clone(),
+        images: Vec::new(),
         at,
     });
     state.apply_project(load_project(&core, "work", "api").await);
@@ -4880,6 +4886,7 @@ async fn stage_three_new_divider_tracks_each_visit_and_the_newest_body_stays_ope
         .extend((0..i64::from(PAGE)).map(|index| ConversationEntry::You {
             event_id: EventId(1 + index),
             text: "Newer page".to_owned(),
+            images: Vec::new(),
             at: Timestamp::from_millis(3_000 + index),
         }));
     assert_eq!(state.reference_project("work", DecisionId(50)), None);
@@ -5482,6 +5489,7 @@ async fn archived_projects_leave_work_surfaces_and_restore_the_same_history() {
     work.history.lock().unwrap().push(ConversationEntry::You {
         event_id: EventId(1),
         text: "A message before archive".into(),
+        images: Vec::new(),
         at: Timestamp::from_millis(1_000),
     });
     let mut state = AppState::paired(["work"]);
@@ -5672,6 +5680,7 @@ async fn deletion_in_another_client_drops_cached_project_and_history_on_refresh(
     work.history.lock().unwrap().push(ConversationEntry::You {
         event_id: EventId(123),
         text: "Project history".to_owned(),
+        images: Vec::new(),
         at: when().now,
     });
     let mut state = AppState::paired(["work"]);
@@ -5896,6 +5905,7 @@ fn said_by_you(id: i64, text: &str, at: i64) -> ConversationEntry {
     ConversationEntry::You {
         event_id: EventId(id),
         text: text.to_owned(),
+        images: Vec::new(),
         at: Timestamp::from_millis(at),
     }
 }
@@ -6145,4 +6155,74 @@ async fn the_space_lead_s_asks_and_the_replies_are_labeled_and_linked() {
     );
     let reply = state.timeline()[0];
     assert!(matches!(reply.spoken, Spoken::Said(_, Author::ProjectLead(from)) if from == "api"));
+}
+
+#[tokio::test]
+async fn image_only_drafts_are_scoped_and_survive_undo_failure_and_history_reload() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let general = Destination::Lead("work".into(), "General".into());
+    let other = Destination::Lead("work".into(), "api".into());
+    let at = when().now;
+    let image = ImageAttachment::new("reference.png".into(), vec![1, 2, 3]);
+    state.loading_images(&general);
+    assert!(!state.is_send_enabled(&general));
+    state.attach_images(&general, Ok(vec![image.clone()]));
+    assert!(state.is_send_enabled(&general));
+    assert!(state.draft_images(&other).is_empty());
+
+    let held = state.request_send(general.clone(), at).held.unwrap();
+    assert!(
+        matches!(state.conversation("work", "General", &when()).last(),
+        Some(Line::Sending { images, .. }) if images == std::slice::from_ref(&image))
+    );
+    state.remove_image(&general, &image);
+    assert!(state.undo_send(&general));
+    assert_eq!(state.draft_images(&general), std::slice::from_ref(&image));
+    assert!(state.tick_send(held).is_none());
+
+    let submit = |state: &mut AppState| {
+        state.request_send(general.clone(), at).held.unwrap();
+        state.request_send(general.clone(), at).flushed.unwrap()
+    };
+    let send = submit(&mut state);
+    state.finish_send(
+        send,
+        Err(ClientError::Unreachable {
+            space: "work".into(),
+            reason: "offline".into(),
+        }),
+    );
+    assert_eq!(state.draft_images(&general), std::slice::from_ref(&image));
+
+    let send = submit(&mut state);
+    let result = send.deliver(&core).await;
+    let event_id = result.as_ref().unwrap().accepted.event_id;
+    let new_image = ImageAttachment::new("later.png".into(), vec![4, 5, 6]);
+    state.attach_images(&general, Ok(vec![new_image.clone()]));
+    state.finish_send(send, result);
+    assert_eq!(state.draft_images(&general), &[new_image]);
+
+    let history = ConversationEntry::You {
+        event_id,
+        text: String::new(),
+        images: vec![image.clone()],
+        at,
+    };
+    state.take_history("work", "General", vec![history], true, PAGE);
+    assert!(
+        matches!(state.conversation("work", "General", &when()).last(),
+        Some(Line::You { images, .. }) if images == std::slice::from_ref(&image))
+    );
+    assert_eq!(
+        state
+            .timeline()
+            .iter()
+            .filter(|row| row.images == std::slice::from_ref(&image))
+            .count(),
+        1
+    );
+    assert!(state.conversation("work", "api", &when()).is_empty());
 }

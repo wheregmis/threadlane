@@ -192,6 +192,7 @@ async fn dream_filters_tools_scope_session_history_and_effects() {
         .send_message(&UserMessage {
             project: Some("Other".into()),
             text: "Other project request".into(),
+            images: Vec::new(),
             client_message_id: "other".into(),
             task: None,
         })

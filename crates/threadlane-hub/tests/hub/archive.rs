@@ -118,6 +118,7 @@ fn message(id: &str) -> UserMessage {
     UserMessage {
         project: named(),
         text: "The conversation remains readable.".into(),
+        images: Vec::new(),
         client_message_id: id.into(),
         task: None,
     }
