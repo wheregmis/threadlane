@@ -219,6 +219,19 @@ impl HubApi for FakeHub {
             } => OrgReply::Agent {
                 agent: agent(&name, &role, &instructions),
             },
+            OrgRequest::UpdateAgent {
+                agent: from,
+                name,
+                role,
+                ..
+            } => OrgReply::Agent {
+                agent: agent(
+                    name.as_deref().unwrap_or(&from),
+                    role.as_deref().unwrap_or("reviewer"),
+                    "",
+                ),
+            },
+            OrgRequest::DeleteAgent { agent, .. } => OrgReply::AgentDeleted { agent },
             OrgRequest::Bindings { .. } => OrgReply::Bindings {
                 bindings: vec![BindingSummary {
                     agent: "Lead".to_owned(),
@@ -1647,6 +1660,111 @@ async fn cli_sends_operations_to_the_selected_hub_and_prints_its_reply() {
             .into_iter()
             .map(|(_, request)| request)
             .collect::<Vec<_>>()
+    );
+    hub.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_edits_an_agent_and_deletes_one_after_its_name_is_typed() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().expect("tempdir");
+    let client_dir = client.path();
+    let socket = hub.socket().display().to_string();
+    expect_success(
+        client_dir,
+        &["hub", "add", "work", &socket],
+        &format!("paired work: {socket}\n"),
+    )
+    .await;
+    let instructions = client_dir.join("instructions.md");
+    std::fs::write(&instructions, "Review every change.\n").expect("write");
+    expect_success(
+        client_dir,
+        &[
+            "agent",
+            "edit",
+            "Reviewer",
+            "--name",
+            "Critic",
+            "--instructions-file",
+            instructions.to_str().expect("utf-8"),
+            "--backend",
+            "codex,claude",
+            "--model",
+            "claude=opus",
+            "--model",
+            "codex=",
+        ],
+        "updated agent Critic (reviewer)\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["agent", "edit", "Critic", "--role", "critic"],
+        "updated agent Critic (critic)\n",
+    )
+    .await;
+    for refused in [
+        &["agent", "edit", "Critic", "--model", "opus"][..],
+        &[
+            "agent",
+            "edit",
+            "Critic",
+            "--instructions",
+            "x",
+            "--instructions-file",
+            "y",
+        ],
+    ] {
+        let output = threadlane(client_dir, refused).await;
+        assert!(!output.status.success(), "{refused:?} is refused");
+    }
+
+    let typed = |text: &'static str| {
+        let mut child = command(client_dir, &["agent", "delete", "Critic"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        let mut stdin = child.stdin.take().expect("stdin");
+        async move {
+            use tokio::io::AsyncWriteExt as _;
+            stdin.write_all(text.as_bytes()).await.expect("type");
+            drop(stdin);
+            child.wait_with_output().await.expect("output")
+        }
+    };
+    let wrong = typed("critic\n").await;
+    assert!(!wrong.status.success(), "a wrong name is refused");
+    let deleted = typed("Critic\n").await;
+    assert!(deleted.status.success(), "{}", stderr(&deleted));
+    assert!(stdout(&deleted).contains("Type \"Critic\" to confirm deletion"));
+    assert!(stdout(&deleted).ends_with("deleted agent Critic\n"));
+
+    let changed = |name: Option<&str>, role: Option<&str>| OrgRequest::UpdateAgent {
+        agent: if name.is_some() { "Reviewer" } else { "Critic" }.to_owned(),
+        name: name.map(str::to_owned),
+        role: role.map(str::to_owned),
+        instructions: name.map(|_| "Review every change.\n".to_owned()),
+        backends: name.map(|_| vec!["codex".to_owned(), "claude".to_owned()]),
+        models: name.map(|_| {
+            [("claude", "opus"), ("codex", "")]
+                .map(|(b, m)| (b.to_owned(), m.to_owned()))
+                .into()
+        }),
+    };
+    assert_eq!(
+        *hub.fake.0.org.lock().expect("lock"),
+        vec![
+            changed(Some("Critic"), None),
+            changed(None, Some("critic")),
+            OrgRequest::DeleteAgent {
+                agent: "Critic".to_owned(),
+                confirm_name: "Critic".to_owned(),
+            },
+        ],
+        "a wrong name never reaches the hub"
     );
     hub.stop().await;
 }

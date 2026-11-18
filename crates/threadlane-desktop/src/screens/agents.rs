@@ -3,16 +3,15 @@
 //! row per project and one cell per agent. A cell changes that agent's mode
 //! in that project, binding it there from "—".
 
-use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_desktop::{BACKENDS, EmptyRegion, Part};
+use threadlane_desktop::{EmptyRegion, Part};
 
+use super::agent_edit::backend_picker;
 use super::project::{MODES, mode_name};
 use super::{empty, gap_line};
 use crate::Desktop;
@@ -47,21 +46,53 @@ impl Desktop {
                         .collect::<Vec<_>>()
                         .join(" then ")
                 };
-                cards =
-                    cards.child(
-                        card(cx)
-                            .w(AGENT_CARD_WIDTH)
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(agent.name.clone()),
-                            )
-                            .child(div().text_size(TYPE_BODY).child(agent.role.clone()))
-                            .child(div().text_size(TYPE_BODY).text_color(muted).child(backends))
-                            .children(self.state.agent_runs_on(&space.name, agent).map(|line| {
-                                div().text_size(TYPE_BODY).text_color(muted).child(line)
-                            })),
-                    );
+                let open = {
+                    let (space, agent) = (space.name.clone(), agent.name.clone());
+                    move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                        this.open_agent_edit(&space, &agent, window, cx);
+                    }
+                };
+                let edit = open.clone();
+                let id = format!("agent-card-{}-{}", space.name, agent.name);
+                cards = cards.child(
+                    div()
+                        .id(SharedString::from(id.clone()))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
+                        .child(
+                            card(cx)
+                                .w(AGENT_CARD_WIDTH)
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .items_center()
+                                        .gap(SM)
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(agent.name.clone()),
+                                        )
+                                        .child(
+                                            button(SharedString::from(format!("{id}-edit")))
+                                                .small()
+                                                .ghost()
+                                                .label("Edit")
+                                                .accessibility_label(format!("Edit {}", agent.name))
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        edit(this, window, cx);
+                                                    },
+                                                )),
+                                        ),
+                                )
+                                .child(div().text_size(TYPE_BODY).child(agent.role.clone()))
+                                .child(div().text_size(TYPE_BODY).text_color(muted).child(backends))
+                                .children(self.state.agent_runs_on(&space.name, agent).map(
+                                    |line| div().text_size(TYPE_BODY).text_color(muted).child(line),
+                                )),
+                        ),
+                );
             }
 
             let grid = self.state.modes(&space.name);
@@ -180,6 +211,11 @@ impl Desktop {
             if self.state.agent_form().space.as_deref() == Some(space.name.as_str()) {
                 part = part.child(self.agent_form(&space.name, cx));
             }
+            if self.state.agent_edit().map(|edit| edit.space.as_str()) == Some(space.name.as_str())
+                && let Some(view) = self.agent_edit_view(cx)
+            {
+                part = part.child(view);
+            }
             if let Some(gap) = space.gap(Part::Agents) {
                 part = part.child(gap_line(&gap, "agents", &space.name, cx));
             } else if space.agents.is_empty() {
@@ -207,21 +243,12 @@ impl Desktop {
     /// The "+ New agent" form: name, role, instructions, and the backends
     /// in order of preference.
     fn agent_form(&self, space: &str, cx: &mut Context<Self>) -> GroupBox {
-        let picked = self.state.agent_form().backends;
-        let backends = ButtonGroup::new("agent-backends")
-            .outline()
-            .compact()
-            .children(BACKENDS.iter().enumerate().map(|(index, (label, _))| {
-                button(SharedString::from(format!("agent-backends-{index}")))
-                    .label(*label)
-                    .selected(picked == index)
-            }))
-            .on_click(cx.listener(|this, clicked: &Vec<usize>, _, cx| {
-                if let Some(index) = clicked.first() {
-                    this.state.agent_form_mut().backends = *index;
-                    cx.notify();
-                }
-            }));
+        let backends = backend_picker(
+            "agent-backends",
+            self.state.agent_form().backends,
+            |this, index| this.state.agent_form_mut().backends = index,
+            cx,
+        );
         let view = cx.entity().downgrade();
         let (offered, note) = match &self.state.agent_form().templates {
             None => (Vec::new(), Some("Listing templates…".to_owned())),

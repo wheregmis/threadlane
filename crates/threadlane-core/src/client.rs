@@ -222,6 +222,28 @@ pub enum OrgRequest {
     DeletePreview { project: String },
     /// The starter agents compiled into the hub (docs/agent-templates.md).
     Templates,
+    /// Changes an agent. A field left out keeps its value; a model set to
+    /// `""` goes back to the backend's default. It applies from the agent's
+    /// next run. Answered with the agent.
+    UpdateAgent {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        /// Backend names in order of preference; empty means either.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backends: Option<Vec<String>>,
+        /// The model per backend name, changing only the backends named.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        models: Option<BTreeMap<String, String>>,
+    },
+    /// Deletes an agent with its bindings and standing rules if the exact
+    /// name was confirmed. Refused for the lead and while any of its tasks
+    /// has not ended.
+    DeleteAgent { agent: String, confirm_name: String },
 }
 
 /// What deleting one project removes.
@@ -404,6 +426,10 @@ pub enum OrgReply {
     },
     Templates {
         templates: Vec<AgentTemplate>,
+    },
+    /// The agent [`OrgRequest::DeleteAgent`] deleted.
+    AgentDeleted {
+        agent: String,
     },
 }
 

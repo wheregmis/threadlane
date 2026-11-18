@@ -252,7 +252,7 @@ async fn remove_digest_members(conn: &Connection, id: ProjectId) -> StoreResult<
     Ok(())
 }
 
-async fn preserve_floors(conn: &Connection) -> StoreResult<()> {
+pub(crate) async fn preserve_floors(conn: &Connection) -> StoreResult<()> {
     for (table, column, name) in [
         ("projects", "id", "projects"),
         ("repositories", "id", "repositories"),

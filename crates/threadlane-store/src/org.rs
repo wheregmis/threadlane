@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
-use threadlane_core::ids::{AgentId, BindingId, LaneId, ProjectId};
+use threadlane_core::ids::{AgentId, BindingId, LaneId, ProjectId, TaskId};
 use threadlane_core::model::{
     Agent, Binding, LaneKind, Mode, NewAgent, NewBinding, NewProject, NewRepository, Project,
     Repository, SpaceSettings,
@@ -402,11 +402,133 @@ impl OrgStore for HubDb {
         let conn = self.db.reader()?;
         query_all(
             &conn,
+            &format!("SELECT {AGENT_COLUMNS} WHERE deleted_at IS NULL ORDER BY id"),
+            (),
+            decode_agent,
+        )
+        .await
+    }
+
+    async fn all_agents(&self) -> StoreResult<Vec<Agent>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
             &format!("SELECT {AGENT_COLUMNS} ORDER BY id"),
             (),
             decode_agent,
         )
         .await
+    }
+
+    async fn update_agent(&self, agent: &Agent) -> StoreResult<Agent> {
+        let tx = self.db.begin().await?;
+        let changed = exec(
+            tx.conn(),
+            "UPDATE agents SET name = ?2, role = ?3, instructions = ?4, backends = ?5, models = ?6
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![
+                agent.id.get(),
+                agent.name.as_str(),
+                agent.role.as_str(),
+                agent.instructions.as_str(),
+                json_text(&agent.backends)?,
+                json_text(&agent.models)?,
+            ],
+        )
+        .await?;
+        if changed == 0 {
+            return Err(StoreError::NotFound {
+                kind: "agent",
+                id: agent.id.to_string(),
+            });
+        }
+        let updated = query_one(
+            tx.conn(),
+            &format!("SELECT {AGENT_COLUMNS} WHERE id = ?1"),
+            params![agent.id.get()],
+            decode_agent,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    async fn delete_agent(&self, id: AgentId) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let name = query_opt(
+            conn,
+            "SELECT name FROM agents WHERE id = ?1 AND deleted_at IS NULL",
+            params![id.get()],
+            |row| Cols(row).text(0),
+        )
+        .await?
+        .ok_or_else(|| StoreError::NotFound {
+            kind: "agent",
+            id: id.to_string(),
+        })?;
+        let leads: Vec<String> = query_all(
+            conn,
+            "SELECT p.name FROM bindings b JOIN projects p ON p.id = b.project_id
+             WHERE b.agent_id = ?1 AND b.is_lead = 1 ORDER BY p.id",
+            params![id.get()],
+            |row| Cols(row).text(0),
+        )
+        .await?;
+        if !leads.is_empty() {
+            return Err(StoreError::Invalid(format!(
+                "{name} is the lead of {}; a lead cannot be deleted",
+                leads.join(", ")
+            )));
+        }
+        let live: Vec<TaskId> = query_all(
+            conn,
+            "SELECT id FROM tasks WHERE agent_id = ?1
+             AND status NOT IN ('done', 'failed', 'cancelled') ORDER BY id",
+            params![id.get()],
+            |row| Cols(row).id(0),
+        )
+        .await?;
+        if !live.is_empty() {
+            let named: Vec<String> = live.iter().map(ToString::to_string).collect();
+            return Err(StoreError::Invalid(format!(
+                "{name} still has tasks that have not ended: {}. Cancel or finish them first",
+                named.join(", ")
+            )));
+        }
+        crate::deletion::preserve_floors(conn).await?;
+        exec(
+            conn,
+            "DELETE FROM standing_rules WHERE agent_id = ?1",
+            params![id.get()],
+        )
+        .await?;
+        exec(
+            conn,
+            "DELETE FROM bindings WHERE agent_id = ?1",
+            params![id.get()],
+        )
+        .await?;
+        // The row stays for history; its name is freed for a new agent.
+        let mut tombstone = format!("{name} (deleted)");
+        let taken = query_opt(
+            conn,
+            "SELECT id FROM agents WHERE name = ?1",
+            params![tombstone.as_str()],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        if taken.is_some() {
+            tombstone = format!("{name} (deleted {id})");
+        }
+        exec(
+            conn,
+            "UPDATE agents SET name = ?2, deleted_at = ?3 WHERE id = ?1",
+            params![id.get(), tombstone.as_str(), self.now().as_millis()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn bind(&self, binding: &NewBinding) -> StoreResult<Binding> {

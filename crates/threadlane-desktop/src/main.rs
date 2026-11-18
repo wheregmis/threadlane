@@ -360,6 +360,12 @@ struct Desktop {
     agent_name: Entity<InputState>,
     agent_role: Entity<InputState>,
     agent_instructions: Entity<InputState>,
+    /// The agent edit view's name, role, instructions, and a model per
+    /// backend in `BackendKind::ALL` order.
+    agent_edit_name: Entity<InputState>,
+    agent_edit_role: Entity<InputState>,
+    agent_edit_instructions: Entity<TextareaState>,
+    agent_edit_models: Vec<Entity<InputState>>,
     /// The "+ Add repository" form's name, remote and default branch.
     repository_name: Entity<InputState>,
     repository_remote: Entity<InputState>,
@@ -397,6 +403,7 @@ impl Desktop {
         let composer = components::composer::input("Tell your team what you need…", window, cx);
         let task_composer = components::composer::input("Add to this task…", window, cx);
         let memory_editor = cx.new(|cx| TextareaState::new(window, cx).rows(16));
+        let agent_edit_instructions = cx.new(|cx| TextareaState::new(window, cx).rows(16));
         let dream_cadence =
             cx.new(|cx| InputState::new(window, cx).placeholder("daily 02:00 or every 6h"));
         let space_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name for the space"));
@@ -431,6 +438,12 @@ impl Desktop {
         let agent_name = field("Name", cx);
         let agent_role = field("Role, for example reviewer", cx);
         let agent_instructions = field("Instructions (optional)", cx);
+        let agent_edit_name = field("Name", cx);
+        let agent_edit_role = field("Role, for example reviewer", cx);
+        let agent_edit_models = threadlane_core::model::BackendKind::ALL
+            .iter()
+            .map(|_| field("Model (the backend's default if empty)", cx))
+            .collect();
         let repository_name = field("Name in the project", cx);
         let repository_remote = field("Remote, git@github.com:you/repo.git", cx);
         let repository_branch = field("Default branch (main)", cx);
@@ -547,6 +560,10 @@ impl Desktop {
             agent_name,
             agent_role,
             agent_instructions,
+            agent_edit_name,
+            agent_edit_role,
+            agent_edit_instructions,
+            agent_edit_models,
             repository_name,
             repository_remote,
             repository_branch,

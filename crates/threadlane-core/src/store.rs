@@ -98,7 +98,17 @@ pub trait OrgStore: Send + Sync {
 
     async fn create_agent(&self, agent: &NewAgent) -> StoreResult<Agent>;
     async fn agent(&self, id: AgentId) -> StoreResult<Option<Agent>>;
+    /// Every agent not deleted.
     async fn agents(&self) -> StoreResult<Vec<Agent>>;
+    /// Every agent, deleted ones included, for naming them in history.
+    async fn all_agents(&self) -> StoreResult<Vec<Agent>>;
+    /// Stores an agent's name, role, instructions, backends and models. A
+    /// name another agent has is a [`StoreError::Conflict`].
+    async fn update_agent(&self, agent: &Agent) -> StoreResult<Agent>;
+    /// Deletes an agent with its bindings and standing rules. Its row stays,
+    /// renamed `<name> (deleted)`, so finished tasks still name it. Refused
+    /// for a lead, and while any of its tasks has not ended.
+    async fn delete_agent(&self, id: AgentId) -> StoreResult<()>;
 
     /// Binds an agent to a project. At most one binding per pair and one lead
     /// per project.
