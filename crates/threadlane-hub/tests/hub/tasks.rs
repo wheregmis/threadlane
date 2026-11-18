@@ -3,6 +3,7 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::NativeSession;
+use threadlane_core::client::{ApiError, TaskReply, TaskRequest};
 use threadlane_core::ids::{AgentId, TaskId};
 use threadlane_core::link::{Begin, RunAssignment, RunFailure};
 use threadlane_core::model::{
@@ -792,6 +793,131 @@ async fn a_task_run_that_does_not_finish_sleeps_and_one_that_fails_is_queued_aga
     };
     hub.link.fail(&lease, run.run_id, &failure).await.unwrap();
     hub.link.release(&lease).await.unwrap();
+    assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Queued);
+
+    // The retry is told to continue, not start over.
+    hub.clock.advance(std::time::Duration::from_secs(60));
+    let (_, retry) = begin(&*hub.link).await;
+    assert_eq!(retry.lane_kind, LaneKind::Task);
+    assert!(
+        retry
+            .prompt
+            .contains("An earlier run on these events did not finish"),
+        "{}",
+        retry.prompt
+    );
+    assert!(!run.prompt.contains("An earlier run"), "{}", run.prompt);
+}
+
+#[tokio::test]
+async fn a_failed_task_can_be_retried_with_its_last_error_and_runs_again() {
+    let (hub, lease, run) = lead_run(2).await;
+    call(
+        &hub,
+        &lease,
+        &run,
+        "toolu_1",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &run).await;
+    let failure = RunFailure::Error {
+        message: "the build broke".into(),
+    };
+    for attempt in 1..=5 {
+        let (lease, run) = begin(&*hub.link).await;
+        assert_eq!(run.lane_kind, LaneKind::Task);
+        hub.link.fail(&lease, run.run_id, &failure).await.unwrap();
+        hub.link.release(&lease).await.unwrap();
+        if attempt < 5 {
+            hub.clock.advance(std::time::Duration::from_secs(600));
+        }
+    }
+    let failed = task(&hub, "T-0001").await;
+    assert_eq!(failed.status, TaskStatus::Failed);
+    let first_end = hub.db.task_completed_at(failed.id).await.unwrap().unwrap();
+
+    let retried = hub
+        .api
+        .tasks(TaskRequest::Retry { task: failed.id })
+        .await
+        .unwrap();
+    let TaskReply::Task { task: retried } = retried else {
+        panic!("a task");
+    };
+    assert_eq!(retried.status, TaskStatus::Queued);
+    assert_eq!(retried.waiting_reason, None);
+    let again = hub.api.tasks(TaskRequest::Retry { task: failed.id }).await;
+    assert!(
+        matches!(&again, Err(ApiError::Invalid(why)) if why.contains("only a failed task")),
+        "{again:?}"
+    );
+
+    let (lease, run) = loop {
+        let (lease, run) = begin(&*hub.link).await;
+        if run.lane_kind == LaneKind::Task {
+            break (lease, run);
+        }
+        finish_run(&hub, &lease, &run).await;
+    };
+    assert_eq!(run.task_id, Some(failed.id));
+    assert_eq!(run.events.len(), 1);
+    let ask = hub.event(run.events[0]).await;
+    assert_eq!(ask.kind, EventKind::UserMessage);
+    assert_eq!(ask.trust, Trust::User);
+    assert!(ask.requested);
+    let text = ask.payload["text"].as_str().unwrap();
+    assert!(text.contains("the build broke"), "{text}");
+    assert!(text.contains("task branch"), "{text}");
+    assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Running);
+
+    // A second failure is reported to the lead again, and retried with it.
+    for attempt in 1..=5 {
+        let (lease, run) = if attempt == 1 {
+            (lease, run.clone())
+        } else {
+            begin(&*hub.link).await
+        };
+        hub.link.fail(&lease, run.run_id, &failure).await.unwrap();
+        hub.link.release(&lease).await.unwrap();
+        hub.clock.advance(std::time::Duration::from_secs(600));
+    }
+    assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Failed);
+    let failures = task_results(&hub)
+        .await
+        .into_iter()
+        .filter(|result| result.payload["status"] == "failed")
+        .count();
+    assert_eq!(failures, 2);
+    // The board dates it by the attempt that ended last.
+    let second_end = hub.db.task_completed_at(failed.id).await.unwrap().unwrap();
+    assert!(second_end > first_end, "{second_end:?} vs {first_end:?}");
+}
+
+#[tokio::test]
+async fn only_a_failed_task_can_be_retried() {
+    let (hub, lease, run) = lead_run(2).await;
+    call(
+        &hub,
+        &lease,
+        &run,
+        "toolu_1",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &run).await;
+    let queued = task(&hub, "T-0001").await;
+    let refused = hub.api.tasks(TaskRequest::Retry { task: queued.id }).await;
+    assert!(
+        matches!(&refused, Err(ApiError::Invalid(why)) if why.contains("queued")),
+        "{refused:?}"
+    );
+    let missing = hub.api.tasks(TaskRequest::Retry { task: TaskId(99) }).await;
+    assert!(matches!(missing, Err(ApiError::NotFound(_))), "{missing:?}");
     assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Queued);
 }
 

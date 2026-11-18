@@ -7,7 +7,7 @@ use threadlane_client::{ClientCore, ClientError, NewTaskSpec};
 use threadlane_core::client::{AgentTemplate, DeletePreview, ProjectSummary, RecordedEvent};
 use threadlane_core::github::normalize_remote;
 use threadlane_core::ids::TaskId;
-use threadlane_core::model::{Agent, BackendKind, Mode, Repository, Task};
+use threadlane_core::model::{Agent, BackendKind, Mode, Repository, Task, TaskStatus};
 
 use crate::{AppState, InSpace, Part, When, describe};
 
@@ -102,6 +102,8 @@ pub struct TaskForm {
     pub repositories: Vec<String>,
     /// The tasks picked that it waits for.
     pub depends_on: Vec<TaskId>,
+    /// Whether the task ends by opening a draft pull request.
+    pub draft_pr: bool,
 }
 
 impl TaskForm {
@@ -131,6 +133,8 @@ pub enum TaskControl {
     Ended,
     /// "Cancel" can be pressed.
     Cancel,
+    /// It failed: "Retry" can be pressed.
+    Retry,
     /// Waiting for you to confirm, with what the confirmation says.
     Confirm(String),
 }
@@ -471,6 +475,7 @@ impl AppState {
             agent,
             repositories: form.repositories.clone(),
             depends_on: form.depends_on.clone(),
+            draft_pr: form.draft_pr,
         })
     }
 
@@ -487,6 +492,9 @@ impl AppState {
         let Some(detail) = self.task(space, task) else {
             return TaskControl::Ended;
         };
+        if detail.summary.task.status == TaskStatus::Failed {
+            return TaskControl::Retry;
+        }
         if detail.summary.task.status.is_terminal() {
             return TaskControl::Ended;
         }

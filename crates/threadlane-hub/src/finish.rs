@@ -163,6 +163,17 @@ impl LocalLink {
                     backoff_until: now,
                 },
             ),
+            // Retrying the same setup fails the same way: die on this attempt.
+            RunFailure::Rejected { message } => (
+                format!(
+                    "the backend refused the run: {message}. Change the agent's model or backend, then retry"
+                ),
+                RetryPolicy {
+                    count_attempt: true,
+                    max_attempts: 1,
+                    backoff_until: now,
+                },
+            ),
             counted => {
                 let error = match counted {
                     RunFailure::Error { message } => message.clone(),

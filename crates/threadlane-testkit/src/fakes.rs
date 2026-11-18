@@ -553,7 +553,9 @@ impl GithubSource for FakeGithub {
             .iter()
             .filter(|(repository, branch, item)| {
                 *repository == target.repository
-                    && *branch == target.branch
+                    // A target known by number only is read on its pull request's items.
+                    && (*branch == target.branch
+                        || (target.branch.is_empty() && item.pull_request == target.number))
                     && since.is_none_or(|since| item.at.as_str() >= since)
             })
             .map(|(_, _, item)| item.clone())

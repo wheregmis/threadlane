@@ -273,3 +273,22 @@ async fn an_account_report_under_a_stale_lease_changes_nothing() {
     );
     assert!(hub.db.accounts().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_rejected_model_dies_on_the_first_attempt() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let event = hub.send("m-1", "do the thing").await.event_id;
+    let rejected = RunFailure::Rejected {
+        message: "The 'gpt-x' model is not supported".into(),
+    };
+    fail_once(&hub, &rejected).await;
+    let dead = hub.event(event).await;
+    assert_eq!(dead.status, EventStatus::Dead);
+    assert_eq!(dead.attempts, 1);
+    let reason = dead.status_reason.unwrap();
+    assert!(
+        reason.contains("gpt-x") && reason.contains("model"),
+        "{reason}"
+    );
+}

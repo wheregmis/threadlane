@@ -209,6 +209,21 @@ pub enum BackendEvent {
     TurnBoundary,
 }
 
+/// Failure text meaning the backend will not run the chosen model at all.
+/// shortcut: matched on the CLIs' wording; upgrade when they report a code.
+const MODEL_REJECTED_TEXT: &[&str] = &[
+    "model is not supported",
+    "issue with the selected model",
+    "model_not_found",
+];
+
+/// Whether a backend failure is the model being refused, which no retry
+/// can fix.
+#[must_use]
+pub fn rejects_model(error: &str) -> bool {
+    MODEL_REJECTED_TEXT.iter().any(|text| error.contains(text))
+}
+
 impl BackendEvent {
     /// Whether this event ends the run.
     #[must_use]
@@ -322,4 +337,15 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
     /// Starts a new session or resumes `request.resume`.
     async fn run(&self, request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError>;
     async fn ask(&self, request: AskRequest) -> Result<Json, BackendError>;
+}
+
+#[cfg(test)]
+mod rejects_model_tests {
+    #[test]
+    fn known_model_refusals_are_recognised() {
+        assert!(super::rejects_model(
+            "The 'gpt-6.2-sol' model is not supported when using Codex with a ChatGPT account."
+        ));
+        assert!(!super::rejects_model("unexpected status 500"));
+    }
 }

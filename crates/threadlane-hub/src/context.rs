@@ -120,6 +120,12 @@ pub(crate) struct PromptParts<'a> {
     pub events: &'a [Event],
 }
 
+/// Told to a task run that takes over events an earlier run failed on.
+const RETRY_NOTE: &str = "\nAn earlier run on these events did not finish: it failed or hit its \
+time or turn limit. Its work is committed on your task branch. Check `git log` and the \
+progress file, and continue from there instead of starting over. Run the checks for the \
+crates or packages you changed before any whole-workspace run.\n";
+
 /// Renders the per-run prompt (Plan.md §8.5 items 4 to 7).
 pub(crate) fn render_prompt(parts: &PromptParts<'_>) -> String {
     let mut out = String::new();
@@ -158,6 +164,10 @@ pub(crate) fn render_prompt(parts: &PromptParts<'_>) -> String {
                 decision.id, decision.kind, decision.question
             );
         }
+    }
+
+    if parts.task.is_some() && parts.events.iter().any(|event| event.attempts > 0) {
+        out.push_str(RETRY_NOTE);
     }
 
     out.push_str("\nNew events, oldest first:\n");

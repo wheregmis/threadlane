@@ -162,8 +162,10 @@ impl Default for RunsConfig {
         Self {
             max_attempts: 5,
             isolate_after_attempts: 2,
-            wall_time_limit_secs: 10 * 60,
-            max_turns: 40,
+            // Engineering tasks that build and test a workspace need this much;
+            // at 10 minutes and 40 turns most of them timed out at least once.
+            wall_time_limit_secs: 30 * 60,
+            max_turns: 150,
             recent_messages: 5,
         }
     }

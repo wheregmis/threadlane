@@ -1154,6 +1154,10 @@ pub enum TaskRequest {
     /// the lead hears of it once. Cancelling a cancelled task changes
     /// nothing.
     Cancel { task: TaskId },
+    /// Queues a failed task again, with a message in its lane quoting the
+    /// last error and asking the agent to continue from the work already
+    /// on the task branch. Only a failed task can be retried.
+    Retry { task: TaskId },
 }
 
 /// The answer to a [`TaskRequest`].

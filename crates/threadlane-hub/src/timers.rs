@@ -374,7 +374,9 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
             SET_FOLLOW_UP,
             "Wake yourself later in this lane: at the time, an event with your instruction \
              arrives here and you are run with it. Give in_minutes or at; it must be at least \
-             a minute away.",
+             a minute away. Finished CI checks, reviews and comments on a pull request this \
+             task opened, commented on or merged wake you by themselves, so do not set a \
+             follow-up to wait for CI.",
             Tier::Local,
             json!({
                 "type": "object",
