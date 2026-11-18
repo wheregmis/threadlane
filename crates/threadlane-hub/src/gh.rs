@@ -16,6 +16,8 @@
 //!   -H "Accept: application/vnd.github+json" notifications?per_page=50`.
 //!   `304` is "not modified", `Last-Modified` the next cursor,
 //!   `X-Poll-Interval` the interval asked for;
+//! - a pull request's head branch, when only its number is known:
+//!   `repos/<owner>/<name>/pulls/<n>`, reading `head.ref`;
 //! - a branch's check runs: `repos/<owner>/<name>/commits/<branch>/check-runs?per_page=100`;
 //! - a pull request's reviews: `repos/<owner>/<name>/pulls/<n>/reviews?per_page=100`;
 //! - its comments: `repos/<owner>/<name>/issues/<n>/comments?per_page=100[&since=<time>]`.
@@ -114,6 +116,21 @@ impl GhSource {
         Ok(pages)
     }
 
+    /// The head branch of pull request `number`, read from `pulls/<n>`.
+    async fn head_branch(&self, repository: &str, number: u64) -> Result<String, GithubError> {
+        let path = format!("repos/{repository}/pulls/{number}");
+        let (ok, output) = self.get(&[], &path).await?;
+        let answer = parse_answer(&output)?;
+        if !ok || !(200..=299).contains(&answer.status) {
+            return Err(GithubError(format!("gh api {path} failed")));
+        }
+        let body: Json = serde_json::from_str(&answer.body)
+            .map_err(|error| GithubError(format!("gh api {path} answered: {error}")))?;
+        text(&body, "/head/ref")
+            .filter(|branch| !branch.is_empty())
+            .ok_or_else(|| GithubError(format!("gh api {path} names no head branch")))
+    }
+
     /// The items of every JSON page of a call that must succeed.
     async fn get_items(
         &self,
@@ -168,6 +185,17 @@ impl GithubSource for GhSource {
                 "{repository:?} is not a repository name"
             )));
         }
+        let resolved;
+        let target = match target.number {
+            Some(number) if target.branch.is_empty() => {
+                resolved = PullTarget {
+                    branch: self.head_branch(repository, number).await?,
+                    ..target.clone()
+                };
+                &resolved
+            }
+            _ => target,
+        };
         let branch = encode(&target.branch);
         let mut items = self
             .get_items(
@@ -480,6 +508,7 @@ mod tests {
     const CHECK_RUNS: &str = include_str!("../tests/fixtures/github/check-runs.json");
     const REVIEWS: &str = include_str!("../tests/fixtures/github/reviews.json");
     const COMMENTS: &str = include_str!("../tests/fixtures/github/comments.json");
+    const PULL: &str = include_str!("../tests/fixtures/github/pull.json");
     const PAGE_1: &str = include_str!("../tests/fixtures/github/notifications-page1.http");
     const PAGE_2: &str = include_str!("../tests/fixtures/github/notifications-page2.http");
     const ENDLESS: &str = include_str!("../tests/fixtures/github/comments-endless.http");
@@ -735,6 +764,52 @@ case "$last" in
         for call in &calls {
             assert!(call.starts_with("api --method GET --include "), "{call}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pull_request_known_by_number_is_read_on_its_head_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                ("*/pulls/529", "pull.http", ok(PULL)),
+                ("*check-runs*", "check-runs.http", ok(CHECK_RUNS)),
+                ("*/reviews*", "reviews.http", ok(REVIEWS)),
+                ("*/comments*", "comments.http", ok(COMMENTS)),
+            ],
+        ));
+        let by_number = PullTarget {
+            repository: "acme/widgets".into(),
+            branch: String::new(),
+            number: Some(529),
+        };
+        let items = source.pull_request(&by_number, None).await.unwrap();
+        let check = items
+            .iter()
+            .find(|item| item.kind == GithubKind::CheckResult)
+            .unwrap();
+        assert_eq!(
+            check.branch.as_deref(),
+            Some("codex/agent-model-preferences")
+        );
+        assert_eq!(check.pull_request, Some(529));
+        let first = calls(dir.path());
+        assert_eq!(
+            first[..2],
+            [
+                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/pulls/529",
+                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/commits/codex%2Fagent-model-preferences/check-runs?per_page=100",
+            ]
+        );
+        assert_eq!(first.len(), 4, "one lookup, then the usual three reads");
+
+        source.pull_request(&target(), None).await.unwrap();
+        assert_eq!(
+            calls(dir.path())[4],
+            "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/commits/threadlane%2FT-0001/check-runs?per_page=100",
+            "a known branch needs no lookup"
+        );
     }
 
     #[cfg(unix)]

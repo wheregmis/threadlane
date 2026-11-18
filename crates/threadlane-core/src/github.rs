@@ -99,6 +99,8 @@ pub struct Feed {
 pub struct PullTarget {
     /// `owner/name`.
     pub repository: String,
+    /// Empty when only the pull request's number is known; the source
+    /// looks up its head branch.
     pub branch: String,
     /// The pull request's number, once one is open.
     pub number: Option<u64>,

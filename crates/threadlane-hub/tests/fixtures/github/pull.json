@@ -1,0 +1,13 @@
+{
+  "id": 2400000529,
+  "number": 529,
+  "state": "open",
+  "title": "Remember each agent's model",
+  "head": {
+    "ref": "codex/agent-model-preferences",
+    "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e"
+  },
+  "base": {
+    "ref": "main"
+  }
+}

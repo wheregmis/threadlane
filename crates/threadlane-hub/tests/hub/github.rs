@@ -17,7 +17,7 @@ use threadlane_core::runtime::steps::github;
 use threadlane_core::runtime::{NoHooks, StepHook};
 use threadlane_core::store::{DecisionStore, InboxStore, OrgStore, TaskStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{HubCore, HubSettings, OPEN_PULL_REQUEST};
+use threadlane_hub::{COMMENT, HubCore, HubSettings, OPEN_PULL_REQUEST};
 use threadlane_store::{Bootstrap, HubDb};
 use threadlane_testkit::fakes::{FakeGithub, GithubCall};
 use threadlane_testkit::{CrashPlan, FakeClock};
@@ -87,6 +87,14 @@ async fn register(hub: &TestHub, project: &Project, name: &str, remote: &str) {
 /// A task in `widgets` whose pull request #42 was opened from its branch,
 /// as the runner records it when it performs your approved call.
 async fn task_with_pull_request(hub: &TestHub) -> Task {
+    let (task, lease) = leased_task(hub).await;
+    record_pull_request(hub, &task, &lease).await;
+    hub.db.release_lease(&lease).await.unwrap();
+    task
+}
+
+/// A queued task T-0001 in `widgets`, with its lane leased.
+async fn leased_task(hub: &TestHub) -> (Task, threadlane_core::model::Lease) {
     let general = hub.general().await;
     let widgets = hub.db.repositories(general.id).await.unwrap()[0].clone();
     let agent = hub.db.agents().await.unwrap()[0].id;
@@ -123,15 +131,38 @@ async fn task_with_pull_request(hub: &TestHub) -> Task {
         .await
         .unwrap()
         .unwrap();
-    record_pull_request(hub, &task, &lease).await;
-    hub.db.release_lease(&lease).await.unwrap();
-    task
+    (task, lease)
 }
 
 pub(super) async fn record_pull_request(
     hub: &TestHub,
     task: &Task,
     lease: &threadlane_core::model::Lease,
+) {
+    record_performed(
+        hub,
+        task,
+        lease,
+        OPEN_PULL_REQUEST,
+        json!({ "repository": "widgets", "title": "Add the page" }),
+        json!({
+            "performed": true,
+            "repository": "widgets",
+            "branch": BRANCH,
+            "pull_request": "https://github.com/acme/widgets/pull/42",
+        }),
+    )
+    .await;
+}
+
+/// Records an approved call of `tool` as performed with `outcome`.
+async fn record_performed(
+    hub: &TestHub,
+    task: &Task,
+    lease: &threadlane_core::model::Lease,
+    tool: &str,
+    arguments: serde_json::Value,
+    outcome: serde_json::Value,
 ) {
     let decision = hub
         .db
@@ -143,9 +174,9 @@ pub(super) async fn record_pull_request(
                 task_id: Some(task.id),
                 session_id: None,
                 run_id: None,
-                tool_call_id: Some("toolu_pr".into()),
-                tool: OPEN_PULL_REQUEST.into(),
-                arguments: json!({ "repository": "widgets", "title": "Add the page" }),
+                tool_call_id: Some(format!("toolu_{tool}")),
+                tool: tool.into(),
+                arguments,
                 arguments_hash: "hash".into(),
                 kind: DecisionKind::Approval,
                 question: "Open a draft pull request?".into(),
@@ -185,18 +216,57 @@ pub(super) async fn record_pull_request(
         .await
         .unwrap();
     hub.db
-        .finish_perform(
-            lease,
-            decision.id,
-            &json!({
-                "performed": true,
-                "repository": "widgets",
-                "branch": BRANCH,
-                "pull_request": "https://github.com/acme/widgets/pull/42",
-            }),
-        )
+        .finish_perform(lease, decision.id, &outcome)
         .await
         .unwrap();
+}
+
+/// A task that only commented on someone else's pull request #529 is
+/// woken by that pull request's finished checks, read on its head branch.
+#[tokio::test]
+async fn a_pull_request_the_task_commented_on_reaches_its_lane() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        COMMENT,
+        json!({ "repository": "widgets", "target": "pull_request", "number": 529, "body": "Looks good." }),
+        json!({ "performed": true, "summary": "Completed the repository action." }),
+    )
+    .await;
+    hub.db.release_lease(&lease).await.unwrap();
+    let at = "2026-11-17T08:00:00Z";
+    github.add_to(
+        "acme/widgets",
+        "codex/agent-model-preferences",
+        GithubItem {
+            branch: Some("codex/agent-model-preferences".into()),
+            ..item(
+                "check_run:529",
+                GithubKind::CheckResult,
+                "acme/widgets",
+                Some(529),
+                at,
+            )
+        },
+    );
+
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    let events = github_events(&hub).await;
+    assert_eq!(ids(&events), ["check_run:529"]);
+    assert_eq!(events[0].lane_id, task.lane_id);
+    assert!(events[0].requested, "it continues the task");
+    assert!(github.calls().contains(&GithubCall::PullRequest {
+        target: PullTarget {
+            repository: "acme/widgets".into(),
+            branch: String::new(),
+            number: Some(529),
+        },
+        since: None,
+    }));
 }
 
 fn item(
