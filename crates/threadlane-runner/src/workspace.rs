@@ -231,9 +231,8 @@ impl GitWorkspaces {
         }
     }
 
-    /// Rebases the worktree at `path` onto `base` if it rebases cleanly and
-    /// has nothing uncommitted; otherwise leaves it as it was. Returns the
-    /// files that conflict.
+    /// Rebases an unpublished, clean worktree onto `base` when it can.
+    /// Returns the files that conflict.
     async fn rebase(
         &self,
         repository: &Repository,
@@ -247,8 +246,11 @@ impl GitWorkspaces {
         {
             return Ok(Vec::new());
         }
-        let dirty = !git(Some(path), ["status", "--porcelain"]).await?.is_empty();
-        if dirty {
+        let remote = format!("refs/remotes/origin/{branch}");
+        let published = git(Some(path), ["show-ref", "--verify", "--quiet", &remote])
+            .await
+            .is_ok();
+        if published || !git(Some(path), ["status", "--porcelain"]).await?.is_empty() {
             return self.conflicts(repository, base, branch).await;
         }
         let mut args = COMMITTER.to_vec();

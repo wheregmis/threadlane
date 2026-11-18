@@ -389,3 +389,23 @@ async fn a_run_start_rebases_a_clean_branch_and_leaves_a_conflicting_one() {
     );
     assert_eq!(branch(&path), "threadlane/T-0001");
 }
+
+#[tokio::test]
+async fn a_published_task_can_push_again_after_the_base_moves() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("work.txt"), "work").unwrap();
+    s.checkpoint(T1).await;
+    git(&path, &["push", "origin", "HEAD"]);
+    let published = git(&path, &["rev-parse", "HEAD"]);
+
+    let landed = s.land_on_main("other.txt", "elsewhere");
+    let check = s.bring_in_base(T1).await;
+    assert!(check.clean(), "{check:?}");
+    assert_eq!(check.base, landed);
+    assert_eq!(git(&path, &["rev-parse", "HEAD"]), published);
+
+    std::fs::write(path.join("work.txt"), "updated").unwrap();
+    s.checkpoint(T1).await;
+    git(&path, &["push", "origin", "HEAD"]);
+}

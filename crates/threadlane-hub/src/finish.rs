@@ -8,7 +8,7 @@ use threadlane_core::model::{
     LaneKind, Lease, NewOutboxMessage, OutboxKind, RetryPolicy, Run, RunOutcome, RunStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{DecisionStore, OutboxStore, SessionStore};
+use threadlane_core::store::{DecisionStore, LeadReply, OutboxStore, SessionStore};
 
 use crate::error::link_error;
 use crate::link::LocalLink;
@@ -34,12 +34,8 @@ impl LocalLink {
         let db = &inner.db;
         let lane = self.check_lease(lease).await?;
         let mut reply = None;
-        let dreaming = db
-            .run_events(run_id)
-            .await
-            .map_err(link_error)?
-            .iter()
-            .any(crate::dreaming::is_dream);
+        let events = db.run_events(run_id).await.map_err(link_error)?;
+        let dreaming = events.iter().any(crate::dreaming::is_dream);
         let outcome = if db.count_for_run(run_id).await.map_err(link_error)? > 0 {
             RunOutcome::Sent
         } else if db
@@ -57,7 +53,7 @@ impl LocalLink {
         {
             // A lead that just answers is heard, as if it had sent the text.
             let run = self.active_run(lease, run_id).await?;
-            reply = Some(NewOutboxMessage {
+            let message = NewOutboxMessage {
                 project_id: Some(lane.project_id),
                 lane_id: Some(lane.id),
                 session_id: Some(run.session_id),
@@ -70,7 +66,17 @@ impl LocalLink {
                 urgency: Urgency::Normal,
                 not_before: None,
                 created_at: inner.clock.now(),
-            });
+            };
+            let route = crate::space_lead::reply_route(
+                db,
+                message.created_at,
+                &events,
+                lane.project_id,
+                text,
+            )
+            .await
+            .map_err(link_error)?;
+            reply = Some(LeadReply { message, route });
             RunOutcome::Sent
         } else {
             RunOutcome::Silent
@@ -89,8 +95,11 @@ impl LocalLink {
         )
         .await
         .map_err(link_error)?;
-        if reply.is_some() {
+        if let Some(reply) = reply {
             inner.wake.wake(WakeTarget::Dispatcher);
+            if let Some(route) = reply.route {
+                inner.wake.wake(WakeTarget::Lane(route.lane_id));
+            }
         }
         if dreaming {
             inner.hook.reach(step::AFTER_MARKER)?;
