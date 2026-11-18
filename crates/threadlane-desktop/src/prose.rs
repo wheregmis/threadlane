@@ -234,6 +234,8 @@ pub enum ProseLimit {
     Result,
     /// An older conversation message.
     Message,
+    /// The body of a long decision question.
+    Question,
 }
 
 impl ProseLimit {
@@ -248,6 +250,7 @@ impl ProseLimit {
             Self::Full => return (None, None),
             Self::Result => (3, "Show", "Hide"),
             Self::Message => (40, "Show more", "Show less"),
+            Self::Question => (6, "Show more", "Show less"),
         };
         if expanded {
             (None, Some(hide))

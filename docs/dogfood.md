@@ -88,7 +88,7 @@ Added from the template and bound to `threadlane`; the lead started it as T-0007
 | # | Finding | State |
 |---|---|---|
 | 25 | The Chief of Staff's menu was grounded: every option cites a finding or a plan step. | checked |
-| 26 | The decision card drew the whole question, a paragraph plus five long numbered options, as one huge bold title. A long question needs a short title and a normal-weight body. | open: given to Threadlane |
-| 27 | An empty bordered box sits above the decision card in the conversation. | open: given to Threadlane |
-| 28 | The sidebar's "In progress" rows wrap the title across lines and overlap the next row ("lead's / final text / to the", "threadla / ne · lead"). | open: given to Threadlane |
-| 29 | The Chief of Staff put each option's detail in the question and used short labels for the options, so the answer buttons say little. The template should say how to split the two. | open: given to Threadlane |
+| 26 | The decision card drew the whole question, a paragraph plus five long numbered options, as one huge bold title. A long question needs a short title and a normal-weight body. | fixed in T-0009; to check in the real window |
+| 27 | An empty bordered box sits above the decision card in the conversation. | fixed in T-0009; to check in the real window |
+| 28 | The sidebar's "In progress" rows wrap the title across lines and overlap the next row ("lead's / final text / to the", "threadla / ne · lead"). | fixed in T-0009; to check in the real window |
+| 29 | The Chief of Staff put each option's detail in the question and used short labels for the options, so the answer buttons say little. The template should say how to split the two. | fixed in T-0009; to check in the real window |

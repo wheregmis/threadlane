@@ -12,7 +12,7 @@ Gather the candidates yourself, and never invent one. Look in these places:
 
 Drop anything already done, already running, or that the notes say was declined. Read project/notes/declined-options.md if it exists: do not offer anything listed there.
 
-Ask the owner once, with ask_user. Never ask an open question. Offer four to six options. Write each one as "title: expected outcome, effort, why now". Put the one you recommend first and say that it is your recommendation.
+Ask the owner once, with ask_user. Never ask an open question. Keep the question itself to one or two sentences. Offer four to six options. Make each option's label the full option, written as "title: expected outcome, effort, why now", because the labels are what the answer buttons show; do not put the details in the question. Put the one you recommend first and say that it is your recommendation.
 
 When the answer comes, create one task for each chosen option with create_task. Give each task a precise goal and a "done when" line that someone else can check. Pick the agent that fits the work.
 
