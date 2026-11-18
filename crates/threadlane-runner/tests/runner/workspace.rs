@@ -5,8 +5,8 @@ use std::path::Path;
 
 use serde_json::json;
 use tempfile::TempDir;
-use threadlane_core::ids::{ProjectId, RepositoryId, TaskId};
-use threadlane_core::link::PROGRESS_WRITTEN;
+use threadlane_core::ids::{ProjectId, RepositoryId, RunId, TaskId};
+use threadlane_core::link::{PROGRESS_WRITTEN, RunReview};
 use threadlane_core::model::{LaneKind, Repository};
 use threadlane_core::workspace::{ReviewRevision, Workspaces};
 use threadlane_runner::GitWorkspaces;
@@ -374,20 +374,30 @@ async fn a_review_uses_the_submitted_commit_after_the_implementation_branch_move
     let implementation = s.prepare(T1).await;
     std::fs::write(implementation.join("work.txt"), "submitted").unwrap();
     s.checkpoint(T1).await;
-    let submitted = s.check_merge(T1).await.revision.unwrap();
+    let checked = s.check_merge(T1).await;
+    let submitted = checked.revision.clone().unwrap();
     std::fs::write(implementation.join("work.txt"), "later edit").unwrap();
     s.checkpoint(T1).await;
 
     let repositories = std::slice::from_ref(&s.repository);
+    assert!(
+        s.workspaces
+            .verify_submission(T1, repositories, &[checked])
+            .await
+            .is_err()
+    );
     let revisions = [ReviewRevision {
         repository: s.repository.id,
         commit: submitted.clone(),
     }];
     let mut assignment = assignment(11);
     assignment.lane_kind = LaneKind::Task;
-    assignment.task_id = Some(T2);
+    assignment.task_id = Some(T1);
     assignment.repositories = repositories.to_vec();
-    assignment.review_revisions = Some(revisions.to_vec());
+    assignment.review = Some(RunReview {
+        submission: RunId(10),
+        revisions: revisions.to_vec(),
+    });
     h.link.grant(lease(LANE));
     h.link.push_begin(Ok(run(assignment)));
     h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
@@ -421,17 +431,25 @@ async fn a_review_uses_the_submitted_commit_after_the_implementation_branch_move
     );
     assert_eq!(
         s.workspaces
-            .prepare_review(T2, repositories, &revisions)
+            .prepare_review(T1, RunId(10), repositories, &revisions)
             .await
             .unwrap(),
         std::slice::from_ref(review)
     );
     assert!(
         s.workspaces
-            .prepare_review(T2, repositories, &[])
+            .prepare_review(T1, RunId(10), repositories, &[])
             .await
             .is_err()
     );
+    let removal = threadlane_core::workspace::WorkspaceRemoval {
+        tasks: vec![T1],
+        repositories: vec![(s.repository.id, s.repository.name.clone())],
+        clones: vec![],
+    };
+    assert!(s.workspaces.remove(&removal).await.is_empty());
+    assert!(!review.exists());
+    assert!(!implementation.exists());
 }
 
 #[tokio::test]

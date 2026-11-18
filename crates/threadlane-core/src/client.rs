@@ -595,6 +595,9 @@ pub struct TaskDetail {
     pub repositories: Vec<String>,
     /// Its runs, oldest first.
     pub runs: Vec<RunSummary>,
+    /// The task's independent review rounds, in submission order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<TaskReviewActivity>,
     /// Every decision asked in its lane, oldest first.
     pub decisions: Vec<Decision>,
     /// The tasks it depends on and the tasks that depend on it.
@@ -609,6 +612,19 @@ pub struct TaskDetail {
     /// Whether the task lane needs a new message or a resume before it can run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stopped: bool,
+}
+
+/// A submitted revision and its committed review outcome, if available.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskReviewActivity {
+    pub submission: crate::ids::RunId,
+    pub reviewer: crate::ids::AgentId,
+    pub reviewer_name: String,
+    pub revisions: Vec<crate::workspace::ReviewRevision>,
+    pub submitted_at: Timestamp,
+    pub verdict: Option<crate::model::TaskReviewVerdict>,
+    pub feedback: Option<String>,
+    pub decided_at: Option<Timestamp>,
 }
 
 /// One entry of the conversation with a project's lead.

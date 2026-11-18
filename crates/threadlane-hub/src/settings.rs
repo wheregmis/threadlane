@@ -9,6 +9,8 @@ use threadlane_core::model::BackendKind;
 /// [`crate::config::HubConfig::settings`]; tests build them directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubSettings {
+    /// The space's independent Reviewer, when configured.
+    pub reviewer: Option<String>,
     /// Lease length (Plan.md §6.4).
     pub lease_ttl: Duration,
     /// Sweep and dispatcher fallback interval (Plan.md §6.5).
@@ -49,6 +51,7 @@ pub struct HubSettings {
 impl Default for HubSettings {
     fn default() -> Self {
         Self {
+            reviewer: None,
             lease_ttl: Duration::from_secs(60),
             poll: Duration::from_secs(30),
             idle_window: Duration::from_secs(30 * 60),

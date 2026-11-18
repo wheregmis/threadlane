@@ -35,6 +35,21 @@ impl LocalLink {
         let lane = self.check_lease(lease).await?;
         let mut reply = None;
         let events = db.run_events(run_id).await.map_err(link_error)?;
+        if events.iter().any(|event| {
+            event.source == threadlane_store::TASK_REVIEW_SOURCE
+                && event.payload.get("submission").is_some()
+        }) && !db.has_review_verdict(run_id).await.map_err(link_error)?
+        {
+            self.fail_run(
+                lease,
+                run_id,
+                &RunFailure::Error {
+                    message: "The Reviewer ended without submitting a verdict".to_owned(),
+                },
+            )
+            .await?;
+            return Ok(RunOutcome::Silent);
+        }
         let dreaming = events.iter().any(crate::dreaming::is_dream);
         let outcome = if db.count_for_run(run_id).await.map_err(link_error)? > 0 {
             RunOutcome::Sent

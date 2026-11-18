@@ -86,6 +86,7 @@ pub(crate) struct LaneState {
     /// The current run wrote its task's progress file, as the hub said in a
     /// tool result (docs/milestone-5.md §1 decision 7).
     progress_written: AtomicBool,
+    pub(crate) submitted: Mutex<Option<Vec<threadlane_core::workspace::MergeCheck>>>,
 }
 
 impl LaneState {
@@ -96,6 +97,7 @@ impl LaneState {
             stop,
             deferred: AtomicBool::new(false),
             progress_written: AtomicBool::new(false),
+            submitted: Mutex::default(),
         }
     }
 

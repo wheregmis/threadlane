@@ -215,6 +215,7 @@ str_enum! {
         Proposed => "proposed",
         Queued => "queued",
         Running => "running",
+        InReview => "in_review",
         WaitingOnYou => "waiting_on_you",
         Sleeping => "sleeping",
         Done => "done",
@@ -235,16 +236,25 @@ impl TaskStatus {
     #[must_use]
     pub const fn can_become(self, next: Self) -> bool {
         use TaskStatus::{
-            Cancelled, Done, Failed, Proposed, Queued, Running, Sleeping, WaitingOnYou,
+            Cancelled, Done, Failed, InReview, Proposed, Queued, Running, Sleeping, WaitingOnYou,
         };
         match (self, next) {
             (from, Cancelled) => !from.is_terminal(),
             (Proposed, Queued)
             | (Queued, Running)
-            | (Running, WaitingOnYou | Sleeping | Queued | Done | Failed)
+            | (Running, WaitingOnYou | Sleeping | Queued | InReview | Done | Failed)
+            | (InReview, Queued | Done)
             | (WaitingOnYou | Sleeping, Queued) => true,
             _ => false,
         }
+    }
+}
+
+str_enum! {
+    /// The independent reviewer's decision on one submitted revision.
+    pub enum TaskReviewVerdict {
+        Approved => "approved",
+        ChangesRequested => "changes_requested",
     }
 }
 

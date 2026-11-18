@@ -89,6 +89,12 @@ A review assignment lists full commit IDs for its repositories. The
 runner opens those commits in detached worktrees for the review and
 keeps the Engineer's branch available for requested fixes.
 
+To enable review for a space, set `reviewer = "Reviewer"` under `[space]`
+in its `hub.toml`. Use the name of a separate agent in that space.
+The task timeline records submissions and verdicts. Repository reviews
+run on the machine that submitted the implementation so the Reviewer
+can inspect local commits before they are published.
+
 Verify the whole path from Main Chat: an Engineer produces a change, the
 Reviewer requests a fix, the Engineer updates the same task, and the
 Reviewer approves the updated revision. The Lead reports the outcome in

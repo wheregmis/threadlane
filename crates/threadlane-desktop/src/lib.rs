@@ -2240,7 +2240,10 @@ impl AppState {
     #[must_use]
     pub fn task_stop(&self, space: &str, task: TaskId) -> Option<LaneTarget> {
         let detail = self.task(space, task)?;
-        (detail.summary.task.status == TaskStatus::Running && !detail.stopped)
+        ((detail.summary.task.status == TaskStatus::Running
+            || (detail.summary.task.status == TaskStatus::InReview
+                && detail.summary.running_since.is_some()))
+            && !detail.stopped)
             .then_some(LaneTarget::Task { task })
     }
 

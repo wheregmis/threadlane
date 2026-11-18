@@ -122,6 +122,14 @@ impl ToolEndpoint for LaneTools {
             .call_tool(&lease, self.run_id, call_id, name, &arguments)
             .await;
         match &result {
+            Ok(output) if output["submitted_for_review"] == true => {
+                *self
+                    .lane
+                    .submitted
+                    .lock()
+                    .expect("submission lock poisoned") =
+                    Some(serde_json::from_value(output[MERGE_CHECKS].clone()).unwrap_or_default());
+            }
             Err(ToolError::Killed(killed)) => self.lane.signal(Stop::Killed(*killed)),
             Err(ToolError::LeaseLost) => self.lane.signal(Stop::LeaseLost),
             Err(ToolError::WaitingOnYou) => self.lane.set_deferred(true),

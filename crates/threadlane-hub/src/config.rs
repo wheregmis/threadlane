@@ -59,12 +59,14 @@ impl Default for LogConfig {
     }
 }
 
-/// The `[space]` table: used only to initialize a new hub's database.
+/// The `[space]` table.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SpaceConfig {
     pub name: String,
     pub mode_ceiling: Mode,
+    /// Name of the independent Reviewer for task submissions in this space.
+    pub reviewer: Option<String>,
 }
 
 impl Default for SpaceConfig {
@@ -73,6 +75,7 @@ impl Default for SpaceConfig {
         Self {
             name: defaults.name,
             mode_ceiling: defaults.mode_ceiling,
+            reviewer: None,
         }
     }
 }
@@ -450,6 +453,7 @@ impl HubConfig {
         let timing = &self.timing;
         let runs = &self.runs;
         HubSettings {
+            reviewer: self.space.reviewer.clone(),
             lease_ttl: timing.lease_ttl(),
             poll: timing.poll(),
             idle_window: Duration::from_secs(timing.idle_window_secs),

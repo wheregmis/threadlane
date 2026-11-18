@@ -369,6 +369,7 @@ impl Inner {
         let run_id = assignment.run_id;
         lane.set_deferred(false);
         lane.set_progress_written(false);
+        *lane.submitted.lock().expect("submission lock poisoned") = None;
         let Some(backend) = self.backend(assignment.backend) else {
             let message = format!("backend {} is not available here", assignment.backend);
             return self.fail(lane, run_id, RunFailure::Error { message }).await;
@@ -382,7 +383,7 @@ impl Inner {
         }
         lane.check()?;
         self.link.check_running(&lane.lease()).await?;
-        if assignment.review_revisions.is_some() && !assignment.perform.is_empty() {
+        if assignment.review.is_some() && !assignment.perform.is_empty() {
             let message = "review runs cannot perform approved repository actions".to_owned();
             return self.fail(lane, run_id, RunFailure::Error { message }).await;
         }
@@ -442,7 +443,10 @@ impl Inner {
         {
             Ended::Terminal(BackendEvent::Finished { final_text, .. }) => {
                 // A run waiting on you ends now; it is resumed with the answer.
-                if assignment.lane_kind == LaneKind::Task && !lane.deferred() {
+                if assignment.lane_kind == LaneKind::Task
+                    && assignment.review.is_none()
+                    && !lane.deferred()
+                {
                     let progress = !lane.progress_written();
                     let quiet = self.left_unwoken(lane, assignment.run_id).await?;
                     // At most one extra turn: both asks share it.
@@ -607,6 +611,7 @@ impl Inner {
                 return Ok(Ended::Terminal(event));
             }
             if !assignment.dreaming
+                && assignment.review.is_none()
                 && assignment.space_lead_ask.is_none()
                 && !lane.deferred()
                 && event == BackendEvent::TurnBoundary
@@ -720,6 +725,27 @@ impl Inner {
             if let Err(error) = self.checkpoint(assignment).await {
                 let message = format!("could not commit the run's work: {error}");
                 return self.fail(lane, run_id, RunFailure::Error { message }).await;
+            }
+            let submitted = lane
+                .submitted
+                .lock()
+                .expect("submission lock poisoned")
+                .take();
+            if let (Some(task), Some(revisions)) = (assignment.task_id, submitted)
+                && let Err(error) = self
+                    .workspaces
+                    .verify_submission(task, &assignment.repositories, &revisions)
+                    .await
+            {
+                return self
+                    .fail(
+                        lane,
+                        run_id,
+                        RunFailure::Error {
+                            message: error.to_string(),
+                        },
+                    )
+                    .await;
             }
             self.reach(AFTER_CHECKPOINT)?;
         }
@@ -907,7 +933,7 @@ impl Inner {
             Arc::clone(&self.workspaces),
             assignment
                 .task_id
-                .filter(|_| assignment.review_revisions.is_none())
+                .filter(|_| assignment.review.is_none())
                 .map(|task| (task, assignment.repositories.clone())),
         );
         RunRequest {
@@ -928,7 +954,7 @@ impl Inner {
     /// task branch. Nothing to do for a lead, or a task without
     /// repositories.
     async fn checkpoint(&self, assignment: &RunAssignment) -> Result<(), String> {
-        if assignment.review_revisions.is_some() {
+        if assignment.review.is_some() {
             return Ok(());
         }
         let Some(task) = assignment.task_id else {
@@ -946,7 +972,7 @@ impl Inner {
     /// tell the session about those it left as they were. A failure costs
     /// only the rebase: the run starts anyway.
     async fn bring_in_base(&self, assignment: &RunAssignment) -> String {
-        if assignment.review_revisions.is_some() {
+        if assignment.review.is_some() {
             return String::new();
         }
         let Some(task) = assignment.task_id else {
@@ -1000,10 +1026,15 @@ impl Inner {
         assignment: &RunAssignment,
     ) -> Result<PathBuf, String> {
         if let Some(task) = assignment.task_id {
-            let paths = match &assignment.review_revisions {
-                Some(revisions) => {
+            let paths = match &assignment.review {
+                Some(review) => {
                     self.workspaces
-                        .prepare_review(task, &assignment.repositories, revisions)
+                        .prepare_review(
+                            task,
+                            review.submission,
+                            &assignment.repositories,
+                            &review.revisions,
+                        )
                         .await
                 }
                 None if assignment.repositories.is_empty() => Ok(Vec::new()),
@@ -1022,6 +1053,10 @@ impl Inner {
             }
         }
         let dir = self.config.lanes_dir.join(lane.lease().lane_id.to_string());
+        let dir = match &assignment.review {
+            Some(review) => dir.join("reviews").join(review.submission.to_string()),
+            None => dir,
+        };
         tokio::fs::create_dir_all(&dir).await.map_err(|error| {
             format!(
                 "could not create the working directory {}: {error}",

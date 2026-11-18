@@ -142,4 +142,5 @@ integrity check passed. Dev was reachable and had no pending decisions.
 
 | # | Finding | State |
 |---|---|---|
-| 42 | The merge check named the base commit but omitted the task commit it checked. A reviewer opening the branch later could see newer work. | fixed on the feature branch. The task shows the commit that was checked, and the runner's review checkout is pinned to that commit. The hub still needs to schedule and record review phases. |
+| 42 | The merge check named the base commit but omitted the task commit it checked. A reviewer opening the branch later could see newer work. | fixed on the feature branch. The task shows the checked commit, and the review checkout is pinned to it. |
+| 43 | Independent review required a second task, and the owner's task could finish before review. | fixed on the feature branch for spaces with a configured Reviewer. The hub test sends requested changes back to the original task and requires approval of a new submission before finishing. |

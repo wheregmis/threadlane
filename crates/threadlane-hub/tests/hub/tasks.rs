@@ -9,6 +9,7 @@ use threadlane_core::model::{
     EventKind, EventStatus, LaneKind, Lease, Mode, NewAgent, NewBinding, NewTask, RunOutcome, Task,
     TaskOrigin, TaskStatus, Trust,
 };
+use threadlane_core::runtime::NoHooks;
 use threadlane_core::store::{InboxStore, OrgStore, OutboxStore, TaskStore};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::ToolError;
@@ -22,6 +23,163 @@ use threadlane_hub::{
 };
 
 use crate::common::{PAST_LEASE, TestHub, begin, usable_report};
+
+#[tokio::test]
+async fn independent_review_sends_changes_back_and_completes_the_same_task() {
+    let hub = TestHub::with(
+        threadlane_hub::HubSettings {
+            reviewer: Some("Reviewer".into()),
+            ..Default::default()
+        },
+        std::sync::Arc::new(NoHooks),
+    )
+    .await;
+    hub.hello().await;
+    let engineer = engineer(&hub, 1).await;
+    let reviewer = hub
+        .db
+        .create_agent(&NewAgent::named("Reviewer", "reviewer"))
+        .await
+        .unwrap();
+    let project = hub.general().await;
+    let created = hub
+        .db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: project.id,
+                agent_id: engineer,
+                title: "Draft report".into(),
+                goal: "Draft a report with totals".into(),
+                repositories: vec![],
+                parent_task_id: None,
+                depends_on: vec![],
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    let id = created.id;
+    let (lease, implementation) = begin(&*hub.link).await;
+    assert!(
+        call(
+            &hub,
+            &lease,
+            &implementation,
+            "self-review",
+            "finish_review",
+            json!({"verdict":"approved","feedback":"Self-approved"})
+        )
+        .await
+        .is_err()
+    );
+    write_progress(&hub, &lease, &implementation, &id.to_string()).await;
+    call(
+        &hub,
+        &lease,
+        &implementation,
+        "submit",
+        FINISH_TASK,
+        json!({"summary":"First draft"}),
+    )
+    .await
+    .unwrap();
+    hub.link
+        .complete(&lease, implementation.run_id, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        task(&hub, &id.to_string()).await.status,
+        TaskStatus::InReview
+    );
+    assert!(task_results(&hub).await.is_empty());
+
+    let Begin::Run(review) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("review never started")
+    };
+    assert_eq!(review.task_id, Some(id));
+    assert_eq!(review.agent_name, "Reviewer");
+    assert_eq!(
+        review.review.as_ref().unwrap().submission,
+        implementation.run_id
+    );
+    assert!(matches!(review.native_session, NativeSession::Start { .. }));
+    assert!(
+        call(&hub, &lease, &review, "publish", PUBLISH_BRANCH, json!({}))
+            .await
+            .is_err()
+    );
+    call(
+        &hub,
+        &lease,
+        &review,
+        "feedback",
+        "finish_review",
+        json!({"verdict":"changes_requested","feedback":"Include the totals"}),
+    )
+    .await
+    .unwrap();
+    hub.link
+        .complete(&lease, review.run_id, None)
+        .await
+        .unwrap();
+    assert_eq!(task(&hub, &id.to_string()).await.status, TaskStatus::Queued);
+    assert_eq!(tasks(&hub).await.len(), 1);
+
+    let Begin::Run(fix) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("Engineer did not get findings")
+    };
+    assert_eq!(fix.task_id, Some(id));
+    assert_eq!(fix.agent_name, "Engineer");
+    assert!(fix.prompt.contains("Include the totals"));
+    call(
+        &hub,
+        &lease,
+        &fix,
+        "submit",
+        FINISH_TASK,
+        json!({"summary":"Includes the totals"}),
+    )
+    .await
+    .unwrap();
+    hub.link.complete(&lease, fix.run_id, None).await.unwrap();
+    let Begin::Run(final_review) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("second review never started")
+    };
+    assert_eq!(final_review.review.as_ref().unwrap().submission, fix.run_id);
+    call(
+        &hub,
+        &lease,
+        &final_review,
+        "approval",
+        "finish_review",
+        json!({"verdict":"approved","feedback":"Totals match"}),
+    )
+    .await
+    .unwrap();
+    hub.link
+        .complete(&lease, final_review.run_id, None)
+        .await
+        .unwrap();
+    let completed = tasks(&hub).await;
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].id, id);
+    assert_eq!(completed[0].status, TaskStatus::Done);
+    assert_eq!(
+        completed[0].result.as_ref().unwrap()["review"]["feedback"],
+        "Totals match"
+    );
+    assert_eq!(task_results(&hub).await.len(), 1);
+    let history = hub.db.task_reviews(id).await.unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].reviewer, reviewer.id);
+    assert_eq!(history[0].feedback.as_deref(), Some("Include the totals"));
+    assert_eq!(history[1].feedback.as_deref(), Some("Totals match"));
+}
 
 /// The agent tasks are given to in these tests.
 const ENGINEER: &str = "Engineer";

@@ -613,6 +613,7 @@ impl HubApi for FakeHub {
                         branch: format!("threadlane/{task}"),
                         repositories: Vec::new(),
                         runs,
+                        reviews: Vec::new(),
                         decisions: Vec::new(),
                         related: Vec::new(),
                         messages: Vec::new(),
@@ -1568,6 +1569,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
         summary,
         branch: "threadlane/T-0007".to_owned(),
         repositories: vec!["payments-service".to_owned()],
+        reviews: Vec::new(),
         runs: vec![
             run(1, 60_000, 120_000, RunStatus::Failed, None),
             run(
@@ -2477,6 +2479,7 @@ fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
         branch: "threadlane/T-0007".to_owned(),
         repositories: Vec::new(),
         runs: vec![run(1, 0, Some(5 * 60_000)), run(2, 10 * 60_000, None)],
+        reviews: Vec::new(),
         decisions: Vec::new(),
         related: Vec::new(),
         messages: Vec::new(),

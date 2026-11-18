@@ -73,11 +73,12 @@ pub struct ProposalCard {
 const DONE_SHOWN: usize = 5;
 
 /// The columns in board order, and whether each is shown when empty.
-const COLUMNS: [(&str, bool); 9] = [
+const COLUMNS: [(&str, bool); 10] = [
     ("Proposed", false),
     ("Queued", true),
     ("Blocked", false),
     ("Running", true),
+    ("In review", false),
     ("Sleeping", false),
     ("Waiting on you", true),
     ("Done", true),
@@ -93,6 +94,7 @@ fn column_of(status: TaskStatus, waiting_reason: Option<&str>) -> &'static str {
         }
         TaskStatus::Queued => "Queued",
         TaskStatus::Running => "Running",
+        TaskStatus::InReview => "In review",
         TaskStatus::Sleeping => "Sleeping",
         TaskStatus::WaitingOnYou => "Waiting on you",
         TaskStatus::Done => "Done",
@@ -154,7 +156,7 @@ impl AppState {
                                 self.waiting_task(space, summary).unwrap_or_default()
                             }
                             (_, Some(id)) => format!("{id} open"),
-                            (TaskStatus::Running, None) => {
+                            (TaskStatus::Running | TaskStatus::InReview, None) => {
                                 summary.machine.clone().unwrap_or_default()
                             }
                             // Claim a follow-up only when one is listed.
@@ -412,7 +414,7 @@ pub struct InProgress {
 pub fn work_elapsed(summary: &TaskSummary, when: &When) -> Option<String> {
     match summary.task.status {
         TaskStatus::Queued => Some(when.since(summary.task.created_at)),
-        TaskStatus::Running => running_elapsed(summary, when),
+        TaskStatus::Running | TaskStatus::InReview => running_elapsed(summary, when),
         _ => None,
     }
 }
@@ -443,7 +445,8 @@ pub struct LatestStep {
 #[must_use]
 pub fn task_header(detail: &TaskDetail, when: &When) -> TaskHeader {
     let summary = &detail.summary;
-    let running = summary.task.status == TaskStatus::Running;
+    let running = summary.task.status == TaskStatus::Running
+        || (summary.task.status == TaskStatus::InReview && summary.running_since.is_some());
     let run = if running {
         detail
             .runs
@@ -531,7 +534,10 @@ pub fn activity_runs(detail: &TaskDetail, when: &When) -> Vec<(String, Vec<Strin
 /// How long the task's active run has been working, if the hub reported a start.
 #[must_use]
 pub fn running_elapsed(summary: &TaskSummary, when: &When) -> Option<String> {
-    if summary.task.status != TaskStatus::Running {
+    if !matches!(
+        summary.task.status,
+        TaskStatus::Running | TaskStatus::InReview
+    ) {
         return None;
     }
     summary.running_since.map(|since| when.since(since))
@@ -818,7 +824,14 @@ fn task_moments(
         let backend = run_summary
             .backend
             .map_or_else(String::new, |kind| format!(" with {kind}"));
-        let on = format!("{} on {}{backend}", summary.agent, run.machine);
+        let agent = detail
+            .reviews
+            .iter()
+            .find(|review| Some(review.reviewer) == run_summary.agent_id)
+            .map_or(summary.agent.as_str(), |review| {
+                review.reviewer_name.as_str()
+            });
+        let on = format!("{agent} on {}{backend}", run.machine);
         let text = match run_summary.status {
             RunStatus::Active => {
                 format!("{on}: working for {}", when.since(run_summary.started_at))
@@ -848,6 +861,40 @@ fn task_moments(
             text,
             None,
         ));
+    }
+    for review in &detail.reviews {
+        let ids: Vec<_> = review
+            .revisions
+            .iter()
+            .map(|revision| revision.commit.get(..7).unwrap_or(&revision.commit))
+            .collect();
+        let revision = if ids.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", ids.join(", "))
+        };
+        moments.push((
+            review.submitted_at,
+            format!("review-request-{}", review.submission),
+            format!("Sent to {} for review{revision}", review.reviewer_name),
+            None,
+        ));
+        if let (Some(verdict), Some(at)) = (review.verdict, review.decided_at) {
+            let label = match verdict {
+                threadlane_core::model::TaskReviewVerdict::Approved => "approved",
+                threadlane_core::model::TaskReviewVerdict::ChangesRequested => "requested changes",
+            };
+            moments.push((
+                at,
+                format!("review-result-{}", review.submission),
+                format!(
+                    "{} {label}{revision}\n\n{}",
+                    review.reviewer_name,
+                    review.feedback.as_deref().unwrap_or_default()
+                ),
+                None,
+            ));
+        }
     }
     for decision in &detail.decisions {
         moments.push((

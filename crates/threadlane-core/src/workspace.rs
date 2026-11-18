@@ -10,7 +10,7 @@ use async_trait::async_trait;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{RepositoryId, TaskId};
+use crate::ids::{RepositoryId, RunId, TaskId};
 use crate::model::Repository;
 
 /// Why setting up or saving a workspace failed.
@@ -63,6 +63,15 @@ pub struct ReviewRevision {
     pub commit: String,
 }
 
+/// Whether an ID names a complete Git SHA-1 or SHA-256 object.
+#[must_use]
+pub fn valid_commit_id(commit: &str) -> bool {
+    matches!(commit.len(), 40 | 64)
+        && commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 impl MergeCheck {
     /// Whether the task branch merges into the base cleanly.
     #[must_use]
@@ -84,13 +93,22 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
         repositories: &[Repository],
     ) -> Result<Vec<PathBuf>, WorkspaceError>;
 
-    /// Checks out the submitted commits in separate worktrees for the review's task ID.
+    /// Checks out the submitted commits in separate worktrees for the task's review round.
     async fn prepare_review(
         &self,
-        review: TaskId,
+        task: TaskId,
+        submission: RunId,
         repositories: &[Repository],
         revisions: &[ReviewRevision],
     ) -> Result<Vec<PathBuf>, WorkspaceError>;
+
+    /// Confirms that the Engineer ended the run on the commits submitted for review.
+    async fn verify_submission(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+        revisions: &[MergeCheck],
+    ) -> Result<(), WorkspaceError>;
 
     /// Commits whatever is uncommitted in the task's worktrees on the task
     /// branch. A clean worktree gets no commit; one never set up is skipped.

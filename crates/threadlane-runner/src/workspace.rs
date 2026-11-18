@@ -25,11 +25,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use threadlane_core::ids::{RepositoryId, TaskId};
+use threadlane_core::ids::{RepositoryId, RunId, TaskId};
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{
     MergeCheck, ReviewRevision, WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces,
-    task_branch, valid_branch_name, valid_repository_name,
+    task_branch, valid_branch_name, valid_commit_id, valid_repository_name,
 };
 use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -332,9 +332,36 @@ impl Workspaces for GitWorkspaces {
         Ok(paths)
     }
 
+    async fn verify_submission(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+        revisions: &[MergeCheck],
+    ) -> Result<(), WorkspaceError> {
+        for repository in repositories {
+            let _repo = self.lock_repository(repository.id).await;
+            let head = git(
+                Some(&self.worktree(task, repository)),
+                ["rev-parse", "--verify", "HEAD"],
+            )
+            .await?;
+            if !revisions.iter().any(|check| {
+                check.repository == repository.name
+                    && check.revision.as_deref() == Some(head.trim())
+            }) {
+                return Err(WorkspaceError(format!(
+                    "{} changed after submission; submit the final revision again",
+                    repository.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     async fn prepare_review(
         &self,
-        review: TaskId,
+        task: TaskId,
+        submission: RunId,
         repositories: &[Repository],
         revisions: &[ReviewRevision],
     ) -> Result<Vec<PathBuf>, WorkspaceError> {
@@ -344,21 +371,32 @@ impl Workspaces for GitWorkspaces {
             ));
         }
         let mut paths = Vec::with_capacity(repositories.len());
+        if repositories.is_empty() {
+            return Ok(paths);
+        }
+        let root = tokio::fs::canonicalize(&self.root)
+            .await
+            .map_err(|error| io_error("resolving", &self.root, &error))?;
+        let task_dir = root.join("worktrees").join(task.to_string());
+        let reviews = task_dir.join(".reviews");
+        let dir = reviews.join(submission.to_string());
+        checked_dir(&root, &task_dir).await?;
+        checked_dir(&root, &reviews).await?;
+        checked_dir(&root, &dir).await?;
         for (repository, revision) in repositories.iter().zip(revisions) {
             check(repository)?;
             let commit = revision.commit.as_str();
-            if repository.id != revision.repository
-                || !matches!(commit.len(), 40 | 64)
-                || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-            {
+            if repository.id != revision.repository || !valid_commit_id(commit) {
                 return Err(WorkspaceError(format!(
                     "invalid review revision for {}",
                     repository.name
                 )));
             }
             let _repo = self.lock_repository(repository.id).await;
-            let path = self.worktree(review, repository);
-            if self.is_ready(review, repository) {
+            let path = dir.join(&repository.name);
+            let marker = dir.join(format!(".{}.ready", repository.name));
+            checked_dir(&root, &path).await?;
+            if marker.is_file() && path.join(".git").is_file() {
                 if git(Some(&path), ["rev-parse", "--abbrev-ref", "HEAD"])
                     .await?
                     .trim()
@@ -378,10 +416,9 @@ impl Workspaces for GitWorkspaces {
                 }
             } else {
                 let clone = self.clone(repository).await?;
-                let marker = self.ready_marker(review, repository);
                 remove_file(&marker).await?;
                 remove_dir(&path).await?;
-                create_dir(&self.task_dir(review)).await?;
+                create_dir(&dir).await?;
                 git(Some(&clone), ["worktree", "prune", "--expire", "now"]).await?;
                 git(
                     Some(&clone),
@@ -588,6 +625,30 @@ async fn remove_task_dir(
     if !checked_dir(root, dir).await? {
         return Ok(());
     }
+    let reviews = dir.join(".reviews");
+    if checked_dir(root, &reviews).await? {
+        let mut entries = tokio::fs::read_dir(&reviews)
+            .await
+            .map_err(|error| io_error("reading reviews in", &reviews, &error))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| io_error("reading reviews in", &reviews, &error))?
+        {
+            let round = entry.path();
+            if checked_dir(root, &round).await? {
+                remove_worktree_set(root, &round, removal).await?;
+            }
+        }
+    }
+    remove_worktree_set(root, dir, removal).await
+}
+
+async fn remove_worktree_set(
+    root: &Path,
+    dir: &Path,
+    removal: &WorkspaceRemoval,
+) -> Result<(), WorkspaceError> {
     for (repo, name) in &removal.repositories {
         if !valid_repository_name(name) {
             return Err(WorkspaceError(format!("Invalid worktree name {name:?}")));

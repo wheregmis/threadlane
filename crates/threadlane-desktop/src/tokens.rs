@@ -136,7 +136,7 @@ impl Status {
         let state = label.split_once(" · ").map_or(label, |(state, _)| state);
         match state {
             "Running" | "Stopping" => Self::Running,
-            "Proposed" | "Blocked" | "Waiting on you" => Self::Waiting,
+            "Proposed" | "Blocked" | "Waiting on you" | "In review" => Self::Waiting,
             "Done" => Self::Done,
             "Failed" => Self::Failed,
             _ => Self::Idle,
