@@ -4350,6 +4350,48 @@ async fn decision_number_answers_current_and_keeps_its_record_in_conversation() 
 }
 
 #[tokio::test]
+async fn a_long_question_splits_into_a_title_and_a_six_line_body_and_a_short_one_stays_whole() {
+    let mut long = decision(1, 1_000);
+    long.kind = DecisionKind::Input;
+    long.tool = "ask_user".into();
+    long.question = "Which of these should the team take on next? I read the progress files \
+        and the dogfood log, and these are the open threads that are worth a task.\n\n\
+        1. Deliver a lead's final text: findings 24 and 8.\n2. Fix the sidebar rows."
+        .into();
+    let hub = FakeHub::new("Work", vec![long, decision(2, 2_000)]);
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let shown: Vec<_> = state
+        .queue()
+        .iter()
+        .map(|queued| state.present_decision(queued, "api", &when()))
+        .collect();
+    assert_eq!(
+        shown[0].question,
+        "Which of these should the team take on next?"
+    );
+    assert_eq!(
+        shown[0].body.as_deref(),
+        Some(
+            "I read the progress files and the dogfood log, and these are the open threads \
+             that are worth a task.\n\n1. Deliver a lead's final text: findings 24 and 8.\n\
+             2. Fix the sidebar rows."
+        )
+    );
+    assert_eq!(shown[1].question, "Question 2?");
+    assert_eq!(shown[1].body, None);
+    assert_eq!(
+        ProseLimit::Question.disclosure(false, true),
+        (Some(6), Some("Show more"))
+    );
+    assert_eq!(
+        question_parts("Pick one:\n- a\n- b"),
+        ("Pick one:".to_owned(), Some("- a\n- b".to_owned()))
+    );
+}
+
+#[tokio::test]
 async fn decision_shortcuts_yield_to_fields_and_enter_only_submits_a_question_note() {
     let mut question = decision(2, 2_000);
     question.kind = DecisionKind::Input;
@@ -4817,6 +4859,8 @@ async fn in_progress_caps_running_leads_and_queued_work_and_uses_the_display_clo
     );
     assert_eq!(work.rows[0].elapsed, "12 min");
     assert_eq!(work.rows[1].title, "api · lead");
+    assert_eq!(work.rows[1].label, "api · lead");
+    assert_eq!(work.rows[0].label, "Task 1");
     assert_eq!(work.rows[1].elapsed, "2 min");
     assert_eq!(state.running_leads().len(), 2);
     assert_eq!(work.rows[3].status, "Queued");
@@ -4827,6 +4871,22 @@ async fn in_progress_caps_running_leads_and_queued_work_and_uses_the_display_clo
     };
     assert_eq!(state.in_progress("dev", &later).rows[3].elapsed, "12 min");
     assert!(state.in_progress("other", &when()).rows.is_empty());
+}
+
+#[tokio::test]
+async fn in_progress_rows_clip_long_titles_to_one_line() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(1, TaskStatus::Running, None);
+    running.task.title = "Deliver a lead's final text to the feed".into();
+    *work.tasks.lock().unwrap() = vec![running];
+    *work.lead.lock().unwrap() = Some(Timestamp::from_millis(600_000));
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    state.apply_at(refresh(&core).await, when().now);
+    let rows = state.in_progress("dev", &when()).rows;
+    assert_eq!(rows[0].title, "Deliver a lead's final text to the feed");
+    assert_eq!(rows[0].label, "Deliver a lead's f…");
+    assert_eq!(rows[0].elapsed, "12 min");
 }
 
 #[tokio::test]
