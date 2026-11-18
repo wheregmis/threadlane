@@ -194,6 +194,21 @@ impl HubApi for FakeHub {
             project.archived = archived;
             return Ok(OrgReply::Project { project });
         }
+        let request = match request {
+            OrgRequest::CreateAgent {
+                name,
+                role,
+                instructions,
+                backends,
+            } => OrgRequest::CreateAgentWithModels {
+                name,
+                role,
+                instructions,
+                backends,
+                models: Default::default(),
+            },
+            other => other,
+        };
         let mut bindings = self.bindings.lock().expect("lock");
         match request {
             OrgRequest::Pacing => Ok(OrgReply::Pacing {
@@ -246,21 +261,6 @@ impl HubApi for FakeHub {
             OrgRequest::Agents => Ok(OrgReply::Agents {
                 agents: self.agents.lock().expect("lock").clone(),
             }),
-            OrgRequest::CreateAgent {
-                name,
-                role,
-                instructions,
-                backends,
-            } => {
-                self.org(OrgRequest::CreateAgentWithModels {
-                    name,
-                    role,
-                    instructions,
-                    backends,
-                    models: Default::default(),
-                })
-                .await
-            }
             OrgRequest::CreateAgentWithModels {
                 name,
                 role,
