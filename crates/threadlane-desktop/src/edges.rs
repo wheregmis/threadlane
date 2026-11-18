@@ -85,7 +85,7 @@ impl EmptyRegion {
                 "No routines yet. Add one to have the lead check something on a cadence."
             }
             Self::AllRoutines => {
-                "No routines or follow-ups yet. Add one from a project’s Routines tab."
+                "No routines or follow-ups yet. Add one from a project’s Setup tab."
             }
             Self::Related => "No other tasks depend on this task or need to finish before it.",
             Self::Activity => "No steps have been recorded for this task yet.",

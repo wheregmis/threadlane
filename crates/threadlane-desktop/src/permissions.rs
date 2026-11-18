@@ -126,7 +126,7 @@ pub struct CeilingCard {
     pub choices: Vec<ModeChoice>,
 }
 
-/// One agent's row on the Agents tab.
+/// One agent's row on the Setup tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRow {
     pub agent: String,

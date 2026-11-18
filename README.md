@@ -265,7 +265,7 @@ open --env THREADLANE_CLIENT_DIR="$HOME/.config/threadlane" target/Threadlane.ap
 
 Without `--env`, the app uses the same default client directory as
 `threadlane`. `THREADLANE_DESKTOP_OPEN` opens a screen at start: `home`,
-`agents`, `machines`, `<space>/<project>[/tasks|/agents]`, or
+`agents`, `machines`, `<space>/<project>[/chat|/tasks|/memory|/setup]`, or
 `<space>/T-0001`.
 
 ## Long and live tests

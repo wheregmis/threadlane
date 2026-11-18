@@ -21,14 +21,13 @@ use threadlane_desktop::{
 
 use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
 use crate::components::{
-    button, card, count, count_badge, decision_scroller, field, icon_button, meta, page_header,
-    section, status_badge,
+    button, card, count, count_badge, field, icon_button, meta, page_header, section, status_badge,
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
     BOARD_COLUMN_MIN, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, MODE_WIDTH, READING_WIDTH,
     ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status, TIMESTAMP_WIDTH,
-    TYPE_BODY, TYPE_META, XS,
+    TYPE_BODY, TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -199,9 +198,8 @@ impl Desktop {
                 let icon = match tab {
                     Tab::Tasks => AppIcon::Columns3,
                     Tab::Conversation => AppIcon::MessagesSquare,
-                    Tab::Agents => AppIcon::Bot,
-                    Tab::Routines => AppIcon::CalendarClock,
                     Tab::Memory => AppIcon::BookOpen,
+                    Tab::Setup => AppIcon::Settings,
                 };
                 KitTab::new().aria_label(label).child(
                     h_flex()
@@ -229,9 +227,8 @@ impl Desktop {
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
             Tab::Conversation => self.conversation_tab(space, project, when, cx),
-            Tab::Agents => self.agents_tab(space, project, cx),
-            Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Memory => self.memory_tab(space, project, when, cx),
+            Tab::Setup => self.setup_tab(space, project, when, cx),
         };
         let (pause_space, pause_project) = (space.to_owned(), project.to_owned());
         let (task_space, task_project) = (space.to_owned(), project.to_owned());
@@ -605,17 +602,40 @@ impl Desktop {
                 .into_any_element(),
         };
 
-        let view = self.state.project(space, project);
-        let mut side = v_flex().gap(SM);
         let decisions: Vec<_> = self
             .state
             .visible_decisions()
             .filter(|_| !archived)
             .map(|queued| self.decision(queued, when, cx))
             .collect();
-        if !decisions.is_empty() {
-            side = side.child(section("Open decisions")).children(decisions);
-        }
+        v_flex()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_h_0()
+            .min_w_0()
+            .gap(MD)
+            .when(!decisions.is_empty(), |column| {
+                column.child(section("Open decisions")).children(decisions)
+            })
+            .children(is_empty.then(|| empty(EmptyRegion::Board, cx)))
+            .child(board)
+            .into_any_element()
+    }
+
+    /// Repositories, agents, routines and machines: what the project runs
+    /// with, as flat sections.
+    fn setup_tab(
+        &self,
+        space: &str,
+        project: &str,
+        when: &When,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let archived = self.state.is_archived(space, project);
+        let view = self.state.project(space, project);
+        let mut side = v_flex().gap(SM);
         let repositories = view
             .map(|view| view.repositories.as_slice())
             .unwrap_or_default();
@@ -640,29 +660,23 @@ impl Desktop {
             );
         }
         side = side.children((!archived).then(|| self.repository_form(space, project, cx)));
-        side = side.child(section("Agents here"));
-        if let Some(gap) = self.state.project_gap(space, project, Part::Bindings) {
-            side = side.child(gap_line(&gap, "agents", space, cx));
-        }
-        for binding in view
-            .map(|view| view.bindings.as_slice())
-            .unwrap_or_default()
-        {
-            side = side.child(
-                h_flex()
-                    .justify_between()
-                    .text_size(TYPE_BODY)
-                    .child(binding.agent.clone())
-                    .child(div().text_color(muted).child(mode_name(binding.mode))),
-            );
-        }
-        side = side.child(section("Machines"));
+        let team = Screen::Agents(Some(space.to_owned()));
+        let agents = v_flex()
+            .gap(SM)
+            .child(
+                h_flex().justify_between().child(section("Agents")).child(
+                    link("setup-edit-agents", "Edit agents in Team".to_owned())
+                        .on_click(cx.listener(move |this, _, _, cx| this.go(team.clone(), cx))),
+                ),
+            )
+            .child(self.agents_tab(space, project, cx));
+        let mut machines = v_flex().gap(SM).child(section("Machines"));
         if let Some(gap) = self
             .state
             .space(space)
             .and_then(|known| known.gap(Part::Machines))
         {
-            side = side.child(gap_line(&gap, "machines", space, cx));
+            machines = machines.child(gap_line(&gap, "machines", space, cx));
         }
         for machine in self
             .state
@@ -675,13 +689,13 @@ impl Desktop {
                 space: space.to_owned(),
                 machine: machine.id,
             };
-            side = side.child(
+            machines = machines.child(
                 h_flex()
                     .gap(XS)
                     .text_size(TYPE_BODY)
                     .child(
                         link(
-                            format!("board-machine-{}", machine.id),
+                            format!("setup-machine-{}", machine.id),
                             format!("{}{hub}", machine.name),
                         )
                         .flex_1()
@@ -695,29 +709,19 @@ impl Desktop {
             );
         }
 
-        h_flex()
+        v_flex()
             .flex_1()
-            .w_full()
             .min_h_0()
-            .min_w_0()
-            .items_start()
-            .gap(LG)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .h_full()
-                    .min_h_0()
-                    .min_w_0()
-                    .gap(MD)
-                    .children(is_empty.then(|| empty(EmptyRegion::Board, cx)))
-                    .child(board),
-            )
-            .child(
-                decision_scroller("board-sidebar", side, &self.decision_scroll)
-                    .w(SIDEBAR_WIDTH)
-                    .h_full()
-                    .flex_none(),
-            )
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
+            .overflow_y_scrollbar()
+            .id("setup")
+            .gap(XL)
+            .child(side)
+            .child(agents)
+            .child(self.routines_tab(space, project, when, cx))
+            .child(machines)
             .into_any_element()
     }
 
@@ -1455,10 +1459,6 @@ impl Desktop {
             }),
         );
         let mut rows = v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .id("agents-tab")
             .gap(MD)
             .child(
                 h_flex()
@@ -1478,8 +1478,7 @@ impl Desktop {
                     )
                     .child(ceiling.disabled(archived)),
             )
-            .children(locked_note(&card.choices, muted))
-            .child(section("Agents in this project"));
+            .children(locked_note(&card.choices, muted));
         let gap = self.state.project_gap(space, project, Part::Bindings);
         let agents = self.state.agent_rows(space, project);
         if let Some(gap) = &gap {
@@ -1800,7 +1799,7 @@ impl Desktop {
             div()
                 .text_size(TYPE_BODY)
                 .text_color(muted)
-                .child("No agent here is on. Turn one on in the Agents tab.")
+                .child("No agent here is on. Turn one on in the Setup tab.")
         } else {
             let mut row = h_flex().gap(XS).flex_wrap();
             for agent in agents {

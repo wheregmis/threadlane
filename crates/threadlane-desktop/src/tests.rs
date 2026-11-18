@@ -2457,11 +2457,14 @@ fn every_tab_is_selected_where_it_is_shown() {
         assert_eq!(labels[tab.index()], tab.label(), "{tab:?}");
         assert_eq!(Tab::named(&tab.label().to_lowercase()), Some(tab));
     }
-    assert_eq!(
-        labels,
-        ["Chat", "Tasks", "Agents", "Routines", "Memory"],
-        "Chat first"
-    );
+    assert_eq!(labels, ["Chat", "Tasks", "Memory", "Setup"], "Chat first");
+}
+
+#[test]
+fn the_old_agents_and_routines_tab_names_open_setup() {
+    assert_eq!(Tab::named("agents"), Some(Tab::Setup));
+    assert_eq!(Tab::named("Routines"), Some(Tab::Setup));
+    assert_eq!(Tab::named("board"), None);
 }
 
 #[test]

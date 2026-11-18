@@ -267,7 +267,7 @@ enum Screen {
 
 impl Screen {
     /// The screen `THREADLANE_DESKTOP_OPEN` names: `home`, `agents`,
-    /// `machines`, `<space>/<project>[/chat|tasks|agents|memory]`
+    /// `machines`, `<space>/<project>[/chat|tasks|memory|setup]`
     /// (`agents/<agent>` expands that agent's row), or
     /// `<space>/T-0001`. For looking at a screen without clicking to it.
     fn named(open: &str) -> Option<Self> {
@@ -676,7 +676,7 @@ impl Desktop {
                 project,
                 tab,
             } => {
-                if tab == Tab::Routines {
+                if tab == Tab::Setup {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }
                 if tab == Tab::Memory {

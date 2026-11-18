@@ -449,23 +449,15 @@ pub enum Tab {
     Tasks,
     /// The conversation with the lead.
     Conversation,
-    /// The mode of each agent bound here.
-    Agents,
-    /// Its routines and follow-ups.
-    Routines,
     /// The memory its runs can see.
     Memory,
+    /// Its repositories, agent modes, routines and machines.
+    Setup,
 }
 
 impl Tab {
     /// Every tab, in the order the tab bar shows them: Chat first.
-    pub const ALL: [Self; 5] = [
-        Self::Conversation,
-        Self::Tasks,
-        Self::Agents,
-        Self::Routines,
-        Self::Memory,
-    ];
+    pub const ALL: [Self; 4] = [Self::Conversation, Self::Tasks, Self::Memory, Self::Setup];
 
     /// Its label on the tab bar.
     #[must_use]
@@ -473,9 +465,8 @@ impl Tab {
         match self {
             Self::Tasks => "Tasks",
             Self::Conversation => "Chat",
-            Self::Agents => "Agents",
-            Self::Routines => "Routines",
             Self::Memory => "Memory",
+            Self::Setup => "Setup",
         }
     }
 
@@ -493,8 +484,15 @@ impl Tab {
     }
 
     /// The tab named `name` in lower case, as `THREADLANE_DESKTOP_OPEN` says.
+    /// `agents` and `routines`, tabs before Setup took them in, open Setup.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
+        if ["agents", "routines"]
+            .iter()
+            .any(|old| old.eq_ignore_ascii_case(name))
+        {
+            return Some(Self::Setup);
+        }
         Self::ALL
             .into_iter()
             .find(|tab| tab.label().eq_ignore_ascii_case(name))
@@ -1049,7 +1047,7 @@ pub struct AppState {
     expanded_messages: HashSet<String>,
     /// Where this app keeps its files.
     client_dir: Option<PathBuf>,
-    /// The agent row expanded on a project's Agents tab: space, project,
+    /// The agent row expanded on a project's Setup tab: space, project,
     /// agent.
     open_agent: Option<(String, String, String)>,
     /// The standing rule you asked to revoke, until you confirm or keep it.
