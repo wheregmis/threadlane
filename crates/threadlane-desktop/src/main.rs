@@ -351,6 +351,8 @@ struct Desktop {
     /// Empty the note at the next render, which has the window it needs.
     /// Empty the new project form at the next render.
     clear_project_form: bool,
+    project_name_missing: bool,
+    remote_pairing: bool,
     /// The "+ New routine" form's instruction, N, time, day of the month
     /// and zone.
     routine_instruction: Entity<InputState>,
@@ -456,6 +458,12 @@ impl Desktop {
         let task_title = field("Title", cx);
         let task_goal = field("Goal: what done looks like", cx);
         let subscriptions = vec![
+            cx.observe(&project_name, |this, name, cx| {
+                if this.project_name_missing && !name.read(cx).value().trim().is_empty() {
+                    this.project_name_missing = false;
+                    cx.notify();
+                }
+            }),
             components::composer::subscribe(threadlane_desktop::Draft::Lead, &composer, window, cx),
             components::composer::subscribe(
                 threadlane_desktop::Draft::Task,
@@ -558,6 +566,8 @@ impl Desktop {
             project_name,
             project_description,
             clear_project_form: false,
+            project_name_missing: false,
+            remote_pairing: false,
             routine_instruction,
             routine_every,
             routine_at,
@@ -863,6 +873,7 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.project_name_missing = false;
             self.reveal_linked_decision = None;
             self.conversation_at_bottom = true;
             self.conversation_follow = Rc::new(Cell::new(false));
@@ -989,12 +1000,12 @@ impl Desktop {
     }
 
     /// Creates the project the new project form describes, then opens it.
-    fn create_project(&mut self, space: String, cx: &mut Context<Self>) {
+    fn create_project(&mut self, space: String, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.project_name.read(cx).value().trim().to_owned();
         let description = self.project_description.read(cx).value().trim().to_owned();
         if name.is_empty() {
-            self.state
-                .report(Activity::Failed("Give the project a name.".to_owned()));
+            self.project_name_missing = true;
+            self.project_name.focus_handle(cx).focus(window, cx);
             cx.notify();
             return;
         }

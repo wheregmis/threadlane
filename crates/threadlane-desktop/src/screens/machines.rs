@@ -6,7 +6,9 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 use threadlane_core::ids::MachineId;
 use threadlane_desktop::{
@@ -355,13 +357,7 @@ impl Desktop {
             .child(
                 card(cx)
                     .child(section("+ Add space"))
-                    .child(
-                        div()
-                            .text_size(TYPE_BODY)
-                            .text_color(muted)
-                            .child("Pair this app with another hub using its join code."),
-                    )
-                    .child(self.join_form("Pair", cx)),
+                    .child(self.join_form(cx)),
             )
             .into_any_element()
     }
@@ -378,43 +374,61 @@ impl Desktop {
             .id("add-space")
             .gap(SM)
             .child(heading("Add space"))
-            .child(card(cx).child(self.join_form("Pair by join code", cx)))
+            .child(card(cx).child(self.join_form(cx)))
             .into_any_element()
     }
 
     /// Names a space and pairs it by join code or by local data directory.
-    fn join_form(&self, code_label: &'static str, cx: &mut Context<Self>) -> Div {
+    fn join_form(&self, cx: &mut Context<Self>) -> Div {
+        let remote = self.remote_pairing;
+        let mut locations = h_flex().gap(XS);
+        for (id, label, other) in [
+            ("local-hub", "This computer", false),
+            ("remote-hub", "Another computer", true),
+        ] {
+            locations = locations.child(
+                button(id)
+                    .small()
+                    .outline()
+                    .label(label)
+                    .selected(remote == other)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remote_pairing = other;
+                        cx.notify();
+                    })),
+            );
+        }
         v_flex()
             .gap(SM)
+            .child(meta("Where is the hub?", cx))
+            .child(locations)
+            .child(meta("Space name", cx))
+            .child(div().max_w(SPACE_NAME_WIDTH).child(field(&self.space_name)))
+            .child(meta(
+                if remote {
+                    "Join code"
+                } else {
+                    "Hub data directory"
+                },
+                cx,
+            ))
+            .child(field(if remote {
+                &self.join_code
+            } else {
+                &self.hub_dir
+            }))
             .child(
-                div()
-                    .w_full()
-                    .max_w(SPACE_NAME_WIDTH)
-                    .child(field(&self.space_name)),
-            )
-            .child(
-                h_flex()
-                    .gap(SM)
-                    .child(div().flex_1().min_w_0().child(field(&self.hub_dir)))
-                    .child(
-                        button("pair-directory")
-                            .primary()
-                            .icon(AppIcon::FolderOpen)
-                            .label("Pair by directory")
-                            .on_click(cx.listener(|this, _, _, cx| this.pair_directory(cx))),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap(SM)
-                    .child(div().flex_1().min_w_0().child(field(&self.join_code)))
-                    .child(
-                        button("pair-code")
-                            .primary()
-                            .icon(AppIcon::Link)
-                            .label(code_label)
-                            .on_click(cx.listener(|this, _, _, cx| this.join_space(cx))),
-                    ),
+                button("connect-space")
+                    .primary()
+                    .self_start()
+                    .label("Connect")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if remote {
+                            this.join_space(cx);
+                        } else {
+                            this.pair_directory(cx);
+                        }
+                    })),
             )
     }
 
@@ -428,11 +442,13 @@ impl Desktop {
         v_flex()
             .flex_1()
             .min_h_0()
-            .w_full().max_w(READING_WIDTH).self_center()
-            .overflow_y_scrollbar().id("first-run")
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
+            .overflow_y_scrollbar()
+            .id("first-run")
             .gap(XL)
             .child(heading("Pair this app with a hub"))
-            .child(empty(EmptyRegion::Pairing, cx))
             .child(div().text_color(muted).child(
                 "A hub keeps one space's projects, agents and memory. This app shows every \
                  hub it is paired with.",
@@ -455,10 +471,9 @@ impl Desktop {
             .child(
                 step(
                     "2. Pair with it",
-                    "Name the space, then give the hub's data directory if it runs on this \
-                     computer, or a join code from `threadlane pair-code` on a computer already paired.",
+                    "Use the local hub directory or a join code from the other computer.",
                 )
-                .child(self.join_form("Pair by join code", cx)),
+                .child(self.join_form(cx)),
             )
             .into_any_element()
     }

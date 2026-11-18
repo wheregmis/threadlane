@@ -1934,6 +1934,10 @@ async fn a_new_project_shows_in_its_space_at_once() {
         .await
         .expect("create");
     state.project_created("work", created.clone());
+    assert_eq!(
+        state.activity(),
+        Some(&Activity::Done("Created Payments in work.".to_owned()))
+    );
     state.project_created("work", created);
     state.project_created(
         "home",
