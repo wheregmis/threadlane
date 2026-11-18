@@ -86,6 +86,7 @@ async fn the_hub_binary_answers_a_message_through_claude() {
         .send_message(&UserMessage {
             project: None,
             text: PROMPT.to_owned(),
+            images: Vec::new(),
             client_message_id: uuid::Uuid::new_v4().to_string(),
             task: None,
         })

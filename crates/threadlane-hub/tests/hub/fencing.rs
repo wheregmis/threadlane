@@ -136,6 +136,7 @@ async fn heartbeats_renew_leases_and_omit_lost_ones() {
         .send_message(&threadlane_core::client::UserMessage {
             project: Some("Alpha".into()),
             text: "alpha work".into(),
+            images: Vec::new(),
             client_message_id: "a-1".into(),
             task: None,
         })

@@ -643,6 +643,14 @@ impl Inner {
                     .is_none_or(|id| id == assignment.session_id)
                 && let Some(text) = event.payload["text"].as_str()
             {
+                // The streaming follow-up is text-only. Preserve order and let
+                // the next run deliver this image and any later messages.
+                if event.payload["images"]
+                    .as_array()
+                    .is_some_and(|images| !images.is_empty())
+                {
+                    break;
+                }
                 events.push(event.id);
                 messages.push(text);
             }
@@ -936,6 +944,7 @@ impl Inner {
         RunRequest {
             working_dir,
             prompt: format!("{}{performed}", assignment.prompt),
+            images: assignment.images.clone(),
             appended_instructions: assignment.appended_instructions.clone(),
             model: assignment.model.clone(),
             session: assignment.native_session.clone(),

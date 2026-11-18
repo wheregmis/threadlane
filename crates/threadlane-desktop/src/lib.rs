@@ -27,6 +27,8 @@ use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use tokio::sync::{RwLock, mpsc};
 
 mod agent_edit;
+use threadlane_core::attachment::ImageAttachment;
+
 mod attention;
 mod clock;
 mod composer;
@@ -96,7 +98,7 @@ pub use timeline::{Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, load_time
 const RECENT: u32 = 50;
 
 /// How many conversation entries one page holds.
-pub const PAGE: u32 = 100;
+pub const PAGE: u32 = threadlane_core::client::CONVERSATION_PAGE;
 
 /// How many results Home lists.
 const RECENT_SHOWN: usize = 8;
@@ -959,6 +961,7 @@ impl Author {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Said {
     project: String,
+    images: Vec<ImageAttachment>,
     text: String,
     at: Timestamp,
     by: Author,
@@ -1987,8 +1990,23 @@ impl AppState {
         let mut oldest = None;
         for entry in entries {
             let at = match entry {
-                ConversationEntry::You { event_id, text, at } => {
-                    self.take_said(space, project, event_id, text, at, Author::You)
+                ConversationEntry::You {
+                    event_id,
+                    text,
+                    images,
+                    at,
+                } => {
+                    self.said.insert(
+                        (space.to_owned(), event_id),
+                        Said {
+                            project: project.to_owned(),
+                            text,
+                            images,
+                            at,
+                            by: Author::You,
+                        },
+                    );
+                    at
                 }
                 ConversationEntry::SpaceLead { event_id, text, at } => {
                     self.take_said(space, project, event_id, text, at, Author::SpaceLead)
@@ -2015,6 +2033,7 @@ impl AppState {
                             text,
                             at,
                             by: Author::You,
+                            images: Vec::new(),
                         },
                     );
                     at
@@ -2056,6 +2075,7 @@ impl AppState {
             text,
             at,
             by,
+            images: Vec::new(),
         };
         self.said.insert((space.to_owned(), event), said);
         at
@@ -2303,6 +2323,18 @@ impl AppState {
     /// Takes a message its hub accepted, so the conversation shows it before
     /// the history does.
     pub fn sent(&mut self, space: &str, project: &str, text: &str, event: EventId, at: Timestamp) {
+        self.sent_with_images(space, project, text, event, at, Vec::new());
+    }
+
+    pub(crate) fn sent_with_images(
+        &mut self,
+        space: &str,
+        project: &str,
+        text: &str,
+        event: EventId,
+        at: Timestamp,
+        images: Vec<ImageAttachment>,
+    ) {
         self.said
             .entry((space.to_owned(), event))
             .or_insert_with(|| Said {
@@ -2310,6 +2342,7 @@ impl AppState {
                 text: text.to_owned(),
                 at,
                 by: Author::You,
+                images,
             });
         if let Some(view) = self
             .projects
@@ -2338,6 +2371,7 @@ impl AppState {
                 detail.messages.push(ConversationEntry::You {
                     event_id: event,
                     text: text.to_owned(),
+                    images: Vec::new(),
                     at,
                 });
             }

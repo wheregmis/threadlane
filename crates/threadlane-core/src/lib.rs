@@ -6,6 +6,7 @@
 
 pub mod adapters;
 pub mod admission;
+pub mod attachment;
 pub mod backend;
 pub mod client;
 pub mod forge;

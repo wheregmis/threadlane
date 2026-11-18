@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use threadlane_client::{ClientCore, ClientError, Sent};
+use threadlane_core::attachment::{ImageAttachment, check_image_budget};
 use threadlane_core::{ids::TaskId, time::Timestamp};
 
 use crate::{Activity, AppState, describe};
@@ -61,6 +62,8 @@ pub struct Outgoing {
     pub destination: Destination,
     /// The draft as typed.
     pub text: String,
+    /// The images selected for this submission.
+    pub images: Vec<ImageAttachment>,
     /// When the owner submitted it.
     pub at: Timestamp,
 }
@@ -74,7 +77,8 @@ impl Outgoing {
     pub async fn deliver(&self, core: &ClientCore) -> Result<Sent, ClientError> {
         match &self.destination {
             Destination::Lead(space, project) => {
-                core.send(Some(space), Some(project), &self.text).await
+                core.send_with_images(Some(space), Some(project), &self.text, self.images.clone())
+                    .await
             }
             Destination::Task(space, task) => {
                 core.send_to_task(Some(space), &task.to_string(), &self.text)
@@ -98,6 +102,8 @@ pub struct SendRequest {
 #[derive(Debug, Default)]
 struct DraftState {
     text: String,
+    images: Vec<ImageAttachment>,
+    loading_images: usize,
     error: Option<String>,
 }
 
@@ -124,6 +130,67 @@ impl AppState {
             .drafts
             .get(destination)
             .map_or("", |draft| draft.text.as_str())
+    }
+
+    /// The images in this destination's draft.
+    #[must_use]
+    pub fn draft_images(&self, destination: &Destination) -> &[ImageAttachment] {
+        self.composer
+            .drafts
+            .get(destination)
+            .map_or(&[], |draft| &draft.images)
+    }
+
+    /// Records an image selection in progress for this conversation.
+    pub fn loading_images(&mut self, destination: &Destination) {
+        self.composer
+            .drafts
+            .entry(destination.clone())
+            .or_default()
+            .loading_images += 1;
+    }
+
+    /// Whether images are being prepared for this conversation.
+    #[must_use]
+    pub fn is_loading_images(&self, destination: &Destination) -> bool {
+        self.composer
+            .drafts
+            .get(destination)
+            .is_some_and(|draft| draft.loading_images > 0)
+    }
+
+    /// Completes one image selection, including cancellation or validation errors.
+    pub fn attach_images(
+        &mut self,
+        destination: &Destination,
+        images: Result<Vec<ImageAttachment>, String>,
+    ) {
+        let draft = self.composer.drafts.entry(destination.clone()).or_default();
+        draft.loading_images = draft.loading_images.saturating_sub(1);
+        draft.error = match images.and_then(|images| {
+            let mut combined = draft.images.clone();
+            for image in images {
+                if !combined.contains(&image) {
+                    combined.push(image);
+                }
+            }
+            check_image_budget(&combined)?;
+            Ok(combined)
+        }) {
+            Ok(images) => {
+                draft.images = images;
+                None
+            }
+            Err(error) => Some(error),
+        };
+    }
+
+    /// Removes a selected image from this destination's draft.
+    pub fn remove_image(&mut self, destination: &Destination, image: &ImageAttachment) {
+        if let Some(draft) = self.composer.drafts.get_mut(destination) {
+            draft.images.retain(|selected| selected != image);
+            draft.error = None;
+        }
     }
 
     /// Records edits without altering the snapshot of a submitted message.
@@ -181,7 +248,8 @@ impl AppState {
     /// Whether another submission is possible.
     #[must_use]
     pub fn is_send_enabled(&self, destination: &Destination) -> bool {
-        !self.draft(destination).trim().is_empty()
+        (!self.draft(destination).trim().is_empty() || !self.draft_images(destination).is_empty())
+            && !self.is_loading_images(destination)
             && (!self.is_sending(destination) || self.held_seconds(destination).is_some())
     }
 
@@ -197,6 +265,7 @@ impl AppState {
         let draft = self.composer.drafts.entry(destination.clone()).or_default();
         draft.error = None;
         let text = draft.text.clone();
+        let images = draft.images.clone();
         let flushed = self
             .composer
             .held
@@ -207,11 +276,9 @@ impl AppState {
             ..SendRequest::default()
         };
         // A second Enter on the same draft expedites it. Edited text starts a new hold.
-        if request
-            .flushed
-            .as_ref()
-            .is_some_and(|send| send.destination == destination && send.text == text)
-        {
+        if request.flushed.as_ref().is_some_and(|send| {
+            send.destination == destination && send.text == text && send.images == images
+        }) {
             return request;
         }
         self.composer.next_id += 1;
@@ -219,6 +286,7 @@ impl AppState {
             id: self.composer.next_id,
             destination,
             text,
+            images,
             at,
         };
         if self.hold_messages() {
@@ -254,8 +322,20 @@ impl AppState {
         }
         if let Some((send, _)) = self.composer.held.take() {
             self.preserve_draft(destination, &send.text);
+            self.restore_images(destination, send.images);
         }
         true
+    }
+
+    fn restore_images(&mut self, destination: &Destination, images: Vec<ImageAttachment>) {
+        let draft = self.composer.drafts.entry(destination.clone()).or_default();
+        let mut restored = images;
+        for image in std::mem::take(&mut draft.images) {
+            if !restored.contains(&image) {
+                restored.push(image);
+            }
+        }
+        draft.images = restored;
     }
 
     fn preserve_draft(&mut self, destination: &Destination, text: &str) {
@@ -287,12 +367,15 @@ impl AppState {
         &self,
         destination: &Destination,
         text: &str,
+        images: &[ImageAttachment],
         at: Timestamp,
     ) -> bool {
-        self.composer
-            .sending
-            .iter()
-            .any(|send| &send.destination == destination && send.text == text && at >= send.at)
+        self.composer.sending.iter().any(|send| {
+            &send.destination == destination
+                && send.text == text
+                && send.images == images
+                && at >= send.at
+        })
     }
 
     /// Reports when the requested message starts going to its recipient.
@@ -333,17 +416,31 @@ impl AppState {
                 let same_draft_has_newer_send = self
                     .outgoing()
                     .any(|other| other.destination == *destination && other.id > send.id);
-                if self.draft(destination) == send.text && !same_draft_has_newer_send {
-                    self.composer.drafts.remove(destination);
+                if !same_draft_has_newer_send
+                    && let Some(draft) = self.composer.drafts.get_mut(destination)
+                {
+                    if draft.text == send.text {
+                        draft.text.clear();
+                    }
+                    for image in &send.images {
+                        if let Some(index) = draft
+                            .images
+                            .iter()
+                            .position(|draft_image| draft_image == image)
+                        {
+                            draft.images.remove(index);
+                        }
+                    }
                 }
                 match send.destination {
                     Destination::Lead(space, project) => {
-                        self.sent(
+                        self.sent_with_images(
                             &space,
                             &project,
                             &send.text,
                             sent.accepted.event_id,
                             send.at,
+                            send.images,
                         );
                     }
                     Destination::Task(space, task) => {
@@ -361,6 +458,7 @@ impl AppState {
             Err(error) => {
                 let why = describe(&error);
                 self.preserve_draft(destination, &send.text);
+                self.restore_images(destination, send.images);
                 self.fail_send(destination, why);
             }
         }

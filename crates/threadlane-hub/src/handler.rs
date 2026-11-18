@@ -303,11 +303,25 @@ impl HubApi for ClientApi {
     }
 
     async fn send_message(&self, message: &UserMessage) -> Result<Accepted, ApiError> {
-        if message.text.trim().is_empty() {
+        if message.text.trim().is_empty() && message.images.is_empty() {
             return Err(ApiError::Invalid("the message is empty".into()));
         }
         if message.client_message_id.trim().is_empty() {
             return Err(ApiError::Invalid("the client message id is empty".into()));
+        }
+        if !message.images.is_empty() {
+            if message.task.is_some() {
+                return Err(ApiError::Invalid(
+                    "Attach images in a conversation with a lead.".into(),
+                ));
+            }
+            let images = message.images.clone();
+            tokio::task::spawn_blocking(move || {
+                threadlane_core::attachment::validate_images(&images)
+            })
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?
+            .map_err(ApiError::Invalid)?;
         }
         let inner = &self.core.inner;
         // A message to a task goes to its lane; one there declines the
@@ -338,6 +352,11 @@ impl HubApi for ClientApi {
                 (project.id, project.lead_lane_id)
             }
         };
+        let mut payload = json!({ "text": message.text });
+        if !message.images.is_empty() {
+            payload["images"] = serde_json::to_value(&message.images)
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+        }
         let inserted = inner
             .db
             .insert_event(&NewEvent {
@@ -346,7 +365,7 @@ impl HubApi for ClientApi {
                 source: CLIENT_SOURCE.to_owned(),
                 source_event_id: message.client_message_id.clone(),
                 kind: EventKind::UserMessage,
-                payload: json!({ "text": message.text }),
+                payload,
                 trust: Trust::User,
                 requested: true,
                 session_ref: None,

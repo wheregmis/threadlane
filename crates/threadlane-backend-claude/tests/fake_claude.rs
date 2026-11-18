@@ -83,6 +83,7 @@ impl Fake {
         RunRequest {
             working_dir: self.work.path().to_owned(),
             prompt: "Say hello.".to_owned(),
+            images: Vec::new(),
             appended_instructions: String::new(),
             model: None,
             session,
@@ -366,6 +367,7 @@ async fn start_passes_every_option() {
     });
     let request = RunRequest {
         prompt: "Reply to the message.\nIt says: hello.".to_owned(),
+        images: Vec::new(),
         appended_instructions: "You are the lead.".to_owned(),
         model: Some("haiku".to_owned()),
         tools: Some(Arc::new(Endpoint)),
@@ -760,6 +762,7 @@ async fn a_missing_program_is_not_installed() {
     let request = RunRequest {
         working_dir: work.path().to_owned(),
         prompt: String::new(),
+        images: Vec::new(),
         appended_instructions: String::new(),
         model: None,
         session: NativeSession::Start {

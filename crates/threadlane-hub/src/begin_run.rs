@@ -382,6 +382,14 @@ impl LocalLink {
             native_session: plan.native,
             appended_instructions,
             prompt,
+            images: events
+                .iter()
+                .filter(|event| {
+                    event.kind == threadlane_core::model::EventKind::UserMessage
+                        && event.trust == threadlane_core::model::Trust::User
+                })
+                .flat_map(|event| threadlane_core::attachment::images_in(&event.payload))
+                .collect(),
             tools: if dreaming {
                 dreaming::definitions()
             } else {
@@ -504,6 +512,16 @@ impl LocalLink {
                 scoped.push(event);
             }
             events = scoped;
+        }
+        // Keep each image turn at its per-message budget. Later events
+        // stay pending and will be delivered in their own turns.
+        let has_images = |event: &Event| {
+            event.payload["images"]
+                .as_array()
+                .is_some_and(|images| !images.is_empty())
+        };
+        if let Some(index) = events.iter().position(has_images) {
+            events.truncate(index.max(1));
         }
         Ok((session, events))
     }

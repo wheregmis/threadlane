@@ -55,6 +55,7 @@ pub fn send_message_tool() -> ToolDefinition {
 /// A lead-lane assignment for run `run` that starts native session `native-<run>`.
 pub fn assignment(run: i64) -> RunAssignment {
     RunAssignment {
+        images: Vec::new(),
         dreaming: false,
         space_lead_ask: None,
         run_id: RunId(run),

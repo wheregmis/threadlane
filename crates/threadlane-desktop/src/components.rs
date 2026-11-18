@@ -10,6 +10,7 @@ use gpui_kit::{
     App, Div, ElementId, Entity, FontWeight, ParentElement as _, SharedString, Styled as _, div,
 };
 
+pub(crate) mod chat_images;
 pub(crate) mod composer;
 mod prose;
 

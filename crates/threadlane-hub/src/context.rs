@@ -190,6 +190,16 @@ fn render_event(event: &Event, out: &mut String) {
     } else {
         out.push_str(content.trim_end());
         out.push('\n');
+        if event.kind == EventKind::UserMessage
+            && event.trust == Trust::User
+            && let Some(images) = event.payload["images"].as_array()
+        {
+            for image in images {
+                if let Some(name) = image["name"].as_str() {
+                    let _ = writeln!(out, "Attached image: {name:?}");
+                }
+            }
+        }
     }
 }
 

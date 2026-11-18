@@ -23,6 +23,8 @@ threadlane-transport-local = { path = "crates/threadlane-transport-local" }
 threadlane-transport-iroh = { path = "crates/threadlane-transport-iroh" }
 
 anyhow = "1"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4", features = ["derive", "env"] }

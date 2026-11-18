@@ -379,6 +379,7 @@ impl Desktop {
                             .items_start()
                             .child(header)
                             .child(body)
+                            .children(crate::components::chat_images::previews(entry.images, cx))
                             .children(from),
                     )
                     .context_menu(move |menu, _, _| {

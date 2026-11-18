@@ -312,6 +312,7 @@ async fn every_request_kind_round_trips() {
     let message = UserMessage {
         project: Some("api".to_owned()),
         text: "hello".to_owned(),
+        images: Vec::new(),
         client_message_id: "m-1".to_owned(),
         task: Some(TaskId(4)),
     };
@@ -328,6 +329,7 @@ async fn every_request_kind_round_trips() {
     let missing = UserMessage {
         project: Some("missing".to_owned()),
         text: "hello".to_owned(),
+        images: Vec::new(),
         client_message_id: "m-2".to_owned(),
         task: None,
     };

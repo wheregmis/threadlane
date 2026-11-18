@@ -270,6 +270,7 @@ fn you(event: Event) -> ConversationEntry {
     ConversationEntry::You {
         event_id: event.id,
         text: field("text"),
+        images: threadlane_core::attachment::images_in(&event.payload),
         at: event.received_at,
     }
 }
@@ -388,7 +389,7 @@ pub(super) async fn handle(
             limit,
         } => {
             let project = api.project_named(project.as_deref()).await?;
-            let limit = limit.min(FEED_PAGE);
+            let limit = limit.min(threadlane_core::client::CONVERSATION_PAGE);
             let names = Names::of(db).await?;
             let mut entries: Vec<(Timestamp, ConversationEntry)> = db
                 .user_messages(project.lead_lane_id, before, limit)

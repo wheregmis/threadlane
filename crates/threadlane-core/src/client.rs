@@ -46,12 +46,17 @@ pub struct ProjectSummary {
     pub archived: bool,
 }
 
+use crate::attachment::ImageAttachment;
+
 /// A message from you to a project's lead, or to one of its tasks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMessage {
     /// The project's name. `None` means the General project.
     pub project: Option<String>,
     pub text: String,
+    /// Images attached to a message to a lead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
     /// Chosen by the client, unique per message. Sending the same id twice
     /// is a successful no-op, so a client may retry freely.
     pub client_message_id: String,
@@ -633,6 +638,10 @@ pub struct TaskReviewActivity {
     pub decided_at: Option<Timestamp>,
 }
 
+/// Maximum chat history page. Full image messages fit within the remote
+/// transport response limit at this page size.
+pub const CONVERSATION_PAGE: u32 = 20;
+
 /// One entry of the conversation with a project's lead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "from", rename_all = "snake_case")]
@@ -646,6 +655,8 @@ pub enum ConversationEntry {
     You {
         event_id: EventId,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageAttachment>,
         at: Timestamp,
     },
     /// An ask the space lead, the General project's lead, handed to this
@@ -941,6 +952,10 @@ pub enum ClientRequest {
     SendMessage {
         message: UserMessage,
     },
+    /// Separate from SendMessage so older hubs cannot silently discard images.
+    SendMessageWithImages {
+        message: UserMessage,
+    },
     Feed {
         after: i64,
         wait_ms: u64,
@@ -1003,7 +1018,8 @@ pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientRespons
             .project_list(include_archived)
             .await
             .map(|projects| ClientResponse::Projects { projects }),
-        ClientRequest::SendMessage { message } => api
+        ClientRequest::SendMessage { message }
+        | ClientRequest::SendMessageWithImages { message } => api
             .send_message(&message)
             .await
             .map(|accepted| ClientResponse::Accepted { accepted }),

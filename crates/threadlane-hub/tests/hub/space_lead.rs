@@ -38,6 +38,7 @@ async fn send_to(hub: &TestHub, project: &str, id: &str, text: &str) {
         .send_message(&UserMessage {
             project: Some(project.into()),
             text: text.into(),
+            images: Vec::new(),
             client_message_id: id.into(),
             task: None,
         })

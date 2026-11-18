@@ -189,6 +189,7 @@ impl AgentBackend for ClaudeBackend {
             config_dir: self.config.config_dir.clone(),
             working_dir: request.working_dir,
             prompt: request.prompt,
+            images: request.images,
             model: request.model,
             appended_instructions: request.appended_instructions,
             mcp_config,

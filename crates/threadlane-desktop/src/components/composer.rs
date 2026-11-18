@@ -6,10 +6,11 @@ use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState, Undo};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
+use threadlane_core::attachment::{ImageAttachment, validate_images};
 use threadlane_core::time::{Clock as _, SystemClock};
 use threadlane_desktop::{Activity, Destination, Draft, Outgoing, sends_on_enter};
 
-use super::{button, composer_surface, meta};
+use super::{button, chat_images, composer_surface, meta};
 use crate::icons::AppIcon;
 use crate::tokens::{COMPOSER_MAX_ROWS, FIELD_RADIUS, SM, TYPE_BODY, XS};
 use crate::{Desktop, Screen, Tab};
@@ -130,8 +131,48 @@ impl Desktop {
         let enabled = destination
             .as_ref()
             .is_some_and(|destination| self.state.is_send_enabled(destination));
+        let loading_images = destination
+            .as_ref()
+            .is_some_and(|target| self.state.is_loading_images(target));
+        let attach_to = destination.clone().filter(|target| {
+            matches!(target, Destination::Lead(space, project) if !self.state.is_archived(space, project))
+        });
+        let paste_to = attach_to.clone();
+        let view = cx.weak_entity();
         v_flex()
             .gap(XS)
+            .children(attach_to.as_ref().map(|target| {
+                h_flex()
+                    .gap(XS)
+                    .flex_wrap()
+                    .children(self.state.draft_images(target).iter().map(|image| {
+                        use std::hash::{BuildHasher as _, RandomState};
+                        use std::sync::LazyLock;
+                        static HASHER: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+                        let target = target.clone();
+                        let id = HASHER.hash_one(image) as usize;
+                        let selected = image.clone();
+                        v_flex()
+                            .gap(XS)
+                            .child(chat_images::preview_button(
+                                ("preview-image", id).into(),
+                                image,
+                                cx,
+                            ))
+                            .child(
+                                button(("remove-image", id))
+                                    .small()
+                                    .ghost()
+                                    .tab_stop(true)
+                                    .label("Remove")
+                                    .accessibility_label(format!("Remove {}", image.name()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.state.remove_image(&target, &selected);
+                                        cx.notify();
+                                    })),
+                            )
+                    }))
+            }))
             .child(
                 composer_surface(cx)
                     .children(picker)
@@ -140,9 +181,26 @@ impl Desktop {
                             Textarea::new(self.draft_input(draft))
                                 .rounded(FIELD_RADIUS)
                                 .text_size(TYPE_BODY)
-                                .aria_label(label),
+                                .aria_label(label)
+                                .on_paste(move |item, _, cx| {
+                                    if let Some(target) = &paste_to {
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.paste_images(target, item, cx);
+                                        });
+                                    }
+                                    false
+                                }),
                         ),
                     )
+                    .children(attach_to.map(|target| {
+                        button("attach-images")
+                            .ghost()
+                            .tab_stop(true)
+                            .label("Attach images…")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.choose_images(target.clone(), window, cx);
+                            }))
+                    }))
                     .child(
                         button("send")
                             .primary()
@@ -157,6 +215,7 @@ impl Desktop {
                             ),
                     ),
             )
+            .children(loading_images.then(|| meta("Preparing images…", cx)))
             .children(held.map(|seconds| {
                 h_flex()
                     .gap(SM)
@@ -187,6 +246,86 @@ impl Desktop {
                             .child(why.to_owned())
                     }),
             )
+    }
+
+    fn choose_images(&mut self, target: Destination, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.loading_images(&target);
+        cx.notify();
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach images".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let images = match selection.await {
+                Ok(Ok(Some(paths))) => {
+                    cx.background_spawn(async move { chat_images::read_images(paths) })
+                        .await
+                }
+                Ok(Ok(None)) | Err(_) => Ok(Vec::new()),
+                Ok(Err(error)) => Err(format!("Could not open image files. {error}")),
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.state.attach_images(&target, images);
+                if this.composer_destination().as_ref() == Some(&target) {
+                    this.draft_input(target.draft())
+                        .focus_handle(cx)
+                        .focus(window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn paste_images(&mut self, target: &Destination, item: &ClipboardItem, cx: &mut Context<Self>) {
+        let images: Vec<_> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image),
+                _ => None,
+            })
+            .collect();
+        if images.is_empty() {
+            return;
+        }
+        self.state.loading_images(target);
+        if images
+            .iter()
+            .map(|image| image.bytes().len())
+            .sum::<usize>()
+            > threadlane_core::attachment::MAX_IMAGE_BYTES
+        {
+            self.state.attach_images(
+                target,
+                Err("Images can total up to 2 MiB per message.".into()),
+            );
+            cx.notify();
+            return;
+        }
+        let images = images
+            .into_iter()
+            .enumerate()
+            .map(|(index, image)| {
+                ImageAttachment::new(
+                    format!("Pasted image {}.{}", index + 1, image.format().extension()),
+                    image.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let target = target.clone();
+        cx.notify();
+        let checked = cx.background_spawn(async move { validate_images(&images).map(|()| images) });
+        cx.spawn(async move |this, cx| {
+            let images = checked.await;
+            let _ = this.update(cx, |this, cx| {
+                this.state.attach_images(&target, images);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn submit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {

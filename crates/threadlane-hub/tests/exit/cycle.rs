@@ -118,6 +118,7 @@ async fn an_agent_set_to_off_never_runs() {
         .send_message(&UserMessage {
             project: None,
             text: "Hello?".into(),
+            images: Vec::new(),
             client_message_id: "m-2".into(),
             task: None,
         })

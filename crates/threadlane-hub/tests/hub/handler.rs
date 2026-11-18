@@ -110,6 +110,7 @@ async fn bad_messages_are_refused() {
     let message = |project: Option<&str>, text: &str, id: &str| UserMessage {
         project: project.map(str::to_owned),
         text: text.to_owned(),
+        images: Vec::new(),
         client_message_id: id.to_owned(),
         task: None,
     };
@@ -147,6 +148,7 @@ async fn a_named_project_routes_to_its_own_lead_lane() {
         .send_message(&UserMessage {
             project: Some("Alpha".into()),
             text: "Ship it".into(),
+            images: Vec::new(),
             client_message_id: "a-1".into(),
             task: None,
         })

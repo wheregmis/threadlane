@@ -79,6 +79,9 @@ pub struct RunAssignment {
     pub appended_instructions: String,
     /// The per-run prompt (Plan.md §8.5 items 4 to 7).
     pub prompt: String,
+    /// Owner images in the same order as the prompt events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::attachment::ImageAttachment>,
     /// The system's tools this run may call.
     pub tools: Vec<ToolDefinition>,
     /// Remove every built-in tool of the backend (leads and dreaming, §5.1).

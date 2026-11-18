@@ -4,6 +4,7 @@
 //! knows nothing of another.
 
 use threadlane_client::{ClientCore, ClientError, SpaceFeedItem};
+use threadlane_core::attachment::ImageAttachment;
 use threadlane_core::client::ConversationEntry;
 use threadlane_core::model::OutboxKind;
 use threadlane_core::time::Timestamp;
@@ -14,7 +15,7 @@ use crate::{AppState, Author};
 pub const TIMELINE_PAGE: usize = 20;
 
 /// How many of each conversation's newest entries a Home load asks for.
-const NEWEST: u32 = 20;
+const NEWEST: u32 = crate::PAGE;
 
 /// What an entry of the timeline says.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,6 +39,8 @@ pub struct TimelineEntry<'a> {
     pub at: Timestamp,
     /// What it says.
     pub spoken: Spoken<'a>,
+    /// Inline images of an owner message.
+    pub images: &'a [ImageAttachment],
 }
 
 impl TimelineEntry<'_> {
@@ -116,6 +119,7 @@ impl AppState {
             project: Some(&said.project),
             at: said.at,
             spoken: Spoken::Said(&said.text, &said.by),
+            images: &said.images,
         });
         let delivered = self
             .delivered
@@ -126,6 +130,7 @@ impl AppState {
                 project: item.item.project_name.as_deref(),
                 at: item.item.delivered_at,
                 spoken: Spoken::Delivered(item),
+                images: &[],
             });
         let mut all: Vec<_> = said
             .chain(delivered)
