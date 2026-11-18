@@ -170,6 +170,17 @@ pub(crate) fn switch_destination(
     })
 }
 
+/// The app icon's mark, shown beside the name at the top of the sidebar.
+fn logo() -> std::sync::Arc<Image> {
+    static LOGO: std::sync::LazyLock<std::sync::Arc<Image>> = std::sync::LazyLock::new(|| {
+        std::sync::Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            include_bytes!("../../resources/logo.png").to_vec(),
+        ))
+    });
+    std::sync::Arc::clone(&LOGO)
+}
+
 impl Desktop {
     /// Opens the nth actionable row regardless of the sidebar's visibility.
     pub(crate) fn sidebar_screen(&self, index: usize) -> Option<Screen> {
@@ -198,8 +209,10 @@ impl Desktop {
                 h_flex()
                     .h(BAR_HEIGHT)
                     .px(MD)
+                    .gap(SM)
                     .text_size(TYPE_EMPHASIS)
                     .font_weight(FontWeight::SEMIBOLD)
+                    .child(img(logo()).size(px(20.)).rounded(px(5.)).flex_none())
                     .child("Threadlane"),
             )
             .child(self.space_switcher(when, cx))
