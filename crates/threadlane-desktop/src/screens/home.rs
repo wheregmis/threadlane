@@ -1,6 +1,6 @@
-//! Home (wireframe 1): everything that needs you across every space, then
-//! what is running, then every conversation as one timeline, and a
-//! composer to any project (General by default).
+//! The Inbox (wireframe 1, `Screen::Home`): everything that needs you across
+//! every space, then recent failures, then every conversation as one
+//! timeline, above a composer to any space's Lead.
 
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::ButtonVariants as _;
@@ -9,13 +9,12 @@ use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_fle
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::OutboxKind;
-use threadlane_desktop::{Author, EmptyRegion, Part, Spoken, When, running_elapsed};
+use threadlane_desktop::{Author, Part, Spoken, When};
 
-use super::{empty, gap_line, menu_item};
+use super::{gap_line, menu_item};
 use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
 use crate::tokens::{
-    CONTROL_HEIGHT, LG, READING_WIDTH, ROW_HEIGHT, SM, Status, TIMESTAMP_WIDTH, TYPE_BODY,
-    TYPE_META, XL, XS,
+    CONTROL_HEIGHT, LG, READING_WIDTH, ROW_HEIGHT, SM, Status, TIMESTAMP_WIDTH, TYPE_BODY, XL, XS,
 };
 use crate::{Desktop, Screen};
 
@@ -98,96 +97,56 @@ impl Desktop {
             needs = needs.child(self.decision(queued, when, cx));
         }
 
-        let running = state.running();
-        let leads = state.running_leads();
-        let running_count = running.len() + leads.len();
-        let mut table = v_flex()
+        let failures = state.recent_failures(when);
+        let mut failed = v_flex()
             .gap(XS)
-            .child(section("Running now").children(count(running_count, cx)));
-        let gaps = state.gaps(Part::Running);
-        for (space, gap) in &gaps {
-            table = table.child(gap_line(gap, "running tasks", space, cx));
-        }
-        let show_running = running_count != 0 || !gaps.is_empty();
-        if running_count != 0 {
-            table = table.child(
-                running_row(["Task", "Project", "Agent", "Machine", "Running"], div())
-                    .text_size(TYPE_META)
-                    .text_color(muted),
-            );
-        }
-        for (space, summary) in running {
+            .child(section("Failed").children(count(failures.len(), cx)));
+        for &(space, summary) in &failures {
             let task = &summary.task;
             let screen = Screen::Task {
                 space: space.to_owned(),
                 task: task.id,
             };
-            let cells = [
-                format!("{} {}", task.id, task.title),
-                summary.project.clone(),
-                summary.agent.clone(),
-                summary.machine.clone().unwrap_or_default(),
-                running_elapsed(summary, when).unwrap_or_default(),
-            ];
-            table = table.child(
-                button(SharedString::from(format!("running-{space}-{}", task.id)))
+            failed = failed.child(
+                button(SharedString::from(format!("failed-{space}-{}", task.id)))
                     .text()
                     .w_full()
                     .accessibility_label(format!("Open {} {}", task.id, task.title))
-                    .child(running_row(cells, status_dot(Status::Running, cx)))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap(SM)
+                            .min_h(ROW_HEIGHT)
+                            .child(
+                                h_flex()
+                                    .size(LG)
+                                    .flex_none()
+                                    .child(status_dot(Status::Failed, cx)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(format!("{} {}", task.id, task.title)),
+                            )
+                            .child(meta(
+                                format!("{space} / {} · {}", summary.project, summary.agent),
+                                cx,
+                            )),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
             );
         }
 
-        for (space, project, started) in leads {
-            let screen = Screen::Project {
-                space: space.to_owned(),
-                project: project.to_owned(),
-                tab: crate::Tab::Conversation,
-            };
-            let title = format!("{project} · lead");
-            table = table.child(
-                button(SharedString::from(format!(
-                    "running-lead-{space}-{project}"
-                )))
-                .text()
-                .w_full()
-                .accessibility_label(format!("Open {title} in {space}"))
-                .child(running_row(
-                    [
-                        title,
-                        project.to_owned(),
-                        "Lead".to_owned(),
-                        String::new(),
-                        when.since(started),
-                    ],
-                    status_dot(Status::Running, cx),
-                ))
-                .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
-            );
-        }
-
-        let quiet = !show_needs && !show_running && banners.is_empty();
-        let history = button("home-history")
-            .small()
-            .ghost()
-            .tab_stop(true)
-            .label(if self.show_home_history {
-                "Hide conversation history"
-            } else if state.home_has_new_replies() {
-                "Show conversation history · New reply"
-            } else {
-                "Show conversation history"
-            })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.state.saw_home_replies();
-                this.show_home_history = !this.show_home_history;
-                cx.notify();
-            }));
+        let recent_empty = state.timeline().is_empty()
+            && state.gaps(Part::Recent).is_empty()
+            && !state.timeline_has_earlier();
+        let quiet = !show_needs && failures.is_empty() && recent_empty && banners.is_empty();
 
         let content = v_flex()
             .gap(XL)
-            .child(heading("Home"))
+            .child(heading("Inbox"))
             .when(state.spaces().len() > 1, |view| {
                 view.child(chips.w_full().min_h(CONTROL_HEIGHT).flex_none())
             })
@@ -199,37 +158,39 @@ impl Desktop {
             )
             .children(banners)
             .when(show_needs, |view| view.child(needs))
-            .when(show_running, |view| view.child(table))
+            .when(!failures.is_empty(), |view| view.child(failed))
+            .when(!recent_empty, |view| view.child(self.timeline(when, cx)))
             .when(quiet, |view| {
-                view.child(meta("No work needs your attention.", cx))
-            })
-            .when(!state.spaces().is_empty(), |view| {
-                view.child(h_flex().child(history))
-                    .when(self.show_home_history, |view| {
-                        view.child(self.timeline(when, cx))
-                    })
-                    .child(self.home_composer(cx))
+                view.child(meta(
+                    "Nothing needs you. Tell your team what you need below.",
+                    cx,
+                ))
             });
-        decision_scroller("home", content, &self.decision_scroll)
+        // The page scrolls above a composer pinned at the bottom, as in a project's Chat tab.
+        v_flex()
+            .flex_1()
+            .min_h_0()
             .w_full()
             .max_w(READING_WIDTH)
             .self_center()
+            .gap(SM)
+            .child(decision_scroller("home", content, &self.decision_scroll))
+            .when(!state.spaces().is_empty(), |view| {
+                view.child(self.home_composer(cx).flex_none())
+            })
             .into_any_element()
     }
 
-    /// Home's timeline (docs/one-place-to-talk.md): every conversation in
+    /// The Inbox timeline (docs/one-place-to-talk.md): every conversation in
     /// the spaces shown, newest first; each entry names its space and
     /// project and opens that conversation.
     fn timeline(&self, when: &When, cx: &mut Context<Self>) -> Div {
         let state = &self.state;
-        let mut list = v_flex().gap(SM).child(section("Conversations"));
+        let mut list = v_flex().gap(SM).child(section("Recent"));
         let entries = state.timeline();
         let gaps = state.gaps(Part::Recent);
         for (space, gap) in &gaps {
             list = list.child(gap_line(gap, "recent results", space, cx));
-        }
-        if entries.is_empty() && gaps.is_empty() {
-            list = list.child(empty(EmptyRegion::Results, cx));
         }
         for (index, entry) in entries.iter().enumerate() {
             let space = entry.space.to_owned();
@@ -366,8 +327,8 @@ impl Desktop {
         list
     }
 
-    /// The Home composer sends to the chosen space's Main Chat.
-    fn home_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The Inbox composer sends to the chosen space's Main Chat.
+    fn home_composer(&self, cx: &mut Context<Self>) -> Div {
         let label = self
             .state
             .target()
@@ -404,27 +365,4 @@ impl Desktop {
             cx,
         )
     }
-}
-
-/// The task title gets the most space, and elapsed time aligns at the trailing edge.
-fn running_row(cells: [impl Into<SharedString>; 5], marker: impl IntoElement) -> Div {
-    h_flex()
-        .w_full()
-        .gap(SM)
-        .min_h(ROW_HEIGHT)
-        .child(h_flex().size(LG).flex_none().child(marker))
-        .children(cells.into_iter().enumerate().map(|(index, cell)| {
-            div()
-                .map(|cell| {
-                    if index == 0 {
-                        cell.flex_1().flex_grow(2.)
-                    } else {
-                        cell.flex_1()
-                    }
-                })
-                .min_w_0()
-                .truncate()
-                .when(index == 4, |cell| cell.text_right())
-                .child(cell.into())
-        }))
 }

@@ -1417,6 +1417,51 @@ fn count_forms_use_singular_only_for_one() {
     }
 }
 
+#[tokio::test]
+async fn inbox_lists_the_newest_recent_failures_of_the_spaces_it_shows() {
+    let day = 24 * 60 * 60 * 1_000;
+    let failed = |id: i64, at: i64| {
+        let mut summary = task(id, TaskStatus::Failed, None);
+        summary.task.created_at = Timestamp::from_millis(at);
+        summary
+    };
+    let work = FakeHub::new("Work", Vec::new());
+    let mut tasks: Vec<_> = (1..=6).map(|id| failed(id, 10 * day + id)).collect();
+    tasks.push(failed(7, 2 * day));
+    tasks.push(task(8, TaskStatus::Done, None));
+    *work.tasks.lock().expect("lock") = tasks;
+    let home = FakeHub::new("Home", Vec::new());
+    *home.tasks.lock().expect("lock") = vec![failed(9, 10 * day + 10)];
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let when = When {
+        now: Timestamp::from_millis(12 * day),
+        offset_minutes: 0,
+    };
+    let listed = |state: &AppState| -> Vec<_> {
+        state
+            .recent_failures(&when)
+            .into_iter()
+            .map(|(space, summary)| (space.to_owned(), summary.task.id.0))
+            .collect()
+    };
+
+    assert_eq!(
+        listed(&state),
+        [
+            ("home".to_owned(), 9),
+            ("work".to_owned(), 6),
+            ("work".to_owned(), 5),
+            ("work".to_owned(), 4),
+            ("work".to_owned(), 3),
+        ],
+        "newest first, at most five, none older than a week, no done tasks"
+    );
+    state.set_filter(Some("home"));
+    assert_eq!(listed(&state), [("home".to_owned(), 9)]);
+}
+
 const BLOCKED_FOR_TEST: &str = "blocked: every model account it can use is at its usage limit";
 
 #[tokio::test]

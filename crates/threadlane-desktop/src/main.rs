@@ -266,14 +266,14 @@ enum Screen {
 }
 
 impl Screen {
-    /// The screen `THREADLANE_DESKTOP_OPEN` names: `home`, `agents`,
+    /// The screen `THREADLANE_DESKTOP_OPEN` names: `home` or `inbox`, `agents`,
     /// `machines`, `<space>/<project>[/chat|tasks|memory|setup]`
     /// (`agents/<agent>` expands that agent's row), or
     /// `<space>/T-0001`. For looking at a screen without clicking to it.
     fn named(open: &str) -> Option<Self> {
         let parts: Vec<&str> = open.split('/').collect();
         Some(match parts.as_slice() {
-            ["home"] => Self::Home,
+            ["home" | "inbox"] => Self::Home,
             ["agents"] => Self::Agents(None),
             ["machines"] => Self::Machines,
             ["routines"] => Self::Routines(None),
@@ -321,7 +321,6 @@ struct Desktop {
     keyboard_focus: FocusHandle,
     sidebar_collapsed: bool,
     decision_scroll: ScrollHandle,
-    show_home_history: bool,
     board_scroll: ScrollHandle,
     reveal_linked_decision: Option<DecisionKey>,
     conversation_at_bottom: bool,
@@ -541,7 +540,6 @@ impl Desktop {
             keyboard_focus,
             sidebar_collapsed: false,
             decision_scroll: ScrollHandle::default(),
-            show_home_history: false,
             board_scroll: ScrollHandle::default(),
             reveal_linked_decision: None,
             conversation_at_bottom: true,

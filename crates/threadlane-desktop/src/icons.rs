@@ -43,7 +43,7 @@ desktop_icons!(
     Folder,
     FolderPlus,
     GitFork,
-    House,
+    Inbox,
     KeyRound,
     ListPlus,
     MessagesSquare,

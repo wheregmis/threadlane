@@ -72,6 +72,12 @@ pub struct ProposalCard {
 /// How many of the most recently finished tasks the board shows.
 const DONE_SHOWN: usize = 5;
 
+/// How many failed tasks the Inbox lists.
+const FAILED_SHOWN: usize = 5;
+
+/// How many days back the Inbox lists failed tasks.
+const FAILED_DAYS: u64 = 7;
+
 /// The columns in board order, and whether each is shown when empty.
 const COLUMNS: [(&str, bool); 10] = [
     ("Proposed", false),
@@ -259,6 +265,39 @@ impl AppState {
         let more = rows.len().saturating_sub(5);
         rows.truncate(5);
         InProgress { rows, more }
+    }
+
+    /// The failed tasks the Inbox lists, with their space: those of the
+    /// spaces it shows from the last seven days, newest first, at most
+    /// five. The hub reports `completed_at` only for done
+    /// tasks, so a failure is dated by when its task was created.
+    #[must_use]
+    pub fn recent_failures(&self, when: &When) -> Vec<(&str, &TaskSummary)> {
+        let since = when.now - std::time::Duration::from_secs(FAILED_DAYS * 24 * 60 * 60);
+        let mut failed: Vec<_> = self
+            .spaces
+            .iter()
+            .filter(|space| self.shown(&space.name))
+            .flat_map(|space| {
+                space
+                    .tasks
+                    .iter()
+                    .map(move |task| (space.name.as_str(), task))
+            })
+            .filter(|(_, summary)| {
+                summary.task.status == TaskStatus::Failed
+                    && summary.completed_at.unwrap_or(summary.task.created_at) >= since
+            })
+            .collect();
+        failed.sort_by_key(|(space, summary)| {
+            std::cmp::Reverse((
+                summary.completed_at.unwrap_or(summary.task.created_at),
+                *space,
+                summary.task.id,
+            ))
+        });
+        failed.truncate(FAILED_SHOWN);
+        failed
     }
 
     /// Whether [`Self::in_progress`] has work in `project`, past its cap.

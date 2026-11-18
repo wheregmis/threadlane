@@ -50,8 +50,8 @@ fn sidebar_entries(state: &AppState) -> Vec<SidebarEntry<'_>> {
     };
     let mut entries = vec![row(
         "go-home".into(),
-        AppIcon::House,
-        "Home".into(),
+        AppIcon::Inbox,
+        "Inbox".into(),
         positive_count(state.queue().len()),
         false,
         Screen::Home,
@@ -565,7 +565,7 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "Home",
+                "Inbox",
                 "[dev]",
                 "Chat",
                 "Tasks",
