@@ -191,32 +191,74 @@ async fn three_rapid_messages_produce_one_run_and_one_reply() {
 }
 
 #[tokio::test]
-async fn a_run_that_sends_nothing_is_silent_with_its_reason() {
+async fn a_lead_run_that_ends_in_text_delivers_it_once() {
     let sim = Sim::start().await;
     sim.backend().set_default(
         Script::new()
-            .text("Nothing to add.")
-            .finish("The user only said thanks."),
+            .text("Thinking.")
+            .finish("You're welcome, the work is merged."),
     );
     let event = sim.send("m-1", "Thanks!").await;
 
     assert_eq!(sim.work_until_idle().await.unwrap(), 1);
-    assert_eq!(sim.dispatch().await.unwrap(), 0);
+    assert_eq!(sim.dispatch().await.unwrap(), 1);
 
     assert_eq!(sim.event(event).await.status, EventStatus::Done);
     let runs = sim.committed_runs_with(event).await;
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].outcome, Some(RunOutcome::Silent));
+    assert_eq!(runs[0].outcome, Some(RunOutcome::Sent));
     assert_eq!(
         runs[0].rationale.as_deref(),
-        Some("The user only said thanks."),
-        "the final text is stored as the rationale"
+        Some("You're welcome, the work is merged."),
+        "the final text is still the rationale"
     );
-    assert!(sim.feed().await.is_empty(), "final text is never delivered");
-    assert!(sim.outbox().await.is_empty());
+    let feed = sim.feed().await;
+    assert_eq!(feed.len(), 1, "delivered once");
+    assert_eq!(
+        feed[0].message.body,
+        json!({ "text": "You're welcome, the work is merged." })
+    );
+    assert_eq!(sim.outbox().await.len(), 1);
 
-    assert_quiet(&sim, "silent").await;
-    assert_invariants(&sim, "silent").await;
+    assert_quiet(&sim, "final text").await;
+    assert_invariants(&sim, "final text").await;
+}
+
+#[tokio::test]
+async fn a_lead_run_that_called_send_message_delivers_nothing_more() {
+    let sim = Sim::start().await;
+    sim.backend().set_default(reply_script());
+    sim.send("m-1", "Hello").await;
+
+    assert_eq!(sim.work_until_idle().await.unwrap(), 1);
+    assert_eq!(sim.dispatch().await.unwrap(), 1);
+
+    let feed = sim.feed().await;
+    assert_eq!(feed.len(), 1, "only the sent message, not the final text");
+    assert_eq!(feed[0].message.body, json!({ "text": REPLY }));
+    assert_eq!(sim.outbox().await.len(), 1);
+
+    assert_invariants(&sim, "sent and final text").await;
+}
+
+#[tokio::test]
+async fn a_lead_run_ending_in_filler_or_nothing_is_silent() {
+    for last in ["No response requested.", "  "] {
+        let sim = Sim::start().await;
+        sim.backend()
+            .set_default(Script::new().text("Nothing to add.").finish(last));
+        let event = sim.send("m-1", "Thanks!").await;
+
+        assert_eq!(sim.work_until_idle().await.unwrap(), 1);
+        assert_eq!(sim.dispatch().await.unwrap(), 0);
+        let runs = sim.committed_runs_with(event).await;
+        assert_eq!(runs[0].outcome, Some(RunOutcome::Silent), "{last:?}");
+        assert!(sim.feed().await.is_empty(), "{last:?} is not delivered");
+        assert!(sim.outbox().await.is_empty());
+
+        assert_quiet(&sim, "silent").await;
+        assert_invariants(&sim, "silent").await;
+    }
 }
 
 #[tokio::test]

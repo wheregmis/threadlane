@@ -145,7 +145,7 @@ pub fn plan_tasks_in(repositories: &[&str], tasks: &[(&str, &[&str])]) -> Script
             }),
         );
     }
-    script.finish("Planned the tasks.")
+    script.finish("No response requested.")
 }
 
 /// Binds an engineer to General that may run `max_parallel` tasks at once.

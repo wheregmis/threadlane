@@ -23,7 +23,7 @@ lines, one commit on the task branch. Not merged: later work overtook it.
 | # | Finding | State |
 |---|---|---|
 | 1 | The lead told the owner the work "isn't committed yet". The runner commits at run end; agents were not told. | fixed in 415a8bf3 (instructions now say so) |
-| 2 | The lead's final text is not delivered; only `send_message` is. A lead that just answers shows nothing. | open |
+| 2 | The lead's final text is not delivered; only `send_message` is. A lead that just answers shows nothing. | fixed in 872bb595 and 1b4c56b1 (a lead run that sent nothing and left no decision delivers its final text; empty text, the "No response requested." filler and dreams are not delivered); not yet seen on a real run |
 
 ## Run 2, 2026-11-17: README update (T-0003) and gh pagination (T-0004)
 
@@ -43,7 +43,7 @@ Goal: two independent tasks, one documentation, one code with tests.
 
 Result of run 2: both tasks' work is in v2. T-0003 took one run. T-0004 took four: two cut short by the two engine bugs above, one woken by hand before the fix, and one after it that finished.
 
-Still open: finding 2 (a lead's final text is not delivered, only `send_message`).
+Finding 2 (a lead's final text is not delivered) was fixed later, in 872bb595 and 1b4c56b1.
 
 ## Run 3, 2026-11-17: smoke test after the driver change
 
@@ -79,7 +79,7 @@ Goal: `docs/agent-templates.md` as two dependent tasks for the Engineer. Both fi
 | 21 | The dependency worked: T-0006 started after T-0005 finished, and its branch contains T-0005's commit. Each took one run. | checked |
 | 22 | Neither run ended early or with work in the background; both ran the three checks in the foreground. The run-ending fix holds. | checked |
 | 23 | Merging T-0006 into v2 conflicted in four files with archive and delete, which had landed meanwhile and added requests in the same places. Resolved by hand; 674 tests pass. Parallel work on the client interface will keep doing this. | open: nothing in the system helps with it |
-| 24 | The lead's final report did not reach `threadlane feed` when I looked (it had been read by an earlier watcher); the owner had to tell me the tasks were done. | open: check whether the lead reported, in the app |
+| 24 | The lead's final report did not reach `threadlane feed` when I looked (it had been read by an earlier watcher); the owner had to tell me the tasks were done. | partly fixed by finding 2's fix (a lead's final text now reaches the feed); whether an earlier watcher can hide a feed item from later ones was not looked at |
 
 ## Run 5, 2026-11-17: the Chief of Staff's first menu
 

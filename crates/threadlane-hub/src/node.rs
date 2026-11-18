@@ -545,7 +545,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Nothing ne
             .unwrap()
             .unwrap();
         assert_eq!(run.status, RunStatus::Committed);
-        assert_eq!(run.outcome, Some(RunOutcome::Silent));
+        // The lead's final text is its answer.
+        assert_eq!(run.outcome, Some(RunOutcome::Sent));
         assert_eq!(run.rationale.as_deref(), Some("Nothing needs saying."));
         let lane = db.lane(event.lane_id).await.unwrap().unwrap();
         assert_eq!(lane.lease_owner, None, "the lane was released");

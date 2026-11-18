@@ -47,7 +47,7 @@ async fn world() -> World {
     );
     backend.route(
         "task_result",
-        Script::new().finish("Waiting for the other tasks."),
+        Script::new().finish("No response requested."),
     );
     backend.route(
         "decision_answer",

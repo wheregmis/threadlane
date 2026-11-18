@@ -218,13 +218,15 @@ pub trait SessionStore: Send + Sync {
     /// their current status.
     async fn run_events(&self, run_id: RunId) -> StoreResult<Vec<Event>>;
     /// Closes a run with its outcome and marks its events done, in one
-    /// transaction (Plan.md §4.3 step 5.6).
+    /// transaction (Plan.md §4.3 step 5.6). `reply`, if given, is queued in
+    /// the same transaction: a lead's final text delivered as its message.
     async fn commit_run(
         &self,
         lease: &Lease,
         run_id: RunId,
         outcome: RunOutcome,
         rationale: Option<&str>,
+        reply: Option<&NewOutboxMessage>,
         ended_at: Timestamp,
     ) -> StoreResult<()>;
     /// Ends a run as failed, in one transaction (Plan.md §4.9): its events
