@@ -9,6 +9,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
+use threadlane_core::model::BackendKind;
 use threadlane_desktop::{EmptyRegion, Part};
 
 use super::agent_edit::backend_picker;
@@ -41,7 +42,7 @@ impl Desktop {
             let mut cards = h_flex().gap(SM).flex_wrap().items_start();
             for agent in &space.agents {
                 let backends = if agent.backends.is_empty() {
-                    "Either backend".to_owned()
+                    "Any backend".to_owned()
                 } else {
                     agent
                         .backends
@@ -250,6 +251,8 @@ impl Desktop {
         let backends = backend_picker(
             "agent-backends",
             self.state.agent_form().backends,
+            None,
+            BackendKind::ALL,
             &self.agent_models,
             |this, index| this.state.agent_form_mut().backends = index,
             cx,

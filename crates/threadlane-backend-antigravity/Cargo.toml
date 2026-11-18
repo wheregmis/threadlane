@@ -1,0 +1,22 @@
+[package]
+name = "threadlane-backend-antigravity"
+description = "Drives the Antigravity command-line agent as a Threadlane backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+threadlane-core.workspace = true
+threadlane-mcp.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+threadlane-testkit.workspace = true
+
+[lints]
+workspace = true

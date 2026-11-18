@@ -420,7 +420,7 @@ enum AgentCommand {
         #[arg(long)]
         instructions: Option<String>,
         /// The backends it may use, in order of preference, for example
-        /// claude,codex; either if left out.
+        /// claude,codex,antigravity; any if left out.
         #[arg(long = "backend", value_delimiter = ',')]
         backends: Vec<BackendKind>,
         /// A model for one backend. May be repeated.
@@ -448,7 +448,7 @@ enum AgentCommand {
         #[arg(long, value_name = "PATH")]
         instructions_file: Option<PathBuf>,
         /// The backends it may use, in order of preference, for example
-        /// claude,codex.
+        /// claude,codex,antigravity.
         #[arg(long = "backend", value_delimiter = ',')]
         backends: Option<Vec<String>>,
         /// A model for one backend, as BACKEND=MODEL; an empty model goes

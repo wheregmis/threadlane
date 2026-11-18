@@ -26,25 +26,27 @@ use crate::{Desktop, Screen};
 pub(super) fn backend_picker(
     id: &'static str,
     picked: usize,
+    saved_label: Option<String>,
+    model_backends: &[BackendKind],
     inputs: &[Entity<InputState>],
     on_pick: fn(&mut Desktop, usize),
     cx: &mut Context<Desktop>,
 ) -> Div {
-    let kinds = BACKENDS[picked].1;
+    let kinds = BACKENDS.get(picked).map_or(&[][..], |(_, kinds)| *kinds);
     let view = cx.entity().downgrade();
     let backend =
-        |label: &'static str, current: &'static str, choices: Vec<(&'static str, usize)>| {
+        |label: &'static str, current: SharedString, choices: Vec<(SharedString, usize)>| {
             let view = view.clone();
             h_flex().gap(SM).child(meta(label, cx)).child(
                 button(SharedString::from(format!("{id}-{label}")))
                     .outline()
-                    .label(current)
+                    .label(current.clone())
                     .accessibility_label(format!("{label}, {current}"))
                     .dropdown_menu(move |mut menu, _, _| {
                         for (name, index) in &choices {
                             let (view, index) = (view.clone(), *index);
                             menu = menu.item(
-                                PopupMenuItem::new(*name)
+                                PopupMenuItem::new(name.clone())
                                     .checked(*name == current)
                                     .on_click(move |_, _, cx| {
                                         let _ = view.update(cx, |this, cx| {
@@ -65,6 +67,7 @@ pub(super) fn backend_picker(
             .unwrap();
         let input = &inputs[index];
         let presets: &[&str] = match kind {
+            BackendKind::Antigravity => &[],
             BackendKind::Claude => &["sonnet", "opus", "haiku"],
             BackendKind::Codex => &["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra"],
         };
@@ -100,34 +103,45 @@ pub(super) fn backend_picker(
             )
     };
     let preferred = kinds.first();
-    let choices = BACKENDS
+    let mut choices: Vec<_> = BACKENDS
         .iter()
         .enumerate()
         .filter(|(_, (_, order))| order.is_empty() || order.len() == kinds.len().max(1))
-        .map(|(index, (_, order))| (order.first().map_or("Either", |k| k.as_str()), index))
+        .map(|(index, (_, order))| {
+            (
+                order.first().map_or("Any backend", |k| k.as_str()).into(),
+                index,
+            )
+        })
         .collect();
-    let mut rows = v_flex().gap(SM).child(backend(
-        "Preferred backend",
-        preferred.map_or("Either", |k| k.as_str()),
-        choices,
-    ));
+    let mut current = SharedString::from(preferred.map_or("Any backend", |k| k.as_str()));
+    if let Some(label) = saved_label {
+        let label = SharedString::from(label);
+        if picked == BACKENDS.len() {
+            current = label.clone();
+        }
+        choices.push((label, BACKENDS.len()));
+    }
+    let mut rows = v_flex()
+        .gap(SM)
+        .child(backend("Preferred backend", current, choices));
     if let Some(first) = preferred {
         let choices = BACKENDS
             .iter()
             .enumerate()
             .filter(|(_, (_, order))| order.first() == preferred)
-            .map(|(index, (_, order))| (order.get(1).map_or("None", |k| k.as_str()), index))
+            .map(|(index, (_, order))| (order.get(1).map_or("None", |k| k.as_str()).into(), index))
             .collect();
         rows = rows.child(model(*first)).child(backend(
             "Fallback backend",
-            kinds.get(1).map_or("None", |k| k.as_str()),
+            kinds.get(1).map_or("None", |k| k.as_str()).into(),
             choices,
         ));
         if let Some(second) = kinds.get(1) {
             rows = rows.child(model(*second));
         }
     } else {
-        for kind in BackendKind::ALL {
+        for kind in model_backends {
             rows = rows.child(model(*kind));
         }
     }
@@ -321,6 +335,8 @@ impl Desktop {
         let backends = backend_picker(
             "agent-edit-backends",
             edit.backends,
+            edit.saved_backend_label(),
+            &edit.model_backends(),
             &self.agent_edit_models,
             |this, index| {
                 if let Some(edit) = this.state.agent_edit_mut() {

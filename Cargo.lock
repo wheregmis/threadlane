@@ -8908,6 +8908,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-backend-antigravity"
+version = "0.1.53"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "threadlane-core",
+ "threadlane-mcp",
+ "threadlane-testkit",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "threadlane-backend-claude"
 version = "0.1.53"
 dependencies = [
@@ -9009,6 +9023,7 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
+ "threadlane-backend-antigravity",
  "threadlane-backend-claude",
  "threadlane-backend-codex",
  "threadlane-core",

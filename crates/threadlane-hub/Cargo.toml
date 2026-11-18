@@ -14,6 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+threadlane-backend-antigravity.workspace = true
 threadlane-backend-claude.workspace = true
 threadlane-backend-codex.workspace = true
 threadlane-core.workspace = true
