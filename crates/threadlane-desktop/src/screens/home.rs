@@ -301,7 +301,7 @@ impl Desktop {
                     let screen = screen.clone();
                     button(SharedString::from(format!("timeline-{index}")))
                         .text()
-                        .accessibility_label(format!("Open the conversation in {place}"))
+                        .accessibility_label(format!("Open chat history for {place}"))
                         .child(title)
                         .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
                         .into_any_element()
@@ -319,12 +319,14 @@ impl Desktop {
                     .ghost()
                     .tab_stop(true)
                     .label(format!("Open {project}"))
-                    .accessibility_label(format!("Open the conversation in {space} / {project}"))
+                    .accessibility_label(format!("Open chat history for {space} / {project}"))
                     .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
             });
             let view = cx.entity().downgrade();
             let text = entry.text();
-            let reply = screen.filter(|_| who != "Notice");
+            let reply = screen.filter(|screen| {
+                who != "Notice" && self.main_chat_screen(&space).as_ref() == Some(screen)
+            });
             list = list.child(
                 h_flex()
                     .id(SharedString::from(format!("timeline-menu-{index}")))
