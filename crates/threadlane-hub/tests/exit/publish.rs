@@ -196,7 +196,7 @@ pub async fn assert_published(sim: &Sim, scenario: &str) {
     let task = sim.task("T-0001").await;
     assert_eq!(task.status, TaskStatus::Done, "{scenario}");
     assert_eq!(
-        merged_cleanly(task.result),
+        merged_cleanly(task.result, "app"),
         Some(json!({
             "summary": TASK_SUMMARY,
             "branch": "threadlane/T-0001",
@@ -305,7 +305,7 @@ async fn a_declined_call_is_not_performed_and_the_session_resumes_with_your_note
     let task = sim.task("T-0001").await;
     assert_eq!(task.status, TaskStatus::Done);
     assert_eq!(
-        merged_cleanly(task.result),
+        merged_cleanly(task.result, "app"),
         Some(json!({ "summary": TASK_SUMMARY }))
     );
     for event in sim.events().await {

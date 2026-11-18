@@ -5,6 +5,9 @@ base when they start, and the owner merges their branches by hand later.
 When two touched the same request enums, the merge conflicted in four
 files. Nothing told anyone until the merge.
 
+Runners need [Git 2.38 or later](https://github.com/git/git/blob/v2.38.0/Documentation/RelNotes/2.38.0.txt)
+for the worktree-free merge check.
+
 ## Decisions
 
 1. **The task finds out, not the owner.** Conflicts are cheapest to
