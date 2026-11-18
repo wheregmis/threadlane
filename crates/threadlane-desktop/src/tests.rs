@@ -5779,6 +5779,17 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
     assert!(state.offers_agent_delete("work", "Reviewer"));
     assert!(!state.offers_agent_delete("work", "Lead"), "never the lead");
 
+    work.org(OrgRequest::UpdateAgent {
+        agent: "Reviewer".to_owned(),
+        name: None,
+        role: None,
+        instructions: Some("Updated by another client.".to_owned()),
+        backends: None,
+        models: None,
+    })
+    .await
+    .expect("edited from another client");
+    state.apply(refresh(&core).await);
     assert_eq!(state.agent_update(&fields), Ok(None), "nothing changed");
     fields.role = " ".to_owned();
     assert!(state.agent_update(&fields).is_err(), "a role is needed");
@@ -5806,12 +5817,20 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
         },
         "only what changed"
     );
+    let saving = state.agent_edit().expect("open").clone();
     let agent = core
         .update_agent(Some("work"), request)
         .await
         .expect("updated");
-    state.agent_updated("work", "Reviewer", agent);
-    assert!(state.agent_edit().is_none(), "Save closes the view");
+    assert_eq!(agent.instructions, "Updated by another client.");
+    state.close_agent_edit();
+    let reopened = state.open_agent_edit("work", "Reviewer").expect("reopened");
+    state.agent_updated(&saving, agent);
+    assert_eq!(
+        state.agent_edit().expect("reopened view stays").agent,
+        "Critic"
+    );
+    assert_eq!(state.agent_update(&reopened), Ok(None));
     assert_eq!(state.modes("work").agents, ["Lead", "Critic"]);
     assert_eq!(state.agent_bindings("work", "Critic").len(), 1, "renamed");
     assert_eq!(

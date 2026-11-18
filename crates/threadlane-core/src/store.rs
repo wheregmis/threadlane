@@ -26,6 +26,14 @@ use crate::model::{
 };
 use crate::time::Timestamp;
 
+/// A delivered lead message and its optional return to the space Lead.
+#[derive(Debug)]
+pub struct LeadReply {
+    pub message: NewOutboxMessage,
+    /// The event's source ID is assigned from the persisted outbox message.
+    pub route: Option<NewEvent>,
+}
+
 /// Why a store operation failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -246,7 +254,7 @@ pub trait SessionStore: Send + Sync {
         run_id: RunId,
         outcome: RunOutcome,
         rationale: Option<&str>,
-        reply: Option<&NewOutboxMessage>,
+        reply: Option<&LeadReply>,
         ended_at: Timestamp,
     ) -> StoreResult<()>;
     /// Ends a run as failed, in one transaction (Plan.md §4.9): its events

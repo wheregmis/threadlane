@@ -9,7 +9,9 @@ use serde_json::{Value as Json, json};
 use threadlane_core::ids::{EventId, ProjectId, TaskId};
 use threadlane_core::model::{Event, EventKind, Inserted, NewEvent, Run, Trust};
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{InboxStore, OrgStore, OutboxStore, SessionStore, TaskStore};
+use threadlane_core::store::{
+    InboxStore, OrgStore, OutboxStore, SessionStore, StoreResult, TaskStore,
+};
 use threadlane_core::time::Timestamp;
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
 use threadlane_store::HubDb;
@@ -210,7 +212,7 @@ pub(crate) async fn ask(
 
 /// The space-lead ask a project lead's run answers, if it answers one: an
 /// ask it consumes, or the result of a task created for one.
-pub(crate) async fn answered_ask(db: &HubDb, events: &[Event]) -> Result<Option<Event>, ToolError> {
+async fn answered_ask(db: &HubDb, events: &[Event]) -> StoreResult<Option<Event>> {
     if let Some(ask) = events
         .iter()
         .find(|event| event.source == SPACE_LEAD_SOURCE)
@@ -224,8 +226,8 @@ pub(crate) async fn answered_ask(db: &HubDb, events: &[Event]) -> Result<Option<
         let Ok(task) = serde_json::from_value::<TaskId>(event.payload["task_id"].clone()) else {
             continue;
         };
-        if let Some(id) = db.space_lead_ask(task).await.map_err(tool_error)? {
-            return db.event(id).await.map_err(tool_error);
+        if let Some(id) = db.space_lead_ask(task).await? {
+            return db.event(id).await;
         }
     }
     Ok(None)
@@ -237,51 +239,43 @@ pub(crate) async fn mark_task(db: &HubDb, task: TaskId, ask: EventId) -> Result<
     db.set_space_lead_ask(task, ask).await.map_err(tool_error)
 }
 
-/// Delivers a project lead's message, sent in reply to `ask`, to the
-/// General lane as an event, once per message.
-pub(crate) async fn route_reply(
+/// Prepares the event to queue with a project lead's reply to the space Lead.
+pub(crate) async fn reply_route(
     db: &HubDb,
-    waker: &dyn Waker,
     now: Timestamp,
-    ask: &Event,
+    events: &[Event],
     project: ProjectId,
-    outbox_id: impl std::fmt::Display,
     text: &str,
-) -> Result<(), ToolError> {
-    let general = db.general_project().await.map_err(tool_error)?;
+) -> StoreResult<Option<NewEvent>> {
+    let Some(ask) = answered_ask(db, events).await? else {
+        return Ok(None);
+    };
+    let general = db.general_project().await?;
     let name = db
         .project(project)
-        .await
-        .map_err(tool_error)?
+        .await?
         .map_or_else(|| project.to_string(), |project| project.name);
-    let inserted = db
-        .insert_event(&NewEvent {
-            project_id: general.id,
-            lane_id: general.lead_lane_id,
-            source: PROJECT_LEAD_SOURCE.to_owned(),
-            source_event_id: format!("reply:{outbox_id}"),
-            kind: EventKind::System,
-            payload: json!({
-                "text": format!(
-                    "The lead of {name} replied to your ask (event {}):\n{text}",
-                    ask.id
-                ),
-                "project": name,
-                "ask_event_id": ask.id,
-            }),
-            trust: Trust::System,
-            requested: ask.requested,
-            session_ref: None,
-            decision_ref: None,
-            reply_to_ref: None,
-            received_at: now,
-        })
-        .await
-        .map_err(tool_error)?;
-    if let Inserted::New(_) = inserted {
-        waker.wake(WakeTarget::Lane(general.lead_lane_id));
-    }
-    Ok(())
+    Ok(Some(NewEvent {
+        project_id: general.id,
+        lane_id: general.lead_lane_id,
+        source: PROJECT_LEAD_SOURCE.to_owned(),
+        source_event_id: String::new(),
+        kind: EventKind::System,
+        payload: json!({
+            "text": format!(
+                "The lead of {name} replied to your ask (event {}):\n{text}",
+                ask.id
+            ),
+            "project": name,
+            "ask_event_id": ask.id,
+        }),
+        trust: Trust::System,
+        requested: ask.requested,
+        session_ref: None,
+        decision_ref: None,
+        reply_to_ref: None,
+        received_at: now,
+    }))
 }
 
 #[cfg(test)]
