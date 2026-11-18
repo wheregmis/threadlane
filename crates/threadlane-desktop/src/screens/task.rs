@@ -131,7 +131,8 @@ impl Desktop {
         let mut published = card(cx)
             .p(SM)
             .child(self.copyable("copy-branch", change.branch, cx))
-            .child(change.state);
+            .child(change.state)
+            .children(change.merge);
         if let Some(url) = change.pull_request {
             let open = url.clone();
             published = published.child(

@@ -367,6 +367,11 @@ pub trait TaskStore: Send + Sync {
     /// [`StoreError::Invalid`] while the task has no progress file
     /// ([`crate::memory::progress_path`]).
     async fn finish_task(&self, lease: &Lease, result: &Json) -> StoreResult<Task>;
+    /// Counts one refusal of `finish_task` for merge conflicts on the
+    /// running task whose lane `lease` holds, unless `limit` were already
+    /// counted (docs/merge-help.md decision 5). Returns whether it counted
+    /// one: `false` means finish anyway.
+    async fn count_merge_refusal(&self, lease: &Lease, limit: i64) -> StoreResult<bool>;
     /// Moves a task along its lifecycle, refusing a move Plan.md §5.2 does
     /// not allow ([`TaskStatus::can_become`]) with [`StoreError::Conflict`].
     /// `proposed` to `queued` inserts the start event.

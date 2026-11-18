@@ -364,6 +364,7 @@ impl Desktop {
                                     })),
                             )
                             .child(meta(task_card.meta, cx).text_right())
+                            .children(task_card.merge.map(|merge| meta(merge, cx).text_right()))
                             .children(answer),
                     )
                     .context_menu(move |menu, _, _| {
