@@ -20,9 +20,12 @@ pub struct AgentEdit {
     pub agent: String,
     /// The selected preset, or `BACKENDS.len()` for the saved order.
     pub backends: usize,
+    pub skills: Vec<threadlane_core::model::SkillBinding>,
+    pub installed_skills: Option<Result<Vec<threadlane_core::model::SkillBinding>, String>>,
     /// The index it opened with: Save sends backends only when it moved.
     opened_with: usize,
     saved_backends: Vec<BackendKind>,
+    original_skills: Vec<threadlane_core::model::SkillBinding>,
     opened_fields: Arc<AgentFields>,
     /// Whether the instructions show rendered as Markdown.
     pub preview: bool,
@@ -125,6 +128,9 @@ impl AppState {
             backends: picked,
             opened_with: picked,
             saved_backends: known.backends.clone(),
+            skills: known.skills.clone(),
+            original_skills: known.skills.clone(),
+            installed_skills: None,
             opened_fields: Arc::new(fields.clone()),
             preview: false,
         });
@@ -173,6 +179,7 @@ impl AppState {
             .map(|(backend, value)| (backend.as_str().to_owned(), value.trim().to_owned()))
             .collect();
         let request = OrgRequest::UpdateAgent {
+            skills: (edit.skills != edit.original_skills).then(|| edit.skills.clone()),
             agent: edit.agent.clone(),
             name: changed(name, &opened.name),
             role: changed(role, &opened.role),
@@ -181,6 +188,7 @@ impl AppState {
             models: (!models.is_empty()).then_some(models),
         };
         let OrgRequest::UpdateAgent {
+            skills: None,
             name: None,
             role: None,
             instructions: None,

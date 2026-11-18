@@ -167,6 +167,16 @@ pub enum OrgRequest {
         backends: Vec<BackendKind>,
         models: BTreeMap<String, String>,
     },
+    /// Personal skills installed on the hub's configured backends.
+    InstalledSkills,
+    CreateAgentWithSkills {
+        name: String,
+        role: String,
+        instructions: String,
+        backends: Vec<BackendKind>,
+        models: BTreeMap<String, String>,
+        skills: Vec<crate::model::SkillBinding>,
+    },
     /// The bindings of a project. `None` means the General project.
     Bindings { project: Option<String> },
     /// Sets the agent's mode in a project, binding it there if it is not yet.
@@ -244,6 +254,8 @@ pub enum OrgRequest {
     /// `""` goes back to the backend's default. It applies from the agent's
     /// next run. Answered with the agent.
     UpdateAgent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skills: Option<Vec<crate::model::SkillBinding>>,
         agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
@@ -390,6 +402,9 @@ pub enum LaneTarget {
     reason = "only with serde_json's preserve_order, which GPUI turns on in the workspace build"
 )]
 pub enum OrgReply {
+    InstalledSkills {
+        skills: Vec<crate::model::SkillBinding>,
+    },
     MachineSlotsSet,
     Project {
         project: ProjectSummary,

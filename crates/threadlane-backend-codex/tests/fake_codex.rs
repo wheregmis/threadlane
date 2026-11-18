@@ -161,6 +161,7 @@ impl Fake {
             working_dir: self.work.path().to_owned(),
             prompt: "Say hello.".to_owned(),
             images: Vec::new(),
+            skills: Vec::new(),
             appended_instructions: String::new(),
             model: None,
             session,
@@ -274,6 +275,7 @@ async fn start_passes_every_option_and_keeps_the_token_off_the_command_line() {
     let request = RunRequest {
         prompt: "Reply to the message.\nIt says: hello.".to_owned(),
         images: Vec::new(),
+        skills: Vec::new(),
         appended_instructions: "You are a task agent.\nUse \"the tools\".".to_owned(),
         model: Some("gpt-test".to_owned()),
         tools: Some(Arc::new(Endpoint)),
@@ -729,4 +731,44 @@ fn every_deny_rule_becomes_a_forbidding_prefix_rule() {
             "{rule}: {policy}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_bound_skill_is_resolved_in_the_run_directory_and_mentioned_on_stdin() {
+    let fake = Fake::new(&format!(
+        r#"if [ "$1" = app-server ]; then
+    pwd -P > @DIR@/catalog-cwd
+    read -r init
+    echo '{{"id":1,"result":{{}}}}'
+    read -r initialized
+    read -r list
+    echo '{{"id":2,"result":{{"data":[{{"skills":[{{"name":"plugin:review","enabled":true,"scope":"user"}},{{"name":"disabled","enabled":false,"scope":"user"}}]}}]}}}}'
+    exit
+fi
+{FAKE}"#
+    ));
+    let backend = fake.backend();
+    let mut request = fake.request(NativeSession::Start {
+        id: "chosen".into(),
+    });
+    request.skills = vec!["plugin:review".into()];
+    let mut run = backend.run(request.clone()).await.unwrap();
+    collect(run.as_mut()).await;
+    assert_eq!(
+        fake.record("stdin"),
+        "Use these installed skills for this run: $plugin:review\n\nSay hello."
+    );
+    assert_eq!(
+        PathBuf::from(fake.record("catalog-cwd").trim()),
+        fake.work.path().canonicalize().unwrap()
+    );
+    request.skills = vec!["disabled".into()];
+    assert!(
+        backend
+            .run(request)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("missing")
+    );
 }

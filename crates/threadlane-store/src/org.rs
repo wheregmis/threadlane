@@ -70,7 +70,7 @@ fn decode_repository(row: &Row) -> StoreResult<Repository> {
 }
 
 const AGENT_COLUMNS: &str =
-    "id, name, role, instructions, backends, models, tools, requirements FROM agents";
+    "id, name, role, instructions, backends, models, tools, requirements, skills FROM agents";
 
 fn decode_agent(row: &Row) -> StoreResult<Agent> {
     let c = Cols(row);
@@ -83,13 +83,14 @@ fn decode_agent(row: &Row) -> StoreResult<Agent> {
         models: c.json(5)?,
         tools: c.json(6)?,
         requirements: c.json(7)?,
+        skills: c.de(8)?,
     })
 }
 
 async fn write_agent(conn: &Connection, agent: &Agent) -> StoreResult<Agent> {
     let changed = exec(
         conn,
-        "UPDATE agents SET name = ?2, role = ?3, instructions = ?4, backends = ?5, models = ?6
+        "UPDATE agents SET name = ?2, role = ?3, instructions = ?4, backends = ?5, models = ?6, skills = ?7
              WHERE id = ?1 AND deleted_at IS NULL",
         params![
             agent.id.get(),
@@ -98,6 +99,7 @@ async fn write_agent(conn: &Connection, agent: &Agent) -> StoreResult<Agent> {
             agent.instructions.as_str(),
             json_text(&agent.backends)?,
             json_text(&agent.models)?,
+            json_text(&agent.skills)?,
         ],
     )
     .await?;
@@ -415,8 +417,8 @@ impl OrgStore for HubDb {
         let tx = self.db.begin().await?;
         let id: AgentId = query_one(
             tx.conn(),
-            "INSERT INTO agents (name, role, instructions, backends, models, tools, requirements)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
+            "INSERT INTO agents (name, role, instructions, backends, models, tools, requirements, skills)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
             params![
                 agent.name.as_str(),
                 agent.role.as_str(),
@@ -425,6 +427,7 @@ impl OrgStore for HubDb {
                 json_text(&agent.models)?,
                 json_text(&agent.tools)?,
                 json_text(&agent.requirements)?,
+                json_text(&agent.skills)?,
             ],
             |row| Cols(row).id(0),
         )

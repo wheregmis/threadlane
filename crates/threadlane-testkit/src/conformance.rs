@@ -114,6 +114,7 @@ impl Conformance {
             working_dir: work.to_owned(),
             prompt: prompt.to_owned(),
             images: Vec::new(),
+            skills: Vec::new(),
             appended_instructions: String::new(),
             model: self.model.clone(),
             session,

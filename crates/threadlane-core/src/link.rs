@@ -72,6 +72,8 @@ pub struct RunAssignment {
     pub perform: Vec<DecisionId>,
     /// Which backend to run on; one the machine reported as usable.
     pub backend: BackendKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
     pub model: Option<String>,
     /// Whether to start the backend's session or resume it.
     pub native_session: NativeSession,

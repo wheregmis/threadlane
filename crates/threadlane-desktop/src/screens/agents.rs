@@ -92,7 +92,13 @@ impl Desktop {
                                         ),
                                 )
                                 .child(div().text_size(TYPE_BODY).child(agent.role.clone()))
-                                .child(div().text_size(TYPE_BODY).text_color(muted).child(backends))
+                                .child(
+                                    div()
+                                        .text_size(TYPE_BODY)
+                                        .text_color(muted)
+                                        .child(backends)
+                                        .child(self.skill_picker(false, cx)),
+                                )
                                 .children(self.state.agent_runs_on(&space.name, agent).map(
                                     |line| div().text_size(TYPE_BODY).text_color(muted).child(line),
                                 )),
@@ -318,6 +324,7 @@ impl Desktop {
             .child(field(&self.agent_role))
             .child(field(&self.agent_instructions))
             .child(backends)
+            .child(self.skill_picker(false, cx))
             .child(
                 div()
                     .text_size(TYPE_META)

@@ -74,6 +74,7 @@ pub fn assignment(run: i64) -> RunAssignment {
         native_session: NativeSession::Start {
             id: format!("native-{run}"),
         },
+        skills: vec!["review".into()],
         appended_instructions: "You are the lead.".into(),
         prompt: format!("prompt for run {run}"),
         tools: vec![send_message_tool()],

@@ -217,6 +217,12 @@ impl HubApi for FakeHub {
                 instructions,
                 ..
             }
+            | OrgRequest::CreateAgentWithSkills {
+                name,
+                role,
+                instructions,
+                ..
+            }
             | OrgRequest::CreateAgentWithModels {
                 name,
                 role,
@@ -594,6 +600,7 @@ fn agent(name: &str, role: &str, instructions: &str) -> Agent {
         backends: Vec::new(),
         models: json!({}),
         tools: json!({}),
+        skills: Vec::new(),
         requirements: json!({}),
     }
 }
@@ -1765,6 +1772,7 @@ async fn the_cli_edits_an_agent_and_deletes_one_after_its_name_is_typed() {
     assert!(stdout(&deleted).ends_with("deleted agent Critic\n"));
 
     let changed = |name: Option<&str>, role: Option<&str>| OrgRequest::UpdateAgent {
+        skills: None,
         agent: if name.is_some() { "Reviewer" } else { "Critic" }.to_owned(),
         name: name.map(str::to_owned),
         role: role.map(str::to_owned),
