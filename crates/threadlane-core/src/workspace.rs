@@ -38,6 +38,29 @@ pub struct WorkspaceCounts {
     pub clones: u64,
 }
 
+/// Where a task branch stands against its repository's default branch
+/// (docs/merge-help.md): checked when the task finishes, and when a run
+/// starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeCheck {
+    /// The repository's name.
+    pub repository: String,
+    /// Its default branch, which the task branch merges into.
+    pub branch: String,
+    /// The commit of the default branch it was checked against.
+    pub base: String,
+    /// The files that conflict; empty when it merges cleanly.
+    pub conflicts: Vec<String>,
+}
+
+impl MergeCheck {
+    /// Whether the task branch merges into the base cleanly.
+    #[must_use]
+    pub fn clean(&self) -> bool {
+        self.conflicts.is_empty()
+    }
+}
+
 /// Sets up and saves the worktrees a task works in.
 #[async_trait]
 pub trait Workspaces: Send + Sync + fmt::Debug {
@@ -59,6 +82,24 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
         repositories: &[Repository],
         message: &str,
     ) -> Result<(), WorkspaceError>;
+
+    /// Fetches each repository's default branch and checks whether the task
+    /// branch merges into it cleanly, touching no worktree. A worktree never
+    /// set up is skipped.
+    async fn check_merge(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+    ) -> Result<Vec<MergeCheck>, WorkspaceError>;
+
+    /// Fetches each repository's default branch and rebases the task branch
+    /// onto it when that rebases cleanly; when it would conflict the branch
+    /// is left as it is. Returns where each set-up worktree stands after.
+    async fn bring_in_base(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+    ) -> Result<Vec<MergeCheck>, WorkspaceError>;
 
     /// Counts the on-disk directories affected by a removal.
     async fn removal_counts(&self, removal: &WorkspaceRemoval) -> WorkspaceCounts;

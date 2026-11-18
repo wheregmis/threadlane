@@ -7,7 +7,9 @@ use threadlane_core::model::{
 };
 use threadlane_core::store::{InboxStore, SessionStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
+use threadlane_hub::{
+    ASK_PROJECT_LEAD, ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP,
+};
 use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME,
     MEMORY_VIEW, SEND_MESSAGE, SKIP_REASON, UPDATE_TASK,
@@ -53,6 +55,7 @@ async fn a_message_produces_one_sent_reply_in_the_feed() {
             LIST_TIMERS,
             CANCEL_TIMER,
             ASK_USER,
+            ASK_PROJECT_LEAD,
         ]
     );
     assert_eq!(assignment.max_turns, Some(40));

@@ -34,6 +34,7 @@ mod publish;
 mod recurrence;
 mod review;
 mod settings;
+mod space_lead;
 mod templates;
 mod timers;
 mod tools;
@@ -62,6 +63,7 @@ pub use crate::memory::{MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME
 pub use crate::node::Hub;
 pub use crate::pairing::JOIN_CODE_TTL;
 pub use crate::settings::HubSettings;
+pub use crate::space_lead::{ASK_PROJECT_LEAD, PROJECT_LEAD_SOURCE, SPACE_LEAD_SOURCE};
 pub use crate::timers::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
 pub use crate::tools::ASK_USER;
 pub use crate::tools::{

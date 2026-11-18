@@ -4,9 +4,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
-use threadlane_core::ids::RunId;
-use threadlane_core::link::{HubLink, PROGRESS_WRITTEN};
+use threadlane_core::ids::{RunId, TaskId};
+use threadlane_core::link::{FINISH_TASK, HubLink, MERGE_CHECKS, PROGRESS_WRITTEN};
+use threadlane_core::model::Repository;
 use threadlane_core::tools::{ToolDefinition, ToolEndpoint, ToolError};
+use threadlane_core::workspace::Workspaces;
+use tracing::warn;
 
 use crate::lane::{LaneState, Stop};
 
@@ -17,12 +20,19 @@ use crate::lane::{LaneState, Stop};
 /// lease is also raised on the lane, which stops on it, and a call that
 /// opened a decision marks the run deferred, which ends it. A result that
 /// says the task's progress file was written marks that on the lane.
+///
+/// A task's `finish_task` carries where its branch stands against each
+/// repository's default branch, checked here first (docs/merge-help.md
+/// decision 2); the hub decides whether to refuse it.
 #[derive(Debug)]
 pub(crate) struct LaneTools {
     link: Arc<dyn HubLink>,
     lane: Arc<LaneState>,
     run_id: RunId,
     definitions: Vec<ToolDefinition>,
+    workspaces: Arc<dyn Workspaces>,
+    /// The task and its repositories; `None` for a lead.
+    task: Option<(TaskId, Vec<Repository>)>,
 }
 
 impl LaneTools {
@@ -31,13 +41,50 @@ impl LaneTools {
         lane: Arc<LaneState>,
         run_id: RunId,
         definitions: Vec<ToolDefinition>,
+        workspaces: Arc<dyn Workspaces>,
+        task: Option<(TaskId, Vec<Repository>)>,
     ) -> Self {
         Self {
             link,
             lane,
             run_id,
             definitions,
+            workspaces,
+            task,
         }
+    }
+
+    /// `finish_task`'s arguments with the merge checks set: the work is
+    /// committed first, so the check sees it. A check that fails leaves
+    /// them out, and the task finishes unchecked rather than not at all.
+    async fn with_merge_checks(&self, mut arguments: Json) -> Json {
+        if let Some(object) = arguments.as_object_mut() {
+            object.remove(MERGE_CHECKS);
+        }
+        let Some((task, repositories)) = &self.task else {
+            return arguments;
+        };
+        if repositories.is_empty() {
+            return arguments;
+        }
+        let message = format!("Threadlane: work of {task}, run {}", self.run_id);
+        let checked = match self
+            .workspaces
+            .checkpoint(*task, repositories, &message)
+            .await
+        {
+            Ok(()) => self.workspaces.check_merge(*task, repositories).await,
+            Err(error) => Err(error),
+        };
+        match checked {
+            Ok(checks) => {
+                if let Some(object) = arguments.as_object_mut() {
+                    object.insert(MERGE_CHECKS.to_owned(), serde_json::json!(checks));
+                }
+            }
+            Err(error) => warn!(%task, %error, "could not check whether the task branch merges"),
+        }
+        arguments
     }
 }
 
@@ -64,6 +111,11 @@ impl ToolEndpoint for LaneTools {
         if self.lane.deferred() {
             return Err(ToolError::WaitingOnYou);
         }
+        let arguments = if name == FINISH_TASK {
+            self.with_merge_checks(arguments).await
+        } else {
+            arguments
+        };
         let lease = self.lane.lease();
         let result = self
             .link

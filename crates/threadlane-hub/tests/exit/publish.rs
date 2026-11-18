@@ -26,7 +26,8 @@ use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::{CrashPlan, Script};
 
 use crate::harness::{
-    REPLY, Sim, TASK_SUMMARY, World, add_engineer, finish_after, plan_tasks_in, reply_script,
+    REPLY, Sim, TASK_SUMMARY, World, add_engineer, finish_after, merged_cleanly, plan_tasks_in,
+    reply_script,
 };
 use crate::invariants::{assert_invariants, assert_quiet};
 
@@ -192,7 +193,7 @@ pub async fn assert_published(sim: &Sim, scenario: &str) {
     let task = sim.task("T-0001").await;
     assert_eq!(task.status, TaskStatus::Done, "{scenario}");
     assert_eq!(
-        task.result,
+        merged_cleanly(task.result),
         Some(json!({
             "summary": TASK_SUMMARY,
             "branch": "threadlane/T-0001",
@@ -300,7 +301,10 @@ async fn a_declined_call_is_not_performed_and_the_session_resumes_with_your_note
     // Declining is information, not failure: no attempt is used.
     let task = sim.task("T-0001").await;
     assert_eq!(task.status, TaskStatus::Done);
-    assert_eq!(task.result, Some(json!({ "summary": TASK_SUMMARY })));
+    assert_eq!(
+        merged_cleanly(task.result),
+        Some(json!({ "summary": TASK_SUMMARY }))
+    );
     for event in sim.events().await {
         assert_eq!(event.attempts, 0, "event {} used an attempt", event.id);
     }

@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{free_backends, usable_backends};
-use threadlane_core::ids::{DecisionId, LaneId, MachineId, ProjectId, RunId, TaskId};
+use threadlane_core::ids::{DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
@@ -976,6 +976,59 @@ impl TaskStore for HubDb {
         let finished = existing_task(conn, task.id).await?;
         tx.commit().await?;
         Ok(finished)
+    }
+
+    async fn count_merge_refusal(&self, lease: &Lease, limit: i64) -> StoreResult<bool> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        check_lease(conn, lease).await?;
+        let task = task_of_lane(conn, lease.lane_id)
+            .await?
+            .ok_or_else(|| StoreError::Invalid(format!("lane {} has no task", lease.lane_id)))?;
+        let counted = query_one(
+            conn,
+            "SELECT merge_refusals FROM tasks WHERE id = ?1",
+            params![task.id.get()],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        if counted >= limit {
+            return Ok(false);
+        }
+        exec(
+            conn,
+            "UPDATE tasks SET merge_refusals = merge_refusals + 1 WHERE id = ?1",
+            params![task.id.get()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    async fn set_space_lead_ask(&self, id: TaskId, ask: EventId) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        let changed = exec(
+            tx.conn(),
+            "UPDATE tasks SET space_lead_event = ?1 WHERE id = ?2",
+            params![ask.get(), id.get()],
+        )
+        .await?;
+        if changed == 0 {
+            return Err(StoreError::not_found("task", id));
+        }
+        tx.commit().await
+    }
+
+    async fn space_lead_ask(&self, id: TaskId) -> StoreResult<Option<EventId>> {
+        let conn = self.db.reader()?;
+        let ask: Option<Option<EventId>> = query_opt(
+            &conn,
+            "SELECT space_lead_event FROM tasks WHERE id = ?1",
+            params![id.get()],
+            |row| Cols(row).opt_id(0),
+        )
+        .await?;
+        Ok(ask.flatten())
     }
 
     async fn set_task_status(

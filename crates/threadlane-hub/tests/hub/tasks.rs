@@ -12,7 +12,9 @@ use threadlane_core::model::{
 use threadlane_core::store::{InboxStore, OrgStore, OutboxStore, TaskStore};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::ToolError;
-use threadlane_hub::{ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
+use threadlane_hub::{
+    ASK_PROJECT_LEAD, ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP,
+};
 use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, ENDED_REASON, FINISH_TASK, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE,
     MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW, OFF_REASON, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
@@ -286,6 +288,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             LIST_TIMERS,
             CANCEL_TIMER,
             ASK_USER,
+            ASK_PROJECT_LEAD,
         ]
     );
     assert!(
