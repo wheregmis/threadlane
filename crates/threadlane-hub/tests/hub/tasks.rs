@@ -1001,16 +1001,10 @@ async fn a_dependency_and_the_parallel_limits_hold_tasks_back_with_their_reason(
         "the older task takes the slot"
     );
     assert_eq!(task(&hub, "T-0003").await.waiting_reason, None);
-    let next = hub
-        .link
-        .request_work()
-        .await
-        .unwrap()
-        .expect("the lead lane");
     assert_eq!(
-        next.lane_id,
-        hub.general().await.lead_lane_id,
-        "the first result"
+        hub.link.request_work().await.unwrap(),
+        None,
+        "the lead also waits for a machine slot"
     );
     assert_eq!(
         task(&hub, "T-0004").await.waiting_reason.as_deref(),
