@@ -4,7 +4,7 @@
 //! pausing a project, and the events recorded but acted on by nobody.
 
 use threadlane_client::{ClientCore, ClientError, NewTaskSpec};
-use threadlane_core::client::{ProjectSummary, RecordedEvent};
+use threadlane_core::client::{AgentTemplate, ProjectSummary, RecordedEvent};
 use threadlane_core::github::normalize_remote;
 use threadlane_core::ids::TaskId;
 use threadlane_core::model::{Agent, BackendKind, Mode, Repository, Task};
@@ -40,6 +40,19 @@ pub struct AgentForm {
     pub space: Option<String>,
     /// The index in [`BACKENDS`] picked.
     pub backends: usize,
+    /// What "Start from a template" offers: `None` while the hub has not
+    /// answered, else its templates or why it could not list them.
+    pub templates: Option<Result<Vec<AgentTemplate>, String>>,
+}
+
+/// What picking a template puts in the form's text fields, to edit before
+/// saving (docs/agent-templates.md §3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDraft {
+    pub name: String,
+    /// The template's id, as `agent add --template` stores it.
+    pub role: String,
+    pub instructions: String,
 }
 
 impl AgentForm {
@@ -50,6 +63,28 @@ impl AgentForm {
             .get(self.backends)
             .map(|(_, kinds)| kinds.to_vec())
             .unwrap_or_default()
+    }
+
+    /// Fills the form from the template `id`: picks its backends, and
+    /// returns what goes in the text fields. `None` for one not offered.
+    pub fn pick_template(&mut self, id: &str) -> Option<AgentDraft> {
+        let template = self
+            .templates
+            .as_ref()?
+            .as_ref()
+            .ok()?
+            .iter()
+            .find(|template| template.id == id)?;
+        // shortcut: backends no BACKENDS entry matches fall back to "Either".
+        self.backends = BACKENDS
+            .iter()
+            .position(|(_, kinds)| *kinds == template.backends.as_slice())
+            .unwrap_or(0);
+        Some(AgentDraft {
+            name: template.name.clone(),
+            role: template.id.clone(),
+            instructions: template.instructions.clone(),
+        })
     }
 }
 
@@ -234,6 +269,26 @@ impl AppState {
     /// Changes the picks of the "+ New agent" form.
     pub fn agent_form_mut(&mut self) -> &mut AgentForm {
         &mut self.agent_form
+    }
+
+    /// Opens the "+ New agent" form in `space`, with nothing picked and its
+    /// templates not yet listed.
+    pub fn open_agent_form(&mut self, space: &str) {
+        self.agent_form = AgentForm {
+            space: Some(space.to_owned()),
+            ..AgentForm::default()
+        };
+    }
+
+    /// Takes the templates `space`'s hub listed, if its form is still open.
+    pub fn templates_loaded(
+        &mut self,
+        space: &str,
+        templates: Result<Vec<AgentTemplate>, ClientError>,
+    ) {
+        if self.agent_form.space.as_deref() == Some(space) {
+            self.agent_form.templates = Some(templates.map_err(|error| describe(&error)));
+        }
     }
 
     /// Takes an agent its hub created: the Agents screen lists it, and the

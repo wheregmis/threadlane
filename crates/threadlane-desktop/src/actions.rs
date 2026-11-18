@@ -68,6 +68,21 @@ impl Desktop {
         cx.notify();
     }
 
+    /// Opens the "+ New agent" form in `space` and lists its templates.
+    pub(crate) fn open_agent_form(&mut self, space: String, cx: &mut Context<Self>) {
+        self.state.open_agent_form(&space);
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let templates = core.read().await.agent_templates(Some(&space)).await;
+                (space, templates)
+            },
+            |this, (space, templates), _| this.state.templates_loaded(&space, templates),
+            cx,
+        );
+        cx.notify();
+    }
+
     /// Creates the agent the "+ New agent" form describes in `space`.
     pub(crate) fn create_agent(&mut self, space: String, cx: &mut Context<Self>) {
         let name = self.agent_name.read(cx).value().trim().to_owned();
