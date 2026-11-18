@@ -47,14 +47,14 @@ impl ToolEndpoint for Endpoint {
 /// Runs the new script once, doing nothing, until Linux stops refusing it
 /// with ETXTBSY: a child that another test forks while the script is being
 /// written holds it open for writing until that child execs.
-fn wait_until_executable(program: &std::path::Path) {
+fn wait_until_executable(program: &Path) {
     for _ in 0..100 {
         match std::process::Command::new(program)
             .env("FAKE_CLAUDE_READY", "1")
             .status()
         {
             Err(error) if error.raw_os_error() == Some(26) => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("fake claude does not start: {error}"),
             Ok(_) => return,
