@@ -146,6 +146,30 @@ pub(crate) fn follow_screen(state: &mut AppState, screen: &Screen) {
     }
 }
 
+/// Where the page goes when the switcher picks `space`: a page of another
+/// space would disagree with the sidebar, so it moves to the new space's Chat
+/// (or its Tasks). App-wide pages and pages of `space` itself stay.
+pub(crate) fn switch_destination(
+    state: &AppState,
+    current: &Screen,
+    space: &str,
+) -> Option<Screen> {
+    if current.space().is_none_or(|current| current == space) {
+        return None;
+    }
+    let chat = state.space(space).and_then(Space::main_chat_project);
+    Some(match chat {
+        Some(project) => Screen::Project {
+            space: space.to_owned(),
+            project: project.to_owned(),
+            tab: Tab::Conversation,
+        },
+        None => Screen::SpaceTasks {
+            space: space.to_owned(),
+        },
+    })
+}
+
 impl Desktop {
     /// Opens the nth actionable row regardless of the sidebar's visibility.
     pub(crate) fn sidebar_screen(&self, index: usize) -> Option<Screen> {
@@ -468,7 +492,10 @@ impl Desktop {
                             .on_click(move |_, _, cx| {
                                 let _gone = view.update(cx, |this, cx| {
                                     this.state.select_space(&space);
-                                    cx.notify();
+                                    match switch_destination(&this.state, &this.screen, &space) {
+                                        Some(screen) => this.go(screen, cx),
+                                        None => cx.notify(),
+                                    }
                                 });
                             }),
                     );
@@ -616,7 +643,7 @@ mod tests {
     use threadlane_core::ids::ProjectId;
     use threadlane_desktop::AppState;
 
-    use super::{SidebarEntry, follow_screen, sidebar_entries};
+    use super::{SidebarEntry, follow_screen, sidebar_entries, switch_destination};
     use crate::{Screen, Tab};
 
     fn project(state: &mut AppState, space: &str, id: i64, name: &str, is_general: bool) {
@@ -702,6 +729,23 @@ mod tests {
         );
         assert!(labels(&state).contains(&"infra".to_owned()));
         assert!(!labels(&state).contains(&"api".to_owned()));
+
+        // Switching spaces moves a page of the old space to the new space's Chat.
+        let dev_tasks = Screen::SpaceTasks {
+            space: "dev".into(),
+        };
+        match switch_destination(&state, &dev_tasks, "ops") {
+            Some(Screen::Project { space, tab, .. }) => {
+                assert_eq!((space.as_str(), tab), ("ops", Tab::Conversation));
+            }
+            Some(Screen::SpaceTasks { space }) => assert_eq!(space, "ops"),
+            other => panic!("expected a page of ops, got {other:?}"),
+        }
+        assert_eq!(switch_destination(&state, &Screen::Home, "ops"), None);
+        let ops_tasks = Screen::SpaceTasks {
+            space: "ops".into(),
+        };
+        assert_eq!(switch_destination(&state, &ops_tasks, "ops"), None);
 
         // Inbox and app-wide screens keep the selection; an unknown space is ignored.
         for screen in [
