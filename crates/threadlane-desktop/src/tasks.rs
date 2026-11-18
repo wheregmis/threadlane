@@ -4,10 +4,12 @@
 use serde_json::Value as Json;
 use threadlane_core::client::{ConversationEntry, TaskDetail, TaskSummary};
 use threadlane_core::ids::{DecisionId, TaskId};
+use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::model::{
     DecisionKind, DecisionStatus, RunOutcome, RunStatus, TaskOrigin, TaskStatus,
 };
 use threadlane_core::time::Timestamp;
+use threadlane_core::workspace::MergeCheck;
 
 use crate::{AppState, Destination, When, count_form, duration, proposed_assignee};
 
@@ -48,6 +50,8 @@ pub struct BoardCard {
     pub decision: Option<DecisionId>,
     /// That decision's options, which answer it from the card.
     pub options: Vec<String>,
+    /// Whether its branch merges into its base, from [`merge_state`].
+    pub merge: Option<String>,
 }
 
 /// An open proposal on the board with the two in-place answers.
@@ -189,6 +193,7 @@ impl AppState {
                             can_cancel: !task.status.is_terminal(),
                             decision,
                             options,
+                            merge: merge_state(task.result.as_ref()),
                         }
                     })
                     .collect();
@@ -614,6 +619,40 @@ pub struct Changes {
     pub state: String,
     /// The pull request opened for it, if any.
     pub pull_request: Option<String>,
+    /// Whether its branch merges into its base, from [`merge_state`].
+    pub merge: Option<String>,
+}
+
+/// Where a task's branches stood against their bases when it last finished
+/// (docs/merge-help.md decision 4): `Merges cleanly into main at 1a2b3c4`
+/// or `Conflicts with main: src/a.rs, src/b.rs`, one per repository, named
+/// when there are several. `None` before a check was recorded.
+#[must_use]
+pub fn merge_state(result: Option<&Json>) -> Option<String> {
+    let checks: Vec<MergeCheck> =
+        serde_json::from_value(result?.get(MERGE_CHECKS)?.clone()).ok()?;
+    let several = checks.len() > 1;
+    let lines: Vec<String> = checks
+        .iter()
+        .map(|check| {
+            let line = if check.clean() {
+                let short = check.base.get(..7).unwrap_or(&check.base);
+                format!("Merges cleanly into {} at {short}", check.branch)
+            } else {
+                format!(
+                    "Conflicts with {}: {}",
+                    check.branch,
+                    check.conflicts.join(", ")
+                )
+            };
+            if several {
+                format!("{}: {line}", check.repository)
+            } else {
+                line
+            }
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join(" · "))
 }
 
 /// Its branch and publish state, from its result and the outcomes of the
@@ -666,6 +705,7 @@ pub fn changes(detail: &TaskDetail) -> Changes {
         branch: detail.branch.clone(),
         state,
         pull_request,
+        merge: merge_state(result),
     }
 }
 

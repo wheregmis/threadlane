@@ -5473,3 +5473,67 @@ async fn deletion_in_another_client_drops_cached_project_and_history_on_refresh(
     assert!(state.project("work", "api").is_none());
     assert!(state.conversation("work", "api", &when()).is_empty());
 }
+
+#[tokio::test]
+async fn the_board_and_task_page_say_whether_a_finished_branch_merges() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut clean = task(1, TaskStatus::Done, None);
+    clean.task.result = Some(json!({
+        "summary": "done",
+        "merge": [{ "repository": "app", "branch": "main",
+                    "base": "1a2b3c4d5e6f", "conflicts": [] }],
+    }));
+    let mut conflicted = task(2, TaskStatus::Done, None);
+    conflicted.task.result = Some(json!({
+        "summary": "done",
+        "merge": [{ "repository": "app", "branch": "main", "base": "9f8e7d6",
+                    "conflicts": ["src/a.rs", "src/b.rs"] }],
+    }));
+    let unchecked = task(3, TaskStatus::Done, None);
+    *work.tasks.lock().expect("lock") = vec![clean, conflicted, unchecked];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    let done = state
+        .board("work", "api", &when())
+        .into_iter()
+        .find(|column| column.title == "Done")
+        .unwrap();
+    let merge = |id| {
+        done.cards
+            .iter()
+            .find(|card| card.id == TaskId(id))
+            .unwrap()
+            .merge
+            .clone()
+    };
+    assert_eq!(
+        merge(1).as_deref(),
+        Some("Merges cleanly into main at 1a2b3c4")
+    );
+    assert_eq!(
+        merge(2).as_deref(),
+        Some("Conflicts with main: src/a.rs, src/b.rs")
+    );
+    assert_eq!(merge(3), None, "no check recorded, nothing claimed");
+
+    state.apply_task(load_task(&core, "work", TaskId(2)).await);
+    let detail = state.task("work", TaskId(2)).unwrap();
+    assert_eq!(
+        changes(detail).merge.as_deref(),
+        Some("Conflicts with main: src/a.rs, src/b.rs")
+    );
+}
+
+#[test]
+fn several_repositories_are_named_in_the_merge_state() {
+    let result = json!({ "merge": [
+        { "repository": "app", "branch": "main", "base": "abcdef0123", "conflicts": [] },
+        { "repository": "web", "branch": "trunk", "base": "0123", "conflicts": ["x"] },
+    ]});
+    assert_eq!(
+        merge_state(Some(&result)).as_deref(),
+        Some("app: Merges cleanly into main at abcdef0 · web: Conflicts with trunk: x")
+    );
+}

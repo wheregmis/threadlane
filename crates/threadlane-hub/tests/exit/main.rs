@@ -25,6 +25,7 @@ mod live;
 mod load;
 mod loops;
 mod memory;
+mod merge;
 mod milestone;
 mod operations;
 mod permissions;

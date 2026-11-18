@@ -8,6 +8,7 @@ use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 use threadlane_core::forge::{COMMENT, CREATE_ISSUE, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
+use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::model::{
     Decision, DecisionOption, LaneKind, MemoryAuthor, NewOutboxMessage, NewTask, OutboxKind, Run,
     Task, TaskOrigin, TaskStatus, Urgency,
@@ -15,7 +16,6 @@ use threadlane_core::model::{
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{OrgStore, OutboxStore, SessionStore, StoreError, TaskStore};
 use threadlane_core::time::Clock;
-use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry};
 use threadlane_core::workspace::MergeCheck;
 use threadlane_store::HubDb;
@@ -438,15 +438,15 @@ impl HubTools {
             }
             result[MERGE_CHECKS] = merge.clone();
         }
-        let task = self
-            .db
-            .finish_task(&context.lease, &result)
-            .await
-            .map_err(|error| match error {
-                // No progress file yet: the agent can write it and retry.
-                StoreError::Invalid(_) => crate::memory::refused(context.project_id, error),
-                other => tool_error(other),
-            })?;
+        let task =
+            self.db
+                .finish_task(&context.lease, &result)
+                .await
+                .map_err(|error| match error {
+                    // No progress file yet: the agent can write it and retry.
+                    StoreError::Invalid(_) => crate::memory::refused(context.project_id, error),
+                    other => tool_error(other),
+                })?;
         Ok(json!({
             "task_id": task.id.to_string(),
             "finished": true,

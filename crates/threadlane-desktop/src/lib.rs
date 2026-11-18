@@ -82,7 +82,8 @@ pub use settings::{
 };
 pub use tasks::{
     BoardCard, Changes, Column, InProgress, LatestStep, Moment, TaskHeader, WorkRow, activity_runs,
-    changes, chips, running_elapsed, status_label, task_header, timeline, usage, work_elapsed,
+    changes, chips, merge_state, running_elapsed, status_label, task_header, timeline, usage,
+    work_elapsed,
 };
 
 /// How many of the newest delivered items Home asks each hub for.

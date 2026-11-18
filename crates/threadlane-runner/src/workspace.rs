@@ -258,13 +258,12 @@ impl GitWorkspaces {
         }
         // A rebase replays commit by commit, so it can stop where the
         // merge-tree of the tips would not: the files it stopped on.
-        let mut files: Vec<String> =
-            git(Some(path), ["diff", "--name-only", "--diff-filter=U"])
-                .await
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_owned)
-                .collect();
+        let mut files: Vec<String> = git(Some(path), ["diff", "--name-only", "--diff-filter=U"])
+            .await
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
         git(Some(path), ["rebase", "--abort"]).await?;
         if files.is_empty() {
             files = self.conflicts(repository, base, branch).await?;
