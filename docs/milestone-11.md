@@ -21,8 +21,10 @@ with `-D warnings` and `cargo fmt --check` passing.
    wait for the second machine.
 4. **Dreaming is an ordinary lead run** (§8.4) started by a system timer
    per project, with a restricted tool set: read that project's sessions
-   since the last dream, read and write that project's memory. No
-   outbound, shared-effect, task or timer tools. A change to an
+   since the last dream, inspect all its tasks, and curate its memory. A dream can
+   report a Threadlane limitation to `wheregmis/threadlane` through the shared-effect
+   permission gate. Each issue describes a public-safe situation and suggested improvement.
+   Previous report titles and outcomes help prevent repeats. A change to an
    instructions file is a proposal, never applied. Off by default per
    project; a setting turns it on with a cadence.
 5. **"Measurably reduces stale and duplicate memory"** is measured by a

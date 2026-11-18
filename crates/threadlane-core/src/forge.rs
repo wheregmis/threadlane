@@ -15,6 +15,8 @@ pub const OPEN_PULL_REQUEST: &str = "open_pull_request";
 pub const COMMENT: &str = "comment";
 /// Create an issue in a registered repository.
 pub const CREATE_ISSUE: &str = "create_issue";
+/// Report a product limitation to the Threadlane upstream during a project dream.
+pub const REPORT_LIMITATION: &str = "report_threadlane_limitation";
 /// Merge a registered repository's pull request.
 pub const MERGE: &str = "merge";
 

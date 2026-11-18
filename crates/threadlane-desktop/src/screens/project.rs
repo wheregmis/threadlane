@@ -1280,7 +1280,8 @@ impl Desktop {
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         this.toggle_dreaming(in_space.clone(), named.clone(), *checked, cx);
                     })),
-            );
+            )
+            .child(meta("Reviews this project’s tasks and memory. Product limitations can be reported to wheregmis/threadlane on GitHub under your publication permissions.", cx));
         panel = if let Some(gap) = &card.cadence_gap {
             panel.child(gap_line(gap, "dreaming settings", space, cx))
         } else {

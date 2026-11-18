@@ -294,6 +294,7 @@ async fn dream_filters_tools_scope_session_history_and_effects() {
         names,
         [
             SESSIONS,
+            threadlane_core::forge::REPORT_LIMITATION,
             MEMORY_VIEW,
             MEMORY_CREATE,
             MEMORY_EDIT,
@@ -419,6 +420,116 @@ async fn dream_filters_tools_scope_session_history_and_effects() {
     assert_eq!(history["runs"].as_array().unwrap().len(), 1);
     assert_eq!(history["runs"][0]["run_id"], user.run_id.get());
     complete(&hub, &lease, &dream).await;
+}
+
+#[tokio::test]
+async fn dream_reports_go_to_upstream_once_after_approval() {
+    use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
+    use threadlane_core::link::Perform;
+
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let project = hub.general().await;
+    let agent = hub.db.bindings(project.id).await.unwrap()[0].agent_id;
+    hub.db
+        .create_task(
+            None,
+            &threadlane_core::model::NewTask {
+                project_id: project.id,
+                agent_id: agent,
+                title: "Historical task".into(),
+                goal: "Proposed before the dream".into(),
+                repositories: vec![],
+                parent_task_id: None,
+                depends_on: vec![],
+                origin: threadlane_core::model::TaskOrigin::User,
+                status: threadlane_core::model::TaskStatus::Proposed,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let history = call(&*hub.link, &lease, &dream, SESSIONS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(history["tasks"][0]["title"], "Historical task");
+    let report = json!({"title":"Explain blocked tasks", "situation":"A blocked task gave no reason.", "suggestion":"Show the blocking dependency."});
+    let mut redirected = report.clone();
+    redirected["repository"] = json!("elsewhere");
+    assert!(matches!(
+        call(&*hub.link, &lease, &dream, REPORT_LIMITATION, redirected).await,
+        Err(ToolError::InvalidArguments(_))
+    ));
+    assert_eq!(
+        call(
+            &*hub.link,
+            &lease,
+            &dream,
+            REPORT_LIMITATION,
+            report.clone()
+        )
+        .await,
+        Err(ToolError::WaitingOnYou)
+    );
+    complete(&hub, &lease, &dream).await;
+    let DecisionReply::Pending { decisions } =
+        hub.api.decisions(DecisionRequest::Pending).await.unwrap()
+    else {
+        panic!("expected pending issue")
+    };
+    let decision = &decisions[0];
+    assert!(decision.context.contains("Show the blocking dependency."));
+    hub.api
+        .decisions(DecisionRequest::Answer {
+            decision: decision.id,
+            option: "approve".into(),
+            note: None,
+        })
+        .await
+        .unwrap();
+    let (lease, followup) = begin(&*hub.link).await;
+    assert_eq!(followup.perform, [decision.id]);
+    let Perform::Repository {
+        remote,
+        action: RepositoryAction::CreateIssue { title, body },
+    } = hub
+        .link
+        .begin_perform(&lease, followup.run_id, decision.id)
+        .await
+        .unwrap()
+    else {
+        panic!("expected an issue")
+    };
+    assert_eq!(remote, "https://github.com/wheregmis/threadlane");
+    assert_eq!(title, "Explain blocked tasks");
+    assert!(body.contains("A blocked task gave no reason."));
+    hub.link
+        .finish_perform(
+            &lease,
+            followup.run_id,
+            decision.id,
+            &json!({"performed":true}),
+        )
+        .await
+        .unwrap();
+    complete(&hub, &lease, &followup).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let history = call(&*hub.link, &lease, &dream, SESSIONS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(history["previous_reports"][0]["title"], title);
+    assert!(matches!(
+        call(&*hub.link, &lease, &dream, REPORT_LIMITATION, report).await,
+        Err(ToolError::Blocked(_))
+    ));
 }
 
 #[tokio::test]

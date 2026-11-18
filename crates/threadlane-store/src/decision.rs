@@ -157,14 +157,19 @@ async fn close_in(
             trust,
             // It continues the run that asked.
             requested: true,
-            session_ref: decision.session_id,
+            session_ref: if decision.tool == threadlane_core::forge::REPORT_LIMITATION {
+                None
+            } else {
+                decision.session_id
+            },
             decision_ref: Some(id),
             reply_to_ref: None,
             received_at: at,
         },
     ))
     .await?;
-    if let Some(run) = decision.run_id
+    if decision.tool != threadlane_core::forge::REPORT_LIMITATION
+        && let Some(run) = decision.run_id
         && crate::dreaming::dream_run_in(conn, run).await?
     {
         exec(
