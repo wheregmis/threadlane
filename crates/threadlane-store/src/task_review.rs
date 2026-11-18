@@ -303,6 +303,8 @@ async fn review_event(
     payload: Json,
     now: Timestamp,
 ) -> StoreResult<()> {
+    // The space's configured review is owner-requested even for autonomous work.
+    let requested = payload.get("submission").is_some() || task.origin.is_requested();
     insert_event_in(
         conn,
         &NewEvent {
@@ -313,7 +315,7 @@ async fn review_event(
             kind: EventKind::System,
             payload,
             trust: Trust::System,
-            requested: task.origin.is_requested(),
+            requested,
             session_ref: None,
             decision_ref: None,
             reply_to_ref: None,

@@ -68,7 +68,7 @@ impl LocalLink {
             None => None,
         };
         if let Some(review) = &review {
-            if !review.revisions.is_empty() && review.machine != self.machine {
+            if !db.review_can_start(lease, now).await.map_err(link_error)? {
                 return Ok(Begin::Idle);
             }
             pending.retain(|event| {

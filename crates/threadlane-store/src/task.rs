@@ -4,7 +4,9 @@
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{free_backends, usable_backends};
-use threadlane_core::ids::{DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId};
+use threadlane_core::ids::{
+    AgentId, DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId,
+};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
@@ -620,6 +622,7 @@ pub(crate) async fn on_event_inserted(conn: &Connection, lane_id: LaneId) -> Sto
 async fn waiting_reason(
     conn: &Connection,
     task: &Task,
+    agent: AgentId,
     now: Timestamp,
 ) -> StoreResult<Option<String>> {
     let (paused, project_limit) = query_one(
@@ -654,7 +657,8 @@ async fn waiting_reason(
         query_one(
             conn,
             "SELECT COUNT(*) FROM tasks t JOIN lanes l ON l.id = t.lane_id
-             WHERE t.project_id = ?1 AND t.id != ?2 AND (?3 IS NULL OR t.agent_id = ?3)
+             WHERE t.project_id = ?1 AND t.id != ?2 AND (?3 IS NULL OR ?3 = COALESCE(
+                 (SELECT r.reviewer FROM task_reviews r WHERE r.task_id = t.id AND r.state = 'pending'), t.agent_id))
                AND l.lease_owner IS NOT NULL AND l.lease_expires_at > ?4
                AND t.status NOT IN ('done', 'failed', 'cancelled')",
             params![
@@ -674,12 +678,12 @@ async fn waiting_reason(
     let agent_limit = query_opt(
         conn,
         "SELECT max_parallel FROM bindings WHERE project_id = ?1 AND agent_id = ?2",
-        params![task.project_id.get(), task.agent_id.get()],
+        params![task.project_id.get(), agent.get()],
         |row| Cols(row).i64(0),
     )
     .await?
     .unwrap_or(0);
-    if agent_limit > 0 && running(Some(task.agent_id.get())).await? >= agent_limit {
+    if agent_limit > 0 && running(Some(agent.get())).await? >= agent_limit {
         return Ok(Some(format!(
             "its agent already runs its limit of {agent_limit} tasks at once in this project"
         )));
@@ -763,14 +767,14 @@ pub(crate) async fn check_eligible(
                 Some(review) if !review.revisions.is_empty() && review.machine != machine_id => {
                     return Ok(false);
                 }
-                Some(_) => match waiting_reason(conn, task, now).await? {
+                Some(review) => match waiting_reason(conn, task, review.reviewer, now).await? {
                     Some(reason) => Some(reason),
                     None => blocked(conn, lane_id, machine_id, now).await?,
                 },
                 None => Some("Waiting for a Reviewer".to_owned()),
             }
         }
-        Some(task) => match waiting_reason(conn, task, now).await? {
+        Some(task) => match waiting_reason(conn, task, task.agent_id, now).await? {
             None if !task.repositories.is_empty() && !gh_login(conn, machine_id).await? => {
                 Some(NO_GH_REASON.to_owned())
             }
@@ -789,6 +793,15 @@ pub(crate) async fn check_eligible(
 }
 
 impl HubDb {
+    /// Rechecks review eligibility if the Engineer handed over under an existing lease.
+    pub async fn review_can_start(&self, lease: &Lease, now: Timestamp) -> StoreResult<bool> {
+        let tx = self.db.begin().await?;
+        check_lease(tx.conn(), lease).await?;
+        let allowed = check_eligible(tx.conn(), lease.lane_id, lease.machine_id, now).await?;
+        tx.commit().await?;
+        Ok(allowed)
+    }
+
     /// Creates a task and records the space Lead's ask in the same transaction.
     pub async fn create_task_for_ask(
         &self,
