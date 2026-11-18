@@ -30,6 +30,7 @@ fn decode(wire: &[u8]) {
 #[hotpath::main(percentiles = [50, 95])]
 fn main() {
     let assignment = Begin::Run(Box::new(RunAssignment {
+        images: Vec::new(),
         dreaming: false,
         space_lead_ask: None,
         run_id: RunId(1),
