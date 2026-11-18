@@ -777,6 +777,9 @@ impl HubApi for ClientApi {
                     leftovers,
                 })
             }
+            OrgRequest::Templates => Ok(OrgReply::Templates {
+                templates: crate::templates::all().map_err(ApiError::Internal)?,
+            }),
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
     }

@@ -232,6 +232,15 @@ impl HubApi for FakeHub {
                     .cloned()
                     .collect(),
             }),
+            OrgRequest::Templates => Ok(OrgReply::Templates {
+                templates: vec![threadlane_core::client::AgentTemplate {
+                    id: "chief-of-staff".to_owned(),
+                    name: "Chief of Staff".to_owned(),
+                    role: "offers the next actions".to_owned(),
+                    backends: vec![BackendKind::Codex, BackendKind::Claude],
+                    instructions: "Offer a menu.".to_owned(),
+                }],
+            }),
             OrgRequest::Agents => Ok(OrgReply::Agents {
                 agents: self.agents.lock().expect("lock").clone(),
             }),
@@ -2490,6 +2499,61 @@ async fn a_new_agent_is_listed_with_unbound_cells_that_bind_it() {
     assert_eq!(
         state.modes("work").rows[0].modes,
         Ok(vec![Some(Mode::OnRequest)])
+    );
+}
+
+#[tokio::test]
+async fn a_template_fills_the_new_agent_form_to_edit_before_saving() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+
+    state.open_agent_form("work");
+    assert_eq!(state.agent_form().templates, None, "not listed yet");
+    assert_eq!(state.agent_form_mut().pick_template("chief-of-staff"), None);
+    state.templates_loaded("home", core.agent_templates(Some("work")).await);
+    assert_eq!(state.agent_form().templates, None, "another space's form");
+    state.templates_loaded("work", core.agent_templates(Some("work")).await);
+
+    let draft = state
+        .agent_form_mut()
+        .pick_template("chief-of-staff")
+        .expect("offered");
+    assert_eq!(
+        (
+            draft.name.as_str(),
+            draft.role.as_str(),
+            draft.instructions.as_str()
+        ),
+        ("Chief of Staff", "chief-of-staff", "Offer a menu.")
+    );
+    assert_eq!(
+        state.agent_form().backends(),
+        [BackendKind::Codex, BackendKind::Claude]
+    );
+    assert_eq!(state.agent_form_mut().pick_template("nobody"), None);
+
+    let agent = core
+        .create_agent(
+            Some("work"),
+            "Tudi",
+            &draft.role,
+            &draft.instructions,
+            &state.agent_form().backends(),
+        )
+        .await
+        .expect("created");
+    state.agent_created("work", agent);
+    assert_eq!(state.agent_form().space, None, "the form closes");
+    assert_eq!(work.agents.lock().expect("lock")[0].name, "Tudi");
+
+    work.down.store(true, Ordering::SeqCst);
+    state.open_agent_form("work");
+    state.templates_loaded("work", core.agent_templates(Some("work")).await);
+    assert!(
+        matches!(state.agent_form().templates, Some(Err(_))),
+        "a hub that cannot answer says why"
     );
 }
 

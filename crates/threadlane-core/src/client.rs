@@ -220,6 +220,8 @@ pub enum OrgRequest {
     },
     /// Counts a project's data and local workspaces before deletion.
     DeletePreview { project: String },
+    /// The starter agents compiled into the hub (docs/agent-templates.md).
+    Templates,
 }
 
 /// What deleting one project removes.
@@ -315,6 +317,20 @@ impl DeletePreview {
     }
 }
 
+/// A starter agent (docs/agent-templates.md §1). Adding one creates an
+/// ordinary agent; later changes to the template do not touch it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTemplate {
+    /// The file name without `.md`, for example `chief-of-staff`.
+    pub id: String,
+    pub name: String,
+    /// The one-line role from the template's first line.
+    pub role: String,
+    /// The backends it may use, in order of preference.
+    pub backends: Vec<BackendKind>,
+    pub instructions: String,
+}
+
 /// The lane targeted by a stop or resume request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -385,6 +401,9 @@ pub enum OrgReply {
         project: String,
         deleted: DeletePreview,
         leftovers: Vec<String>,
+    },
+    Templates {
+        templates: Vec<AgentTemplate>,
     },
 }
 

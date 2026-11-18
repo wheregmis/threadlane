@@ -139,8 +139,7 @@ impl Desktop {
                     .on_click({
                         let space = space.name.clone();
                         cx.listener(move |this, _, _, cx| {
-                            this.state.agent_form_mut().space = Some(space.clone());
-                            cx.notify();
+                            this.open_agent_form(space.clone(), cx);
                         })
                     }),
             );
@@ -223,10 +222,63 @@ impl Desktop {
                     cx.notify();
                 }
             }));
+        let view = cx.entity().downgrade();
+        let (offered, note) = match &self.state.agent_form().templates {
+            None => (Vec::new(), Some("Listing templates…".to_owned())),
+            Some(Ok(templates)) if templates.is_empty() => {
+                (Vec::new(), Some("This hub offers no templates.".to_owned()))
+            }
+            Some(Ok(templates)) => (templates.clone(), None),
+            Some(Err(error)) => (Vec::new(), Some(format!("No templates: {error}"))),
+        };
+        let mut start = h_flex().gap(SM).items_center().child(
+            button("agent-template")
+                .small()
+                .outline()
+                .icon(AppIcon::FileText)
+                .label("Start from a template")
+                .disabled(offered.is_empty())
+                .dropdown_menu(move |mut menu, _, _| {
+                    for template in &offered {
+                        let (id, view) = (template.id.clone(), view.clone());
+                        let label = format!("{}: {}", template.name, template.role);
+                        menu =
+                            menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                                let _gone = view.update(cx, |this, cx| {
+                                    let Some(draft) =
+                                        this.state.agent_form_mut().pick_template(&id)
+                                    else {
+                                        return;
+                                    };
+                                    for (input, value) in [
+                                        (&this.agent_name, draft.name),
+                                        (&this.agent_role, draft.role),
+                                        (&this.agent_instructions, draft.instructions),
+                                    ] {
+                                        input.update(cx, |input, cx| {
+                                            input.set_value(value, window, cx);
+                                        });
+                                    }
+                                    cx.notify();
+                                });
+                            }));
+                    }
+                    menu
+                }),
+        );
+        if let Some(note) = note {
+            start = start.child(
+                div()
+                    .text_size(TYPE_META)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(note),
+            );
+        }
         let space = space.to_owned();
         card(cx)
             .max_w(FORM_WIDTH)
             .child(section(format!("New agent in {space}")))
+            .child(start)
             .child(field(&self.agent_name))
             .child(field(&self.agent_role))
             .child(field(&self.agent_instructions))

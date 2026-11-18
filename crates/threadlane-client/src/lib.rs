@@ -24,10 +24,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use threadlane_core::admission::AdmittedKey;
 use threadlane_core::client::{
-    Accepted, ApiError, BindingSummary, ConversationEntry, DecisionReply, DecisionRequest,
-    FeedItem, HubApi, HubInfo, LeadRun, MemoryReply, MemoryRequest, OrgReply, OrgRequest,
-    OverviewReply, OverviewRequest, PairingReply, PairingRequest, ProjectSummary, TaskDetail,
-    TaskSummary, UserMessage,
+    Accepted, AgentTemplate, ApiError, BindingSummary, ConversationEntry, DecisionReply,
+    DecisionRequest, FeedItem, HubApi, HubInfo, LeadRun, MemoryReply, MemoryRequest, OrgReply,
+    OrgRequest, OverviewReply, OverviewRequest, PairingReply, PairingRequest, ProjectSummary,
+    TaskDetail, TaskSummary, UserMessage,
 };
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::model::{
@@ -787,6 +787,22 @@ impl ClientCore {
         match self.org(space, OrgRequest::Agents).await? {
             (_, OrgReply::Agents { agents }) => Ok(agents),
             (space, _) => Err(wrong_reply(&space, "agents")),
+        }
+    }
+
+    /// The starter agents a space's hub offers. `None` means the only paired
+    /// hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn agent_templates(
+        &self,
+        space: Option<&str>,
+    ) -> Result<Vec<AgentTemplate>, ClientError> {
+        match self.org(space, OrgRequest::Templates).await? {
+            (_, OrgReply::Templates { templates }) => Ok(templates),
+            (space, _) => Err(wrong_reply(&space, "agent templates")),
         }
     }
 

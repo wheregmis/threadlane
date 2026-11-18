@@ -47,7 +47,7 @@ pub use attention::{AttentionRow, needs_you};
 pub use clock::{When, duration};
 pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
 pub use control::{
-    AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository,
+    AgentDraft, AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository,
     can_confirm_deletion, copy_agent, same_remote,
 };
 pub use conversation::{
