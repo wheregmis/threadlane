@@ -72,8 +72,8 @@ impl Desktop {
             Screen::Project {
                 space,
                 project,
-                tab: Tab::Tasks | Tab::Conversation,
-            } if !self.state.is_archived(space, project) => {
+                tab: Tab::Conversation,
+            } if self.is_main_chat(space, project) => {
                 Some(Destination::Lead(space.clone(), project.clone()))
             }
             Screen::Task { space, task }

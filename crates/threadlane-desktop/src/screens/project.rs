@@ -132,6 +132,11 @@ impl Desktop {
                 );
             }))
             .children(Tab::ALL.map(|tab| {
+                let label = if tab == Tab::Conversation {
+                    "History"
+                } else {
+                    tab.label()
+                };
                 let icon = match tab {
                     Tab::Tasks => AppIcon::Columns3,
                     Tab::Conversation => AppIcon::MessagesSquare,
@@ -139,12 +144,12 @@ impl Desktop {
                     Tab::Routines => AppIcon::CalendarClock,
                     Tab::Memory => AppIcon::BookOpen,
                 };
-                KitTab::new().aria_label(tab.label()).child(
+                KitTab::new().aria_label(label).child(
                     h_flex()
                         .gap(XS)
                         .flex_none()
                         .child(Icon::new(icon).size(TYPE_BODY))
-                        .child(tab.label()),
+                        .child(label),
                 )
             }));
         let archived = self.state.is_archived(space, project);
@@ -172,7 +177,17 @@ impl Desktop {
         let (pause_space, pause_project) = (space.to_owned(), project.to_owned());
         let (task_space, task_project) = (space.to_owned(), project.to_owned());
         let form_open = self.state.task_form(space, project).is_some();
-        let mut actions = h_flex().gap(SM).flex_wrap();
+        let mut actions = h_flex()
+            .gap(SM)
+            .flex_wrap()
+            .children(self.main_chat_screen(space).map(|screen| {
+                button("project-main-chat")
+                    .small()
+                    .ghost()
+                    .icon(AppIcon::MessagesSquare)
+                    .label("Main Chat")
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
+            }));
         if archived {
             actions = actions.child(
                 button("unarchive-project")
@@ -618,10 +633,7 @@ impl Desktop {
                     .min_w_0()
                     .gap(MD)
                     .children(is_empty.then(|| empty(EmptyRegion::Board, cx)))
-                    .child(board)
-                    .children(
-                        (!archived).then(|| self.project_composer(space, project, cx).flex_none()),
-                    ),
+                    .child(board),
             )
             .child(
                 decision_scroller("board-sidebar", side, &self.decision_scroll)
@@ -632,20 +644,20 @@ impl Desktop {
             .into_any_element()
     }
 
-    fn is_main_chat(&self, space: &str, project: &str) -> bool {
+    pub(crate) fn is_main_chat(&self, space: &str, project: &str) -> bool {
         self.state
             .space(space)
             .and_then(threadlane_desktop::Space::main_chat_project)
             == Some(project)
     }
 
-    fn project_composer(&self, space: &str, project: &str, cx: &mut Context<Self>) -> Div {
-        let placeholder = if self.is_main_chat(space, project) {
-            "Message the space Lead".to_owned()
-        } else {
-            format!("Message the lead of {project}")
-        };
-        self.render_composer(threadlane_desktop::Draft::Lead, placeholder, None, cx)
+    pub(crate) fn main_chat_screen(&self, space: &str) -> Option<Screen> {
+        let project = self.state.space(space)?.main_chat_project()?;
+        Some(Screen::Project {
+            space: space.to_owned(),
+            project: project.to_owned(),
+            tab: Tab::Conversation,
+        })
     }
 
     /// The conversation with the lead, then the tasks and open decisions of
@@ -670,7 +682,7 @@ impl Desktop {
         if let Some(gap) = self.state.project_gap(space, project, Part::Conversation) {
             lines = lines.child(gap_line(&gap, "conversation", space, cx));
         }
-        let archived = self.state.is_archived(space, project);
+        let main_chat = self.is_main_chat(space, project);
         let conversation = self.state.conversation(space, project, when);
         if conversation.is_empty()
             && self
@@ -685,7 +697,7 @@ impl Desktop {
         for (index, line) in conversation.iter().enumerate() {
             let limit = message_limit(newest, index);
             let said = |id: String, who: &str, time: &str, text: &str, reply: bool| {
-                let reply = reply && !archived;
+                let reply = reply && main_chat;
                 let id = format!("conversation-{space}-{project}-{id}");
                 let quote = text.to_owned();
                 let menu_text = quote.clone();
@@ -896,8 +908,7 @@ impl Desktop {
             lines = lines.child(self.recorded_section(space, project, recorded, cx));
         }
 
-        let side = (!self.is_main_chat(space, project))
-            .then(|| self.conversation_sidebar(space, project, when, cx));
+        let side = (!main_chat).then(|| self.conversation_sidebar(space, project, when, cx));
         h_flex()
             .flex_1()
             .min_h_0()
@@ -910,9 +921,15 @@ impl Desktop {
                     .min_w_0()
                     .gap(SM)
                     .child(self.conversation_scroller(space, project, lines, cx))
-                    .children(
-                        (!archived).then(|| self.project_composer(space, project, cx).flex_none()),
-                    ),
+                    .children(main_chat.then(|| {
+                        self.render_composer(
+                            threadlane_desktop::Draft::Lead,
+                            "Message the space Lead",
+                            None,
+                            cx,
+                        )
+                        .flex_none()
+                    })),
             )
             .children(side)
             .into_any_element()
