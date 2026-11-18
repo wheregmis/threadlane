@@ -53,3 +53,13 @@ Milestone 10 stage A changed the Claude driver to feed prompts through streaming
 |---|---|---|
 | 12 | The driver's streaming input works on the real `claude` (start of a lead session, a reply through `send_message`). Fold-in during a run and a stop were not exercised. | checked |
 | 13 | Asked which projects exist, the General lead said it can see only General. It has no view of the space's other projects. | open; the planned space lead (`Plan.md`, "Before the prerelease") addresses it |
+
+## UI quality pass, on screen (2026-11-17)
+
+Each stage is built by Codex, which cannot see the app, and then looked at against the `dev` hub.
+
+| # | Finding | State |
+|---|---|---|
+| 14 | Stage 1 as delivered: icons with no asset drew gaps, tabs lost their labels, "Pause project", "+ New task" and Home's space filter were gone, settings rows unreadable. None of it visible to tests. | fixed in debcf967 after one round; a test now fails when an icon has no asset |
+| 15 | The project header shifts between tabs (the column narrows on Conversation and a "Lead mode" line pushes the tabs down); "+ New task" has a plus icon and a "+". | open |
+| 16 | Stage 2: nothing regressed, the View menu items and the Settings menu item work, tooltips show shortcuts. Letter and digit keys could not be sent to the app in the background, and the hub has no pending decision, so J/K, 1 to 9, `?` and the new decision card are unseen. There is no menu item that opens the shortcuts dialog. | to check by hand: press `?` in the app |
