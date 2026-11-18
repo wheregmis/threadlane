@@ -195,6 +195,8 @@ threadlane agent edit Reviewer --skill claude=lint
 threadlane agent edit Reviewer --clear-skills
 ```
 
+Profile skill bindings are available for Codex and Claude. Antigravity runs accept an empty binding list.
+
 Repeated `--skill` options replace the whole list. Omitting both edit options preserves it. `threadlane agents` shows saved bindings. Only provider and name travel with the profile. The runner resolves the chosen backend's names on each launch, including after fallback. If a name is missing, reinstall it on that runner or update the profile. Existing profiles start with an empty list and continue using ordinary provider discovery.
 
 Codex uses the installed app server's `skills/list` and passes explicit `$name` mentions to `codex exec`. The picker offers unique, enabled, non-repository names. Repository skills remain available through Codex's usual discovery. An ambiguous name in the actual run directory fails resolution. [Codex skills](https://developers.openai.com/codex/skills/) · [Codex app server](https://developers.openai.com/codex/app-server/)
