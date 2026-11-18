@@ -4,6 +4,7 @@ use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::separator::Separator;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_desktop::{
@@ -455,16 +456,26 @@ impl Desktop {
             ConnectionStatus::Reconnecting => Status::Waiting,
             ConnectionStatus::Unreachable => Status::Failed,
         };
-        h_flex()
-            .gap(XS)
-            .min_w_0()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(space.to_owned()),
+        let heading = h_flex().gap(XS).min_w_0().child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(space.to_owned()),
+        );
+        if connection.status == ConnectionStatus::Live {
+            heading.child(
+                h_flex()
+                    .id(SharedString::from(format!("connected-{space}")))
+                    .p(XS)
+                    .role(Role::Status)
+                    .aria_label(format!("{space} connected"))
+                    .child(status_dot(status, cx))
+                    .tooltip(|window, cx| Tooltip::new("Connected").build(window, cx)),
             )
-            .child(status_dot(status, cx))
-            .child(meta(connection.label, cx))
+        } else {
+            heading
+                .child(status_dot(status, cx))
+                .child(meta(connection.label, cx))
+        }
     }
 
     pub(crate) fn page_connections(&self, when: &When, cx: &App) -> Option<Div> {
