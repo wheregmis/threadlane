@@ -53,7 +53,9 @@ const MAX_LABEL: usize = 80;
 pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
     match tool {
         crate::dreaming::PROJECT_SESSIONS => false,
-        SEND_MESSAGE | UPDATE_TASK | CANCEL_TASK | LIST_TASKS => kind == LaneKind::Lead,
+        // ask_project_lead is offered to the General lead only (begin_run).
+        SEND_MESSAGE | UPDATE_TASK | CANCEL_TASK | LIST_TASKS
+        | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
         FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE => {
             kind == LaneKind::Task
         }
@@ -183,6 +185,21 @@ impl HubTools {
             .await
             .map_err(tool_error)?;
         self.waker.wake(WakeTarget::Dispatcher);
+        // shortcut: not in the enqueue's transaction, so a crash between the
+        // two loses the reply to the space lead; move into the store if seen.
+        let events = self.db.run_events(run.id).await.map_err(tool_error)?;
+        if let Some(ask) = crate::space_lead::answered_ask(&self.db, &events).await? {
+            crate::space_lead::route_reply(
+                &self.db,
+                self.waker.as_ref(),
+                self.clock.now(),
+                &ask,
+                context.project_id,
+                message.id,
+                &text,
+            )
+            .await?;
+        }
         Ok(json!({ "outbox_id": message.id }))
     }
 }
@@ -255,6 +272,7 @@ impl HubTools {
         // A subtask inherits its parent's origin, and its repositories if it
         // names none; a lead's task comes from you if the run works on
         // something you asked for.
+        let mut space_lead_ask = None;
         let (parent_task_id, origin, repositories) = match context.task_id {
             Some(parent) => {
                 let parent = self
@@ -267,13 +285,12 @@ impl HubTools {
                 (Some(parent.id), parent.origin, repositories)
             }
             None => {
-                let requested = self
-                    .db
-                    .run_events(run.id)
-                    .await
-                    .map_err(tool_error)?
+                let events = self.db.run_events(run.id).await.map_err(tool_error)?;
+                let requested = events.iter().any(|event| event.requested);
+                space_lead_ask = events
                     .iter()
-                    .any(|event| event.requested);
+                    .find(|event| event.source == crate::space_lead::SPACE_LEAD_SOURCE)
+                    .map(|event| event.id);
                 (
                     None,
                     if requested {
@@ -317,6 +334,9 @@ impl HubTools {
             )
             .await
             .map_err(tool_error)?;
+        if let Some(ask) = space_lead_ask {
+            crate::space_lead::mark_task(&self.db, task.id, ask).await?;
+        }
         self.waker.wake(WakeTarget::Lane(task.lane_id));
         Ok(task_json(&task))
     }
@@ -895,6 +915,7 @@ impl ToolRegistry for HubTools {
         definitions.extend(crate::memory::definitions());
         definitions.extend(crate::timers::definitions());
         definitions.push(ask_user_definition());
+        definitions.push(crate::space_lead::definition());
         definitions
     }
 
@@ -917,6 +938,20 @@ impl ToolRegistry for HubTools {
             CANCEL_TASK => self.cancel_task(context, &arguments).await,
             LIST_TASKS => self.list_tasks(context, &arguments).await,
             FINISH_TASK => self.finish_task(context, &arguments).await,
+            crate::space_lead::ASK_PROJECT_LEAD => {
+                let run = self.run(context).await?;
+                let key = effect_key(context, &run, name, &arguments);
+                crate::space_lead::ask(
+                    &self.db,
+                    self.waker.as_ref(),
+                    self.clock.now(),
+                    context.project_id,
+                    &run,
+                    key,
+                    &arguments,
+                )
+                .await
+            }
             name if crate::memory::is_memory(name) => self.memory(context, name, &arguments).await,
             name if crate::timers::is_timer(name) => {
                 let run = self.run(context).await?;
@@ -1059,6 +1094,7 @@ mod tests {
                     .map(|tool| tool.name),
             );
             names.push(ASK_USER.to_owned());
+            names.push(crate::space_lead::ASK_PROJECT_LEAD.to_owned());
             names
                 .into_iter()
                 .filter(|name| offered_in(name, kind))
@@ -1086,7 +1122,8 @@ mod tests {
                     CANCEL_TASK,
                     LIST_TASKS
                 ][..],
-                &memory
+                &memory,
+                &[crate::space_lead::ASK_PROJECT_LEAD]
             ]
             .concat()
         );
