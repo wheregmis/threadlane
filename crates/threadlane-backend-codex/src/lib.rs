@@ -31,13 +31,9 @@
 //! - **Ask**: `exec --output-schema` in a read-only sandbox, ephemeral, in a
 //!   temporary directory, ignoring user tool configuration and disabling shell, image, app,
 //!   plugin and multi-agent features. Tool activity invalidates the answer.
-//! - **Removing built-in tools** (leads): Codex has no switch to remove its
-//!   shell and file tools. The nearest is a read-only sandbox with web
-//!   search off: the lead can still run commands that only read (files
-//!   anywhere the user can read them, `git log`), but cannot write files or
-//!   reach the network from them. MCP servers in the user's own Codex
-//!   configuration also stay available, unlike Claude's
-//!   `--strict-mcp-config`.
+//! - **Lead runs**: read-only sandbox, user configuration ignored, web search
+//!   and local execution features disabled. The run receives its Threadlane
+//!   tools through the same scoped MCP endpoint as other backends.
 //! - **Turn cap, mid-run messages**: none; the runner's wall-time limit
 //!   applies.
 

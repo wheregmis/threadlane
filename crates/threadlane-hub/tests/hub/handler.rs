@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::json;
 use threadlane_core::client::{ApiError, UserMessage};
 use threadlane_core::link::HubMessage;
-use threadlane_core::model::{BackendKind, EventKind, EventStatus, Mode, NewProject, Trust};
+use threadlane_core::model::{EventKind, EventStatus, Mode, NewProject, Trust};
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::store::{InboxStore, MachineStore, OrgStore};
 use threadlane_core::time::Clock;
@@ -22,11 +22,7 @@ async fn a_fresh_hub_has_a_lead_a_binding_and_a_machine_and_new_is_idempotent() 
     assert_eq!(agents[0].name, LEAD_NAME);
     assert_eq!(agents[0].role, LEAD_ROLE);
     assert_eq!(agents[0].instructions, LEAD_INSTRUCTIONS);
-    assert_eq!(
-        agents[0].backends,
-        [BackendKind::Claude],
-        "a lead runs on Claude only"
-    );
+    assert!(agents[0].backends.is_empty(), "use any available backend");
 
     let general = hub.general().await;
     let binding = hub.db.lead_binding(general.id).await.unwrap().unwrap();

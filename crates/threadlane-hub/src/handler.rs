@@ -569,21 +569,10 @@ impl HubApi for ClientApi {
                 let target_name = name.unwrap_or(agent_name);
                 let agent = db
                     .patch_agent(agent_name, |current| {
-                        if current.role == LEAD_ROLE {
-                            if role.is_some_and(|role| role != LEAD_ROLE) {
-                                return Err(StoreError::Invalid(format!(
-                                    "the lead's role stays {LEAD_ROLE:?}"
-                                )));
-                            }
-                            // Codex cannot remove its built-in tools (Plan.md §18.4 item 12).
-                            if backends
-                                .as_ref()
-                                .is_some_and(|backends| backends != &[BackendKind::Claude])
-                            {
-                                return Err(StoreError::Invalid(
-                                    "the lead runs on Claude only".into(),
-                                ));
-                            }
+                        if current.role == LEAD_ROLE && role.is_some_and(|role| role != LEAD_ROLE) {
+                            return Err(StoreError::Invalid(format!(
+                                "the lead's role stays {LEAD_ROLE:?}"
+                            )));
                         }
                         if let Some(name) = name {
                             name.clone_into(&mut current.name);

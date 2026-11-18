@@ -229,17 +229,6 @@ async fn an_update_refuses_bad_fields() {
         .await,
         "lead's role",
     );
-    refused(
-        api.org(edit(
-            LEAD_NAME,
-            Changes {
-                backends: Some(vec!["codex".into()]),
-                ..Changes::default()
-            },
-        ))
-        .await,
-        "Claude only",
-    );
     let missing = api.org(update("Nobody")).await;
     assert!(matches!(missing, Err(ApiError::NotFound(_))), "{missing:?}");
     let OrgReply::Agent { agent } = api
@@ -247,6 +236,7 @@ async fn an_update_refuses_bad_fields() {
             LEAD_NAME,
             Changes {
                 name: Some("Chief".into()),
+                backends: Some(vec!["codex".into()]),
                 ..Changes::default()
             },
         ))
@@ -255,6 +245,7 @@ async fn an_update_refuses_bad_fields() {
     else {
         panic!("expected an agent");
     };
+    assert_eq!(agent.backends, [BackendKind::Codex]);
     assert_eq!(agent.name, "Chief", "the lead may be renamed");
 }
 
