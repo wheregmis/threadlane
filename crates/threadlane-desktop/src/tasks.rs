@@ -233,6 +233,7 @@ impl AppState {
             .map(|task| WorkRow::task_in(&space.name, task, when))
             .chain(space.leads.iter().map(|(project, since)| WorkRow {
                 destination: Destination::Lead(space.name.clone(), project.clone()),
+                label: format!("{} · lead", clip(project, SIDEBAR_CHARS - 7)),
                 title: format!("{project} · lead"),
                 elapsed: when.since(*since),
                 status: "Running",
@@ -330,6 +331,17 @@ impl AppState {
     }
 }
 
+/// Characters of a title that fit on one sidebar row beside its time.
+const SIDEBAR_CHARS: usize = 18;
+
+/// `text` cut to `chars` characters, ending in "…" when cut.
+fn clip(text: &str, chars: usize) -> String {
+    match text.char_indices().nth(chars) {
+        Some((at, _)) => format!("{}…", text[..at].trim_end()),
+        None => text.to_owned(),
+    }
+}
+
 /// A compact row that opens a task or a lead conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkRow {
@@ -337,6 +349,8 @@ pub struct WorkRow {
     pub destination: Destination,
     /// The task or lead's display title.
     pub title: String,
+    /// The title cut to fit the sidebar's one line.
+    pub label: String,
     /// Time elapsed from the start or enqueue.
     pub elapsed: String,
     /// The display status.
@@ -347,6 +361,7 @@ impl WorkRow {
     fn task_in(space: &str, summary: &TaskSummary, when: &When) -> Self {
         Self {
             destination: Destination::Task(space.to_owned(), summary.task.id),
+            label: clip(&summary.task.title, SIDEBAR_CHARS),
             title: summary.task.title.clone(),
             elapsed: work_elapsed(summary, when).unwrap_or_default(),
             status: status_label(summary.task.status, summary.task.waiting_reason.as_deref()),

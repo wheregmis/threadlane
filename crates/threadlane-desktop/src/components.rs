@@ -212,6 +212,24 @@ pub(super) fn live_step(step: threadlane_desktop::LatestStep, cx: &App) -> Div {
     }
 }
 
+/// A sidebar work row's single line: dot, clipped title, and its time at the right.
+pub(super) fn work_line(label: String, elapsed: String, status: Status, cx: &App) -> Div {
+    h_flex()
+        .w_full()
+        .gap(XS)
+        .min_w_0()
+        .child(status_dot(status, cx))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(label),
+        )
+        .child(meta(elapsed, cx).flex_none().whitespace_nowrap().text_right())
+}
+
 /// The shared bordered surface for groups and cards.
 pub(super) fn card(cx: &App) -> GroupBox {
     GroupBox::new()
@@ -243,8 +261,8 @@ pub(super) fn empty_state(sentence: impl Into<SharedString>, hint: Option<&str>,
         .children(hint.map(|hint| meta(hint.to_owned(), cx)))
 }
 
-/// A decision surface with a distinct keyboard selection ring.
-pub(super) fn decision_surface(proposal: bool, current: bool, cx: &App) -> Div {
+/// A decision surface; wrap the filled surface in [`decision_ring`].
+pub(super) fn decision_surface(proposal: bool, cx: &App) -> Div {
     use gpui_kit::prelude::FluentBuilder as _;
 
     v_flex()
@@ -258,20 +276,22 @@ pub(super) fn decision_surface(proposal: bool, current: bool, cx: &App) -> Div {
         .bg(cx.theme().group_box)
         .p(MD)
         .gap(SM)
-        .map(|surface| {
-            v_flex()
-                .w_full()
-                .flex_none()
-                .p(XXS)
-                .rounded(ROW_RADIUS + XXS)
-                .border_1()
-                .border_color(if current {
-                    cx.theme().ring
-                } else {
-                    cx.theme().ring.opacity(0.)
-                })
-                .child(surface)
+}
+
+/// The keyboard selection ring around a filled decision surface.
+pub(super) fn decision_ring(surface: Div, current: bool, cx: &App) -> Div {
+    v_flex()
+        .w_full()
+        .flex_none()
+        .p(XXS)
+        .rounded(ROW_RADIUS + XXS)
+        .border_1()
+        .border_color(if current {
+            cx.theme().ring
+        } else {
+            cx.theme().ring.opacity(0.)
         })
+        .child(surface)
 }
 
 /// A key displayed on an option or in the keyboard shortcuts dialog.

@@ -286,14 +286,15 @@ impl Desktop {
                             )))
                             .ghost()
                             .w_full()
+                            .flex_none()
                             .h(crate::tokens::ROW_HEIGHT)
                             .accessibility_label(format!(
                                 "{} · {} · {}",
                                 row.status, row.title, row.elapsed
                             ))
-                            .child(crate::components::work_label(
-                                row.title,
-                                Some(row.elapsed),
+                            .child(crate::components::work_line(
+                                row.label,
+                                row.elapsed,
                                 Status::task(row.status),
                                 cx,
                             ))

@@ -56,7 +56,7 @@ pub use conversation::{
 pub use decision_keys::{
     DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope,
 };
-pub use decision_record::{DecisionDisplay, DecisionLink, DecisionRecord, load_decision_link};
+pub use decision_record::{DecisionDisplay, DecisionLink, DecisionRecord, question_parts, load_decision_link};
 pub use dreaming::{DreamingAction, DreamingCard, DreamingLoad, change_dreaming, load_dreaming};
 pub use edges::{
     Confirmation, Connection, ConnectionStatus, Consequence, EmptyRegion, StateSentence,
