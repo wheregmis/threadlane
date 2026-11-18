@@ -7,7 +7,9 @@ use threadlane_core::ids::RunId;
 use threadlane_core::model::{Mode, OutboxKind, Run, RunOutcome, RunStatus};
 use threadlane_core::time::Timestamp;
 
-use crate::{AppState, Card, DecisionScope, Destination, Moment, ProseLimit, When, count_form};
+use crate::{
+    AppState, Author, Card, DecisionScope, Destination, Moment, ProseLimit, When, count_form,
+};
 
 /// One line of a conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,27 @@ pub enum Line {
         /// What you wrote.
         text: String,
         /// When, as `14:20`.
+        time: String,
+    },
+    /// An ask from the space lead, General's lead (docs/one-place-to-talk.md).
+    SpaceLead {
+        /// Stable event identity.
+        id: threadlane_core::ids::EventId,
+        /// What it asked.
+        text: String,
+        /// When it asked.
+        time: String,
+    },
+    /// In General: a project lead's reply to the space lead, which links to
+    /// that project's conversation.
+    ProjectReply {
+        /// Stable event identity.
+        id: threadlane_core::ids::EventId,
+        /// The project whose lead replied.
+        project: String,
+        /// The reply.
+        text: String,
+        /// When it arrived.
         time: String,
     },
     /// A message from the lead.
@@ -184,10 +207,23 @@ impl AppState {
                 lines.push((
                     said.at,
                     i64::MIN,
-                    Entry::Visible(Line::You {
-                        id: *id,
-                        text: said.text.clone(),
-                        time: when.time(said.at),
+                    Entry::Visible(match &said.by {
+                        Author::You => Line::You {
+                            id: *id,
+                            text: said.text.clone(),
+                            time: when.time(said.at),
+                        },
+                        Author::SpaceLead => Line::SpaceLead {
+                            id: *id,
+                            text: said.text.clone(),
+                            time: when.time(said.at),
+                        },
+                        Author::ProjectLead(from) => Line::ProjectReply {
+                            id: *id,
+                            project: from.clone(),
+                            text: said.text.clone(),
+                            time: when.time(said.at),
+                        },
                     }),
                 ));
             }
@@ -523,7 +559,12 @@ pub fn newest_message(lines: &[Line]) -> Option<usize> {
     lines.iter().rposition(|line| {
         matches!(
             line,
-            Line::You { .. } | Line::Lead { .. } | Line::Sending { .. } | Line::Digest { .. }
+            Line::You { .. }
+                | Line::SpaceLead { .. }
+                | Line::ProjectReply { .. }
+                | Line::Lead { .. }
+                | Line::Sending { .. }
+                | Line::Digest { .. }
         )
     })
 }

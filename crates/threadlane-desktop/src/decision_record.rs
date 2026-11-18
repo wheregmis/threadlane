@@ -346,9 +346,10 @@ impl AppState {
 
 pub(crate) fn conversation_time(entry: &ConversationEntry) -> Option<Timestamp> {
     match entry {
-        ConversationEntry::You { at, .. } | ConversationEntry::DeliveryFailure { at, .. } => {
-            Some(*at)
-        }
+        ConversationEntry::You { at, .. }
+        | ConversationEntry::SpaceLead { at, .. }
+        | ConversationEntry::ProjectReply { at, .. }
+        | ConversationEntry::DeliveryFailure { at, .. } => Some(*at),
         ConversationEntry::Delivered { item } => Some(item.delivered_at),
         _ => None,
     }
