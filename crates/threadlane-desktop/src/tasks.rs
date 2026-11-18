@@ -574,7 +574,10 @@ const PUBLISHING: [&str; 2] = ["publish_branch", "open_pull_request"];
 /// The task screen's "Usage" card: how many runs, how long they took, and
 /// what the hub says of tokens and cost.
 #[must_use]
-pub fn usage(detail: &TaskDetail, when: &When) -> [String; 2] {
+pub fn usage(detail: &TaskDetail, when: &When) -> Vec<String> {
+    if detail.runs.is_empty() {
+        return vec!["No runs".to_owned()];
+    }
     let took = detail
         .runs
         .iter()
@@ -622,7 +625,7 @@ pub fn usage(detail: &TaskDetail, when: &When) -> [String; 2] {
     } else {
         format!("Reported usage · {}", fields.join(" · "))
     };
-    [format!("{run_count} {runs} · {}", duration(took)), totals]
+    vec![format!("{run_count} {runs} · {}", duration(took)), totals]
 }
 
 /// The task screen's "Changes" card: its branch and whether it is published.

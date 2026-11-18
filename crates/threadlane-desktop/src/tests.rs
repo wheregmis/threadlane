@@ -2450,9 +2450,18 @@ fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
         proposed_by: None,
         stopped: false,
     };
-    let [runs, tokens] = usage(&detail, &when());
-    assert_eq!(runs, "2 runs · 7 min", "the running one counts until now");
-    assert!(tokens.contains("not reported"), "{tokens}");
+    let usage_lines = usage(&detail, &when());
+    assert_eq!(
+        usage_lines[0], "2 runs · 7 min",
+        "the running one counts until now"
+    );
+    assert!(usage_lines[1].contains("not reported"), "{usage_lines:?}");
+    let unstarted = TaskDetail {
+        summary: task(7, TaskStatus::Queued, None),
+        runs: Vec::new(),
+        ..detail.clone()
+    };
+    assert_eq!(usage(&unstarted, &when()), ["No runs"]);
 
     let published = |detail: &TaskDetail| {
         let changes = changes(detail);
@@ -4241,7 +4250,7 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         "run_duration": {"count": 1, "mean_ms": 12.0, "max_ms": 12},
         "account_cooldowns": {}, "account_wait_ms": 83, "dead_events": 2,
         "timer_lateness": {"count": 0, "mean_ms": null, "max_ms": null},
-        "outbox_lag_ms": null, "messages_per_day": {"2026-01-01": 4},
+        "outbox_lag_ms": 125_000, "messages_per_day": {"2026-01-01": 4},
         "silent_run_ratio": 0.25, "decisions_per_day": 5,
         "answer_latency": {"count": 0, "mean_ms": null, "max_ms": null}, "standing_rules_created": 1
     })).unwrap());
@@ -4254,7 +4263,8 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         .into_iter()
         .collect();
     assert_eq!(rows["Project queues"], "api 3");
-    assert_eq!(rows["Oldest lane event"], "53 ms");
+    assert_eq!(rows["Oldest pending event"], "53 ms");
+    assert_eq!(rows["Outbox lag"], "2 min");
     assert_eq!(
         rows["Run duration"],
         "12 ms avg · 12 ms max · 1 observation"

@@ -164,24 +164,25 @@ impl Desktop {
         }
         for other in &detail.related {
             let relation = if summary.task.depends_on.contains(&other.task.id) {
-                "it waits for this"
+                "Required by this task"
             } else {
-                "waits for it"
+                "Depends on this task"
             };
             let screen = Screen::Task {
                 space: space.to_owned(),
                 task: other.task.id,
             };
             let status = status_label(other.task.status, other.task.waiting_reason.as_deref());
+            let label = format!("{} {}", other.task.id, other.task.title);
             related = related.child(
                 v_flex()
                     .gap(XS)
                     .child(
-                        link(
-                            format!("related-{}", other.task.id),
-                            format!("{} {}", other.task.id, other.task.title),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+                        link(format!("related-{}", other.task.id), label.clone())
+                            .accessibility_label(format!("{label}, {status}. {relation}."))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                            ),
                     )
                     .child(
                         h_flex()

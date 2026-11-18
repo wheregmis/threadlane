@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::admission::AdmittedKey;
-use crate::ids::{DecisionId, EventId, ProjectId, StandingRuleId, TaskId, TimerId};
+use crate::ids::{DecisionId, EventId, LaneId, ProjectId, StandingRuleId, TaskId, TimerId};
 use crate::model::{
     Account, Agent, BackendKind, Cell, Decision, EventKind, Machine, MemoryFile, Mode,
     OutboxMessage, Recurrence, Repository, Run, StandingRule, Task, Timer,
@@ -1142,7 +1142,8 @@ pub struct OperationsMetrics {
     /// Time used for ages, cooldowns, and the rolling day.
     pub at: Timestamp,
     /// Age of the oldest pending event per lane with pending work.
-    pub lane_lag_ms: BTreeMap<crate::ids::LaneId, i64>,
+    #[serde(deserialize_with = "deserialize_lane_lag")]
+    pub lane_lag_ms: BTreeMap<LaneId, i64>,
     /// Pending events across all lanes of each included project, including zeros.
     pub queue_depth: BTreeMap<String, i64>,
     /// Time from start to end for every ended run.
@@ -1168,6 +1169,21 @@ pub struct OperationsMetrics {
     pub answer_latency: Latency,
     /// Standing rules ever created, including revoked rules.
     pub standing_rules_created: i64,
+}
+
+fn deserialize_lane_lag<'de, D>(deserializer: D) -> Result<BTreeMap<LaneId, i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Internally tagged replies buffer JSON object keys as strings.
+    BTreeMap::<String, i64>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(id, lag)| {
+            id.parse::<i64>()
+                .map(|id| (LaneId(id), lag))
+                .map_err(serde::de::Error::custom)
+        })
+        .collect()
 }
 
 /// Operational records for a lane, oldest first by row ID.

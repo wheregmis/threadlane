@@ -170,6 +170,9 @@ enum Command {
         /// Show the whole feed, not only what is new.
         #[arg(long)]
         from_start: bool,
+        /// Show items without changing the saved feed position.
+        #[arg(long)]
+        peek: bool,
     },
     /// List the routines and follow-ups of a project that have not ended.
     Routines {
@@ -916,6 +919,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
             space,
             follow,
             from_start,
+            peek,
         } => {
             let space = space.as_deref();
             if from_start {
@@ -933,14 +937,18 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     let Some(item) = item else { break };
                     let item = item?;
                     print_item(&item);
-                    core.acknowledge(&item)?;
+                    if !peek {
+                        core.acknowledge(&item)?;
+                    }
                 }
             } else {
                 for item in core.poll_feed(space, Duration::ZERO).await? {
                     print_item(&item);
                 }
             }
-            core.commit_feed()?;
+            if !peek {
+                core.commit_feed()?;
+            }
         }
         Command::Routines { space, project } => {
             let timers = core.routines(space.as_deref(), project.as_deref()).await?;

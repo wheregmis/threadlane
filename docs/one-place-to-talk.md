@@ -43,3 +43,23 @@ project; the project's lead does it and General reports back".
 Home's timeline across spaces from the existing conversation requests,
 paged; each entry with space, project and time, opening its
 conversation; the composer defaulting to General; state-layer tests.
+
+## After the current tasks land
+
+Each space has one Main Chat with its Lead. Open the space to pick up that
+conversation and give the Lead work for any project in the space. The
+composer sends to the Lead without a project picker. The Lead routes work
+to the right project and reports back in the same chat.
+
+Agents, routines, and tasks are reached from the space. Task and routine
+rows can name or filter by project when it helps identify the work. Use
+space-level settings for agent behavior and scheduling. Project screens
+keep project details such as repositories and history, with links to
+relevant work in the space.
+
+Keep existing history and project context when changing navigation.
+Project and repository permissions still apply when the Lead routes work.
+Verify with two spaces and at least two projects in one space. A request
+from Main Chat should reach the right project, appear in the space's task
+list, and report back to the same chat. Switching spaces should open that
+space's own conversation, agents, routines, and tasks.

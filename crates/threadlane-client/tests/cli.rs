@@ -754,6 +754,12 @@ async fn the_cli_against_a_running_hub() {
         .push(OutboxKind::Message, Some("api"), "status update");
     expect_success(
         client_dir,
+        &["feed", "--peek"],
+        "[work] notice: backup finished\n[work/api] status update\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
         &["feed"],
         "[work] notice: backup finished\n[work/api] status update\n",
     )
@@ -1140,7 +1146,7 @@ async fn the_cli_sets_the_space_ceiling_and_how_many_tasks_run_at_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn feed_follow_keeps_waiting_for_new_items() {
+async fn feed_follow_peek_keeps_waiting_without_consuming_items() {
     let hub = Hub::start().await;
     let client = tempfile::tempdir().expect("tempdir");
     let socket = hub.socket().display().to_string();
@@ -1151,7 +1157,7 @@ async fn feed_follow_keeps_waiting_for_new_items() {
     )
     .await;
 
-    let mut child = command(client.path(), &["feed", "--follow"])
+    let mut child = command(client.path(), &["feed", "--follow", "--peek"])
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn");
@@ -1175,6 +1181,13 @@ async fn feed_follow_keeps_waiting_for_new_items() {
     );
 
     child.kill().await.expect("kill");
+    expect_success(
+        client.path(),
+        &["feed"],
+        "[work/api] first\n[work] notice: second\n",
+    )
+    .await;
+    expect_success(client.path(), &["feed"], "").await;
     hub.stop().await;
 }
 
