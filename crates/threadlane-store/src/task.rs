@@ -4,7 +4,9 @@
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{free_backends, usable_backends};
-use threadlane_core::ids::{DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId};
+use threadlane_core::ids::{
+    AgentId, DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId,
+};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
@@ -18,6 +20,7 @@ use crate::db::{exec, query_all, query_one, query_opt};
 use crate::inbox::{check_lease, insert_event_in};
 use crate::memory::live_in;
 use crate::row::{Cols, json_text, opt_raw, params};
+use crate::task_review;
 
 /// Source name of `task_start` and `task_result` events.
 pub const TASK_SOURCE: &str = "task";
@@ -211,7 +214,7 @@ async fn wait_on_decision(conn: &Connection, task: &Task) -> StoreResult<bool> {
 /// performed for it (docs/milestone-3.md §4 "Result"). shortcut: with
 /// several repositories the last one performed wins; key them by repository
 /// when a task publishes more than one.
-async fn with_published(conn: &Connection, task: &Task) -> StoreResult<Option<Json>> {
+pub(crate) async fn with_published(conn: &Connection, task: &Task) -> StoreResult<Option<Json>> {
     let outcomes: Vec<Json> = query_all(
         conn,
         "SELECT outcome FROM decisions WHERE lane_id = ?1 AND outcome IS NOT NULL ORDER BY id",
@@ -236,7 +239,11 @@ async fn with_published(conn: &Connection, task: &Task) -> StoreResult<Option<Js
 }
 
 /// Moves a task to `status`, refusing what the lifecycle does not allow.
-async fn transition(conn: &Connection, task: &Task, status: TaskStatus) -> StoreResult<()> {
+pub(crate) async fn transition(
+    conn: &Connection,
+    task: &Task,
+    status: TaskStatus,
+) -> StoreResult<()> {
     if !task.status.can_become(status) {
         return Err(StoreError::Conflict(format!(
             "task {} cannot go from {} to {status}",
@@ -278,7 +285,7 @@ async fn insert_start_event(conn: &Connection, task: &Task) -> StoreResult<()> {
 /// `why` as the error of a failed task or the reason for another ending. A
 /// task that failed or was cancelled cancels the tasks waiting for it, and
 /// theirs in turn.
-async fn end_task(
+pub(crate) async fn end_task(
     conn: &Connection,
     task: &Task,
     status: TaskStatus,
@@ -286,6 +293,10 @@ async fn end_task(
     now: Timestamp,
 ) -> StoreResult<()> {
     transition(conn, task, status).await?;
+    if status == TaskStatus::Cancelled {
+        exec(conn, "UPDATE task_reviews SET state = 'cancelled' WHERE task_id = ?1 AND state IN ('submitted', 'pending')",
+            params![task.id.get()]).await?;
+    }
     // A terminal task's lane can drain its events without starting a backend.
     exec(
         conn,
@@ -449,8 +460,14 @@ pub(crate) async fn on_run_committed(
     let Some(task) = task_of_lane(conn, lane_id).await? else {
         return Ok(());
     };
+    if task.status == TaskStatus::InReview {
+        return task_review::finish_review(conn, &task, run_id, now).await;
+    }
     if task.status != TaskStatus::Running || wait_on_decision(conn, &task).await? {
         return Ok(());
+    }
+    if task_review::submitted(conn, task.id, run_id).await? {
+        return task_review::start_review(conn, &task, run_id, now).await;
     }
     if task.result.is_some() {
         let result = with_published(conn, &task).await?;
@@ -500,6 +517,15 @@ async fn left_unwoken(conn: &Connection, lane_id: LaneId) -> StoreResult<bool> {
     };
     Ok(task.status == TaskStatus::Running
         && task.result.is_none()
+        && query_opt(
+            conn,
+            "SELECT 1 FROM task_reviews JOIN runs ON runs.id = submission_run
+            WHERE task_id = ?1 AND state = 'submitted' AND runs.status = 'active'",
+            params![task.id.get()],
+            |row| Cols(row).i64(0),
+        )
+        .await?
+        .is_none()
         && pending_decision(conn, lane_id).await?.is_none()
         && pending_events(conn, lane_id).await? == 0
         && !will_wake(conn, lane_id).await?)
@@ -519,6 +545,15 @@ pub(crate) async fn on_run_failed(
     let Some(task) = task_of_lane(conn, lane_id).await? else {
         return Ok(());
     };
+    if task.status == TaskStatus::InReview && died {
+        exec(
+            conn,
+            "UPDATE tasks SET waiting_reason = ?2 WHERE id = ?1",
+            params![task.id.get(), format!("Reviewer failed: {error}")],
+        )
+        .await?;
+        return Ok(());
+    }
     if task.status != TaskStatus::Running {
         return Ok(());
     }
@@ -587,6 +622,7 @@ pub(crate) async fn on_event_inserted(conn: &Connection, lane_id: LaneId) -> Sto
 async fn waiting_reason(
     conn: &Connection,
     task: &Task,
+    agent: AgentId,
     now: Timestamp,
 ) -> StoreResult<Option<String>> {
     let (paused, project_limit) = query_one(
@@ -621,7 +657,8 @@ async fn waiting_reason(
         query_one(
             conn,
             "SELECT COUNT(*) FROM tasks t JOIN lanes l ON l.id = t.lane_id
-             WHERE t.project_id = ?1 AND t.id != ?2 AND (?3 IS NULL OR t.agent_id = ?3)
+             WHERE t.project_id = ?1 AND t.id != ?2 AND (?3 IS NULL OR ?3 = COALESCE(
+                 (SELECT r.reviewer FROM task_reviews r WHERE r.task_id = t.id AND r.state = 'pending'), t.agent_id))
                AND l.lease_owner IS NOT NULL AND l.lease_expires_at > ?4
                AND t.status NOT IN ('done', 'failed', 'cancelled')",
             params![
@@ -641,12 +678,12 @@ async fn waiting_reason(
     let agent_limit = query_opt(
         conn,
         "SELECT max_parallel FROM bindings WHERE project_id = ?1 AND agent_id = ?2",
-        params![task.project_id.get(), task.agent_id.get()],
+        params![task.project_id.get(), agent.get()],
         |row| Cols(row).i64(0),
     )
     .await?
     .unwrap_or(0);
-    if agent_limit > 0 && running(Some(task.agent_id.get())).await? >= agent_limit {
+    if agent_limit > 0 && running(Some(agent.get())).await? >= agent_limit {
         return Ok(Some(format!(
             "its agent already runs its limit of {agent_limit} tasks at once in this project"
         )));
@@ -667,6 +704,7 @@ async fn blocked(
     let preferred = query_opt(
         conn,
         "SELECT a.backends FROM lanes l JOIN agents a ON a.id = COALESCE(
+             (SELECT reviewer FROM task_reviews WHERE task_id = l.task_id AND state = 'pending'),
              (SELECT agent_id FROM tasks WHERE lane_id = l.id),
              (SELECT agent_id FROM bindings WHERE project_id = l.project_id AND is_lead = 1))
          WHERE l.id = ?1",
@@ -724,7 +762,19 @@ pub(crate) async fn check_eligible(
     let task = task_of_lane(conn, lane_id).await?;
     let reason = match &task {
         Some(task) if task.status.is_terminal() => None,
-        Some(task) => match waiting_reason(conn, task, now).await? {
+        Some(task) if task.status == TaskStatus::InReview => {
+            match task_review::pending_in(conn, task.id).await? {
+                Some(review) if !review.revisions.is_empty() && review.machine != machine_id => {
+                    return Ok(false);
+                }
+                Some(review) => match waiting_reason(conn, task, review.reviewer, now).await? {
+                    Some(reason) => Some(reason),
+                    None => blocked(conn, lane_id, machine_id, now).await?,
+                },
+                None => Some("Waiting for a Reviewer".to_owned()),
+            }
+        }
+        Some(task) => match waiting_reason(conn, task, task.agent_id, now).await? {
             None if !task.repositories.is_empty() && !gh_login(conn, machine_id).await? => {
                 Some(NO_GH_REASON.to_owned())
             }
@@ -743,6 +793,15 @@ pub(crate) async fn check_eligible(
 }
 
 impl HubDb {
+    /// Rechecks review eligibility if the Engineer handed over under an existing lease.
+    pub async fn review_can_start(&self, lease: &Lease, now: Timestamp) -> StoreResult<bool> {
+        let tx = self.db.begin().await?;
+        check_lease(tx.conn(), lease).await?;
+        let allowed = check_eligible(tx.conn(), lease.lane_id, lease.machine_id, now).await?;
+        tx.commit().await?;
+        Ok(allowed)
+    }
+
     /// Creates a task and records the space Lead's ask in the same transaction.
     pub async fn create_task_for_ask(
         &self,

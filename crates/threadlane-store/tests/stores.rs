@@ -1018,7 +1018,7 @@ async fn a_task_status_changes_only_along_its_lifecycle() {
         match status {
             Proposed | Queued => vec![],
             Running => vec![Running],
-            WaitingOnYou | Sleeping | Done | Failed => vec![Running, status],
+            InReview | WaitingOnYou | Sleeping | Done | Failed => vec![Running, status],
             Cancelled => vec![Cancelled],
         }
     };

@@ -80,6 +80,7 @@ impl HubCore {
             db.clone(),
             Arc::clone(&clock),
             Arc::clone(&wake) as Arc<dyn Waker>,
+            settings.reviewer.clone(),
         ));
         Ok(Self {
             inner: Arc::new(Inner {

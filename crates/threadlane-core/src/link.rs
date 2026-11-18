@@ -61,6 +61,9 @@ pub struct RunAssignment {
     /// lead, and for a task that names none, which works in a plain
     /// directory.
     pub repositories: Vec<Repository>,
+    /// A review checks these immutable commits in its own worktrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<RunReview>,
     /// The events this run consumes.
     pub events: Vec<EventId>,
     /// Decisions answered with approval among those events: the runner
@@ -88,6 +91,13 @@ pub struct RunAssignment {
     /// The run's durable trace ID, for correlation with hub records.
     #[serde(default)]
     pub trace_id: String,
+}
+
+/// Which implementation submission a Reviewer run examines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunReview {
+    pub submission: RunId,
+    pub revisions: Vec<crate::workspace::ReviewRevision>,
 }
 
 /// The hub's answer to [`HubLink::begin_run`].

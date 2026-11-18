@@ -137,3 +137,10 @@ timeline and opened the project conversation from a timeline entry.
 The batch landed on `main` in PRs #508, #507, and #509. The hub binary
 upgraded a disposable schema 14 database to schema 15, and SQLite's
 integrity check passed. Dev was reachable and had no pending decisions.
+
+## Space and task review, 2026-11-18
+
+| # | Finding | State |
+|---|---|---|
+| 42 | The merge check named the base commit but omitted the task commit it checked. A reviewer opening the branch later could see newer work. | fixed on the feature branch. The task shows the checked commit, and the review checkout is pinned to it. |
+| 43 | Independent review required a second task, and the owner's task could finish before review. | fixed on the feature branch for spaces with a configured Reviewer. The hub test sends requested changes back to the original task and requires approval of a new submission before finishing. |

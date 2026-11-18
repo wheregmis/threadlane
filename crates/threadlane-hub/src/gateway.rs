@@ -22,7 +22,9 @@ use crate::link::LocalLink;
 use crate::memory;
 use crate::publish::approval_options;
 use crate::timers;
-use crate::tools::{ASK_USER, CREATE_TASK, HubTools, derived_call_key, offered_in, question};
+use crate::tools::{
+    ASK_USER, CREATE_TASK, HubTools, derived_call_key, offered_for_review, offered_in, question,
+};
 
 /// Key of the envelope a failed call's error is recorded in, so a repeated
 /// call returns the same error instead of "outcome unknown".
@@ -53,6 +55,10 @@ impl LocalLink {
                 ToolError::Failed(format!("run {run_id} is not active under this lease"))
             })?;
         let events = db.run_events(run.id).await.map_err(tool_error)?;
+        let review = events.iter().any(|event| {
+            event.source == threadlane_store::TASK_REVIEW_SOURCE
+                && event.payload.get("submission").is_some()
+        });
         let dream = events.iter().find(|event| dreaming::is_dream(event));
         let definition = if dream.is_some() {
             let definition = dreaming::definitions()
@@ -69,7 +75,7 @@ impl LocalLink {
                 .definition(tool)
                 .ok_or_else(|| ToolError::UnknownTool(tool.to_owned()))?;
             // A backend can name a tool it was never offered.
-            if !offered_in(tool, lane.kind) {
+            if (review && !offered_for_review(tool)) || (!review && !offered_in(tool, lane.kind)) {
                 return Err(ToolError::Blocked(format!(
                     "{tool} is not available in a {} lane",
                     lane.kind
@@ -198,7 +204,14 @@ impl LocalLink {
         // A run you triggered: every event in its batch is from you
         // (docs/milestone-5.md §1 decision 6).
         let requested = !events.is_empty() && events.iter().all(|event| event.trust == Trust::User);
-        let mode = binding.map_or(Mode::Off, |binding| binding.mode);
+        let review = events.iter().any(|event| {
+            event.source == threadlane_store::TASK_REVIEW_SOURCE
+                && event.payload.get("submission").is_some()
+        });
+        let mode = binding.map_or(
+            if review { Mode::OnRequest } else { Mode::Off },
+            |binding| binding.mode,
+        );
         let new_work = if definition.name == CREATE_TASK
             && !timers::run_requested(db, run.id, lane.task_id)
                 .await
@@ -561,6 +574,7 @@ impl LocalLink {
             inner.db.clone(),
             Arc::clone(&inner.clock),
             Arc::clone(&inner.wake) as Arc<dyn Waker>,
+            None,
         );
         let context = ToolContext {
             lease: *lease,

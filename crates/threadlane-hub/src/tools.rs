@@ -11,13 +11,13 @@ use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::model::{
     Decision, DecisionOption, LaneKind, MemoryAuthor, NewOutboxMessage, NewTask, OutboxKind, Run,
-    Task, TaskOrigin, TaskStatus, Urgency,
+    Task, TaskOrigin, TaskReviewVerdict, TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{LeadReply, OrgStore, SessionStore, StoreError, TaskStore};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry};
-use threadlane_core::workspace::MergeCheck;
+use threadlane_core::workspace::{MergeCheck, ReviewRevision};
 use threadlane_store::HubDb;
 
 use crate::error::tool_error;
@@ -38,6 +38,11 @@ pub const CANCEL_TASK: &str = "cancel_task";
 pub const LIST_TASKS: &str = "list_tasks";
 /// A task agent reports its task done, with a result.
 pub use threadlane_core::link::FINISH_TASK;
+pub(crate) const FINISH_REVIEW: &str = "finish_review";
+
+pub(crate) fn offered_for_review(tool: &str) -> bool {
+    tool == FINISH_REVIEW
+}
 /// Asks you a question with options; your answer resumes the session
 /// (Plan.md §9.4, kind `input`).
 pub const ASK_USER: &str = "ask_user";
@@ -52,7 +57,7 @@ const MAX_LABEL: usize = 80;
 #[must_use]
 pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
     match tool {
-        crate::dreaming::PROJECT_SESSIONS => false,
+        crate::dreaming::PROJECT_SESSIONS | FINISH_REVIEW => false,
         // ask_project_lead is offered to the General lead only (begin_run).
         SEND_MESSAGE
         | UPDATE_TASK
@@ -124,13 +129,24 @@ pub struct HubTools {
     db: HubDb,
     clock: Arc<dyn Clock>,
     waker: Arc<dyn Waker>,
+    reviewer: Option<String>,
 }
 
 impl HubTools {
     /// Tools that write to `db` and wake the dispatcher through `waker`.
     #[must_use]
-    pub fn new(db: HubDb, clock: Arc<dyn Clock>, waker: Arc<dyn Waker>) -> Self {
-        Self { db, clock, waker }
+    pub fn new(
+        db: HubDb,
+        clock: Arc<dyn Clock>,
+        waker: Arc<dyn Waker>,
+        reviewer: Option<String>,
+    ) -> Self {
+        Self {
+            db,
+            clock,
+            waker,
+            reviewer,
+        }
     }
 
     fn send_message_definition() -> ToolDefinition {
@@ -459,6 +475,38 @@ impl HubTools {
             }
             result[MERGE_CHECKS] = merge.clone();
         }
+        if let Some(name) = &self.reviewer {
+            let task_id = context
+                .task_id
+                .ok_or_else(|| ToolError::Blocked("only a task can request review".into()))?;
+            let task = self
+                .project_task(context, &json!(task_id.to_string()))
+                .await?;
+            let reviewer = self
+                .db
+                .agents()
+                .await
+                .map_err(tool_error)?
+                .into_iter()
+                .find(|agent| agent.name == *name)
+                .ok_or_else(|| {
+                    ToolError::Blocked(format!("Space Reviewer {name:?} is unavailable"))
+                })?;
+            let revisions = self.review_revisions(&task, &result).await?;
+            self.db
+                .submit_for_review(
+                    &context.lease,
+                    context.run_id,
+                    reviewer.id,
+                    &revisions,
+                    &result,
+                )
+                .await
+                .map_err(tool_error)?;
+            return Ok(
+                json!({"task_id": task.id, "submitted_for_review": true, "merge": result[MERGE_CHECKS], "next": "End your turn so the Reviewer can start."}),
+            );
+        }
         let task =
             self.db
                 .finish_task(&context.lease, &result)
@@ -473,6 +521,62 @@ impl HubTools {
             "finished": true,
             "next": "End your turn now. The task is done, and its result reaches the lead, when this run ends.",
         }))
+    }
+
+    async fn review_revisions(
+        &self,
+        task: &Task,
+        result: &Json,
+    ) -> Result<Vec<ReviewRevision>, ToolError> {
+        if task.repositories.is_empty() {
+            return Ok(Vec::new());
+        }
+        let checks: Vec<MergeCheck> = serde_json::from_value(result[MERGE_CHECKS].clone())
+            .map_err(|_| {
+                ToolError::Blocked(
+                    "A successful merge check is required to identify the submitted commits".into(),
+                )
+            })?;
+        let repositories = self
+            .db
+            .repositories(task.project_id)
+            .await
+            .map_err(tool_error)?;
+        task.repositories
+            .iter()
+            .map(|id| {
+                let commit = repositories
+                    .iter()
+                    .find(|repo| repo.id == *id)
+                    .and_then(|repo| checks.iter().find(|check| check.repository == repo.name))
+                    .and_then(|check| check.revision.clone())
+                    .ok_or_else(|| {
+                        ToolError::Blocked(format!("No submitted commit for repository {id}"))
+                    })?;
+                Ok(ReviewRevision {
+                    repository: *id,
+                    commit,
+                })
+            })
+            .collect()
+    }
+
+    async fn finish_review(
+        &self,
+        context: &ToolContext,
+        arguments: &Json,
+    ) -> Result<Json, ToolError> {
+        let object = fields(arguments, &["verdict", "feedback"])?;
+        let verdict = text_field(object, "verdict")?
+            .ok_or_else(|| missing("verdict"))?
+            .parse::<TaskReviewVerdict>()
+            .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+        let feedback = text_field(object, "feedback")?.ok_or_else(|| missing("feedback"))?;
+        self.db
+            .store_task_review_verdict(&context.lease, context.run_id, verdict, feedback)
+            .await
+            .map_err(tool_error)?;
+        Ok(json!({"verdict": verdict, "next": "End your turn to record the review."}))
     }
 }
 
@@ -874,6 +978,15 @@ fn task_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         ),
+        define(
+            FINISH_REVIEW,
+            "Record your independent verdict for the submitted revision, then end the turn. Give file and line for each requested correction.",
+            Tier::Local,
+            json!({ "type": "object", "properties": {
+                "verdict": {"type": "string", "enum": ["approved", "changes_requested"]},
+                "feedback": {"type": "string"}
+            }, "required": ["verdict", "feedback"], "additionalProperties": false }),
+        ),
     ]
 }
 
@@ -939,6 +1052,7 @@ impl ToolRegistry for HubTools {
             CANCEL_TASK => self.cancel_task(context, &arguments).await,
             LIST_TASKS => self.list_tasks(context, &arguments).await,
             FINISH_TASK => self.finish_task(context, &arguments).await,
+            FINISH_REVIEW => self.finish_review(context, &arguments).await,
             crate::space_lead::ASK_PROJECT_LEAD => {
                 let run = self.run(context).await?;
                 let key = effect_key(context, &run, name, &arguments);

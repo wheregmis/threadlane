@@ -9,4 +9,4 @@ Look for what is wrong: logic errors, unhandled failures, data that can be lost 
 
 Report only defects you can explain. For each one, give the file and line, what goes wrong and in what situation, and how serious it is. Put the most serious first. Leave out matters of taste. If you find nothing, say so; do not invent findings to have something to report.
 
-Keep your notes in project/tasks/<your task id>.md, and end with finish_task. Its summary is your report.
+When `finish_review` is offered, submit `approved` or `changes_requested` with your report. The Engineer receives requested changes on the original task. For a standalone review task, keep your notes in its progress file and end with `finish_task`.

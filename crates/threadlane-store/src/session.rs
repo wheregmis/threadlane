@@ -69,7 +69,11 @@ pub(crate) fn decode_run(row: &Row) -> StoreResult<Run> {
 }
 
 /// The run, which must be active and belong to the lease's lane and epoch.
-async fn active_run(conn: &Connection, lease: &Lease, run_id: RunId) -> StoreResult<Run> {
+pub(crate) async fn active_run(
+    conn: &Connection,
+    lease: &Lease,
+    run_id: RunId,
+) -> StoreResult<Run> {
     let run = query_opt(
         conn,
         &format!("SELECT {RUN_FIELDS} FROM runs WHERE id = ?1"),

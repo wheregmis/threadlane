@@ -510,8 +510,10 @@ impl OrgStore for HubDb {
         }
         let live: Vec<TaskId> = query_all(
             conn,
-            "SELECT id FROM tasks WHERE agent_id = ?1
-             AND status NOT IN ('done', 'failed', 'cancelled') ORDER BY id",
+            "SELECT id FROM tasks WHERE status NOT IN ('done', 'failed', 'cancelled') AND (
+                agent_id = ?1 OR id IN (SELECT task_id FROM task_reviews r JOIN runs ON runs.id = r.submission_run
+                    WHERE r.reviewer = ?1 AND (r.state = 'pending' OR (r.state = 'submitted' AND runs.status = 'active')))
+             ) ORDER BY id",
             params![id.get()],
             |row| Cols(row).id(0),
         )

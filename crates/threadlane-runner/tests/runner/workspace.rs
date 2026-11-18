@@ -3,12 +3,17 @@
 
 use std::path::Path;
 
+use serde_json::json;
 use tempfile::TempDir;
-use threadlane_core::ids::{ProjectId, RepositoryId, TaskId};
-use threadlane_core::model::Repository;
-use threadlane_core::workspace::Workspaces;
+use threadlane_core::ids::{ProjectId, RepositoryId, RunId, TaskId};
+use threadlane_core::link::{PROGRESS_WRITTEN, RunReview};
+use threadlane_core::model::{LaneKind, Repository};
+use threadlane_core::workspace::{ReviewRevision, Workspaces};
 use threadlane_runner::GitWorkspaces;
+use threadlane_testkit::Script;
 use threadlane_testkit::git::{bare_repository, git};
+
+use crate::support::{Call, Harness, LANE, assignment, lease, run};
 
 const T1: TaskId = TaskId(1);
 const T2: TaskId = TaskId(2);
@@ -345,6 +350,7 @@ async fn the_merge_check_names_the_base_and_the_conflicting_files_and_touches_no
     let checked = s.check_merge(T1).await;
     assert_eq!(checked.conflicts, ["README.md"]);
     assert_eq!(checked.base, conflicting);
+    assert_eq!(checked.revision.as_deref(), Some(head.trim()));
     assert_eq!(
         git(&path, &["rev-parse", "HEAD"]),
         head,
@@ -358,6 +364,92 @@ async fn the_merge_check_names_the_base_and_the_conflicting_files_and_touches_no
         .await
         .unwrap();
     assert!(unset.is_empty(), "a worktree never set up is skipped");
+}
+
+#[tokio::test]
+async fn a_review_uses_the_submitted_commit_after_the_implementation_branch_moves() {
+    let h = Harness::new();
+    let mut s = setup();
+    s.workspaces = GitWorkspaces::new(h.config.lanes_dir.parent().unwrap().join("workspaces"));
+    let implementation = s.prepare(T1).await;
+    std::fs::write(implementation.join("work.txt"), "submitted").unwrap();
+    s.checkpoint(T1).await;
+    let checked = s.check_merge(T1).await;
+    let submitted = checked.revision.clone().unwrap();
+    std::fs::write(implementation.join("work.txt"), "later edit").unwrap();
+    s.checkpoint(T1).await;
+
+    let repositories = std::slice::from_ref(&s.repository);
+    assert!(
+        s.workspaces
+            .verify_submission(T1, repositories, &[checked])
+            .await
+            .is_err()
+    );
+    let revisions = [ReviewRevision {
+        repository: s.repository.id,
+        commit: submitted.clone(),
+    }];
+    let mut assignment = assignment(11);
+    assignment.lane_kind = LaneKind::Task;
+    assignment.task_id = Some(T1);
+    assignment.repositories = repositories.to_vec();
+    assignment.review = Some(RunReview {
+        submission: RunId(10),
+        revisions: revisions.to_vec(),
+    });
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment)));
+    h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
+    h.backend.scripted.push(
+        Script::new()
+            .call("progress", "memory_create", json!({}))
+            .finish("Reviewed"),
+    );
+    h.runner.work_once().await.unwrap();
+    let runs = h.backend.scripted.received();
+    assert_eq!(runs.len(), 1);
+    let review = &runs[0].working_dir;
+    assert!(
+        h.calls()
+            .iter()
+            .any(|call| matches!(call, Call::Complete { .. }))
+    );
+    assert_ne!(review, &implementation);
+    assert_eq!(git(review, &["rev-parse", "HEAD"]).trim(), submitted);
+    assert_eq!(
+        git(review, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "HEAD"
+    );
+    assert_eq!(
+        std::fs::read_to_string(review.join("work.txt")).unwrap(),
+        "submitted"
+    );
+    assert_eq!(
+        std::fs::read_to_string(implementation.join("work.txt")).unwrap(),
+        "later edit"
+    );
+    assert_eq!(
+        s.workspaces
+            .prepare_review(T1, RunId(10), repositories, &revisions)
+            .await
+            .unwrap(),
+        std::slice::from_ref(review)
+    );
+    assert!(
+        s.workspaces
+            .prepare_review(T1, RunId(10), repositories, &[])
+            .await
+            .is_err()
+    );
+    let removal = threadlane_core::workspace::WorkspaceRemoval {
+        tasks: vec![T1],
+        repositories: vec![(s.repository.id, s.repository.name.clone())],
+        clones: vec![],
+    };
+    assert!(s.workspaces.remove(&removal).await.is_empty());
+    assert!(!review.exists());
+    assert!(!implementation.exists());
 }
 
 #[tokio::test]

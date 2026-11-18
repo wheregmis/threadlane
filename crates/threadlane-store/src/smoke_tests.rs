@@ -39,6 +39,7 @@ const TABLES: &[&str] = &[
     "space",
     "standing_rules",
     "task_dependencies",
+    "task_reviews",
     "tasks",
     "timers",
     "tool_calls",

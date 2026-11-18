@@ -154,7 +154,7 @@ async fn summary(
         runs.iter()
             .rfind(|row| row.run.status == RunStatus::Active)
             .map(|row| row.run.clone())
-    } else if task.status == TaskStatus::Running {
+    } else if matches!(task.status, TaskStatus::Running | TaskStatus::InReview) {
         db.lane_runs(task.lane_id)
             .await
             .map_err(api_error)?
@@ -298,13 +298,17 @@ pub(super) async fn handle(
                         .await
                         .map_err(api_error)?
                         .into_iter()
-                        .filter(|task| task.status == TaskStatus::Running),
+                        .filter(|task| {
+                            matches!(task.status, TaskStatus::Running | TaskStatus::InReview)
+                        }),
                 );
             }
             running.sort_by_key(|task| task.id);
-            Ok(OverviewReply::Tasks {
-                tasks: summaries(db, &names, running).await?,
-            })
+            let mut tasks = summaries(db, &names, running).await?;
+            tasks.retain(|summary| {
+                summary.task.status == TaskStatus::Running || summary.running_since.is_some()
+            });
+            Ok(OverviewReply::Tasks { tasks })
         }
         OverviewRequest::Task { task } => {
             let task = db
@@ -368,6 +372,7 @@ pub(super) async fn handle(
                     branch: task_branch(task.id),
                     repositories,
                     runs,
+                    reviews: db.task_reviews(task.id).await.map_err(api_error)?,
                     decisions,
                     related,
                     messages,

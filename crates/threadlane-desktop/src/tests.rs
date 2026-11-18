@@ -613,6 +613,7 @@ impl HubApi for FakeHub {
                         branch: format!("threadlane/{task}"),
                         repositories: Vec::new(),
                         runs,
+                        reviews: Vec::new(),
                         decisions: Vec::new(),
                         related: Vec::new(),
                         messages: Vec::new(),
@@ -1568,6 +1569,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
         summary,
         branch: "threadlane/T-0007".to_owned(),
         repositories: vec!["payments-service".to_owned()],
+        reviews: Vec::new(),
         runs: vec![
             run(1, 60_000, 120_000, RunStatus::Failed, None),
             run(
@@ -2477,6 +2479,7 @@ fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
         branch: "threadlane/T-0007".to_owned(),
         repositories: Vec::new(),
         runs: vec![run(1, 0, Some(5 * 60_000)), run(2, 10 * 60_000, None)],
+        reviews: Vec::new(),
         decisions: Vec::new(),
         related: Vec::new(),
         messages: Vec::new(),
@@ -5715,7 +5718,7 @@ async fn the_board_and_task_page_say_whether_a_finished_branch_merges() {
     clean.task.result = Some(json!({
         "summary": "done",
         "merge": [{ "repository": "app", "branch": "main",
-                    "base": "1a2b3c4d5e6f", "conflicts": [] }],
+                    "base": "1a2b3c4d5e6f", "revision": "e4d3c2b1a6f5", "conflicts": [] }],
     }));
     let mut conflicted = task(2, TaskStatus::Done, None);
     conflicted.task.result = Some(json!({
@@ -5744,7 +5747,7 @@ async fn the_board_and_task_page_say_whether_a_finished_branch_merges() {
     };
     assert_eq!(
         merge(1).as_deref(),
-        Some("Merges cleanly into main at 1a2b3c4")
+        Some("Merges cleanly into main at 1a2b3c4 (checked e4d3c2b)")
     );
     assert_eq!(
         merge(2).as_deref(),
