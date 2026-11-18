@@ -216,6 +216,22 @@ async fn a_heartbeat_that_drops_a_lease_stops_that_lane() {
 }
 
 #[tokio::test]
+async fn a_released_lane_refills_a_slot_below_runner_capacity() {
+    let h = Harness::with_config(|config| config.poll = HOUR);
+    h.link.grant(lease(3));
+    h.link.push_request_work(Ok(None)); // The machine's single shared slot is occupied.
+    h.link.grant(lease(4));
+
+    let (shutdown, task) = h.spawn_run();
+    eventually("both lanes finish without a poll or nudge", || {
+        releases(&h) == [lease(3), lease(4)]
+    })
+    .await;
+    shutdown.send(()).expect("runner is running");
+    task.await.expect("task").expect("run");
+}
+
+#[tokio::test]
 async fn at_most_max_parallel_lanes_run_at_once() {
     let h = Harness::with_config(|config| config.poll = HOUR);
     hanging_lanes(&h, &[3, 4, 5]);

@@ -137,7 +137,7 @@ impl Runner {
         let mut heartbeat = clock.sleep(config.heartbeat);
         let mut poll = clock.sleep(config.poll);
         let mut lanes = JoinSet::new();
-        let mut saturated = self.claim(&mut lanes).await?;
+        self.claim(&mut lanes).await?;
 
         loop {
             tokio::select! {
@@ -145,13 +145,11 @@ impl Runner {
                 () = &mut shutdown => break,
                 Some(joined) = lanes.join_next() => {
                     lane_finished(joined)?;
-                    if saturated {
-                        saturated = self.claim(&mut lanes).await?;
-                    }
+                    self.claim(&mut lanes).await?;
                 }
                 Some(message) = messages.next() => {
                     if message == HubMessage::Nudge {
-                        saturated = self.claim(&mut lanes).await?;
+                        self.claim(&mut lanes).await?;
                     } else {
                         debug!(?message, "ignoring a hub message this runner does not handle yet");
                     }
@@ -161,7 +159,7 @@ impl Runner {
                     heartbeat = clock.sleep(config.heartbeat);
                 }
                 () = &mut poll => {
-                    saturated = self.claim(&mut lanes).await?;
+                    self.claim(&mut lanes).await?;
                     poll = clock.sleep(config.poll);
                 }
             }
@@ -170,8 +168,7 @@ impl Runner {
     }
 
     /// Asks for lanes until the hub has none or `max_parallel` are running.
-    /// Returns whether it stopped because every slot is taken.
-    async fn claim(&self, lanes: &mut JoinSet<Result<(), Killed>>) -> Result<bool, RunnerError> {
+    async fn claim(&self, lanes: &mut JoinSet<Result<(), Killed>>) -> Result<(), RunnerError> {
         let max_parallel = usize::try_from(self.inner.config.max_parallel).unwrap_or(usize::MAX);
         while lanes.len() < max_parallel {
             match self.inner.link.request_work().await {
@@ -180,15 +177,15 @@ impl Runner {
                     let inner = Arc::clone(&self.inner);
                     lanes.spawn(async move { inner.work_lane(&registration.lane).await });
                 }
-                Ok(None) => return Ok(false),
+                Ok(None) => break,
                 Err(LinkError::Killed(killed)) => return Err(killed.into()),
                 Err(error) => {
                     warn!(%error, "could not ask the hub for work");
-                    return Ok(false);
+                    break;
                 }
             }
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Stops every running lane, which stops its backend and releases its
