@@ -464,6 +464,23 @@ pub struct NewRepository {
     pub protected_branches: Vec<String>,
 }
 
+/// A personal skill identified by its provider and installed directory name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillBinding {
+    pub backend: BackendKind,
+    pub name: String,
+}
+
+impl SkillBinding {
+    #[must_use]
+    pub fn valid_name(name: &str) -> bool {
+        (1..=64).contains(&name.len())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':'))
+    }
+}
+
 /// A configured role (Plan.md §2.4 `agents`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Agent {
@@ -479,6 +496,8 @@ pub struct Agent {
     pub tools: Json,
     /// Capabilities a machine must have to run it.
     pub requirements: Json,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillBinding>,
 }
 
 /// Input for [`crate::store::OrgStore::create_agent`].
@@ -491,6 +510,7 @@ pub struct NewAgent {
     pub models: Json,
     pub tools: Json,
     pub requirements: Json,
+    pub skills: Vec<SkillBinding>,
 }
 
 impl NewAgent {
@@ -504,6 +524,7 @@ impl NewAgent {
             backends: Vec::new(),
             models: Json::Object(serde_json::Map::new()),
             tools: Json::Object(serde_json::Map::new()),
+            skills: Vec::new(),
             requirements: Json::Object(serde_json::Map::new()),
         }
     }

@@ -41,6 +41,8 @@ pub struct AgentForm {
     pub space: Option<String>,
     /// The index in [`BACKENDS`] picked.
     pub backends: usize,
+    pub skills: Vec<threadlane_core::model::SkillBinding>,
+    pub installed_skills: Option<Result<Vec<threadlane_core::model::SkillBinding>, String>>,
     /// What "Start from a template" offers: `None` while the hub has not
     /// answered, else its templates or why it could not list them.
     pub templates: Option<Result<Vec<AgentTemplate>, String>>,
@@ -237,7 +239,7 @@ pub async fn add_repository(
 ///
 /// The hub's refusal, for example a name it already has.
 pub async fn copy_agent(core: &ClientCore, agent: &Agent, to: &str) -> Result<Agent, ClientError> {
-    core.create_agent_with_models(
+    core.create_agent_profile(
         Some(to),
         &agent.name,
         &agent.role,
@@ -250,6 +252,7 @@ pub async fn copy_agent(core: &ClientCore, agent: &Agent, to: &str) -> Result<Ag
                 Some((kind.as_str().to_owned(), model.to_owned()))
             })
             .collect(),
+        agent.skills.clone(),
     )
     .await
 }

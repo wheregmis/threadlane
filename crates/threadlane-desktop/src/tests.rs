@@ -282,12 +282,14 @@ impl HubApi for FakeHub {
                     backends,
                     models: json!(models),
                     tools: json!({}),
+                    skills: Vec::new(),
                     requirements: json!({}),
                 };
                 agents.push(agent.clone());
                 Ok(OrgReply::Agent { agent })
             }
             OrgRequest::UpdateAgent {
+                skills,
                 agent: from,
                 name,
                 role,
@@ -300,6 +302,9 @@ impl HubApi for FakeHub {
                     .iter_mut()
                     .find(|agent| agent.name == from)
                     .ok_or_else(|| ApiError::NotFound(format!("agent {from:?}")))?;
+                if let Some(skills) = skills {
+                    agent.skills = skills;
+                }
                 if let Some(name) = name {
                     agent.name = name;
                 }
@@ -2013,6 +2018,7 @@ async fn the_modes_grid_has_a_row_per_project_and_a_cell_per_agent() {
             backends: Vec::new(),
             models: json!({}),
             tools: json!({}),
+            skills: Vec::new(),
             requirements: json!({}),
         })
         .collect();
@@ -4339,6 +4345,7 @@ async fn stage_b_lead_mode_obeys_the_ceiling_and_agent_placement_uses_backend_pr
         backends: vec![BackendKind::Claude],
         models: json!({}),
         tools: json!({}),
+        skills: Vec::new(),
         requirements: json!({}),
     };
     assert_eq!(
@@ -6071,6 +6078,7 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
     assert!(!state.offers_agent_delete("work", "Lead"), "never the lead");
 
     work.org(OrgRequest::UpdateAgent {
+        skills: None,
         agent: "Reviewer".to_owned(),
         name: None,
         role: None,
@@ -6087,6 +6095,11 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
     fields.role = "reviewer".to_owned();
     fields.name = " Critic ".to_owned();
     fields.models[0].1 = "opus".to_owned();
+    let skill = threadlane_core::model::SkillBinding {
+        backend: BackendKind::Codex,
+        name: "review".into(),
+    };
+    state.agent_edit_mut().unwrap().skills.push(skill.clone());
     state.agent_edit_mut().expect("open").backends = 2;
     assert_eq!(
         state.agent_edit().expect("open").model_backends(),
@@ -6099,6 +6112,7 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
     assert_eq!(
         request,
         OrgRequest::UpdateAgent {
+            skills: Some(vec![skill]),
             agent: "Reviewer".to_owned(),
             name: Some("Critic".to_owned()),
             role: None,

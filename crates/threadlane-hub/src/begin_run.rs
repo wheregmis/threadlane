@@ -373,6 +373,12 @@ impl LocalLink {
             events: events.iter().map(|event| event.id).collect(),
             perform,
             backend,
+            skills: agent
+                .skills
+                .iter()
+                .filter(|s| s.backend == backend)
+                .map(|s| s.name.clone())
+                .collect(),
             model: model_for(
                 binding.as_ref(),
                 &agent,
@@ -733,6 +739,7 @@ mod tests {
             backends: Vec::new(),
             models,
             tools: json!({}),
+            skills: Vec::new(),
             requirements: json!({}),
         }
     }

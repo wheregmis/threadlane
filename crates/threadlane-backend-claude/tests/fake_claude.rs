@@ -84,6 +84,7 @@ impl Fake {
             working_dir: self.work.path().to_owned(),
             prompt: "Say hello.".to_owned(),
             images: Vec::new(),
+            skills: Vec::new(),
             appended_instructions: String::new(),
             model: None,
             session,
@@ -368,6 +369,7 @@ async fn start_passes_every_option() {
     let request = RunRequest {
         prompt: "Reply to the message.\nIt says: hello.".to_owned(),
         images: Vec::new(),
+        skills: Vec::new(),
         appended_instructions: "You are the lead.".to_owned(),
         model: Some("haiku".to_owned()),
         tools: Some(Arc::new(Endpoint)),
@@ -763,6 +765,7 @@ async fn a_missing_program_is_not_installed() {
         working_dir: work.path().to_owned(),
         prompt: String::new(),
         images: Vec::new(),
+        skills: Vec::new(),
         appended_instructions: String::new(),
         model: None,
         session: NativeSession::Start {
@@ -830,4 +833,37 @@ exit 0"#,
         recorded_prompts(&fake),
         ["Say hello.", "One more question."]
     );
+}
+
+#[tokio::test]
+async fn personal_skills_reach_claude_stdin_and_a_removed_skill_fails_before_launch() {
+    let fake = recorder();
+    let account = fake.dir.path().join("account");
+    let backend = ClaudeBackend::new(ClaudeConfig {
+        program: fake.program(),
+        config_dir: Some(account.clone()),
+    });
+    for name in ["review", "tests"] {
+        let folder = account.join("skills").join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("SKILL.md"), "private skill body").unwrap();
+    }
+    let mut request = fake.request(NativeSession::Start { id: SESSION.into() });
+    request.skills = backend.installed_skills(None).await.unwrap();
+    let mut run = backend.run(request.clone()).await.unwrap();
+    collect(run.as_mut()).await;
+    assert_eq!(
+        recorded_prompts(&fake),
+        ["Use these installed skills for this run: /review /tests\n\nSay hello."]
+    );
+    std::fs::remove_file(account.join("skills/review/SKILL.md")).unwrap();
+    assert!(
+        backend
+            .run(request)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("review")
+    );
+    assert_eq!(fake.invocations().len(), 1);
 }

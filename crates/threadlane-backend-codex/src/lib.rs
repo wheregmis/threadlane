@@ -38,6 +38,7 @@
 //!   applies.
 
 mod run;
+mod skills;
 mod stream;
 
 use std::path::PathBuf;
@@ -158,6 +159,13 @@ impl AgentBackend for CodexBackend {
         BackendKind::Codex
     }
 
+    async fn installed_skills(
+        &self,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Vec<String>, BackendError> {
+        skills::list(&self.config, cwd).await
+    }
+
     async fn probe(&self) -> Result<Probe, BackendError> {
         let version = match self.status(&["--version"], true).await {
             Ok((true, line)) => line,
@@ -187,7 +195,8 @@ impl AgentBackend for CodexBackend {
         })
     }
 
-    async fn run(&self, request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
+    async fn run(&self, mut request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
+        self.apply_skills(&mut request).await?;
         let working_dir = request.working_dir.canonicalize().map_err(|error| {
             BackendError::Failed(format!(
                 "working directory {}: {error}",

@@ -946,6 +946,7 @@ impl Inner {
             prompt: format!("{}{performed}", assignment.prompt),
             images: assignment.images.clone(),
             appended_instructions: assignment.appended_instructions.clone(),
+            skills: assignment.skills.clone(),
             model: assignment.model.clone(),
             session: assignment.native_session.clone(),
             tools: Some(Arc::new(tools)),

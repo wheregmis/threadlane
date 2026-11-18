@@ -70,6 +70,7 @@ fn request(work: &std::path::Path, prompt: &str, session: NativeSession) -> RunR
         working_dir: work.to_owned(),
         prompt: prompt.to_owned(),
         images: Vec::new(),
+        skills: Vec::new(),
         appended_instructions: String::new(),
         model: Some("haiku".to_owned()),
         session,

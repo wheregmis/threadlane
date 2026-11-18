@@ -37,6 +37,7 @@ struct Changes {
     instructions: Option<String>,
     backends: Option<Vec<String>>,
     models: Option<BTreeMap<String, String>>,
+    skills: Option<Vec<threadlane_core::model::SkillBinding>>,
 }
 
 fn update(agent: &str) -> OrgRequest {
@@ -45,6 +46,7 @@ fn update(agent: &str) -> OrgRequest {
 
 fn edit(agent: &str, changes: Changes) -> OrgRequest {
     OrgRequest::UpdateAgent {
+        skills: changes.skills,
         agent: agent.into(),
         name: changes.name,
         role: changes.role,
@@ -329,4 +331,58 @@ async fn delete_refuses_the_lead_a_wrong_name_and_open_tasks() {
     );
     // The name is free for a new agent.
     create(&hub, "Reviewer").await;
+}
+
+#[tokio::test]
+async fn fallback_assignment_carries_only_the_selected_providers_skills() {
+    use threadlane_core::model::SkillBinding;
+    let hub = TestHub::start().await;
+    hub.hello().await; // Only Claude is usable on the runner.
+    let bindings = vec![
+        SkillBinding {
+            backend: BackendKind::Codex,
+            name: "codex-only".into(),
+        },
+        SkillBinding {
+            backend: BackendKind::Claude,
+            name: "claude-only".into(),
+        },
+    ];
+    let change = edit(
+        LEAD_NAME,
+        Changes {
+            backends: Some(vec!["codex".into(), "claude".into()]),
+            skills: Some(bindings.clone()),
+            ..Changes::default()
+        },
+    );
+
+    let OrgReply::Agent { agent } = hub.api.org(change).await.unwrap() else {
+        panic!("agent")
+    };
+    assert_eq!(
+        hub.db.agent(agent.id).await.unwrap().unwrap().skills,
+        bindings
+    );
+    hub.send("bound", "hello").await;
+    let (_, assignment) = crate::common::begin(&*hub.link).await;
+    assert_eq!(assignment.backend, BackendKind::Claude);
+    assert_eq!(assignment.skills, ["claude-only"]);
+    let clear = edit(
+        LEAD_NAME,
+        Changes {
+            skills: Some(Vec::new()),
+            ..Changes::default()
+        },
+    );
+    hub.api.org(clear).await.unwrap();
+    assert!(
+        hub.db
+            .agent(agent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .skills
+            .is_empty()
+    );
 }
