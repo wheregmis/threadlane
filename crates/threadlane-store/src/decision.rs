@@ -889,4 +889,16 @@ impl DecisionStore for HubDb {
         tx.commit().await?;
         Ok(rule)
     }
+
+    async fn claim_reminder(&self, id: DecisionId, now: Timestamp) -> StoreResult<bool> {
+        let tx = self.db.begin().await?;
+        let claimed = exec(
+            tx.conn(),
+            "UPDATE decisions SET reminded_at = ?1 WHERE id = ?2 AND reminded_at IS NULL",
+            params![now.as_millis(), id.get()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(claimed == 1)
+    }
 }

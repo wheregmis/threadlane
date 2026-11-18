@@ -578,6 +578,9 @@ pub trait DecisionStore: Send + Sync {
         id: StandingRuleId,
         now: Timestamp,
     ) -> StoreResult<StandingRule>;
+    /// Marks the one reminder for decision `id` as sent. `true` only the
+    /// first time, so a reminder goes out once across restarts.
+    async fn claim_reminder(&self, id: DecisionId, now: Timestamp) -> StoreResult<bool>;
 }
 
 /// Outgoing messages (Plan.md §10).
