@@ -37,7 +37,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 # Pinned per Plan.md §18.1: rerun the crash gate before every upgrade.
 turso = { version = "=0.8.3", default-features = false }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 tempfile = "3"
 # Pinned: iroh's API changes between releases. No default features: no
 # portmapper (it talks to the router) and no metrics; ring for TLS.
