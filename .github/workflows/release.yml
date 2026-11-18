@@ -1,0 +1,133 @@
+name: Release packages
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Release tag created by Release Please
+        required: true
+        type: string
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to package
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-packages-${{ inputs.release_tag || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Package ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            platform: linux-aarch64
+          - runner: macos-15
+            platform: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.platform }}
+
+      - name: Verify release tag
+        shell: bash
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -er '.packages[] | select(.name == "threadlane-desktop") | .version')
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match threadlane-desktop version v$version"
+            exit 1
+          fi
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev cmake libclang-dev \
+            libfontconfig-dev libwayland-dev wayland-protocols \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb-xkb-dev libxcb-randr0-dev \
+            libxcb-image0-dev libxcb-icccm4-dev libxcb-keysyms1-dev \
+            libxcb-util-dev libvulkan-dev libasound2-dev \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Build and archive
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            scripts/bundle-desktop.sh
+          else
+            cargo build --locked --release --bin threadlane-desktop
+          fi
+          cargo build --locked --release --bin threadlane --bin threadlane-hub
+          mkdir package
+          cp target/release/{threadlane,threadlane-hub} package/
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            mv target/Threadlane.app package/
+            ditto -c -k package "Threadlane-${RELEASE_TAG#v}-$PLATFORM.zip"
+          else
+            cp target/release/threadlane-desktop package/
+            tar -czf "Threadlane-${RELEASE_TAG#v}-$PLATFORM.tar.gz" -C package .
+          fi
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.platform }}
+          path: Threadlane-*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release packages
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Attach packages and checksums
+        working-directory: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          packages=("Threadlane-$version-linux-x86_64.tar.gz"
+                    "Threadlane-$version-linux-aarch64.tar.gz"
+                    "Threadlane-$version-macos-arm64.zip")
+          sha256sum "${packages[@]}" > SHA256SUMS
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" "${packages[@]}" SHA256SUMS --clobber
