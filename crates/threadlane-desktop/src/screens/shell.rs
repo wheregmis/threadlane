@@ -32,6 +32,8 @@ enum SidebarEntry<'a> {
     Space(&'a Space),
     App,
     Archived(&'a Space),
+    /// Running work, last in its space so rows coming and going don't move the rows above.
+    InProgress(&'a Space),
 }
 
 impl Desktop {
@@ -137,6 +139,7 @@ impl Desktop {
                     )
                 }),
             );
+            entries.push(SidebarEntry::InProgress(space));
         }
         entries.push(SidebarEntry::App);
         entries.push(row(
@@ -327,6 +330,8 @@ impl Desktop {
                     } else if space.active_projects().next().is_none() {
                         group = group.child(empty(EmptyRegion::Projects, cx));
                     }
+                }
+                SidebarEntry::InProgress(space) => {
                     let work = self.state.in_progress(&space.name, when);
                     if !work.rows.is_empty() {
                         group = group.child(meta("In progress", cx).px(MD));

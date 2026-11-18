@@ -402,9 +402,8 @@ impl Desktop {
             .project_gap(space, project, Part::Tasks)
             .is_none()
             && board_columns.iter().all(|column| column.count == 0);
-        let column_count = board_columns.len();
-        let board_min = BOARD_COLUMN_MIN * column_count + SM * column_count.saturating_sub(1);
         let columns = board_columns.into_iter().map(|column| {
+            let blank = column.cards.is_empty() && column.proposals.is_empty();
             let status = Status::task(column.title);
             let proposals = column.proposals.into_iter().map(|proposal| {
                 let id = proposal.id;
@@ -536,7 +535,7 @@ impl Desktop {
                         menu
                     })
             });
-            v_flex()
+            let column = v_flex()
                 .min_w_0()
                 .gap(SM)
                 .p(SM)
@@ -555,8 +554,27 @@ impl Desktop {
                     column
                         .more
                         .map(|label| div().text_size(TYPE_META).text_color(muted).child(label)),
-                )
+                );
+            (blank, column)
         });
+        // Adjacent empty columns share one grid cell, so the board fits beside the side panel.
+        let mut cells = Vec::new();
+        let mut blanks = Vec::new();
+        for (blank, column) in columns {
+            if blank {
+                blanks.push(column);
+                continue;
+            }
+            if !blanks.is_empty() {
+                cells.push(v_flex().min_w_0().gap(SM).children(blanks.drain(..)));
+            }
+            cells.push(column);
+        }
+        if !blanks.is_empty() {
+            cells.push(v_flex().min_w_0().gap(SM).children(blanks));
+        }
+        let column_count = cells.len();
+        let board_min = BOARD_COLUMN_MIN * column_count + SM * column_count.saturating_sub(1);
         let board = match self.state.project_gap(space, project, Part::Tasks) {
             Some(gap) => div()
                 .flex_1()
@@ -584,7 +602,7 @@ impl Desktop {
                                 .flex_none()
                                 .items_start()
                                 .gap(SM)
-                                .children(columns),
+                                .children(cells),
                         ),
                 )
                 .scrollbar(&self.board_scroll, ScrollbarAxis::Both)

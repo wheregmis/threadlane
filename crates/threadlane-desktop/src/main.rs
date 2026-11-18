@@ -1508,7 +1508,8 @@ impl Render for Desktop {
                         }),
                     )
                     .children(self.page_connections(&when, cx))
-                    .child(body)
+                    // The body takes the spare height so the activity line stays at the bottom.
+                    .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
                     .children(self.activity(cx)),
             )
     }
