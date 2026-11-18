@@ -133,3 +133,7 @@ timeline and opened the project conversation from a timeline entry.
 | 39 | Rebasing a published task branch could make its next regular push fail. | fixed in the PR batch. A local Git regression pushes, advances the base, and then pushes the task's next commit. |
 | 40 | Clarification decisions and follow-up timers could lose the link to a space Lead request. Replies could mix when several requests reached the same project. | fixed in the PR batch. A hub test sends two overlapping requests and checks that each reply keeps its original request. |
 | 41 | A slow Git operation in one repository held a shared lock and delayed tasks in other repositories. | fixed in the PR batch. Git workspace operations acquire a lock for the repository they touch. An interrupted run checks its stop state again before starting the backend. An in-flight Git command can still take until its timeout to finish. |
+
+The batch landed on `main` in PRs #508, #507, and #509. The hub binary
+upgraded a disposable schema 14 database to schema 15, and SQLite's
+integrity check passed. Dev was reachable and had no pending decisions.

@@ -53,21 +53,78 @@ impl Desktop {
         )];
         for space in self.state.spaces() {
             entries.push(SidebarEntry::Space(space));
-            entries.extend(space.active_projects().map(|project| {
-                let open = self.state.open_in(&space.name, project.id)
-                    + self.state.attention_in(&space.name, &project.name);
-                row(
-                    format!("go-{}-{}", space.name, project.name),
-                    AppIcon::Folder,
-                    project.name.clone(),
-                    positive_count(open),
+            if let Some(project) = space.main_chat_project() {
+                entries.push(row(
+                    format!("main-chat-{}", space.name),
+                    AppIcon::MessagesSquare,
+                    "Main Chat".into(),
+                    positive_count(self.state.attention_in(&space.name, project)),
                     Screen::Project {
                         space: space.name.clone(),
-                        project: project.name.clone(),
-                        tab: Tab::Tasks,
+                        project: project.to_owned(),
+                        tab: Tab::Conversation,
                     },
-                )
-            }));
+                ));
+            }
+            entries.extend(
+                [
+                    (
+                        "tasks",
+                        AppIcon::Columns3,
+                        "Tasks",
+                        Screen::SpaceTasks {
+                            space: space.name.clone(),
+                        },
+                    ),
+                    (
+                        "agents",
+                        AppIcon::Bot,
+                        "Agents",
+                        Screen::Agents(Some(space.name.clone())),
+                    ),
+                    (
+                        "routines",
+                        AppIcon::CalendarClock,
+                        "Routines",
+                        Screen::Routines(Some(space.name.clone())),
+                    ),
+                    (
+                        "settings",
+                        AppIcon::Settings,
+                        "Settings",
+                        Screen::Settings(Some(space.name.clone())),
+                    ),
+                ]
+                .map(|(id, icon, label, screen)| {
+                    row(
+                        format!("{id}-{}", space.name),
+                        icon,
+                        label.into(),
+                        None,
+                        screen,
+                    )
+                }),
+            );
+            entries.extend(
+                space
+                    .active_projects()
+                    .filter(|project| !project.is_general)
+                    .map(|project| {
+                        let open = self.state.open_in(&space.name, project.id)
+                            + self.state.attention_in(&space.name, &project.name);
+                        row(
+                            format!("go-{}-{}", space.name, project.name),
+                            AppIcon::Folder,
+                            project.name.clone(),
+                            positive_count(open),
+                            Screen::Project {
+                                space: space.name.clone(),
+                                project: project.name.clone(),
+                                tab: Tab::Tasks,
+                            },
+                        )
+                    }),
+            );
             entries.push(row(
                 format!("new-project-{}", space.name),
                 AppIcon::FolderPlus,
@@ -96,14 +153,6 @@ impl Desktop {
         entries.push(SidebarEntry::Team);
         entries.extend(
             [
-                ("go-agents", AppIcon::Bot, "Agents", None, Screen::Agents),
-                (
-                    "go-routines",
-                    AppIcon::CalendarClock,
-                    "Routines",
-                    None,
-                    Screen::Routines,
-                ),
                 (
                     "go-machines",
                     AppIcon::Monitor,
@@ -114,9 +163,9 @@ impl Desktop {
                 (
                     "go-settings",
                     AppIcon::Settings,
-                    "Settings",
+                    "App settings",
                     None,
-                    Screen::Settings,
+                    Screen::Settings(None),
                 ),
             ]
             .map(|(id, icon, label, count, screen)| {
@@ -182,7 +231,7 @@ impl Desktop {
                     };
                     let command = match screen {
                         Screen::Home => shortcut_hint(cx, &GoHome),
-                        Screen::Settings => shortcut_hint(cx, &OpenSettings),
+                        Screen::Settings(None) => shortcut_hint(cx, &OpenSettings),
                         Screen::AddSpace => shortcut_hint(cx, &OpenAddSpace),
                         _ => None,
                     };
@@ -198,7 +247,10 @@ impl Desktop {
                     let open = screen.clone();
                     let button = button
                         .on_click(cx.listener(move |this, _, _, cx| this.go(open.clone(), cx)));
-                    bar = if let Screen::Project { space, project, .. } = &screen {
+                    bar = if let Screen::Project { space, project, .. } = &screen
+                        && self.state.space(space).and_then(Space::main_chat_project)
+                            != Some(project)
+                    {
                         let paused = self.state.is_paused(space, project);
                         let offers_archive = self.state.offers_archive(space, project);
                         let offers_delete = self.state.offers_delete(space, project);

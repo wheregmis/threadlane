@@ -15,14 +15,14 @@ use super::agent_edit::backend_picker;
 use super::project::{MODES, mode_name};
 use super::{empty, gap_line};
 use crate::Desktop;
-use crate::components::{button, card, field, heading, meta, section};
+use crate::components::{button, card, field, heading, section};
 use crate::icons::AppIcon;
 use crate::tokens::{
     AGENT_CARD_WIDTH, FORM_WIDTH, GRID_CELL_WIDTH, LG, SM, TYPE_BODY, TYPE_META, XS,
 };
 
 impl Desktop {
-    pub(crate) fn agents(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn agents(&self, scope: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let view = cx.entity().downgrade();
         let mut screen = v_flex()
@@ -31,9 +31,13 @@ impl Desktop {
             .overflow_y_scrollbar()
             .id("agents")
             .gap(LG)
-            .child(heading("Agents"))
-            .child(meta("Agents are defined per space.", cx));
-        for space in self.state.spaces() {
+            .child(heading("Agents"));
+        for space in self
+            .state
+            .spaces()
+            .iter()
+            .filter(|space| scope.is_none_or(|name| space.name == name))
+        {
             let mut cards = h_flex().gap(SM).flex_wrap().items_start();
             for agent in &space.agents {
                 let backends = if agent.backends.is_empty() {

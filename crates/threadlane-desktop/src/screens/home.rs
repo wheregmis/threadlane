@@ -379,21 +379,20 @@ impl Desktop {
         list
     }
 
-    /// The composer with its project picker (Plan.md §2.1: every message
-    /// goes to one project's lead).
+    /// The Home composer sends to the chosen space's Main Chat.
     fn home_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let label = self.state.target().map_or_else(
-            || "No project".to_owned(),
-            |(space, project)| format!("{space} / {project} ▾"),
-        );
+        let label = self
+            .state
+            .target()
+            .map_or_else(|| "No space".to_owned(), |(space, _)| format!("{space} ▾"));
         let view = cx.entity().downgrade();
         let targets: Vec<(String, String)> = self
             .state
-            .targets()
-            .into_iter()
-            .map(|(space, project)| (space.to_owned(), project.to_owned()))
+            .spaces()
+            .iter()
+            .filter_map(|space| Some((space.name.clone(), space.main_chat_project()?.to_owned())))
             .collect();
-        let accessibility = format!("Choose a project · {label}");
+        let accessibility = format!("Choose a space · {label}");
         let picker = button("target")
             .label(label)
             .tab_stop(true)
@@ -401,20 +400,19 @@ impl Desktop {
             .dropdown_menu(move |mut menu, _, _| {
                 for (space, project) in &targets {
                     let (space, project, view) = (space.clone(), project.clone(), view.clone());
-                    menu = menu.item(PopupMenuItem::new(format!("{space} / {project}")).on_click(
-                        move |_, _, cx| {
+                    menu =
+                        menu.item(PopupMenuItem::new(space.clone()).on_click(move |_, _, cx| {
                             let _gone = view.update(cx, |this, cx| {
                                 this.state.set_target(&space, &project);
                                 cx.notify();
                             });
-                        },
-                    ));
+                        }));
                 }
                 menu
             });
         self.render_composer(
             threadlane_desktop::Draft::Lead,
-            "Message the selected project's lead",
+            "Message the selected space Lead",
             Some(picker.into_any_element()),
             cx,
         )

@@ -1,5 +1,7 @@
 //! Drafts and the delivery lifecycle for the desktop composer.
 
+use std::collections::HashMap;
+
 use threadlane_client::{ClientCore, ClientError, Sent};
 use threadlane_core::{ids::TaskId, time::Timestamp};
 
@@ -17,17 +19,8 @@ pub enum Draft {
     Task,
 }
 
-impl Draft {
-    fn index(self) -> usize {
-        match self {
-            Self::Lead => 0,
-            Self::Task => 1,
-        }
-    }
-}
-
 /// Where a submitted draft will go, even if the owner navigates away.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Destination {
     /// A project lead in the named space.
     Lead(String, String),
@@ -36,7 +29,9 @@ pub enum Destination {
 }
 
 impl Destination {
-    fn draft(&self) -> Draft {
+    /// Which input can edit this destination.
+    #[must_use]
+    pub fn draft(&self) -> Draft {
         match self {
             Self::Lead(..) => Draft::Lead,
             Self::Task(..) => Draft::Task,
@@ -101,21 +96,20 @@ pub struct SendRequest {
 }
 
 #[derive(Debug, Default)]
+struct DraftState {
+    text: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct Composer {
-    drafts: [String; 2],
-    errors: [Option<String>; 2],
+    drafts: HashMap<Destination, DraftState>,
     held: Option<(Outgoing, u8)>,
     sending: Vec<Outgoing>,
     next_id: u64,
 }
 
 impl Composer {
-    fn is_sending(&self, draft: Draft) -> bool {
-        self.sending
-            .iter()
-            .any(|send| send.destination.draft() == draft)
-    }
-
     fn start(&mut self, send: Outgoing) -> Outgoing {
         self.sending.push(send.clone());
         send
@@ -125,20 +119,24 @@ impl Composer {
 impl AppState {
     /// The text currently in the composer.
     #[must_use]
-    pub fn draft(&self, draft: Draft) -> &str {
-        &self.composer.drafts[draft.index()]
+    pub fn draft(&self, destination: &Destination) -> &str {
+        self.composer
+            .drafts
+            .get(destination)
+            .map_or("", |draft| draft.text.as_str())
     }
 
     /// Records edits without altering the snapshot of a submitted message.
-    pub fn edit_draft(&mut self, draft: Draft, text: &str) {
-        if self.draft(draft) != text {
-            text.clone_into(&mut self.composer.drafts[draft.index()]);
-            self.composer.errors[draft.index()] = None;
+    pub fn edit_draft(&mut self, destination: &Destination, text: &str) {
+        if self.draft(destination) != text {
+            let draft = self.composer.drafts.entry(destination.clone()).or_default();
+            text.clone_into(&mut draft.text);
+            draft.error = None;
         }
     }
 
     /// Adds a Markdown quotation of the chosen message to the draft.
-    pub fn reply_to_message(&mut self, composer: Draft, text: &str) {
+    pub fn reply_to_message(&mut self, destination: &Destination, text: &str) {
         let quote = text
             .lines()
             .map(|line| {
@@ -151,51 +149,54 @@ impl AppState {
         let draft = format!(
             "{quote}
 {}",
-            self.draft(composer)
+            self.draft(destination)
         );
-        self.edit_draft(composer, &draft);
+        self.edit_draft(destination, &draft);
     }
 
     /// The failure associated with the draft, if any.
     #[must_use]
-    pub fn send_error(&self, draft: Draft) -> Option<&str> {
-        self.composer.errors[draft.index()].as_deref()
+    pub fn send_error(&self, destination: &Destination) -> Option<&str> {
+        self.composer.drafts.get(destination)?.error.as_deref()
     }
 
     /// The hold countdown for this composer.
     #[must_use]
-    pub fn held_seconds(&self, draft: Draft) -> Option<u8> {
+    pub fn held_seconds(&self, destination: &Destination) -> Option<u8> {
         self.composer
             .held
             .as_ref()
-            .and_then(|(send, seconds)| (send.destination.draft() == draft).then_some(*seconds))
+            .and_then(|(send, seconds)| (&send.destination == destination).then_some(*seconds))
     }
 
     /// Whether a delivery to this composer is in progress.
     #[must_use]
-    pub fn is_sending(&self, draft: Draft) -> bool {
-        self.composer.is_sending(draft)
+    pub fn is_sending(&self, destination: &Destination) -> bool {
+        self.composer
+            .sending
+            .iter()
+            .any(|send| &send.destination == destination)
     }
 
     /// Whether another submission is possible.
     #[must_use]
-    pub fn is_send_enabled(&self, draft: Draft) -> bool {
-        !self.draft(draft).trim().is_empty()
-            && (!self.is_sending(draft) || self.held_seconds(draft).is_some())
+    pub fn is_send_enabled(&self, destination: &Destination) -> bool {
+        !self.draft(destination).trim().is_empty()
+            && (!self.is_sending(destination) || self.held_seconds(destination).is_some())
     }
 
     /// Takes a nonempty draft, flushing any previous hold first.
     pub fn request_send(&mut self, destination: Destination, at: Timestamp) -> SendRequest {
-        let draft = destination.draft();
         let archived = match &destination {
             Destination::Lead(space, project) => self.is_archived(space, project),
             Destination::Task(space, task) => self.task_is_archived(space, *task),
         };
-        if archived || !self.is_send_enabled(draft) {
+        if archived || !self.is_send_enabled(&destination) {
             return SendRequest::default();
         }
-        self.composer.errors[draft.index()] = None;
-        let text = self.draft(draft).to_owned();
+        let draft = self.composer.drafts.entry(destination.clone()).or_default();
+        draft.error = None;
+        let text = draft.text.clone();
         let flushed = self
             .composer
             .held
@@ -247,20 +248,25 @@ impl AppState {
     }
 
     /// Cancels the visible held message and restores its text without losing later edits.
-    pub fn undo_send(&mut self, draft: Draft) -> bool {
-        if self.held_seconds(draft).is_none() {
+    pub fn undo_send(&mut self, destination: &Destination) -> bool {
+        if self.held_seconds(destination).is_none() {
             return false;
         }
         if let Some((send, _)) = self.composer.held.take() {
-            self.preserve_draft(draft, &send.text);
+            self.preserve_draft(destination, &send.text);
         }
         true
     }
 
-    fn preserve_draft(&mut self, draft: Draft, text: &str) {
-        let current = self.draft(draft);
-        if current != text {
-            self.composer.drafts[draft.index()] = if current.trim().is_empty() {
+    fn preserve_draft(&mut self, destination: &Destination, text: &str) {
+        let current = &mut self
+            .composer
+            .drafts
+            .entry(destination.clone())
+            .or_default()
+            .text;
+        if current.as_str() != text {
+            *current = if current.trim().is_empty() {
                 text.to_owned()
             } else {
                 format!(
@@ -306,8 +312,12 @@ impl AppState {
     }
 
     /// Shows a submission failure beside the draft and in the status line.
-    pub fn fail_send(&mut self, draft: Draft, why: String) {
-        self.composer.errors[draft.index()] = Some(why.clone());
+    fn fail_send(&mut self, destination: &Destination, why: String) {
+        self.composer
+            .drafts
+            .entry(destination.clone())
+            .or_default()
+            .error = Some(why.clone());
         self.report(Activity::Failed(why));
     }
 
@@ -316,15 +326,15 @@ impl AppState {
         self.composer
             .sending
             .retain(|pending| pending.id != send.id);
-        let draft = send.destination.draft();
+        let destination = &send.destination;
         let label = send.destination.label();
         match result {
             Ok(sent) => {
                 let same_draft_has_newer_send = self
                     .outgoing()
-                    .any(|other| other.destination.draft() == draft && other.id > send.id);
-                if self.draft(draft) == send.text && !same_draft_has_newer_send {
-                    self.composer.drafts[draft.index()].clear();
+                    .any(|other| other.destination == *destination && other.id > send.id);
+                if self.draft(destination) == send.text && !same_draft_has_newer_send {
+                    self.composer.drafts.remove(destination);
                 }
                 match send.destination {
                     Destination::Lead(space, project) => {
@@ -350,8 +360,8 @@ impl AppState {
             }
             Err(error) => {
                 let why = describe(&error);
-                self.preserve_draft(draft, &send.text);
-                self.fail_send(draft, why);
+                self.preserve_draft(destination, &send.text);
+                self.fail_send(destination, why);
             }
         }
     }

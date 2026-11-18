@@ -255,6 +255,14 @@ pub struct Space {
 }
 
 impl Space {
+    /// The project that stores this space's Main Chat.
+    #[must_use]
+    pub fn main_chat_project(&self) -> Option<&str> {
+        self.active_projects()
+            .find(|project| project.is_general)
+            .map(|project| project.name.as_str())
+    }
+
     fn new(name: &str) -> Self {
         Self {
             name: name.to_owned(),

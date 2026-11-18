@@ -298,7 +298,7 @@ pub(crate) fn install(
     desktop_action(cx, &desktop, |this, _: &OpenSettings, window, cx| {
         if !window.has_active_dialog(cx) {
             this.keyboard_focus.focus(window, cx);
-            this.go(Screen::Settings, cx);
+            this.go(Screen::Settings(None), cx);
         }
     });
     desktop_action(cx, &desktop, |this, _: &OpenAddSpace, window, cx| {
