@@ -52,6 +52,7 @@ impl Desktop {
                 .into_any_element();
         };
         let summary = &detail.summary;
+        let archived = self.state.is_archived(space, &summary.project);
         let project = Screen::Project {
             space: space.to_owned(),
             project: summary.project.clone(),
@@ -86,14 +87,15 @@ impl Desktop {
                 moments.child(row.context_menu(move |menu, _, _| {
                     let copy = text.clone();
                     let quote = text.clone();
-                    menu.item(menu_item(&view, "Copy text", move |this, _, cx| {
+                    let mut menu = menu.item(menu_item(&view, "Copy text", move |this, _, cx| {
                         this.copy(copy.clone(), cx)
-                    }))
-                    .item(menu_item(
-                        &view,
-                        "Reply",
-                        move |this, window, cx| this.reply_to(&quote, window, cx),
-                    ))
+                    }));
+                    if !archived {
+                        menu = menu.item(menu_item(&view, "Reply", move |this, window, cx| {
+                            this.reply_to(&quote, window, cx)
+                        }));
+                    }
+                    menu
                 }))
             } else {
                 moments.child(row)
@@ -108,7 +110,12 @@ impl Desktop {
                 decision: decision.clone(),
             })
             .collect();
-        decisions.extend(self.state.visible_decisions().cloned());
+        decisions.extend(
+            self.state
+                .visible_decisions()
+                .filter(|_| !archived)
+                .cloned(),
+        );
         decisions.sort_by_key(|queued| (queued.decision.created_at, queued.decision.id));
         let decision_cards: Vec<_> = decisions
             .iter()
@@ -202,21 +209,22 @@ impl Desktop {
             .task_stop(space, task)
             .map(|target| self.stop_button(space, target, format!("Stop {task}"), cx));
         let in_space = space.to_owned();
-        let control = (self.state.task_control(space, task) != TaskControl::Ended).then(|| {
-            button("task-cancel")
-                .small()
-                .ghost()
-                .icon(AppIcon::X)
-                .label("Cancel…")
-                .accessibility_label(format!("Cancel {task}"))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.confirm_action(
-                        Consequence::CancelTask(in_space.clone(), task),
-                        window,
-                        cx,
-                    );
-                }))
-        });
+        let control = (!archived && self.state.task_control(space, task) != TaskControl::Ended)
+            .then(|| {
+                button("task-cancel")
+                    .small()
+                    .ghost()
+                    .icon(AppIcon::X)
+                    .label("Cancel…")
+                    .accessibility_label(format!("Cancel {task}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_action(
+                            Consequence::CancelTask(in_space.clone(), task),
+                            window,
+                            cx,
+                        );
+                    }))
+            });
         let header = task_header(detail, when);
         let in_space = space.to_owned();
         let expanded = self.state.activity_open(space, task);
@@ -248,7 +256,7 @@ impl Desktop {
         let actions = h_flex()
             .gap(SM)
             .flex_wrap()
-            .children(stop)
+            .children(stop.filter(|_| !archived))
             .children(control);
         let content = v_flex()
             .gap(XL)
@@ -327,7 +335,7 @@ impl Desktop {
                     )
                     .child(related),
             )
-            .child(
+            .children((!archived).then(|| {
                 v_flex()
                     .gap(XS)
                     .child(self.render_composer(
@@ -336,8 +344,8 @@ impl Desktop {
                         None,
                         cx,
                     ))
-                    .child(meta(self.state.task_hint(space, task), cx)),
-            );
+                    .child(meta(self.state.task_hint(space, task), cx))
+            }));
         decision_scroller("task", content, &self.decision_scroll)
             .w_full()
             .max_w(READING_WIDTH)

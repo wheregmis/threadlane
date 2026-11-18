@@ -173,9 +173,13 @@ async fn write_version(
     .await?;
     let id: i64 = query_one(
         conn,
-        "INSERT INTO memory_versions
-             (path, version, content, deleted, written_by_run, written_at, written_by_call)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
+        concat!(
+            "INSERT INTO memory_versions
+             (id, path, version, content, deleted, written_by_run, written_at, written_by_call)
+         VALUES (",
+            crate::db::next_id_sql!("memory_versions"),
+            ", ?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id"
+        ),
         params![path, version, content, deleted, run, at, call],
         |row| Cols(row).i64(0),
     )

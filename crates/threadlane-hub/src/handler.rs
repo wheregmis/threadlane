@@ -288,8 +288,16 @@ impl HubApi for ClientApi {
     }
 
     async fn projects(&self) -> Result<Vec<ProjectSummary>, ApiError> {
+        self.project_list(false).await
+    }
+
+    async fn project_list(&self, include_archived: bool) -> Result<Vec<ProjectSummary>, ApiError> {
         let projects = self.core.inner.db.projects().await.map_err(api_error)?;
-        Ok(projects.into_iter().map(summary).collect())
+        Ok(projects
+            .into_iter()
+            .filter(|project| include_archived || project.archived_at.is_none())
+            .map(summary)
+            .collect())
     }
 
     async fn send_message(&self, message: &UserMessage) -> Result<Accepted, ApiError> {
@@ -310,6 +318,9 @@ impl HubApi for ClientApi {
                     .await
                     .map_err(api_error)?
                     .ok_or_else(|| ApiError::NotFound(format!("task {task}")))?;
+                if let Some(project) = inner.db.project(task.project_id).await.map_err(api_error)? {
+                    active_project(&project)?;
+                }
                 if task.status.is_terminal() {
                     return Err(ApiError::Invalid(format!(
                         "task {} has ended ({}); tell the lead instead",
@@ -320,6 +331,7 @@ impl HubApi for ClientApi {
             }
             None => {
                 let project = self.project_named(message.project.as_deref()).await?;
+                active_project(&project)?;
                 self.lead_is_on(&project).await?;
                 (project.id, project.lead_lane_id)
             }
@@ -341,7 +353,7 @@ impl HubApi for ClientApi {
                 received_at: inner.clock.now(),
             })
             .await
-            .map_err(api_error)?;
+            .map_err(project_error)?;
         match inserted {
             Inserted::New(event_id) => {
                 inner.wake.wake(WakeTarget::Lane(lane_id));
@@ -704,6 +716,67 @@ impl HubApi for ClientApi {
                 self.core.inner.wake.wake(WakeTarget::Lane(lane_id));
                 Ok(OrgReply::LaneUpdated)
             }
+            OrgRequest::SetArchived { project, archived } => {
+                let project = self.project_named(project.as_deref()).await?;
+                let project = db
+                    .set_project_archived(project.id, archived)
+                    .await
+                    .map_err(project_error)?;
+                if !archived {
+                    self.core.inner.wake.wake(WakeTarget::Runners);
+                }
+                Ok(OrgReply::Project {
+                    project: summary(project),
+                })
+            }
+            OrgRequest::DeletePreview { project } => {
+                let (mut preview, removal) = db
+                    .project_deletion_preview(&project)
+                    .await
+                    .map_err(project_error)?;
+                if let Some(files) = &self.core.inner.workspace_files {
+                    let counts = files.removal_counts(&removal).await;
+                    preview.worktrees = counts.worktrees;
+                    preview.clones = counts.clones;
+                }
+                Ok(OrgReply::DeletePreview { preview })
+            }
+            OrgRequest::DeleteProject {
+                project,
+                confirm_name,
+            } => {
+                let inner = &self.core.inner;
+                let _removal = inner.project_removal.lock().await;
+                let (id, mut deleted, removal) = {
+                    let _dispatch = inner.dispatch.lock().await;
+                    db.delete_project(&project, &confirm_name, inner.clock.now())
+                        .await
+                        .map_err(project_error)?
+                };
+                inner
+                    .hook
+                    .reach(threadlane_core::runtime::steps::project_delete::AFTER_COMMIT)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?;
+                inner.wake.wake(WakeTarget::Dispatcher);
+                if let Some(files) = &inner.workspace_files {
+                    let counts = files.removal_counts(&removal).await;
+                    deleted.worktrees = counts.worktrees;
+                    deleted.clones = counts.clones;
+                }
+                let leftovers = self.core.cleanup_project(id, &removal).await;
+                if !leftovers.is_empty()
+                    && let Some(files) = &inner.workspace_files
+                {
+                    let remaining = files.removal_counts(&removal).await;
+                    deleted.worktrees = deleted.worktrees.saturating_sub(remaining.worktrees);
+                    deleted.clones = deleted.clones.saturating_sub(remaining.clones);
+                }
+                Ok(OrgReply::ProjectDeleted {
+                    project,
+                    deleted,
+                    leftovers,
+                })
+            }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
     }
@@ -790,6 +863,24 @@ impl HubApi for ClientApi {
     }
 }
 
+fn project_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::Invalid(message) => ApiError::Invalid(message),
+        StoreError::NotFound { kind, id } => ApiError::NotFound(format!("{kind} {id}")),
+        other => api_error(other),
+    }
+}
+
+fn active_project(project: &Project) -> Result<(), ApiError> {
+    if project.archived_at.is_some() {
+        return Err(ApiError::Invalid(format!(
+            "Project {:?} is archived.",
+            project.name
+        )));
+    }
+    Ok(())
+}
+
 fn summary(project: Project) -> ProjectSummary {
     ProjectSummary {
         id: project.id,
@@ -797,6 +888,7 @@ fn summary(project: Project) -> ProjectSummary {
         is_general: project.is_general,
         paused: project.paused,
         mode_ceiling: project.mode_ceiling,
+        archived: project.archived_at.is_some(),
     }
 }
 

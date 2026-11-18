@@ -462,8 +462,8 @@ impl HubCore {
                     lanes.insert(timer.lane_id);
                 }
                 Ok(Inserted::Duplicate(_)) => {}
-                // Paused, cancelled, or moved since the scan.
-                Err(StoreError::Conflict(_)) => {}
+                // Paused, cancelled, moved or deleted since the scan.
+                Err(StoreError::Conflict(_) | StoreError::NotFound { kind: "timer", .. }) => {}
                 Err(error) => return Err(error.into()),
             }
             inner.hook.reach(scheduler::AFTER_FIRE)?;

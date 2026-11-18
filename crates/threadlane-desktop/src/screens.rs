@@ -14,6 +14,7 @@ use crate::{Desktop, Screen};
 
 mod agents;
 mod decision;
+mod delete_project;
 mod home;
 mod machines;
 mod new_project;
@@ -102,6 +103,9 @@ impl Desktop {
                 self.set_ceiling(space, project, mode, cx)
             }
             Consequence::SetCeiling(space, None, mode) => self.set_space_ceiling(space, mode, cx),
+            Consequence::ArchiveProject(space, project) => {
+                self.set_archived(space, project, true, cx)
+            }
         }
     }
 }

@@ -12,6 +12,7 @@
 mod admission;
 mod db;
 mod decision;
+mod deletion;
 mod dreaming;
 mod inbox;
 mod machine;
@@ -195,3 +196,6 @@ impl HubDb {
 }
 
 mod operations;
+
+/// Why an outside event was recorded without work while a project was archived.
+pub const ARCHIVED_EVENT_REASON: &str = "project archived";

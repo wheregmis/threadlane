@@ -552,3 +552,50 @@ async fn invariant_19_a_hub_creates_events_only_for_its_own_repositories() {
     assert_eq!(ids(&github_events(&work).await), ["n:work"]);
     assert_eq!(ids(&github_events(&personal).await), ["n:notes"]);
 }
+
+#[tokio::test]
+async fn archived_repository_github_events_are_recorded_and_never_run() {
+    use threadlane_core::client::{OrgRequest, OverviewReply, OverviewRequest};
+    use threadlane_core::model::EventStatus;
+
+    let github = FakeGithub::default();
+    let (hub, project) = start(&github, Arc::new(NoHooks)).await;
+    let archive = |archived| {
+        hub.api.org(OrgRequest::SetArchived {
+            project: Some(project.name.clone()),
+            archived,
+        })
+    };
+    archive(true).await.unwrap();
+    github.notify(item(
+        "n:archived-review",
+        GithubKind::ReviewRequest,
+        "acme/gadgets",
+        Some(9),
+        "2026-11-17T08:00:00Z",
+    ));
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    let events = github_events(&hub).await;
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event.project_id, project.id);
+    assert_eq!(event.status, EventStatus::Skipped);
+    assert!(matches!(
+        hub.api.overview(OverviewRequest::Recorded {
+            project: Some(project.name.clone()),
+            limit: 5,
+        }).await.unwrap(),
+        OverviewReply::Recorded { events, total: 1 } if events[0].id == event.id
+    ));
+    assert!(hub.link.request_work().await.unwrap().is_none());
+    archive(false).await.unwrap();
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 0);
+    assert!(
+        hub.db
+            .pending_events(project.lead_lane_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(hub.link.request_work().await.unwrap().is_none());
+}

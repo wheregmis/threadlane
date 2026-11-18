@@ -72,6 +72,7 @@ fn projects() -> Vec<ProjectSummary> {
             is_general: true,
             paused: false,
             mode_ceiling: None,
+            archived: false,
         },
         ProjectSummary {
             id: ProjectId(2),
@@ -79,6 +80,7 @@ fn projects() -> Vec<ProjectSummary> {
             is_general: false,
             paused: true,
             mode_ceiling: None,
+            archived: false,
         },
     ]
 }
@@ -131,6 +133,7 @@ impl HubApi for FakeHub {
                     is_general: false,
                     paused: false,
                     mode_ceiling: None,
+                    archived: false,
                 },
             }),
             _ => Err(ApiError::Invalid("unsupported".to_owned())),
@@ -339,6 +342,7 @@ async fn every_request_kind_round_trips() {
         is_general: false,
         paused: false,
         mode_ceiling: None,
+        archived: false,
     };
     assert_eq!(
         client

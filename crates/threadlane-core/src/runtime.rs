@@ -80,6 +80,14 @@ impl StepHook for NoHooks {
 pub mod steps {
     use super::Step;
 
+    /// Permanent project deletion.
+    pub mod project_delete {
+        use super::Step;
+
+        /// Database rows and the cleanup job are durable, before filesystem cleanup.
+        pub const AFTER_COMMIT: Step = Step("project_delete.after_commit");
+    }
+
     /// Runner cycle, Plan.md §4.3. The runner reaches these between its
     /// calls to the hub, so each one is a distinct durable state.
     pub mod runner {

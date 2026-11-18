@@ -19,7 +19,7 @@ use threadlane_desktop::{
     Consequence, EmptyRegion, Line, ModeChoice, Part, When, message_limit, newest_message,
 };
 
-use super::{empty, gap_line, link, menu_item};
+use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
 use crate::components::{
     button, card, count, count_badge, decision_scroller, field, icon_button, meta, page_header,
     section, status_badge,
@@ -82,6 +82,7 @@ impl Desktop {
                         .child(tab.label()),
                 )
             }));
+        let archived = self.state.is_archived(space, project);
         let paused = self.state.is_paused(space, project);
         let lead_gap = self.state.project_gap(space, project, Part::Lead);
         let lead = lead_gap
@@ -106,48 +107,113 @@ impl Desktop {
         let (pause_space, pause_project) = (space.to_owned(), project.to_owned());
         let (task_space, task_project) = (space.to_owned(), project.to_owned());
         let form_open = self.state.task_form(space, project).is_some();
-        let actions = h_flex()
-            .gap(SM)
-            .child(
-                button("pause-project")
+        let mut actions = h_flex().gap(SM).flex_wrap();
+        if archived {
+            actions = actions.child(
+                button("unarchive-project")
                     .small()
-                    .icon(if paused {
-                        AppIcon::Play
-                    } else {
-                        AppIcon::Pause
-                    })
-                    .label(if paused {
-                        "Resume project"
-                    } else {
-                        "Pause project"
-                    })
+                    .outline()
+                    .label("Unarchive")
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_paused(pause_space.clone(), pause_project.clone(), !paused, cx);
-                    })),
-            )
-            .child(
-                button("new-task")
-                    .small()
-                    .primary()
-                    .icon(AppIcon::ListPlus)
-                    .label("New task")
-                    .accessibility_label("New task, skipping the lead")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state
-                            .open_task_form(&task_space, &task_project, !form_open);
-                        cx.notify();
+                        this.set_archived(pause_space.clone(), pause_project.clone(), false, cx);
                     })),
             );
-        let form = form_open.then(|| self.task_form(space, project, cx));
+        } else {
+            actions = actions
+                .child(
+                    button("pause-project")
+                        .small()
+                        .icon(if paused {
+                            AppIcon::Play
+                        } else {
+                            AppIcon::Pause
+                        })
+                        .label(if paused {
+                            "Resume project"
+                        } else {
+                            "Pause project"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_paused(
+                                pause_space.clone(),
+                                pause_project.clone(),
+                                !paused,
+                                cx,
+                            );
+                        })),
+                )
+                .children(self.state.offers_archive(space, project).then(|| {
+                    let action = Consequence::ArchiveProject(space.to_owned(), project.to_owned());
+                    button("archive-project")
+                        .small()
+                        .ghost()
+                        .label("Archive project…")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.confirm_action(action.clone(), window, cx);
+                        }))
+                }))
+                .child(
+                    button("new-task")
+                        .small()
+                        .primary()
+                        .icon(AppIcon::ListPlus)
+                        .label("New task")
+                        .accessibility_label("New task, skipping the lead")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state
+                                .open_task_form(&task_space, &task_project, !form_open);
+                            cx.notify();
+                        })),
+                );
+        }
+        if self.state.offers_delete(space, project) {
+            let (space, project) = (space.to_owned(), project.to_owned());
+            if archived {
+                actions = actions.child(
+                    button("delete-archived-project")
+                        .small()
+                        .danger()
+                        .icon(AppIcon::Trash)
+                        .label("Delete project…")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.confirm_project_deletion(
+                                space.clone(),
+                                project.clone(),
+                                window,
+                                cx,
+                            );
+                        })),
+                );
+            } else {
+                let view = cx.entity().downgrade();
+                actions = actions.child(
+                    button("project-overflow")
+                        .small()
+                        .ghost()
+                        .label("More")
+                        .accessibility_label("More project actions")
+                        .dropdown_menu(move |menu, _, cx| {
+                            menu.item(delete_project_item(
+                                &view,
+                                space.clone(),
+                                project.clone(),
+                                cx,
+                            ))
+                        }),
+                );
+            }
+        }
+        let form = (!archived && form_open).then(|| self.task_form(space, project, cx));
         let context = h_flex()
             .gap(SM)
             .flex_wrap()
             .child(meta(space.to_owned(), cx))
             .child(meta(format!("Ceiling · {}", mode_name(ceiling)), cx))
             .children(paused.then(|| status_badge("Paused", Status::Waiting, cx)))
+            .children(archived.then(|| status_badge("Archived", Status::Idle, cx)))
             .children(lead_mode.map(|mode| meta(format!("Lead mode · {}", mode_name(mode)), cx)))
             .children(lead.map(|line| meta(line, cx)))
-            .children(stop);
+            .children(stop.filter(|_| !archived));
         v_flex()
             .flex_1()
             .min_h_0()
@@ -186,6 +252,7 @@ impl Desktop {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let view = cx.entity().downgrade();
+        let archived = self.state.is_archived(space, project);
         let board_columns = self.state.board(space, project, when);
         let is_empty = self
             .state
@@ -226,8 +293,12 @@ impl Desktop {
                         h_flex()
                             .gap(XS)
                             .flex_wrap()
-                            .children(button("Start", proposal.start))
-                            .children(button("Decline", proposal.decline).map(Button::ghost)),
+                            .children(button("Start", proposal.start).filter(|_| !archived))
+                            .children(
+                                button("Decline", proposal.decline)
+                                    .filter(|_| !archived)
+                                    .map(Button::ghost),
+                            ),
                     )
             });
             let cards = column.cards.into_iter().map(|task_card| {
@@ -235,7 +306,7 @@ impl Desktop {
                     space: space.to_owned(),
                     task: task_card.id,
                 };
-                let answer = task_card.decision.map(|decision| {
+                let answer = task_card.decision.filter(|_| !archived).map(|decision| {
                     let (space, id, view) = (space.to_owned(), decision.to_string(), view.clone());
                     let options = task_card.options.clone();
                     button(SharedString::from(format!("answer-task-{}", task_card.id)))
@@ -304,7 +375,7 @@ impl Desktop {
                             .item(menu_item(&menu_view, "Copy id", move |this, _, cx| {
                                 this.copy(id.to_string(), cx)
                             }));
-                        if task_card.can_cancel {
+                        if task_card.can_cancel && !archived {
                             let space = menu_space.clone();
                             menu = menu.item(menu_item(
                                 &menu_view,
@@ -381,6 +452,7 @@ impl Desktop {
         let decisions: Vec<_> = self
             .state
             .visible_decisions()
+            .filter(|_| !archived)
             .map(|queued| self.decision(queued, when, cx))
             .collect();
         if !decisions.is_empty() {
@@ -409,7 +481,7 @@ impl Desktop {
                     ),
             );
         }
-        side = side.child(self.repository_form(space, project, cx));
+        side = side.children((!archived).then(|| self.repository_form(space, project, cx)));
         side = side.child(section("Agents here"));
         if let Some(gap) = self.state.project_gap(space, project, Part::Bindings) {
             side = side.child(gap_line(&gap, "agents", space, cx));
@@ -481,7 +553,7 @@ impl Desktop {
                     .gap(MD)
                     .children(is_empty.then(|| empty(EmptyRegion::Board, cx)))
                     .child(board)
-                    .child(self.project_composer(project, cx).flex_none()),
+                    .children((!archived).then(|| self.project_composer(project, cx).flex_none())),
             )
             .child(
                 decision_scroller("board-sidebar", side, &self.decision_scroll)
@@ -523,6 +595,7 @@ impl Desktop {
         if let Some(gap) = self.state.project_gap(space, project, Part::Conversation) {
             lines = lines.child(gap_line(&gap, "conversation", space, cx));
         }
+        let archived = self.state.is_archived(space, project);
         let conversation = self.state.conversation(space, project, when);
         if conversation.is_empty()
             && self
@@ -537,6 +610,7 @@ impl Desktop {
         for (index, line) in conversation.iter().enumerate() {
             let limit = message_limit(newest, index);
             let said = |id: String, who: &str, time: &str, text: &str, reply: bool| {
+                let reply = reply && !archived;
                 let id = format!("conversation-{space}-{project}-{id}");
                 let quote = text.to_owned();
                 let menu_text = quote.clone();
@@ -836,7 +910,7 @@ impl Desktop {
                     .min_w_0()
                     .gap(SM)
                     .child(self.conversation_scroller(space, project, lines, cx))
-                    .child(self.project_composer(project, cx).flex_none()),
+                    .children((!archived).then(|| self.project_composer(project, cx).flex_none())),
             )
             .child(side)
             .into_any_element()
@@ -912,10 +986,12 @@ impl Desktop {
             }
             Some(path) => {
                 let file = self.state.memory_file(space, project);
-                let editing = self.state.memory_editing(space, project);
+                let archived = self.state.is_archived(space, project);
+                let can_edit = self.state.memory_can_edit(space, project);
+                let editing = !archived && self.state.memory_editing(space, project);
                 detail = detail.child(section(path.to_owned()));
                 let mut actions = h_flex().gap(SM);
-                if self.state.memory_can_edit(space, project) {
+                if can_edit && !archived {
                     let (in_space, named) = (space.to_owned(), project.to_owned());
                     if editing {
                         let (save_space, save_project) = (in_space.clone(), named.clone());
@@ -967,7 +1043,7 @@ impl Desktop {
                                     })),
                             );
                     }
-                } else if file.is_some() {
+                } else if file.is_some() && !can_edit {
                     actions = actions.child(
                         div()
                             .text_size(TYPE_BODY)
@@ -1003,7 +1079,7 @@ impl Desktop {
                     ),
                     (None, false) => {
                         detail.child(div().text_size(TYPE_BODY).text_color(muted).child(
-                            if self.state.memory_can_edit(space, project) {
+                            if can_edit {
                                 "Not written yet. Instructions are loaded into every run."
                             } else {
                                 "This file is deleted."
@@ -1039,6 +1115,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Div {
         let card = self.state.dreaming_card(space, project, when);
+        let disabled = card.disabled || self.state.is_archived(space, project);
         let muted = cx.theme().muted_foreground;
         let (in_space, named) = (space.to_owned(), project.to_owned());
         let mut panel = v_flex()
@@ -1052,7 +1129,7 @@ impl Desktop {
                     .label("Dreaming")
                     .accessibility_label("Dreaming")
                     .checked(card.enabled)
-                    .disabled(card.disabled)
+                    .disabled(disabled)
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         this.toggle_dreaming(in_space.clone(), named.clone(), *checked, cx);
                     })),
@@ -1075,13 +1152,13 @@ impl Desktop {
                     .child(
                         div()
                             .flex_1()
-                            .child(field(&self.dream_cadence).disabled(card.disabled)),
+                            .child(field(&self.dream_cadence).disabled(disabled)),
                     )
                     .child(
                         button("save-dream-cadence")
                             .icon(AppIcon::Save)
                             .label("Save cadence")
-                            .disabled(card.disabled)
+                            .disabled(disabled)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.save_dream_cadence(in_space.clone(), named.clone(), cx);
                             })),
@@ -1115,6 +1192,7 @@ impl Desktop {
     fn agents_tab(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let card = self.state.ceiling_card(space, project);
+        let archived = self.state.is_archived(space, project);
         let (at_space, at_project, choices) =
             (space.to_owned(), project.to_owned(), card.choices.clone());
         let ceiling = mode_control(format!("ceiling-{project}"), &card.choices).on_click(
@@ -1150,7 +1228,7 @@ impl Desktop {
                                 .child(card.note.clone()),
                         ),
                     )
-                    .child(ceiling),
+                    .child(ceiling.disabled(archived)),
             )
             .children(locked_note(&card.choices, muted))
             .child(section("Agents in this project"));
@@ -1185,7 +1263,7 @@ impl Desktop {
             let step = |id: &str, icon, name: String, to: Option<u32>| {
                 let (space, project, agent) = (space.to_owned(), project.to_owned(), agent.clone());
                 icon_button(format!("{id}-{agent}"), icon, name)
-                    .disabled(to.is_none())
+                    .disabled(archived || to.is_none())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(to) = to {
                             this.set_max_parallel(
@@ -1268,7 +1346,7 @@ impl Desktop {
                                     .child(row.role.clone()),
                             ),
                     )
-                    .child(control)
+                    .child(control.disabled(archived))
                     .child(at_once)
                     .child(expand),
             );
@@ -1291,6 +1369,7 @@ impl Desktop {
     ) -> Option<Div> {
         let muted = cx.theme().muted_foreground;
         let may = self.state.may_do(space, project, agent)?;
+        let archived = self.state.is_archived(space, project);
         let view = cx.entity().downgrade();
         let mut statements = v_flex()
             .gap(XS)
@@ -1299,7 +1378,7 @@ impl Desktop {
             .child(section(may.title.clone()));
         for (index, statement) in may.statements.into_iter().enumerate() {
             let cell: AnyElement = match statement.tier {
-                Some(tier) if !statement.choices.is_empty() => {
+                Some(tier) if !archived && !statement.choices.is_empty() => {
                     let (space, project, agent, view) = (
                         space.to_owned(),
                         project.to_owned(),
@@ -1410,7 +1489,7 @@ impl Desktop {
                                             .text_size(TYPE_BODY)
                                             .child(rule.allows.clone()),
                                     )
-                                    .child(actions),
+                                    .children((!archived).then_some(actions)),
                             )
                             .child(
                                 div()

@@ -7,13 +7,14 @@ use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_desktop::{
-    Activity, Connection, ConnectionStatus, Destination, EmptyRegion, Part, Space, When,
+    Activity, Connection, ConnectionStatus, Consequence, Destination, EmptyRegion, Part, Space,
+    When,
 };
 
-use super::{empty, gap_line, menu_item};
+use super::{delete_project::delete_project_item, empty, gap_line, menu_item};
 use crate::components::{meta, row, status_dot};
 use crate::icons::AppIcon;
-use crate::menus::{GoHome, OpenSettings, SidebarShortcut, shortcut_hint};
+use crate::menus::{GoHome, OpenAddSpace, OpenSettings, SidebarShortcut, shortcut_hint};
 use crate::tokens::{BAR_HEIGHT, LG, MD, SIDEBAR_WIDTH, SM, Status, TYPE_EMPHASIS, XS};
 use crate::{Desktop, Screen, Tab};
 
@@ -29,6 +30,7 @@ enum SidebarEntry<'a> {
     Row(NavigationRow),
     Space(&'a Space),
     Team,
+    Archived(&'a Space),
 }
 
 impl Desktop {
@@ -51,7 +53,7 @@ impl Desktop {
         )];
         for space in self.state.spaces() {
             entries.push(SidebarEntry::Space(space));
-            entries.extend(space.projects.iter().map(|project| {
+            entries.extend(space.active_projects().map(|project| {
                 let open = self.state.open_in(&space.name, project.id)
                     + self.state.attention_in(&space.name, &project.name);
                 row(
@@ -75,7 +77,17 @@ impl Desktop {
                     space: space.name.clone(),
                 },
             ));
+            if space.archived_projects().next().is_some() {
+                entries.push(SidebarEntry::Archived(space));
+            }
         }
+        entries.push(row(
+            "add-space-row".into(),
+            AppIcon::Plus,
+            "Add space".into(),
+            None,
+            Screen::AddSpace,
+        ));
         let machines = self
             .state
             .machine_count()
@@ -171,6 +183,7 @@ impl Desktop {
                     let command = match screen {
                         Screen::Home => shortcut_hint(cx, &GoHome),
                         Screen::Settings => shortcut_hint(cx, &OpenSettings),
+                        Screen::AddSpace => shortcut_hint(cx, &OpenAddSpace),
                         _ => None,
                     };
                     let shortcuts: Vec<_> = command
@@ -187,31 +200,57 @@ impl Desktop {
                         .on_click(cx.listener(move |this, _, _, cx| this.go(open.clone(), cx)));
                     bar = if let Screen::Project { space, project, .. } = &screen {
                         let paused = self.state.is_paused(space, project);
+                        let offers_archive = self.state.offers_archive(space, project);
+                        let offers_delete = self.state.offers_delete(space, project);
                         let (space, project) = (space.clone(), project.clone());
                         let view = cx.entity().downgrade();
-                        bar.child(button.context_menu(move |menu, _, _| {
+                        bar.child(button.context_menu(move |menu, _, cx| {
                             let open = screen.clone();
-                            let (space, name, copy) =
+                            let (pause_space, pause_name, copy) =
                                 (space.clone(), project.clone(), project.clone());
-                            menu.item(menu_item(&view, "Open", move |this, _, cx| {
-                                this.go(open.clone(), cx)
-                            }))
-                            .item(menu_item(
-                                &view,
-                                if paused {
-                                    "Resume project"
-                                } else {
-                                    "Pause project"
-                                },
-                                move |this, _, cx| {
-                                    this.set_paused(space.clone(), name.clone(), !paused, cx);
-                                },
-                            ))
-                            .item(menu_item(
-                                &view,
-                                "Copy name",
-                                move |this, _, cx| this.copy(copy.clone(), cx),
-                            ))
+                            let mut menu = menu
+                                .item(menu_item(&view, "Open", move |this, _, cx| {
+                                    this.go(open.clone(), cx)
+                                }))
+                                .item(menu_item(
+                                    &view,
+                                    if paused {
+                                        "Resume project"
+                                    } else {
+                                        "Pause project"
+                                    },
+                                    move |this, _, cx| {
+                                        this.set_paused(
+                                            pause_space.clone(),
+                                            pause_name.clone(),
+                                            !paused,
+                                            cx,
+                                        );
+                                    },
+                                ))
+                                .item(menu_item(&view, "Copy name", move |this, _, cx| {
+                                    this.copy(copy.clone(), cx)
+                                }));
+                            if offers_archive {
+                                let action =
+                                    Consequence::ArchiveProject(space.clone(), project.clone());
+                                menu = menu.item(menu_item(
+                                    &view,
+                                    "Archive project…",
+                                    move |this, window, cx| {
+                                        this.confirm_action(action.clone(), window, cx)
+                                    },
+                                ));
+                            }
+                            if offers_delete {
+                                menu = menu.item(delete_project_item(
+                                    &view,
+                                    space.clone(),
+                                    project.clone(),
+                                    cx,
+                                ));
+                            }
+                            menu
                         }))
                     } else {
                         bar.child(button)
@@ -225,7 +264,7 @@ impl Desktop {
                     ));
                     if let Some(gap) = space.gap(Part::Projects) {
                         bar = bar.child(gap_line(&gap, "projects", &space.name, cx));
-                    } else if space.projects.is_empty() {
+                    } else if space.active_projects().next().is_none() {
                         bar = bar.child(empty(EmptyRegion::Projects, cx));
                     }
                     let work = self.state.in_progress(&space.name, when);
@@ -268,6 +307,76 @@ impl Desktop {
                     }
                 }
                 SidebarEntry::Team => bar = bar.child(meta("TEAM", cx).px(MD).pt(MD)),
+                SidebarEntry::Archived(space) => {
+                    let name = space.name.clone();
+                    let open = space.archived_open();
+                    bar = bar.child(
+                        row(
+                            SharedString::from(format!("archived-{name}")),
+                            if open {
+                                AppIcon::ChevronDown
+                            } else {
+                                AppIcon::ChevronRight
+                            },
+                            "Archived",
+                            None,
+                            false,
+                            cx,
+                        )
+                        .tab_stop(true)
+                        .accessibility_label(if open {
+                            "Collapse archived projects"
+                        } else {
+                            "Expand archived projects"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.toggle_archived(&name);
+                            cx.notify();
+                        })),
+                    );
+                    if open {
+                        for project in space.archived_projects() {
+                            let active = matches!(&self.screen, Screen::Project { space: shown, project: name, .. }
+                                if shown == &space.name && name == &project.name);
+                            let screen = Screen::Project {
+                                space: space.name.clone(),
+                                project: project.name.clone(),
+                                tab: Tab::Tasks,
+                            };
+                            let view = cx.entity().downgrade();
+                            let (at, name) = (space.name.clone(), project.name.clone());
+                            bar = bar.child(
+                                div().pl(MD).child(
+                                    row(
+                                        SharedString::from(format!(
+                                            "archived-project-{}-{}",
+                                            space.name, project.id
+                                        )),
+                                        AppIcon::Folder,
+                                        project.name.clone(),
+                                        None,
+                                        active,
+                                        cx,
+                                    )
+                                    .tab_stop(true)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.go(screen.clone(), cx)
+                                    }))
+                                    .context_menu(
+                                        move |menu, _, cx| {
+                                            menu.item(delete_project_item(
+                                                &view,
+                                                at.clone(),
+                                                name.clone(),
+                                                cx,
+                                            ))
+                                        },
+                                    ),
+                                ),
+                            );
+                        }
+                    }
+                }
             }
         }
         bar

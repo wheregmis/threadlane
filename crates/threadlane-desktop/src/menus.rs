@@ -32,6 +32,7 @@ actions!(
         OpenShortcutsMenu,
         OpenDocumentation,
         Dismiss,
+        OpenAddSpace,
     ]
 );
 
@@ -161,6 +162,11 @@ fn shortcuts() -> Vec<Shortcut> {
             "Window",
             "Quit Threadlane",
             [KeyBinding::new("cmd-q", Quit, None)],
+        ),
+        shortcut(
+            "Navigate",
+            "Add space",
+            [KeyBinding::new("g s", OpenAddSpace, Some(OUTSIDE_INPUT))],
         ),
     ]
 }
@@ -293,6 +299,11 @@ pub(crate) fn install(
         if !window.has_active_dialog(cx) {
             this.keyboard_focus.focus(window, cx);
             this.go(Screen::Settings, cx);
+        }
+    });
+    desktop_action(cx, &desktop, |this, _: &OpenAddSpace, window, cx| {
+        if !window.has_focused_input(cx) && !window.has_active_dialog(cx) {
+            this.go(Screen::AddSpace, cx);
         }
     });
     desktop_action(cx, &desktop, |this, _: &ShowShortcuts, window, cx| {

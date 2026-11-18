@@ -47,8 +47,8 @@ pub use attention::{AttentionRow, needs_you};
 pub use clock::{When, duration};
 pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
 pub use control::{
-    AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository, copy_agent,
-    same_remote,
+    AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository,
+    can_confirm_deletion, copy_agent, same_remote,
 };
 pub use conversation::{
     Digest, Line, belongs_in_conversation, follow_latest, message_limit, newest_message,
@@ -244,6 +244,7 @@ pub struct Space {
     held: Option<HeldResults>,
     /// The tasks of all its projects, for what needs attention on Home.
     pub tasks: Vec<TaskSummary>,
+    archived_open: bool,
 }
 
 impl Space {
@@ -265,7 +266,24 @@ impl Space {
             recorded: None,
             held: None,
             tasks: Vec::new(),
+            archived_open: false,
         }
+    }
+
+    /// Projects shown in ordinary navigation and work pickers.
+    pub fn active_projects(&self) -> impl Iterator<Item = &ProjectSummary> {
+        self.projects.iter().filter(|project| !project.archived)
+    }
+
+    /// Projects available under the Archived group.
+    pub fn archived_projects(&self) -> impl Iterator<Item = &ProjectSummary> {
+        self.projects.iter().filter(|project| project.archived)
+    }
+
+    /// Whether this space's archived projects are revealed in the sidebar.
+    #[must_use]
+    pub fn archived_open(&self) -> bool {
+        self.archived_open
     }
 
     /// Its machines that are online.
@@ -690,12 +708,12 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
     for status in statuses.iter().filter(|status| status.is_reachable()) {
         let name = status.name.as_str();
         let listed = core
-            .projects(Some(name))
+            .project_list(Some(name), true)
             .await
             .map(|listed| listed.projects);
         if let Ok(listed) = &listed {
             tasks.push((name.to_owned(), all_tasks(core, name, listed).await));
-            for project in listed {
+            for project in listed.iter().filter(|project| !project.archived) {
                 let running = core.lead(Some(name), Some(&project.name)).await;
                 leads.push((name.to_owned(), project.name.clone(), running));
             }
@@ -731,7 +749,7 @@ async fn all_tasks(
     projects: &[ProjectSummary],
 ) -> Result<Vec<TaskSummary>, ClientError> {
     let mut all: Vec<TaskSummary> = Vec::new();
-    for project in projects {
+    for project in projects.iter().filter(|project| !project.archived) {
         for summary in core.tasks(Some(space), Some(&project.name)).await? {
             if !all.iter().any(|known| known.task.id == summary.task.id) {
                 all.push(summary);
@@ -1328,8 +1346,7 @@ impl AppState {
             .iter()
             .flat_map(|space| {
                 space
-                    .projects
-                    .iter()
+                    .active_projects()
                     .map(move |project| (space.name.as_str(), project.name.as_str()))
             })
             .collect()
@@ -1354,11 +1371,10 @@ impl AppState {
     fn target_in<'a>(&self, space: &'a Space) -> Option<(&'a str, &'a str)> {
         let last = self.last_targets.get(&space.name);
         let project = space
-            .projects
-            .iter()
+            .active_projects()
             .find(|project| Some(&project.name) == last)
-            .or_else(|| space.projects.iter().find(|project| project.is_general))
-            .or_else(|| space.projects.first())?;
+            .or_else(|| space.active_projects().find(|project| project.is_general))
+            .or_else(|| space.active_projects().next())?;
         Some((&space.name, &project.name))
     }
 
@@ -1446,6 +1462,19 @@ impl AppState {
         self.forgotten.remove(name);
         if self.space(name).is_none() {
             self.spaces.push(Space::new(name));
+        }
+    }
+
+    /// Opens the newly paired space in Home.
+    pub fn open_paired_space(&mut self, name: &str) {
+        self.space_added(name);
+        self.set_filter(Some(name));
+    }
+
+    /// Shows or hides this space's archived projects in the sidebar.
+    pub fn toggle_archived(&mut self, space: &str) {
+        if let Some(space) = self.spaces.iter_mut().find(|known| known.name == space) {
+            space.archived_open = !space.archived_open;
         }
     }
 
@@ -1593,15 +1622,25 @@ impl AppState {
         let find = |spaces: &mut Vec<Space>, name: &str| -> Option<usize> {
             spaces.iter().position(|space| space.name == name)
         };
+        let mut removed = Vec::new();
         for (name, listed) in projects {
             let current = listed.is_ok();
             if let Some(at) = find(&mut spaces, &name)
                 && let Some(listed) = spaces[at].take(Part::Projects, listed)
                 && current
             {
-                spaces[at]
-                    .leads
-                    .retain(|(name, _)| listed.iter().any(|project| project.name == *name));
+                spaces[at].leads.retain(|(name, _)| {
+                    listed
+                        .iter()
+                        .any(|project| !project.archived && project.name == *name)
+                });
+                removed.extend(
+                    spaces[at]
+                        .projects
+                        .iter()
+                        .filter(|old| !listed.iter().any(|current| current.id == old.id))
+                        .map(|old| (name.clone(), old.name.clone(), old.id)),
+                );
                 spaces[at].projects = listed;
             }
         }
@@ -1679,7 +1718,15 @@ impl AppState {
             }
         }
         self.spaces = spaces;
+        for (space, project, id) in &removed {
+            self.forget_project(space, project, *id);
+        }
         for item in items {
+            if removed.iter().any(|(space, _, id)| {
+                *space == item.space && Some(*id) == item.item.message.project_id
+            }) {
+                continue;
+            }
             self.deliver(item);
         }
 
@@ -1723,6 +1770,67 @@ impl AppState {
         });
     }
 
+    fn forget_project(&mut self, space: &str, project: &str, id: ProjectId) {
+        let key = (space.to_owned(), project.to_owned());
+        let task_ids: HashSet<_> = self
+            .spaces
+            .iter()
+            .filter(|known| known.name == space)
+            .flat_map(|known| &known.tasks)
+            .filter(|task| task.task.project_id == id)
+            .map(|task| task.task.id)
+            .chain(self.tasks.iter().filter_map(|((at, task), detail)| {
+                (at == space && detail.summary.task.project_id == id).then_some(*task)
+            }))
+            .collect();
+        if let Some(known) = self.spaces.iter_mut().find(|known| known.name == space) {
+            known.projects.retain(|known| known.id != id);
+            known.tasks.retain(|task| task.task.project_id != id);
+            known.running.retain(|task| task.task.project_id != id);
+            known.leads.retain(|(known, _)| known != project);
+        }
+        self.projects.remove(&key);
+        self.memory.remove(&key);
+        self.routines.remove(&key);
+        self.dreaming.remove(&key);
+        self.loaded.remove(&key);
+        self.recorded_open.remove(&key);
+        self.conversation_read.remove(&key);
+        self.save_conversation_seen();
+        self.tasks
+            .retain(|(at, task), _| at != space || !task_ids.contains(task));
+        self.task_failures
+            .retain(|(at, task), _| at != space || !task_ids.contains(task));
+        self.task_activity
+            .retain(|(at, task)| at != space || !task_ids.contains(task));
+        self.machine_history.remove(space);
+        self.said
+            .retain(|(at, _), said| at != space || said.project != project);
+        self.failures
+            .retain(|(at, _), said| at != space || said.project != project);
+        self.delivered.retain(|(at, _), item| {
+            at != space
+                || (item.item.message.project_id != Some(id)
+                    && item
+                        .item
+                        .digest
+                        .iter()
+                        .all(|entry| entry.project.as_deref() != Some(project)))
+        });
+        self.queue
+            .retain(|queued| queued.space != space || queued.decision.project_id != id);
+        self.decision_records
+            .retain(|key, record| key.space != space || record.project_id != id);
+        if self
+            .last_targets
+            .get(space)
+            .is_some_and(|known| known == project)
+        {
+            self.last_targets.remove(space);
+            self.save_targets();
+        }
+    }
+
     /// Takes what the project screen loaded. A part that could not be
     /// listed shows the hub's error instead; the conversation keeps what
     /// was delivered.
@@ -1740,6 +1848,9 @@ impl AppState {
             rules,
             lead_runs,
         } = load;
+        if self.project_absent(&space, &project) {
+            return;
+        }
         let view = self
             .projects
             .entry((space.clone(), project.clone()))
@@ -1995,8 +2106,7 @@ impl AppState {
             .map(|agent| agent.name.clone())
             .collect();
         let rows = known
-            .projects
-            .iter()
+            .active_projects()
             .map(|project| {
                 let modes = match self.project_gap(space, &project.name, Part::Bindings) {
                     Some(gap) => Err(gap),

@@ -94,8 +94,6 @@ pub(super) const SHORT_FIELD_WIDTH: Pixels = px(90.);
 pub(super) const ZONE_WIDTH: Pixels = px(260.);
 /// Space name width in logical pixels.
 pub(super) const SPACE_NAME_WIDTH: Pixels = px(240.);
-/// Join name width in logical pixels.
-pub(super) const JOIN_NAME_WIDTH: Pixels = px(180.);
 /// Stepper width in logical pixels.
 pub(super) const STEPPER_WIDTH: Pixels = px(56.);
 /// Agent card width in logical pixels.

@@ -260,7 +260,10 @@ async fn start_embedded_runner(
     let runner = Runner::new(
         core.link(machine),
         core.inner.backends.clone(),
-        Arc::new(GitWorkspaces::new(data_dir.workspaces())),
+        core.inner
+            .workspace_files
+            .clone()
+            .unwrap_or_else(|| Arc::new(GitWorkspaces::new(data_dir.workspaces()))),
         Arc::new(GitForge::with_gh(&config.github.gh)),
         clock,
         Arc::new(NoHooks),

@@ -448,7 +448,11 @@ pub(super) async fn handle(
         OverviewRequest::Recorded { project, limit } => {
             let project = api.project_named(project.as_deref()).await?;
             let (events, total) = db
-                .skipped_events(Some(project.id), SKIP_REASON, limit.min(FEED_PAGE))
+                .skipped_events(
+                    Some(project.id),
+                    [SKIP_REASON, threadlane_store::ARCHIVED_EVENT_REASON],
+                    limit.min(FEED_PAGE),
+                )
                 .await
                 .map_err(api_error)?;
             Ok(OverviewReply::Recorded {
@@ -467,7 +471,11 @@ pub(super) async fn handle(
         }
         OverviewRequest::RecordedCount => {
             let (_, total) = db
-                .skipped_events(None, SKIP_REASON, 0)
+                .skipped_events(
+                    None,
+                    [SKIP_REASON, threadlane_store::ARCHIVED_EVENT_REASON],
+                    0,
+                )
                 .await
                 .map_err(api_error)?;
             Ok(OverviewReply::RecordedCount { total })

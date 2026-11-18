@@ -257,6 +257,8 @@ enum Screen {
     Routines,
     /// What each hub reports about itself, and this app's own settings.
     Settings,
+    /// Pair another space with this app.
+    AddSpace,
 }
 
 impl Screen {
@@ -594,8 +596,27 @@ impl Desktop {
         self.run(
             async move { refresh(&*core.read().await).await },
             |this, refreshed, cx| {
+                let open_project = match &this.screen {
+                    Screen::Project { space, project, .. } => {
+                        Some((space.clone(), project.clone()))
+                    }
+                    Screen::Task { space, task } => this
+                        .state
+                        .task(space, *task)
+                        .map(|detail| (space.clone(), detail.summary.project.clone())),
+                    _ => None,
+                };
                 this.state.apply(refreshed);
-                this.load_screen(cx);
+                if let Some((space, project)) = open_project
+                    && this.state.project_absent(&space, &project)
+                {
+                    this.state.report(Activity::Failed(format!(
+                        "No project {project:?} in {space}."
+                    )));
+                    this.go(Screen::Home, cx);
+                } else {
+                    this.load_screen(cx);
+                }
             },
             cx,
         );
@@ -725,7 +746,7 @@ impl Desktop {
                     cx,
                 );
             }
-            Screen::Home | Screen::Machines | Screen::NewProject { .. } => {}
+            Screen::Home | Screen::Machines | Screen::NewProject { .. } | Screen::AddSpace => {}
         }
     }
 
@@ -1162,12 +1183,7 @@ impl Desktop {
                 (name, joined)
             },
             |this, (name, joined), cx| match joined {
-                Ok(()) => {
-                    this.state.space_added(&name);
-                    this.state.report(Activity::Done(format!("Paired {name}.")));
-                    this.clear_join = true;
-                    this.refresh(cx);
-                }
+                Ok(()) => this.space_paired(&name, cx),
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
@@ -1210,17 +1226,20 @@ impl Desktop {
                 (name, paired)
             },
             |this, (name, paired), cx| match paired {
-                Ok(()) => {
-                    this.state.space_added(&name);
-                    this.state.report(Activity::Done(format!("Paired {name}.")));
-                    this.clear_join = true;
-                    this.refresh(cx);
-                }
+                Ok(()) => this.space_paired(&name, cx),
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
         );
         cx.notify();
+    }
+
+    fn space_paired(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.state.open_paired_space(name);
+        self.state.report(Activity::Done(format!("Paired {name}.")));
+        self.clear_join = true;
+        self.go(Screen::Home, cx);
+        self.refresh(cx);
     }
 
     /// Puts `text` on the clipboard; the status area says so.
@@ -1407,9 +1426,12 @@ impl Render for Desktop {
             Screen::Machine { space, machine } => self.machine(&space, machine, &when, cx),
             Screen::Routines => self.routines_screen(&when, cx),
             Screen::Settings => self.settings(&when, cx),
+            Screen::AddSpace => self.add_space(cx),
         };
         // With no hub paired, every screen but Machines explains pairing.
-        let body = if self.state.first_run() && self.screen != Screen::Machines {
+        let body = if self.state.first_run()
+            && !matches!(self.screen, Screen::Machines | Screen::AddSpace)
+        {
             self.first_run(cx)
         } else {
             body

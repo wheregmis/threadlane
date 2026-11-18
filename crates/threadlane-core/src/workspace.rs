@@ -8,13 +8,35 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use crate::ids::TaskId;
+use serde::{Deserialize, Serialize};
+
+use crate::ids::{RepositoryId, TaskId};
 use crate::model::Repository;
 
 /// Why setting up or saving a workspace failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("workspace: {0}")]
 pub struct WorkspaceError(pub String);
+
+/// Local workspace paths to inspect or remove after deleting a project.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRemoval {
+    /// Owned task directories.
+    pub tasks: Vec<TaskId>,
+    /// Project repository IDs and directory names, including shared remotes.
+    pub repositories: Vec<(RepositoryId, String)>,
+    /// Clones to delete because no surviving project has their remote.
+    pub clones: Vec<RepositoryId>,
+}
+
+/// Actual directories found under a hub workspace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceCounts {
+    /// Task worktrees.
+    pub worktrees: u64,
+    /// Complete and partial clones.
+    pub clones: u64,
+}
 
 /// Sets up and saves the worktrees a task works in.
 #[async_trait]
@@ -37,6 +59,12 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
         repositories: &[Repository],
         message: &str,
     ) -> Result<(), WorkspaceError>;
+
+    /// Counts the on-disk directories affected by a removal.
+    async fn removal_counts(&self, removal: &WorkspaceRemoval) -> WorkspaceCounts;
+
+    /// Removes local worktrees and clones, reporting paths it could not remove.
+    async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String>;
 }
 
 /// The branch a task works on: `threadlane/T-0142`.

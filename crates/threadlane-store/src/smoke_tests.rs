@@ -42,6 +42,8 @@ const TABLES: &[&str] = &[
     "tasks",
     "timers",
     "tool_calls",
+    "deletion_floors",
+    "project_cleanup",
 ];
 
 async fn hub() -> HubDb {
@@ -72,7 +74,9 @@ async fn every_table_exists() {
     .await
     .expect("schema query");
     found.retain(|name| !name.starts_with("sqlite_"));
-    assert_eq!(found, TABLES);
+    let mut expected = TABLES.to_vec();
+    expected.sort_unstable();
+    assert_eq!(found, expected);
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@
 //!
 //! A thin layer over [`ClientCore`]: parse, call the core, print.
 
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -35,8 +36,11 @@ enum Command {
         /// The space (paired hub name); may be left out if only one is paired.
         #[arg(short, long)]
         space: Option<String>,
+        /// List archived projects.
+        #[arg(long)]
+        archived: bool,
     },
-    /// Create projects.
+    /// Create, pause, archive or delete projects.
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
@@ -350,6 +354,27 @@ enum ProjectCommand {
         /// The project's name.
         name: String,
     },
+    /// Archive an idle project, keeping its history and repositories.
+    Archive {
+        #[arg(short, long)]
+        space: Option<String>,
+        name: String,
+    },
+    /// Restore an archived project.
+    Unarchive {
+        #[arg(short, long)]
+        space: Option<String>,
+        name: String,
+    },
+    /// Permanently delete a project and its local data.
+    Delete {
+        #[arg(long)]
+        space: Option<String>,
+        name: String,
+        /// Skip the prompt by supplying the exact project name.
+        #[arg(long, value_name = "NAME")]
+        yes: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -519,15 +544,22 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
             println!("revoked {}", client.name);
         }
         Command::Status => return Ok(status(&core).await),
-        Command::Projects { space } => {
-            let listed = core.projects(space.as_deref()).await?;
-            for project in listed.projects {
+        Command::Projects { space, archived } => {
+            let listed = core.project_list(space.as_deref(), archived).await?;
+            for project in listed
+                .projects
+                .into_iter()
+                .filter(|project| project.archived == archived)
+            {
                 let mut flags = Vec::new();
                 if project.is_general {
                     flags.push("general");
                 }
                 if project.paused {
                     flags.push("paused");
+                }
+                if project.archived {
+                    flags.push("archived");
                 }
                 if flags.is_empty() {
                     println!("[{}] {}", listed.space, project.name);
@@ -562,6 +594,37 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 .set_paused(space.as_deref(), Some(&name), false)
                 .await?;
             println!("resumed project {}", project.name);
+        }
+        Command::Project {
+            command: ProjectCommand::Archive { space, name },
+        } => {
+            let project = core.set_archived(space.as_deref(), &name, true).await?;
+            println!("archived project {}", project.name);
+        }
+        Command::Project {
+            command: ProjectCommand::Unarchive { space, name },
+        } => {
+            let project = core.set_archived(space.as_deref(), &name, false).await?;
+            println!("unarchived project {}", project.name);
+        }
+        Command::Project {
+            command: ProjectCommand::Delete { space, name, yes },
+        } => {
+            let preview = core.delete_preview(space.as_deref(), &name).await?;
+            println!(
+                "Deleting {name:?} permanently removes {} from Threadlane.",
+                preview.inventory()
+            );
+            println!("Branches and pull requests on GitHub are not touched.");
+            let confirmed =
+                confirm_project_deletion(&name, yes, io::stdin().lock(), io::stdout().lock())?;
+            let (deleted, leftovers) = core
+                .delete_project(space.as_deref(), &name, &confirmed)
+                .await?;
+            println!("Deleted {name:?} and {}.", deleted.inventory());
+            for path in leftovers {
+                eprintln!("Workspace cleanup still needed for {path}");
+            }
         }
         Command::Task {
             command: TaskCommand::Cancel { space, task },
@@ -1421,5 +1484,124 @@ mod dreaming_cli_tests {
                 }
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod archive_cli_tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_project_archive_unarchive_and_archived_listing() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["threadlane"].into_iter().chain(args.iter().copied()))
+                .unwrap()
+                .command
+        };
+        assert!(matches!(
+            parse(&["project", "archive", "API"]),
+            Command::Project { command: ProjectCommand::Archive { name, space: None } }
+                if name == "API"
+        ));
+        assert!(matches!(
+            parse(&["project", "unarchive", "API", "-s", "work"]),
+            Command::Project { command: ProjectCommand::Unarchive { name, space: Some(space) } }
+                if name == "API" && space == "work"
+        ));
+        assert!(matches!(
+            parse(&["projects", "--archived"]),
+            Command::Projects { archived: true, .. }
+        ));
+        assert!(matches!(
+            parse(&["projects"]),
+            Command::Projects {
+                archived: false,
+                ..
+            }
+        ));
+    }
+}
+
+fn confirm_project_deletion(
+    name: &str,
+    supplied: Option<String>,
+    mut input: impl BufRead,
+    mut output: impl Write,
+) -> anyhow::Result<String> {
+    let confirmed = match supplied {
+        Some(typed) => typed,
+        None => {
+            write!(output, "Type {name:?} to confirm deletion: ")?;
+            output.flush()?;
+            let mut typed = String::new();
+            input.read_line(&mut typed)?;
+            if typed.ends_with('\n') {
+                typed.pop();
+                if typed.ends_with('\r') {
+                    typed.pop();
+                }
+            }
+            typed
+        }
+    };
+    anyhow::ensure!(
+        confirmed == name,
+        "the confirmation must be the exact project name {name:?}"
+    );
+    Ok(confirmed)
+}
+
+#[cfg(test)]
+mod deletion_cli_tests {
+    use super::*;
+
+    #[test]
+    fn deletion_prompt_accepts_only_the_exact_name() {
+        let mut output = Vec::new();
+        assert_eq!(
+            confirm_project_deletion("My API", None, &b"My API\r\n"[..], &mut output).unwrap(),
+            "My API"
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("Type \"My API\"")
+        );
+        for wrong in [b"My API \n".as_slice(), b"my API\n", b""] {
+            assert!(confirm_project_deletion("My API", None, wrong, io::sink()).is_err());
+        }
+    }
+
+    #[test]
+    fn deletion_yes_requires_a_matching_value_and_skips_the_prompt() {
+        let parse = |args| Cli::try_parse_from(args);
+        let parsed = parse([
+            "threadlane",
+            "project",
+            "delete",
+            "My API",
+            "--yes",
+            "My API",
+        ])
+        .unwrap();
+        let Command::Project {
+            command: ProjectCommand::Delete { yes, name, .. },
+        } = parsed.command
+        else {
+            panic!("expected delete");
+        };
+        let mut output = Vec::new();
+        assert_eq!(
+            confirm_project_deletion(&name, yes, &b""[..], &mut output).unwrap(),
+            name
+        );
+        assert!(output.is_empty());
+        assert!(
+            confirm_project_deletion(&name, Some("Other".into()), &b""[..], io::sink()).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["threadlane", "project", "delete", "My API", "--yes"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["threadlane", "project", "delete", "My API", "-y"]).is_err());
     }
 }

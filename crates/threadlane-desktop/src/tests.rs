@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
@@ -37,6 +38,8 @@ struct FakeHub {
     no_recorded: AtomicBool,
     projects_fail: AtomicBool,
     created: Mutex<Vec<ProjectSummary>>,
+    archived: Mutex<BTreeSet<ProjectId>>,
+    removed_projects: Mutex<BTreeSet<ProjectId>>,
     machines: Mutex<Vec<Machine>>,
     accounts: Mutex<Vec<Account>>,
     lead: Mutex<Option<Timestamp>>,
@@ -107,6 +110,10 @@ impl HubApi for FakeHub {
     }
 
     async fn projects(&self) -> Result<Vec<ProjectSummary>, ApiError> {
+        self.project_list(false).await
+    }
+
+    async fn project_list(&self, include_archived: bool) -> Result<Vec<ProjectSummary>, ApiError> {
         self.up()?;
         if self.projects_fail.load(Ordering::SeqCst) {
             return Err(ApiError::Internal(
@@ -114,6 +121,8 @@ impl HubApi for FakeHub {
             ));
         }
         let created = self.created.lock().expect("lock").clone();
+        let archived = self.archived.lock().expect("lock");
+        let removed = self.removed_projects.lock().expect("lock");
         Ok([
             ProjectSummary {
                 id: ProjectId(1),
@@ -121,6 +130,7 @@ impl HubApi for FakeHub {
                 is_general: false,
                 paused: false,
                 mode_ceiling: None,
+                archived: false,
             },
             ProjectSummary {
                 id: ProjectId(2),
@@ -128,10 +138,16 @@ impl HubApi for FakeHub {
                 is_general: true,
                 paused: false,
                 mode_ceiling: None,
+                archived: false,
             },
         ]
         .into_iter()
         .chain(created)
+        .map(|project| ProjectSummary {
+            archived: archived.contains(&project.id),
+            ..project
+        })
+        .filter(|project| !removed.contains(&project.id) && (include_archived || !project.archived))
         .collect())
     }
 
@@ -160,6 +176,22 @@ impl HubApi for FakeHub {
 
     async fn org(&self, request: OrgRequest) -> Result<OrgReply, ApiError> {
         self.up()?;
+        if let OrgRequest::SetArchived { project, archived } = request {
+            let mut project = self
+                .project_list(true)
+                .await?
+                .into_iter()
+                .find(|known| project.as_deref() == Some(known.name.as_str()))
+                .ok_or_else(|| ApiError::NotFound(format!("project {project:?}")))?;
+            let mut archived_ids = self.archived.lock().expect("lock");
+            if archived {
+                archived_ids.insert(project.id);
+            } else {
+                archived_ids.remove(&project.id);
+            }
+            project.archived = archived;
+            return Ok(OrgReply::Project { project });
+        }
         let mut bindings = self.bindings.lock().expect("lock");
         match request {
             OrgRequest::Pacing => Ok(OrgReply::Pacing {
@@ -255,6 +287,7 @@ impl HubApi for FakeHub {
                     is_general: false,
                     paused,
                     mode_ceiling: None,
+                    archived: false,
                 },
             }),
             OrgRequest::CreateProject { name, .. } => {
@@ -265,9 +298,26 @@ impl HubApi for FakeHub {
                     is_general: false,
                     paused: false,
                     mode_ceiling: None,
+                    archived: false,
                 };
                 created.push(project.clone());
                 Ok(OrgReply::Project { project })
+            }
+            OrgRequest::DeletePreview { project } if project == "api" => {
+                Ok(OrgReply::DeletePreview {
+                    preview: deletion_test_preview(),
+                })
+            }
+            OrgRequest::DeleteProject {
+                project,
+                confirm_name,
+            } if project == "api" && project == confirm_name => {
+                self.removed_projects.lock().unwrap().insert(ProjectId(1));
+                Ok(OrgReply::ProjectDeleted {
+                    project,
+                    deleted: deletion_test_preview(),
+                    leftovers: vec!["workspaces/clones/1".into()],
+                })
             }
             OrgRequest::SetSpaceCeiling { mode } => {
                 *self.ceiling.lock().expect("lock") = Some(mode);
@@ -1785,6 +1835,7 @@ async fn a_new_project_shows_in_its_space_at_once() {
             is_general: false,
             paused: false,
             mode_ceiling: None,
+            archived: false,
         },
     );
 
@@ -2646,13 +2697,13 @@ async fn pausing_a_project_shows_it_paused_until_resumed() {
         .set_paused(Some("work"), Some("api"), true)
         .await
         .expect("paused");
-    state.project_paused("work", paused);
+    state.project_updated("work", paused);
     assert!(state.is_paused("work", "api"));
     let resumed = core
         .set_paused(Some("work"), Some("api"), false)
         .await
         .expect("resumed");
-    state.project_paused("work", resumed);
+    state.project_updated("work", resumed);
     assert!(!state.is_paused("work", "api"));
 }
 
@@ -3193,7 +3244,7 @@ async fn a_queued_card_says_why_it_waits_from_the_hub_or_from_what_the_app_knows
     assert_eq!(state.queued_reason("work", "api", &summary), None);
 
     // A paused project says so.
-    state.project_paused(
+    state.project_updated(
         "work",
         ProjectSummary {
             id: ProjectId(1),
@@ -3201,6 +3252,7 @@ async fn a_queued_card_says_why_it_waits_from_the_hub_or_from_what_the_app_knows
             is_general: false,
             paused: true,
             mode_ceiling: None,
+            archived: false,
         },
     );
     assert_eq!(
@@ -3868,6 +3920,7 @@ async fn stage_b_composer_lists_every_project_and_restores_each_space_after_rest
         is_general: false,
         paused: false,
         mode_ceiling: None,
+        archived: false,
     });
     let (dir, core) = core(&[("work", &work), ("home", &home)]);
     let mut state = AppState::default();
@@ -5137,4 +5190,222 @@ async fn machine_detail_reads_capabilities_and_filters_active_and_recent_runs_by
         .sentence("machine runs", "dev");
     assert_eq!(status.text, "Could not load machine runs from dev.");
     assert!(status.detail.is_some());
+}
+
+#[tokio::test]
+async fn archived_projects_leave_work_surfaces_and_restore_the_same_history() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    work.tasks
+        .lock()
+        .unwrap()
+        .push(task(1, TaskStatus::Done, None));
+    work.history.lock().unwrap().push(ConversationEntry::You {
+        event_id: EventId(1),
+        text: "A message before archive".into(),
+        at: Timestamp::from_millis(1_000),
+    });
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.set_target("work", "api");
+    state.apply_project(load_project(&core, "work", "api").await);
+    state.edit_draft(Draft::Lead, "Keep this draft");
+    let conversation = state.conversation("work", "api", &when());
+    assert!(!conversation.is_empty());
+    assert!(state.offers_archive("work", "api"));
+    assert!(!state.offers_archive("work", "General"));
+    assert_eq!(state.target(), Some(("work", "api")));
+
+    let archive = Consequence::ArchiveProject("work".into(), "api".into());
+    let confirmation = state.confirmation(&archive).unwrap();
+    assert!(
+        confirmation
+            .sentence
+            .contains("history stays readable under Archived")
+    );
+    assert!(
+        confirmation
+            .sentence
+            .contains("unavailable to other spaces")
+    );
+    let project = core.set_archived(Some("work"), "api", true).await.unwrap();
+    state.project_updated("work", project);
+    assert!(state.is_archived("work", "api"));
+    assert!(!state.offers_archive("work", "api"));
+    assert_eq!(state.target(), Some(("work", "General")));
+    assert!(!state.targets().contains(&("work", "api")));
+    assert!(
+        state
+            .modes("work")
+            .rows
+            .iter()
+            .all(|row| row.project != "api")
+    );
+    let space = state.space("work").unwrap();
+    assert!(!space.archived_open());
+    assert_eq!(
+        space
+            .active_projects()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["General"]
+    );
+    assert_eq!(
+        space
+            .archived_projects()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["api"]
+    );
+    state.toggle_archived("work");
+    state.apply(refresh(&core).await);
+    assert!(state.space("work").unwrap().archived_open());
+    state.apply_project(load_project(&core, "work", "api").await);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    assert!(state.task_is_archived("work", TaskId(1)));
+    assert_eq!(state.conversation("work", "api", &when()), conversation);
+    assert_eq!(state.project("work", "api").unwrap().tasks.len(), 1);
+    let send = state.request_send(Destination::Lead("work".into(), "api".into()), when().now);
+    assert!(send.held.is_none() && send.immediate.is_none() && send.flushed.is_none());
+    assert_eq!(state.draft(Draft::Lead), "Keep this draft");
+
+    let project = core.set_archived(Some("work"), "api", false).await.unwrap();
+    state.project_updated("work", project);
+    assert!(!state.is_archived("work", "api"));
+    assert!(state.offers_archive("work", "api"));
+    assert_eq!(state.target(), Some(("work", "api")));
+    assert!(
+        state
+            .modes("work")
+            .rows
+            .iter()
+            .any(|row| row.project == "api")
+    );
+    assert!(
+        state
+            .space("work")
+            .unwrap()
+            .archived_projects()
+            .next()
+            .is_none()
+    );
+    assert_eq!(state.conversation("work", "api", &when()), conversation);
+}
+
+#[tokio::test]
+async fn an_archived_projects_remote_cannot_move_to_another_paired_space() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    core.add_repository(
+        Some("home"),
+        Some("api"),
+        "widgets",
+        "https://github.com/Acme/Widgets.git",
+        None,
+    )
+    .await
+    .unwrap();
+    core.set_archived(Some("home"), "api", true).await.unwrap();
+    assert!(
+        core.projects(Some("home"))
+            .await
+            .unwrap()
+            .projects
+            .iter()
+            .all(|p| p.name != "api")
+    );
+    let refused = add_repository(
+        &core,
+        "work",
+        "api",
+        "widgets",
+        "git@github.com:acme/widgets",
+        "",
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.contains("already registered in home, as repository widgets of project api"));
+}
+
+#[test]
+fn a_newly_paired_space_appears_and_home_opens_it() {
+    let mut state = AppState::paired(["home"]);
+    state.open_paired_space("work");
+    assert_eq!(state.filter(), Some("work"));
+    assert_eq!(
+        state
+            .spaces()
+            .iter()
+            .map(|space| space.name.as_str())
+            .collect::<Vec<_>>(),
+        ["home", "work"]
+    );
+}
+
+fn deletion_test_preview() -> threadlane_core::client::DeletePreview {
+    threadlane_core::client::DeletePreview {
+        tasks: 3,
+        queued_tasks: 2,
+        decisions: 4,
+        open_decisions: 1,
+        memory_files: 2,
+        clones: 1,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn deletion_dialog_requires_an_exact_name_and_shows_the_result_and_leftovers() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    state.set_target("work", "api");
+    assert!(state.offers_delete("work", "api"));
+    assert!(!state.offers_delete("work", "General"));
+    let preview = core.delete_preview(Some("work"), "api").await.unwrap();
+    assert!(!can_confirm_deletion("api", "api", None));
+    for different in ["", "API", "api ", " api"] {
+        assert!(!can_confirm_deletion("api", different, Some(&preview)));
+    }
+    assert!(can_confirm_deletion("api", "api", Some(&preview)));
+    let (deleted, leftovers) = core
+        .delete_project(Some("work"), "api", "api")
+        .await
+        .unwrap();
+    state.project_deleted("work", "api", &deleted, &leftovers);
+    assert!(state.project_absent("work", "api"));
+    assert!(state.project("work", "api").is_none());
+    assert_eq!(state.target(), Some(("work", "General")));
+    assert!(
+        matches!(state.activity(), Some(Activity::Done(text)) if text.contains("3 tasks (2 queued)")
+        && text.contains("4 decisions (1 open)") && text.contains("workspaces/clones/1"))
+    );
+}
+
+#[tokio::test]
+async fn deletion_in_another_client_drops_cached_project_and_history_on_refresh() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    work.history.lock().unwrap().push(ConversationEntry::You {
+        event_id: EventId(123),
+        text: "Project history".to_owned(),
+        at: when().now,
+    });
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    let stale = load_project(&core, "work", "api").await;
+    assert!(!state.conversation("work", "api", &when()).is_empty());
+    core.delete_project(Some("work"), "api", "api")
+        .await
+        .unwrap();
+    state.apply(refresh(&core).await);
+    state.apply_project(stale);
+    assert!(state.project_absent("work", "api"));
+    assert!(!state.targets().contains(&("work", "api")));
+    assert!(state.project("work", "api").is_none());
+    assert!(state.conversation("work", "api", &when()).is_empty());
 }

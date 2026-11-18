@@ -130,6 +130,7 @@ impl HubApi for FakeHub {
                 is_general: true,
                 paused: false,
                 mode_ceiling: None,
+                archived: false,
             },
             ProjectSummary {
                 id: ProjectId(2),
@@ -137,6 +138,7 @@ impl HubApi for FakeHub {
                 is_general: false,
                 paused: true,
                 mode_ceiling: None,
+                archived: false,
             },
         ])
     }
@@ -203,6 +205,7 @@ impl HubApi for FakeHub {
                     is_general: false,
                     paused: false,
                     mode_ceiling: None,
+                    archived: false,
                 },
             },
             OrgRequest::Agents => OrgReply::Agents {
@@ -254,6 +257,7 @@ impl HubApi for FakeHub {
                     is_general: false,
                     paused,
                     mode_ceiling: None,
+                    archived: false,
                 },
             },
             OrgRequest::SetCeiling { mode, .. } if mode > Mode::Assisted => {

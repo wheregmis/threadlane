@@ -136,7 +136,12 @@ impl HubApi for LocalClient {
     }
 
     async fn projects(&self) -> Result<Vec<ProjectSummary>, ApiError> {
-        match self.call(&ClientRequest::Projects, REQUEST_TIMEOUT).await? {
+        self.project_list(false).await
+    }
+
+    async fn project_list(&self, include_archived: bool) -> Result<Vec<ProjectSummary>, ApiError> {
+        let request = ClientRequest::Projects { include_archived };
+        match self.call(&request, REQUEST_TIMEOUT).await? {
             ClientResponse::Projects { projects } => Ok(projects),
             other => Err(unexpected(other, "projects")),
         }
