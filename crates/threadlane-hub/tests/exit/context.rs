@@ -195,17 +195,17 @@ async fn milestone_5_exit_memory_and_context() {
 
     // A space instruction applies in every project of the hub.
     say(&sim, Some("Alpha"), "Remember everywhere: sign replies").await;
-    let general = say(&sim, None, "Status?").await;
     let alpha = say(&sim, Some("Alpha"), "Status in Alpha?").await;
+    let general = say(&sim, None, "Status?").await;
     assert!(general[0].appended_instructions.contains(SPACE_RULE));
     assert!(alpha[0].appended_instructions.contains(SPACE_RULE));
 
-    // Appended instructions are byte-identical across runs when memory has
-    // not changed, and differ when it has.
+    // Appended instructions are byte-identical while memory and the project
+    // summary are unchanged.
     let again = say(&sim, None, "Status once more?").await;
     assert_eq!(
         again[0].appended_instructions, general[0].appended_instructions,
-        "memory did not change"
+        "memory and project activity did not change"
     );
     assert_ne!(
         general[0].appended_instructions,
