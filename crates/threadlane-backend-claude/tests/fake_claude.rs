@@ -44,6 +44,25 @@ impl ToolEndpoint for Endpoint {
     }
 }
 
+/// Runs the new script once, doing nothing, until Linux stops refusing it
+/// with ETXTBSY: a child that another test forks while the script is being
+/// written holds it open for writing until that child execs.
+fn wait_until_executable(program: &std::path::Path) {
+    for _ in 0..100 {
+        match std::process::Command::new(program)
+            .env("FAKE_CLAUDE_READY", "1")
+            .status()
+        {
+            Err(error) if error.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("fake claude does not start: {error}"),
+            Ok(_) => return,
+        }
+    }
+    panic!("fake claude stayed busy");
+}
+
 /// A fake `claude` in its own temp directory, next to the files it records.
 struct Fake {
     dir: TempDir,
@@ -55,13 +74,14 @@ impl Fake {
     fn new(body: &str) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let script = format!(
-            "#!/bin/sh\n{}\n",
+            "#!/bin/sh\n[ -n \"$FAKE_CLAUDE_READY\" ] && exit 0\n{}\n",
             body.replace("@DIR@", &dir.path().display().to_string())
         );
         let program = dir.path().join("claude");
         std::fs::write(&program, script).expect("writes fake claude");
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
             .expect("makes fake claude executable");
+        wait_until_executable(&program);
         Self {
             dir,
             work: tempfile::tempdir().expect("temp dir"),
