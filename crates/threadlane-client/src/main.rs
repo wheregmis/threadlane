@@ -222,19 +222,14 @@ enum Command {
         #[command(subcommand)]
         command: RuleCommand,
     },
-    /// Set how many of an agent's tasks may run at the same time in a
-    /// project.
+    /// Set the number of shared run slots on a machine.
     AtOnce {
-        /// The space (paired hub name); may be left out if only one is paired.
         #[arg(short, long)]
         space: Option<String>,
-        /// The project; the General project if left out.
-        #[arg(short, long)]
-        project: Option<String>,
-        /// The agent's name.
-        agent: String,
-        /// How many at once; 0 for no limit.
-        count: u32,
+        /// Machine ID in this space.
+        machine: i64,
+        #[arg(value_parser = clap::value_parser!(u32).range(1..))]
+        slots: u32,
     },
     /// Read or change space delivery pacing.
     Pacing {
@@ -1002,17 +997,12 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         }
         Command::AtOnce {
             space,
-            project,
-            agent,
-            count,
+            machine,
+            slots,
         } => {
-            let binding = core
-                .set_max_parallel(space.as_deref(), project.as_deref(), &agent, count)
+            core.set_machine_slots(space.as_deref(), machine.into(), slots)
                 .await?;
-            match binding.max_parallel {
-                0 => println!("{} may run any number of tasks at once", binding.agent),
-                n => println!("{} may run {n} at once", binding.agent),
-            }
+            println!("Machine {machine} has {slots} run slots");
         }
         Command::Pacing {
             space,

@@ -15,7 +15,7 @@ use crate::inbox::check_lease;
 use crate::row::{Cols, json_text, opt_ts, params};
 
 const MACHINE_FIELDS: &str = "id, name, endpoint_id, is_hub, trust, status, last_seen,
-    capabilities, backends, gh_login, max_parallel, load";
+    capabilities, backends, gh_login, MIN(max_parallel, COALESCE(slot_limit, max_parallel)), load";
 
 fn decode_machine(row: &Row) -> StoreResult<Machine> {
     let c = Cols(row);
@@ -151,7 +151,7 @@ impl MachineStore for HubDb {
         let changed = exec(
             tx.conn(),
             "UPDATE machines SET capabilities = ?1, backends = ?2, gh_login = ?3, load = ?4,
-                 last_seen = ?5,
+                 last_seen = ?5, max_parallel = COALESCE(?7, max_parallel),
                  status = CASE WHEN status = 'offline' THEN 'online' ELSE status END
              WHERE id = ?6 AND status != 'revoked'",
             params![
@@ -161,12 +161,36 @@ impl MachineStore for HubDb {
                 i64::from(report.load),
                 now.as_millis(),
                 id.get(),
+                report.capabilities["max_parallel"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                    .map(i64::from),
             ],
         )
         .await?;
         if changed != 1 {
             return Err(StoreError::Conflict(format!(
                 "machine {id} is unknown or revoked"
+            )));
+        }
+        tx.commit().await
+    }
+
+    async fn set_machine_slots(&self, id: MachineId, slots: u32) -> StoreResult<()> {
+        if slots == 0 {
+            return Err(StoreError::Invalid("run slots must be positive".into()));
+        }
+        let tx = self.db.begin().await?;
+        let changed = exec(
+            tx.conn(),
+            "UPDATE machines SET slot_limit = ?2 WHERE id = ?1 AND ?2 <= max_parallel",
+            params![id.get(), i64::from(slots)],
+        )
+        .await?;
+        if changed != 1 {
+            return Err(StoreError::Invalid(format!(
+                "machine {id} is missing or its runner supports fewer than {slots} slots"
             )));
         }
         tx.commit().await

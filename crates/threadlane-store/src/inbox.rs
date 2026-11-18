@@ -477,6 +477,18 @@ impl InboxStore for HubDb {
             tx.commit().await?;
             return Ok(None);
         }
+        let full = query_one(
+            tx.conn(),
+            "SELECT (SELECT COUNT(*) FROM lanes WHERE lease_owner = ?1 AND lease_expires_at > ?2)
+                >= MIN(max_parallel, COALESCE(slot_limit, max_parallel)) FROM machines WHERE id = ?1",
+            params![machine_id.get(), now.as_millis()],
+            |row| Cols(row).bool(0),
+        )
+        .await?;
+        if full {
+            tx.commit().await?;
+            return Ok(None);
+        }
         if lane.lease_owner.is_some() {
             // Taking over an expired lease ends the previous holder's run.
             reclaim_lane(tx.conn(), lane_id, now).await?;

@@ -128,6 +128,8 @@ impl MachineRun {
 /// The selected machine's observed data.
 #[derive(Debug)]
 pub struct MachineDetail {
+    pub slots: u32,
+    pub runner_slots: u32,
     /// The current report.
     pub report: MachineRow,
     /// The reported membership state.
@@ -263,6 +265,11 @@ impl AppState {
                     )
         };
         Some(MachineDetail {
+            slots: machine.max_parallel,
+            runner_slots: machine.capabilities["max_parallel"]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(machine.max_parallel),
             report: machine_row(machine, when),
             status: machine.status,
             platform: (!platform.is_empty()).then(|| platform.join(" · ")),

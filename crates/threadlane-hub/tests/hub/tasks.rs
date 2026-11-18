@@ -197,7 +197,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
 }
 
 #[tokio::test]
-async fn review_handoffs_respect_the_reviewers_parallel_limit() {
+async fn review_handoffs_share_machine_slots() {
     let hub = TestHub::with(
         threadlane_hub::HubSettings {
             reviewer: Some("Reviewer".into()),
@@ -272,17 +272,9 @@ async fn review_handoffs_respect_the_reviewers_parallel_limit() {
         .complete(&second, second_run.run_id, None)
         .await
         .unwrap();
-    assert_eq!(hub.link.begin_run(&second).await.unwrap(), Begin::Idle);
-    assert!(
-        hub.db
-            .task(second_run.task_id.unwrap())
-            .await
-            .unwrap()
-            .unwrap()
-            .waiting_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("limit of 1"))
-    );
+    let Begin::Run(next) = hub.link.begin_run(&second).await.unwrap() else {
+        panic!("second review should use its existing slot")
+    };
     call(
         &hub,
         &first,
@@ -297,9 +289,6 @@ async fn review_handoffs_respect_the_reviewers_parallel_limit() {
         .complete(&first, review.run_id, None)
         .await
         .unwrap();
-    let Begin::Run(next) = hub.link.begin_run(&second).await.unwrap() else {
-        panic!("review did not start after the slot freed")
-    };
     assert_eq!(next.agent_name, "Reviewer");
     assert_eq!(next.task_id, second_run.task_id);
 }
@@ -1012,16 +1001,10 @@ async fn a_dependency_and_the_parallel_limits_hold_tasks_back_with_their_reason(
         "the older task takes the slot"
     );
     assert_eq!(task(&hub, "T-0003").await.waiting_reason, None);
-    let next = hub
-        .link
-        .request_work()
-        .await
-        .unwrap()
-        .expect("the lead lane");
     assert_eq!(
-        next.lane_id,
-        hub.general().await.lead_lane_id,
-        "the first result"
+        hub.link.request_work().await.unwrap(),
+        None,
+        "the lead also waits for a machine slot"
     );
     assert_eq!(
         task(&hub, "T-0004").await.waiting_reason.as_deref(),
@@ -1030,7 +1013,7 @@ async fn a_dependency_and_the_parallel_limits_hold_tasks_back_with_their_reason(
 }
 
 #[tokio::test]
-async fn an_agent_s_own_limit_holds_its_tasks_back() {
+async fn one_agent_can_fill_machine_slots() {
     let (hub, lease, run) = lead_run(1).await;
     for n in 0..2 {
         call(
@@ -1046,11 +1029,8 @@ async fn an_agent_s_own_limit_holds_its_tasks_back() {
     }
     finish_run(&hub, &lease, &run).await;
     begin(&*hub.link).await;
+    begin(&*hub.link).await;
     assert_eq!(hub.link.request_work().await.unwrap(), None);
-    assert_eq!(
-        task(&hub, "T-0002").await.waiting_reason.as_deref(),
-        Some("its agent already runs its limit of 1 tasks at once in this project")
-    );
 }
 
 #[tokio::test]

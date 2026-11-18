@@ -176,18 +176,6 @@ impl AppState {
         if !waiting.is_empty() {
             return Some(format!("waits for {}", listed(&waiting)));
         }
-        let limit = self
-            .project(space, project)
-            .and_then(|view| view.bindings.iter().find(|b| b.agent == summary.agent))
-            .map_or(0, |binding| binding.max_parallel);
-        let running = u32::try_from(holding.len()).unwrap_or(u32::MAX);
-        if limit > 0 && running >= limit {
-            return Some(format!(
-                "{} runs at most {limit} at once here: {} {holds}",
-                summary.agent,
-                listed(&holding)
-            ));
-        }
         let online: Vec<_> = self
             .space(space)
             .map(|known| known.machines.as_slice())

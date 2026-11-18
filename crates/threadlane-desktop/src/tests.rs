@@ -3177,10 +3177,7 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
     state.ceiling_set("work", "api", Mode::OnRequest);
     let rows = state.agent_rows("work", "api");
     let engineer = &rows[1];
-    assert_eq!(engineer.at_once, at_once(3));
-    assert_eq!(at_once(3).fewer, Some(2));
-    assert_eq!(at_once(1).fewer, None);
-    assert_eq!(at_once(0).label, "No limit");
+
     let modes: Vec<_> = engineer
         .choices
         .iter()
@@ -3283,14 +3280,6 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
             .rules_title,
         "Standing rule (1)"
     );
-
-    // "At once" goes through the hub and shows at once.
-    let set = core
-        .set_max_parallel(Some("work"), Some("api"), "Engineer", 2)
-        .await
-        .expect("set");
-    state.mode_set("work", "api", set);
-    assert_eq!(state.agent_rows("work", "api")[1].at_once.label, "2");
 }
 
 #[tokio::test]
@@ -3410,10 +3399,7 @@ async fn a_queued_card_says_why_it_waits_from_the_hub_or_from_what_the_app_knows
                  project: T-0001 holds it"
                     .to_owned()
             ),
-            (
-                TaskId(3),
-                "Engineer · Engineer runs at most 1 at once here: T-0001 holds it".to_owned()
-            ),
+            (TaskId(3), "Engineer · waiting for a machine".to_owned()),
             (TaskId(4), "Engineer · waits for T-0003".to_owned()),
         ]
     );

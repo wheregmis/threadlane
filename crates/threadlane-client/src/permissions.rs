@@ -14,6 +14,22 @@ use threadlane_core::tools::Tier;
 use crate::{ClientCore, ClientError, SpaceAnswer, api_error, wrong_reply};
 
 impl ClientCore {
+    /// Sets the shared run slots for one machine in a space.
+    pub async fn set_machine_slots(
+        &self,
+        space: Option<&str>,
+        machine: threadlane_core::ids::MachineId,
+        slots: u32,
+    ) -> Result<(), ClientError> {
+        match self
+            .org(space, OrgRequest::SetMachineSlots { machine, slots })
+            .await?
+        {
+            (_, OrgReply::MachineSlotsSet) => Ok(()),
+            (space, _) => Err(wrong_reply(&space, "set machine slots")),
+        }
+    }
+
     /// Sets a project's ceiling, and returns what it now is. `space: None`
     /// means the only paired hub; `project: None` the General project.
     ///

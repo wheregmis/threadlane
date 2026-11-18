@@ -234,7 +234,7 @@ Every table below exists once per hub. No table has a space column.
 | `mode` | `off`, `on_request`, `assisted`, `autonomous` |
 | `is_lead` | Exactly one per project |
 | `models` | Override, per backend |
-| `max_parallel` | Cap on this agent's simultaneous tasks in the project |
+| `max_parallel` | Legacy binding value, ignored for scheduling |
 | `overrides` | Per-action changes to the mode matrix |
 
 **`standing_rules`**
@@ -680,7 +680,7 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-A task is eligible to run when its lane has pending events, its dependencies are `done`, its project is not paused, and the project's and binding's parallel limits have room.
+A task is eligible to run when its lane has pending events, its dependencies are `done`, its project is not paused, and the project has room and the requesting machine has a free run slot.
 
 ### 5.3 Machines
 

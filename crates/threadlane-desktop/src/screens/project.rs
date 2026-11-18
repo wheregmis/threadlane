@@ -27,8 +27,8 @@ use crate::components::{
 use crate::icons::AppIcon;
 use crate::tokens::{
     BOARD_COLUMN_MIN, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, MODE_WIDTH, READING_WIDTH,
-    ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, STEPPER_WIDTH, Status,
-    TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XS,
+    ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status, TIMESTAMP_WIDTH,
+    TYPE_BODY, TYPE_META, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -1408,50 +1408,6 @@ impl Desktop {
                     }
                 }),
             );
-            let step = |id: &str, icon, name: String, to: Option<u32>| {
-                let (space, project, agent) = (space.to_owned(), project.to_owned(), agent.clone());
-                icon_button(format!("{id}-{agent}"), icon, name)
-                    .disabled(archived || to.is_none())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(to) = to {
-                            this.set_max_parallel(
-                                space.clone(),
-                                project.clone(),
-                                agent.clone(),
-                                to,
-                                cx,
-                            );
-                        }
-                    }))
-            };
-            let at_once = h_flex()
-                .gap(XS)
-                .items_center()
-                .child(
-                    div()
-                        .text_size(TYPE_BODY)
-                        .text_color(muted)
-                        .child("At once"),
-                )
-                .child(step(
-                    "fewer",
-                    AppIcon::Minus,
-                    format!("Fewer of {agent}'s tasks at once"),
-                    row.at_once.fewer,
-                ))
-                .child(
-                    div()
-                        .text_size(TYPE_BODY)
-                        .min_w(STEPPER_WIDTH)
-                        .text_right()
-                        .child(row.at_once.label.clone()),
-                )
-                .child(step(
-                    "more",
-                    AppIcon::Plus,
-                    format!("More of {agent}'s tasks at once"),
-                    row.at_once.more,
-                ));
             let (toggle_space, toggle_project, toggle_agent) =
                 (space.to_owned(), project.to_owned(), agent.clone());
             let expand = icon_button(
@@ -1495,7 +1451,6 @@ impl Desktop {
                             ),
                     )
                     .child(control.disabled(archived))
-                    .child(at_once)
                     .child(expand),
             );
             rows = rows.children(locked_note(&row.choices, muted));

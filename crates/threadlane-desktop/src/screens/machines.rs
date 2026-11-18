@@ -6,7 +6,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::MachineId;
 use threadlane_desktop::{
@@ -90,6 +90,47 @@ impl Desktop {
                     .map(|account| status_badge(account, Status::Idle, cx)),
             )
             .child(section("Run slots"));
+        let step = |name: &'static str, icon, slots: Option<u32>| {
+            let space = space.to_owned();
+            crate::components::icon_button(name, icon, name.into())
+                .disabled(slots.is_none())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let Some(slots) = slots else { return };
+                    let core = this.core.clone();
+                    let space = space.clone();
+                    this.run(
+                        async move {
+                            core.read()
+                                .await
+                                .set_machine_slots(Some(&space), id, slots)
+                                .await
+                        },
+                        |this, result, cx| match result {
+                            Ok(()) => this.refresh(cx),
+                            Err(error) => this.state.report(threadlane_desktop::Activity::Failed(
+                                threadlane_desktop::describe(&error),
+                            )),
+                        },
+                        cx,
+                    );
+                }))
+        };
+        page = page.child(
+            h_flex()
+                .gap(XS)
+                .items_center()
+                .child(step(
+                    "Fewer run slots",
+                    AppIcon::Minus,
+                    (detail.slots > 1).then(|| detail.slots - 1),
+                ))
+                .child(meta(detail.slots.to_string(), cx))
+                .child(step(
+                    "More run slots",
+                    AppIcon::Plus,
+                    (detail.slots < detail.runner_slots).then(|| detail.slots + 1),
+                )),
+        );
         page = if let Some(value) = detail.occupancy {
             page.child(meta(report.load.clone(), cx)).child(
                 Progress::new("machine-occupancy")
@@ -99,7 +140,7 @@ impl Desktop {
         } else {
             page.child(meta("This machine has not reported its run slots.", cx))
         };
-        page = page.child(meta("The hub has no memory or disk measurements.", cx));
+        page = page.child(meta("To raise the runner ceiling, increase runner.max_parallel on this machine and restart its runner.", cx));
         match self.state.machine_runs(space, id) {
             Ok((active, recent)) => {
                 for (title, rows, empty_region) in [

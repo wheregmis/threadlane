@@ -74,8 +74,8 @@ pub use memory::{
     load_memory,
 };
 pub use permissions::{
-    AgentRow, AtOnce, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement,
-    allows, applied, at_once, cell_label, matrix, mode_label,
+    AgentRow, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement, allows,
+    applied, cell_label, matrix, mode_label,
 };
 pub use prose::{ProseLimit, Reference, Segment, markdown_source, segments};
 pub use routines::{
