@@ -1601,6 +1601,10 @@ The two ways work can start or continue without a message from you.
 
 **Exit:** Dreaming measurably reduces stale and duplicate memory on a seeded corpus. All invariants hold under load with random process and machine kills. A guest machine cannot read memory or receive unassigned tasks.
 
+### Before the prerelease: the best experience in the app
+
+Agreed on 2026-11-17, to start once milestone 11 stage B is in. The screens exist and work; this pass is about how good they are to use. [Noop](https://github.com/huacnlee/noop) is the reference for layout, decision cards, live activity and polish. The plan is `docs/ui-experience.md`: five stages (the look; decisions and the keyboard; reading and writing; running work and the task page; states and edges).
+
 ### Before the prerelease: one place to talk
 
 Agreed on 2026-11-17, to be built after milestones 8 to 11 and before the second machine.
