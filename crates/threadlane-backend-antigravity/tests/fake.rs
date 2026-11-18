@@ -24,6 +24,7 @@ if read -r prompt; then touch delivered; fi
             working_dir: dir.path().into(),
             prompt: "private follow-up".into(),
             images: Vec::new(),
+            skills: Vec::new(),
             appended_instructions: String::new(),
             model: None,
             session: NativeSession::Resume {
