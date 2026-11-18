@@ -195,8 +195,9 @@ async fn milestone_5_exit_memory_and_context() {
 
     // A space instruction applies in every project of the hub.
     say(&sim, Some("Alpha"), "Remember everywhere: sign replies").await;
-    let general = say(&sim, None, "Status?").await;
+    // Alpha first: its lead's reply is in General's space summary.
     let alpha = say(&sim, Some("Alpha"), "Status in Alpha?").await;
+    let general = say(&sim, None, "Status?").await;
     assert!(general[0].appended_instructions.contains(SPACE_RULE));
     assert!(alpha[0].appended_instructions.contains(SPACE_RULE));
 
