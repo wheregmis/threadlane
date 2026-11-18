@@ -793,6 +793,19 @@ async fn a_task_run_that_does_not_finish_sleeps_and_one_that_fails_is_queued_aga
     hub.link.fail(&lease, run.run_id, &failure).await.unwrap();
     hub.link.release(&lease).await.unwrap();
     assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Queued);
+
+    // The retry is told to continue, not start over.
+    hub.clock.advance(std::time::Duration::from_secs(60));
+    let (_, retry) = begin(&*hub.link).await;
+    assert_eq!(retry.lane_kind, LaneKind::Task);
+    assert!(
+        retry
+            .prompt
+            .contains("An earlier run on these events did not finish"),
+        "{}",
+        retry.prompt
+    );
+    assert!(!run.prompt.contains("An earlier run"), "{}", run.prompt);
 }
 
 #[tokio::test]
