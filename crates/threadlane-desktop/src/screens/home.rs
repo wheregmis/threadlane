@@ -101,6 +101,12 @@ impl Desktop {
         let mut failed = v_flex()
             .gap(XS)
             .child(section("Failed").children(count(failures.len(), cx)));
+        // A space whose task list failed to load could be hiding failures.
+        let task_gaps = state.gaps(Part::Tasks);
+        let show_failed = !failures.is_empty() || !task_gaps.is_empty();
+        for (space, gap) in &task_gaps {
+            failed = failed.child(gap_line(gap, "tasks", space, cx));
+        }
         for &(space, summary) in &failures {
             let task = &summary.task;
             let screen = Screen::Task {
@@ -142,7 +148,7 @@ impl Desktop {
         let recent_empty = state.timeline().is_empty()
             && state.gaps(Part::Recent).is_empty()
             && !state.timeline_has_earlier();
-        let quiet = !show_needs && failures.is_empty() && recent_empty && banners.is_empty();
+        let quiet = !show_needs && !show_failed && recent_empty && banners.is_empty();
 
         let content = v_flex()
             .gap(XL)
@@ -158,7 +164,7 @@ impl Desktop {
             )
             .children(banners)
             .when(show_needs, |view| view.child(needs))
-            .when(!failures.is_empty(), |view| view.child(failed))
+            .when(show_failed, |view| view.child(failed))
             .when(!recent_empty, |view| view.child(self.timeline(when, cx)))
             .when(quiet, |view| {
                 view.child(meta(

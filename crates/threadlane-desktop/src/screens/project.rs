@@ -21,7 +21,8 @@ use threadlane_desktop::{
 
 use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
 use crate::components::{
-    button, card, count, count_badge, field, icon_button, meta, page_header, section, status_badge,
+    button, card, count, count_badge, decision_scroller, field, icon_button, meta, page_header,
+    section, status_badge,
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
@@ -616,7 +617,19 @@ impl Desktop {
             .min_w_0()
             .gap(MD)
             .when(!decisions.is_empty(), |column| {
-                column.child(section("Open decisions")).children(decisions)
+                // Capped and scrollable so decisions never push the board off the page.
+                column.child(
+                    decision_scroller(
+                        "board-decisions",
+                        v_flex()
+                            .gap(MD)
+                            .child(section("Open decisions"))
+                            .children(decisions),
+                        &self.decision_scroll,
+                    )
+                    .flex_none()
+                    .max_h(relative(0.45)),
+                )
             })
             .children(is_empty.then(|| empty(EmptyRegion::Board, cx)))
             .child(board)
