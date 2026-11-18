@@ -2986,6 +2986,7 @@ async fn a_new_task_goes_to_an_agent_that_is_on_and_waits_for_open_tasks() {
     );
     state.task_form_mut().agent = Some("Engineer".to_owned());
     state.task_form_mut().toggle_dependency(TaskId(1));
+    state.task_form_mut().draft_pr = true;
     assert_eq!(
         state.task_spec("work", "api", "  ", "Make it pass"),
         Err("Give the task a title and a goal.".to_owned())
@@ -2996,7 +2997,14 @@ async fn a_new_task_goes_to_an_agent_that_is_on_and_waits_for_open_tasks() {
     assert_eq!(spec.title, "Fix it");
     assert_eq!(spec.depends_on, [TaskId(1)]);
     assert_eq!(spec.project.as_deref(), Some("api"));
+    assert!(spec.draft_pr);
     let created = core.create_task(Some("work"), spec).await.expect("created");
+    assert!(
+        created.goal.starts_with("Make it pass")
+            && created.goal.ends_with(threadlane_client::DRAFT_PR_GOAL),
+        "{}",
+        created.goal
+    );
     state.task_created("work", "api");
     assert!(state.task_form("work", "api").is_none());
     state.apply_project(load_project(&core, "work", "api").await);

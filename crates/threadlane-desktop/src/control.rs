@@ -100,6 +100,8 @@ pub struct TaskForm {
     pub repositories: Vec<String>,
     /// The tasks picked that it waits for.
     pub depends_on: Vec<TaskId>,
+    /// Whether the task ends by opening a draft pull request.
+    pub draft_pr: bool,
 }
 
 impl TaskForm {
@@ -470,6 +472,7 @@ impl AppState {
             agent,
             repositories: form.repositories.clone(),
             depends_on: form.depends_on.clone(),
+            draft_pr: form.draft_pr,
         })
     }
 

@@ -24,7 +24,14 @@ pub struct NewTaskSpec {
     pub repositories: Vec<String>,
     /// Tasks of the project it waits for.
     pub depends_on: Vec<TaskId>,
+    /// Whether the task ends by opening a draft pull request.
+    pub draft_pr: bool,
 }
+
+/// Added to the goal of a task that ends with a draft pull request, so the
+/// work does not stop at an unpublished branch.
+pub const DRAFT_PR_GOAL: &str = "When the work is done and checked, open a draft pull \
+request for it with open_pull_request before you call finish_task.";
 
 impl ClientCore {
     /// Creates a task of yours in one space, skipping the lead, with a
@@ -42,7 +49,11 @@ impl ClientCore {
         let request = TaskRequest::Create {
             project: spec.project,
             title: spec.title,
-            goal: spec.goal,
+            goal: if spec.draft_pr {
+                format!("{}\n\n{DRAFT_PR_GOAL}", spec.goal)
+            } else {
+                spec.goal
+            },
             agent: spec.agent,
             repositories: spec.repositories,
             depends_on: spec.depends_on,
