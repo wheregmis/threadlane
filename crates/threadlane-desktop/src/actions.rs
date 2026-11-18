@@ -96,6 +96,16 @@ impl Desktop {
             return;
         }
         let backends = self.state.agent_form().backends();
+        let models = threadlane_core::model::BackendKind::ALL
+            .iter()
+            .zip(&self.agent_models)
+            .filter(|(backend, _)| backends.is_empty() || backends.contains(backend))
+            .filter_map(|(backend, field)| {
+                let value = field.read(cx).value();
+                let model = value.trim();
+                (!model.is_empty()).then(|| (backend.as_str().to_owned(), model.to_owned()))
+            })
+            .collect();
         let core = Arc::clone(&self.core);
         self.state
             .report(Activity::Working(format!("Creating {name} in {space}…")));
@@ -104,7 +114,14 @@ impl Desktop {
                 let created = core
                     .read()
                     .await
-                    .create_agent(Some(&space), &name, &role, &instructions, &backends)
+                    .create_agent_with_models(
+                        Some(&space),
+                        &name,
+                        &role,
+                        &instructions,
+                        &backends,
+                        models,
+                    )
                     .await;
                 (space, created)
             },
@@ -115,6 +132,7 @@ impl Desktop {
                         agent.name
                     )));
                     this.state.agent_created(&space, agent);
+                    this.clear_fields.extend(this.agent_models.iter().cloned());
                     this.clear_fields.extend([
                         this.agent_name.clone(),
                         this.agent_role.clone(),

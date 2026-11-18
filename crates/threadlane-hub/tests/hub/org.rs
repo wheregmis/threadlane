@@ -204,11 +204,16 @@ async fn project_names_must_be_present_and_unique() {
 #[tokio::test]
 async fn agents_are_listed_and_created_with_unique_names_and_a_role() {
     let hub = TestHub::start().await;
-    let create = |name: &str, role: &str| OrgRequest::CreateAgent {
+    let create = |name: &str, role: &str| OrgRequest::CreateAgentWithModels {
         name: name.to_owned(),
         role: role.to_owned(),
         instructions: "Review every change.".to_owned(),
         backends: vec![BackendKind::Codex, BackendKind::Claude, BackendKind::Codex],
+        models: [
+            ("codex".into(), " custom ".into()),
+            ("claude".into(), "opus".into()),
+        ]
+        .into(),
     };
     let reply = org(&hub, create(" Reviewer ", "reviewer")).await.unwrap();
     let OrgReply::Agent { agent } = reply else {
@@ -217,6 +222,10 @@ async fn agents_are_listed_and_created_with_unique_names_and_a_role() {
     assert_eq!(agent.name, "Reviewer");
     assert_eq!(agent.role, "reviewer");
     assert_eq!(agent.instructions, "Review every change.");
+    assert_eq!(
+        agent.models,
+        serde_json::json!({"codex": "custom", "claude": "opus"})
+    );
     assert_eq!(
         agent.backends,
         [BackendKind::Codex, BackendKind::Claude],

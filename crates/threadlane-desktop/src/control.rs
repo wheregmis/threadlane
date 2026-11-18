@@ -236,12 +236,19 @@ pub async fn add_repository(
 ///
 /// The hub's refusal, for example a name it already has.
 pub async fn copy_agent(core: &ClientCore, agent: &Agent, to: &str) -> Result<Agent, ClientError> {
-    core.create_agent(
+    core.create_agent_with_models(
         Some(to),
         &agent.name,
         &agent.role,
         &agent.instructions,
         &agent.backends,
+        BackendKind::ALL
+            .iter()
+            .filter_map(|kind| {
+                let model = agent.models.get(kind.as_str())?.as_str()?;
+                Some((kind.as_str().to_owned(), model.to_owned()))
+            })
+            .collect(),
     )
     .await
 }

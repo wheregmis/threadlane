@@ -194,6 +194,21 @@ impl HubApi for FakeHub {
             project.archived = archived;
             return Ok(OrgReply::Project { project });
         }
+        let request = match request {
+            OrgRequest::CreateAgent {
+                name,
+                role,
+                instructions,
+                backends,
+            } => OrgRequest::CreateAgentWithModels {
+                name,
+                role,
+                instructions,
+                backends,
+                models: Default::default(),
+            },
+            other => other,
+        };
         let mut bindings = self.bindings.lock().expect("lock");
         match request {
             OrgRequest::Pacing => Ok(OrgReply::Pacing {
@@ -246,12 +261,12 @@ impl HubApi for FakeHub {
             OrgRequest::Agents => Ok(OrgReply::Agents {
                 agents: self.agents.lock().expect("lock").clone(),
             }),
-            OrgRequest::CreateAgent {
+            OrgRequest::CreateAgentWithModels {
                 name,
                 role,
                 instructions,
                 backends,
-                ..
+                models,
             } => {
                 let mut agents = self.agents.lock().expect("lock");
                 if agents.iter().any(|agent| agent.name == name) {
@@ -265,7 +280,7 @@ impl HubApi for FakeHub {
                     role,
                     instructions,
                     backends,
-                    models: json!({}),
+                    models: json!(models),
                     tools: json!({}),
                     requirements: json!({}),
                 };
@@ -2677,11 +2692,12 @@ async fn copying_an_agent_offers_what_the_other_space_lacks_and_copies_it_whole(
     let home = FakeHub::new("Home", Vec::new());
     let (_dir, core) = core(&[("work", &work), ("home", &home)]);
     for (name, hub) in [("Reviewer", &work), ("Writer", &work), ("Writer", &home)] {
-        hub.org(OrgRequest::CreateAgent {
+        hub.org(OrgRequest::CreateAgentWithModels {
             name: name.to_owned(),
             role: "role".to_owned(),
             instructions: format!("Be {name}."),
             backends: vec![BackendKind::Codex],
+            models: [("codex".into(), "custom".into())].into(),
         })
         .await
         .expect("created");
@@ -2710,6 +2726,7 @@ async fn copying_an_agent_offers_what_the_other_space_lacks_and_copies_it_whole(
         ),
         ("role", "Be Reviewer.", [BackendKind::Codex].as_slice())
     );
+    assert_eq!(copied.models, json!({"codex": "custom"}));
     state.agent_created("home", copied);
     assert!(state.copy_targets("work")[0].1.is_empty());
     assert!(copy_agent(&core, &targets[0].1[0], "home").await.is_err());

@@ -159,6 +159,14 @@ pub enum OrgRequest {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         backends: Vec<BackendKind>,
     },
+    /// Distinct operation so older hubs reject model overrides before creating the agent.
+    CreateAgentWithModels {
+        name: String,
+        role: String,
+        instructions: String,
+        backends: Vec<BackendKind>,
+        models: BTreeMap<String, String>,
+    },
     /// The bindings of a project. `None` means the General project.
     Bindings { project: Option<String> },
     /// Sets the agent's mode in a project, binding it there if it is not yet.

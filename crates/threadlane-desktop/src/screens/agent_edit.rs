@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::{InputState, Textarea};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -21,27 +22,116 @@ use crate::icons::AppIcon;
 use crate::tokens::{FIELD_RADIUS, FORM_WIDTH, MD, ROW_RADIUS, SM, TYPE_BODY};
 use crate::{Desktop, Screen};
 
-/// The backends picker the new-agent form and the edit view share.
+/// Backend order and per-backend models, shared by the create and edit forms.
 pub(super) fn backend_picker(
     id: &'static str,
     picked: usize,
-    on_pick: impl Fn(&mut Desktop, usize) + 'static,
+    inputs: &[Entity<InputState>],
+    on_pick: fn(&mut Desktop, usize),
     cx: &mut Context<Desktop>,
-) -> ButtonGroup {
-    ButtonGroup::new(id)
-        .outline()
-        .compact()
-        .children(BACKENDS.iter().enumerate().map(|(index, (label, _))| {
-            button(SharedString::from(format!("{id}-{index}")))
-                .label(*label)
-                .selected(picked == index)
-        }))
-        .on_click(cx.listener(move |this, clicked: &Vec<usize>, _, cx| {
-            if let Some(index) = clicked.first() {
-                on_pick(this, *index);
-                cx.notify();
-            }
-        }))
+) -> Div {
+    let kinds = BACKENDS[picked].1;
+    let view = cx.entity().downgrade();
+    let backend =
+        |label: &'static str, current: &'static str, choices: Vec<(&'static str, usize)>| {
+            let view = view.clone();
+            h_flex().gap(SM).child(meta(label, cx)).child(
+                button(SharedString::from(format!("{id}-{label}")))
+                    .outline()
+                    .label(current)
+                    .accessibility_label(format!("{label}, {current}"))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for (name, index) in &choices {
+                            let (view, index) = (view.clone(), *index);
+                            menu = menu.item(
+                                PopupMenuItem::new(*name)
+                                    .checked(*name == current)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = view.update(cx, |this, cx| {
+                                            on_pick(this, index);
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+        };
+    let model = |kind: BackendKind| {
+        let index = BackendKind::ALL
+            .iter()
+            .position(|known| *known == kind)
+            .unwrap();
+        let input = &inputs[index];
+        let presets: &[&str] = match kind {
+            BackendKind::Claude => &["sonnet", "opus", "haiku"],
+            BackendKind::Codex => &["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra"],
+        };
+        let target = input.clone();
+        h_flex()
+            .gap(SM)
+            .child(meta(format!("{kind} model"), cx))
+            .child(div().flex_1().child(field(input)))
+            .child(
+                button(SharedString::from(format!("{id}-{kind}-models")))
+                    .outline()
+                    .label("Choose")
+                    .accessibility_label(format!("Choose {kind} model"))
+                    .dropdown_menu(move |mut menu, _, cx| {
+                        let selected = target.read(cx).value();
+                        for value in std::iter::once("").chain(presets.iter().copied()) {
+                            let target = target.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(if value.is_empty() {
+                                    "Default model"
+                                } else {
+                                    value
+                                })
+                                .checked(selected.trim() == value)
+                                .on_click(move |_, window, cx| {
+                                    target
+                                        .update(cx, |input, cx| input.set_value(value, window, cx))
+                                }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+    };
+    let preferred = kinds.first();
+    let choices = BACKENDS
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, order))| order.is_empty() || order.len() == kinds.len().max(1))
+        .map(|(index, (_, order))| (order.first().map_or("Either", |k| k.as_str()), index))
+        .collect();
+    let mut rows = v_flex().gap(SM).child(backend(
+        "Preferred backend",
+        preferred.map_or("Either", |k| k.as_str()),
+        choices,
+    ));
+    if let Some(first) = preferred {
+        let choices = BACKENDS
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, order))| order.first() == preferred)
+            .map(|(index, (_, order))| (order.get(1).map_or("None", |k| k.as_str()), index))
+            .collect();
+        rows = rows.child(model(*first)).child(backend(
+            "Fallback backend",
+            kinds.get(1).map_or("None", |k| k.as_str()),
+            choices,
+        ));
+        if let Some(second) = kinds.get(1) {
+            rows = rows.child(model(*second));
+        }
+    } else {
+        for kind in BackendKind::ALL {
+            rows = rows.child(model(*kind));
+        }
+    }
+    rows
 }
 
 impl Desktop {
@@ -231,6 +321,7 @@ impl Desktop {
         let backends = backend_picker(
             "agent-edit-backends",
             edit.backends,
+            &self.agent_edit_models,
             |this, index| {
                 if let Some(edit) = this.state.agent_edit_mut() {
                     edit.backends = index;
@@ -238,24 +329,6 @@ impl Desktop {
             },
             cx,
         );
-        let mut models = v_flex().gap(SM);
-        for backend in edit.model_backends() {
-            let Some(index) = BackendKind::ALL.iter().position(|known| *known == backend) else {
-                continue;
-            };
-            models = models.child(
-                h_flex()
-                    .gap(SM)
-                    .items_center()
-                    .child(
-                        div()
-                            .w(px(64.))
-                            .text_size(TYPE_BODY)
-                            .child(backend.to_string()),
-                    )
-                    .child(div().flex_1().child(field(&self.agent_edit_models[index]))),
-            );
-        }
         let preview = edit.preview;
         let mode = ButtonGroup::new("agent-edit-instructions-mode")
             .outline()
@@ -330,10 +403,7 @@ impl Desktop {
             .child(section(format!("Edit {} in {}", edit.agent, edit.space)))
             .child(field(&self.agent_edit_name))
             .child(field(&self.agent_edit_role))
-            .child(label("Backends, in order of preference"))
             .child(backends)
-            .child(label("Model for each backend"))
-            .child(models)
             .child(
                 h_flex()
                     .justify_between()

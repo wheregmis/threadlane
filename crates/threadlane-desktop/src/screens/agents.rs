@@ -250,6 +250,7 @@ impl Desktop {
         let backends = backend_picker(
             "agent-backends",
             self.state.agent_form().backends,
+            &self.agent_models,
             |this, index| this.state.agent_form_mut().backends = index,
             cx,
         );
@@ -313,12 +314,6 @@ impl Desktop {
             .child(field(&self.agent_name))
             .child(field(&self.agent_role))
             .child(field(&self.agent_instructions))
-            .child(
-                div()
-                    .text_size(TYPE_BODY)
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Backends, in order of preference"),
-            )
             .child(backends)
             .child(
                 div()

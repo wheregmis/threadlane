@@ -29,6 +29,7 @@ async fn world() -> World {
         .db
         .create_agent(&NewAgent {
             backends: vec![BackendKind::Codex, BackendKind::Claude],
+            models: serde_json::json!({"codex": "preferred-model", "claude": "fallback-model"}),
             ..NewAgent::named(ENGINEER, "engineer")
         })
         .await
@@ -122,7 +123,12 @@ async fn at_a_usage_limit_the_task_goes_on_on_the_other_backend_in_a_fresh_sessi
         task_backends(&sim).await,
         [Some(BackendKind::Codex), Some(BackendKind::Claude)]
     );
+    assert_eq!(
+        codex.received().last().unwrap().model.as_deref(),
+        Some("preferred-model")
+    );
     let task_run = claude.received().pop().unwrap();
+    assert_eq!(task_run.model.as_deref(), Some("fallback-model"));
     assert!(
         matches!(task_run.session, NativeSession::Start { .. }),
         "a fresh session: {:?}",

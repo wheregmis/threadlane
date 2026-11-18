@@ -373,6 +373,7 @@ struct Desktop {
     agent_edit_name: Entity<InputState>,
     agent_edit_role: Entity<InputState>,
     agent_edit_instructions: Entity<TextareaState>,
+    agent_models: Vec<Entity<InputState>>,
     agent_edit_models: Vec<Entity<InputState>>,
     /// The "+ Add repository" form's name, remote and default branch.
     repository_name: Entity<InputState>,
@@ -448,10 +449,14 @@ impl Desktop {
         let agent_instructions = field("Instructions (optional)", cx);
         let agent_edit_name = field("Name", cx);
         let agent_edit_role = field("Role, for example reviewer", cx);
-        let agent_edit_models = threadlane_core::model::BackendKind::ALL
-            .iter()
-            .map(|_| field("Model (the backend's default if empty)", cx))
-            .collect();
+        let mut model_fields = || {
+            threadlane_core::model::BackendKind::ALL
+                .iter()
+                .map(|_| field("Default model", cx))
+                .collect()
+        };
+        let agent_models = model_fields();
+        let agent_edit_models = model_fields();
         let repository_name = field("Name in the project", cx);
         let repository_remote = field("Remote, git@github.com:you/repo.git", cx);
         let repository_branch = field("Default branch (main)", cx);
@@ -581,6 +586,7 @@ impl Desktop {
             agent_edit_name,
             agent_edit_role,
             agent_edit_instructions,
+            agent_models,
             agent_edit_models,
             repository_name,
             repository_remote,
