@@ -184,7 +184,8 @@ impl AgentBackend for AntigravityBackend {
             .map_err(|_| BackendError::Timeout)?
     }
 
-    async fn run(&self, request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
+    async fn run(&self, mut request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
+        self.apply_skills(&mut request).await?;
         if !request.images.is_empty() {
             return Err(failed("Antigravity CLI stream input supports text only"));
         }

@@ -186,7 +186,7 @@ threadlane mode "Frontend Developer" on_request -p web
 
 ### Agent skills
 
-In **Agents**, open **New agent** or edit an existing profile. Each provider's skills menu lists skills on the paired hub. Check a name to bind it, or uncheck it to remove it. An existing binding that disappears from the catalog remains removable.
+In **Agents**, open **New agent** or edit an existing profile. The Claude and Codex menus list skills on the paired hub. Antigravity does not support explicit skill bindings. Check a name to bind it, or uncheck it to remove it. An existing binding that disappears from the catalog remains removable.
 
 ```sh
 threadlane agent skills --space work

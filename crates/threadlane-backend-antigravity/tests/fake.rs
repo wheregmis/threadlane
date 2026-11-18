@@ -23,6 +23,7 @@ if read -r prompt; then touch delivered; fi
         .run(RunRequest {
             working_dir: dir.path().into(),
             prompt: "private follow-up".into(),
+            skills: Vec::new(),
             images: Vec::new(),
             appended_instructions: String::new(),
             model: None,

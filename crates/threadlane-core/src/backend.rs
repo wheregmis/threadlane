@@ -280,6 +280,15 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
         if request.skills.is_empty() {
             return Ok(());
         }
+        let prefix = match self.kind() {
+            BackendKind::Claude => "/",
+            BackendKind::Codex => "$",
+            BackendKind::Antigravity => {
+                return Err(BackendError::Failed(
+                    "Antigravity does not support explicit skill bindings".into(),
+                ));
+            }
+        };
         let installed = self.installed_skills(Some(&request.working_dir)).await?;
         let mut mentions = Vec::new();
         for name in &request.skills {
@@ -289,10 +298,6 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
                     self.kind()
                 )));
             }
-            let prefix = match self.kind() {
-                BackendKind::Claude => "/",
-                BackendKind::Codex => "$",
-            };
             mentions.push(format!("{prefix}{name}"));
         }
         if request.remove_builtin_tools {
