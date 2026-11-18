@@ -15,10 +15,12 @@ else
     "$cargo" build -p threadlane-desktop
 fi
 
-app=target/Threadlane.app
+target_dir="${CARGO_TARGET_DIR:-target}"
+app="$target_dir/Threadlane.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
-cp "target/$profile/threadlane-desktop" "$app/Contents/MacOS/threadlane-desktop"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp crates/threadlane-desktop/resources/Threadlane.icns "$app/Contents/Resources/"
+cp "$target_dir/$profile/threadlane-desktop" "$app/Contents/MacOS/threadlane-desktop"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -28,6 +30,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
     <string>dev.threadlane.desktop</string>
     <key>CFBundleName</key>
     <string>Threadlane</string>
+    <key>CFBundleIconFile</key>
+    <string>Threadlane.icns</string>
     <key>CFBundleExecutable</key>
     <string>threadlane-desktop</string>
     <key>CFBundlePackageType</key>

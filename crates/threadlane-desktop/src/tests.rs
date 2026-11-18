@@ -1279,7 +1279,10 @@ fn an_item_seen_twice_is_shown_once() {
     let mut state = AppState::default();
     let first = item("work", 1, OutboxKind::Message, json!({ "text": "hi" }));
     state.receive(first.clone());
+    assert!(state.home_has_new_replies());
+    state.saw_home_replies();
     state.receive(first);
+    assert!(!state.home_has_new_replies());
     // The same seq from another space is another item.
     state.receive(item(
         "home",
@@ -1287,6 +1290,12 @@ fn an_item_seen_twice_is_shown_once() {
         OutboxKind::Message,
         json!({ "text": "hi" }),
     ));
+
+    state.set_filter(Some("work"));
+    state.saw_home_replies();
+    assert!(!state.home_has_new_replies());
+    state.set_filter(None);
+    assert!(state.home_has_new_replies());
 
     let lines = |space| said(&state.conversation(space, "api", &when()));
     assert_eq!(lines("work"), ["-- Today", "lead: hi"]);
