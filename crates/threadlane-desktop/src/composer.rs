@@ -264,6 +264,16 @@ impl AppState {
             .any(|send| &send.destination == destination)
     }
 
+    /// Whether this composer's recipient may change: not while a send is held
+    /// or delivering, nor while images are loading, since those stay with the
+    /// recipient they started for.
+    #[must_use]
+    pub fn can_retarget(&self, destination: &Destination) -> bool {
+        !self.is_loading_images(destination)
+            && !self.is_sending(destination)
+            && self.held_seconds(destination).is_none()
+    }
+
     /// Whether another submission is possible.
     #[must_use]
     pub fn is_send_enabled(&self, destination: &Destination) -> bool {

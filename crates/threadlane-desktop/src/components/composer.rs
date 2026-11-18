@@ -113,11 +113,20 @@ impl Desktop {
                 )
             })
             .collect();
+        let locked = self
+            .composer_destination()
+            .is_some_and(|from| !self.state.can_retarget(&from));
+        let accessibility = if locked {
+            format!("Sending to {lead} — wait for the send to finish to choose another lead")
+        } else {
+            accessibility
+        };
         let choose = Rc::new(choose);
         let view = cx.entity().downgrade();
         button("target")
             .label(label)
             .tab_stop(true)
+            .disabled(locked)
             .accessibility_label(accessibility)
             .dropdown_menu(move |mut menu, _, _| {
                 for (name, space, project, checked) in &items {
@@ -127,6 +136,12 @@ impl Desktop {
                         move |_, _, cx| {
                             let _gone = view.update(cx, |this, cx| {
                                 let from = this.composer_destination();
+                                if from
+                                    .as_ref()
+                                    .is_some_and(|from| !this.state.can_retarget(from))
+                                {
+                                    return;
+                                }
                                 choose(&mut this.state, &space, &project);
                                 if let (Some(from), Some(to)) = (from, this.composer_destination())
                                 {

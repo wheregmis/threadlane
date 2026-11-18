@@ -1110,6 +1110,29 @@ fn choosing_another_recipient_carries_the_draft_being_typed() {
     assert_eq!(state.draft(&general), "Second\n\nShip it");
 }
 
+#[test]
+fn the_recipient_is_locked_while_a_send_is_held_or_images_load() {
+    let mut state = AppState::default();
+    let general = Destination::Lead("work".into(), "General".into());
+    assert!(state.can_retarget(&general));
+
+    state.loading_images(&general);
+    assert!(!state.can_retarget(&general), "images loading");
+    state.attach_images(&general, Ok(vec![]));
+    assert!(state.can_retarget(&general));
+
+    state.edit_draft(&general, "Ship it");
+    assert!(
+        state
+            .request_send(general.clone(), Timestamp::from_millis(1_000))
+            .held
+            .is_some()
+    );
+    assert!(!state.can_retarget(&general), "send held");
+    assert!(state.undo_send(&general));
+    assert!(state.can_retarget(&general));
+}
+
 #[tokio::test]
 async fn each_space_uses_its_own_general_project_for_main_chat() {
     let work = FakeHub::new("Work", vec![]);
