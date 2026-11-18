@@ -41,8 +41,9 @@ impl Names {
                 .into_iter()
                 .map(|project| (project.id, project.name))
                 .collect(),
+            // Deleted agents too: finished tasks still name them.
             agents: db
-                .agents()
+                .all_agents()
                 .await
                 .map_err(api_error)?
                 .into_iter()

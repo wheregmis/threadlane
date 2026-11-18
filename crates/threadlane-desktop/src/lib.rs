@@ -26,6 +26,7 @@ use threadlane_core::model::{
 use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use tokio::sync::{RwLock, mpsc};
 
+mod agent_edit;
 mod attention;
 mod clock;
 mod composer;
@@ -43,6 +44,7 @@ mod routines;
 mod settings;
 mod tasks;
 
+pub use agent_edit::{AgentBinding, AgentEdit, AgentFields};
 pub use attention::{AttentionRow, needs_you};
 pub use clock::{When, duration};
 pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
@@ -993,6 +995,8 @@ pub struct AppState {
     routine_form: RoutineForm,
     /// The picks of the "+ New agent" form.
     agent_form: AgentForm,
+    /// The agent whose edit view is open.
+    agent_edit: Option<AgentEdit>,
     /// The picks of the "+ New task" form.
     task_form: TaskForm,
     /// The project whose "+ Add repository" form is open.
@@ -1547,6 +1551,9 @@ impl AppState {
         }
         if here(self.agent_form.space.as_ref()) {
             self.agent_form = AgentForm::default();
+        }
+        if here(self.agent_edit.as_ref().map(|edit| &edit.space)) {
+            self.agent_edit = None;
         }
         if here(self.repository_form.as_ref().map(|(space, _)| space)) {
             self.repository_form = None;

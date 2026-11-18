@@ -12,6 +12,7 @@ use crate::icons::AppIcon;
 use crate::tokens::{MD, TYPE_BODY, XS};
 use crate::{Desktop, Screen};
 
+mod agent_edit;
 mod agents;
 mod decision;
 mod delete_project;

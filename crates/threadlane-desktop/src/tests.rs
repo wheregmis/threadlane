@@ -270,6 +270,58 @@ impl HubApi for FakeHub {
                 agents.push(agent.clone());
                 Ok(OrgReply::Agent { agent })
             }
+            OrgRequest::UpdateAgent {
+                agent: from,
+                name,
+                role,
+                instructions,
+                backends,
+                models,
+            } => {
+                let mut agents = self.agents.lock().expect("lock");
+                let agent = agents
+                    .iter_mut()
+                    .find(|agent| agent.name == from)
+                    .ok_or_else(|| ApiError::NotFound(format!("agent {from:?}")))?;
+                if let Some(name) = name {
+                    agent.name = name;
+                }
+                if let Some(role) = role {
+                    agent.role = role;
+                }
+                if let Some(instructions) = instructions {
+                    agent.instructions = instructions;
+                }
+                if let Some(backends) = backends {
+                    agent.backends = backends
+                        .iter()
+                        .map(|backend| backend.parse().expect("a backend"))
+                        .collect();
+                }
+                for (backend, model) in models.unwrap_or_default() {
+                    agent.models[backend] = json!(model);
+                }
+                for binding in bindings.iter_mut().filter(|b| b.agent == from) {
+                    binding.agent.clone_from(&agent.name);
+                }
+                Ok(OrgReply::Agent {
+                    agent: agent.clone(),
+                })
+            }
+            OrgRequest::DeleteAgent {
+                agent,
+                confirm_name,
+            } => {
+                if agent != confirm_name {
+                    return Err(ApiError::Invalid("type the agent's name".to_owned()));
+                }
+                self.agents
+                    .lock()
+                    .expect("lock")
+                    .retain(|known| known.name != agent);
+                bindings.retain(|binding| binding.agent != agent);
+                Ok(OrgReply::AgentDeleted { agent })
+            }
             OrgRequest::AddRepository {
                 project,
                 name,
@@ -5595,5 +5647,116 @@ fn several_repositories_are_named_in_the_merge_state() {
     assert_eq!(
         merge_state(Some(&result)).as_deref(),
         Some("app: Merges cleanly into main at abcdef0 · web: Conflicts with trunk: x")
+    );
+}
+
+#[tokio::test]
+async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    for (name, role) in [("Lead", "lead"), ("Reviewer", "reviewer")] {
+        work.org(OrgRequest::CreateAgent {
+            name: name.to_owned(),
+            role: role.to_owned(),
+            instructions: "Review.".to_owned(),
+            backends: vec![BackendKind::Claude],
+        })
+        .await
+        .expect("created");
+    }
+    *work.bindings.lock().expect("lock") = vec![BindingSummary {
+        agent: "Lead".to_owned(),
+        role: "lead".to_owned(),
+        mode: Mode::OnRequest,
+        is_lead: true,
+        max_parallel: 1,
+        overrides: Default::default(),
+    }];
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    let projects = vec![
+        ("work".to_owned(), "api".to_owned()),
+        ("work".to_owned(), "General".to_owned()),
+    ];
+    state.apply_modes(load_modes(&core, projects).await);
+    let binding = core
+        .set_mode(Some("work"), Some("api"), "Reviewer", Mode::Assisted)
+        .await
+        .expect("bound");
+    state.mode_set("work", "api", binding);
+
+    assert!(state.open_agent_edit("work", "Nobody").is_none());
+    let mut fields = state.open_agent_edit("work", "Reviewer").expect("known");
+    assert_eq!(
+        (fields.name.as_str(), fields.instructions.as_str()),
+        ("Reviewer", "Review.")
+    );
+    let edit = state.agent_edit().expect("open").clone();
+    assert_eq!(BACKENDS[edit.backends].1, [BackendKind::Claude]);
+    assert_eq!(edit.model_backends(), [BackendKind::Claude]);
+    let bound: Vec<_> = state
+        .agent_bindings("work", "Reviewer")
+        .into_iter()
+        .map(|bound| (bound.project, bound.binding.mode))
+        .collect();
+    assert_eq!(bound[0], ("api".to_owned(), Mode::Assisted));
+    assert!(state.offers_agent_delete("work", "Reviewer"));
+    assert!(!state.offers_agent_delete("work", "Lead"), "never the lead");
+
+    assert_eq!(state.agent_update(&fields), Ok(None), "nothing changed");
+    fields.role = " ".to_owned();
+    assert!(state.agent_update(&fields).is_err(), "a role is needed");
+    fields.role = "reviewer".to_owned();
+    fields.name = " Critic ".to_owned();
+    fields.models[0].1 = "opus".to_owned();
+    state.agent_edit_mut().expect("open").backends = 2;
+    assert_eq!(
+        state.agent_edit().expect("open").model_backends(),
+        [BackendKind::Codex, BackendKind::Claude]
+    );
+    let request = state
+        .agent_update(&fields)
+        .expect("valid")
+        .expect("changed");
+    assert_eq!(
+        request,
+        OrgRequest::UpdateAgent {
+            agent: "Reviewer".to_owned(),
+            name: Some("Critic".to_owned()),
+            role: None,
+            instructions: None,
+            backends: Some(vec!["codex".to_owned(), "claude".to_owned()]),
+            models: Some([("claude".to_owned(), "opus".to_owned())].into()),
+        },
+        "only what changed"
+    );
+    let agent = core
+        .update_agent(Some("work"), request)
+        .await
+        .expect("updated");
+    state.agent_updated("work", "Reviewer", agent);
+    assert!(state.agent_edit().is_none(), "Save closes the view");
+    assert_eq!(state.modes("work").agents, ["Lead", "Critic"]);
+    assert_eq!(state.agent_bindings("work", "Critic").len(), 1, "renamed");
+    assert_eq!(
+        state.space("work").expect("space").agents[1].models["claude"],
+        "opus"
+    );
+
+    state.open_agent_edit("work", "Critic").expect("known");
+    let deleted = core
+        .delete_agent(Some("work"), "Critic", "Critic")
+        .await
+        .expect("deleted");
+    state.agent_deleted("work", &deleted);
+    assert!(state.agent_edit().is_none());
+    assert_eq!(state.modes("work").agents, ["Lead"]);
+    assert!(state.agent_bindings("work", "Critic").is_empty());
+    assert!(
+        work.agents
+            .lock()
+            .expect("lock")
+            .iter()
+            .all(|a| a.name != "Critic")
     );
 }

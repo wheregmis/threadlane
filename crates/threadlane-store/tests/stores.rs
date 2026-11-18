@@ -2992,3 +2992,102 @@ async fn the_client_history_queries_page_from_the_newest() {
         ]
     );
 }
+
+#[tokio::test]
+async fn an_agent_can_be_updated_and_its_name_stays_unique() {
+    let hub = hub().await;
+    let first = hub
+        .create_agent(&NewAgent::named("Engineer", "engineer"))
+        .await
+        .unwrap();
+    hub.create_agent(&NewAgent::named("Reviewer", "reviewer"))
+        .await
+        .unwrap();
+    let updated = hub
+        .update_agent(&Agent {
+            name: "Builder".into(),
+            instructions: "Build it.".into(),
+            backends: vec![BackendKind::Codex],
+            models: json!({"codex": "gpt-5"}),
+            ..first.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated.name, "Builder");
+    assert_eq!(updated.models, json!({"codex": "gpt-5"}));
+    assert_eq!(hub.agent(first.id).await.unwrap(), Some(updated.clone()));
+    let clash = hub
+        .update_agent(&Agent {
+            name: "Reviewer".into(),
+            ..updated
+        })
+        .await;
+    assert!(matches!(clash, Err(StoreError::Conflict(_))), "{clash:?}");
+}
+
+#[tokio::test]
+async fn deleting_an_agent_waits_for_its_tasks_and_keeps_its_history() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let lead = hub
+        .create_agent(&NewAgent::named("Lead", "lead"))
+        .await
+        .unwrap();
+    hub.bind(&NewBinding {
+        project_id: general.id,
+        agent_id: lead.id,
+        mode: Mode::OnRequest,
+        is_lead: true,
+        max_parallel: 1,
+    })
+    .await
+    .unwrap();
+    let refused = hub.delete_agent(lead.id).await;
+    assert!(
+        matches!(&refused, Err(StoreError::Invalid(m)) if m.contains("lead")),
+        "{refused:?}"
+    );
+
+    let agent = engineer(&hub, &general, 1).await;
+    let queued = hub
+        .create_task(None, &new_task(&general, agent, "open", vec![]))
+        .await
+        .unwrap();
+    let refused = hub.delete_agent(agent).await;
+    assert!(
+        matches!(&refused, Err(StoreError::Invalid(m)) if m.contains(&queued.id.to_string())),
+        "{refused:?}"
+    );
+
+    hub.cancel_task(None, queued.id, T0).await.unwrap();
+    let name = hub.agent(agent).await.unwrap().unwrap().name;
+    hub.delete_agent(agent).await.unwrap();
+    assert!(hub.agents().await.unwrap().iter().all(|a| a.id != agent));
+    assert!(
+        hub.bindings(general.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|b| b.agent_id != agent)
+    );
+    let kept = hub.agent(agent).await.unwrap().unwrap();
+    assert_eq!(kept.name, format!("{name} (deleted)"));
+    assert!(hub.all_agents().await.unwrap().contains(&kept));
+    assert_eq!(task(&hub, queued.id).await.agent_id, agent);
+
+    // The name is free again, and a second deletion of it still succeeds.
+    let again = hub
+        .create_agent(&NewAgent::named(name.clone(), "engineer"))
+        .await
+        .unwrap();
+    hub.delete_agent(again.id).await.unwrap();
+    assert_eq!(
+        hub.agent(again.id).await.unwrap().unwrap().name,
+        format!("{name} (deleted {})", again.id)
+    );
+    let missing = hub.delete_agent(agent).await;
+    assert!(
+        matches!(missing, Err(StoreError::NotFound { .. })),
+        "{missing:?}"
+    );
+}

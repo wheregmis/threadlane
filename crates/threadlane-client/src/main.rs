@@ -7,9 +7,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use clap::{ArgGroup, Parser, Subcommand};
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
-use threadlane_core::client::{ApiError, OperationsRequest};
+use threadlane_core::client::{ApiError, OperationsRequest, OrgRequest};
 use threadlane_core::model::{BackendKind, Mode, OutboxKind};
 use threadlane_core::model::{Recurrence, Rule, Timer, TimerCreator, TimerStatus, Weekday};
 use threadlane_core::time::{Clock as _, SystemClock};
@@ -425,6 +426,46 @@ enum AgentCommand {
         #[arg(long = "backend", value_delimiter = ',')]
         backends: Vec<BackendKind>,
     },
+    /// Change an agent; options left out keep their value. It applies from
+    /// the agent's next run.
+    Edit {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The agent's current name.
+        agent: String,
+        /// Its new name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Its new role.
+        #[arg(long)]
+        role: Option<String>,
+        /// Its new instructions.
+        #[arg(long, conflicts_with = "instructions_file")]
+        instructions: Option<String>,
+        /// Read its new instructions from this file.
+        #[arg(long, value_name = "PATH")]
+        instructions_file: Option<PathBuf>,
+        /// The backends it may use, in order of preference, for example
+        /// claude,codex.
+        #[arg(long = "backend", value_delimiter = ',')]
+        backends: Option<Vec<String>>,
+        /// A model for one backend, as BACKEND=MODEL; an empty model goes
+        /// back to the backend's default. May be repeated.
+        #[arg(long = "model", value_name = "BACKEND=MODEL", value_parser = backend_model)]
+        models: Vec<(String, String)>,
+    },
+    /// Delete an agent with its bindings and standing rules, after you type
+    /// its name. Finished tasks keep its name.
+    Delete {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        name: String,
+        /// Skip the prompt by supplying the exact agent name.
+        #[arg(long, value_name = "NAME")]
+        yes: Option<String>,
+    },
     /// List the starter agents the hub offers.
     Templates {
         /// The space (paired hub name); may be left out if only one is paired.
@@ -630,8 +671,13 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 preview.inventory()
             );
             println!("Branches and pull requests on GitHub are not touched.");
-            let confirmed =
-                confirm_project_deletion(&name, yes, io::stdin().lock(), io::stdout().lock())?;
+            let confirmed = confirm_deletion(
+                "project",
+                &name,
+                yes,
+                io::stdin().lock(),
+                io::stdout().lock(),
+            )?;
             let (deleted, leftovers) = core
                 .delete_project(space.as_deref(), &name, &confirmed)
                 .await?;
@@ -723,6 +769,47 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 )
                 .await?;
             println!("created agent {} ({})", agent.name, agent.role);
+        }
+        Command::Agent {
+            command:
+                AgentCommand::Edit {
+                    space,
+                    agent,
+                    name,
+                    role,
+                    instructions,
+                    instructions_file,
+                    backends,
+                    models,
+                },
+        } => {
+            let instructions = match instructions_file {
+                Some(path) => Some(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading {}", path.display()))?,
+                ),
+                None => instructions,
+            };
+            let request = OrgRequest::UpdateAgent {
+                agent,
+                name,
+                role,
+                instructions,
+                backends,
+                models: (!models.is_empty()).then(|| models.into_iter().collect()),
+            };
+            let agent = core.update_agent(space.as_deref(), request).await?;
+            println!("updated agent {} ({})", agent.name, agent.role);
+        }
+        Command::Agent {
+            command: AgentCommand::Delete { space, name, yes },
+        } => {
+            let confirmed =
+                confirm_deletion("agent", &name, yes, io::stdin().lock(), io::stdout().lock())?;
+            let deleted = core
+                .delete_agent(space.as_deref(), &name, &confirmed)
+                .await?;
+            println!("deleted agent {deleted}");
         }
         Command::Agent {
             command: AgentCommand::Templates { space },
@@ -1566,7 +1653,16 @@ mod archive_cli_tests {
     }
 }
 
-fn confirm_project_deletion(
+/// `BACKEND=MODEL` from `--model`.
+fn backend_model(value: &str) -> Result<(String, String), String> {
+    value
+        .split_once('=')
+        .map(|(backend, model)| (backend.trim().to_owned(), model.trim().to_owned()))
+        .ok_or_else(|| format!("{value:?} is not BACKEND=MODEL, for example claude=opus"))
+}
+
+fn confirm_deletion(
+    kind: &str,
     name: &str,
     supplied: Option<String>,
     mut input: impl BufRead,
@@ -1590,7 +1686,7 @@ fn confirm_project_deletion(
     };
     anyhow::ensure!(
         confirmed == name,
-        "the confirmation must be the exact project name {name:?}"
+        "the confirmation must be the exact {kind} name {name:?}"
     );
     Ok(confirmed)
 }
@@ -1603,7 +1699,7 @@ mod deletion_cli_tests {
     fn deletion_prompt_accepts_only_the_exact_name() {
         let mut output = Vec::new();
         assert_eq!(
-            confirm_project_deletion("My API", None, &b"My API\r\n"[..], &mut output).unwrap(),
+            confirm_deletion("project", "My API", None, &b"My API\r\n"[..], &mut output).unwrap(),
             "My API"
         );
         assert!(
@@ -1612,7 +1708,7 @@ mod deletion_cli_tests {
                 .contains("Type \"My API\"")
         );
         for wrong in [b"My API \n".as_slice(), b"my API\n", b""] {
-            assert!(confirm_project_deletion("My API", None, wrong, io::sink()).is_err());
+            assert!(confirm_deletion("project", "My API", None, wrong, io::sink()).is_err());
         }
     }
 
@@ -1636,12 +1732,12 @@ mod deletion_cli_tests {
         };
         let mut output = Vec::new();
         assert_eq!(
-            confirm_project_deletion(&name, yes, &b""[..], &mut output).unwrap(),
+            confirm_deletion("project", &name, yes, &b""[..], &mut output).unwrap(),
             name
         );
         assert!(output.is_empty());
         assert!(
-            confirm_project_deletion(&name, Some("Other".into()), &b""[..], io::sink()).is_err()
+            confirm_deletion("project", &name, Some("Other".into()), &b""[..], io::sink()).is_err()
         );
         assert!(
             Cli::try_parse_from(["threadlane", "project", "delete", "My API", "--yes"]).is_err()

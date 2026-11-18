@@ -832,6 +832,44 @@ impl ClientCore {
         }
     }
 
+    /// Changes an agent; each `None` keeps that field. The request is
+    /// [`OrgRequest::UpdateAgent`] as built by the caller.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn update_agent(
+        &self,
+        space: Option<&str>,
+        request: OrgRequest,
+    ) -> Result<Agent, ClientError> {
+        match self.org(space, request).await? {
+            (_, OrgReply::Agent { agent }) => Ok(agent),
+            (space, _) => Err(wrong_reply(&space, "update agent")),
+        }
+    }
+
+    /// Deletes an agent whose exact name was confirmed.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn delete_agent(
+        &self,
+        space: Option<&str>,
+        agent: &str,
+        confirm_name: &str,
+    ) -> Result<String, ClientError> {
+        let request = OrgRequest::DeleteAgent {
+            agent: agent.to_owned(),
+            confirm_name: confirm_name.to_owned(),
+        };
+        match self.org(space, request).await? {
+            (_, OrgReply::AgentDeleted { agent }) => Ok(agent),
+            (space, _) => Err(wrong_reply(&space, "delete agent")),
+        }
+    }
+
     /// The bindings of a project. `space: None` means the only paired hub;
     /// `project: None` means the General project.
     ///
