@@ -274,6 +274,14 @@ impl LocalLink {
                 content.map(|file| file.content).unwrap_or_default(),
             ));
         }
+        // The space lead also sees the space's other projects.
+        let general_lead = !dreaming && project.is_general && lane.kind == LaneKind::Lead;
+        if general_lead {
+            memory.push((
+                "Projects in this space:",
+                crate::space_lead::summary(db).await.map_err(link_error)?,
+            ));
+        }
         let appended_instructions = if dreaming {
             String::new()
         } else {
@@ -312,6 +320,7 @@ impl LocalLink {
                     .definitions()
                     .into_iter()
                     .filter(|tool| offered_in(&tool.name, lane.kind))
+                    .filter(|tool| general_lead || tool.name != crate::space_lead::ASK_PROJECT_LEAD)
                     .collect()
             },
             // A lead has no file or shell tools to refuse anything with; a

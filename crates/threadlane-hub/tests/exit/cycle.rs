@@ -13,7 +13,9 @@ use threadlane_core::model::{
 use threadlane_core::runtime::steps::{placement, runner};
 use threadlane_core::store::{OrgStore, SessionStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP};
+use threadlane_hub::{
+    ASK_PROJECT_LEAD, ASK_USER, CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_UP,
+};
 use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, HubSettings, LEAD_NAME, LEAD_ROLE, LIST_TASKS, MEMORY_CREATE,
     MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW, OFF_REASON, SEND_MESSAGE, UPDATE_TASK,
@@ -80,6 +82,7 @@ async fn a_message_produces_exactly_one_reply() {
             LIST_TIMERS,
             CANCEL_TIMER,
             ASK_USER,
+            ASK_PROJECT_LEAD,
         ],
         "a lead gets the lead's tools only"
     );

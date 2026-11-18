@@ -372,6 +372,11 @@ pub trait TaskStore: Send + Sync {
     /// counted (docs/merge-help.md decision 5). Returns whether it counted
     /// one: `false` means finish anyway.
     async fn count_merge_refusal(&self, lease: &Lease, limit: i64) -> StoreResult<bool>;
+    /// Records that a project lead created task `id` for the space lead's
+    /// ask, event `ask` (docs/one-place-to-talk.md decision 2).
+    async fn set_space_lead_ask(&self, id: TaskId, ask: EventId) -> StoreResult<()>;
+    /// The space lead's ask task `id` was created for, if any.
+    async fn space_lead_ask(&self, id: TaskId) -> StoreResult<Option<EventId>>;
     /// Moves a task along its lifecycle, refusing a move Plan.md §5.2 does
     /// not allow ([`TaskStatus::can_become`]) with [`StoreError::Conflict`].
     /// `proposed` to `queued` inserts the start event.
