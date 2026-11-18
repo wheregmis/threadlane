@@ -231,6 +231,7 @@ impl LocalLink {
         // 8. The assignment.
         Ok(Begin::Run(Box::new(RunAssignment {
             run_id: run.id,
+            trace_id: run.trace_id,
             session_id: run.session_id,
             project_id: project.id,
             lane_kind: lane.kind,

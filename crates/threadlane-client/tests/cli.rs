@@ -15,6 +15,7 @@ use threadlane_core::client::{
     MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
     PairingRequest, ProjectSummary, UserMessage,
 };
+use threadlane_core::client::{LaneTarget, OperationsReply, OperationsRequest, TraceInspection};
 use threadlane_core::client::{
     StandingRuleSummary, TaskReply, TaskRequest, TimerReply, TimerRequest,
 };
@@ -51,6 +52,7 @@ struct Shared {
     /// D-0007, pending until it is answered.
     decision: Mutex<Decision>,
     timers: Mutex<Vec<TimerRequest>>,
+    operations: Mutex<Vec<OperationsRequest>>,
 }
 
 impl Shared {
@@ -62,6 +64,7 @@ impl Shared {
             digest: Vec::new(),
             seq,
             message: OutboxMessage {
+                trace_id: None,
                 id: OutboxId(seq),
                 project_id: project.map(|_| ProjectId(1)),
                 lane_id: None,
@@ -104,6 +107,7 @@ impl FakeHub {
             pacing: Mutex::default(),
             decision: Mutex::new(pending_decision()),
             timers: Mutex::new(Vec::new()),
+            operations: Mutex::new(Vec::new()),
         }))
     }
 }
@@ -431,6 +435,21 @@ impl HubApi for FakeHub {
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
+
+    async fn operations(&self, request: OperationsRequest) -> Result<OperationsReply, ApiError> {
+        let id = format!("{request:?}");
+        self.0.operations.lock().expect("operations").push(request);
+        Ok(OperationsReply::Trace {
+            trace: TraceInspection {
+                id,
+                events: Vec::new(),
+                runs: Vec::new(),
+                tool_calls: Vec::new(),
+                decisions: Vec::new(),
+                outbox: Vec::new(),
+            },
+        })
+    }
 }
 
 /// Rule 1: the reviewer may open draft pull requests in `app`.
@@ -496,6 +515,7 @@ fn pending_decision() -> Decision {
         effect: json!({ "approve": approve }),
     };
     Decision {
+        trace_id: None,
         id: DecisionId(7),
         project_id: ProjectId(1),
         lane_id: LaneId(4),
@@ -1489,4 +1509,70 @@ async fn cli_rejects_conflicting_lane_targets_and_incomplete_quiet_hours() {
             stderr(&output)
         );
     }
+}
+
+#[tokio::test]
+async fn cli_sends_operations_to_the_selected_hub_and_prints_its_reply() {
+    let hub = Hub::start().await;
+    let client = tempfile::tempdir().unwrap();
+    let data_dir = hub.data_dir().to_str().unwrap();
+    expect_success(
+        client.path(),
+        &["hub", "add", "work", data_dir],
+        &format!("paired work: {}\n", hub.socket().display()),
+    )
+    .await;
+
+    let requests = [
+        (
+            &["metrics", "-s", "work", "-p", "General"][..],
+            OperationsRequest::Metrics {
+                project: Some("General".into()),
+            },
+        ),
+        (
+            &["lane", "T-0003"][..],
+            OperationsRequest::Lane {
+                target: LaneTarget::Task {
+                    task: threadlane_core::ids::TaskId(3),
+                },
+            },
+        ),
+        (
+            &["replay", "7"][..],
+            OperationsRequest::Replay { event: EventId(7) },
+        ),
+        (
+            &["memory", "rollback", "space/notes/style.md", "2"][..],
+            OperationsRequest::Rollback {
+                path: "space/notes/style.md".into(),
+                version: 2,
+                project: None,
+            },
+        ),
+        (
+            &["trace", "event-7"][..],
+            OperationsRequest::Trace {
+                id: "event-7".into(),
+            },
+        ),
+    ];
+    for (args, request) in &requests {
+        let output = threadlane(client.path(), args).await;
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        let reply = serde_json::from_slice::<OperationsReply>(&output.stdout).unwrap();
+        let OperationsReply::Trace { trace } = reply else {
+            panic!("expected fake reply");
+        };
+        assert_eq!(trace.id, format!("{request:?}"));
+    }
+    let seen = hub.fake.0.operations.lock().expect("operations").clone();
+    assert_eq!(
+        seen,
+        requests
+            .into_iter()
+            .map(|(_, request)| request)
+            .collect::<Vec<_>>()
+    );
+    hub.stop().await;
 }

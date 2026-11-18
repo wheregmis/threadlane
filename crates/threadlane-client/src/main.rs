@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use clap::{ArgGroup, Parser, Subcommand};
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
-use threadlane_core::client::ApiError;
+use threadlane_core::client::{ApiError, OperationsRequest};
 use threadlane_core::model::{BackendKind, Mode, OutboxKind};
 use threadlane_core::model::{Recurrence, Rule, Timer, TimerCreator, TimerStatus, Weekday};
 use threadlane_core::time::{Clock as _, SystemClock};
@@ -253,6 +253,8 @@ enum Command {
     Stop(LaneArgs),
     /// Resume a stopped lead or task.
     Resume(LaneArgs),
+    #[command(flatten)]
+    Operations(OperationsCommand),
 }
 
 #[derive(Debug, clap::Args)]
@@ -868,6 +870,11 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 .await?;
             println!("Lane resumed.");
         }
+        Command::Operations(command) => {
+            let (space, request) = operations_request(command);
+            let reply = core.operations(space.as_deref(), request).await?;
+            println!("{}", serde_json::to_string_pretty(&reply)?);
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1111,5 +1118,185 @@ fn print_item(item: &SpaceFeedItem) {
         OutboxKind::Message => println!("[{}] {}", item.label(), item.text()),
         OutboxKind::Decision => println!("[{}] decision: {}", item.label(), item.text()),
         OutboxKind::SystemNotice => println!("[{}] notice: {}", item.space, item.text()),
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum OperationsCommand {
+    /// Show operational metrics.
+    Metrics {
+        /// The space (paired hub name).
+        #[arg(short, long)]
+        space: Option<String>,
+        /// Include only this project's records.
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+    /// Inspect a project's lead lane or a task lane.
+    Lane {
+        /// Project name or task ID such as T-0001.
+        target: String,
+        /// The space (paired hub name).
+        #[arg(short, long)]
+        space: Option<String>,
+    },
+    /// Return a dead event to its lane once.
+    Replay {
+        /// Numeric event ID.
+        #[arg(value_parser = clap::value_parser!(i64).range(1..))]
+        event: i64,
+        /// The space (paired hub name).
+        #[arg(short, long)]
+        space: Option<String>,
+    },
+    /// Work with versioned memory.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+    /// Inspect the records carrying a trace ID.
+    Trace {
+        id: String,
+        /// The space (paired hub name).
+        #[arg(short, long)]
+        space: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommand {
+    /// Restore an earlier version as a new version by you.
+    Rollback {
+        path: String,
+        #[arg(value_parser = clap::value_parser!(i64).range(1..))]
+        version: i64,
+        /// The space (paired hub name).
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project, or General if left out.
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+}
+
+fn operations_request(command: OperationsCommand) -> (Option<String>, OperationsRequest) {
+    use threadlane_core::client::LaneTarget;
+    use threadlane_core::ids::{EventId, TaskId};
+
+    match command {
+        OperationsCommand::Metrics { space, project } => {
+            (space, OperationsRequest::Metrics { project })
+        }
+        OperationsCommand::Lane { target, space } => {
+            let task = target
+                .get(..2)
+                .filter(|prefix| prefix.eq_ignore_ascii_case("t-"))
+                .and_then(|_| TaskId::parse(&target));
+            let target = match task {
+                Some(task) => LaneTarget::Task { task },
+                None => LaneTarget::Lead {
+                    project: Some(target),
+                },
+            };
+            (space, OperationsRequest::Lane { target })
+        }
+        OperationsCommand::Replay { event, space } => (
+            space,
+            OperationsRequest::Replay {
+                event: EventId(event),
+            },
+        ),
+        OperationsCommand::Memory {
+            command:
+                MemoryCommand::Rollback {
+                    path,
+                    version,
+                    space,
+                    project,
+                },
+        } => (
+            space,
+            OperationsRequest::Rollback {
+                project,
+                path,
+                version,
+            },
+        ),
+        OperationsCommand::Trace { id, space } => (space, OperationsRequest::Trace { id }),
+    }
+}
+
+#[cfg(test)]
+mod operations_tests {
+    use threadlane_core::client::LaneTarget;
+    use threadlane_core::ids::{EventId, TaskId};
+
+    use super::*;
+
+    #[test]
+    fn cli_parses_all_operations_without_opening_a_client() {
+        use OperationsRequest::{Lane, Metrics, Replay, Rollback, Trace};
+        for (args, expected_space, expected) in [
+            (
+                &["metrics", "-p", "Build", "-s", "work"][..],
+                Some("work"),
+                Metrics {
+                    project: Some("Build".to_owned()),
+                },
+            ),
+            (&["metrics"][..], None, Metrics { project: None }),
+            (
+                &["lane", "Build"][..],
+                None,
+                Lane {
+                    target: LaneTarget::Lead {
+                        project: Some("Build".to_owned()),
+                    },
+                },
+            ),
+            (
+                &["lane", "t-0042"][..],
+                None,
+                Lane {
+                    target: LaneTarget::Task { task: TaskId(42) },
+                },
+            ),
+            (&["replay", "17"][..], None, Replay { event: EventId(17) }),
+            (
+                &[
+                    "memory",
+                    "rollback",
+                    "project/notes/a.md",
+                    "2",
+                    "-p",
+                    "Build",
+                ][..],
+                None,
+                Rollback {
+                    project: Some("Build".to_owned()),
+                    path: "project/notes/a.md".to_owned(),
+                    version: 2,
+                },
+            ),
+            (
+                &["trace", "event-17"][..],
+                None,
+                Trace {
+                    id: "event-17".to_owned(),
+                },
+            ),
+        ] {
+            let parsed =
+                Cli::try_parse_from(std::iter::once("threadlane").chain(args.iter().copied()))
+                    .unwrap();
+            let Command::Operations(command) = parsed.command else {
+                panic!("expected operations command for {args:?}");
+            };
+            let (space, request) = operations_request(command);
+            assert_eq!(space.as_deref(), expected_space, "{args:?}");
+            assert_eq!(request, expected, "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["threadlane", "replay", "0"]).is_err());
+        assert!(Cli::try_parse_from(["threadlane", "memory", "rollback", "a", "0"]).is_err());
     }
 }

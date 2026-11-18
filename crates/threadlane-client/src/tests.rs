@@ -164,6 +164,7 @@ fn item(seq: i64, kind: OutboxKind, project: Option<&str>, text: &str) -> FeedIt
         digest: Vec::new(),
         seq,
         message: OutboxMessage {
+            trace_id: None,
             id: OutboxId(seq),
             project_id: project.map(|_| ProjectId(1)),
             lane_id: None,

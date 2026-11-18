@@ -19,13 +19,14 @@ use crate::session::NOTICE_CHANNEL;
 
 /// Key prefix of the account notices: `system:account:<n>:blocked`, then
 /// `system:account:<n>:resumed`, for the n-th time the space was blocked.
-const ACCOUNT_NOTICE: &str = "system:account:";
+pub(crate) const ACCOUNT_NOTICE: &str = "system:account:";
 
-const OUTBOX_FIELDS: &str = "id, project_id, lane_id, session_id, run_id, tool_call_id, kind,
+pub(crate) const OUTBOX_FIELDS: &str =
+    "id, project_id, lane_id, session_id, run_id, tool_call_id, kind,
     decision_id, channel, body, urgency, status, not_before, attempts, channel_message_id,
-    created_at, sent_at, delivery_seq";
+    created_at, sent_at, delivery_seq, trace_id";
 
-fn decode_message(row: &Row) -> StoreResult<OutboxMessage> {
+pub(crate) fn decode_message(row: &Row) -> StoreResult<OutboxMessage> {
     let c = Cols(row);
     Ok(OutboxMessage {
         id: c.id(0)?,
@@ -46,6 +47,7 @@ fn decode_message(row: &Row) -> StoreResult<OutboxMessage> {
         created_at: c.ts(15)?,
         sent_at: c.opt_ts(16)?,
         delivery_seq: c.opt_i64(17)?,
+        trace_id: c.opt_text(18)?,
     })
 }
 
@@ -64,22 +66,19 @@ async fn adopt(
     if new_run == old_run {
         return Ok(existing);
     }
-    let changed = exec(
+    let changed = query_opt(
         conn,
-        "UPDATE outbox SET run_id = ?1
+        &format!(
+            "UPDATE outbox SET run_id = ?1, trace_id = (SELECT trace_id FROM runs WHERE id = ?1)
          WHERE id = ?2
-           AND NOT EXISTS (SELECT 1 FROM runs WHERE id = ?3 AND status = 'committed')",
+           AND NOT EXISTS (SELECT 1 FROM runs WHERE id = ?3 AND status = 'committed')
+         RETURNING {OUTBOX_FIELDS}"
+        ),
         params![new_run.get(), existing.id.get(), old_run.get()],
+        decode_message,
     )
     .await?;
-    Ok(if changed == 1 {
-        OutboxMessage {
-            run_id: Some(new_run),
-            ..existing
-        }
-    } else {
-        existing
-    })
+    Ok(changed.unwrap_or(existing))
 }
 
 /// Queues a message inside the caller's transaction. A repeated
@@ -104,8 +103,8 @@ pub(crate) async fn enqueue_in(
         conn,
         &format!(
             "INSERT INTO outbox (project_id, lane_id, session_id, run_id, tool_call_id, kind,
-                 decision_id, channel, body, urgency, status, not_before, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12)
+                 decision_id, channel, body, urgency, status, not_before, created_at, trace_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12, (SELECT trace_id FROM runs WHERE id = ?4))
              RETURNING {OUTBOX_FIELDS}"
         ),
         params![

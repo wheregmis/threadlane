@@ -14,6 +14,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0005_standing_rule_uses.sql"),
     include_str!("../migrations/0006_permissions.sql"),
     include_str!("../migrations/0007_delivery.sql"),
+    include_str!("../migrations/0008_operations.sql"),
 ];
 
 /// The schema version this build expects.

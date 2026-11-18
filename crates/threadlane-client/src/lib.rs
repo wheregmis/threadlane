@@ -1856,3 +1856,21 @@ impl ClientCore {
         }
     }
 }
+
+impl ClientCore {
+    /// Reads operational history or performs an owner repair on one paired hub.
+    ///
+    /// # Errors
+    ///
+    /// The hub could not be selected or the operation failed.
+    pub async fn operations(
+        &self,
+        space: Option<&str>,
+        request: threadlane_core::client::OperationsRequest,
+    ) -> Result<threadlane_core::client::OperationsReply, ClientError> {
+        let (space, api) = self.target(space)?;
+        api.operations(request)
+            .await
+            .map_err(|error| api_error(&space, error))
+    }
+}

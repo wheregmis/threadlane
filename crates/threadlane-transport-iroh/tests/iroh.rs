@@ -177,6 +177,7 @@ fn item(seq: i64) -> FeedItem {
         digest: Vec::new(),
         seq,
         message: OutboxMessage {
+            trace_id: None,
             id: OutboxId(seq),
             project_id: Some(ProjectId(1)),
             lane_id: None,

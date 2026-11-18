@@ -653,6 +653,12 @@ pub trait HubApi: Send + Sync + fmt::Debug {
     async fn memory(&self, request: MemoryRequest) -> Result<MemoryReply, ApiError>;
     /// Creates a task of yours directly, or cancels a task.
     async fn tasks(&self, request: TaskRequest) -> Result<TaskReply, ApiError>;
+    /// Reads operational records and performs explicit owner repairs.
+    async fn operations(&self, request: OperationsRequest) -> Result<OperationsReply, ApiError> {
+        Err(ApiError::Invalid(format!(
+            "operations are not offered here: {request:?}"
+        )))
+    }
 }
 
 /// [`HubApi`] as it crosses a transport.
@@ -671,6 +677,7 @@ pub enum ClientRequest {
     Timers { request: TimerRequest },
     Memory { request: MemoryRequest },
     Tasks { request: TaskRequest },
+    Operations { request: OperationsRequest },
 }
 
 /// The answer to a [`ClientRequest`].
@@ -694,6 +701,7 @@ pub enum ClientResponse {
     Error { error: ApiError },
     Timers { reply: TimerReply },
     Tasks { reply: TaskReply },
+    Operations { reply: OperationsReply },
 }
 
 /// Answers one request from an API. Shared by every transport's server side.
@@ -740,6 +748,10 @@ pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientRespons
             .tasks(request)
             .await
             .map(|reply| ClientResponse::Tasks { reply }),
+        ClientRequest::Operations { request } => api
+            .operations(request)
+            .await
+            .map(|reply| ClientResponse::Operations { reply }),
     };
     result.unwrap_or_else(|error| ClientResponse::Error { error })
 }
@@ -820,4 +832,144 @@ pub enum TaskRequest {
 pub enum TaskReply {
     /// The task as it now stands.
     Task { task: Task },
+}
+
+/// Read the hub's operational history or perform an owner repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OperationsRequest {
+    /// Read a space snapshot, optionally restricted to one project's records.
+    Metrics { project: Option<String> },
+    /// Inspect a lead lane by project name or a task lane by task ID.
+    Lane { target: LaneTarget },
+    /// Return a dead event to its lane once.
+    Replay { event: EventId },
+    /// Restore an earlier memory version as a new owner-authored version.
+    Rollback {
+        project: Option<String>,
+        path: String,
+        version: i64,
+    },
+    /// Read the records carrying this trace ID.
+    Trace { id: String },
+}
+
+/// The answer to an operations request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OperationsReply {
+    /// The snapshot at the hub's current time.
+    Metrics { metrics: Box<OperationsMetrics> },
+    /// Lease and history of the selected lane.
+    Lane { lane: Box<LaneInspection> },
+    /// The event after its status and attempts were reset.
+    Replayed { event: crate::model::Event },
+    /// The newly written version.
+    RolledBack { file: MemoryFile },
+    /// The records carrying the requested ID.
+    Trace { trace: TraceInspection },
+}
+
+/// Latency in milliseconds across all matching historical records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Latency {
+    /// Number of observations.
+    pub count: i64,
+    /// Arithmetic mean, absent for an empty sample.
+    pub mean_ms: Option<f64>,
+    /// Maximum, absent for an empty sample.
+    pub max_ms: Option<i64>,
+}
+
+/// A requested snapshot of the hub's operational metrics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperationsMetrics {
+    /// Time used for ages, cooldowns, and the rolling day.
+    pub at: Timestamp,
+    /// Age of the oldest pending event per lane with pending work.
+    pub lane_lag_ms: BTreeMap<crate::ids::LaneId, i64>,
+    /// Pending events across all lanes of each included project, including zeros.
+    pub queue_depth: BTreeMap<String, i64>,
+    /// Time from start to end for every ended run.
+    pub run_duration: Latency,
+    /// Accounts currently cooling down, with their reset times.
+    pub account_cooldowns: BTreeMap<String, Timestamp>,
+    /// Space-wide elapsed time from recorded account-blocked notices to
+    /// their matching resumed notices, or to the snapshot for an open interval.
+    pub account_wait_ms: i64,
+    /// Events currently dead.
+    pub dead_events: i64,
+    /// Time from due to fired for each recorded timer occurrence.
+    pub timer_lateness: Latency,
+    /// Age of the oldest pending or retrying outbox row, absent if none.
+    pub outbox_lag_ms: Option<i64>,
+    /// Ordinary outbox messages delivered per UTC date (YYYY-MM-DD).
+    pub messages_per_day: BTreeMap<String, i64>,
+    /// Silent committed runs divided by all committed runs, absent if none.
+    pub silent_run_ratio: Option<f64>,
+    /// Decisions created in the rolling 24 hours up to the snapshot.
+    pub decisions_per_day: i64,
+    /// Time from creation to answer for decisions with status answered.
+    pub answer_latency: Latency,
+    /// Standing rules ever created, including revoked rules.
+    pub standing_rules_created: i64,
+}
+
+/// Operational records for a lane, oldest first by row ID.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LaneInspection {
+    /// Lane record, including its lease owner, expiry and epoch.
+    pub lane: crate::model::Lane,
+    /// All accepted events and their current state.
+    pub events: Vec<crate::model::Event>,
+    /// All sessions in the lane.
+    pub sessions: Vec<crate::model::Session>,
+    /// All runs in the lane.
+    pub runs: Vec<Run>,
+    /// Decisions still waiting for an answer.
+    pub open_decisions: Vec<Decision>,
+    /// Timers belonging to the lane.
+    pub timers: Vec<Timer>,
+}
+
+/// One stored tool call in a trace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TracedToolCall {
+    /// The run that started the call.
+    pub run_id: crate::ids::RunId,
+    /// Idempotency key within that run.
+    pub key: String,
+    /// Name of the system tool.
+    pub tool: String,
+    /// The arguments supplied to the tool.
+    pub arguments: serde_json::Value,
+    /// Whether the call has finished.
+    pub status: crate::model::ToolCallStatus,
+    /// Recorded result, when available.
+    pub result: Option<serde_json::Value>,
+    /// When the call started.
+    pub started_at: Timestamp,
+    /// When its result was recorded.
+    pub finished_at: Option<Timestamp>,
+    /// Trace inherited from the run.
+    pub trace_id: String,
+}
+
+/// All records carrying a trace ID, oldest first by row ID.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceInspection {
+    /// The requested trace ID.
+    pub id: String,
+    /// Events that originated this trace.
+    pub events: Vec<crate::model::Event>,
+    /// Runs that inherited this trace.
+    pub runs: Vec<Run>,
+    /// Calls made by those runs.
+    pub tool_calls: Vec<TracedToolCall>,
+    /// Decisions opened by those runs.
+    pub decisions: Vec<Decision>,
+    /// Outbox rows attributed to those runs.
+    pub outbox: Vec<OutboxMessage>,
 }

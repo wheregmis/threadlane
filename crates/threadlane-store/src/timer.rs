@@ -19,11 +19,12 @@ use crate::row::{Cols, json_text, opt_raw, params};
 /// Source name of `timer_fired` events.
 pub const TIMER_SOURCE: &str = "timer";
 
-const TIMER_FIELDS: &str = "id, project_id, lane_id, agent_id, task_ref, category, due_at,
+pub(crate) const TIMER_FIELDS: &str =
+    "id, project_id, lane_id, agent_id, task_ref, category, due_at,
     recurrence, instruction, status, created_by, created_by_call, last_fired_at, fire_count,
     requested";
 
-fn decode_timer(row: &Row) -> StoreResult<Timer> {
+pub(crate) fn decode_timer(row: &Row) -> StoreResult<Timer> {
     let c = Cols(row);
     Ok(Timer {
         id: c.id(0)?,

@@ -581,6 +581,9 @@ pub struct Event {
     pub received_at: Timestamp,
     /// Why it was skipped or died, if it was.
     pub status_reason: Option<String>,
+    /// The trace assigned when this event was accepted.
+    #[serde(default)]
+    pub trace_id: String,
 }
 
 /// Result of inserting an event. A duplicate is a successful no-op (Plan.md §6.3).
@@ -667,6 +670,9 @@ pub struct Run {
     pub error: Option<String>,
     pub started_at: Timestamp,
     pub ended_at: Option<Timestamp>,
+    /// The trace of the oldest event that triggered this run.
+    #[serde(default)]
+    pub trace_id: String,
 }
 
 /// How a failed run's events are retried (Plan.md §4.9).
@@ -1002,6 +1008,9 @@ pub struct Decision {
     /// The asking run's agent, when an open proposal is listed for the client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_by: Option<String>,
+    /// The asking run’s trace, when a run opened this decision.
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 impl Decision {
@@ -1143,6 +1152,9 @@ pub struct OutboxMessage {
     /// client's feed cursor; ids are not used because pacing can deliver a
     /// later message first.
     pub delivery_seq: Option<i64>,
+    /// The sending run’s trace, when this row belongs to a run.
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 impl OutboxMessage {

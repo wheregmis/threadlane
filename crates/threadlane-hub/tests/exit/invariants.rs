@@ -174,6 +174,9 @@ pub async fn assert_one_task_per_create_task_call(sim: &Sim, scenario: &str) {
             .created_by_call
             .clone()
             .unwrap_or_else(|| panic!("{scenario}: task {} names no call", task.id));
+        if task.origin == threadlane_core::model::TaskOrigin::User && key.starts_with("client:") {
+            continue;
+        }
         // `s<session>:<call id>`, or `r<run>:<derived key>` without a call id.
         let (scope, id) = key
             .split_once(':')

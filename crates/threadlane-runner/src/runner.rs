@@ -28,7 +28,7 @@ use threadlane_core::time::{Clock, Timestamp};
 use threadlane_core::workspace::{Workspaces, task_branch};
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::config::RunnerConfig;
 use crate::error::RunnerError;
@@ -302,7 +302,8 @@ impl Inner {
                 break;
             };
             self.reach(AFTER_START_RUN)?;
-            if self.execute(lane, &assignment).await? == AfterRun::Release {
+            let span = info_span!("run", run = %assignment.run_id, trace_id = %assignment.trace_id);
+            if self.execute(lane, &assignment).instrument(span).await? == AfterRun::Release {
                 break;
             }
         }

@@ -220,6 +220,49 @@ async fn reindex_in(conn: &Connection, by: Stamp<'_>, paths: &[&str]) -> StoreRe
     Ok(())
 }
 
+async fn write_owner_in(
+    conn: &Connection,
+    path: &str,
+    content: &str,
+    at: Timestamp,
+) -> StoreResult<MemoryFile> {
+    checked(path, content)?;
+    let by = Stamp::owner(at);
+    let file = write_version(conn, by, path, content, false).await?;
+    reindex_in(conn, by, &[path]).await?;
+    Ok(file)
+}
+
+impl HubDb {
+    /// Appends an older version's content as a new version under today's owner write rules.
+    pub async fn rollback_memory(
+        &self,
+        path: &str,
+        version: i64,
+        at: Timestamp,
+    ) -> StoreResult<MemoryFile> {
+        validate_path(path)?;
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let previous = query_opt(
+            conn,
+            &format!("SELECT {VERSION_FIELDS} FROM memory_versions v WHERE v.path = ?1 AND v.version = ?2"),
+            params![path, version],
+            decode_file,
+        )
+        .await?
+        .ok_or_else(|| StoreError::not_found("memory version", version))?;
+        if previous.deleted {
+            return Err(StoreError::Invalid(format!(
+                "version {version} is a deletion"
+            )));
+        }
+        let file = write_owner_in(conn, path, &previous.content, at).await?;
+        tx.commit().await?;
+        Ok(file)
+    }
+}
+
 #[async_trait]
 impl MemoryStore for HubDb {
     async fn read(&self, path: &str) -> StoreResult<Option<MemoryFile>> {
@@ -328,12 +371,8 @@ impl MemoryStore for HubDb {
         content: &str,
         at: Timestamp,
     ) -> StoreResult<MemoryFile> {
-        checked(path, content)?;
         let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        let by = Stamp::owner(at);
-        let file = write_version(conn, by, path, content, false).await?;
-        reindex_in(conn, by, &[path]).await?;
+        let file = write_owner_in(tx.conn(), path, content, at).await?;
         tx.commit().await?;
         Ok(file)
     }

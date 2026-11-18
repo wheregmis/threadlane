@@ -56,6 +56,7 @@ pub fn send_message_tool() -> ToolDefinition {
 pub fn assignment(run: i64) -> RunAssignment {
     RunAssignment {
         run_id: RunId(run),
+        trace_id: format!("event-{}", 1000 + run),
         session_id: SessionId(100 + run),
         project_id: ProjectId(1),
         lane_kind: LaneKind::Lead,
@@ -84,6 +85,7 @@ pub fn run(assignment: RunAssignment) -> Begin {
 
 pub fn event(kind: EventKind) -> Event {
     Event {
+        trace_id: String::new(),
         id: EventId(1),
         project_id: ProjectId(1),
         lane_id: LaneId(LANE),

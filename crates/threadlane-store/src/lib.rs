@@ -192,3 +192,5 @@ impl HubDb {
         }))
     }
 }
+
+mod operations;

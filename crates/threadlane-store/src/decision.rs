@@ -27,11 +27,11 @@ pub const DECISION_SOURCE: &str = "decision";
 /// The note of a decision that expired (docs/milestone-9.md decision 8).
 pub const NO_RESPONSE: &str = "no response";
 
-const DECISION_FIELDS: &str = "id, project_id, lane_id, task_id, session_id, run_id,
+pub(crate) const DECISION_FIELDS: &str = "id, project_id, lane_id, task_id, session_id, run_id,
     tool_call_id, tool, arguments, arguments_hash, kind, question, context, options,
-    recommended, offers_standing_rule, status, answer, expires_at, created_at, outcome";
+    recommended, offers_standing_rule, status, answer, expires_at, created_at, outcome, trace_id";
 
-fn decode_decision(row: &Row) -> StoreResult<Decision> {
+pub(crate) fn decode_decision(row: &Row) -> StoreResult<Decision> {
     let c = Cols(row);
     Ok(Decision {
         id: c.id(0)?,
@@ -56,6 +56,7 @@ fn decode_decision(row: &Row) -> StoreResult<Decision> {
         created_at: c.ts(19)?,
         outcome: c.opt_json(20)?,
         proposed_by: None,
+        trace_id: c.opt_text(21)?,
     })
 }
 
@@ -420,9 +421,9 @@ async fn insert_decision_in(
         &format!(
             "INSERT INTO decisions (project_id, lane_id, task_id, session_id, run_id,
                  tool_call_id, tool, arguments, arguments_hash, kind, question, context,
-                 options, recommended, offers_standing_rule, status, expires_at, created_at)
+                 options, recommended, offers_standing_rule, status, expires_at, created_at, trace_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                 'pending', ?16, ?17)
+                 'pending', ?16, ?17, (SELECT trace_id FROM runs WHERE id = ?5))
              RETURNING {DECISION_FIELDS}"
         ),
         params![

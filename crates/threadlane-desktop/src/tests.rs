@@ -675,6 +675,7 @@ fn decision(id: i64, created_at: i64) -> Decision {
         effect: json!({ "approve": approve }),
     };
     Decision {
+        trace_id: None,
         id: DecisionId(id),
         project_id: ProjectId(1),
         lane_id: LaneId(1),
@@ -705,6 +706,7 @@ fn feed_item(seq: i64, kind: OutboxKind, body: Json, at: i64) -> FeedItem {
         digest: Vec::new(),
         seq,
         message: OutboxMessage {
+            trace_id: None,
             id: OutboxId(seq),
             project_id: Some(ProjectId(1)),
             lane_id: None,
@@ -1256,6 +1258,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
     summary.task.result = Some(json!({ "summary": "Refunds are idempotent." }));
     let run = |id, started, ended, status, outcome| RunSummary {
         run: Run {
+            trace_id: String::new(),
             id: RunId(id),
             lane_id: LaneId(17),
             session_id: SessionId(1),
@@ -2203,6 +2206,7 @@ fn every_tab_is_selected_where_it_is_shown() {
 fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
     let run = |id, started: i64, ended: Option<i64>| RunSummary {
         run: Run {
+            trace_id: String::new(),
             id: RunId(id),
             lane_id: LaneId(17),
             session_id: SessionId(1),
@@ -3346,6 +3350,7 @@ async fn quiet_lead_runs_group_in_chronological_order_and_reveal_why() {
     .map(|(id, minutes, rationale, outcome)| LeadRun {
         sent_message: outcome == Some(RunOutcome::Sent),
         run: Run {
+            trace_id: String::new(),
             id: RunId(id),
             lane_id: LaneId(1),
             session_id: SessionId(1),
@@ -3440,6 +3445,7 @@ async fn running_elapsed_advances_on_home_and_the_task_without_reloading() {
     *work.task_runs.lock().unwrap() = vec![RunSummary {
         machine: "hub".to_owned(),
         run: Run {
+            trace_id: String::new(),
             id: RunId(1),
             lane_id: running.task.lane_id,
             session_id: SessionId(1),
@@ -3526,6 +3532,7 @@ async fn stage_b_stops_running_lanes_and_sending_a_message_resumes_them() {
         .unwrap()
         .push(task(7, TaskStatus::Running, None));
     let stopped_run = Run {
+        trace_id: String::new(),
         id: RunId(1),
         lane_id: LaneId(1),
         session_id: SessionId(1),

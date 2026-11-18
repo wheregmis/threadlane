@@ -25,10 +25,11 @@ use crate::task;
 /// Channel that system notices about dead work in a lead lane go to.
 pub(crate) const NOTICE_CHANNEL: &str = "client";
 
-const SESSION_FIELDS: &str = "id, lane_id, agent_id, backend, native_session_id, machine_id,
+pub(crate) const SESSION_FIELDS: &str =
+    "id, lane_id, agent_id, backend, native_session_id, machine_id,
     status, created_at, last_active_at";
 
-fn decode_session(row: &Row) -> StoreResult<Session> {
+pub(crate) fn decode_session(row: &Row) -> StoreResult<Session> {
     let c = Cols(row);
     Ok(Session {
         id: c.id(0)?,
@@ -43,10 +44,11 @@ fn decode_session(row: &Row) -> StoreResult<Session> {
     })
 }
 
-const RUN_FIELDS: &str = "id, lane_id, session_id, machine_id, lease_epoch, agent_id, backend,
-    status, outcome, rationale, error, started_at, ended_at";
+pub(crate) const RUN_FIELDS: &str =
+    "id, lane_id, session_id, machine_id, lease_epoch, agent_id, backend,
+    status, outcome, rationale, error, started_at, ended_at, trace_id";
 
-fn decode_run(row: &Row) -> StoreResult<Run> {
+pub(crate) fn decode_run(row: &Row) -> StoreResult<Run> {
     let c = Cols(row);
     Ok(Run {
         id: c.id(0)?,
@@ -62,6 +64,7 @@ fn decode_run(row: &Row) -> StoreResult<Run> {
         error: c.opt_text(10)?,
         started_at: c.ts(11)?,
         ended_at: c.opt_ts(12)?,
+        trace_id: c.text(13)?,
     })
 }
 
@@ -275,12 +278,10 @@ impl SessionStore for HubDb {
             }
         };
 
-        let run = query_one(
+        let run_id: RunId = query_one(
             conn,
-            &format!(
-                "INSERT INTO runs (lane_id, session_id, machine_id, lease_epoch, agent_id, backend, status, started_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7) RETURNING {RUN_FIELDS}"
-            ),
+            "INSERT INTO runs (lane_id, session_id, machine_id, lease_epoch, agent_id, backend, status, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7) RETURNING id",
             params![
                 lease.lane_id.get(),
                 session_id.get(),
@@ -290,11 +291,23 @@ impl SessionStore for HubDb {
                 start.backend.map(|backend| backend.as_str()),
                 now,
             ],
-            decode_run,
+            |row| Cols(row).id(0),
         )
         .await?;
 
-        claim_events(conn, lease.lane_id, run.id, &start.events).await?;
+        claim_events(conn, lease.lane_id, run_id, &start.events).await?;
+        let run = query_one(
+            conn,
+            &format!(
+                "UPDATE runs SET trace_id = (
+                    SELECT e.trace_id FROM run_events re JOIN events e ON e.id = re.event_id
+                    WHERE re.run_id = ?1 ORDER BY e.received_at, e.id LIMIT 1
+                 ) WHERE id = ?1 RETURNING {RUN_FIELDS}"
+            ),
+            params![run_id.get()],
+            decode_run,
+        )
+        .await?;
         task::on_run_started(conn, lease.lane_id, lease.machine_id).await?;
         tx.commit().await?;
         Ok(run)
@@ -462,7 +475,7 @@ impl SessionStore for HubDb {
         let conn = tx.conn();
         check_lease(conn, lease).await?;
         check_running(conn, lease).await?;
-        active_run(conn, lease, key.run_id).await?;
+        let run = active_run(conn, lease, key.run_id).await?;
         let existing = query_opt(
             conn,
             "SELECT status, result, safe_to_repeat, tool, arguments FROM tool_calls WHERE run_id = ?1 AND call_key = ?2",
@@ -485,8 +498,8 @@ impl SessionStore for HubDb {
             None => {
                 exec(
                     conn,
-                    "INSERT INTO tool_calls (run_id, call_key, tool, arguments, safe_to_repeat, status, started_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'started', ?6)",
+                    "INSERT INTO tool_calls (run_id, call_key, tool, arguments, safe_to_repeat, status, started_at, trace_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'started', ?6, ?7)",
                     params![
                         key.run_id.get(),
                         key.key.as_str(),
@@ -494,6 +507,7 @@ impl SessionStore for HubDb {
                         json_text(arguments)?,
                         safe_to_repeat,
                         now.as_millis(),
+                        run.trace_id.as_str(),
                     ],
                 )
                 .await?;

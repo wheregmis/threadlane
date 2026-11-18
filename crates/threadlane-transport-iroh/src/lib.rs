@@ -34,7 +34,9 @@ use threadlane_core::client::{
     HubApi, HubInfo, MemoryReply, MemoryRequest, OrgReply, OrgRequest, OverviewReply,
     OverviewRequest, PairingReply, PairingRequest, ProjectSummary, UserMessage, dispatch,
 };
-use threadlane_core::client::{TaskReply, TaskRequest, TimerReply, TimerRequest};
+use threadlane_core::client::{
+    OperationsReply, OperationsRequest, TaskReply, TaskRequest, TimerReply, TimerRequest,
+};
 use threadlane_transport_local::{MAX_FEED_WAIT, cap_wait, encode, unexpected};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -834,6 +836,16 @@ impl HubApi for IrohClient {
         {
             ClientResponse::Tasks { reply } => Ok(reply),
             other => Err(unexpected(other, "tasks")),
+        }
+    }
+
+    async fn operations(&self, request: OperationsRequest) -> Result<OperationsReply, ApiError> {
+        match self
+            .call(&ClientRequest::Operations { request }, REQUEST_TIMEOUT)
+            .await?
+        {
+            ClientResponse::Operations { reply } => Ok(reply),
+            other => Err(unexpected(other, "operations")),
         }
     }
 }

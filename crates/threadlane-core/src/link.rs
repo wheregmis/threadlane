@@ -66,6 +66,9 @@ pub struct RunAssignment {
     pub deny_rules: Vec<String>,
     pub wall_time_limit: Duration,
     pub max_turns: Option<u32>,
+    /// The run's durable trace ID, for correlation with hub records.
+    #[serde(default)]
+    pub trace_id: String,
 }
 
 /// The hub's answer to [`HubLink::begin_run`].

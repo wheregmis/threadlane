@@ -20,7 +20,7 @@ use crate::task;
 
 pub(crate) const EVENT_FIELDS: &str = "id, project_id, lane_id, source, source_event_id, kind,
     payload, trust, requested, session_ref, decision_ref, reply_to_ref, status, claimed_by_run,
-    attempts, received_at, status_reason";
+    attempts, received_at, status_reason, trace_id";
 
 pub(crate) fn decode_event(row: &Row) -> StoreResult<Event> {
     let c = Cols(row);
@@ -42,13 +42,14 @@ pub(crate) fn decode_event(row: &Row) -> StoreResult<Event> {
         attempts: c.u32(14)?,
         received_at: c.ts(15)?,
         status_reason: c.opt_text(16)?,
+        trace_id: c.text(17)?,
     })
 }
 
-const LANE_FIELDS: &str = "id, project_id, kind, task_id, lease_owner, lease_expires_at,
+pub(crate) const LANE_FIELDS: &str = "id, project_id, kind, task_id, lease_owner, lease_expires_at,
     lease_epoch, backoff_until, last_machine_id";
 
-fn decode_lane(row: &Row) -> StoreResult<Lane> {
+pub(crate) fn decode_lane(row: &Row) -> StoreResult<Lane> {
     let c = Cols(row);
     Ok(Lane {
         id: c.id(0)?,
@@ -140,6 +141,12 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
             event.received_at.as_millis(),
         ],
         |row| Cols(row).id(0),
+    )
+    .await?;
+    exec(
+        conn,
+        "UPDATE events SET trace_id = 'event-' || id WHERE id = ?1",
+        params![id.get()],
     )
     .await?;
     if event.kind == EventKind::Stop {

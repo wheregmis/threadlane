@@ -781,6 +781,13 @@ impl HubApi for ClientApi {
     async fn tasks(&self, request: TaskRequest) -> Result<TaskReply, ApiError> {
         tasks::handle(self, request).await
     }
+
+    async fn operations(
+        &self,
+        request: threadlane_core::client::OperationsRequest,
+    ) -> Result<threadlane_core::client::OperationsReply, ApiError> {
+        operations::handle(self, request).await
+    }
 }
 
 fn summary(project: Project) -> ProjectSummary {
@@ -855,3 +862,5 @@ impl ClientApi {
         }
     }
 }
+
+mod operations;
