@@ -204,8 +204,14 @@ pub(super) fn work_label(title: String, elapsed: Option<String>, status: Status,
         .gap(XS)
         .min_w_0()
         .child(status_dot(status, cx))
-        .child(div().flex_1().min_w_0().whitespace_normal().child(title))
-        .children(elapsed.map(|elapsed| meta(elapsed, cx).flex_none().text_right()))
+        // The elapsed time goes under the title: beside it, it squeezed a narrow card's title to a few letters.
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().whitespace_normal().child(title))
+                .children(elapsed.map(|elapsed| meta(elapsed, cx))),
+        )
 }
 
 /// The active task's latest step or quiet warning.
