@@ -50,6 +50,7 @@ const MAX_LABEL: usize = 80;
 #[must_use]
 pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
     match tool {
+        crate::dreaming::PROJECT_SESSIONS => false,
         SEND_MESSAGE | UPDATE_TASK | CANCEL_TASK | LIST_TASKS => kind == LaneKind::Lead,
         FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE => {
             kind == LaneKind::Task

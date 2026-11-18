@@ -360,7 +360,7 @@ async fn start_passes_every_option_and_keeps_the_token_off_the_command_line() {
 }
 
 #[tokio::test]
-async fn a_lead_run_is_read_only_without_web_search_or_rules() {
+async fn a_lead_run_is_read_only_and_has_no_local_tools() {
     let fake = Fake::conforming();
     let request = RunRequest {
         remove_builtin_tools: true,
@@ -381,6 +381,23 @@ async fn a_lead_run_is_read_only_without_web_search_or_rules() {
         ]
     );
     assert!(!invocation.iter().any(|arg| arg.starts_with("projects=")));
+    assert!(invocation.iter().any(|arg| arg == "--ignore-user-config"));
+    for tool in [
+        "shell_tool",
+        "unified_exec",
+        "view_image",
+        "apps",
+        "plugins",
+        "multi_agent",
+        "memories",
+    ] {
+        assert!(
+            invocation
+                .windows(2)
+                .any(|pair| pair == ["--disable", tool]),
+            "{tool}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -111,7 +111,10 @@ impl Launch {
             args.extend(["--output-schema".into(), schema.display().to_string()]);
         }
         if self.ephemeral {
-            args.extend(["--ephemeral".into(), "--ignore-user-config".into()]);
+            args.push("--ephemeral".into());
+        }
+        if self.read_only || self.ephemeral {
+            args.push("--ignore-user-config".into());
             for feature in [
                 "shell_tool",
                 "unified_exec",
@@ -119,6 +122,7 @@ impl Launch {
                 "apps",
                 "plugins",
                 "multi_agent",
+                "memories",
             ] {
                 args.extend(["--disable".into(), feature.into()]);
             }

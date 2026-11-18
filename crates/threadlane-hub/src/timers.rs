@@ -224,7 +224,10 @@ pub(crate) async fn execute(
                 .timer(id)
                 .await
                 .map_err(tool_error)?
-                .filter(|timer| timer.project_id == context.project_id)
+                .filter(|timer| {
+                    timer.project_id == context.project_id
+                        && timer.created_by != TimerCreator::System
+                })
                 .ok_or_else(|| ToolError::InvalidArguments(format!("no timer {id} here")))?;
             if timer.created_by == TimerCreator::User {
                 return Err(ToolError::InvalidArguments(format!(
@@ -443,7 +446,7 @@ impl HubCore {
         let mut lanes = BTreeSet::new();
         for timer in due {
             let next = match &timer.recurrence {
-                Some(recurrence) if timer.category == TimerCategory::Schedule => {
+                Some(recurrence) if timer.category != TimerCategory::FollowUp => {
                     match next_occurrence(recurrence, timer.due_at, now) {
                         Ok(next) => Some(next),
                         Err(error) => {
@@ -483,6 +486,7 @@ async fn timer(db: &HubDb, id: TimerId) -> Result<Timer, ApiError> {
     db.timer(id)
         .await
         .map_err(api_error)?
+        .filter(|timer| timer.category != TimerCategory::Dreaming)
         .ok_or_else(|| ApiError::NotFound(format!("timer {id}")))
 }
 
@@ -553,9 +557,12 @@ pub(crate) async fn handle(core: &HubCore, request: TimerRequest) -> Result<Time
                 .map_err(api_error)?;
             Ok(TimerReply::Timer { timer })
         }
-        TimerRequest::Pause { timer: id } => Ok(TimerReply::Timer {
-            timer: db.pause_timer(id).await.map_err(ended)?,
-        }),
+        TimerRequest::Pause { timer: id } => {
+            timer(db, id).await?;
+            Ok(TimerReply::Timer {
+                timer: db.pause_timer(id).await.map_err(ended)?,
+            })
+        }
         TimerRequest::Resume { timer: id } => {
             let current = timer(db, id).await?;
             let now = inner.clock.now();

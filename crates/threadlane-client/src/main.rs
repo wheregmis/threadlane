@@ -255,6 +255,18 @@ enum Command {
     Resume(LaneArgs),
     #[command(flatten)]
     Operations(OperationsCommand),
+    /// Set the project's dreaming cadence.
+    Dreaming {
+        /// off, daily HH:MM, or every Nh.
+        #[arg(required = true, num_args = 1..=2)]
+        cadence: Vec<String>,
+        /// The space (paired hub name).
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project, or General if left out.
+        #[arg(short, long)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -875,6 +887,15 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
             let reply = core.operations(space.as_deref(), request).await?;
             println!("{}", serde_json::to_string_pretty(&reply)?);
         }
+        Command::Dreaming {
+            cadence,
+            space,
+            project,
+        } => {
+            let request = dreaming_request(&cadence, project, local_zone)?;
+            let reply = core.memory(space.as_deref(), request).await?;
+            println!("{}", serde_json::to_string_pretty(&reply)?);
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1177,6 +1198,15 @@ enum MemoryCommand {
         #[arg(short, long)]
         project: Option<String>,
     },
+    /// Find duplicate notes and stale references.
+    Check {
+        /// The space (paired hub name).
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The project, or General if left out.
+        #[arg(short, long)]
+        project: Option<String>,
+    },
 }
 
 fn operations_request(command: OperationsCommand) -> (Option<String>, OperationsRequest) {
@@ -1223,6 +1253,9 @@ fn operations_request(command: OperationsCommand) -> (Option<String>, Operations
             },
         ),
         OperationsCommand::Trace { id, space } => (space, OperationsRequest::Trace { id }),
+        OperationsCommand::Memory {
+            command: MemoryCommand::Check { space, project },
+        } => (space, OperationsRequest::CheckMemory { project }),
     }
 }
 
@@ -1298,5 +1331,95 @@ mod operations_tests {
         }
         assert!(Cli::try_parse_from(["threadlane", "replay", "0"]).is_err());
         assert!(Cli::try_parse_from(["threadlane", "memory", "rollback", "a", "0"]).is_err());
+    }
+}
+
+fn dreaming_request(
+    args: &[String],
+    project: Option<String>,
+    zone: impl FnOnce() -> Option<String>,
+) -> anyhow::Result<threadlane_core::client::MemoryRequest> {
+    use threadlane_core::client::MemoryRequest;
+
+    let cadence = threadlane_client::parse_dreaming_cadence(
+        &args.join(" "),
+        &zone().unwrap_or_else(|| "UTC".to_owned()),
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok(MemoryRequest::SetDreaming { project, cadence })
+}
+
+#[cfg(test)]
+mod dreaming_cli_tests {
+    use super::*;
+    use threadlane_core::client::MemoryRequest;
+
+    #[test]
+    fn parses_dreaming_and_memory_check_without_contacting_a_hub() {
+        for (words, expected) in [
+            (&["off"][..], None),
+            (
+                &["daily", "07:30"][..],
+                Some(Recurrence {
+                    rule: Rule::Daily {
+                        hour: 7,
+                        minute: 30,
+                    },
+                    zone: "America/Toronto".into(),
+                }),
+            ),
+            (
+                &["every", "8h"][..],
+                Some(Recurrence {
+                    rule: Rule::Interval { minutes: 480 },
+                    zone: "UTC".into(),
+                }),
+            ),
+        ] {
+            let parsed = Cli::try_parse_from(
+                ["threadlane", "dreaming"]
+                    .into_iter()
+                    .chain(words.iter().copied())
+                    .chain(["-p", "Build"]),
+            )
+            .unwrap();
+            let Command::Dreaming {
+                cadence, project, ..
+            } = parsed.command
+            else {
+                panic!("wrong command")
+            };
+            assert_eq!(
+                dreaming_request(&cadence, project, || Some("America/Toronto".into())).unwrap(),
+                MemoryRequest::SetDreaming {
+                    project: Some("Build".into()),
+                    cadence: expected
+                }
+            );
+        }
+        for bad in [
+            ["daily", "24:00"],
+            ["daily", "7:20"],
+            ["every", "0h"],
+            ["every", "20m"],
+            ["every", "4294967295h"],
+        ] {
+            assert!(dreaming_request(&bad.map(str::to_owned), None, || None).is_err());
+        }
+        let parsed =
+            Cli::try_parse_from(["threadlane", "memory", "check", "-p", "Build", "-s", "work"])
+                .unwrap();
+        let Command::Operations(command) = parsed.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(
+            operations_request(command),
+            (
+                Some("work".into()),
+                OperationsRequest::CheckMemory {
+                    project: Some("Build".into())
+                }
+            )
+        );
     }
 }

@@ -12,6 +12,7 @@
 mod admission;
 mod db;
 mod decision;
+mod dreaming;
 mod inbox;
 mod machine;
 mod memory;

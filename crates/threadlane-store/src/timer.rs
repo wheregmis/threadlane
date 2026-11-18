@@ -103,7 +103,7 @@ async fn set_status(
 /// Creates a timer inside the caller's transaction; a repeated
 /// `created_by_call` returns the original.
 pub(crate) async fn insert_timer_in(conn: &Connection, timer: &NewTimer) -> StoreResult<Timer> {
-    if timer.category == TimerCategory::Schedule && timer.recurrence.is_none() {
+    if timer.category != TimerCategory::FollowUp && timer.recurrence.is_none() {
         return Err(StoreError::Invalid("a schedule needs a recurrence".into()));
     }
     if let Some(call) = &timer.created_by_call {
@@ -221,6 +221,8 @@ impl TimerStore for HubDb {
             tx.commit().await?;
             return Ok(inserted);
         }
+        let dreaming =
+            timer.category == TimerCategory::Dreaming && timer.created_by == TimerCreator::System;
         match timer.category {
             TimerCategory::FollowUp => {
                 exec(
@@ -231,7 +233,7 @@ impl TimerStore for HubDb {
                 )
                 .await?;
             }
-            TimerCategory::Schedule => {
+            TimerCategory::Schedule | TimerCategory::Dreaming => {
                 let next = next_due_at.ok_or_else(|| {
                     StoreError::Invalid(format!("schedule {id} fired without a next occurrence"))
                 })?;
@@ -249,6 +251,19 @@ impl TimerStore for HubDb {
                 .await?;
             }
         }
+        if dreaming
+            && let Some(event) = query_opt(
+                conn,
+                "SELECT id FROM events WHERE lane_id = ?1 AND kind = 'dream'
+             AND source = 'timer' AND status = 'pending' LIMIT 1",
+                params![timer.lane_id.get()],
+                |row| Cols(row).id(0),
+            )
+            .await?
+        {
+            tx.commit().await?;
+            return Ok(Inserted::Duplicate(event));
+        }
         let inserted = insert_event_in(
             conn,
             &NewEvent {
@@ -256,7 +271,11 @@ impl TimerStore for HubDb {
                 lane_id: timer.lane_id,
                 source: TIMER_SOURCE.to_owned(),
                 source_event_id,
-                kind: EventKind::TimerFired,
+                kind: if dreaming {
+                    EventKind::Dream
+                } else {
+                    EventKind::TimerFired
+                },
                 payload: json!({
                     "timer_id": id,
                     "category": timer.category,

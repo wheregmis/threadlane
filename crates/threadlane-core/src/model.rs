@@ -126,6 +126,8 @@ str_enum! {
         /// A recorded user interruption, consumed by the hub.
         Stop => "stop",
         System => "system",
+        /// A system schedule asking the lead to curate project memory.
+        Dream => "dream",
     }
 }
 
@@ -277,6 +279,8 @@ str_enum! {
     pub enum TimerCategory {
         FollowUp => "follow_up",
         Schedule => "schedule",
+        /// The project’s system-owned dreaming cadence.
+        Dreaming => "dreaming",
     }
 }
 
@@ -1014,6 +1018,16 @@ pub struct Decision {
 }
 
 impl Decision {
+    /// Whether this is a dream's advisory change to the project instructions.
+    #[must_use]
+    pub fn is_instruction_proposal(&self) -> bool {
+        self.kind == DecisionKind::Proposal
+            && self
+                .options
+                .iter()
+                .any(|option| option.effect["dream_proposal"] == true)
+    }
+
     /// The option the answer chose, if answered.
     #[must_use]
     pub fn chosen(&self) -> Option<&DecisionOption> {

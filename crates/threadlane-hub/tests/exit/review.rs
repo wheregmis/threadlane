@@ -226,7 +226,7 @@ async fn block_returns_the_reason_and_failed_reviews_open_one_card() {
     }
 }
 
-async fn external(sim: &Sim, text: &str) {
+pub(super) async fn external(sim: &Sim, text: &str) {
     let task = sim.task("T-0001").await;
     sim.db()
         .insert_event(&NewEvent {
@@ -247,7 +247,7 @@ async fn external(sim: &Sim, text: &str) {
         .unwrap();
 }
 
-async fn waiting_task() -> World {
+pub(super) async fn waiting_task() -> World {
     let w = publish_world(
         World::new().await,
         Script::new().finish("Waiting for feedback."),

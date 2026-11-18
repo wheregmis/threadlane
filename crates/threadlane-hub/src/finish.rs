@@ -34,9 +34,22 @@ impl LocalLink {
         } else {
             RunOutcome::Silent
         };
+        let dreaming = db
+            .run_events(run_id)
+            .await
+            .map_err(link_error)?
+            .iter()
+            .any(crate::dreaming::is_dream);
+        use threadlane_core::runtime::steps::dreaming as step;
+        if dreaming {
+            inner.hook.reach(step::BEFORE_MARKER)?;
+        }
         db.commit_run(lease, run_id, outcome, final_text, inner.clock.now())
             .await
             .map_err(link_error)?;
+        if dreaming {
+            inner.hook.reach(step::AFTER_MARKER)?;
+        }
         if lane.kind == LaneKind::Task {
             // A finished task's result waits in the lead lane, and its
             // dependents and its parallel slot may now be free.

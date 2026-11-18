@@ -52,6 +52,9 @@ struct FakeHub {
     bindings: Mutex<Vec<BindingSummary>>,
     memory: Mutex<Vec<MemoryFile>>,
     timers: Mutex<Vec<Timer>>,
+    dreaming: Mutex<BTreeMap<String, threadlane_core::client::DreamingStatus>>,
+    findings: Mutex<Vec<threadlane_core::client::MemoryFinding>>,
+    metrics: Mutex<Option<threadlane_core::client::OperationsMetrics>>,
     agents: Mutex<Vec<Agent>>,
     repositories: Mutex<Vec<Repository>>,
     recorded: Mutex<Vec<RecordedEvent>>,
@@ -506,6 +509,24 @@ impl HubApi for FakeHub {
             MemoryReply::File { file }
         };
         match request {
+            MemoryRequest::Dreaming { project } => {
+                let status = self
+                    .dreaming
+                    .lock()
+                    .unwrap()
+                    .get(&project.unwrap_or_default())
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(MemoryReply::Dreaming { status })
+            }
+            MemoryRequest::SetDreaming { project, cadence } => {
+                let mut state = self.dreaming.lock().unwrap();
+                let status = state.entry(project.unwrap_or_default()).or_default();
+                status.cadence = cadence;
+                Ok(MemoryReply::Dreaming {
+                    status: status.clone(),
+                })
+            }
             MemoryRequest::List { .. } => {
                 let mut paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
                 paths.sort();
@@ -535,6 +556,32 @@ impl HubApi for FakeHub {
             ),
             MemoryRequest::Write { path, content, .. } => Ok(change(path, content, false)),
             MemoryRequest::Delete { path, .. } => Ok(change(path, String::new(), true)),
+            other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
+        }
+    }
+
+    async fn operations(
+        &self,
+        request: threadlane_core::client::OperationsRequest,
+    ) -> Result<threadlane_core::client::OperationsReply, ApiError> {
+        use threadlane_core::client::{OperationsReply, OperationsRequest};
+
+        self.up()?;
+        match request {
+            OperationsRequest::Metrics { project: None } => self
+                .metrics
+                .lock()
+                .unwrap()
+                .clone()
+                .map(|metrics| OperationsReply::Metrics {
+                    metrics: Box::new(metrics),
+                })
+                .ok_or_else(|| ApiError::Invalid("metrics unavailable".into())),
+            OperationsRequest::CheckMemory {
+                project: Some(project),
+            } if project == "api" => Ok(OperationsReply::MemoryCheck {
+                findings: self.findings.lock().unwrap().clone(),
+            }),
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -3849,5 +3896,142 @@ async fn stage_b_lead_mode_obeys_the_ceiling_and_agent_placement_uses_backend_pr
     assert_eq!(
         state.agent_runs_on("work", &agent).as_deref(),
         Some("No online machine has a usable backend.")
+    );
+}
+
+#[tokio::test]
+async fn dreaming_card_applies_project_settings_versions_and_findings() {
+    use threadlane_core::client::{DreamChange, DreamSummary, MemoryFinding};
+
+    let work = FakeHub::new("Work", vec![]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    let when = work.when();
+    assert!(state.dreaming_card("work", "api", &when).disabled);
+
+    work.dreaming
+        .lock()
+        .unwrap()
+        .entry("api".into())
+        .or_default()
+        .last = Some(DreamSummary {
+        at: Timestamp::from_millis(120_000),
+        changes: vec![DreamChange {
+            path: "project/notes/obsolete.md".into(),
+            version: 2,
+            deleted: true,
+        }],
+    });
+    work.findings
+        .lock()
+        .unwrap()
+        .push(MemoryFinding::MissingTask {
+            note: "project/notes/guide.md".into(),
+            task: TaskId(999),
+        });
+    let stale = load_dreaming(&core, "work", "api", 0).await;
+    state.apply_dreaming(load_dreaming(&core, "work", "api", 0).await);
+    let card = state.dreaming_card("work", "api", &when);
+    assert!(!card.enabled && !card.disabled);
+    assert_eq!(
+        card.last,
+        [
+            "Last dream · 00:02",
+            "Deleted project/notes/obsolete.md · version 2"
+        ]
+    );
+    assert!(card.findings[0].contains("T-0999"));
+
+    let on = state
+        .dreaming_request(
+            "work",
+            "api",
+            DreamingAction::Toggle(true),
+            "America/Toronto",
+        )
+        .unwrap()
+        .unwrap();
+    assert!(state.dreaming_card("work", "api", &when).disabled);
+    assert!(
+        state
+            .dreaming_request("work", "api", DreamingAction::Toggle(false), "UTC")
+            .unwrap()
+            .is_none()
+    );
+    let saved = change_dreaming(&core, "work", on).await;
+    state.dreaming_saved("work", "api", saved);
+    state.apply_dreaming(stale);
+    let card = state.dreaming_card("work", "api", &when);
+    assert!(card.enabled && card.cadence.contains("02:00 America/Toronto"));
+    assert!(!state.dreaming_card("work", "General", &when).enabled);
+    assert!(
+        state
+            .dreaming_request("work", "api", DreamingAction::Cadence("every 0h"), "UTC")
+            .is_err()
+    );
+    let cadence = state
+        .dreaming_request("work", "api", DreamingAction::Cadence("every 6h"), "UTC")
+        .unwrap()
+        .unwrap();
+    state.dreaming_saved("work", "api", change_dreaming(&core, "work", cadence).await);
+    assert_eq!(
+        state.dreaming_card("work", "api", &when).cadence,
+        "Every 6 h"
+    );
+
+    let off = state
+        .dreaming_request("work", "api", DreamingAction::Toggle(false), "UTC")
+        .unwrap()
+        .unwrap();
+    state.dreaming_saved("work", "api", change_dreaming(&core, "work", off).await);
+    assert!(!state.dreaming_card("work", "api", &when).enabled);
+    let again = state
+        .dreaming_request("work", "api", DreamingAction::Toggle(true), "UTC")
+        .unwrap()
+        .unwrap();
+    state.dreaming_saved("work", "api", change_dreaming(&core, "work", again).await);
+    assert_eq!(
+        state.dreaming_card("work", "api", &when).cadence,
+        "Every 6 h"
+    );
+}
+
+#[tokio::test]
+async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
+    let work = FakeHub::new("Work", vec![]);
+    let home = FakeHub::new("Home", vec![]);
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    let when = work.when();
+    assert_eq!(state.metrics_rows("work", &when), Err("Loading metrics…"));
+    *work.metrics.lock().unwrap() = Some(serde_json::from_value(json!({
+        "at": 0, "lane_lag_ms": {"1": 53, "2": 22}, "queue_depth": {"api": 3},
+        "run_duration": {"count": 1, "mean_ms": 12.0, "max_ms": 12},
+        "account_cooldowns": {}, "account_wait_ms": 83, "dead_events": 2,
+        "timer_lateness": {"count": 0, "mean_ms": null, "max_ms": null},
+        "outbox_lag_ms": null, "messages_per_day": {"2026-01-01": 4},
+        "silent_run_ratio": 0.25, "decisions_per_day": 5,
+        "answer_latency": {"count": 0, "mean_ms": null, "max_ms": null}, "standing_rules_created": 1
+    })).unwrap());
+    for space in ["work", "home"] {
+        state.apply_metrics(space.to_owned(), load_metrics(&core, space).await);
+    }
+    let rows: BTreeMap<_, _> = state
+        .metrics_rows("work", &when)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(rows["Project queues"], "api 3");
+    assert_eq!(rows["Oldest lane event"], "53 ms");
+    assert_eq!(
+        rows["Run duration"],
+        "12 ms avg · 12 ms max · 1 observations"
+    );
+    assert_eq!(rows["Silent runs"], "25%");
+    assert!(
+        state
+            .metrics_rows("home", &when)
+            .unwrap_err()
+            .contains("metrics unavailable")
     );
 }

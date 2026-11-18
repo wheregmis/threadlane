@@ -7,14 +7,15 @@ use serde_json::{Value as Json, json};
 use threadlane_core::ids::{DecisionId, RunId, StandingRuleId};
 use threadlane_core::link::{LinkError, Perform};
 use threadlane_core::model::{
-    Decision, DecisionKind, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run, RunStatus,
-    StandingRule, ToolCallBegin, ToolCallKey, Trust,
+    Decision, DecisionKind, DecisionOption, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run,
+    RunStatus, StandingRule, ToolCallBegin, ToolCallKey, Trust,
 };
 use threadlane_core::runtime::steps::{perform, tool_call as step};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{DecisionStore, OrgStore, SessionStore};
 use threadlane_core::tools::{ToolContext, ToolDefinition, ToolError, Verdict};
 
+use crate::dreaming;
 use crate::error::{link_error, link_to_tool, tool_error};
 use crate::gate::{self, GateInput};
 use crate::link::LocalLink;
@@ -51,20 +52,43 @@ impl LocalLink {
             .ok_or_else(|| {
                 ToolError::Failed(format!("run {run_id} is not active under this lease"))
             })?;
-        let definition = inner
-            .tools
-            .definition(tool)
-            .ok_or_else(|| ToolError::UnknownTool(tool.to_owned()))?;
-        // Each lane kind has its own tools (Plan.md §5.1); not offering the
-        // others is not enough, a backend can name any tool.
-        if !offered_in(tool, lane.kind) {
-            return Err(ToolError::Blocked(format!(
-                "{tool} is not available in a {} lane",
-                lane.kind
-            )));
-        }
-        let (verdict, new_work) = self.gate(&run, &lane, &definition, arguments).await?;
+        let events = db.run_events(run.id).await.map_err(tool_error)?;
+        let dream = events.iter().find(|event| dreaming::is_dream(event));
+        let definition = if dream.is_some() {
+            let definition = dreaming::definitions()
+                .into_iter()
+                .find(|definition| definition.name == tool)
+                .ok_or_else(|| ToolError::Blocked(format!("{tool} is not available in a dream")))?;
+            if memory::is_memory(tool) {
+                dreaming::check_paths(tool, arguments)?;
+            }
+            definition
+        } else {
+            let definition = inner
+                .tools
+                .definition(tool)
+                .ok_or_else(|| ToolError::UnknownTool(tool.to_owned()))?;
+            // A backend can name a tool it was never offered.
+            if !offered_in(tool, lane.kind) {
+                return Err(ToolError::Blocked(format!(
+                    "{tool} is not available in a {} lane",
+                    lane.kind
+                )));
+            }
+            definition
+        };
+        let (verdict, new_work) = self
+            .gate(&run, &lane, &definition, arguments, &events)
+            .await?;
         let asked = match verdict {
+            Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
+            _ if dream.is_some() && memory::protected(tool, arguments) => Some(Asked::Dream),
+            Verdict::Allow { rule: None } if dream.is_some() => None,
+            _ if dream.is_some() => {
+                return Err(ToolError::Blocked(format!(
+                    "{tool} needs authorization outside a dream"
+                )));
+            }
             Verdict::Allow { rule } => rule.map(Asked::Rule),
             Verdict::Review { offers_rule } => Some(Asked::Review {
                 offers_rule,
@@ -74,7 +98,6 @@ impl LocalLink {
                 offers_rule,
                 proposal: new_work,
             }),
-            Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
         };
 
         let key = ToolCallKey {
@@ -107,9 +130,10 @@ impl LocalLink {
             task_id: lane.task_id,
             call_id: call_id.map(str::to_owned),
         };
-        let outcome = match asked {
-            None => inner.tools.execute(&context, tool, arguments.clone()).await,
-            Some(asked) => {
+        let outcome = match (asked, dream) {
+            (None, Some(event)) => self.core.dream_call(event, &context, tool, arguments).await,
+            (None, None) => inner.tools.execute(&context, tool, arguments.clone()).await,
+            (Some(asked), _) => {
                 self.ask(lease, &run, &lane, &key, tool, arguments, asked)
                     .await
             }
@@ -140,6 +164,7 @@ impl LocalLink {
         lane: &Lane,
         definition: &ToolDefinition,
         arguments: &Json,
+        events: &[threadlane_core::model::Event],
     ) -> Result<(Verdict, bool), ToolError> {
         let db = &self.core.inner.db;
         let project_id = lane.project_id;
@@ -168,7 +193,6 @@ impl LocalLink {
                 .collect(),
             None => Vec::new(),
         };
-        let events = db.run_events(run.id).await.map_err(tool_error)?;
         let tainted = events.iter().any(|e| e.trust == Trust::External)
             && db.run_tainted(run.id).await.map_err(tool_error)?;
         // A run you triggered: every event in its batch is from you
@@ -236,9 +260,25 @@ impl LocalLink {
         let inner = &self.core.inner;
         // Checks the call, so a refused one is refused before any ask
         // (invariant 19).
-        let proposal = crate::publish::proposal(&inner.db, lane, tool, arguments).await?;
+        let mut proposal = crate::publish::proposal(&inner.db, lane, tool, arguments).await?;
+        if matches!(asked, Asked::Dream) {
+            let details = proposal
+                .context
+                .split_once("\n\n")
+                .map_or("", |(_, details)| details);
+            proposal.context = format!("You can apply a suggested change in Project instructions on the Memory tab.\n\n{details}").trim_end().to_owned();
+        }
         let (kind, options, recommended) = if tool == ASK_USER {
             (DecisionKind::Input, question(arguments)?.1, None)
+        } else if matches!(asked, Asked::Dream) {
+            (
+                DecisionKind::Proposal,
+                vec![DecisionOption {
+                    label: "Dismiss".to_owned(),
+                    effect: json!({"dream_proposal": true}),
+                }],
+                None,
+            )
         } else if matches!(
             asked,
             Asked::You { proposal: true, .. } | Asked::Review { proposal: true, .. }
@@ -289,7 +329,7 @@ impl LocalLink {
                     .reviewed_decision(lease, &id, &decision, reason.as_deref())
                     .await
             }
-            Asked::You { .. } => inner
+            Asked::You { .. } | Asked::Dream => inner
                 .db
                 .open_decision(Some(lease), &decision)
                 .await
@@ -318,6 +358,19 @@ impl LocalLink {
         let db = &inner.db;
         let lane = self.check_lease(lease).await?;
         self.active_run(lease, run_id).await?;
+        if inner
+            .db
+            .run_events(run_id)
+            .await
+            .map_err(link_error)?
+            .iter()
+            .any(dreaming::is_dream)
+        {
+            return Err(LinkError::Rejected(
+                "a dream cannot perform a decision".into(),
+            ));
+        }
+
         let decision = db
             .decision(id)
             .await
@@ -326,6 +379,7 @@ impl LocalLink {
                 decision.lane_id == lane.id
                     && decision.project_id == lane.project_id
                     && decision.approved()
+                    && !decision.is_instruction_proposal()
             })
             .ok_or_else(|| {
                 LinkError::Rejected(format!("{id} is not an approved decision in this lane"))
@@ -550,6 +604,19 @@ impl LocalLink {
         let inner = &self.core.inner;
         self.check_lease(lease).await?;
         self.active_run(lease, run_id).await?;
+        if inner
+            .db
+            .run_events(run_id)
+            .await
+            .map_err(link_error)?
+            .iter()
+            .any(dreaming::is_dream)
+        {
+            return Err(LinkError::Rejected(
+                "a dream cannot perform a decision".into(),
+            ));
+        }
+
         inner
             .db
             .finish_perform(lease, id, outcome)
@@ -564,6 +631,7 @@ impl LocalLink {
 /// request.
 #[derive(Clone, Copy)]
 enum Asked {
+    Dream,
     Review { offers_rule: bool, proposal: bool },
     You { offers_rule: bool, proposal: bool },
     Rule(StandingRuleId),

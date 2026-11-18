@@ -31,6 +31,9 @@ pub const PROGRESS_WRITTEN: &str = "progress_written";
 /// Everything a runner needs to execute one run. Built by the hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunAssignment {
+    /// A project memory pass, isolated from user turns.
+    #[serde(default)]
+    pub dreaming: bool,
     pub run_id: RunId,
     pub session_id: SessionId,
     pub project_id: ProjectId,

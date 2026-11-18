@@ -207,6 +207,20 @@ pub mod steps {
         pub const ALL: &[Step] = &[AFTER_BEGIN, AFTER_EFFECT, AFTER_FINISH];
     }
 
+    /// Durable dreaming boundaries.
+    pub mod dreaming {
+        use super::Step;
+
+        /// Before the setting and timer are changed atomically.
+        pub const BEFORE_SETTING: Step = Step("dreaming.before_setting");
+        /// After the setting and timer are durable.
+        pub const AFTER_SETTING: Step = Step("dreaming.after_setting");
+        /// Before the run commits and becomes the new marker.
+        pub const BEFORE_MARKER: Step = Step("dreaming.before_marker");
+        /// After the completed dream is durable.
+        pub const AFTER_MARKER: Step = Step("dreaming.after_marker");
+    }
+
     /// Scheduler pass, Plan.md §7.3.
     pub mod scheduler {
         use super::Step;

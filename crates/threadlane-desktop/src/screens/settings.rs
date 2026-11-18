@@ -17,7 +17,11 @@ use super::{heading, section};
 use crate::Desktop;
 
 impl Desktop {
-    pub(crate) fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn settings(
+        &self,
+        when: &threadlane_desktop::When,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let line = |label: &'static str, value: String| {
             h_flex()
@@ -38,6 +42,15 @@ impl Desktop {
         for row in self.state.settings_rows() {
             let ceiling = self.space_ceiling(&row.paired_as, cx);
             let pacing = self.space_pacing(&row.paired_as, cx);
+            let mut metrics = v_flex().gap_1().pt_2().child(section("Metrics"));
+            metrics = match self.state.metrics_rows(&row.paired_as, when) {
+                Ok(rows) => {
+                    metrics.children(rows.into_iter().map(|(label, value)| line(label, value)))
+                }
+                Err(status) => {
+                    metrics.child(div().text_sm().text_color(muted).child(status.to_owned()))
+                }
+            };
             screen = screen.child(
                 v_flex()
                     .gap_1()
@@ -72,7 +85,8 @@ impl Desktop {
                         },
                     ))
                     .child(ceiling)
-                    .child(pacing),
+                    .child(pacing)
+                    .child(metrics),
             );
         }
         let notifications = self.state.notifications();

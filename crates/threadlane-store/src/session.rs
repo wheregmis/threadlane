@@ -296,6 +296,20 @@ impl SessionStore for HubDb {
         .await?;
 
         claim_events(conn, lease.lane_id, run_id, &start.events).await?;
+        if crate::dreaming::dream_run_in(conn, run_id).await? {
+            if start.events.len() != 1 || start.session != SessionChoice::New {
+                return Err(StoreError::Invalid(
+                    "a dream needs its own session and event".to_owned(),
+                ));
+            }
+            // A dream's native session is never a candidate for ordinary lead work.
+            exec(
+                conn,
+                "UPDATE sessions SET status = 'closed' WHERE id = ?1",
+                params![session_id.get()],
+            )
+            .await?;
+        }
         let run = query_one(
             conn,
             &format!(
@@ -455,7 +469,7 @@ impl SessionStore for HubDb {
             ended_at,
         )
         .await?;
-        if !failed.dead.is_empty() {
+        if !failed.dead.is_empty() && !crate::dreaming::dream_run_in(conn, run_id).await? {
             report_dead(conn, &run, dead_attempts, error, ended_at).await?;
         }
         tx.commit().await?;
@@ -702,6 +716,11 @@ impl HubDb {
         check_lease(conn, lease).await?;
         check_running(conn, lease).await?;
         let run = active_run(conn, lease, run_id).await?;
+        if crate::dreaming::dream_run_in(conn, run_id).await? {
+            return Err(StoreError::Invalid(
+                "a dream cannot accept user input".to_owned(),
+            ));
+        }
         for id in events {
             let eligible = query_one(
                 conn,

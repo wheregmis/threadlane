@@ -379,3 +379,126 @@ impl AppState {
         }
     }
 }
+
+/// Reads the space-wide metrics used in Settings.
+pub async fn load_metrics(
+    core: &threadlane_client::ClientCore,
+    space: &str,
+) -> Result<threadlane_core::client::OperationsMetrics, String> {
+    use threadlane_core::client::{OperationsReply, OperationsRequest};
+
+    match core
+        .operations(Some(space), OperationsRequest::Metrics { project: None })
+        .await
+    {
+        Ok(OperationsReply::Metrics { metrics }) => Ok(*metrics),
+        Ok(_) => Err("The hub returned an unexpected metrics reply.".to_owned()),
+        Err(error) => Err(describe(&error)),
+    }
+}
+
+impl AppState {
+    /// Takes the metrics reported by one hub.
+    pub fn apply_metrics(
+        &mut self,
+        space: String,
+        metrics: Result<threadlane_core::client::OperationsMetrics, String>,
+    ) {
+        self.metrics.insert(space, metrics);
+    }
+
+    /// Labels and values displayed in one space's Metrics card.
+    pub fn metrics_rows(
+        &self,
+        space: &str,
+        when: &crate::When,
+    ) -> Result<Vec<(&'static str, String)>, &str> {
+        use threadlane_core::client::Latency;
+
+        let metrics = self
+            .metrics
+            .get(space)
+            .ok_or("Loading metrics…")?
+            .as_ref()
+            .map_err(String::as_str)?;
+        let number = |values: Vec<String>, empty: &str| {
+            if values.is_empty() {
+                empty.to_owned()
+            } else {
+                values.join(" · ")
+            }
+        };
+        let latency = |latency: &Latency| match (latency.mean_ms, latency.max_ms) {
+            (Some(mean), Some(max)) => format!(
+                "{mean:.0} ms avg · {max} ms max · {} observations",
+                latency.count
+            ),
+            _ => "No observations".to_owned(),
+        };
+        let age =
+            |value: Option<i64>| value.map_or_else(|| "Empty".to_owned(), |ms| format!("{ms} ms"));
+        Ok(vec![
+            ("Snapshot", when.moment(metrics.at)),
+            (
+                "Project queues",
+                number(
+                    metrics
+                        .queue_depth
+                        .iter()
+                        .map(|(name, count)| format!("{name} {count}"))
+                        .collect(),
+                    "No projects",
+                ),
+            ),
+            (
+                "Oldest lane event",
+                age(metrics.lane_lag_ms.values().copied().max()),
+            ),
+            ("Run duration", latency(&metrics.run_duration)),
+            (
+                "Account cooldowns",
+                number(
+                    metrics
+                        .account_cooldowns
+                        .iter()
+                        .map(|(account, at)| format!("{account} until {}", when.moment(*at)))
+                        .collect(),
+                    "None",
+                ),
+            ),
+            ("Account wait", format!("{} ms", metrics.account_wait_ms)),
+            ("Dead events", metrics.dead_events.to_string()),
+            ("Timer lateness", latency(&metrics.timer_lateness)),
+            ("Outbox lag", age(metrics.outbox_lag_ms)),
+            (
+                "Messages per day",
+                number(
+                    metrics
+                        .messages_per_day
+                        .iter()
+                        .rev()
+                        .take(7)
+                        .map(|(day, count)| format!("{day} {count}"))
+                        .collect(),
+                    "None sent",
+                ),
+            ),
+            (
+                "Silent runs",
+                metrics.silent_run_ratio.map_or_else(
+                    || "No completed runs".to_owned(),
+                    |ratio| format!("{:.0}%", 100.0 * ratio),
+                ),
+            ),
+            (
+                "Decisions in 24 hours",
+                metrics.decisions_per_day.to_string(),
+            ),
+            ("Answer latency", latency(&metrics.answer_latency)),
+            (
+                "Standing rules created",
+                metrics.standing_rules_created.to_string(),
+            ),
+        ])
+    }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "requested reply",
+  "events": [
+    {
+      "id": 1, "project_id": 1, "lane_id": 1,
+      "source": "client", "source_event_id": "reply-1",
+      "kind": "user_message", "payload": {"text": "Please confirm you received this. Reply with pong."},
+      "trust": "user", "requested": true, "status": "done",
+      "attempts": 0, "received_at": 1767225600000
+    }
+  ],
+  "expected": {
+    "messages": 1, "lead_commits": 1, "tasks": 0,
+    "task_proposals": 0, "approvals_requested": 0, "forge_writes": 0
+  }
+}

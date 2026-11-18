@@ -238,6 +238,7 @@ fn row_of(timer: &Timer, when: &When, confirming: bool) -> RoutineRow {
         }
         (None, TimerCategory::FollowUp) => "follow-up".to_owned(),
         (None, TimerCategory::Schedule) => "routine".to_owned(),
+        (None, TimerCategory::Dreaming) => "dreaming".to_owned(),
     };
     let paused = timer.status == TimerStatus::Paused;
     let by = match timer.created_by {

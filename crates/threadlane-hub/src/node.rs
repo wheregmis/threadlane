@@ -94,7 +94,8 @@ impl Hub {
         )
         .await
         .map(|core| {
-            core.with_github(Arc::new(GhSource::with_gh(&self.config.github.gh)))
+            core.with_workspaces(self.data_dir.workspaces())
+                .with_github(Arc::new(GhSource::with_gh(&self.config.github.gh)))
                 .with_backends(vec![
                     Arc::new(ClaudeBackend::new(
                         self.config.backends.claude.claude_config(),

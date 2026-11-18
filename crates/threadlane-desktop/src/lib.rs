@@ -30,6 +30,7 @@ mod attention;
 mod clock;
 mod control;
 mod conversation;
+mod dreaming;
 mod machines;
 mod memory;
 mod permissions;
@@ -44,6 +45,7 @@ pub use control::{
     same_remote,
 };
 pub use conversation::{Digest, Line, belongs_in_conversation};
+pub use dreaming::{DreamingAction, DreamingCard, DreamingLoad, change_dreaming, load_dreaming};
 pub use machines::{MachineRow, machine_row};
 pub use memory::{
     LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, change_memory, editable,
@@ -57,7 +59,7 @@ pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
 };
 pub use settings::{
-    Notifications, PACING_FIELDS, PacingField, SETTINGS_FILE, SpaceRow, parse_pacing,
+    Notifications, PACING_FIELDS, PacingField, SETTINGS_FILE, SpaceRow, load_metrics, parse_pacing,
 };
 pub use tasks::{
     BoardCard, Changes, Column, Moment, changes, chips, running_elapsed, status_label, timeline,
@@ -923,6 +925,8 @@ pub struct AppState {
     codes: HashMap<String, IssuedCode>,
     /// Each project's memory, for the Memory tab.
     memory: HashMap<InSpace<String>, memory::MemoryView>,
+    dreaming: HashMap<InSpace<String>, dreaming::DreamingView>,
+    metrics: HashMap<String, Result<threadlane_core::client::OperationsMetrics, String>>,
     /// The last action and where it stands.
     activity: Option<Activity>,
     /// The space you asked to unpair, until you confirm or cancel.
@@ -1037,6 +1041,15 @@ impl AppState {
         let decision = &queued.decision;
         let dashed = decision.kind == DecisionKind::Proposal;
         let (context, details, would_run_as, note_label) = match decision.kind {
+            DecisionKind::Proposal if decision.is_instruction_proposal() => (
+                Some("Dreaming suggested a change to project instructions.".to_owned()),
+                context_line(decision)
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+                None,
+                "Note (optional)",
+            ),
             DecisionKind::Proposal => {
                 let proposer =
                     decision
@@ -1411,6 +1424,8 @@ impl AppState {
         self.projects.retain(|(space, _), _| space != name);
         self.tasks.retain(|(space, _), _| space != name);
         self.memory.retain(|(space, _), _| space != name);
+        self.dreaming.retain(|(space, _), _| space != name);
+        self.metrics.remove(name);
         self.routines.retain(|(space, _), _| space != name);
         if self
             .cancelling

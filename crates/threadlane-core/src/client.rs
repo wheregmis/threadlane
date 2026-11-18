@@ -593,6 +593,13 @@ pub enum MemoryRequest {
         project: Option<String>,
         path: String,
     },
+    /// The project's current cadence and last completed dream.
+    Dreaming { project: Option<String> },
+    /// Sets the cadence, or disables dreaming with `None`.
+    SetDreaming {
+        project: Option<String>,
+        cadence: Option<Recurrence>,
+    },
 }
 
 /// The answer to a [`MemoryRequest`]. Every file's `path` is as agents
@@ -601,9 +608,19 @@ pub enum MemoryRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MemoryReply {
-    Files { files: Vec<MemoryFile> },
-    File { file: MemoryFile },
-    History { versions: Vec<MemoryFile> },
+    Files {
+        files: Vec<MemoryFile>,
+    },
+    File {
+        file: MemoryFile,
+    },
+    History {
+        versions: Vec<MemoryFile>,
+    },
+    /// The setting and last completed dream.
+    Dreaming {
+        status: DreamingStatus,
+    },
 }
 
 /// Why a client request failed.
@@ -853,6 +870,8 @@ pub enum OperationsRequest {
     },
     /// Read the records carrying this trace ID.
     Trace { id: String },
+    /// Checks the project's notes for duplicates and stale references.
+    CheckMemory { project: Option<String> },
 }
 
 /// The answer to an operations request.
@@ -870,6 +889,8 @@ pub enum OperationsReply {
     RolledBack { file: MemoryFile },
     /// The records carrying the requested ID.
     Trace { trace: TraceInspection },
+    /// Deterministic findings on the project's current notes.
+    MemoryCheck { findings: Vec<MemoryFinding> },
 }
 
 /// Latency in milliseconds across all matching historical records.
@@ -972,4 +993,64 @@ pub struct TraceInspection {
     pub decisions: Vec<Decision>,
     /// Outbox rows attributed to those runs.
     pub outbox: Vec<OutboxMessage>,
+}
+
+/// Project dreaming state, including the last completed pass when one exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DreamingStatus {
+    /// The active cadence. `None` means dreaming is off.
+    pub cadence: Option<Recurrence>,
+    /// The last completed dream, retained when dreaming is turned off.
+    pub last: Option<DreamSummary>,
+}
+
+/// The result of a committed dream run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DreamSummary {
+    /// When the run committed.
+    pub at: Timestamp,
+    /// Versions written by the dream, including deletions.
+    pub changes: Vec<DreamChange>,
+}
+
+/// A project memory version written by a dream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DreamChange {
+    /// Project-relative memory path prefixed with `project/`.
+    pub path: String,
+    /// Version written by the dream.
+    pub version: i64,
+    /// Whether this version removed the file.
+    pub deleted: bool,
+}
+
+/// One duplicate pair or dangling reference in project notes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MemoryFinding {
+    /// Two notes with identical normalized bodies.
+    ExactDuplicate { first: String, second: String },
+    /// Two notes with very similar normalized bodies.
+    NearDuplicate { first: String, second: String },
+    /// A reference to a task absent from this project.
+    MissingTask { note: String, task: TaskId },
+    /// A reference to a file absent from its known location.
+    MissingFile { note: String, target: String },
+}
+
+impl fmt::Display for MemoryFinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExactDuplicate { first, second } => {
+                write!(f, "Duplicate notes: {first} and {second}")
+            }
+            Self::NearDuplicate { first, second } => {
+                write!(f, "Similar notes: {first} and {second}")
+            }
+            Self::MissingTask { note, task } => write!(f, "{note} refers to missing task {task}"),
+            Self::MissingFile { note, target } => {
+                write!(f, "{note} refers to missing file {target}")
+            }
+        }
+    }
 }

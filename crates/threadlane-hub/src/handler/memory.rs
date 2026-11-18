@@ -18,6 +18,22 @@ pub(super) async fn handle(
 ) -> Result<MemoryReply, ApiError> {
     let inner = &api.core.inner;
     let db = &inner.db;
+    match request {
+        MemoryRequest::Dreaming { project } => {
+            let id = api.project_named(project.as_deref()).await?.id;
+            return Ok(MemoryReply::Dreaming {
+                status: api.core.dreaming_status(id).await?,
+            });
+        }
+        MemoryRequest::SetDreaming { project, cadence } => {
+            let project = api.project_named(project.as_deref()).await?;
+            api.core.set_dreaming(&project, cadence).await?;
+            return Ok(MemoryReply::Dreaming {
+                status: api.core.dreaming_status(project.id).await?,
+            });
+        }
+        _ => {}
+    }
     let (project, path) = match &request {
         MemoryRequest::List { project } => (project.clone(), None),
         MemoryRequest::Read { project, path }

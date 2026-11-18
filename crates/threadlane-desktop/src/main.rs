@@ -23,6 +23,7 @@ use threadlane_desktop::{
     Activity, AppState, RoutineText, Tab, When, change_memory, decision_of_tag, describe,
     load_earlier, load_memory, load_modes, load_project, load_routines, load_task, pump, refresh,
 };
+use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
 use tokio::runtime::Runtime;
 use tokio::sync::{RwLock, mpsc};
 
@@ -265,6 +266,7 @@ struct Desktop {
     task_composer: Entity<InputState>,
     /// The Memory tab's editor.
     memory_editor: Entity<TextareaState>,
+    dream_cadence: Entity<InputState>,
     /// The "+ Add space" form's name and join code.
     space_name: Entity<InputState>,
     join_code: Entity<InputState>,
@@ -327,6 +329,8 @@ impl Desktop {
         let task_composer =
             cx.new(|cx| InputState::new(window, cx).placeholder("Add to this task…"));
         let memory_editor = cx.new(|cx| TextareaState::new(window, cx).rows(16));
+        let dream_cadence =
+            cx.new(|cx| InputState::new(window, cx).placeholder("daily 02:00 or every 6h"));
         let space_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name for the space"));
         let join_code = cx.new(|cx| InputState::new(window, cx).placeholder("Join code"));
         let Feed {
@@ -444,6 +448,7 @@ impl Desktop {
             pacing_inputs,
             task_composer,
             memory_editor,
+            dream_cadence,
             space_name,
             join_code,
             shown,
@@ -537,6 +542,19 @@ impl Desktop {
                 if tab == Tab::Routines {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }
+                if tab == Tab::Memory {
+                    let (in_space, named) = (space.clone(), project.clone());
+                    let for_dreaming = Arc::clone(&core);
+                    let revision = self.state.dreaming_revision(&space, &project);
+                    self.run(
+                        async move {
+                            load_dreaming(&*for_dreaming.read().await, &in_space, &named, revision)
+                                .await
+                        },
+                        |this, loaded, _| this.state.apply_dreaming(loaded),
+                        cx,
+                    );
+                }
                 // The Conversation tab's card and the Memory tab need the memory.
                 let selected = self
                     .state
@@ -587,14 +605,18 @@ impl Desktop {
                         let core = core.read().await;
                         let mut settings = Vec::new();
                         for space in spaces {
-                            let pacing = core.pacing(Some(&space)).await;
-                            settings.push((space, pacing));
+                            let (pacing, metrics) = tokio::join!(
+                                core.pacing(Some(&space)),
+                                load_metrics(&core, &space)
+                            );
+                            settings.push((space, pacing, metrics));
                         }
                         settings
                     },
                     |this, settings, _| {
-                        for (space, pacing) in settings {
-                            this.state.apply_pacing(space, pacing);
+                        for (space, pacing, metrics) in settings {
+                            this.state.apply_pacing(space.clone(), pacing);
+                            this.state.apply_metrics(space, metrics);
                         }
                     },
                     cx,
@@ -663,6 +685,16 @@ impl Desktop {
     }
 
     fn go(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        if matches!(
+            self.screen,
+            Screen::Project {
+                tab: Tab::Memory,
+                ..
+            }
+        ) && self.screen != screen
+        {
+            self.clear_fields.push(self.dream_cadence.clone());
+        }
         self.screen = screen;
         self.load_screen(cx);
         cx.notify();
@@ -963,6 +995,61 @@ impl Desktop {
         cx.notify();
     }
 
+    fn toggle_dreaming(
+        &mut self,
+        space: String,
+        project: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_dreaming(space, project, DreamingAction::Toggle(enabled), cx);
+    }
+
+    fn save_dream_cadence(&mut self, space: String, project: String, cx: &mut Context<Self>) {
+        let text = self.dream_cadence.read(cx).value();
+        self.set_dreaming(space, project, DreamingAction::Cadence(&text), cx);
+    }
+
+    fn set_dreaming(
+        &mut self,
+        space: String,
+        project: String,
+        action: DreamingAction<'_>,
+        cx: &mut Context<Self>,
+    ) {
+        let zone = local_zone().unwrap_or_else(|| "UTC".to_owned());
+        let request = match self.state.dreaming_request(&space, &project, action, &zone) {
+            Ok(Some(request)) => request,
+            Ok(None) => return,
+            Err(error) => {
+                self.state.report(Activity::Failed(error));
+                cx.notify();
+                return;
+            }
+        };
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let result = change_dreaming(&*core.read().await, &space, request).await;
+                (space, project, result)
+            },
+            |this, (space, project, result), cx| {
+                match &result {
+                    Ok(_) => {
+                        this.clear_fields.push(this.dream_cadence.clone());
+                        this.state
+                            .report(Activity::Done("Dreaming settings saved.".to_owned()));
+                    }
+                    Err(error) => this.state.report(Activity::Failed(error.clone())),
+                }
+                this.state.dreaming_saved(&space, &project, result);
+                this.load_screen(cx);
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
     /// Pairs this app with the hub of the join code under the name given,
     /// as `threadlane hub join <name> <code>` does; its feed follows.
     fn join_space(&mut self, cx: &mut Context<Self>) {
@@ -1234,7 +1321,7 @@ impl Render for Desktop {
             Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),
             Screen::Routines => self.routines_screen(&when, cx),
-            Screen::Settings => self.settings(cx),
+            Screen::Settings => self.settings(&when, cx),
         };
         // With no hub paired, every screen but Machines explains pairing.
         let body = if self.state.first_run() && self.screen != Screen::Machines {

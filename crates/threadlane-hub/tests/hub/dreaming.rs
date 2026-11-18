@@ -1,0 +1,663 @@
+//! Dreaming through the client, scheduler, lead lease and tool gateway.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{Value as Json, json};
+use threadlane_core::client::{
+    ApiError, DecisionReply, DecisionRequest, DreamingStatus, MemoryFinding, MemoryReply,
+    MemoryRequest, OperationsReply, OperationsRequest, OrgRequest, TimerRequest, UserMessage,
+};
+use threadlane_core::link::{Begin, HubLink, RunAssignment};
+use threadlane_core::model::{
+    DecisionKind, EventKind, EventStatus, Lease, OutboxKind, Recurrence, Rule, RunOutcome,
+    SessionStatus,
+};
+use threadlane_core::runtime::{
+    NoHooks,
+    steps::{begin_run, dreaming, scheduler, tool_call},
+};
+use threadlane_core::store::{
+    InboxStore, MemoryStore, OrgStore, SessionStore, TaskStore, TimerStore,
+};
+use threadlane_core::time::Clock;
+use threadlane_core::tools::ToolError;
+use threadlane_hub::{
+    HubSettings, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW,
+};
+use threadlane_testkit::CrashPlan;
+
+use crate::common::{PAST_LEASE, TestHub, begin};
+
+const HOUR: Duration = Duration::from_secs(3600);
+const SESSIONS: &str = "project_sessions";
+
+fn interval() -> Recurrence {
+    Recurrence {
+        rule: Rule::Interval { minutes: 60 },
+        zone: "UTC".to_owned(),
+    }
+}
+
+async fn status(hub: &TestHub, project: Option<String>) -> DreamingStatus {
+    let MemoryReply::Dreaming { status } = hub
+        .api
+        .memory(MemoryRequest::Dreaming { project })
+        .await
+        .unwrap()
+    else {
+        panic!("expected dreaming status");
+    };
+    status
+}
+
+async fn set(hub: &TestHub, cadence: Option<Recurrence>) {
+    hub.api
+        .memory(MemoryRequest::SetDreaming {
+            project: None,
+            cadence,
+        })
+        .await
+        .unwrap();
+}
+
+async fn findings(hub: &TestHub) -> Vec<MemoryFinding> {
+    let OperationsReply::MemoryCheck { findings } = hub
+        .api
+        .operations(OperationsRequest::CheckMemory { project: None })
+        .await
+        .unwrap()
+    else {
+        panic!("expected checker findings");
+    };
+    findings
+}
+
+async fn call(
+    link: &dyn HubLink,
+    lease: &Lease,
+    run: &RunAssignment,
+    tool: &str,
+    args: Json,
+) -> Result<Json, ToolError> {
+    link.call_tool(lease, run.run_id, None, tool, &args).await
+}
+
+async fn complete(hub: &TestHub, lease: &Lease, run: &RunAssignment) -> RunOutcome {
+    let outcome = hub
+        .link
+        .complete(lease, run.run_id, Some("Reviewed project memory."))
+        .await
+        .unwrap();
+    hub.link.release(lease).await.unwrap();
+    outcome
+}
+
+#[tokio::test]
+async fn settings_are_project_scoped_validate_cadence_and_own_the_system_timer() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let project = hub.general().await;
+    assert_eq!(status(&hub, None).await, DreamingStatus::default());
+    hub.clock.advance(10 * HOUR);
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
+    assert!(hub.link.request_work().await.unwrap().is_none());
+    let bad = Recurrence {
+        rule: Rule::Interval { minutes: 1 },
+        zone: "UTC".into(),
+    };
+    assert!(matches!(
+        hub.api
+            .memory(MemoryRequest::SetDreaming {
+                project: None,
+                cadence: Some(bad)
+            })
+            .await,
+        Err(ApiError::Invalid(_))
+    ));
+    assert!(matches!(
+        hub.api
+            .operations(OperationsRequest::CheckMemory {
+                project: Some("unknown".into())
+            })
+            .await,
+        Err(ApiError::NotFound(_))
+    ));
+
+    let daily = Recurrence {
+        rule: Rule::Daily {
+            hour: 11,
+            minute: 30,
+        },
+        zone: "UTC".into(),
+    };
+    set(&hub, Some(daily.clone())).await;
+    assert_eq!(status(&hub, None).await.cadence, Some(daily.clone()));
+    let (id, _) = hub.db.dreaming_timer(project.id).await.unwrap().unwrap();
+    let due = hub.db.timer(id).await.unwrap().unwrap().due_at;
+    assert_eq!(due, hub.clock.now() + Duration::from_secs(5400));
+    hub.clock.advance(HOUR);
+    set(&hub, Some(daily)).await;
+    assert_eq!(
+        hub.db.dreaming_timer(project.id).await.unwrap().unwrap().0,
+        id
+    );
+    assert_eq!(hub.db.timer(id).await.unwrap().unwrap().due_at, due);
+    assert!(
+        hub.api
+            .timers(TimerRequest::Pause { timer: id })
+            .await
+            .is_err()
+    );
+    assert!(
+        hub.api
+            .timers(TimerRequest::Cancel { timer: id })
+            .await
+            .is_err()
+    );
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
+    hub.clock.advance(Duration::from_secs(1800));
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 1);
+    set(&hub, None).await;
+    assert!(
+        hub.link.request_work().await.unwrap().is_none(),
+        "off removes queued occurrences"
+    );
+    hub.clock.advance(48 * HOUR);
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
+    assert_eq!(status(&hub, None).await, DreamingStatus::default());
+}
+
+#[tokio::test]
+async fn dream_filters_tools_scope_session_history_and_effects() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let project = hub.general().await;
+    hub.api
+        .org(OrgRequest::CreateProject {
+            name: "Other".into(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+    let other = hub
+        .db
+        .projects()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "Other")
+        .unwrap();
+    hub.api
+        .send_message(&UserMessage {
+            project: Some("Other".into()),
+            text: "Other project request".into(),
+            client_message_id: "other".into(),
+            task: None,
+        })
+        .await
+        .unwrap();
+    let (lease, other_run) = begin(&*hub.link).await;
+    assert_eq!(other_run.project_id, other.id);
+    call(
+        &*hub.link,
+        &lease,
+        &other_run,
+        "send_message",
+        json!({"text":"Other project update"}),
+    )
+    .await
+    .unwrap();
+    complete(&hub, &lease, &other_run).await;
+    hub.db
+        .write_by_owner(
+            "space/notes/secret.md",
+            "# Space\nSecret from space",
+            hub.clock.now(),
+        )
+        .await
+        .unwrap();
+    let foreign = format!("projects/{}/notes/secret.md", other.id.get());
+    hub.db
+        .write_by_owner(
+            &foreign,
+            "# Other\nSecret from another project",
+            hub.clock.now(),
+        )
+        .await
+        .unwrap();
+    hub.send("prior", "Give one update").await;
+    let (lease, ordinary) = begin(&*hub.link).await;
+    assert!(ordinary.tools.iter().all(|tool| tool.name != SESSIONS));
+    assert!(
+        call(&*hub.link, &lease, &ordinary, SESSIONS, json!({}))
+            .await
+            .is_err()
+    );
+    call(
+        &*hub.link,
+        &lease,
+        &ordinary,
+        "send_message",
+        json!({"text":"Delivered update"}),
+    )
+    .await
+    .unwrap();
+    complete(&hub, &lease, &ordinary).await;
+    hub.core.dispatch_once().await.unwrap();
+
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(5 * HOUR);
+    let timer = hub.db.dreaming_timer(project.id).await.unwrap().unwrap().0;
+    assert_eq!(
+        hub.core.schedule_once().await.unwrap(),
+        1,
+        "one event after downtime"
+    );
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
+    let timer = hub.db.timer(timer).await.unwrap().unwrap();
+    assert_eq!(timer.due_at, hub.clock.now() + HOUR);
+    assert_eq!(timer.fire_count, 1);
+    assert_eq!(
+        status(&hub, Some("Other".into())).await,
+        DreamingStatus::default()
+    );
+    let user_event = hub
+        .send("during", "Handle a separate user request")
+        .await
+        .event_id;
+    let (lease, dream) = begin(&*hub.link).await;
+    assert!(dream.dreaming && dream.remove_builtin_tools);
+    assert_ne!(dream.session_id, ordinary.session_id);
+    assert_eq!(dream.events.len(), 1);
+    assert!(dream.perform.is_empty());
+    assert!(
+        hub.link
+            .folded_in(&lease, dream.run_id, &[user_event])
+            .await
+            .is_err()
+    );
+    assert!(
+        hub.link
+            .begin_perform(&lease, dream.run_id, threadlane_core::ids::DecisionId(999))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("a dream cannot perform")
+    );
+
+    assert!(dream.prompt.contains("Curate this project's memory"));
+    assert!(dream.appended_instructions.is_empty());
+    let names: std::collections::BTreeSet<_> =
+        dream.tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            SESSIONS,
+            MEMORY_VIEW,
+            MEMORY_CREATE,
+            MEMORY_EDIT,
+            MEMORY_DELETE,
+            MEMORY_RENAME
+        ]
+        .into()
+    );
+    for tool in [
+        "send_message",
+        "create_task",
+        "set_follow_up",
+        "list_tasks",
+        "ask_user",
+        "comment",
+        "custom",
+        "Bash",
+    ] {
+        assert!(
+            matches!(
+                call(&*hub.link, &lease, &dream, tool, json!({})).await,
+                Err(ToolError::Blocked(_))
+            ),
+            "{tool}"
+        );
+    }
+    for path in [
+        "space",
+        "space/notes/secret.md",
+        "project/../space/notes/secret.md",
+        &foreign,
+    ] {
+        assert!(
+            call(
+                &*hub.link,
+                &lease,
+                &dream,
+                MEMORY_VIEW,
+                json!({"path":path})
+            )
+            .await
+            .is_err(),
+            "{path}"
+        );
+        assert!(
+            call(
+                &*hub.link,
+                &lease,
+                &dream,
+                MEMORY_CREATE,
+                json!({"path":path,"content":"# Overwrite\nBad"})
+            )
+            .await
+            .is_err(),
+            "{path}"
+        );
+        assert!(
+            call(
+                &*hub.link,
+                &lease,
+                &dream,
+                MEMORY_RENAME,
+                json!({"from":"project/notes/shadow.md","to":path})
+            )
+            .await
+            .is_err(),
+            "{path}"
+        );
+    }
+    assert!(
+        call(
+            &*hub.link,
+            &lease,
+            &dream,
+            SESSIONS,
+            json!({"project":"Other"})
+        )
+        .await
+        .is_err()
+    );
+    let history = call(&*hub.link, &lease, &dream, SESSIONS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(history["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(history["runs"][0]["rationale"], "Reviewed project memory.");
+    assert_eq!(history["runs"][0]["outcome"], "sent");
+    assert_eq!(
+        history["runs"][0]["sent_messages"][0]["body"]["text"],
+        "Delivered update"
+    );
+    assert!(!history.to_string().contains("Give one update"));
+    assert_eq!(
+        hub.db
+            .session(dream.session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SessionStatus::Closed
+    );
+    assert_eq!(complete(&hub, &lease, &dream).await, RunOutcome::Silent);
+    hub.core.dispatch_once().await.unwrap();
+    assert!(
+        hub.feed()
+            .await
+            .iter()
+            .all(|item| item.message.run_id != Some(dream.run_id)
+                || item.message.kind != OutboxKind::Message)
+    );
+    assert!(hub.db.tasks(project.id).await.unwrap().is_empty());
+    let (lease, user) = begin(&*hub.link).await;
+    assert!(!user.dreaming);
+    assert_ne!(user.session_id, dream.session_id);
+    assert!(user.prompt.contains("Handle a separate user request"));
+    complete(&hub, &lease, &user).await;
+
+    hub.clock.advance(HOUR);
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 1);
+    let (lease, dream) = begin(&*hub.link).await;
+    let history = call(&*hub.link, &lease, &dream, SESSIONS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(history["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(history["runs"][0]["run_id"], user.run_id.get());
+    complete(&hub, &lease, &dream).await;
+}
+
+#[tokio::test]
+async fn instruction_changes_are_advisory_and_the_answer_does_not_wake_a_lead() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let path = format!("projects/{}/instructions.md", hub.general().await.id.get());
+    hub.db
+        .write_by_owner(&path, "Original", hub.clock.now())
+        .await
+        .unwrap();
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    assert_eq!(
+        call(
+            &*hub.link,
+            &lease,
+            &dream,
+            MEMORY_CREATE,
+            json!({"path":"project/instructions.md","content":"Suggested"})
+        )
+        .await,
+        Err(ToolError::WaitingOnYou)
+    );
+    assert_eq!(complete(&hub, &lease, &dream).await, RunOutcome::Deferred);
+    let DecisionReply::Pending { decisions } =
+        hub.api.decisions(DecisionRequest::Pending).await.unwrap()
+    else {
+        panic!("pending");
+    };
+    let proposal = &decisions[0];
+    assert_eq!(proposal.kind, DecisionKind::Proposal);
+    assert!(proposal.is_instruction_proposal());
+    assert!(proposal.options.iter().all(|option| !option.approves()));
+    for option in ["approve", "Dismiss"] {
+        let result = hub
+            .api
+            .decisions(DecisionRequest::Answer {
+                decision: proposal.id,
+                option: option.into(),
+                note: None,
+            })
+            .await;
+        assert_eq!(result.is_ok(), option == "Dismiss");
+    }
+    assert_eq!(
+        hub.db.read(&path).await.unwrap().unwrap().content,
+        "Original"
+    );
+    assert_eq!(hub.db.history(&path).await.unwrap().len(), 1);
+    assert!(hub.link.request_work().await.unwrap().is_none());
+    assert!(status(&hub, None).await.last.unwrap().changes.is_empty());
+}
+
+#[tokio::test]
+async fn scripted_dream_reduces_duplicates_and_missing_references_and_reports_versions() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let prefix = format!("projects/{}/notes", hub.general().await.id.get());
+    for (file, content) in [
+        (
+            "retain",
+            "# Restore\nUse the verified release artifact first.",
+        ),
+        (
+            "duplicate",
+            "# Recovery\nUSE the verified release artifact first!",
+        ),
+        ("near", "# Copy\nUse the verified release artifact second."),
+        (
+            "stale",
+            "# FAQ\nSee T-0999 and [more](missing.md). Keep the retention policy.",
+        ),
+    ] {
+        hub.db
+            .write_by_owner(&format!("{prefix}/{file}.md"), content, hub.clock.now())
+            .await
+            .unwrap();
+    }
+    assert_eq!(findings(&hub).await.len(), 5);
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    for file in ["duplicate", "near"] {
+        call(
+            &*hub.link,
+            &lease,
+            &dream,
+            MEMORY_DELETE,
+            json!({"path":format!("project/notes/{file}.md")}),
+        )
+        .await
+        .unwrap();
+    }
+    call(
+        &*hub.link,
+        &lease,
+        &dream,
+        MEMORY_EDIT,
+        json!({
+            "path":"project/notes/stale.md",
+            "old_text":"See T-0999 and [more](missing.md). ",
+            "new_text":""
+        }),
+    )
+    .await
+    .unwrap();
+    complete(&hub, &lease, &dream).await;
+    assert!(findings(&hub).await.is_empty());
+    assert_eq!(
+        hub.db
+            .read(&format!("{prefix}/stale.md"))
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "# FAQ\nKeep the retention policy."
+    );
+    set(&hub, None).await;
+    let summary = status(&hub, None).await.last.unwrap();
+    assert_eq!(summary.at, hub.clock.now());
+    for (name, deleted) in [("duplicate", true), ("near", true), ("stale", false)] {
+        assert!(
+            summary
+                .changes
+                .iter()
+                .any(|change| change.path == format!("project/notes/{name}.md")
+                    && change.version == 2
+                    && change.deleted == deleted)
+        );
+    }
+}
+
+#[tokio::test]
+async fn dreaming_recovers_at_setting_scheduler_run_and_tool_boundaries() {
+    for step in [
+        dreaming::BEFORE_SETTING,
+        dreaming::AFTER_SETTING,
+        scheduler::AFTER_SCAN,
+        scheduler::AFTER_FIRE,
+        scheduler::AFTER_WAKE,
+        begin_run::AFTER_START_RUN,
+        begin_run::AFTER_ASSEMBLE_CONTEXT,
+        tool_call::AFTER_BEGIN,
+        tool_call::AFTER_EFFECT,
+        tool_call::AFTER_FINISH,
+        dreaming::BEFORE_MARKER,
+        dreaming::AFTER_MARKER,
+    ] {
+        let plan = CrashPlan::kill_at(step);
+        let hub = TestHub::with(HubSettings::default(), Arc::new(plan.clone())).await;
+        hub.hello().await;
+        let project = hub.general().await;
+        let args = json!({"path":"project/notes/test.md","content":"# Test\nDurable details"});
+        let attempt = async {
+            hub.api
+                .memory(MemoryRequest::SetDreaming {
+                    project: None,
+                    cadence: Some(interval()),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            hub.clock.advance(HOUR);
+            hub.core.schedule_once().await.map_err(|e| e.to_string())?;
+            let lease = hub
+                .link
+                .request_work()
+                .await
+                .map_err(|e| e.to_string())?
+                .unwrap();
+            let Begin::Run(run) = hub
+                .link
+                .begin_run(&lease)
+                .await
+                .map_err(|e| e.to_string())?
+            else {
+                panic!("dream not assigned")
+            };
+            call(&*hub.link, &lease, &run, MEMORY_CREATE, args.clone())
+                .await
+                .map_err(|e| e.to_string())?;
+            hub.link
+                .complete(&lease, run.run_id, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(())
+        };
+        assert!(attempt.await.is_err(), "{step:?}");
+        assert_eq!(plan.killed(), Some(step));
+
+        let hub = hub.restart(Arc::new(NoHooks)).await;
+        let enabled = status(&hub, None).await.cadence.is_some();
+        assert_eq!(enabled, step != dreaming::BEFORE_SETTING);
+        if !enabled {
+            set(&hub, Some(interval())).await;
+        }
+        hub.clock.advance(
+            if [dreaming::BEFORE_SETTING, dreaming::AFTER_SETTING].contains(&step) {
+                HOUR
+            } else {
+                PAST_LEASE
+            },
+        );
+        hub.core.sweep_once().await.unwrap();
+        hub.core.schedule_once().await.unwrap();
+        if step != dreaming::AFTER_MARKER {
+            assert!(status(&hub, None).await.last.is_none(), "{step:?}");
+            let (lease, dream) = begin(&*hub.link).await;
+            call(&*hub.link, &lease, &dream, MEMORY_CREATE, args.clone())
+                .await
+                .unwrap();
+            complete(&hub, &lease, &dream).await;
+        }
+        let events = hub.db.pending_events(project.lead_lane_id).await.unwrap();
+        assert!(events.is_empty(), "{step:?}: {events:?}");
+        let event = hub.event(threadlane_core::ids::EventId(1)).await;
+        assert_eq!(
+            (event.kind, event.status),
+            (EventKind::Dream, EventStatus::Done),
+            "{step:?}"
+        );
+        assert_eq!(hub.committed_runs_with(event.id).await, 1, "{step:?}");
+        let history = hub
+            .db
+            .history(&format!("projects/{}/notes/test.md", project.id.get()))
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1, "{step:?}");
+        assert!(
+            status(&hub, None)
+                .await
+                .last
+                .unwrap()
+                .changes
+                .iter()
+                .any(|change| change.path == "project/notes/test.md")
+        );
+    }
+}

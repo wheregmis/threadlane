@@ -55,6 +55,7 @@ pub fn send_message_tool() -> ToolDefinition {
 /// A lead-lane assignment for run `run` that starts native session `native-<run>`.
 pub fn assignment(run: i64) -> RunAssignment {
     RunAssignment {
+        dreaming: false,
         run_id: RunId(run),
         trace_id: format!("event-{}", 1000 + run),
         session_id: SessionId(100 + run),

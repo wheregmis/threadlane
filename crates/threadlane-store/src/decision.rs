@@ -139,7 +139,7 @@ async fn close_in(
         params![expiry_call(id).as_str()],
     )
     .await?;
-    Box::pin(insert_event_in(
+    let inserted = Box::pin(insert_event_in(
         conn,
         &NewEvent {
             project_id: decision.project_id,
@@ -163,7 +163,19 @@ async fn close_in(
             received_at: at,
         },
     ))
-    .await
+    .await?;
+    if let Some(run) = decision.run_id
+        && crate::dreaming::dream_run_in(conn, run).await?
+    {
+        exec(
+            conn,
+            "UPDATE events SET status = 'skipped', status_reason = 'dream proposal closed'
+             WHERE id = ?1 AND status = 'pending'",
+            params![inserted.id().get()],
+        )
+        .await?;
+    }
+    Ok(inserted)
 }
 
 /// Records an answer to a pending decision and inserts its event into the
@@ -415,6 +427,27 @@ async fn insert_decision_in(
         .await?
     {
         return Ok((existing, false));
+    }
+    if let Some(run) = decision.run_id
+        && decision
+            .options
+            .iter()
+            .any(|option| option.effect["dream_proposal"] == true)
+        && let Some(previous) = query_opt(
+            conn,
+            &format!(
+                "SELECT {DECISION_FIELDS} FROM decisions WHERE arguments_hash = ?2
+                AND run_id IN (
+                    SELECT prior.run_id FROM run_events prior JOIN run_events current
+                        ON prior.event_id = current.event_id WHERE current.run_id = ?1
+                ) ORDER BY id LIMIT 1"
+            ),
+            params![run.get(), decision.arguments_hash.as_str()],
+            decode_decision,
+        )
+        .await?
+    {
+        return Ok((previous, false));
     }
     let created = query_one(
         conn,

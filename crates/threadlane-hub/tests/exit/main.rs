@@ -15,6 +15,7 @@ mod context;
 mod crash;
 mod cycle;
 mod delivery;
+mod evals;
 mod failures;
 mod fencing;
 mod github;

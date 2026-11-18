@@ -5,6 +5,7 @@
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
@@ -692,6 +693,7 @@ impl Desktop {
             .h_full()
             .overflow_y_scroll()
             .gap_2();
+        detail = detail.child(self.dreaming_settings(space, project, when, cx));
         match self.state.memory_selected(space, project) {
             None => {
                 detail = detail.child(
@@ -799,6 +801,67 @@ impl Desktop {
             .child(list)
             .child(detail)
             .into_any_element()
+    }
+
+    fn dreaming_settings(
+        &self,
+        space: &str,
+        project: &str,
+        when: &When,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let card = self.state.dreaming_card(space, project, when);
+        let muted = cx.theme().muted_foreground;
+        let (in_space, named) = (space.to_owned(), project.to_owned());
+        let mut panel = v_flex()
+            .gap_2()
+            .p_3()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(
+                Switch::new("dreaming-switch")
+                    .label("Dreaming")
+                    .accessibility_label("Dreaming")
+                    .checked(card.enabled)
+                    .disabled(card.disabled)
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        this.toggle_dreaming(in_space.clone(), named.clone(), *checked, cx);
+                    })),
+            )
+            .child(div().text_sm().text_color(muted).child(card.cadence));
+        if card.enabled {
+            let (in_space, named) = (space.to_owned(), project.to_owned());
+            panel = panel.child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.dream_cadence).disabled(card.disabled)),
+                    )
+                    .child(
+                        Button::new("save-dream-cadence")
+                            .label("Save cadence")
+                            .disabled(card.disabled)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.save_dream_cadence(in_space.clone(), named.clone(), cx);
+                            })),
+                    ),
+            );
+        }
+        panel
+            .children(
+                card.last
+                    .into_iter()
+                    .map(|line| div().text_sm().child(line)),
+            )
+            .child(section("Memory check"))
+            .children(
+                card.findings
+                    .into_iter()
+                    .map(|line| div().text_sm().text_color(muted).child(line)),
+            )
     }
 
     /// The project ceiling, then one row per agent bound here: its mode a

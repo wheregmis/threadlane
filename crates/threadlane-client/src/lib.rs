@@ -1874,3 +1874,50 @@ impl ClientCore {
             .map_err(|error| api_error(&space, error))
     }
 }
+
+/// Parses a dreaming setting as `off`, `daily HH:MM`, or `every Nh`.
+/// The named `zone` applies to daily schedules and is validated by the hub.
+pub fn parse_dreaming_cadence(
+    input: &str,
+    zone: &str,
+) -> Result<Option<threadlane_core::model::Recurrence>, String> {
+    use threadlane_core::model::{Recurrence, Rule};
+
+    let mut parts = input.split_whitespace();
+    let rule = match (parts.next(), parts.next(), parts.next()) {
+        (Some("off"), None, None) => return Ok(None),
+        (Some("daily"), Some(time), None) => {
+            let bad_time = || "Enter a daily time in HH:MM.".to_owned();
+            let [h1, h2, b':', m1, m2] = time.as_bytes() else {
+                return Err(bad_time());
+            };
+            if ![h1, h2, m1, m2].into_iter().all(u8::is_ascii_digit) {
+                return Err(bad_time());
+            }
+            let hour = (*h1 - b'0') * 10 + (*h2 - b'0');
+            let minute = (*m1 - b'0') * 10 + (*m2 - b'0');
+            if hour > 23 || minute > 59 {
+                return Err(bad_time());
+            }
+            Rule::Daily { hour, minute }
+        }
+        (Some("every"), Some(hours), None) => {
+            let minutes = hours
+                .strip_suffix('h')
+                .filter(|hours| hours.bytes().all(|byte| byte.is_ascii_digit()))
+                .and_then(|hours| hours.parse::<u32>().ok())
+                .filter(|hours| *hours > 0)
+                .and_then(|hours| hours.checked_mul(60))
+                .ok_or_else(|| "Enter a positive whole number of hours, such as 6h.".to_owned())?;
+            return Ok(Some(Recurrence {
+                rule: Rule::Interval { minutes },
+                zone: "UTC".to_owned(),
+            }));
+        }
+        _ => return Err("Enter off, daily HH:MM, or every Nh.".to_owned()),
+    };
+    Ok(Some(Recurrence {
+        rule,
+        zone: zone.to_owned(),
+    }))
+}

@@ -74,6 +74,13 @@ pub(super) async fn handle(
             let trace = db.inspect_trace(&id).await.map_err(operator_error)?;
             Ok(OperationsReply::Trace { trace })
         }
+        OperationsRequest::CheckMemory { project } => {
+            let id = api.project_named(project.as_deref()).await?.id;
+            let findings = crate::memory_check::check(db, id, inner.workspaces.as_deref())
+                .await
+                .map_err(api_error)?;
+            Ok(OperationsReply::MemoryCheck { findings })
+        }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }
 }

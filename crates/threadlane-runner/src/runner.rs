@@ -599,7 +599,7 @@ impl Inner {
             if event.is_terminal() {
                 return Ok(Ended::Terminal(event));
             }
-            if !lane.deferred() && event == BackendEvent::TurnBoundary {
+            if !assignment.dreaming && !lane.deferred() && event == BackendEvent::TurnBoundary {
                 self.fold_in(lane, assignment, run).await?;
             }
             if lane.deferred() && matches!(event, BackendEvent::ToolUse { .. }) {

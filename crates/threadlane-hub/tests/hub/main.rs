@@ -8,6 +8,7 @@ mod control;
 mod crash;
 mod cycle;
 mod decisions;
+mod dreaming;
 mod failures;
 mod feed;
 mod fencing;

@@ -107,7 +107,7 @@ impl HubDb {
         let timer_lateness = latency(
             &conn, project,
             "SELECT MAX(0, received_at - json_extract(payload, '$.occurrence')) AS ms FROM events
-             WHERE source = 'timer' AND kind = 'timer_fired'
+             WHERE source = 'timer' AND kind IN ('timer_fired', 'dream')
                 AND json_extract(payload, '$.occurrence') IS NOT NULL AND (?1 IS NULL OR project_id = ?1)
              UNION ALL
              SELECT MAX(0, last_fired_at - due_at) FROM timers

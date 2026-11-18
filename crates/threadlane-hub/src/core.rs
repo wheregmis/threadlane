@@ -1,6 +1,7 @@
 //! [`HubCore`]: the hub's roles over one database (docs/milestone-1.md §9).
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use threadlane_core::adapters::ChannelAdapter;
@@ -42,6 +43,7 @@ pub(crate) struct Inner {
     pub(crate) backends: Vec<Arc<dyn threadlane_core::backend::AgentBackend>>,
     /// Where the GitHub poller reads; `None` runs no poller.
     pub(crate) github: Option<Arc<dyn GithubSource>>,
+    pub(crate) workspaces: Option<PathBuf>,
 }
 
 /// The hub of one space: handler, placement, begin-run, tool gateway,
@@ -87,9 +89,14 @@ impl HubCore {
                 channels: vec![Arc::new(ClientChannel)],
                 iroh: None,
                 github: None,
+                workspaces: None,
                 backends: Vec::new(),
             }),
         })
+    }
+
+    pub(crate) fn with_workspaces(self, root: PathBuf) -> Self {
+        self.map_inner(|inner| inner.workspaces = Some(root))
     }
 
     /// The same hub with another tool registry. Combine it with

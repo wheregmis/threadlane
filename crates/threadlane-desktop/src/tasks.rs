@@ -214,6 +214,7 @@ impl AppState {
             .filter(|q| {
                 q.space == space
                     && q.decision.kind == DecisionKind::Proposal
+                    && !q.decision.is_instruction_proposal()
                     && self.project_name(space, q.decision.project_id) == Some(project)
             })
             .map(|q| {

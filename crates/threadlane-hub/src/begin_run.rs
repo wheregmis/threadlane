@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::accounts::cooling;
 use crate::context::{PromptParts, appended_instructions, loaded_memory, render_prompt};
+use crate::dreaming;
 use crate::error::link_error;
 use crate::link::LocalLink;
 use crate::tools::offered_in;
@@ -56,11 +57,38 @@ impl LocalLink {
         let now = inner.clock.now();
 
         // 1. Pending events.
-        let pending = db.pending_events(lane.id).await.map_err(link_error)?;
+        let mut pending = db.pending_events(lane.id).await.map_err(link_error)?;
         inner.hook.reach(step::AFTER_READ_PENDING)?;
         if pending.is_empty() || lane.backoff_until.is_some_and(|until| until > now) {
             return Ok(Begin::Idle);
         }
+
+        if pending.iter().any(dreaming::is_dream) {
+            let active = db
+                .dreaming_timer(lane.project_id)
+                .await
+                .map_err(link_error)?
+                .map(|(id, _)| id);
+            let stale: Vec<_> = pending
+                .iter()
+                .filter(|event| {
+                    dreaming::is_dream(event)
+                        && active
+                            .is_none_or(|id| event.payload["timer_id"].as_i64() != Some(id.get()))
+                })
+                .map(|event| event.id)
+                .collect();
+            if !stale.is_empty() {
+                db.skip_events(lease, &stale, "dreaming setting changed")
+                    .await
+                    .map_err(link_error)?;
+                pending.retain(|event| !stale.contains(&event.id));
+            }
+            if pending.is_empty() {
+                return Ok(Begin::Idle);
+            }
+        }
+        let dreaming = pending.first().is_some_and(dreaming::is_dream);
 
         // 2. Initiative. A task that has ended does no more work. An agent
         // that is effectively Off, or not bound in the project at all, never
@@ -101,7 +129,13 @@ impl LocalLink {
         inner.hook.reach(step::AFTER_INITIATIVE_CHECK)?;
 
         // 3. Session routing, grouping, isolation.
-        let (session, events) = self.choose_batch(&lane, pending, now).await?;
+        let (session, events) = if dreaming {
+            pending.truncate(1);
+            (None, pending)
+        } else {
+            pending.retain(|event| !dreaming::is_dream(event));
+            self.choose_batch(&lane, pending, now).await?
+        };
 
         let mut retained = Vec::with_capacity(events.len());
         let mut tainted = false;
@@ -175,7 +209,7 @@ impl LocalLink {
             .await
             .map_err(link_error)?
             .ok_or_else(|| LinkError::Rejected(format!("project {} not found", lane.project_id)))?;
-        let recent = if plan.new_native_id.is_some() && lane.kind == LaneKind::Lead {
+        let recent = if !dreaming && plan.new_native_id.is_some() && lane.kind == LaneKind::Lead {
             let mut recent = db
                 .recent_messages(project.id, inner.settings.recent_messages)
                 .await
@@ -194,7 +228,16 @@ impl LocalLink {
                 .map(|file| file.content),
             _ => None,
         };
-        let decisions = db.pending_decisions(lane.id).await.map_err(link_error)?;
+        let decisions = if dreaming {
+            Vec::new()
+        } else {
+            db.pending_decisions(lane.id)
+                .await
+                .map_err(link_error)?
+                .into_iter()
+                .filter(|decision| !decision.is_instruction_proposal())
+                .collect()
+        };
         // The answers among the events: the approved calls, which the
         // runner performs before the session resumes (Plan.md §9.4).
         let mut perform = Vec::new();
@@ -208,28 +251,40 @@ impl LocalLink {
                 perform.push(id);
             }
         }
-        let prompt = render_prompt(&PromptParts {
-            project: &project,
-            task: task.as_ref(),
-            progress: progress.as_deref(),
-            recent: &recent,
-            decisions: &decisions,
-            events: &events,
-        });
+        let prompt = if dreaming {
+            dreaming::PROMPT.to_owned()
+        } else {
+            render_prompt(&PromptParts {
+                project: &project,
+                task: task.as_ref(),
+                progress: progress.as_deref(),
+                recent: &recent,
+                decisions: &decisions,
+                events: &events,
+            })
+        };
         let mut memory = Vec::new();
-        for (heading, path) in loaded_memory(project.id, lane.kind) {
+        for (heading, path) in loaded_memory(project.id, lane.kind)
+            .into_iter()
+            .filter(|_| !dreaming)
+        {
             let content = db.read(&path).await.map_err(link_error)?;
             memory.push((
                 heading,
                 content.map(|file| file.content).unwrap_or_default(),
             ));
         }
-        let appended_instructions = appended_instructions(&agent, lane.kind, &memory);
+        let appended_instructions = if dreaming {
+            String::new()
+        } else {
+            appended_instructions(&agent, lane.kind, &memory)
+        };
         let repositories = self.task_repositories(task.as_ref()).await?;
         inner.hook.reach(step::AFTER_ASSEMBLE_CONTEXT)?;
 
         // 8. The assignment.
         Ok(Begin::Run(Box::new(RunAssignment {
+            dreaming,
             run_id: run.id,
             trace_id: run.trace_id,
             session_id: run.session_id,
@@ -249,12 +304,16 @@ impl LocalLink {
             native_session: plan.native,
             appended_instructions,
             prompt,
-            tools: inner
-                .tools
-                .definitions()
-                .into_iter()
-                .filter(|tool| offered_in(&tool.name, lane.kind))
-                .collect(),
+            tools: if dreaming {
+                dreaming::definitions()
+            } else {
+                inner
+                    .tools
+                    .definitions()
+                    .into_iter()
+                    .filter(|tool| offered_in(&tool.name, lane.kind))
+                    .collect()
+            },
             // A lead has no file or shell tools to refuse anything with; a
             // task agent has full access less the direct shared effects.
             remove_builtin_tools: lane.kind == LaneKind::Lead,
