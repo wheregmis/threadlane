@@ -324,18 +324,31 @@ pub(crate) async fn end_task(
         };
         payload[key] = json!(why);
     }
-    tell_lead(
-        conn,
-        task,
-        format!("result:{}", task.id.get()),
-        payload,
-        now,
-    )
-    .await?;
+    tell_lead(conn, task, result_key(conn, task.id).await?, payload, now).await?;
     if matches!(status, TaskStatus::Failed | TaskStatus::Cancelled) {
         cancel_dependents(conn, task, status, now).await?;
     }
     Ok(())
+}
+
+/// How many times the user retried task `id`.
+async fn retries(conn: &Connection, id: TaskId) -> StoreResult<i64> {
+    query_one(
+        conn,
+        "SELECT COUNT(*) FROM events WHERE source = ?1 AND source_event_id LIKE ?2",
+        params![TASK_SOURCE, format!("retry:{}:%", id.get())],
+        |row| Cols(row).i64(0),
+    )
+    .await
+}
+
+/// The `source_event_id` of the lead's `task_result` event for the current
+/// attempt of task `id`, a new one after each retry.
+async fn result_key(conn: &Connection, id: TaskId) -> StoreResult<String> {
+    Ok(match retries(conn, id).await? {
+        0 => format!("result:{}", id.get()),
+        n => format!("result:{}:retry{n}", id.get()),
+    })
 }
 
 /// Inserts a `task_result` event about `task` in its project's lead lane,
@@ -995,6 +1008,70 @@ impl TaskStore for HubDb {
         let cancelled = existing_task(conn, id).await?;
         tx.commit().await?;
         Ok(cancelled)
+    }
+
+    async fn retry_task(&self, id: TaskId, now: Timestamp) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let task = existing_task(conn, id).await?;
+        if task.status != TaskStatus::Failed {
+            return Err(StoreError::Conflict(format!(
+                "task {id} is {}; only a failed task can be retried",
+                task.status
+            )));
+        }
+        // The error is kept in the lead's report of how the attempt ended.
+        let error: Option<Json> = query_opt(
+            conn,
+            "SELECT payload FROM events WHERE source = ?1 AND source_event_id = ?2",
+            params![TASK_SOURCE, result_key(conn, id).await?],
+            |row| Cols(row).json(0),
+        )
+        .await?;
+        let error = error
+            .as_ref()
+            .and_then(|payload| payload["error"].as_str())
+            .unwrap_or("unknown");
+        // The one way out of `failed`, which the lifecycle otherwise ends.
+        exec(
+            conn,
+            "UPDATE tasks SET status = ?1, waiting_reason = NULL, result = NULL WHERE id = ?2",
+            params![TaskStatus::Queued.as_str(), id.get()],
+        )
+        .await?;
+        // The user asked for it now: the failed attempts' backoff does not hold it.
+        exec(
+            conn,
+            "UPDATE lanes SET backoff_until = NULL WHERE id = ?1",
+            params![task.lane_id.get()],
+        )
+        .await?;
+        let attempt = retries(conn, id).await? + 1;
+        insert_event_in(
+            conn,
+            &NewEvent {
+                project_id: task.project_id,
+                lane_id: task.lane_id,
+                source: TASK_SOURCE.to_owned(),
+                source_event_id: format!("retry:{}:{attempt}", id.get()),
+                kind: EventKind::UserMessage,
+                payload: json!({ "text": format!(
+                    "The user asked for a retry of {id}. The last attempt failed with: {error}\n\n\
+                     Your earlier work is committed on the task branch. Continue from it; \
+                     do not start over."
+                ) }),
+                trust: Trust::User,
+                requested: true,
+                session_ref: None,
+                decision_ref: None,
+                reply_to_ref: None,
+                received_at: now,
+            },
+        )
+        .await?;
+        let retried = existing_task(conn, id).await?;
+        tx.commit().await?;
+        Ok(retried)
     }
 
     async fn finish_task(&self, lease: &Lease, result: &Json) -> StoreResult<Task> {

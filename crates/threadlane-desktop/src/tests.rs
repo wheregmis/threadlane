@@ -842,6 +842,19 @@ impl HubApi for FakeHub {
                     task: summary.task.clone(),
                 })
             }
+            TaskRequest::Retry { task: id } => {
+                let summary = tasks
+                    .iter_mut()
+                    .find(|summary| summary.task.id == id)
+                    .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+                if summary.task.status != TaskStatus::Failed {
+                    return Err(ApiError::Invalid(format!("task {id} has not failed")));
+                }
+                summary.task.status = TaskStatus::Queued;
+                Ok(TaskReply::Task {
+                    task: summary.task.clone(),
+                })
+            }
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -3025,6 +3038,28 @@ async fn cancelling_a_task_asks_first_then_shows_it_ended() {
         .expect("cancelled");
     state.task_cancelled("work", cancelled);
     assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Ended);
+}
+
+#[tokio::test]
+async fn a_failed_task_offers_retry_and_is_queued_again() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.tasks
+        .lock()
+        .expect("lock")
+        .push(task(1, TaskStatus::Failed, None));
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Retry);
+
+    let retried = core
+        .retry_task(Some("work"), "T-0001")
+        .await
+        .expect("retried");
+    assert_eq!(retried.status, TaskStatus::Queued);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Cancel);
 }
 
 #[tokio::test]

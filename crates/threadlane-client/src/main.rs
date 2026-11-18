@@ -188,7 +188,7 @@ enum Command {
         #[command(subcommand)]
         command: RoutineCommand,
     },
-    /// Cancel tasks.
+    /// Cancel tasks, or retry failed ones.
     Task {
         #[command(subcommand)]
         command: TaskCommand,
@@ -304,6 +304,14 @@ impl LaneArgs {
 enum TaskCommand {
     /// Cancel a task, and the tasks that wait on it; the lead hears of it.
     Cancel {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// The task, for example T-0001.
+        task: String,
+    },
+    /// Queue a failed task again, continuing from the work on its branch.
+    Retry {
         /// The space (paired hub name); may be left out if only one is paired.
         #[arg(short, long)]
         space: Option<String>,
@@ -691,6 +699,12 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
             command: TaskCommand::Cancel { space, task },
         } => {
             let task = core.cancel_task(space.as_deref(), &task).await?;
+            println!("{} is {}", task.id, task.status);
+        }
+        Command::Task {
+            command: TaskCommand::Retry { space, task },
+        } => {
+            let task = core.retry_task(space.as_deref(), &task).await?;
             println!("{} is {}", task.id, task.status);
         }
         Command::Repo {

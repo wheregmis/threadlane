@@ -7,7 +7,7 @@ use threadlane_client::{ClientCore, ClientError, NewTaskSpec};
 use threadlane_core::client::{AgentTemplate, DeletePreview, ProjectSummary, RecordedEvent};
 use threadlane_core::github::normalize_remote;
 use threadlane_core::ids::TaskId;
-use threadlane_core::model::{Agent, BackendKind, Mode, Repository, Task};
+use threadlane_core::model::{Agent, BackendKind, Mode, Repository, Task, TaskStatus};
 
 use crate::{AppState, InSpace, Part, When, describe};
 
@@ -129,6 +129,8 @@ pub enum TaskControl {
     Ended,
     /// "Cancel" can be pressed.
     Cancel,
+    /// It failed: "Retry" can be pressed.
+    Retry,
     /// Waiting for you to confirm, with what the confirmation says.
     Confirm(String),
 }
@@ -484,6 +486,9 @@ impl AppState {
         let Some(detail) = self.task(space, task) else {
             return TaskControl::Ended;
         };
+        if detail.summary.task.status == TaskStatus::Failed {
+            return TaskControl::Retry;
+        }
         if detail.summary.task.status.is_terminal() {
             return TaskControl::Ended;
         }

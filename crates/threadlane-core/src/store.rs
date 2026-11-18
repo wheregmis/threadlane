@@ -389,6 +389,10 @@ pub trait TaskStore: Send + Sync {
         id: TaskId,
         now: Timestamp,
     ) -> StoreResult<Task>;
+    /// Queues a failed task again and inserts a user message in its lane
+    /// asking for the retry, with the last error. Refused with
+    /// [`StoreError::Conflict`] unless the task has failed.
+    async fn retry_task(&self, id: TaskId, now: Timestamp) -> StoreResult<Task>;
     /// Records the result of the running task whose lane `lease` holds. The
     /// task becomes `done`, and its result is reported, when the run commits.
     /// Recording again replaces the result. Refused with

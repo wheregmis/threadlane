@@ -46,6 +46,8 @@ pub struct BoardCard {
     pub elapsed: Option<String>,
     /// Whether this task still accepts cancellation.
     pub can_cancel: bool,
+    /// Whether this task failed and can be retried.
+    pub can_retry: bool,
     /// The decision waiting on you in it, which the card offers to answer.
     pub decision: Option<DecisionId>,
     /// That decision's options, which answer it from the card.
@@ -199,6 +201,7 @@ impl AppState {
                             },
                             elapsed: work_elapsed(summary, when),
                             can_cancel: !task.status.is_terminal(),
+                            can_retry: task.status == TaskStatus::Failed,
                             decision,
                             options,
                             merge: merge_state(task.result.as_ref()),

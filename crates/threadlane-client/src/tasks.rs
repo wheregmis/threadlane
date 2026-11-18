@@ -1,5 +1,5 @@
 //! What you start and stop yourself through [`ClientCore`]: a task created
-//! skipping the lead, cancelling a task, pausing a project, and the events
+//! skipping the lead, cancelling or retrying a task, pausing a project, and the events
 //! recorded but acted on by nobody.
 
 use threadlane_core::client::{
@@ -59,14 +59,30 @@ impl ClientCore {
     /// No such hub, several hubs and none named, an id that is not a
     /// task's, or the hub's error.
     pub async fn cancel_task(&self, space: Option<&str>, task: &str) -> Result<Task, ClientError> {
+        let id = self.task_id(space, task)?;
+        self.one_task(space, TaskRequest::Cancel { task: id }).await
+    }
+
+    /// Queues failed task `task` (`T-0142`) of one space again, telling its
+    /// agent the last error. `None` means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, an id that is not a
+    /// task's, or the hub's error, for example a task that has not failed.
+    pub async fn retry_task(&self, space: Option<&str>, task: &str) -> Result<Task, ClientError> {
+        let id = self.task_id(space, task)?;
+        self.one_task(space, TaskRequest::Retry { task: id }).await
+    }
+
+    fn task_id(&self, space: Option<&str>, task: &str) -> Result<TaskId, ClientError> {
         let (name, _api) = self.target(space)?;
-        let id = TaskId::parse(task).ok_or_else(|| {
+        TaskId::parse(task).ok_or_else(|| {
             api_error(
                 &name,
                 ApiError::Invalid(format!("{task:?} is not a task id like T-0142")),
             )
-        })?;
-        self.one_task(space, TaskRequest::Cancel { task: id }).await
+        })
     }
 
     async fn one_task(

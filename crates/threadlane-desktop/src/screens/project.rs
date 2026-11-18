@@ -526,6 +526,12 @@ impl Desktop {
                                 },
                             ));
                         }
+                        if task_card.can_retry && !archived {
+                            let space = menu_space.clone();
+                            menu = menu.item(menu_item(&menu_view, "Retry", move |this, _, cx| {
+                                this.retry_task(space.clone(), id, cx);
+                            }));
+                        }
                         menu
                     })
             });
