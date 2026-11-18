@@ -742,9 +742,14 @@ pub(crate) async fn check_eligible(
     Ok(reason.is_none())
 }
 
-#[async_trait]
-impl TaskStore for HubDb {
-    async fn create_task(&self, lease: Option<&Lease>, task: &NewTask) -> StoreResult<Task> {
+impl HubDb {
+    /// Creates a task and records the space Lead's ask in the same transaction.
+    pub async fn create_task_for_ask(
+        &self,
+        lease: Option<&Lease>,
+        task: &NewTask,
+        ask: Option<EventId>,
+    ) -> StoreResult<Task> {
         if !matches!(task.status, TaskStatus::Proposed | TaskStatus::Queued) {
             return Err(StoreError::Invalid(format!(
                 "a task starts proposed or queued, not {}",
@@ -791,10 +796,10 @@ impl TaskStore for HubDb {
             conn,
             concat!(
                 "INSERT INTO tasks (id, project_id, lane_id, agent_id, title, goal, repositories,
-                 parent_task_id, origin, status, priority, created_by_call, created_at)
+                 parent_task_id, origin, status, priority, created_by_call, created_at, space_lead_event)
              VALUES (",
                 crate::db::next_id_sql!("tasks"),
-                ", ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) RETURNING id"
+                ", ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) RETURNING id"
             ),
             params![
                 task.project_id.get(),
@@ -809,6 +814,7 @@ impl TaskStore for HubDb {
                 task.priority,
                 task.created_by_call.as_deref(),
                 task.created_at.as_millis(),
+                opt_raw(ask, |id| id.get()),
             ],
             |row| Cols(row).id(0),
         )
@@ -856,6 +862,13 @@ impl TaskStore for HubDb {
         let created = existing_task(conn, id).await?;
         tx.commit().await?;
         Ok(created)
+    }
+}
+
+#[async_trait]
+impl TaskStore for HubDb {
+    async fn create_task(&self, lease: Option<&Lease>, task: &NewTask) -> StoreResult<Task> {
+        self.create_task_for_ask(lease, task, None).await
     }
 
     async fn left_unwoken(&self, lane_id: LaneId) -> StoreResult<bool> {
@@ -1003,20 +1016,6 @@ impl TaskStore for HubDb {
         .await?;
         tx.commit().await?;
         Ok(true)
-    }
-
-    async fn set_space_lead_ask(&self, id: TaskId, ask: EventId) -> StoreResult<()> {
-        let tx = self.db.begin().await?;
-        let changed = exec(
-            tx.conn(),
-            "UPDATE tasks SET space_lead_event = ?1 WHERE id = ?2",
-            params![ask.get(), id.get()],
-        )
-        .await?;
-        if changed == 0 {
-            return Err(StoreError::not_found("task", id));
-        }
-        tx.commit().await
     }
 
     async fn space_lead_ask(&self, id: TaskId) -> StoreResult<Option<EventId>> {

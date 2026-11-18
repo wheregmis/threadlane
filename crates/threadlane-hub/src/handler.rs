@@ -527,65 +527,101 @@ impl HubApi for ClientApi {
                 backends,
                 models,
             } => {
-                let mut agent = self.agent_named(&agent).await?;
-                let is_lead = agent.role == LEAD_ROLE;
-                if let Some(name) = name {
-                    agent.name = required("agent name", &name)?.to_owned();
+                let name = name
+                    .as_deref()
+                    .map(|value| required("agent name", value))
+                    .transpose()?;
+                let role = role
+                    .as_deref()
+                    .map(|value| required("agent role", value))
+                    .transpose()?;
+                if let Some(instructions) = &instructions
+                    && instructions.len() > INSTRUCTIONS_BUDGET
+                {
+                    return Err(ApiError::Invalid(format!(
+                        "the instructions are {} bytes, over their budget of {INSTRUCTIONS_BUDGET}",
+                        instructions.len()
+                    )));
                 }
-                if let Some(role) = role {
-                    let role = required("agent role", &role)?;
-                    if is_lead && role != LEAD_ROLE {
-                        return Err(ApiError::Invalid(format!(
-                            "the lead's role stays {LEAD_ROLE:?}"
-                        )));
-                    }
-                    role.clone_into(&mut agent.role);
-                }
-                if let Some(instructions) = instructions {
-                    if instructions.len() > INSTRUCTIONS_BUDGET {
-                        return Err(ApiError::Invalid(format!(
-                            "the instructions are {} bytes, over their budget of \
-                             {INSTRUCTIONS_BUDGET}",
-                            instructions.len()
-                        )));
-                    }
-                    agent.instructions = instructions;
-                }
-                if let Some(backends) = backends {
-                    let mut preferred = Vec::with_capacity(backends.len());
-                    for backend in backends {
-                        let backend = known_backend(&backend)?;
-                        if !preferred.contains(&backend) {
-                            preferred.push(backend);
-                        }
-                    }
-                    // Codex cannot remove its built-in tools (Plan.md §18.4 item 12).
-                    if is_lead && preferred != [BackendKind::Claude] {
-                        return Err(ApiError::Invalid("the lead runs on Claude only".into()));
-                    }
-                    agent.backends = preferred;
-                }
-                if let Some(models) = models {
-                    if !agent.models.is_object() {
-                        agent.models = json!({});
-                    }
-                    for (backend, model) in models {
-                        let backend = known_backend(&backend)?.as_str().to_owned();
-                        let model = model.trim();
-                        if let Some(map) = agent.models.as_object_mut() {
-                            if model.is_empty() {
-                                map.remove(&backend);
-                            } else {
-                                map.insert(backend, json!(model));
+                let backends = backends
+                    .map(|backends| {
+                        let mut preferred = Vec::with_capacity(backends.len());
+                        for backend in backends {
+                            let backend = known_backend(&backend)?;
+                            if !preferred.contains(&backend) {
+                                preferred.push(backend);
                             }
                         }
-                    }
-                }
-                let name = agent.name.clone();
+                        Ok::<_, ApiError>(preferred)
+                    })
+                    .transpose()?;
+                let models = models
+                    .map(|models| {
+                        models
+                            .into_iter()
+                            .map(|(backend, model)| {
+                                Ok((known_backend(&backend)?.as_str().to_owned(), model))
+                            })
+                            .collect::<Result<Vec<_>, ApiError>>()
+                    })
+                    .transpose()?;
+                let agent_name = agent.trim();
+                let target_name = name.unwrap_or(agent_name);
                 let agent = db
-                    .update_agent(&agent)
+                    .patch_agent(agent_name, |current| {
+                        if current.role == LEAD_ROLE {
+                            if role.is_some_and(|role| role != LEAD_ROLE) {
+                                return Err(StoreError::Invalid(format!(
+                                    "the lead's role stays {LEAD_ROLE:?}"
+                                )));
+                            }
+                            // Codex cannot remove its built-in tools (Plan.md §18.4 item 12).
+                            if backends
+                                .as_ref()
+                                .is_some_and(|backends| backends != &[BackendKind::Claude])
+                            {
+                                return Err(StoreError::Invalid(
+                                    "the lead runs on Claude only".into(),
+                                ));
+                            }
+                        }
+                        if let Some(name) = name {
+                            name.clone_into(&mut current.name);
+                        }
+                        if let Some(role) = role {
+                            role.clone_into(&mut current.role);
+                        }
+                        if let Some(instructions) = instructions {
+                            current.instructions = instructions;
+                        }
+                        if let Some(backends) = backends {
+                            current.backends = backends;
+                        }
+                        if let Some(models) = models {
+                            if !current.models.is_object() {
+                                current.models = json!({});
+                            }
+                            if let Some(map) = current.models.as_object_mut() {
+                                for (backend, model) in models {
+                                    let model = model.trim();
+                                    if model.is_empty() {
+                                        map.remove(&backend);
+                                    } else {
+                                        map.insert(backend, json!(model));
+                                    }
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
                     .await
-                    .map_err(|error| taken(error, "agent", &name))?;
+                    .map_err(|error| match error {
+                        StoreError::Invalid(message) => ApiError::Invalid(message),
+                        StoreError::NotFound { .. } => {
+                            ApiError::NotFound(format!("agent {agent_name:?}"))
+                        }
+                        other => taken(other, "agent", target_name),
+                    })?;
                 Ok(OrgReply::Agent { agent })
             }
             OrgRequest::DeleteAgent {

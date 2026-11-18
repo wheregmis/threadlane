@@ -183,20 +183,32 @@ pub(crate) async fn execute(
             let requested = run_requested(db, run.id, context.task_id)
                 .await
                 .map_err(tool_error)?;
+            let ask = if context.task_id.is_none() {
+                let events = db.run_events(run.id).await.map_err(tool_error)?;
+                crate::space_lead::answered_ask(db, &events)
+                    .await
+                    .map_err(tool_error)?
+                    .map(|event| event.id)
+            } else {
+                None
+            };
             let timer = db
-                .create_timer(&NewTimer {
-                    project_id: context.project_id,
-                    lane_id: context.lease.lane_id,
-                    agent_id: context.agent_id,
-                    task_ref: context.task_id,
-                    category: TimerCategory::FollowUp,
-                    due_at,
-                    recurrence: None,
-                    instruction,
-                    created_by: TimerCreator::Agent,
-                    created_by_call: Some(key),
-                    requested,
-                })
+                .create_timer_for_ask(
+                    &NewTimer {
+                        project_id: context.project_id,
+                        lane_id: context.lease.lane_id,
+                        agent_id: context.agent_id,
+                        task_ref: context.task_id,
+                        category: TimerCategory::FollowUp,
+                        due_at,
+                        recurrence: None,
+                        instruction,
+                        created_by: TimerCreator::Agent,
+                        created_by_call: Some(key),
+                        requested,
+                    },
+                    ask,
+                )
                 .await
                 .map_err(tool_error)?;
             Ok(timer_json(&timer))

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::json;
-use threadlane_core::ids::{ProjectId, TimerId};
+use threadlane_core::ids::{EventId, ProjectId, TimerId};
 use threadlane_core::model::{
     EventKind, Inserted, NewEvent, NewTimer, Timer, TimerCategory, TimerCreator, TimerStatus, Trust,
 };
@@ -102,7 +102,11 @@ async fn set_status(
 
 /// Creates a timer inside the caller's transaction; a repeated
 /// `created_by_call` returns the original.
-pub(crate) async fn insert_timer_in(conn: &Connection, timer: &NewTimer) -> StoreResult<Timer> {
+pub(crate) async fn insert_timer_in(
+    conn: &Connection,
+    timer: &NewTimer,
+    ask: Option<EventId>,
+) -> StoreResult<Timer> {
     if timer.category != TimerCategory::FollowUp && timer.recurrence.is_none() {
         return Err(StoreError::Invalid("a schedule needs a recurrence".into()));
     }
@@ -122,8 +126,8 @@ pub(crate) async fn insert_timer_in(conn: &Connection, timer: &NewTimer) -> Stor
         conn,
         &format!(
             "INSERT INTO timers (id, project_id, lane_id, agent_id, task_ref, category, due_at,
-                 recurrence, instruction, status, created_by, created_by_call, requested)
-             VALUES ({}, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11)
+                 recurrence, instruction, status, created_by, created_by_call, requested, space_lead_event)
+             VALUES ({}, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12)
              RETURNING {TIMER_FIELDS}",
             crate::db::next_id_sql!("timers")
         ),
@@ -139,19 +143,31 @@ pub(crate) async fn insert_timer_in(conn: &Connection, timer: &NewTimer) -> Stor
             timer.created_by.as_str(),
             timer.created_by_call.as_deref(),
             timer.requested,
+            opt_raw(ask, |id| id.get()),
         ],
         decode_timer,
     )
     .await
 }
 
+impl HubDb {
+    /// Saves a follow-up and the space Lead's ask that it continues.
+    pub async fn create_timer_for_ask(
+        &self,
+        timer: &NewTimer,
+        ask: Option<EventId>,
+    ) -> StoreResult<Timer> {
+        let tx = self.db.begin().await?;
+        let created = insert_timer_in(tx.conn(), timer, ask).await?;
+        tx.commit().await?;
+        Ok(created)
+    }
+}
+
 #[async_trait]
 impl TimerStore for HubDb {
     async fn create_timer(&self, timer: &NewTimer) -> StoreResult<Timer> {
-        let tx = self.db.begin().await?;
-        let created = insert_timer_in(tx.conn(), timer).await?;
-        tx.commit().await?;
-        Ok(created)
+        self.create_timer_for_ask(timer, None).await
     }
 
     async fn timer(&self, id: TimerId) -> StoreResult<Option<Timer>> {
@@ -273,6 +289,25 @@ impl TimerStore for HubDb {
             tx.commit().await?;
             return Ok(Inserted::Duplicate(event));
         }
+        let mut payload = json!({
+            "timer_id": id,
+            "category": timer.category,
+            "instruction": timer.instruction,
+            "occurrence": occurrence,
+            "task_ref": timer.task_ref,
+            "created_by": timer.created_by,
+        });
+        if timer.category == TimerCategory::FollowUp
+            && let Some(ask) = query_one(
+                conn,
+                "SELECT space_lead_event FROM timers WHERE id = ?1",
+                params![id.get()],
+                |row| Cols(row).opt_id::<EventId>(0),
+            )
+            .await?
+        {
+            payload["space_lead_event"] = json!(ask);
+        }
         let inserted = insert_event_in(
             conn,
             &NewEvent {
@@ -285,14 +320,7 @@ impl TimerStore for HubDb {
                 } else {
                     EventKind::TimerFired
                 },
-                payload: json!({
-                    "timer_id": id,
-                    "category": timer.category,
-                    "instruction": timer.instruction,
-                    "occurrence": occurrence,
-                    "task_ref": timer.task_ref,
-                    "created_by": timer.created_by,
-                }),
+                payload,
                 trust: Trust::System,
                 requested: timer.requested,
                 session_ref: None,
