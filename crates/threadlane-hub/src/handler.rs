@@ -520,6 +520,21 @@ impl HubApi for ClientApi {
                 role,
                 instructions,
                 backends,
+            } => {
+                self.org(OrgRequest::CreateAgentWithModels {
+                    name,
+                    role,
+                    instructions,
+                    backends,
+                    models: Default::default(),
+                })
+                .await
+            }
+            OrgRequest::CreateAgentWithModels {
+                name,
+                role,
+                instructions,
+                backends,
                 models,
             } => {
                 let name = required("agent name", &name)?;

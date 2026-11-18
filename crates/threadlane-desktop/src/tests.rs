@@ -251,6 +251,21 @@ impl HubApi for FakeHub {
                 role,
                 instructions,
                 backends,
+            } => {
+                self.org(OrgRequest::CreateAgentWithModels {
+                    name,
+                    role,
+                    instructions,
+                    backends,
+                    models: Default::default(),
+                })
+                .await
+            }
+            OrgRequest::CreateAgentWithModels {
+                name,
+                role,
+                instructions,
+                backends,
                 models,
             } => {
                 let mut agents = self.agents.lock().expect("lock");
@@ -2677,7 +2692,7 @@ async fn copying_an_agent_offers_what_the_other_space_lacks_and_copies_it_whole(
     let home = FakeHub::new("Home", Vec::new());
     let (_dir, core) = core(&[("work", &work), ("home", &home)]);
     for (name, hub) in [("Reviewer", &work), ("Writer", &work), ("Writer", &home)] {
-        hub.org(OrgRequest::CreateAgent {
+        hub.org(OrgRequest::CreateAgentWithModels {
             name: name.to_owned(),
             role: "role".to_owned(),
             instructions: format!("Be {name}."),
@@ -5779,7 +5794,6 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
             role: role.to_owned(),
             instructions: "Review.".to_owned(),
             backends: vec![BackendKind::Claude],
-            models: Default::default(),
         })
         .await
         .expect("created");

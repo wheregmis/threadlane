@@ -22,7 +22,6 @@ async fn hub_with_reviewer() -> TestHub {
             role: "reviewer".into(),
             instructions: String::new(),
             backends: Vec::new(),
-            models: Default::default(),
         },
         OrgRequest::SetMode {
             project: None,
@@ -100,7 +99,6 @@ async fn a_task_needs_a_bound_agent_that_is_on_and_what_the_project_has() {
             role: "tester".into(),
             instructions: String::new(),
             backends: Vec::new(),
-            models: Default::default(),
         })
         .await
         .unwrap();

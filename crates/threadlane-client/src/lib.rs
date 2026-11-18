@@ -838,12 +838,25 @@ impl ClientCore {
         backends: &[BackendKind],
         models: BTreeMap<String, String>,
     ) -> Result<Agent, ClientError> {
-        let request = OrgRequest::CreateAgent {
-            models,
-            name: name.to_owned(),
-            role: role.to_owned(),
-            instructions: instructions.to_owned(),
-            backends: backends.to_vec(),
+        let name = name.to_owned();
+        let role = role.to_owned();
+        let instructions = instructions.to_owned();
+        let backends = backends.to_vec();
+        let request = if models.is_empty() {
+            OrgRequest::CreateAgent {
+                name,
+                role,
+                instructions,
+                backends,
+            }
+        } else {
+            OrgRequest::CreateAgentWithModels {
+                name,
+                role,
+                instructions,
+                backends,
+                models,
+            }
         };
         match self.org(space, request).await? {
             (_, OrgReply::Agent { agent }) => Ok(agent),

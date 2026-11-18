@@ -216,6 +216,12 @@ impl HubApi for FakeHub {
                 role,
                 instructions,
                 ..
+            }
+            | OrgRequest::CreateAgentWithModels {
+                name,
+                role,
+                instructions,
+                ..
             } => OrgReply::Agent {
                 agent: agent(&name, &role, &instructions),
             },
@@ -863,7 +869,7 @@ async fn the_cli_manages_projects_agents_and_modes() {
                 name: "web".to_owned(),
                 description: "the site".to_owned(),
             },
-            OrgRequest::CreateAgent {
+            OrgRequest::CreateAgentWithModels {
                 name: "Reviewer".to_owned(),
                 role: "reviewer".to_owned(),
                 instructions: String::new(),
@@ -934,7 +940,6 @@ async fn the_cli_lists_templates_and_adds_an_agent_from_one() {
         role: "chief-of-staff".to_owned(),
         instructions: "Offer a menu.".to_owned(),
         backends: vec![BackendKind::Claude],
-        models: Default::default(),
     };
     assert_eq!(
         *hub.fake.0.org.lock().expect("lock"),

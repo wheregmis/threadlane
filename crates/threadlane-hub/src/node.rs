@@ -395,7 +395,6 @@ mod tests {
                 role: "reviewer".into(),
                 instructions: String::new(),
                 backends: Vec::new(),
-                models: Default::default(),
             })
             .await
             .unwrap();

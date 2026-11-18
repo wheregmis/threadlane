@@ -204,7 +204,7 @@ async fn project_names_must_be_present_and_unique() {
 #[tokio::test]
 async fn agents_are_listed_and_created_with_unique_names_and_a_role() {
     let hub = TestHub::start().await;
-    let create = |name: &str, role: &str| OrgRequest::CreateAgent {
+    let create = |name: &str, role: &str| OrgRequest::CreateAgentWithModels {
         name: name.to_owned(),
         role: role.to_owned(),
         instructions: "Review every change.".to_owned(),
@@ -257,7 +257,6 @@ async fn set_mode_changes_a_binding_or_creates_one() {
             role: "reviewer".into(),
             instructions: String::new(),
             backends: Vec::new(),
-            models: Default::default(),
         },
     )
     .await
