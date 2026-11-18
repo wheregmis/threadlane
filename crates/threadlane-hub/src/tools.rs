@@ -369,7 +369,7 @@ impl HubTools {
 
     async fn list_tasks(&self, context: &ToolContext, arguments: &Json) -> Result<Json, ToolError> {
         fields(arguments, &[])?;
-        let agents = self.db.agents().await.map_err(tool_error)?;
+        let agents = self.db.all_agents().await.map_err(tool_error)?;
         let tasks = self
             .db
             .tasks(context.project_id)

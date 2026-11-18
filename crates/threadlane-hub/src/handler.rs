@@ -13,10 +13,11 @@ use threadlane_core::client::{
 };
 use threadlane_core::client::{TaskReply, TaskRequest, TimerReply, TimerRequest};
 use threadlane_core::ids::{DecisionId, ProjectId};
+use threadlane_core::memory::INSTRUCTIONS_BUDGET;
 use threadlane_core::model::{
-    Agent, Answered, Binding, Decision, DecisionAnswer, DecisionOption, DecisionStatus, EventKind,
-    Inserted, Mode, NewAgent, NewBinding, NewEvent, NewProject, NewRepository, NewStandingRule,
-    Project, StandingRule, Trust,
+    Agent, Answered, BackendKind, Binding, Decision, DecisionAnswer, DecisionOption,
+    DecisionStatus, EventKind, Inserted, Mode, NewAgent, NewBinding, NewEvent, NewProject,
+    NewRepository, NewStandingRule, Project, StandingRule, Trust,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{
@@ -26,7 +27,7 @@ use threadlane_core::time::Timestamp;
 use threadlane_core::workspace::{valid_branch_name, valid_repository_name};
 
 use crate::core::HubCore;
-use crate::defaults::ensure_defaults;
+use crate::defaults::{LEAD_ROLE, ensure_defaults};
 use crate::error::api_error;
 use crate::gate;
 use crate::tools::CLIENT_CHANNEL;
@@ -518,6 +519,95 @@ impl HubApi for ClientApi {
                     .map_err(|error| taken(error, "agent", name))?;
                 Ok(OrgReply::Agent { agent })
             }
+            OrgRequest::UpdateAgent {
+                agent,
+                name,
+                role,
+                instructions,
+                backends,
+                models,
+            } => {
+                let mut agent = self.agent_named(&agent).await?;
+                let is_lead = agent.role == LEAD_ROLE;
+                if let Some(name) = name {
+                    agent.name = required("agent name", &name)?.to_owned();
+                }
+                if let Some(role) = role {
+                    let role = required("agent role", &role)?;
+                    if is_lead && role != LEAD_ROLE {
+                        return Err(ApiError::Invalid(format!(
+                            "the lead's role stays {LEAD_ROLE:?}"
+                        )));
+                    }
+                    role.clone_into(&mut agent.role);
+                }
+                if let Some(instructions) = instructions {
+                    if instructions.len() > INSTRUCTIONS_BUDGET {
+                        return Err(ApiError::Invalid(format!(
+                            "the instructions are {} bytes, over their budget of \
+                             {INSTRUCTIONS_BUDGET}",
+                            instructions.len()
+                        )));
+                    }
+                    agent.instructions = instructions;
+                }
+                if let Some(backends) = backends {
+                    let mut preferred = Vec::with_capacity(backends.len());
+                    for backend in backends {
+                        let backend = known_backend(&backend)?;
+                        if !preferred.contains(&backend) {
+                            preferred.push(backend);
+                        }
+                    }
+                    // Codex cannot remove its built-in tools (Plan.md §18.4 item 12).
+                    if is_lead && preferred != [BackendKind::Claude] {
+                        return Err(ApiError::Invalid("the lead runs on Claude only".into()));
+                    }
+                    agent.backends = preferred;
+                }
+                if let Some(models) = models {
+                    if !agent.models.is_object() {
+                        agent.models = json!({});
+                    }
+                    for (backend, model) in models {
+                        let backend = known_backend(&backend)?.as_str().to_owned();
+                        let model = model.trim();
+                        if let Some(map) = agent.models.as_object_mut() {
+                            if model.is_empty() {
+                                map.remove(&backend);
+                            } else {
+                                map.insert(backend, json!(model));
+                            }
+                        }
+                    }
+                }
+                let name = agent.name.clone();
+                let agent = db
+                    .update_agent(&agent)
+                    .await
+                    .map_err(|error| taken(error, "agent", &name))?;
+                Ok(OrgReply::Agent { agent })
+            }
+            OrgRequest::DeleteAgent {
+                agent,
+                confirm_name,
+            } => {
+                let agent = self.agent_named(&agent).await?;
+                if confirm_name.trim() != agent.name {
+                    return Err(ApiError::Invalid(format!(
+                        "type the agent's name, {:?}, to delete it",
+                        agent.name
+                    )));
+                }
+                if agent.role == LEAD_ROLE {
+                    return Err(ApiError::Invalid(format!(
+                        "{} is the lead and cannot be deleted",
+                        agent.name
+                    )));
+                }
+                db.delete_agent(agent.id).await.map_err(project_error)?;
+                Ok(OrgReply::AgentDeleted { agent: agent.name })
+            }
             OrgRequest::Bindings { project } => {
                 let project = self.project_named(project.as_deref()).await?;
                 let mut bindings = Vec::new();
@@ -908,6 +998,16 @@ fn binding_summary(agent: Agent, binding: &Binding) -> BindingSummary {
 }
 
 /// `value` trimmed, or an error naming `what` if that leaves nothing.
+fn known_backend(name: &str) -> Result<BackendKind, ApiError> {
+    name.trim().parse().map_err(|_| {
+        let known: Vec<&str> = BackendKind::ALL.iter().map(|b| b.as_str()).collect();
+        ApiError::Invalid(format!(
+            "{name:?} is not a backend; use {}",
+            known.join(" or ")
+        ))
+    })
+}
+
 fn required<'a>(what: &str, value: &'a str) -> Result<&'a str, ApiError> {
     let value = value.trim();
     if value.is_empty() {

@@ -27,4 +27,5 @@ mod tasks;
 mod timers;
 mod tools;
 
+mod agents;
 mod archive;
