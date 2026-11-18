@@ -369,6 +369,7 @@ impl SessionStore for HubDb {
         run_id: RunId,
         outcome: RunOutcome,
         rationale: Option<&str>,
+        reply: Option<&NewOutboxMessage>,
         ended_at: Timestamp,
     ) -> StoreResult<()> {
         let tx = self.db.begin().await?;
@@ -376,6 +377,9 @@ impl SessionStore for HubDb {
         check_lease(conn, lease).await?;
         check_running(conn, lease).await?;
         let run = active_run(conn, lease, run_id).await?;
+        if let Some(reply) = reply {
+            enqueue_in(conn, reply).await?;
+        }
         exec(
             conn,
             "UPDATE runs SET status = ?1, outcome = ?2, rationale = ?3, ended_at = ?4 WHERE id = ?5",

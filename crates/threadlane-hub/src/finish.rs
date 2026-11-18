@@ -1,14 +1,26 @@
 //! Ending a run: `complete` (Plan.md §4.3 step 5.6, §4.5) and `fail`
 //! (Plan.md §4.9, docs/milestone-1.md §9 "fail").
 
+use serde_json::json;
 use threadlane_core::ids::RunId;
 use threadlane_core::link::{LinkError, RunFailure};
-use threadlane_core::model::{LaneKind, Lease, RetryPolicy, Run, RunOutcome, RunStatus};
+use threadlane_core::model::{
+    LaneKind, Lease, NewOutboxMessage, OutboxKind, RetryPolicy, Run, RunOutcome, RunStatus, Urgency,
+};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{DecisionStore, OutboxStore, SessionStore};
 
 use crate::error::link_error;
 use crate::link::LocalLink;
+use crate::tools::CLIENT_CHANNEL;
+
+/// What Claude Code says when a turn needed no answer; never worth sending.
+const FILLER: &str = "No response requested.";
+
+/// Whether a lead's final text is worth delivering.
+fn deliverable(text: &str) -> bool {
+    !text.is_empty() && text != FILLER
+}
 
 impl LocalLink {
     /// Derives the outcome from what the run did and commits it.
@@ -21,6 +33,7 @@ impl LocalLink {
         let inner = &self.core.inner;
         let db = &inner.db;
         let lane = self.check_lease(lease).await?;
+        let mut reply = None;
         let outcome = if db.count_for_run(run_id).await.map_err(link_error)? > 0 {
             RunOutcome::Sent
         } else if db
@@ -31,6 +44,27 @@ impl LocalLink {
             .any(|decision| decision.run_id == Some(run_id))
         {
             RunOutcome::Deferred
+        } else if let Some(text) = final_text
+            .map(str::trim)
+            .filter(|text| lane.kind == LaneKind::Lead && deliverable(text))
+        {
+            // A lead that just answers is heard, as if it had sent the text.
+            let run = self.active_run(lease, run_id).await?;
+            reply = Some(NewOutboxMessage {
+                project_id: Some(lane.project_id),
+                lane_id: Some(lane.id),
+                session_id: Some(run.session_id),
+                run_id: Some(run_id),
+                tool_call_id: Some(format!("final_text:{}", run_id.get())),
+                kind: OutboxKind::Message,
+                decision_id: None,
+                channel: CLIENT_CHANNEL.to_owned(),
+                body: json!({ "text": text }),
+                urgency: Urgency::Normal,
+                not_before: None,
+                created_at: inner.clock.now(),
+            });
+            RunOutcome::Sent
         } else {
             RunOutcome::Silent
         };
@@ -44,9 +78,19 @@ impl LocalLink {
         if dreaming {
             inner.hook.reach(step::BEFORE_MARKER)?;
         }
-        db.commit_run(lease, run_id, outcome, final_text, inner.clock.now())
-            .await
-            .map_err(link_error)?;
+        db.commit_run(
+            lease,
+            run_id,
+            outcome,
+            final_text,
+            reply.as_ref(),
+            inner.clock.now(),
+        )
+        .await
+        .map_err(link_error)?;
+        if reply.is_some() {
+            inner.wake.wake(WakeTarget::Dispatcher);
+        }
         if dreaming {
             inner.hook.reach(step::AFTER_MARKER)?;
         }

@@ -239,8 +239,9 @@ pub trait HubLink: Send + Sync + fmt::Debug {
     ) -> Result<Json, ToolError>;
 
     /// Commits a finished run: events done, run closed (Plan.md §4.3 step
-    /// 5.6). `final_text` is stored as the rationale and never delivered.
-    /// The hub derives the outcome from what the run did.
+    /// 5.6). `final_text` is stored as the rationale. When a lead's run sent
+    /// nothing and left no decision, the hub delivers it as the lead's
+    /// message. The hub derives the outcome from what the run did.
     async fn complete(
         &self,
         lease: &Lease,
