@@ -9,7 +9,7 @@ use threadlane_core::client::{
 };
 use threadlane_core::ids::{AgentId, MachineId, ProjectId};
 use threadlane_core::model::{
-    Event, JournalEntry, OutboxMessage, Run, RunOutcome, RunStatus, Task, TaskStatus,
+    Event, EventKind, JournalEntry, OutboxMessage, Run, RunOutcome, RunStatus, Task, TaskStatus,
 };
 use threadlane_core::store::{
     DecisionStore, InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore, TaskStore,
@@ -248,17 +248,27 @@ pub(super) async fn feed_item(
     })
 }
 
-/// Your message as the conversation and the task screen show it.
+/// Your message as the conversation and the task screen show it; a
+/// space lead's ask, as its bare message, in a project's conversation.
 fn you(event: Event) -> ConversationEntry {
-    let text = event
-        .payload
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    let field = |name: &str| {
+        event
+            .payload
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    if event.source == crate::space_lead::SPACE_LEAD_SOURCE {
+        return ConversationEntry::SpaceLead {
+            event_id: event.id,
+            text: field("message"),
+            at: event.received_at,
+        };
+    }
     ConversationEntry::You {
         event_id: event.id,
-        text,
+        text: field("text"),
         at: event.received_at,
     }
 }
@@ -381,6 +391,32 @@ pub(super) async fn handle(
                 .into_iter()
                 .map(|event| (event.received_at, you(event)))
                 .collect();
+            if project.is_general {
+                for event in db
+                    .lane_events_from(
+                        project.lead_lane_id,
+                        EventKind::System,
+                        crate::space_lead::PROJECT_LEAD_SOURCE,
+                        before,
+                        limit,
+                    )
+                    .await
+                    .map_err(api_error)?
+                {
+                    let payload = &event.payload;
+                    entries.push((
+                        event.received_at,
+                        ConversationEntry::ProjectReply {
+                            event_id: event.id,
+                            project: payload["project"].as_str().unwrap_or_default().to_owned(),
+                            ask_event_id: serde_json::from_value(payload["ask_event_id"].clone())
+                                .ok(),
+                            text: event_text(&event),
+                            at: event.received_at,
+                        },
+                    ));
+                }
+            }
             for message in db
                 .sent_before(CLIENT_CHANNEL, Some(project.id), before, limit)
                 .await

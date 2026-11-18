@@ -668,6 +668,48 @@ impl Desktop {
                 Line::You { id, text, time } => {
                     lines.child(said(format!("you-{id}"), "You", time, text, true))
                 }
+                Line::SpaceLead { id, text, time } => lines.child(said(
+                    format!("space-lead-{id}"),
+                    "General lead",
+                    time,
+                    text,
+                    false,
+                )),
+                Line::ProjectReply {
+                    id,
+                    project: from,
+                    text,
+                    time,
+                } => {
+                    let screen = Screen::Project {
+                        space: space.to_owned(),
+                        project: from.clone(),
+                        tab: Tab::Conversation,
+                    };
+                    lines.child(
+                        v_flex()
+                            .gap(XS)
+                            .child(said(
+                                format!("reply-{id}"),
+                                &format!("{from} lead"),
+                                time,
+                                text,
+                                false,
+                            ))
+                            .child(
+                                h_flex().child(
+                                    button(SharedString::from(format!("open-reply-{id}")))
+                                        .small()
+                                        .ghost()
+                                        .tab_stop(true)
+                                        .label(format!("Open {from}"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.go(screen.clone(), cx)
+                                        })),
+                                ),
+                            ),
+                    )
+                }
                 Line::Lead { seq, text, time } => {
                     lines.child(said(format!("lead-{seq}"), "Lead", time, text, true))
                 }

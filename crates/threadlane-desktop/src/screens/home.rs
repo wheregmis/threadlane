@@ -9,7 +9,7 @@ use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_fle
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::OutboxKind;
-use threadlane_desktop::{EmptyRegion, Part, Spoken, When, running_elapsed};
+use threadlane_desktop::{Author, EmptyRegion, Part, Spoken, When, running_elapsed};
 
 use super::{empty, gap_line, menu_item};
 use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
@@ -249,21 +249,29 @@ impl Desktop {
         }
         for (index, entry) in entries.iter().enumerate() {
             let space = entry.space.to_owned();
+            // A reply in General links to the conversation it came from.
+            let mut from = None;
             let (who, body) = match entry.spoken {
-                Spoken::You(text) => (
-                    "You",
-                    div()
-                        .text_size(TYPE_BODY)
-                        .whitespace_normal()
-                        .child(text.to_owned())
-                        .into_any_element(),
-                ),
+                Spoken::Said(text, by) => {
+                    if let Author::ProjectLead(project) = by {
+                        from = Some(project.clone());
+                    }
+                    (
+                        by.label(),
+                        div()
+                            .text_size(TYPE_BODY)
+                            .whitespace_normal()
+                            .child(text.to_owned())
+                            .into_any_element(),
+                    )
+                }
                 Spoken::Delivered(item) => {
                     let who = if item.kind() == OutboxKind::SystemNotice {
                         "Notice"
                     } else {
                         "Lead"
-                    };
+                    }
+                    .to_owned();
                     let body = match state.digest(item) {
                         Some(digest) => self.digest_entry(&space, digest, cx).into_any_element(),
                         None => {
@@ -287,7 +295,7 @@ impl Desktop {
             let title = h_flex()
                 .gap(SM)
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(place.clone()))
-                .child(meta(who, cx));
+                .child(meta(who.clone(), cx));
             let header = match &screen {
                 Some(screen) => {
                     let screen = screen.clone();
@@ -300,6 +308,20 @@ impl Desktop {
                 }
                 None => title.into_any_element(),
             };
+            let from = from.map(|project| {
+                let screen = Screen::Project {
+                    space: space.clone(),
+                    project: project.clone(),
+                    tab: crate::Tab::Conversation,
+                };
+                button(SharedString::from(format!("timeline-from-{index}")))
+                    .small()
+                    .ghost()
+                    .tab_stop(true)
+                    .label(format!("Open {project}"))
+                    .accessibility_label(format!("Open the conversation in {space} / {project}"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
+            });
             let view = cx.entity().downgrade();
             let text = entry.text();
             let reply = screen.filter(|_| who != "Notice");
@@ -320,7 +342,8 @@ impl Desktop {
                             .min_w_0()
                             .items_start()
                             .child(header)
-                            .child(body),
+                            .child(body)
+                            .children(from),
                     )
                     .context_menu(move |menu, _, _| {
                         let copy = text.clone();

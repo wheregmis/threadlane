@@ -8,7 +8,7 @@ use threadlane_core::client::ConversationEntry;
 use threadlane_core::model::OutboxKind;
 use threadlane_core::time::Timestamp;
 
-use crate::AppState;
+use crate::{AppState, Author};
 
 /// How many entries the timeline shows at first, and adds per "Show earlier".
 pub const TIMELINE_PAGE: usize = 20;
@@ -19,8 +19,9 @@ const NEWEST: u32 = 20;
 /// What an entry of the timeline says.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Spoken<'a> {
-    /// A message you sent.
-    You(&'a str),
+    /// A message on the asking side: yours, the space lead's ask, or in
+    /// General a project lead's reply to it.
+    Said(&'a str, &'a Author),
     /// A message or notice the hub delivered.
     Delivered(&'a SpaceFeedItem),
 }
@@ -44,7 +45,7 @@ impl TimelineEntry<'_> {
     #[must_use]
     pub fn text(&self) -> String {
         match self.spoken {
-            Spoken::You(text) => text.to_owned(),
+            Spoken::Said(text, _) => text.to_owned(),
             Spoken::Delivered(item) => item.text(),
         }
     }
@@ -114,7 +115,7 @@ impl AppState {
             space,
             project: Some(&said.project),
             at: said.at,
-            spoken: Spoken::You(&said.text),
+            spoken: Spoken::Said(&said.text, &said.by),
         });
         let delivered = self
             .delivered

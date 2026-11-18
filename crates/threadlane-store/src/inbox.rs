@@ -618,6 +618,34 @@ impl InboxStore for HubDb {
         .await
     }
 
+    async fn lane_events_from(
+        &self,
+        lane_id: LaneId,
+        kind: EventKind,
+        source: &str,
+        before: Option<Timestamp>,
+        limit: u32,
+    ) -> StoreResult<Vec<Event>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {EVENT_FIELDS} FROM events
+                 WHERE lane_id = ?1 AND kind = ?2 AND source = ?3 AND received_at < ?4
+                 ORDER BY received_at DESC, id DESC LIMIT ?5"
+            ),
+            params![
+                lane_id.get(),
+                kind.as_str(),
+                source,
+                before.map_or(i64::MAX, Timestamp::as_millis),
+                i64::from(limit)
+            ],
+            decode_event,
+        )
+        .await
+    }
+
     async fn skipped_events(
         &self,
         project_id: Option<ProjectId>,

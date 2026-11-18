@@ -1114,6 +1114,8 @@ fn said(lines: &[Line]) -> Vec<String> {
             Line::New => "new".to_owned(),
             Line::Sending { text, .. } => format!("sending: {text}"),
             Line::You { text, .. } => format!("you: {text}"),
+            Line::SpaceLead { text, .. } => format!("General lead: {text}"),
+            Line::ProjectReply { project, text, .. } => format!("{project} lead: {text}"),
             Line::Lead { text, .. } => format!("lead: {text}"),
             Line::Notice { text, .. } => format!("notice: {text}"),
             Line::Decision { card, pending, .. } => format!("{}: pending {pending}", card.id),
@@ -5633,8 +5635,9 @@ fn timeline_of(state: &AppState) -> Vec<String> {
         .iter()
         .map(|entry| {
             let who = match entry.spoken {
-                Spoken::You(_) => "you",
-                Spoken::Delivered(_) => "lead",
+                Spoken::Said(_, Author::You) => "you".to_owned(),
+                Spoken::Said(_, by) => by.label(),
+                Spoken::Delivered(_) => "lead".to_owned(),
             };
             format!(
                 "{} / {} {who}: {}",
@@ -5800,4 +5803,75 @@ async fn home_s_composer_stays_on_general_until_you_pick_another_project() {
     );
     state.set_target("work", "api");
     assert_eq!(state.target(), Some(("work", "api")));
+}
+
+#[tokio::test]
+async fn the_space_lead_s_asks_and_the_replies_are_labeled_and_linked() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.histories.lock().unwrap().extend([
+        (
+            "api".to_owned(),
+            vec![
+                ConversationEntry::SpaceLead {
+                    event_id: EventId(5),
+                    text: "Ship the refunds fix".to_owned(),
+                    at: Timestamp::from_millis(2_000),
+                },
+                said_by_lead(1, "api", "Shipped", 3_000),
+            ],
+        ),
+        (
+            "General".to_owned(),
+            vec![
+                said_by_you(1, "Get refunds shipped", 1_000),
+                ConversationEntry::ProjectReply {
+                    event_id: EventId(6),
+                    project: "api".to_owned(),
+                    ask_event_id: Some(EventId(5)),
+                    text: "The lead of api replied: Shipped".to_owned(),
+                    at: Timestamp::from_millis(3_500),
+                },
+            ],
+        ),
+    ]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
+
+    let lines = |project| {
+        said(&state.conversation("work", project, &when()))
+            .into_iter()
+            .filter(|line| !line.starts_with("--"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lines("api"),
+        ["General lead: Ship the refunds fix", "lead: Shipped"],
+        "an ask is not yours"
+    );
+    assert_eq!(
+        lines("General"),
+        [
+            "you: Get refunds shipped",
+            "api lead: The lead of api replied: Shipped"
+        ]
+    );
+    assert!(
+        state
+            .conversation("work", "General", &when())
+            .iter()
+            .any(|line| matches!(line, Line::ProjectReply { project, .. } if project == "api"))
+    );
+    assert_eq!(
+        timeline_of(&state),
+        [
+            "work / General api lead: The lead of api replied: Shipped",
+            "work / api lead: Shipped",
+            "work / api General lead: Ship the refunds fix",
+            "work / General you: Get refunds shipped",
+        ]
+    );
+    let reply = state.timeline()[0];
+    assert!(matches!(reply.spoken, Spoken::Said(_, Author::ProjectLead(from)) if from == "api"));
 }

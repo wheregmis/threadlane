@@ -5,7 +5,9 @@
 use std::time::Duration;
 
 use serde_json::json;
-use threadlane_core::client::{OrgReply, OrgRequest};
+use threadlane_core::client::{
+    ConversationEntry, OrgReply, OrgRequest, OverviewReply, OverviewRequest,
+};
 use threadlane_core::model::{EventKind, Mode, NewAgent, NewBinding, TaskStatus};
 use threadlane_core::store::OrgStore;
 use threadlane_hub::{
@@ -132,5 +134,43 @@ async fn the_owner_asks_general_for_a_projects_goal_its_lead_does_it_and_general
     assert!(
         sent.contains(&(Some(general.id), json!(GENERAL_REPORT))),
         "{sent:?}"
+    );
+
+    // Stage 2: the app's conversations show the ask as the space lead's,
+    // and General's reply entry names the project it came from.
+    let conversation = |project: Option<&str>| {
+        let request = OverviewRequest::Conversation {
+            project: project.map(str::to_owned),
+            before: None,
+            limit: 50,
+        };
+        let api = &sim.api;
+        async move {
+            match api.overview(request).await.unwrap() {
+                OverviewReply::Conversation { entries } => entries,
+                other => panic!("expected a conversation, got {other:?}"),
+            }
+        }
+    };
+    let in_api = conversation(Some("API")).await;
+    assert!(
+        in_api.iter().any(|entry| matches!(entry,
+            ConversationEntry::SpaceLead { event_id, text, .. }
+                if *event_id == ask.id && text == "Write the API docs.")),
+        "{in_api:?}"
+    );
+    assert!(
+        !in_api
+            .iter()
+            .any(|entry| matches!(entry, ConversationEntry::You { .. })),
+        "the ask is not the owner's"
+    );
+    let in_general = conversation(None).await;
+    assert!(
+        in_general.iter().any(|entry| matches!(entry,
+            ConversationEntry::ProjectReply { event_id, project, ask_event_id, text, .. }
+                if *event_id == reply.id && project == "API"
+                    && *ask_event_id == Some(ask.id) && text.contains(API_REPORT))),
+        "{in_general:?}"
     );
 }

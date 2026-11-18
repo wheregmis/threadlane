@@ -922,12 +922,36 @@ pub struct ProjectView {
     lead_runs: Vec<LeadRun>,
 }
 
+/// Who wrote a message on the asking side of a lead's conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Author {
+    /// You.
+    You,
+    /// The space lead, General's lead, handing this project a goal.
+    SpaceLead,
+    /// In General: the lead of this project, replying to the space lead.
+    ProjectLead(String),
+}
+
+impl Author {
+    /// How the conversation and Home name it.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::You => "You".to_owned(),
+            Self::SpaceLead => "General lead".to_owned(),
+            Self::ProjectLead(project) => format!("{project} lead"),
+        }
+    }
+}
+
 /// A message you sent, as the conversation shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Said {
     project: String,
     text: String,
     at: Timestamp,
+    by: Author,
 }
 
 /// How far back a conversation is loaded.
@@ -1947,16 +1971,25 @@ impl AppState {
         for entry in entries {
             let at = match entry {
                 ConversationEntry::You { event_id, text, at } => {
-                    self.said.insert(
-                        (space.to_owned(), event_id),
-                        Said {
-                            project: project.to_owned(),
-                            text,
-                            at,
-                        },
-                    );
-                    at
+                    self.take_said(space, project, event_id, text, at, Author::You)
                 }
+                ConversationEntry::SpaceLead { event_id, text, at } => {
+                    self.take_said(space, project, event_id, text, at, Author::SpaceLead)
+                }
+                ConversationEntry::ProjectReply {
+                    event_id,
+                    project: from,
+                    text,
+                    at,
+                    ..
+                } => self.take_said(
+                    space,
+                    project,
+                    event_id,
+                    text,
+                    at,
+                    Author::ProjectLead(from),
+                ),
                 ConversationEntry::DeliveryFailure { event_id, text, at } => {
                     self.failures.insert(
                         (space.to_owned(), event_id),
@@ -1964,6 +1997,7 @@ impl AppState {
                             project: project.to_owned(),
                             text,
                             at,
+                            by: Author::You,
                         },
                     );
                     at
@@ -1989,6 +2023,25 @@ impl AppState {
                 self.loaded.insert(key, page);
             }
         }
+    }
+
+    fn take_said(
+        &mut self,
+        space: &str,
+        project: &str,
+        event: EventId,
+        text: String,
+        at: Timestamp,
+        by: Author,
+    ) -> Timestamp {
+        let said = Said {
+            project: project.to_owned(),
+            text,
+            at,
+            by,
+        };
+        self.said.insert((space.to_owned(), event), said);
+        at
     }
 
     /// Where an earlier page of the conversation starts, if there may be one.
@@ -2236,6 +2289,7 @@ impl AppState {
                 project: project.to_owned(),
                 text: text.to_owned(),
                 at,
+                by: Author::You,
             });
         if let Some(view) = self
             .projects

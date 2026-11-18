@@ -600,6 +600,26 @@ pub enum ConversationEntry {
         text: String,
         at: Timestamp,
     },
+    /// An ask the space lead, the General project's lead, handed to this
+    /// project's lead (docs/one-place-to-talk.md).
+    SpaceLead {
+        event_id: EventId,
+        /// What it asked.
+        text: String,
+        at: Timestamp,
+    },
+    /// In General's conversation: a project lead's reply to the space
+    /// lead's ask.
+    ProjectReply {
+        event_id: EventId,
+        /// The project whose lead replied.
+        project: String,
+        /// The ask it replies to, an event in that project's lead lane.
+        ask_event_id: Option<EventId>,
+        /// The reply as the space lead received it.
+        text: String,
+        at: Timestamp,
+    },
     /// A delivered message, decision card, or notice, as the feed has it.
     Delivered { item: FeedItem },
     /// Delivery of an outbox message from this project failed permanently.
