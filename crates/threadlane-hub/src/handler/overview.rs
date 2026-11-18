@@ -365,7 +365,7 @@ pub(super) async fn handle(
                 .await
                 .map_err(api_error)?
                 .into_iter()
-                .map(you)
+                .map(|event| you(event, false))
                 .collect();
             messages.reverse();
             let proposed_by = crate::proposal::accepted_author(db, &task)
