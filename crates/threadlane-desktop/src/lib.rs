@@ -1044,6 +1044,8 @@ pub struct AppState {
     notifications: Notifications,
     appearance: Appearance,
     skip_send_hold: bool,
+    /// The space the sidebar shows, as last chosen; saved in `desktop.json`.
+    selected_space: Option<String>,
     composer: composer::Composer,
     conversation_read: HashMap<InSpace<String>, conversation::ConversationRead>,
     expanded_messages: HashSet<String>,

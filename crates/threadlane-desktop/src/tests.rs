@@ -4451,6 +4451,35 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
 }
 
 #[test]
+fn the_selected_space_round_trips_and_falls_back_to_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(SETTINGS_FILE), r#"{"appearance":"dark"}"#).unwrap();
+    let mut state = AppState::paired(["dev", "ops"]);
+    state.set_client_dir(dir.path().to_owned());
+    assert_eq!(
+        state.selected_space().map(|space| space.name.as_str()),
+        Some("dev")
+    );
+    state.select_space("ops");
+
+    let mut reloaded = AppState::paired(["dev", "ops"]);
+    reloaded.set_client_dir(dir.path().to_owned());
+    assert_eq!(
+        reloaded.selected_space().map(|space| space.name.as_str()),
+        Some("ops")
+    );
+    assert_eq!(reloaded.appearance(), Appearance::Dark);
+
+    // A saved space that is no longer paired shows the first one.
+    let mut unpaired = AppState::paired(["dev"]);
+    unpaired.set_client_dir(dir.path().to_owned());
+    assert_eq!(
+        unpaired.selected_space().map(|space| space.name.as_str()),
+        Some("dev")
+    );
+}
+
+#[test]
 fn desktop_appearance_round_trips_with_existing_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(SETTINGS_FILE);

@@ -266,6 +266,21 @@ enum Screen {
 }
 
 impl Screen {
+    /// The space this screen belongs to, if it belongs to one.
+    fn space(&self) -> Option<&str> {
+        match self {
+            Self::Project { space, .. }
+            | Self::Task { space, .. }
+            | Self::SpaceTasks { space }
+            | Self::NewProject { space }
+            | Self::Machine { space, .. }
+            | Self::Agents(Some(space))
+            | Self::Routines(Some(space))
+            | Self::Settings(Some(space)) => Some(space),
+            _ => None,
+        }
+    }
+
     /// The screen `THREADLANE_DESKTOP_OPEN` names: `home` or `inbox`, `agents`,
     /// `machines`, `<space>/<project>[/chat|tasks|memory|setup]`
     /// (`agents/<agent>` expands that agent's row), or
@@ -335,14 +350,14 @@ struct Desktop {
     /// The Memory tab's editor.
     memory_editor: Entity<TextareaState>,
     dream_cadence: Entity<InputState>,
-    /// The "+ Add space" form's name and join code.
+    /// The Add space form's name and join code.
     space_name: Entity<InputState>,
     join_code: Entity<InputState>,
     /// Where a newly paired space's feed goes.
     shown: mpsc::UnboundedSender<SpaceFeedItem>,
     /// Text to put in the memory editor at the next render.
     fill_editor: Option<String>,
-    /// Empty the "+ Add space" form at the next render.
+    /// Empty the Add space form at the next render.
     clear_join: bool,
     /// The new project form's name and description.
     project_name: Entity<InputState>,
@@ -514,6 +529,7 @@ impl Desktop {
             }
         });
         let screen = start.unwrap_or(Screen::Home);
+        screens::shell::follow_screen(&mut state, &screen);
         state.set_decision_scope(screen.decision_scope());
         let conversation = if let Screen::Project {
             space,
@@ -894,6 +910,7 @@ impl Desktop {
             self.decision_scroll = ScrollHandle::default();
             self.board_scroll = ScrollHandle::default();
         }
+        screens::shell::follow_screen(&mut self.state, &screen);
         self.screen = screen;
         self.load_screen(cx);
         cx.notify();
@@ -1272,6 +1289,7 @@ impl Desktop {
 
     fn space_paired(&mut self, name: &str, cx: &mut Context<Self>) {
         self.state.open_paired_space(name);
+        self.state.select_space(name);
         self.state.report(Activity::Done(format!("Paired {name}.")));
         self.clear_join = true;
         self.go(Screen::Home, cx);

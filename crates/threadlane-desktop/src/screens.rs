@@ -22,7 +22,7 @@ mod new_project;
 mod project;
 mod routines;
 mod settings;
-mod shell;
+pub(crate) mod shell;
 mod task;
 
 /// What a part shows instead of its contents: that it is loading, or the

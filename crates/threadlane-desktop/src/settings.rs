@@ -136,6 +136,7 @@ impl AppState {
             serde_json::from_value(saved["last_projects"].clone()).unwrap_or_default();
         self.appearance = Appearance::from_saved(&saved);
         self.skip_send_hold = saved["hold_messages"].as_bool() == Some(false);
+        self.selected_space = saved["selected_space"].as_str().map(str::to_owned);
         let seen = serde_json::from_value::<BTreeMap<String, BTreeMap<String, i64>>>(
             saved["conversation_seen"].clone(),
         )
@@ -390,6 +391,35 @@ impl AppState {
             self.last_targets
                 .insert(space.to_owned(), project.to_owned());
             self.save_targets();
+        }
+    }
+
+    /// The space the sidebar shows: the one last chosen while it is paired,
+    /// else the first.
+    #[must_use]
+    pub fn selected_space(&self) -> Option<&crate::Space> {
+        self.selected_space
+            .as_deref()
+            .and_then(|name| self.space(name))
+            .or_else(|| self.spaces().first())
+    }
+
+    /// Shows `space` in the sidebar and remembers it; a name that is not
+    /// paired is ignored.
+    pub fn select_space(&mut self, space: &str) {
+        if self.space(space).is_none() || self.selected_space.as_deref() == Some(space) {
+            return;
+        }
+        self.selected_space = Some(space.to_owned());
+        if let Some(dir) = &self.client_dir {
+            let mut saved = read(dir);
+            saved["selected_space"] = json!(space);
+            if let Err(error) = write(dir, &saved) {
+                self.report(crate::Activity::Failed(format!(
+                    "Could not save the selected space: {}",
+                    describe(&error)
+                )));
+            }
         }
     }
 
