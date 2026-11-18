@@ -66,13 +66,23 @@ async fn push_publishes_the_task_branch_to_the_remote_and_is_safe_to_repeat() {
 /// A fake `gh` that appends its arguments, NUL-separated and ended by a
 /// line `<<end>>`, and its working directory to files in its own directory,
 /// and prints a pull request URL for `pr create` and for `pr list` once one
-/// was created.
+/// was created. `api user` prints the login `me`, or fails if `login` is
+/// false.
 struct FakeGh {
     dir: TempDir,
 }
 
 impl FakeGh {
     fn new() -> Self {
+        Self::with_login(true)
+    }
+
+    fn with_login(login: bool) -> Self {
+        let api_user = if login {
+            "echo me"
+        } else {
+            "echo 'HTTP 401' >&2; exit 1"
+        };
         let dir = tempfile::tempdir().unwrap();
         let record = dir.path().display().to_string();
         let script = format!(
@@ -86,6 +96,8 @@ impl FakeGh {
                echo 'https://github.test/me/app/pull/7'\n\
              elif [ \"$1 $2\" = \"pr list\" ] && [ -f {record}/created ]; then\n\
                echo 'https://github.test/me/app/pull/7'\n\
+             elif [ \"$1 $2\" = \"api user\" ]; then\n\
+               {api_user}\n\
              fi\n"
         );
         let program = dir.path().join("gh");
@@ -137,7 +149,8 @@ async fn a_draft_pull_request_is_opened_with_exact_arguments_after_the_push() {
             &branch,
             "main",
             "--title=hijack",
-            "Adds the page.\n\n- one\n- two",
+            "Adds the page.\n\n- one\n- two\n",
+            "Engineer, T-0001",
         )
         .await
         .unwrap();
@@ -165,6 +178,9 @@ async fn a_draft_pull_request_is_opened_with_exact_arguments_after_the_push() {
         gh.invocations(),
         vec![
             list.map(str::to_owned).to_vec(),
+            ["api", "user", "--jq", ".login"]
+                .map(str::to_owned)
+                .to_vec(),
             [
                 "pr",
                 "create",
@@ -175,7 +191,8 @@ async fn a_draft_pull_request_is_opened_with_exact_arguments_after_the_push() {
                 "main",
                 // Bound to their option, so a title cannot pass as one.
                 "--title=--title=hijack",
-                "--body=Adds the page.\n\n- one\n- two",
+                "--body=Adds the page.\n\n- one\n- two\n\n\
+                 🤖 Opened by Threadlane (Engineer, T-0001) acting for @me",
             ]
             .map(str::to_owned)
             .to_vec(),
@@ -193,6 +210,31 @@ async fn a_draft_pull_request_is_opened_with_exact_arguments_after_the_push() {
         git(&worktree, &["rev-parse", "HEAD"]),
         "opening a pull request publishes its branch first"
     );
+}
+
+#[tokio::test]
+async fn a_failed_login_lookup_leaves_the_attribution_out_and_is_not_repeated() {
+    let dir = tempfile::tempdir().unwrap();
+    let (worktree, _remote) = worktree_with_work(dir.path()).await;
+    let gh = FakeGh::with_login(false);
+    let forge = GitForge::with_gh(gh.program());
+    let branch = task_branch(TASK);
+    for _ in 0..2 {
+        let url = forge
+            .open_draft_pull_request(&worktree, &branch, "main", "t", "Body", "Engineer, T-0001")
+            .await
+            .unwrap();
+        assert_eq!(url, "https://github.test/me/app/pull/7");
+    }
+    let calls = gh.invocations();
+    let lookups = calls.iter().filter(|call| call[0] == "api").count();
+    assert_eq!(lookups, 1, "the login is looked up once: {calls:?}");
+    let bodies: Vec<_> = calls
+        .iter()
+        .filter_map(|call| call.last())
+        .filter(|arg| arg.starts_with("--body="))
+        .collect();
+    assert_eq!(bodies, ["--body=Body", "--body=Body"]);
 }
 
 /// A fake `gh` whose `auth status` prints token-like lines and exits with

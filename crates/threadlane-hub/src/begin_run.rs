@@ -299,6 +299,7 @@ impl LocalLink {
             project_id: project.id,
             lane_kind: lane.kind,
             task_id: task.as_ref().map(|task| task.id),
+            agent_name: agent.name.clone(),
             repositories,
             events: events.iter().map(|event| event.id).collect(),
             perform,

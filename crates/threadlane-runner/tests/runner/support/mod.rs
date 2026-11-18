@@ -62,6 +62,7 @@ pub fn assignment(run: i64) -> RunAssignment {
         project_id: ProjectId(1),
         lane_kind: LaneKind::Lead,
         task_id: None,
+        agent_name: "Lead".into(),
         repositories: Vec::new(),
         events: vec![EventId(1000 + run)],
         perform: Vec::new(),

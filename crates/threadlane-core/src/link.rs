@@ -49,6 +49,10 @@ pub struct RunAssignment {
     pub lane_kind: LaneKind,
     /// The task a task lane works.
     pub task_id: Option<TaskId>,
+    /// The name of the agent the run is for, as a pull request's
+    /// attribution line names it.
+    #[serde(default)]
+    pub agent_name: String,
     /// The task's repositories, in the order it named them: one worktree
     /// each, the first one the working directory (Plan.md §5.5). Empty for a
     /// lead, and for a task that names none, which works in a plain

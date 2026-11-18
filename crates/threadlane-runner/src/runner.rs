@@ -870,6 +870,7 @@ impl Inner {
                             &assignment.repositories[index].default_branch,
                             text("title").trim(),
                             text("body"),
+                            &format!("{}, {task}", assignment.agent_name),
                         )
                         .await
                         .map_err(|error| error.to_string())?,
