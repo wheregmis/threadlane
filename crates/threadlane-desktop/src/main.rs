@@ -662,6 +662,12 @@ impl Desktop {
                     _ => None,
                 };
                 this.state.apply(refreshed);
+                // Refreshes run every REFRESH_EVERY, so this re-checks well within a minute.
+                for alert in this.state.reminders(SystemClock.now()) {
+                    if this.state.notifies(&alert) {
+                        this.notify(&alert, cx);
+                    }
+                }
                 if let Some((space, project)) = open_project
                     && this.state.project_absent(&space, &project)
                 {

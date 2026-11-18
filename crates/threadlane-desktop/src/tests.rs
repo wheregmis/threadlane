@@ -3150,6 +3150,46 @@ async fn events_nobody_asked_for_are_a_collapsed_section_and_a_count_on_home() {
     assert!(!state.retry_soon());
 }
 
+#[tokio::test]
+async fn a_decision_waiting_ten_minutes_is_reminded_about_once() {
+    let minute = 60_000;
+    let work = FakeHub::new("Work", vec![decision(1, 0), decision(2, 9 * minute)]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let at = |millis| Timestamp::from_millis(millis);
+
+    assert!(
+        state.reminders(at(9 * minute)).is_empty(),
+        "nothing is old yet"
+    );
+    let first = state.reminders(at(10 * minute));
+    assert_eq!(first.len(), 1, "only D-0001 has waited ten minutes");
+    assert_eq!(
+        first[0].tag(),
+        "work/D-0001",
+        "its buttons answer the decision"
+    );
+    assert_eq!(decision_of_tag(&first[0].tag()), Some(("work", "D-0001")));
+    assert!(first[0].title().starts_with("Still waiting: "));
+    assert_eq!(first[0].options(), ["approve", "decline"]);
+    state.apply(refresh(&core).await);
+    assert!(
+        state.reminders(at(11 * minute)).is_empty(),
+        "one reminder only"
+    );
+
+    let answer = core
+        .answer(Some("work"), "D-0002", "approve", None)
+        .await
+        .expect("answer");
+    state.answered(&answer);
+    assert!(
+        state.reminders(at(30 * minute)).is_empty(),
+        "an answered decision gets none"
+    );
+}
+
 #[test]
 fn notification_settings_are_kept_in_the_client_directory_and_applied() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -3167,6 +3207,7 @@ fn notification_settings_are_kept_in_the_client_directory_and_applied() {
             context: None,
             recommended: None,
         },
+        reminder: false,
     };
     let notice = Alert::Notice {
         label: "work".to_owned(),
