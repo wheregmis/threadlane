@@ -80,3 +80,15 @@ Goal: `docs/agent-templates.md` as two dependent tasks for the Engineer. Both fi
 | 22 | Neither run ended early or with work in the background; both ran the three checks in the foreground. The run-ending fix holds. | checked |
 | 23 | Merging T-0006 into v2 conflicted in four files with archive and delete, which had landed meanwhile and added requests in the same places. Resolved by hand; 674 tests pass. Parallel work on the client interface will keep doing this. | open: nothing in the system helps with it |
 | 24 | The lead's final report did not reach `threadlane feed` when I looked (it had been read by an earlier watcher); the owner had to tell me the tasks were done. | open: check whether the lead reported, in the app |
+
+## Run 5, 2026-11-17: the Chief of Staff's first menu
+
+Added from the template and bound to `threadlane`; the lead started it as T-0007. It read the progress files and this log and asked one question with five options and "None for now", its recommendation first, all real. The owner picked 1 from the decision card; it became T-0008 (deliver a lead's final text). First real decision card, first answer from it.
+
+| # | Finding | State |
+|---|---|---|
+| 25 | The Chief of Staff's menu was grounded: every option cites a finding or a plan step. | checked |
+| 26 | The decision card drew the whole question, a paragraph plus five long numbered options, as one huge bold title. A long question needs a short title and a normal-weight body. | open: given to Threadlane |
+| 27 | An empty bordered box sits above the decision card in the conversation. | open: given to Threadlane |
+| 28 | The sidebar's "In progress" rows wrap the title across lines and overlap the next row ("lead's / final text / to the", "threadla / ne · lead"). | open: given to Threadlane |
+| 29 | The Chief of Staff put each option's detail in the question and used short labels for the options, so the answer buttons say little. The template should say how to split the two. | open: given to Threadlane |
