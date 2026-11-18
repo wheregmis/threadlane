@@ -1,4 +1,4 @@
-//! Routines and follow-ups as a project's Routines tab and the Routines
+//! Routines and follow-ups as a project's Setup tab and the Routines
 //! screen show them (Plan.md §7, wireframe sidebar "Routines"): what each
 //! does, when, who set it, and the "+ New routine" form.
 

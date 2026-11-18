@@ -202,6 +202,25 @@ impl AppState {
         }
     }
 
+    /// Carries the text and images typed for `from` over to `to`, so
+    /// choosing another recipient keeps what you were writing.
+    pub fn move_draft(&mut self, from: &Destination, to: &Destination) {
+        if from == to {
+            return;
+        }
+        let Some(draft) = self.composer.drafts.get_mut(from) else {
+            return;
+        };
+        let text = std::mem::take(&mut draft.text);
+        let images = std::mem::take(&mut draft.images);
+        if !text.trim().is_empty() {
+            self.preserve_draft(to, &text);
+        }
+        if !images.is_empty() {
+            self.restore_images(to, images);
+        }
+    }
+
     /// Adds a Markdown quotation of the chosen message to the draft.
     pub fn reply_to_message(&mut self, destination: &Destination, text: &str) {
         let quote = text
@@ -243,6 +262,16 @@ impl AppState {
             .sending
             .iter()
             .any(|send| &send.destination == destination)
+    }
+
+    /// Whether this composer's recipient may change: not while a send is held
+    /// or delivering, nor while images are loading, since those stay with the
+    /// recipient they started for.
+    #[must_use]
+    pub fn can_retarget(&self, destination: &Destination) -> bool {
+        !self.is_loading_images(destination)
+            && !self.is_sending(destination)
+            && self.held_seconds(destination).is_none()
     }
 
     /// Whether another submission is possible.

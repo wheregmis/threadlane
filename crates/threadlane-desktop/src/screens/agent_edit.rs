@@ -434,7 +434,7 @@ impl Desktop {
                             Screen::Project {
                                 space: space.clone(),
                                 project: project.clone(),
-                                tab: Tab::Agents,
+                                tab: Tab::Setup,
                             },
                             cx,
                         );

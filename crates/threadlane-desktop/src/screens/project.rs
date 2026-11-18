@@ -28,7 +28,7 @@ use crate::icons::AppIcon;
 use crate::tokens::{
     BOARD_COLUMN_MIN, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, MODE_WIDTH, READING_WIDTH,
     ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status, TIMESTAMP_WIDTH,
-    TYPE_BODY, TYPE_META, XS,
+    TYPE_BODY, TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -111,7 +111,7 @@ impl Desktop {
                         .children(self.main_chat_screen(space).map(|screen| {
                             button("space-open-chat")
                                 .outline()
-                                .label("Open Main Chat")
+                                .label("Open space chat")
                                 .on_click(
                                     cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
                                 )
@@ -173,7 +173,7 @@ impl Desktop {
                 .max_w(READING_WIDTH)
                 .self_center()
                 .gap(MD)
-                .child(page_header("Main Chat", Some(context), actions))
+                .child(page_header("Chat", Some(context), actions))
                 .child(self.conversation_tab(space, project, when, cx))
                 .into_any_element();
         }
@@ -195,17 +195,12 @@ impl Desktop {
                 );
             }))
             .children(Tab::ALL.map(|tab| {
-                let label = if tab == Tab::Conversation {
-                    "History"
-                } else {
-                    tab.label()
-                };
+                let label = tab.label();
                 let icon = match tab {
                     Tab::Tasks => AppIcon::Columns3,
                     Tab::Conversation => AppIcon::MessagesSquare,
-                    Tab::Agents => AppIcon::Bot,
-                    Tab::Routines => AppIcon::CalendarClock,
                     Tab::Memory => AppIcon::BookOpen,
+                    Tab::Setup => AppIcon::Settings,
                 };
                 KitTab::new().aria_label(label).child(
                     h_flex()
@@ -233,9 +228,8 @@ impl Desktop {
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
             Tab::Conversation => self.conversation_tab(space, project, when, cx),
-            Tab::Agents => self.agents_tab(space, project, cx),
-            Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Memory => self.memory_tab(space, project, when, cx),
+            Tab::Setup => self.setup_tab(space, project, when, cx),
         };
         let (pause_space, pause_project) = (space.to_owned(), project.to_owned());
         let (task_space, task_project) = (space.to_owned(), project.to_owned());
@@ -248,7 +242,7 @@ impl Desktop {
                     .small()
                     .ghost()
                     .icon(AppIcon::MessagesSquare)
-                    .label("Main Chat")
+                    .label("Space chat")
                     .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
             }));
         if archived {
@@ -402,9 +396,8 @@ impl Desktop {
             .project_gap(space, project, Part::Tasks)
             .is_none()
             && board_columns.iter().all(|column| column.count == 0);
-        let column_count = board_columns.len();
-        let board_min = BOARD_COLUMN_MIN * column_count + SM * column_count.saturating_sub(1);
         let columns = board_columns.into_iter().map(|column| {
+            let blank = column.cards.is_empty() && column.proposals.is_empty();
             let status = Status::task(column.title);
             let proposals = column.proposals.into_iter().map(|proposal| {
                 let id = proposal.id;
@@ -536,7 +529,7 @@ impl Desktop {
                         menu
                     })
             });
-            v_flex()
+            let column = v_flex()
                 .min_w_0()
                 .gap(SM)
                 .p(SM)
@@ -555,8 +548,27 @@ impl Desktop {
                     column
                         .more
                         .map(|label| div().text_size(TYPE_META).text_color(muted).child(label)),
-                )
+                );
+            (blank, column)
         });
+        // Adjacent empty columns share one grid cell, so the board fits beside the side panel.
+        let mut cells = Vec::new();
+        let mut blanks = Vec::new();
+        for (blank, column) in columns {
+            if blank {
+                blanks.push(column);
+                continue;
+            }
+            if !blanks.is_empty() {
+                cells.push(v_flex().min_w_0().gap(SM).children(blanks.drain(..)));
+            }
+            cells.push(column);
+        }
+        if !blanks.is_empty() {
+            cells.push(v_flex().min_w_0().gap(SM).children(blanks));
+        }
+        let column_count = cells.len();
+        let board_min = BOARD_COLUMN_MIN * column_count + SM * column_count.saturating_sub(1);
         let board = match self.state.project_gap(space, project, Part::Tasks) {
             Some(gap) => div()
                 .flex_1()
@@ -584,24 +596,59 @@ impl Desktop {
                                 .flex_none()
                                 .items_start()
                                 .gap(SM)
-                                .children(columns),
+                                .children(cells),
                         ),
                 )
                 .scrollbar(&self.board_scroll, ScrollbarAxis::Both)
                 .into_any_element(),
         };
 
-        let view = self.state.project(space, project);
-        let mut side = v_flex().gap(SM);
         let decisions: Vec<_> = self
             .state
             .visible_decisions()
             .filter(|_| !archived)
             .map(|queued| self.decision(queued, when, cx))
             .collect();
-        if !decisions.is_empty() {
-            side = side.child(section("Open decisions")).children(decisions);
-        }
+        v_flex()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_h_0()
+            .min_w_0()
+            .gap(MD)
+            .when(!decisions.is_empty(), |column| {
+                // Capped and scrollable so decisions never push the board off the page.
+                column.child(
+                    decision_scroller(
+                        "board-decisions",
+                        v_flex()
+                            .gap(MD)
+                            .child(section("Open decisions"))
+                            .children(decisions),
+                        &self.decision_scroll,
+                    )
+                    .flex_none()
+                    .max_h(relative(0.45)),
+                )
+            })
+            .children(is_empty.then(|| empty(EmptyRegion::Board, cx)))
+            .child(board)
+            .into_any_element()
+    }
+
+    /// Repositories, agents, routines and machines: what the project runs
+    /// with, as flat sections.
+    fn setup_tab(
+        &self,
+        space: &str,
+        project: &str,
+        when: &When,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let archived = self.state.is_archived(space, project);
+        let view = self.state.project(space, project);
+        let mut side = v_flex().gap(SM);
         let repositories = view
             .map(|view| view.repositories.as_slice())
             .unwrap_or_default();
@@ -626,29 +673,27 @@ impl Desktop {
             );
         }
         side = side.children((!archived).then(|| self.repository_form(space, project, cx)));
-        side = side.child(section("Agents here"));
-        if let Some(gap) = self.state.project_gap(space, project, Part::Bindings) {
-            side = side.child(gap_line(&gap, "agents", space, cx));
-        }
-        for binding in view
-            .map(|view| view.bindings.as_slice())
-            .unwrap_or_default()
-        {
-            side = side.child(
-                h_flex()
-                    .justify_between()
-                    .text_size(TYPE_BODY)
-                    .child(binding.agent.clone())
-                    .child(div().text_color(muted).child(mode_name(binding.mode))),
-            );
-        }
-        side = side.child(section("Machines"));
+        let team = Screen::Agents(Some(space.to_owned()));
+        let agents = v_flex()
+            .gap(SM)
+            .child(
+                section("Agents").child(
+                    link("setup-edit-agents", "Edit agents in Team".to_owned())
+                        .w_auto()
+                        .flex_none()
+                        .text_size(TYPE_BODY)
+                        .font_weight(FontWeight::NORMAL)
+                        .on_click(cx.listener(move |this, _, _, cx| this.go(team.clone(), cx))),
+                ),
+            )
+            .child(self.agents_tab(space, project, cx));
+        let mut machines = v_flex().gap(SM).child(section("Machines"));
         if let Some(gap) = self
             .state
             .space(space)
             .and_then(|known| known.gap(Part::Machines))
         {
-            side = side.child(gap_line(&gap, "machines", space, cx));
+            machines = machines.child(gap_line(&gap, "machines", space, cx));
         }
         for machine in self
             .state
@@ -661,13 +706,13 @@ impl Desktop {
                 space: space.to_owned(),
                 machine: machine.id,
             };
-            side = side.child(
+            machines = machines.child(
                 h_flex()
                     .gap(XS)
                     .text_size(TYPE_BODY)
                     .child(
                         link(
-                            format!("board-machine-{}", machine.id),
+                            format!("setup-machine-{}", machine.id),
                             format!("{}{hub}", machine.name),
                         )
                         .flex_1()
@@ -681,29 +726,19 @@ impl Desktop {
             );
         }
 
-        h_flex()
+        v_flex()
             .flex_1()
-            .w_full()
             .min_h_0()
-            .min_w_0()
-            .items_start()
-            .gap(LG)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .h_full()
-                    .min_h_0()
-                    .min_w_0()
-                    .gap(MD)
-                    .children(is_empty.then(|| empty(EmptyRegion::Board, cx)))
-                    .child(board),
-            )
-            .child(
-                decision_scroller("board-sidebar", side, &self.decision_scroll)
-                    .w(SIDEBAR_WIDTH)
-                    .h_full()
-                    .flex_none(),
-            )
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
+            .overflow_y_scrollbar()
+            .id("setup")
+            .gap(XL)
+            .child(side)
+            .child(agents)
+            .child(self.routines_tab(space, project, when, cx))
+            .child(machines)
             .into_any_element()
     }
 
@@ -762,7 +797,7 @@ impl Desktop {
                         button("history-main-chat")
                             .self_start()
                             .outline()
-                            .label(format!("Open {space} Main Chat"))
+                            .label(format!("Open {space} space chat"))
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
                             )
@@ -1006,11 +1041,19 @@ impl Desktop {
                     .min_w_0()
                     .gap(SM)
                     .child(self.conversation_scroller(space, project, lines, cx))
-                    .children(main_chat.then(|| {
+                    .children((!self.state.is_archived(space, project)).then(|| {
+                        let page = (space.to_owned(), project.to_owned());
+                        let picker = self.to_picker(
+                            self.state.chat_target(space, project),
+                            move |state, space, project| {
+                                state.set_chat_target((&page.0, &page.1), (space, project));
+                            },
+                            cx,
+                        );
                         self.render_composer(
                             threadlane_desktop::Draft::Lead,
-                            "Message the space Lead",
-                            None,
+                            "Message the lead",
+                            Some(picker),
                             cx,
                         )
                         .flex_none()
@@ -1185,6 +1228,7 @@ impl Desktop {
                                 AppIcon::FileText,
                                 row.title,
                                 None,
+                                false,
                                 row.selected,
                                 cx,
                             )
@@ -1440,10 +1484,6 @@ impl Desktop {
             }),
         );
         let mut rows = v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .id("agents-tab")
             .gap(MD)
             .child(
                 h_flex()
@@ -1463,8 +1503,7 @@ impl Desktop {
                     )
                     .child(ceiling.disabled(archived)),
             )
-            .children(locked_note(&card.choices, muted))
-            .child(section("Agents in this project"));
+            .children(locked_note(&card.choices, muted));
         let gap = self.state.project_gap(space, project, Part::Bindings);
         let agents = self.state.agent_rows(space, project);
         if let Some(gap) = &gap {
@@ -1785,7 +1824,7 @@ impl Desktop {
             div()
                 .text_size(TYPE_BODY)
                 .text_color(muted)
-                .child("No agent here is on. Turn one on in the Agents tab.")
+                .child("No agent here is on. Turn one on in the Setup tab.")
         } else {
             let mut row = h_flex().gap(XS).flex_wrap();
             for agent in agents {

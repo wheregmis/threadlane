@@ -1051,6 +1051,104 @@ async fn decisions_from_two_hubs_merge_oldest_first() {
 }
 
 #[tokio::test]
+async fn the_to_picker_lists_each_space_lead_first_and_names_spaces_only_when_several() {
+    let work = FakeHub::new("Work", vec![]);
+    let (_one, single) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&single).await);
+    assert_eq!(state.lead_targets(), [("work", "General"), ("work", "api")]);
+    assert_eq!(state.lead_name("work", "General"), "Space lead");
+    assert_eq!(state.to_label("work", "General"), "To: Space lead");
+    assert_eq!(state.to_label("work", "api"), "To: api lead");
+
+    let home = FakeHub::new("Home", vec![]);
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.lead_targets(),
+        [
+            ("work", "General"),
+            ("work", "api"),
+            ("home", "General"),
+            ("home", "api")
+        ]
+    );
+    assert_eq!(state.to_label("home", "api"), "To: home · api lead");
+}
+
+#[tokio::test]
+async fn a_chat_tab_sends_to_its_own_lead_until_another_is_picked_there() {
+    let work = FakeHub::new("Work", vec![]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(state.chat_target("work", "api"), ("work", "api"));
+
+    state.set_chat_target(("work", "api"), ("work", "General"));
+    assert_eq!(state.chat_target("work", "api"), ("work", "General"));
+    assert_eq!(
+        state.chat_target("work", "General"),
+        ("work", "General"),
+        "another page keeps its own lead"
+    );
+    state.set_chat_target(("work", "api"), ("work", "gone"));
+    assert_eq!(
+        state.chat_target("work", "api"),
+        ("work", "api"),
+        "unknown lead"
+    );
+
+    state.set_chat_target(("work", "api"), ("work", "General"));
+    state.reset_chat_target();
+    assert_eq!(
+        state.chat_target("work", "api"),
+        ("work", "api"),
+        "after navigating"
+    );
+}
+
+#[test]
+fn choosing_another_recipient_carries_the_draft_being_typed() {
+    let mut state = AppState::default();
+    let api = Destination::Lead("work".into(), "api".into());
+    let general = Destination::Lead("work".into(), "General".into());
+    state.edit_draft(&api, "Ship it");
+    state.move_draft(&api, &general);
+    assert_eq!(state.draft(&general), "Ship it");
+    assert!(
+        state.draft(&api).is_empty(),
+        "no copy left on the page's own lead"
+    );
+
+    state.edit_draft(&api, "Second");
+    state.move_draft(&api, &general);
+    assert_eq!(state.draft(&general), "Second\n\nShip it");
+}
+
+#[test]
+fn the_recipient_is_locked_while_a_send_is_held_or_images_load() {
+    let mut state = AppState::default();
+    let general = Destination::Lead("work".into(), "General".into());
+    assert!(state.can_retarget(&general));
+
+    state.loading_images(&general);
+    assert!(!state.can_retarget(&general), "images loading");
+    state.attach_images(&general, Ok(vec![]));
+    assert!(state.can_retarget(&general));
+
+    state.edit_draft(&general, "Ship it");
+    assert!(
+        state
+            .request_send(general.clone(), Timestamp::from_millis(1_000))
+            .held
+            .is_some()
+    );
+    assert!(!state.can_retarget(&general), "send held");
+    assert!(state.undo_send(&general));
+    assert!(state.can_retarget(&general));
+}
+
+#[tokio::test]
 async fn each_space_uses_its_own_general_project_for_main_chat() {
     let work = FakeHub::new("Work", vec![]);
     let home = FakeHub::new("Home", vec![]);
@@ -1430,6 +1528,51 @@ fn count_forms_use_singular_only_for_one() {
         assert_eq!(count_form(1_usize, one, many), one);
         assert_eq!(count_form(2_usize, one, many), many);
     }
+}
+
+#[tokio::test]
+async fn inbox_lists_the_newest_recent_failures_of_the_spaces_it_shows() {
+    let day = 24 * 60 * 60 * 1_000;
+    let failed = |id: i64, at: i64| {
+        let mut summary = task(id, TaskStatus::Failed, None);
+        summary.task.created_at = Timestamp::from_millis(at);
+        summary
+    };
+    let work = FakeHub::new("Work", Vec::new());
+    let mut tasks: Vec<_> = (1..=6).map(|id| failed(id, 10 * day + id)).collect();
+    tasks.push(failed(7, 2 * day));
+    tasks.push(task(8, TaskStatus::Done, None));
+    *work.tasks.lock().expect("lock") = tasks;
+    let home = FakeHub::new("Home", Vec::new());
+    *home.tasks.lock().expect("lock") = vec![failed(9, 10 * day + 10)];
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let when = When {
+        now: Timestamp::from_millis(12 * day),
+        offset_minutes: 0,
+    };
+    let listed = |state: &AppState| -> Vec<_> {
+        state
+            .recent_failures(&when)
+            .into_iter()
+            .map(|(space, summary)| (space.to_owned(), summary.task.id.0))
+            .collect()
+    };
+
+    assert_eq!(
+        listed(&state),
+        [
+            ("home".to_owned(), 9),
+            ("work".to_owned(), 6),
+            ("work".to_owned(), 5),
+            ("work".to_owned(), 4),
+            ("work".to_owned(), 3),
+        ],
+        "newest first, at most five, none older than a week, no done tasks"
+    );
+    state.set_filter(Some("home"));
+    assert_eq!(listed(&state), [("home".to_owned(), 9)]);
 }
 
 const BLOCKED_FOR_TEST: &str = "blocked: every model account it can use is at its usage limit";
@@ -2472,11 +2615,14 @@ fn every_tab_is_selected_where_it_is_shown() {
         assert_eq!(labels[tab.index()], tab.label(), "{tab:?}");
         assert_eq!(Tab::named(&tab.label().to_lowercase()), Some(tab));
     }
-    assert_eq!(
-        labels,
-        ["Tasks", "Conversation", "Agents", "Routines", "Memory"],
-        "the wireframe's order"
-    );
+    assert_eq!(labels, ["Chat", "Tasks", "Memory", "Setup"], "Chat first");
+}
+
+#[test]
+fn the_old_agents_and_routines_tab_names_open_setup() {
+    assert_eq!(Tab::named("agents"), Some(Tab::Setup));
+    assert_eq!(Tab::named("Routines"), Some(Tab::Setup));
+    assert_eq!(Tab::named("board"), None);
 }
 
 #[test]
@@ -4345,6 +4491,35 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
 }
 
 #[test]
+fn the_selected_space_round_trips_and_falls_back_to_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(SETTINGS_FILE), r#"{"appearance":"dark"}"#).unwrap();
+    let mut state = AppState::paired(["dev", "ops"]);
+    state.set_client_dir(dir.path().to_owned());
+    assert_eq!(
+        state.selected_space().map(|space| space.name.as_str()),
+        Some("dev")
+    );
+    state.select_space("ops");
+
+    let mut reloaded = AppState::paired(["dev", "ops"]);
+    reloaded.set_client_dir(dir.path().to_owned());
+    assert_eq!(
+        reloaded.selected_space().map(|space| space.name.as_str()),
+        Some("ops")
+    );
+    assert_eq!(reloaded.appearance(), Appearance::Dark);
+
+    // A saved space that is no longer paired shows the first one.
+    let mut unpaired = AppState::paired(["dev"]);
+    unpaired.set_client_dir(dir.path().to_owned());
+    assert_eq!(
+        unpaired.selected_space().map(|space| space.name.as_str()),
+        Some("dev")
+    );
+}
+
+#[test]
 fn desktop_appearance_round_trips_with_existing_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(SETTINGS_FILE);
@@ -5044,6 +5219,24 @@ async fn in_progress_rows_clip_long_titles_to_one_line() {
     assert_eq!(rows[0].title, "Deliver a lead's final text to the feed");
     assert_eq!(rows[0].label, "Deliver a lead's f…");
     assert_eq!(rows[0].elapsed, "12 min");
+}
+
+#[tokio::test]
+async fn running_work_marks_its_project_even_past_the_cap() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().unwrap() = (1..=7)
+        .map(|id| task(id, TaskStatus::Queued, None))
+        .collect();
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    state.apply_at(refresh(&core).await, when().now);
+    assert!(state.is_working("dev", "api"));
+    assert!(!state.is_working("dev", "General"));
+    assert!(!state.is_working("other", "api"));
+    *work.tasks.lock().unwrap() = Vec::new();
+    *work.lead.lock().unwrap() = Some(Timestamp::from_millis(600_000));
+    state.apply_at(refresh(&core).await, when().now);
+    assert!(state.is_working("dev", "General"));
 }
 
 #[tokio::test]

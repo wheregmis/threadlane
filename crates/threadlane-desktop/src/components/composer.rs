@@ -1,13 +1,14 @@
 //! Shared composer and the adapter between GPUI inputs and draft state.
 
-use std::{sync::Arc, time::Duration};
+use std::{rc::Rc, sync::Arc, time::Duration};
 
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState, Undo};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::time::{Clock as _, SystemClock};
-use threadlane_desktop::{Activity, Destination, Draft, Outgoing, sends_on_enter};
+use threadlane_desktop::{Activity, AppState, Destination, Draft, Outgoing, sends_on_enter};
 
 use super::{button, chat_images, composer_surface, meta};
 use crate::icons::AppIcon;
@@ -65,16 +66,17 @@ impl Desktop {
 
     fn composer_destination(&self) -> Option<Destination> {
         match &self.screen {
-            Screen::Home => self.state.target().and_then(|(space, _)| {
-                let project = self.state.space(space)?.main_chat_project()?;
-                Some(Destination::Lead(space.to_owned(), project.to_owned()))
-            }),
+            Screen::Home => self
+                .state
+                .target()
+                .map(|(space, project)| Destination::Lead(space.to_owned(), project.to_owned())),
             Screen::Project {
                 space,
                 project,
                 tab: Tab::Conversation,
-            } if self.is_main_chat(space, project) => {
-                Some(Destination::Lead(space.clone(), project.clone()))
+            } if !self.state.is_archived(space, project) => {
+                let (space, project) = self.state.chat_target(space, project);
+                Some(Destination::Lead(space.to_owned(), project.to_owned()))
             }
             Screen::Task { space, task }
                 if self.state.task(space, *task).is_some()
@@ -84,6 +86,75 @@ impl Desktop {
             }
             _ => None,
         }
+    }
+
+    /// The composer's "To:" picker over every lead, showing `current`.
+    /// `choose` records a pick; the draft being typed follows it.
+    pub(crate) fn to_picker(
+        &self,
+        current: (&str, &str),
+        choose: impl Fn(&mut AppState, &str, &str) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = self.state.to_label(current.0, current.1);
+        let lead = label.trim_start_matches("To: ");
+        let accessibility = format!("Send to {lead} — choose who receives this message");
+        let items: Vec<(String, String, String, bool)> = self
+            .state
+            .lead_targets()
+            .into_iter()
+            .map(|(space, project)| {
+                let name = format!("{space} · {}", self.state.lead_name(space, project));
+                (
+                    name,
+                    space.to_owned(),
+                    project.to_owned(),
+                    (space, project) == current,
+                )
+            })
+            .collect();
+        let locked = self
+            .composer_destination()
+            .is_some_and(|from| !self.state.can_retarget(&from));
+        let accessibility = if locked {
+            format!("Sending to {lead} — wait for the send to finish to choose another lead")
+        } else {
+            accessibility
+        };
+        let choose = Rc::new(choose);
+        let view = cx.entity().downgrade();
+        button("target")
+            .label(label)
+            .tab_stop(true)
+            .disabled(locked)
+            .accessibility_label(accessibility)
+            .dropdown_menu(move |mut menu, _, _| {
+                for (name, space, project, checked) in &items {
+                    let (space, project) = (space.clone(), project.clone());
+                    let (view, choose) = (view.clone(), Rc::clone(&choose));
+                    menu = menu.item(PopupMenuItem::new(name.clone()).checked(*checked).on_click(
+                        move |_, _, cx| {
+                            let _gone = view.update(cx, |this, cx| {
+                                let from = this.composer_destination();
+                                if from
+                                    .as_ref()
+                                    .is_some_and(|from| !this.state.can_retarget(from))
+                                {
+                                    return;
+                                }
+                                choose(&mut this.state, &space, &project);
+                                if let (Some(from), Some(to)) = (from, this.composer_destination())
+                                {
+                                    this.state.move_draft(&from, &to);
+                                }
+                                cx.notify();
+                            });
+                        },
+                    ));
+                }
+                menu
+            })
+            .into_any_element()
     }
 
     fn draft_input(&self, draft: Draft) -> &Entity<TextareaState> {
