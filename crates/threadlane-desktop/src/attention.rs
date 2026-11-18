@@ -258,17 +258,22 @@ impl AppState {
         if !decision.offers_standing_rule {
             return None;
         }
-        let project = self
-            .project_name(&queued.space, decision.project_id)
-            .unwrap_or("this project");
+        let project = self.project_name(&queued.space, decision.project_id);
+        let repository = decision
+            .arguments
+            .get("repository")
+            .and_then(serde_json::Value::as_str);
         // The rule matches the target fields of the arguments only.
         let words = allows(&decision.tool, &decision.arguments);
         let ticked = self.always.contains(&(queued.space.clone(), decision.id));
+        // "in threadlane, in threadlane" when the repository shares the project's name.
+        let place = if repository.is_some() && repository == project {
+            String::new()
+        } else {
+            format!(", in {}", project.unwrap_or("this project"))
+        };
         Some((
-            format!(
-                "Always allow {} to {words}, in {project}",
-                self.asker(queued)
-            ),
+            format!("Always allow {} to {words}{place}", self.asker(queued)),
             ticked,
         ))
     }

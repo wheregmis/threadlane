@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::{Value as Json, json};
 use threadlane_core::model::{Mode, Pacing, QuietHours};
@@ -566,8 +567,12 @@ impl AppState {
             ),
             _ => "No observations".to_owned(),
         };
-        let age =
-            |value: Option<i64>| value.map_or_else(|| "Empty".to_owned(), |ms| format!("{ms} ms"));
+        let age = |value: Option<i64>| match value {
+            Some(ms @ 60_000..) => crate::clock::duration(Duration::from_millis(ms as u64)),
+            Some(ms @ 1_000..) => format!("{:.1} s", ms as f64 / 1_000.0),
+            Some(ms) => format!("{ms} ms"),
+            None => "Empty".to_owned(),
+        };
         Ok(vec![
             ("Snapshot", when.moment(metrics.at)),
             (
@@ -582,7 +587,7 @@ impl AppState {
                 ),
             ),
             (
-                "Oldest lane event",
+                "Oldest pending event",
                 age(metrics.lane_lag_ms.values().copied().max()),
             ),
             ("Run duration", latency(&metrics.run_duration)),

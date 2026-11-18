@@ -111,6 +111,9 @@ follow). `THREADLANE_LOCAL_DISCOVERY=off` turns discovery off in the client.
 No relay and no outside lookup is used, so client and hub must share a
 network.
 
+Use `threadlane feed --follow --peek` to watch new items without moving the
+saved feed position. Add `--from-start` to review earlier items as well.
+
 `send` waits for the reply (up to `--timeout`, 120 s by default) unless given
 `--no-wait`. `-s <space>` picks a hub when several are paired and `-p
 <project>` a project (General by default). The client keeps its pairings in

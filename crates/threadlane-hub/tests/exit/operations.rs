@@ -376,6 +376,15 @@ async fn lane_and_metrics_dispatch_use_scope_and_show_live_lease_and_history() {
     };
     assert_eq!(metrics.queue_depth.len(), 2);
     assert_eq!(metrics.queue_depth.values().sum::<i64>(), 1);
+    assert_eq!(metrics.lane_lag_ms.len(), 1);
+    let response = ClientResponse::Operations {
+        reply: OperationsReply::Metrics { metrics },
+    };
+    let wire = serde_json::to_vec(&response).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<ClientResponse>(&wire).unwrap(),
+        response
+    );
     assert!(matches!(
         sim.api
             .operations(OperationsRequest::Replay { event: EventId(99) })

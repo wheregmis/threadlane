@@ -167,18 +167,16 @@ pub async fn add_engineer(db: &HubDb, max_parallel: u32) {
 
 /// A task's result without its merge record, which it checks says the
 /// branch merged cleanly (docs/merge-help.md decision 4).
-pub fn merged_cleanly(result: Option<Json>) -> Option<Json> {
+pub fn merged_cleanly(result: Option<Json>, repository: &str) -> Option<Json> {
     let mut result = result?;
     let merge = result
         .as_object_mut()
         .and_then(|object| object.remove("merge"))
         .expect("a merge record");
-    assert!(
-        merge
-            .as_array()
-            .is_some_and(|checks| checks.iter().all(|check| check["conflicts"] == json!([]))),
-        "{merge}"
-    );
+    let checks = merge.as_array().expect("an array of merge checks");
+    assert_eq!(checks.len(), 1, "{merge}");
+    assert_eq!(checks[0]["repository"], repository, "{merge}");
+    assert_eq!(checks[0]["conflicts"], json!([]), "{merge}");
     Some(result)
 }
 

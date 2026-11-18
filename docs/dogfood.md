@@ -79,7 +79,7 @@ Goal: `docs/agent-templates.md` as two dependent tasks for the Engineer. Both fi
 | 21 | The dependency worked: T-0006 started after T-0005 finished, and its branch contains T-0005's commit. Each took one run. | checked |
 | 22 | Neither run ended early or with work in the background; both ran the three checks in the foreground. The run-ending fix holds. | checked |
 | 23 | Merging T-0006 into v2 conflicted in four files with archive and delete, which had landed meanwhile and added requests in the same places. Resolved by hand; 674 tests pass. Parallel work on the client interface will keep doing this. | open: nothing in the system helps with it |
-| 24 | The lead's final report did not reach `threadlane feed` when I looked (it had been read by an earlier watcher); the owner had to tell me the tasks were done. | partly fixed by finding 2's fix (a lead's final text now reaches the feed); whether an earlier watcher can hide a feed item from later ones was not looked at |
+| 24 | The lead's final report did not reach `threadlane feed` when I looked. Two watchers using the same client directory share a saved position, so the second watcher misses items the first has read. | reproduced on Dev. `threadlane feed --follow --peek` watches without advancing the saved position. `--from-start --peek` can also read earlier items without changing it. |
 
 ## Run 5, 2026-11-17: the Chief of Staff's first menu
 
@@ -100,5 +100,36 @@ Task T-0013 in the GitHub-backed repository: add an attribution line to pull req
 | # | Finding | State |
 |---|---|---|
 | 30 | Publishing works end to end on the real `gh`: approval card, one push, one draft pull request, the body as the agent wrote it. | checked |
-| 31 | The "Always allow" line names the place twice when the project and repository share a name: "in threadlane, in threadlane". | open: given to Threadlane |
-| 32 | A long title in the sidebar's In progress row still runs into its time ("One plac" under "less than a minute"). | open: given to Threadlane |
+| 31 | The "Always allow" line names the place twice when the project and repository share a name: "in threadlane, in threadlane". | fixed in T-0015; to check in the real window |
+| 32 | A long title in the sidebar's In progress row still runs into its time ("One plac" under "less than a minute"). The 18-character cut assumed a short time; "less than a minute" alone is as long as the title. | fixed in T-0015: the sidebar says "< 1 min" and the title is cut to what the row leaves beside its time; to check in the real window |
+
+## Live monitoring pass, 2026-11-18
+
+The CLI reported Dev reachable and the desktop showed `dev · Live`. No
+decisions were waiting. T-0015 was queued behind T-0014 with no runs yet.
+Machines opened the live hub's detail page, which showed two of two run
+slots occupied. Help → Keyboard Shortcuts opened the dialog, and Escape
+closed it.
+
+| # | Finding | State |
+|---|---|---|
+| 33 | When a lane has pending work, `threadlane metrics` and Settings → Metrics both fail to read the hub reply. Lane IDs are JSON object keys, which the tagged reply decoder buffers as strings. | fixed in this checkout. The regression test round-trips a hub snapshot with pending work. The rebuilt CLI and desktop both read metrics from the running Dev hub with two pending lanes. |
+| 34 | T-0014 hit Claude's 40-turn limit once and the 600-second run limit three times. The desktop timeline showed each failed attempt and its reason. | T-0014 finished on its fifth attempt, and T-0015 started without manual intervention. Repeated run limits remain open. |
+| 35 | Settings formatted the oldest pending event and outbox lag in raw milliseconds, even for waits of several minutes. | fixed in this checkout. The rebuilt desktop showed an oldest pending event of 1 h 7 min. |
+| 36 | T-0015 showed an elapsed time and a missing backend report despite having zero runs. The Related panel used “it waits for this” and “waits for it” for the two directions of a task dependency. | fixed in this checkout and verified on T-0014 and T-0015. The usage card says “No runs”, and navigation to a related task exposes its status and relationship to assistive technology. |
+
+The live Cancel task dialog offered “Keep it”, which closed the dialog
+and left T-0015 queued.
+
+## Review before merging to main, 2026-11-18
+
+All 15 Dev tasks reached Done. The combined desktop loaded the live Dev
+timeline and opened the project conversation from a timeline entry.
+
+| # | Finding | State |
+|---|---|---|
+| 37 | A project lead's final text reached the owner without waking the space Lead. An interruption could also separate an explicit message from its routed reply. | fixed in the PR batch. The outbox message and routed reply are queued together. The hub exit tests cover both forms of reply. |
+| 38 | A refresh while editing an agent could revert fields changed by another client. The completion of an earlier save could close a reopened draft. Simultaneous saves could also overwrite unrelated fields on the hub. | fixed in the PR batch. Desktop and hub tests cover the drafts and concurrent saves. |
+| 39 | Rebasing a published task branch could make its next regular push fail. | fixed in the PR batch. A local Git regression pushes, advances the base, and then pushes the task's next commit. |
+| 40 | Clarification decisions and follow-up timers could lose the link to a space Lead request. Replies could mix when several requests reached the same project. | fixed in the PR batch. A hub test sends two overlapping requests and checks that each reply keeps its original request. |
+| 41 | A slow Git operation in one repository held a shared lock and delayed tasks in other repositories. | fixed in the PR batch. Git workspace operations acquire a lock for the repository they touch. An interrupted run checks its stop state again before starting the backend. An in-flight Git command can still take until its timeout to finish. |

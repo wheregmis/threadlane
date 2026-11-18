@@ -203,6 +203,16 @@ pub trait InboxStore: Send + Sync {
         before: Option<Timestamp>,
         limit: u32,
     ) -> StoreResult<Vec<Event>>;
+    /// Events of `kind` from `source` in a lane, received before `before`
+    /// (all of them when `None`), newest first, at most `limit`.
+    async fn lane_events_from(
+        &self,
+        lane_id: LaneId,
+        kind: crate::model::EventKind,
+        source: &str,
+        before: Option<Timestamp>,
+        limit: u32,
+    ) -> StoreResult<Vec<Event>>;
     /// Events skipped for either reason, in one project or in the whole space
     /// when `None`: the newest `limit`, newest first, and how many there
     /// are in all.

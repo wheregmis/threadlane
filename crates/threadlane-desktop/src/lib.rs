@@ -43,6 +43,7 @@ mod prose;
 mod routines;
 mod settings;
 mod tasks;
+mod timeline;
 
 pub use agent_edit::{AgentBinding, AgentEdit, AgentFields};
 pub use attention::{AttentionRow, needs_you};
@@ -89,6 +90,7 @@ pub use tasks::{
     changes, chips, merge_state, running_elapsed, status_label, task_header, timeline, usage,
     work_elapsed,
 };
+pub use timeline::{Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, load_timeline};
 
 /// How many of the newest delivered items Home asks each hub for.
 const RECENT: u32 = 50;
@@ -922,12 +924,36 @@ pub struct ProjectView {
     lead_runs: Vec<LeadRun>,
 }
 
+/// Who wrote a message on the asking side of a lead's conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Author {
+    /// You.
+    You,
+    /// The space lead, General's lead, handing this project a goal.
+    SpaceLead,
+    /// In General: the lead of this project, replying to the space lead.
+    ProjectLead(String),
+}
+
+impl Author {
+    /// How the conversation and Home name it.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::You => "You".to_owned(),
+            Self::SpaceLead => "General lead".to_owned(),
+            Self::ProjectLead(project) => format!("{project} lead"),
+        }
+    }
+}
+
 /// A message you sent, as the conversation shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Said {
     project: String,
     text: String,
     at: Timestamp,
+    by: Author,
 }
 
 /// How far back a conversation is loaded.
@@ -1024,6 +1050,8 @@ pub struct AppState {
     expanded_quiet: HashSet<InSpace<RunId>>,
     /// The ceiling you asked to set a space to, until you confirm or keep it.
     space_ceiling_asked: Option<InSpace<Mode>>,
+    /// The pages of Home's timeline shown beyond the first.
+    timeline_pages: usize,
 }
 
 impl AppState {
@@ -1879,7 +1907,7 @@ impl AppState {
         let entries = take(&mut view.answers, Part::Conversation, history);
         self.remember_decisions(&space, decision_records);
         if listed {
-            self.take_history(&space, &project, entries, true);
+            self.take_history(&space, &project, entries, true, PAGE);
         }
     }
 
@@ -1931,34 +1959,44 @@ impl AppState {
     pub fn apply_earlier(&mut self, load: EarlierLoad) {
         self.remember_decisions(&load.space, load.decision_records);
         if let Ok(entries) = load.history {
-            self.take_history(&load.space, &load.project, entries, false);
+            self.take_history(&load.space, &load.project, entries, false, PAGE);
         }
     }
 
     /// Takes a page of history. The newest page leaves how far back is
     /// loaded alone once an earlier page was taken.
-    fn take_history(
+    pub(crate) fn take_history(
         &mut self,
         space: &str,
         project: &str,
         entries: Vec<ConversationEntry>,
         newest: bool,
+        limit: u32,
     ) {
-        let full = entries.len() >= usize::try_from(PAGE).unwrap_or(usize::MAX);
+        let full = entries.len() >= usize::try_from(limit).unwrap_or(usize::MAX);
         let mut oldest = None;
         for entry in entries {
             let at = match entry {
                 ConversationEntry::You { event_id, text, at } => {
-                    self.said.insert(
-                        (space.to_owned(), event_id),
-                        Said {
-                            project: project.to_owned(),
-                            text,
-                            at,
-                        },
-                    );
-                    at
+                    self.take_said(space, project, event_id, text, at, Author::You)
                 }
+                ConversationEntry::SpaceLead { event_id, text, at } => {
+                    self.take_said(space, project, event_id, text, at, Author::SpaceLead)
+                }
+                ConversationEntry::ProjectReply {
+                    event_id,
+                    project: from,
+                    text,
+                    at,
+                    ..
+                } => self.take_said(
+                    space,
+                    project,
+                    event_id,
+                    text,
+                    at,
+                    Author::ProjectLead(from),
+                ),
                 ConversationEntry::DeliveryFailure { event_id, text, at } => {
                     self.failures.insert(
                         (space.to_owned(), event_id),
@@ -1966,6 +2004,7 @@ impl AppState {
                             project: project.to_owned(),
                             text,
                             at,
+                            by: Author::You,
                         },
                     );
                     at
@@ -1991,6 +2030,25 @@ impl AppState {
                 self.loaded.insert(key, page);
             }
         }
+    }
+
+    fn take_said(
+        &mut self,
+        space: &str,
+        project: &str,
+        event: EventId,
+        text: String,
+        at: Timestamp,
+        by: Author,
+    ) -> Timestamp {
+        let said = Said {
+            project: project.to_owned(),
+            text,
+            at,
+            by,
+        };
+        self.said.insert((space.to_owned(), event), said);
+        at
     }
 
     /// Where an earlier page of the conversation starts, if there may be one.
@@ -2238,8 +2296,8 @@ impl AppState {
                 project: project.to_owned(),
                 text: text.to_owned(),
                 at,
+                by: Author::You,
             });
-        self.remember_target(space, project);
         if let Some(view) = self
             .projects
             .get_mut(&(space.to_owned(), project.to_owned()))

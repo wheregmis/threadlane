@@ -54,6 +54,8 @@ struct FakeHub {
     traced_decisions: Mutex<Vec<Decision>>,
     tasks: Mutex<Vec<TaskSummary>>,
     history: Mutex<Vec<ConversationEntry>>,
+    /// A project's own conversation, by name, in place of `history`.
+    histories: Mutex<BTreeMap<String, Vec<ConversationEntry>>>,
     recent: Mutex<Vec<FeedItem>>,
     bindings: Mutex<Vec<BindingSummary>>,
     memory: Mutex<Vec<MemoryFile>>,
@@ -532,9 +534,20 @@ impl HubApi for FakeHub {
                     .filter(|summary| summary.task.status == TaskStatus::Running)
                     .collect(),
             }),
-            OverviewRequest::Conversation { before, limit, .. } => {
+            OverviewRequest::Conversation {
+                project,
+                before,
+                limit,
+            } => {
                 use crate::decision_record::conversation_time;
-                let mut entries = self.history.lock().expect("lock").clone();
+                let named = project.unwrap_or_else(|| "General".to_owned());
+                let mut entries = self
+                    .histories
+                    .lock()
+                    .expect("lock")
+                    .get(&named)
+                    .cloned()
+                    .unwrap_or_else(|| self.history.lock().expect("lock").clone());
                 entries.retain(|entry| {
                     conversation_time(entry)
                         .is_some_and(|at| before.is_none_or(|before| at < before))
@@ -1153,6 +1166,8 @@ fn said(lines: &[Line]) -> Vec<String> {
             Line::New => "new".to_owned(),
             Line::Sending { text, .. } => format!("sending: {text}"),
             Line::You { text, .. } => format!("you: {text}"),
+            Line::SpaceLead { text, .. } => format!("General lead: {text}"),
+            Line::ProjectReply { project, text, .. } => format!("{project} lead: {text}"),
             Line::Lead { text, .. } => format!("lead: {text}"),
             Line::Notice { text, .. } => format!("notice: {text}"),
             Line::Decision { card, pending, .. } => format!("{}: pending {pending}", card.id),
@@ -2450,9 +2465,18 @@ fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
         proposed_by: None,
         stopped: false,
     };
-    let [runs, tokens] = usage(&detail, &when());
-    assert_eq!(runs, "2 runs · 7 min", "the running one counts until now");
-    assert!(tokens.contains("not reported"), "{tokens}");
+    let usage_lines = usage(&detail, &when());
+    assert_eq!(
+        usage_lines[0], "2 runs · 7 min",
+        "the running one counts until now"
+    );
+    assert!(usage_lines[1].contains("not reported"), "{usage_lines:?}");
+    let unstarted = TaskDetail {
+        summary: task(7, TaskStatus::Queued, None),
+        runs: Vec::new(),
+        ..detail.clone()
+    };
+    assert_eq!(usage(&unstarted, &when()), ["No runs"]);
 
     let published = |detail: &TaskDetail| {
         let changes = changes(detail);
@@ -3237,6 +3261,31 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
         .expect("set");
     state.mode_set("work", "api", set);
     assert_eq!(state.agent_rows("work", "api")[1].at_once.label, "2");
+}
+
+#[tokio::test]
+async fn always_allow_names_the_place_once_when_repository_and_project_match() {
+    let mut offered = decision(1, 1_000);
+    offered.offers_standing_rule = true;
+    offered.arguments = json!({ "repository": "api" });
+    let mut distinct = decision(2, 2_000);
+    distinct.offers_standing_rule = true;
+    distinct.arguments = json!({ "repository": "service in api" });
+    let work = FakeHub::new("Work", vec![offered, distinct]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.always_offer(&state.queue()[0]).map(|(line, _)| line),
+        Some("Always allow the lead to open draft pull requests in api".to_owned())
+    );
+    assert_eq!(
+        state.always_offer(&state.queue()[1]).map(|(line, _)| line),
+        Some(
+            "Always allow the lead to open draft pull requests in service in api, in api"
+                .to_owned()
+        )
+    );
 }
 
 #[tokio::test]
@@ -4241,7 +4290,7 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         "run_duration": {"count": 1, "mean_ms": 12.0, "max_ms": 12},
         "account_cooldowns": {}, "account_wait_ms": 83, "dead_events": 2,
         "timer_lateness": {"count": 0, "mean_ms": null, "max_ms": null},
-        "outbox_lag_ms": null, "messages_per_day": {"2026-01-01": 4},
+        "outbox_lag_ms": 125_000, "messages_per_day": {"2026-01-01": 4},
         "silent_run_ratio": 0.25, "decisions_per_day": 5,
         "answer_latency": {"count": 0, "mean_ms": null, "max_ms": null}, "standing_rules_created": 1
     })).unwrap());
@@ -4254,7 +4303,8 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         .into_iter()
         .collect();
     assert_eq!(rows["Project queues"], "api 3");
-    assert_eq!(rows["Oldest lane event"], "53 ms");
+    assert_eq!(rows["Oldest pending event"], "53 ms");
+    assert_eq!(rows["Outbox lag"], "2 min");
     assert_eq!(
         rows["Run duration"],
         "12 ms avg · 12 ms max · 1 observation"
@@ -4939,6 +4989,32 @@ async fn in_progress_rows_clip_long_titles_to_one_line() {
     assert_eq!(rows[0].title, "Deliver a lead's final text to the feed");
     assert_eq!(rows[0].label, "Deliver a lead's f…");
     assert_eq!(rows[0].elapsed, "12 min");
+}
+
+#[tokio::test]
+async fn in_progress_titles_leave_room_for_a_long_time() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(1, TaskStatus::Running, None);
+    running.task.title = "One place for every finding".into();
+    *work.tasks.lock().unwrap() = vec![running];
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    state.apply_at(refresh(&core).await, when().now);
+    let at = |millis| When {
+        now: Timestamp::from_millis(millis),
+        ..when()
+    };
+    for (now, label, elapsed) in [
+        (30_000, "One place for eve…", "< 1 min"),
+        (12 * 60_000, "One place for ever…", "12 min"),
+        (125 * 60_000, "One place for e…", "2 h 5 min"),
+        (725 * 60_000, "One place for…", "12 h 5 min"),
+    ] {
+        let row = &state.in_progress("dev", &at(now)).rows[0];
+        assert_eq!((row.label.as_str(), row.elapsed.as_str()), (label, elapsed));
+        // The title and the time share one row's width; the time keeps its own.
+        assert!(row.label.chars().count() + row.elapsed.chars().count() <= 25);
+    }
 }
 
 #[tokio::test]
@@ -5778,4 +5854,267 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
             .iter()
             .all(|a| a.name != "Critic")
     );
+}
+
+/// A delivered lead message of `project` at `at`.
+fn said_by_lead(seq: i64, project: &str, text: &str, at: i64) -> ConversationEntry {
+    let mut item = feed_item(seq, OutboxKind::Message, json!({ "text": text }), at);
+    item.project_name = Some(project.to_owned());
+    item.message.project_id = Some(project_id(Some(project)));
+    ConversationEntry::Delivered { item }
+}
+
+fn said_by_you(id: i64, text: &str, at: i64) -> ConversationEntry {
+    ConversationEntry::You {
+        event_id: EventId(id),
+        text: text.to_owned(),
+        at: Timestamp::from_millis(at),
+    }
+}
+
+fn timeline_of(state: &AppState) -> Vec<String> {
+    state
+        .timeline()
+        .iter()
+        .map(|entry| {
+            let who = match entry.spoken {
+                Spoken::Said(_, Author::You) => "you".to_owned(),
+                Spoken::Said(_, by) => by.label(),
+                Spoken::Delivered(_) => "lead".to_owned(),
+            };
+            format!(
+                "{} / {} {who}: {}",
+                entry.space,
+                entry.project.unwrap_or("-"),
+                entry.text()
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn home_merges_every_conversation_of_every_space_newest_first() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    work.histories.lock().unwrap().extend([
+        (
+            "api".to_owned(),
+            vec![
+                said_by_you(1, "Fix the refunds", 1_000),
+                said_by_lead(1, "api", "On it", 4_000),
+                ConversationEntry::Delivered {
+                    item: feed_item(
+                        2,
+                        OutboxKind::Decision,
+                        json!({ "decision": "D-0001", "question": "Open it?" }),
+                        5_000,
+                    ),
+                },
+            ],
+        ),
+        (
+            "General".to_owned(),
+            vec![said_by_you(2, "What is everyone doing?", 2_000)],
+        ),
+    ]);
+    home.histories.lock().unwrap().insert(
+        "General".to_owned(),
+        vec![said_by_lead(1, "General", "Garden watered", 3_000)],
+    );
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.timeline_projects(),
+        [
+            pair("work", "api"),
+            pair("work", "General"),
+            pair("home", "api"),
+            pair("home", "General"),
+        ]
+    );
+    state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
+    // The feed delivers one of them again: still shown once.
+    state.receive(SpaceFeedItem {
+        space: "work".to_owned(),
+        item: feed_item(1, OutboxKind::Message, json!({ "text": "On it" }), 4_000),
+    });
+
+    let all = [
+        "work / api lead: On it",
+        "home / General lead: Garden watered",
+        "work / General you: What is everyone doing?",
+        "work / api you: Fix the refunds",
+    ];
+    assert_eq!(timeline_of(&state), all, "decisions stay under Needs you");
+    assert!(!state.timeline_has_earlier());
+    // The project screen shows the same history.
+    assert_eq!(
+        said(&state.conversation("work", "api", &when()))
+            .into_iter()
+            .filter(|line| !line.starts_with("--"))
+            .collect::<Vec<_>>(),
+        [
+            "you: Fix the refunds",
+            "lead: On it",
+            "D-0001: pending false"
+        ]
+    );
+
+    state.set_filter(Some("home"));
+    assert_eq!(timeline_of(&state), ["home / General lead: Garden watered"]);
+    assert_eq!(
+        state.timeline_projects(),
+        [pair("home", "api"), pair("home", "General")]
+    );
+    state.set_filter(None);
+    assert_eq!(timeline_of(&state), all);
+}
+
+#[tokio::test]
+async fn home_s_timeline_pages_and_stops_where_a_conversation_is_not_loaded() {
+    let work = FakeHub::new("Work", Vec::new());
+    // api has 30 lead messages, one a second from 1 s; General one at 0.5 s.
+    work.histories.lock().unwrap().extend([
+        (
+            "api".to_owned(),
+            (1..=30)
+                .map(|n| said_by_lead(n, "api", &format!("api {n}"), n * 1_000))
+                .collect(),
+        ),
+        (
+            "General".to_owned(),
+            vec![said_by_you(1, "older in General", 500)],
+        ),
+    ]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
+
+    // Only api's newest 20 (11..=30) are loaded, so nothing older than 11 s
+    // is shown yet: General's message waits until api's are loaded past it.
+    let shown = timeline_of(&state);
+    assert_eq!(shown.len(), TIMELINE_PAGE);
+    assert_eq!(shown[0], "work / api lead: api 30");
+    assert_eq!(shown[19], "work / api lead: api 11");
+    assert!(state.timeline_has_earlier());
+
+    let earlier = state.show_earlier_timeline();
+    assert_eq!(
+        earlier,
+        [(
+            "work".to_owned(),
+            "api".to_owned(),
+            Timestamp::from_millis(11_000)
+        )]
+    );
+    assert_eq!(
+        timeline_of(&state).len(),
+        TIMELINE_PAGE,
+        "nothing more loaded yet"
+    );
+    for (space, project, before) in earlier {
+        state.apply_earlier(load_earlier(&core, &space, &project, before).await);
+    }
+    let shown = timeline_of(&state);
+    assert_eq!(shown.len(), 31);
+    assert_eq!(shown[29], "work / api lead: api 1");
+    assert_eq!(shown[30], "work / General you: older in General");
+    assert!(!state.timeline_has_earlier());
+    assert!(state.show_earlier_timeline().is_empty());
+
+    // A refresh of the newest page keeps how far back is loaded.
+    state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
+    assert_eq!(timeline_of(&state).len(), 31);
+}
+
+#[tokio::test]
+async fn home_s_composer_stays_on_general_until_you_pick_another_project() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(state.target(), Some(("work", "General")));
+    // Writing in a project's own conversation does not move Home's composer.
+    state.sent("work", "api", "From the api tab", EventId(9), when().now);
+    assert_eq!(state.target(), Some(("work", "General")));
+    assert_eq!(
+        timeline_of(&state),
+        ["work / api you: From the api tab"],
+        "and the timeline has it at once"
+    );
+    state.set_target("work", "api");
+    assert_eq!(state.target(), Some(("work", "api")));
+}
+
+#[tokio::test]
+async fn the_space_lead_s_asks_and_the_replies_are_labeled_and_linked() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.histories.lock().unwrap().extend([
+        (
+            "api".to_owned(),
+            vec![
+                ConversationEntry::SpaceLead {
+                    event_id: EventId(5),
+                    text: "Ship the refunds fix".to_owned(),
+                    at: Timestamp::from_millis(2_000),
+                },
+                said_by_lead(1, "api", "Shipped", 3_000),
+            ],
+        ),
+        (
+            "General".to_owned(),
+            vec![
+                said_by_you(1, "Get refunds shipped", 1_000),
+                ConversationEntry::ProjectReply {
+                    event_id: EventId(6),
+                    project: "api".to_owned(),
+                    ask_event_id: Some(EventId(5)),
+                    text: "The lead of api replied: Shipped".to_owned(),
+                    at: Timestamp::from_millis(3_500),
+                },
+            ],
+        ),
+    ]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
+
+    let lines = |project| {
+        said(&state.conversation("work", project, &when()))
+            .into_iter()
+            .filter(|line| !line.starts_with("--"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lines("api"),
+        ["General lead: Ship the refunds fix", "lead: Shipped"],
+        "an ask is not yours"
+    );
+    assert_eq!(
+        lines("General"),
+        [
+            "you: Get refunds shipped",
+            "api lead: The lead of api replied: Shipped"
+        ]
+    );
+    assert!(
+        state
+            .conversation("work", "General", &when())
+            .iter()
+            .any(|line| matches!(line, Line::ProjectReply { project, .. } if project == "api"))
+    );
+    assert_eq!(
+        timeline_of(&state),
+        [
+            "work / General api lead: The lead of api replied: Shipped",
+            "work / api lead: Shipped",
+            "work / api General lead: Ship the refunds fix",
+            "work / General you: Get refunds shipped",
+        ]
+    );
+    let reply = state.timeline()[0];
+    assert!(matches!(reply.spoken, Spoken::Said(_, Author::ProjectLead(from)) if from == "api"));
 }
