@@ -42,7 +42,37 @@ fn decode_review(row: &Row) -> StoreResult<TaskReview> {
     })
 }
 
+/// A committed review waiting for delivery to the task's GitHub pull request.
+#[derive(Debug)]
+pub struct GithubReview {
+    pub submission: RunId,
+    pub pull_url: String,
+    pub delivery_key: String,
+    pub revision: String,
+    pub body: String,
+}
+
 impl HubDb {
+    /// Lists outstanding deliveries in submission order.
+    pub async fn pending_github_reviews(&self) -> StoreResult<Vec<GithubReview>> {
+        query_all(&self.db.reader()?, "SELECT submission, pull_url, revision, body, delivery_key FROM github_reviews ORDER BY submission", (), |row| {
+            let c = Cols(row);
+            Ok(GithubReview { submission: c.id(0)?, pull_url: c.text(1)?, revision: c.text(2)?, body: c.text(3)?, delivery_key: c.text(4)? })
+        }).await
+    }
+
+    /// Acknowledges one successful delivery.
+    pub async fn delivered_github_review(&self, review: &GithubReview) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        exec(
+            tx.conn(),
+            "DELETE FROM github_reviews WHERE submission = ?1 AND pull_url = ?2",
+            params![review.submission.get(), review.pull_url.as_str()],
+        )
+        .await?;
+        tx.commit().await
+    }
+
     /// Review rounds shown in the task's timeline.
     pub async fn task_reviews(&self, task: TaskId) -> StoreResult<Vec<TaskReviewActivity>> {
         let conn = self.db.reader()?;
@@ -257,6 +287,45 @@ pub(crate) async fn finish_review(
         params![submission.get(), verdict.as_str()],
     )
     .await?;
+    let targets = query_all(
+        conn,
+        "SELECT DISTINCT json_extract(d.outcome, '$.pull_request'), repos.remote_url,
+            revision.value ->> '$.commit', agents.name
+        FROM task_reviews r JOIN agents ON agents.id = r.reviewer
+        JOIN json_each(r.revisions) revision
+        JOIN repositories repos ON repos.id = json_extract(revision.value, '$.repository')
+        JOIN decisions d ON d.lane_id = ?2 AND d.tool = 'open_pull_request'
+        WHERE r.submission_run = ?1 AND json_extract(d.outcome, '$.performed') = 1
+        AND json_extract(d.outcome, '$.repository') = repos.name
+        AND json_type(d.outcome, '$.pull_request') = 'text'",
+        params![submission.get(), task.lane_id.get()],
+        |row| {
+            let c = Cols(row);
+            Ok((c.text(0)?, c.text(1)?, c.text(2)?, c.text(3)?))
+        },
+    )
+    .await?;
+    for (url, remote, commit, name) in targets {
+        let Some(number) = threadlane_core::github::pull_request_number(&url) else {
+            continue;
+        };
+        let Some(repo) = threadlane_core::github::normalize_remote(&remote) else {
+            continue;
+        };
+        if !url.eq_ignore_ascii_case(&format!("https://{repo}/pull/{number}")) {
+            continue;
+        }
+        let decision = match verdict {
+            TaskReviewVerdict::Approved => "Approved",
+            TaskReviewVerdict::ChangesRequested => "Changes requested",
+        };
+        let body = format!(
+            "**{decision}**\n\n{feedback}\n\n🤖 Reviewed by Threadlane ({name}, {})",
+            task.id
+        );
+        exec(conn, "INSERT INTO github_reviews (submission, pull_url, revision, body) VALUES (?1, ?2, ?3, ?4)",
+            params![submission.get(), url.as_str(), commit.as_str(), body.as_str()]).await?;
+    }
     let new_owner_message = query_opt(
         conn,
         "SELECT 1 FROM events WHERE lane_id = ?1 AND status = 'pending'

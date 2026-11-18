@@ -123,12 +123,22 @@ async fn task_with_pull_request(hub: &TestHub) -> Task {
         .await
         .unwrap()
         .unwrap();
+    record_pull_request(hub, &task, &lease).await;
+    hub.db.release_lease(&lease).await.unwrap();
+    task
+}
+
+pub(super) async fn record_pull_request(
+    hub: &TestHub,
+    task: &Task,
+    lease: &threadlane_core::model::Lease,
+) {
     let decision = hub
         .db
         .open_decision(
-            Some(&lease),
+            Some(lease),
             &NewDecision {
-                project_id: general.id,
+                project_id: task.project_id,
                 lane_id: task.lane_id,
                 task_id: Some(task.id),
                 session_id: None,
@@ -171,12 +181,12 @@ async fn task_with_pull_request(hub: &TestHub) -> Task {
         .await
         .unwrap();
     hub.db
-        .begin_perform(&lease, decision.id, hub.clock.now())
+        .begin_perform(lease, decision.id, hub.clock.now())
         .await
         .unwrap();
     hub.db
         .finish_perform(
-            &lease,
+            lease,
             decision.id,
             &json!({
                 "performed": true,
@@ -187,8 +197,6 @@ async fn task_with_pull_request(hub: &TestHub) -> Task {
         )
         .await
         .unwrap();
-    hub.db.release_lease(&lease).await.unwrap();
-    task
 }
 
 fn item(

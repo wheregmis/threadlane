@@ -20,6 +20,7 @@ const TABLES: &[&str] = &[
     "checkpoints",
     "decisions",
     "events",
+    "github_reviews",
     "join_codes",
     "journal",
     "lanes",

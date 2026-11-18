@@ -106,6 +106,30 @@ impl Hub {
         .context("starting the hub's roles")
     }
 
+    async fn deliver_reviews(&self) -> anyhow::Result<()> {
+        let forge = GitForge::with_gh(&self.config.github.gh);
+        loop {
+            let reviews = self.db.pending_github_reviews().await?;
+            for review in reviews {
+                if forge
+                    .publish_review(
+                        &review.pull_url,
+                        &review.revision,
+                        &review.body,
+                        &review.delivery_key,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    self.db.delivered_github_review(&review).await?;
+                } else {
+                    tracing::warn!(url = %review.pull_url, submission = %review.submission, "GitHub review delivery failed; will retry");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    }
+
     /// Serves the client interface on `<data dir>/hub.sock` and, unless
     /// `[iroh]` turns it off, over iroh with the key in `<data dir>/hub.key`
     /// (created on first start). Runs the hub's roles until `shutdown`
@@ -136,6 +160,12 @@ impl Hub {
         let socket = self.data_dir.socket();
         let work = async {
             tokio::try_join!(
+                async {
+                    tokio::select! {
+                        result = self.deliver_reviews() => result,
+                        () = until_stopped(stopped.clone()) => anyhow::Ok(()),
+                    }
+                },
                 async {
                     if let Some(endpoint) = endpoint {
                         threadlane_transport_iroh::serve(

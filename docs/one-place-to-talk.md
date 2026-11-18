@@ -95,6 +95,13 @@ The task timeline records submissions and verdicts. Repository reviews
 run on the machine that submitted the implementation so the Reviewer
 can inspect local commits before they are published.
 
+When Threadlane opens a pull request, the description names the opening
+agent and task. For each completed review of that PR, the hub uses its
+configured GitHub CLI login to post the verdict, feedback, and reviewing
+agent on the submitted commit. GitHub shows these as comment reviews so
+agents sharing the PR author's login can still report their verdicts.
+Delivery retries if GitHub is unavailable or the commit has yet to be pushed.
+
 Verify the whole path from Main Chat: an Engineer produces a change, the
 Reviewer requests a fix, the Engineer updates the same task, and the
 Reviewer approves the updated revision. The Lead reports the outcome in
