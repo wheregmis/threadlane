@@ -195,11 +195,7 @@ impl Desktop {
                 );
             }))
             .children(Tab::ALL.map(|tab| {
-                let label = if tab == Tab::Conversation {
-                    "History"
-                } else {
-                    tab.label()
-                };
+                let label = tab.label();
                 let icon = match tab {
                     Tab::Tasks => AppIcon::Columns3,
                     Tab::Conversation => AppIcon::MessagesSquare,
@@ -1203,6 +1199,7 @@ impl Desktop {
                                 AppIcon::FileText,
                                 row.title,
                                 None,
+                                false,
                                 row.selected,
                                 cx,
                             )

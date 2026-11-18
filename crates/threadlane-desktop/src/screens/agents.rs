@@ -31,7 +31,7 @@ impl Desktop {
             .overflow_y_scrollbar()
             .id("agents")
             .gap(LG)
-            .child(heading("Agents"));
+            .child(heading("Team"));
         for space in self
             .state
             .spaces()

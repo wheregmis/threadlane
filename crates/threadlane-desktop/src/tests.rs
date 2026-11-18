@@ -2459,8 +2459,8 @@ fn every_tab_is_selected_where_it_is_shown() {
     }
     assert_eq!(
         labels,
-        ["Tasks", "Conversation", "Agents", "Routines", "Memory"],
-        "the wireframe's order"
+        ["Chat", "Tasks", "Agents", "Routines", "Memory"],
+        "Chat first"
     );
 }
 
@@ -5027,6 +5027,24 @@ async fn in_progress_rows_clip_long_titles_to_one_line() {
     assert_eq!(rows[0].title, "Deliver a lead's final text to the feed");
     assert_eq!(rows[0].label, "Deliver a lead's f…");
     assert_eq!(rows[0].elapsed, "12 min");
+}
+
+#[tokio::test]
+async fn running_work_marks_its_project_even_past_the_cap() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().unwrap() = (1..=7)
+        .map(|id| task(id, TaskStatus::Queued, None))
+        .collect();
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    state.apply_at(refresh(&core).await, when().now);
+    assert!(state.is_working("dev", "api"));
+    assert!(!state.is_working("dev", "General"));
+    assert!(!state.is_working("other", "api"));
+    *work.tasks.lock().unwrap() = Vec::new();
+    *work.lead.lock().unwrap() = Some(Timestamp::from_millis(600_000));
+    state.apply_at(refresh(&core).await, when().now);
+    assert!(state.is_working("dev", "General"));
 }
 
 #[tokio::test]

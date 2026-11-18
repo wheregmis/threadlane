@@ -267,7 +267,7 @@ enum Screen {
 
 impl Screen {
     /// The screen `THREADLANE_DESKTOP_OPEN` names: `home`, `agents`,
-    /// `machines`, `<space>/<project>[/tasks|conversation|agents|memory]`
+    /// `machines`, `<space>/<project>[/chat|tasks|agents|memory]`
     /// (`agents/<agent>` expands that agent's row), or
     /// `<space>/T-0001`. For looking at a screen without clicking to it.
     fn named(open: &str) -> Option<Self> {
@@ -288,8 +288,8 @@ impl Screen {
                 space: (*space).to_owned(),
                 project: (*project).to_owned(),
                 tab: match rest {
-                    [name, ..] => Tab::named(name).unwrap_or(Tab::Tasks),
-                    _ => Tab::Tasks,
+                    [name, ..] => Tab::named(name).unwrap_or(Tab::Conversation),
+                    _ => Tab::Conversation,
                 },
             },
             _ => return None,

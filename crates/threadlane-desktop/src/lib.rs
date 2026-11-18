@@ -458,10 +458,10 @@ pub enum Tab {
 }
 
 impl Tab {
-    /// Every tab, in the order the tab bar shows them (the wireframe's).
+    /// Every tab, in the order the tab bar shows them: Chat first.
     pub const ALL: [Self; 5] = [
-        Self::Tasks,
         Self::Conversation,
+        Self::Tasks,
         Self::Agents,
         Self::Routines,
         Self::Memory,
@@ -472,7 +472,7 @@ impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Self::Tasks => "Tasks",
-            Self::Conversation => "Conversation",
+            Self::Conversation => "Chat",
             Self::Agents => "Agents",
             Self::Routines => "Routines",
             Self::Memory => "Memory",

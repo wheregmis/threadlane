@@ -1,6 +1,5 @@
 //! Navigation, space reachability, and the last action.
 
-use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::separator::Separator;
@@ -8,12 +7,11 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_desktop::{
-    Activity, Connection, ConnectionStatus, Consequence, Destination, EmptyRegion, Part, Space,
-    When,
+    Activity, AppState, Connection, ConnectionStatus, Consequence, EmptyRegion, Part, Space, When,
 };
 
 use super::{delete_project::delete_project_item, empty, gap_line, menu_item};
-use crate::components::{meta, row, status_dot};
+use crate::components::{icon_button, meta, row, status_dot};
 use crate::icons::AppIcon;
 use crate::menus::{GoHome, OpenAddSpace, OpenSettings, SidebarShortcut, shortcut_hint};
 use crate::tokens::{BAR_HEIGHT, LG, MD, SIDEBAR_WIDTH, SM, Status, TYPE_EMPHASIS, XS};
@@ -24,163 +22,164 @@ struct NavigationRow {
     icon: AppIcon,
     label: String,
     count: Option<SharedString>,
+    /// Running work here: a decoration, so the row never moves.
+    running: bool,
     screen: Screen,
 }
 
 enum SidebarEntry<'a> {
     Row(NavigationRow),
     Space(&'a Space),
+    /// The "Projects" label and its new-project button.
+    Projects(&'a Space),
+    Label(&'static str),
     App,
     Archived(&'a Space),
-    /// Running work, last in its space so rows coming and going don't move the rows above.
-    InProgress(&'a Space),
 }
 
-impl Desktop {
-    fn sidebar_entries(&self) -> Vec<SidebarEntry<'_>> {
-        let row = |id: String, icon, label: String, count, screen| {
-            SidebarEntry::Row(NavigationRow {
-                id,
-                icon,
-                label,
-                count,
-                screen,
-            })
-        };
-        let mut entries = vec![row(
-            "go-home".into(),
-            AppIcon::House,
-            "Home".into(),
-            positive_count(self.state.queue().len()),
-            Screen::Home,
-        )];
-        for space in self.state.spaces() {
-            entries.push(SidebarEntry::Space(space));
-            entries.extend(
-                space
-                    .active_projects()
-                    .filter(|project| !project.is_general)
-                    .map(|project| {
-                        let open = self.state.open_in(&space.name, project.id);
-                        row(
-                            format!("go-{}-{}", space.name, project.name),
-                            AppIcon::Folder,
-                            project.name.clone(),
-                            positive_count(open),
-                            Screen::Project {
-                                space: space.name.clone(),
-                                project: project.name.clone(),
-                                tab: Tab::Tasks,
-                            },
-                        )
-                    }),
-            );
+fn sidebar_entries(state: &AppState) -> Vec<SidebarEntry<'_>> {
+    let row = |id: String, icon, label: String, count, running, screen| {
+        SidebarEntry::Row(NavigationRow {
+            id,
+            icon,
+            label,
+            count,
+            running,
+            screen,
+        })
+    };
+    let mut entries = vec![row(
+        "go-home".into(),
+        AppIcon::House,
+        "Home".into(),
+        positive_count(state.queue().len()),
+        false,
+        Screen::Home,
+    )];
+    for space in state.spaces() {
+        entries.push(SidebarEntry::Space(space));
+        if let Some(project) = space.active_projects().find(|project| project.is_general) {
             entries.push(row(
-                format!("new-project-{}", space.name),
-                AppIcon::FolderPlus,
-                "New project".into(),
-                None,
-                Screen::NewProject {
+                format!("main-chat-{}", space.name),
+                AppIcon::MessagesSquare,
+                "Chat".into(),
+                positive_count(state.open_in(&space.name, project.id)),
+                state.is_working(&space.name, &project.name),
+                Screen::Project {
                     space: space.name.clone(),
+                    project: project.name.clone(),
+                    tab: Tab::Conversation,
                 },
             ));
-            if space.archived_projects().next().is_some() {
-                entries.push(SidebarEntry::Archived(space));
-            }
-            if let Some(project) = space.active_projects().find(|project| project.is_general) {
-                entries.push(row(
-                    format!("main-chat-{}", space.name),
-                    AppIcon::MessagesSquare,
-                    "Main Chat".into(),
-                    positive_count(self.state.open_in(&space.name, project.id)),
-                    Screen::Project {
-                        space: space.name.clone(),
-                        project: project.name.clone(),
-                        tab: Tab::Conversation,
-                    },
-                ));
-            }
-            entries.extend(
-                [
-                    (
-                        "tasks",
-                        AppIcon::Columns3,
-                        "Tasks",
-                        Screen::SpaceTasks {
-                            space: space.name.clone(),
-                        },
-                    ),
-                    (
-                        "agents",
-                        AppIcon::Bot,
-                        "Agents",
-                        Screen::Agents(Some(space.name.clone())),
-                    ),
-                    (
-                        "routines",
-                        AppIcon::CalendarClock,
-                        "Routines",
-                        Screen::Routines(Some(space.name.clone())),
-                    ),
-                    (
-                        "settings",
-                        AppIcon::Settings,
-                        "Settings",
-                        Screen::Settings(Some(space.name.clone())),
-                    ),
-                ]
-                .map(|(id, icon, label, screen)| {
+        }
+        entries.push(row(
+            format!("tasks-{}", space.name),
+            AppIcon::Columns3,
+            "Tasks".into(),
+            None,
+            false,
+            Screen::SpaceTasks {
+                space: space.name.clone(),
+            },
+        ));
+        entries.push(SidebarEntry::Projects(space));
+        entries.extend(
+            space
+                .active_projects()
+                .filter(|project| !project.is_general)
+                .map(|project| {
                     row(
-                        format!("{id}-{}", space.name),
-                        icon,
-                        label.into(),
-                        None,
-                        screen,
+                        format!("go-{}-{}", space.name, project.name),
+                        AppIcon::Folder,
+                        project.name.clone(),
+                        positive_count(state.open_in(&space.name, project.id)),
+                        state.is_working(&space.name, &project.name),
+                        Screen::Project {
+                            space: space.name.clone(),
+                            project: project.name.clone(),
+                            tab: Tab::Conversation,
+                        },
                     )
                 }),
-            );
-            entries.push(SidebarEntry::InProgress(space));
+        );
+        if space.archived_projects().next().is_some() {
+            entries.push(SidebarEntry::Archived(space));
         }
-        entries.push(SidebarEntry::App);
-        entries.push(row(
-            "add-space-row".into(),
-            AppIcon::Plus,
-            "Add space".into(),
-            None,
-            Screen::AddSpace,
-        ));
-        let machines = self
-            .state
-            .machine_count()
-            .filter(|&(_, all)| all != 0)
-            .map(|(online, all)| format!("{online} / {all}").into());
+        entries.push(SidebarEntry::Label("Manage"));
         entries.extend(
             [
                 (
-                    "go-machines",
-                    AppIcon::Monitor,
-                    "Machines",
-                    machines,
-                    Screen::Machines,
+                    "agents",
+                    AppIcon::Bot,
+                    "Team",
+                    Screen::Agents(Some(space.name.clone())),
                 ),
                 (
-                    "go-settings",
+                    "routines",
+                    AppIcon::CalendarClock,
+                    "Routines",
+                    Screen::Routines(Some(space.name.clone())),
+                ),
+                (
+                    "settings",
                     AppIcon::Settings,
-                    "App settings",
-                    None,
-                    Screen::Settings(None),
+                    "Settings",
+                    Screen::Settings(Some(space.name.clone())),
                 ),
             ]
-            .map(|(id, icon, label, count, screen)| {
-                row(id.into(), icon, label.into(), count, screen)
+            .map(|(id, icon, label, screen)| {
+                row(
+                    format!("{id}-{}", space.name),
+                    icon,
+                    label.into(),
+                    None,
+                    false,
+                    screen,
+                )
             }),
         );
-        entries
     }
+    entries.push(SidebarEntry::App);
+    entries.push(row(
+        "add-space-row".into(),
+        AppIcon::Plus,
+        "Add space".into(),
+        None,
+        false,
+        Screen::AddSpace,
+    ));
+    let machines = state
+        .machine_count()
+        .filter(|&(_, all)| all != 0)
+        .map(|(online, all)| format!("{online} / {all}").into());
+    entries.extend(
+        [
+            (
+                "go-machines",
+                AppIcon::Monitor,
+                "Machines",
+                machines,
+                Screen::Machines,
+            ),
+            (
+                "go-settings",
+                AppIcon::Settings,
+                "App settings",
+                None,
+                Screen::Settings(None),
+            ),
+        ]
+        .map(|(id, icon, label, count, screen)| {
+            row(id.into(), icon, label.into(), count, false, screen)
+        }),
+    );
+    entries
+}
 
+impl Desktop {
     /// Opens the nth actionable row regardless of the sidebar's visibility.
     pub(crate) fn sidebar_screen(&self, index: usize) -> Option<Screen> {
-        self.sidebar_entries()
+        sidebar_entries(&self.state)
             .into_iter()
             .filter_map(|entry| match entry {
                 SidebarEntry::Row(row) => Some(row.screen),
@@ -213,13 +212,14 @@ impl Desktop {
             );
         let mut group = v_flex().gap(XS);
         let mut index = 0;
-        for entry in self.sidebar_entries() {
+        for entry in sidebar_entries(&self.state) {
             match entry {
                 SidebarEntry::Row(NavigationRow {
                     id,
                     icon,
                     label,
                     count,
+                    running,
                     screen,
                 }) => {
                     let active = match (&self.screen, &screen) {
@@ -244,7 +244,7 @@ impl Desktop {
                         .chain(shortcut_hint(cx, &SidebarShortcut(index)))
                         .collect();
                     index += 1;
-                    let mut button = row(id, icon, label.clone(), count, active, cx);
+                    let mut button = row(id, icon, label.clone(), count, running, active, cx);
                     if !shortcuts.is_empty() {
                         button = button.tooltip(format!("{label}  {}", shortcuts.join(" / ")));
                     }
@@ -325,53 +325,36 @@ impl Desktop {
                         .pl(SM)
                         .border_l_1()
                         .border_color(cx.theme().sidebar_border);
+                }
+                SidebarEntry::Projects(space) => {
+                    let screen = Screen::NewProject {
+                        space: space.name.clone(),
+                    };
+                    group = group.child(
+                        h_flex()
+                            .justify_between()
+                            .pl(MD)
+                            .pt(SM)
+                            .child(meta("Projects", cx))
+                            .child(
+                                icon_button(
+                                    SharedString::from(format!("new-project-{}", space.name)),
+                                    AppIcon::Plus,
+                                    format!("New project in {}", space.name),
+                                )
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                                ),
+                            ),
+                    );
                     if let Some(gap) = space.gap(Part::Projects) {
                         group = group.child(gap_line(&gap, "projects", &space.name, cx));
                     } else if space.active_projects().next().is_none() {
                         group = group.child(empty(EmptyRegion::Projects, cx));
                     }
                 }
-                SidebarEntry::InProgress(space) => {
-                    let work = self.state.in_progress(&space.name, when);
-                    if !work.rows.is_empty() {
-                        group = group.child(meta("In progress", cx).px(MD));
-                    }
-                    for row in work.rows {
-                        let screen = match row.destination {
-                            Destination::Task(space, task) => Screen::Task { space, task },
-                            Destination::Lead(space, project) => Screen::Project {
-                                space,
-                                project,
-                                tab: Tab::Conversation,
-                            },
-                        };
-                        group = group.child(
-                            crate::components::button(SharedString::from(format!(
-                                "in-progress-{screen:?}"
-                            )))
-                            .ghost()
-                            .w_full()
-                            .flex_none()
-                            .h(crate::tokens::ROW_HEIGHT)
-                            .accessibility_label(format!(
-                                "{} · {} · {}",
-                                row.status, row.title, row.elapsed
-                            ))
-                            .tooltip(row.title)
-                            .child(crate::components::work_line(
-                                row.label,
-                                row.elapsed,
-                                Status::task(row.status),
-                                cx,
-                            ))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
-                            ),
-                        );
-                    }
-                    if work.more != 0 {
-                        group = group.child(meta(format!("{} more", work.more), cx).px(MD));
-                    }
+                SidebarEntry::Label(label) => {
+                    group = group.child(meta(label, cx).px(MD).pt(SM));
                 }
                 SidebarEntry::App => {
                     bar = bar
@@ -393,6 +376,7 @@ impl Desktop {
                             "Archived",
                             None,
                             false,
+                            false,
                             cx,
                         )
                         .tab_stop(true)
@@ -413,7 +397,7 @@ impl Desktop {
                             let screen = Screen::Project {
                                 space: space.name.clone(),
                                 project: project.name.clone(),
-                                tab: Tab::Tasks,
+                                tab: Tab::Conversation,
                             };
                             let view = cx.entity().downgrade();
                             let (at, name) = (space.name.clone(), project.name.clone());
@@ -427,6 +411,7 @@ impl Desktop {
                                         AppIcon::Folder,
                                         project.name.clone(),
                                         None,
+                                        false,
                                         active,
                                         cx,
                                     )
@@ -539,4 +524,73 @@ impl Desktop {
 
 fn positive_count(count: usize) -> Option<SharedString> {
     (count > 0).then(|| count.to_string().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use threadlane_core::client::ProjectSummary;
+    use threadlane_core::ids::ProjectId;
+    use threadlane_desktop::AppState;
+
+    use super::{SidebarEntry, sidebar_entries};
+    use crate::{Screen, Tab};
+
+    #[test]
+    fn a_space_lists_chat_and_tasks_first_then_projects_then_manage() {
+        let mut state = AppState::paired(["dev"]);
+        for (id, name, is_general) in [(1, "api", false), (2, "General", true)] {
+            state.project_created(
+                "dev",
+                ProjectSummary {
+                    id: ProjectId(id),
+                    name: name.to_owned(),
+                    is_general,
+                    paused: false,
+                    mode_ceiling: None,
+                    archived: false,
+                },
+            );
+        }
+        let labels: Vec<_> = sidebar_entries(&state)
+            .into_iter()
+            .map(|entry| match entry {
+                SidebarEntry::Row(row) => row.label,
+                SidebarEntry::Space(space) => format!("[{}]", space.name),
+                SidebarEntry::Projects(_) => "PROJECTS +".to_owned(),
+                SidebarEntry::Label(label) => label.to_uppercase(),
+                SidebarEntry::App => "APPLICATION".to_owned(),
+                SidebarEntry::Archived(_) => "Archived".to_owned(),
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Home",
+                "[dev]",
+                "Chat",
+                "Tasks",
+                "PROJECTS +",
+                "api",
+                "MANAGE",
+                "Team",
+                "Routines",
+                "Settings",
+                "APPLICATION",
+                "Add space",
+                "Machines",
+                "App settings",
+            ]
+        );
+        let Some(SidebarEntry::Row(api)) = sidebar_entries(&state).into_iter().nth(5) else {
+            panic!("the api row");
+        };
+        assert!(matches!(
+            api.screen,
+            Screen::Project {
+                tab: Tab::Conversation,
+                ..
+            }
+        ));
+        assert!(!api.running);
+    }
 }

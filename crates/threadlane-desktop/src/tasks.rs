@@ -261,6 +261,24 @@ impl AppState {
         InProgress { rows, more }
     }
 
+    /// Whether [`Self::in_progress`] has work in `project`, past its cap.
+    #[must_use]
+    pub fn is_working(&self, space: &str, project: &str) -> bool {
+        self.space(space).is_some_and(|space| {
+            space.leads.iter().any(|(lead, _)| lead == project)
+                || space
+                    .running
+                    .iter()
+                    .chain(
+                        space
+                            .tasks
+                            .iter()
+                            .filter(|task| task.task.status == TaskStatus::Queued),
+                    )
+                    .any(|task| task.project == project)
+        })
+    }
+
     /// Whether ticking durations are shown by any work view.
     #[must_use]
     pub fn has_ticking_work(&self) -> bool {

@@ -162,13 +162,17 @@ pub(super) fn row(
     icon: AppIcon,
     label: impl Into<SharedString>,
     trailing: Option<SharedString>,
+    running: bool,
     selected: bool,
     cx: &App,
 ) -> Button {
     let label = label.into();
-    let name = trailing
+    let mut name = trailing
         .as_ref()
-        .map_or_else(|| label.clone(), |value| format!("{label}, {value}").into());
+        .map_or_else(|| label.to_string(), |value| format!("{label}, {value}"));
+    if running {
+        name.push_str(", running");
+    }
     let style = ButtonCustomVariant::new(cx)
         .foreground(cx.theme().sidebar_foreground)
         .hover(cx.theme().muted)
@@ -188,6 +192,7 @@ pub(super) fn row(
                 .gap(SM)
                 .child(Icon::new(icon).size(TYPE_SECTION))
                 .child(div().flex_1().min_w_0().truncate().child(label))
+                .children(running.then(|| status_dot(Status::Running, cx)))
                 .children(trailing.map(|value| count_badge(value, cx))),
         )
 }
@@ -211,22 +216,6 @@ pub(super) fn live_step(step: threadlane_desktop::LatestStep, cx: &App) -> Div {
     } else {
         line
     }
-}
-
-/// A sidebar work row's single line: dot, clipped title, and its time at the right.
-pub(super) fn work_line(label: String, elapsed: String, status: Status, cx: &App) -> Div {
-    h_flex()
-        .w_full()
-        .gap(XS)
-        .min_w_0()
-        .child(status_dot(status, cx))
-        .child(div().flex_1().min_w_0().truncate().child(label))
-        .child(
-            meta(elapsed, cx)
-                .flex_none()
-                .whitespace_nowrap()
-                .text_right(),
-        )
 }
 
 /// The shared bordered surface for groups and cards.
