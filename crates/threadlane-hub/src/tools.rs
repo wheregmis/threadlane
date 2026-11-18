@@ -54,7 +54,10 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
     match tool {
         crate::dreaming::PROJECT_SESSIONS => false,
         // ask_project_lead is offered to the General lead only (begin_run).
-        SEND_MESSAGE | UPDATE_TASK | CANCEL_TASK | LIST_TASKS
+        SEND_MESSAGE
+        | UPDATE_TASK
+        | CANCEL_TASK
+        | LIST_TASKS
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
         FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE => {
             kind == LaneKind::Task

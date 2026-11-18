@@ -225,7 +225,7 @@ pub(crate) async fn answered_ask(db: &HubDb, events: &[Event]) -> Result<Option<
             continue;
         };
         if let Some(id) = db.space_lead_ask(task).await.map_err(tool_error)? {
-            return Ok(db.event(id).await.map_err(tool_error)?);
+            return db.event(id).await.map_err(tool_error);
         }
     }
     Ok(None)

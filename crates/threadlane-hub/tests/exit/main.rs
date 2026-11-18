@@ -31,5 +31,6 @@ mod operations;
 mod permissions;
 mod publish;
 mod review;
+mod space_lead;
 mod tasks;
 mod timers;

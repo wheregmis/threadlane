@@ -320,9 +320,7 @@ impl LocalLink {
                     .definitions()
                     .into_iter()
                     .filter(|tool| offered_in(&tool.name, lane.kind))
-                    .filter(|tool| {
-                        general_lead || tool.name != crate::space_lead::ASK_PROJECT_LEAD
-                    })
+                    .filter(|tool| general_lead || tool.name != crate::space_lead::ASK_PROJECT_LEAD)
                     .collect()
             },
             // A lead has no file or shell tools to refuse anything with; a
