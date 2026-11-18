@@ -868,7 +868,10 @@ impl ClientCore {
     ///
     /// # Errors
     /// Returns pairing or hub validation errors.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors the existing profile creation API"
+    )]
     pub async fn create_agent_profile(
         &self,
         space: Option<&str>,

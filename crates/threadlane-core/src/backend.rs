@@ -301,11 +301,15 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
                 self.kind()
             )));
         }
-        request.prompt = format!(
-            "Use these installed skills for this run: {}\n\n{}",
-            mentions.join(" "),
-            request.prompt
-        );
+        request.prompt = match (self.kind(), mentions.as_slice()) {
+            // Claude print mode expands one leading slash command, treating the rest as arguments.
+            (BackendKind::Claude, [command]) => format!("{command} {}", request.prompt),
+            _ => format!(
+                "Use these installed skills for this run: {}\n\n{}",
+                mentions.join(" "),
+                request.prompt
+            ),
+        };
         Ok(())
     }
 

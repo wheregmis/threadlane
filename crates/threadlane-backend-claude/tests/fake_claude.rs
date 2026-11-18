@@ -856,6 +856,11 @@ async fn personal_skills_reach_claude_stdin_and_a_removed_skill_fails_before_lau
         recorded_prompts(&fake),
         ["Use these installed skills for this run: /review /tests\n\nSay hello."]
     );
+    let mut single = request.clone();
+    single.skills.truncate(1);
+    let mut run = backend.run(single).await.unwrap();
+    collect(run.as_mut()).await;
+    assert_eq!(recorded_prompts(&fake), ["/review Say hello."]);
     std::fs::remove_file(account.join("skills/review/SKILL.md")).unwrap();
     assert!(
         backend
@@ -865,5 +870,5 @@ async fn personal_skills_reach_claude_stdin_and_a_removed_skill_fails_before_lau
             .to_string()
             .contains("review")
     );
-    assert_eq!(fake.invocations().len(), 1);
+    assert_eq!(fake.invocations().len(), 2);
 }

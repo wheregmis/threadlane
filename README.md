@@ -199,10 +199,9 @@ Repeated `--skill` options replace the whole list. Omitting both edit options pr
 
 Codex uses the installed app server's `skills/list` and passes explicit `$name` mentions to `codex exec`. The picker offers unique, enabled, non-repository names. Repository skills remain available through Codex's usual discovery. An ambiguous name in the actual run directory fails resolution. [Codex skills](https://developers.openai.com/codex/skills/) · [Codex app server](https://developers.openai.com/codex/app-server/)
 
-For Claude, the picker lists personal directories containing `SKILL.md` under the configured Claude home. Threadlane requests those skills by their `/directory-name` aliases in the run message. Claude decides whether to invoke its Skill tool. Its print-mode CLI expands only the first skill in a stack of leading slash commands. Project, managed, and plugin skills remain under Claude's normal discovery and precedence. [Claude Code skills](https://code.claude.com/docs/en/skills)
+For Claude, the picker lists personal directories containing `SKILL.md` under the configured Claude home. With one binding, Threadlane invokes `/directory-name` directly and passes the task as its argument. With multiple bindings, it requests each by name and Claude decides whether to invoke its Skill tool. Its print-mode CLI expands only the first skill in a stack of leading slash commands. Project, managed, and plugin skills remain under Claude's normal discovery and precedence. [Claude Code skills](https://code.claude.com/docs/en/skills)
 
 Explicit bindings require native tools. Runs that disable built-in tools, including lead and dreaming runs, report a launch error if their selected provider has bindings. Removing a binding affects future requests. Previously loaded instructions may persist in a resumed provider session.
-
 
 An agent set to `off` never runs in that project, and `send` to a project
 whose lead is off is refused. Until milestone 9 every mode above `off` acts as
