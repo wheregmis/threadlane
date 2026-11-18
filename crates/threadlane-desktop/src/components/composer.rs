@@ -6,7 +6,6 @@ use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState, Undo};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_core::attachment::{ImageAttachment, validate_images};
 use threadlane_core::time::{Clock as _, SystemClock};
 use threadlane_desktop::{Activity, Destination, Draft, Outgoing, sends_on_enter};
 
@@ -292,32 +291,18 @@ impl Desktop {
             return;
         }
         self.state.loading_images(target);
-        if images
-            .iter()
-            .map(|image| image.bytes().len())
-            .sum::<usize>()
-            > threadlane_core::attachment::MAX_IMAGE_BYTES
-        {
-            self.state.attach_images(
-                target,
-                Err("Images can total up to 2 MiB per message.".into()),
-            );
-            cx.notify();
-            return;
-        }
-        let images = images
-            .into_iter()
-            .enumerate()
-            .map(|(index, image)| {
-                ImageAttachment::new(
-                    format!("Pasted image {}.{}", index + 1, image.format().extension()),
-                    image.bytes().to_vec(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let images = match chat_images::copy_clipboard_images(&images) {
+            Ok(images) => images,
+            Err(error) => {
+                self.state.attach_images(target, Err(error));
+                cx.notify();
+                return;
+            }
+        };
         let target = target.clone();
         cx.notify();
-        let checked = cx.background_spawn(async move { validate_images(&images).map(|()| images) });
+        let checked =
+            cx.background_spawn(async move { chat_images::prepare_clipboard_images(images) });
         cx.spawn(async move |this, cx| {
             let images = checked.await;
             let _ = this.update(cx, |this, cx| {

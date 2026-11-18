@@ -1,14 +1,70 @@
-//! File selection and inline thumbnails for chat images.
+//! Attachment preparation and inline thumbnails for chat images.
 
-use std::{fs::File, io::Read as _, path::PathBuf, sync::Arc};
+use std::{
+    fs::File,
+    io::{Cursor, Read as _},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
-use threadlane_core::attachment::{ImageAttachment, MAX_IMAGE_BYTES, validate_images};
+use threadlane_core::attachment::{
+    ImageAttachment, MAX_IMAGE_BYTES, check_image_budget, validate_images,
+};
 
 use super::{button, meta};
 use crate::tokens::{READING_WIDTH, SM, XS};
+
+// Cap the clipboard bytes we copy before handing them to the background worker.
+const MAX_CLIPBOARD_BYTES: usize = 128 << 20;
+
+pub(super) fn copy_clipboard_images(images: &[&Image]) -> Result<Vec<Image>, String> {
+    let mut remaining_clipboard = MAX_CLIPBOARD_BYTES;
+    let mut remaining_message = MAX_IMAGE_BYTES;
+    for image in images {
+        let len = image.bytes().len();
+        remaining_clipboard = remaining_clipboard
+            .checked_sub(len)
+            .ok_or_else(|| "Clipboard images can total up to 128 MiB.".to_owned())?;
+        if !matches!(image.format(), ImageFormat::Tiff | ImageFormat::Bmp) {
+            remaining_message = remaining_message
+                .checked_sub(len)
+                .ok_or_else(|| "Images can total up to 2 MiB per message.".to_owned())?;
+        }
+    }
+    Ok(images.iter().map(|&image| image.clone()).collect())
+}
+
+pub(super) fn prepare_clipboard_images(
+    clipboard_images: Vec<Image>,
+) -> Result<Vec<ImageAttachment>, String> {
+    let mut images = Vec::new();
+    for (index, image) in clipboard_images.into_iter().enumerate() {
+        let name = format!("Pasted image {}", index + 1);
+        let format = image.format();
+        let extension = format.extension();
+        let mut attachment = ImageAttachment::new(format!("{name}.{extension}"), image.bytes);
+        if matches!(format, ImageFormat::Tiff | ImageFormat::Bmp) {
+            let decoded = attachment.decode().map_err(|_| {
+                format!(
+                    "Could not decode {:?}. Check the file and its dimensions.",
+                    attachment.name()
+                )
+            })?;
+            let mut png = Cursor::new(Vec::new());
+            decoded
+                .write_to(&mut png, image::ImageFormat::Png)
+                .map_err(|_| format!("Could not convert {name} to PNG."))?;
+            attachment = ImageAttachment::new(format!("{name}.png"), png.into_inner());
+        }
+        images.push(attachment);
+        check_image_budget(&images)?;
+    }
+    validate_images(&images)?;
+    Ok(images)
+}
 
 pub(super) fn read_images(paths: Vec<PathBuf>) -> Result<Vec<ImageAttachment>, String> {
     let mut images = Vec::new();
@@ -173,5 +229,80 @@ impl Asset for Thumbnail {
         _: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         async move { Some(render_image(source.decode().ok()?.thumbnail(320, 240))) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use gpui_kit::{Image, ImageFormat};
+    use threadlane_core::attachment::MAX_IMAGE_BYTES;
+
+    use super::{copy_clipboard_images, prepare_clipboard_images};
+
+    fn clipboard_image(
+        pixels: &image::DynamicImage,
+        clipboard_format: ImageFormat,
+        encoded_format: image::ImageFormat,
+    ) -> Image {
+        let mut bytes = Cursor::new(Vec::new());
+        pixels.write_to(&mut bytes, encoded_format).unwrap();
+        Image::from_bytes(clipboard_format, bytes.into_inner())
+    }
+
+    #[test]
+    fn clipboard_normalizes_native_formats_and_preserves_png() {
+        let pixels = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1024,
+            768,
+            image::Rgb([20, 40, 60]),
+        ));
+        let tiff = clipboard_image(&pixels, ImageFormat::Tiff, image::ImageFormat::Tiff);
+        let bmp = clipboard_image(&pixels, ImageFormat::Bmp, image::ImageFormat::Bmp);
+        let png = clipboard_image(&pixels, ImageFormat::Png, image::ImageFormat::Png);
+        assert!(tiff.bytes().len() > MAX_IMAGE_BYTES);
+        assert!(bmp.bytes().len() > MAX_IMAGE_BYTES);
+
+        let images =
+            prepare_clipboard_images(copy_clipboard_images(&[&tiff, &bmp, &png]).unwrap()).unwrap();
+        for (index, image) in images.iter().enumerate() {
+            assert_eq!(image.name(), format!("Pasted image {}.png", index + 1));
+            assert_eq!(image.format(), Some(("image/png", "png")));
+            assert_eq!(image.decode().unwrap(), pixels);
+        }
+        assert_eq!(images[2].bytes(), png.bytes());
+    }
+
+    #[test]
+    fn clipboard_checks_combined_normalized_size() {
+        let mut state = 1u32;
+        let pixels = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(768, 768, |_, _| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let [r, g, b, _] = state.to_le_bytes();
+            image::Rgb([r, g, b])
+        }));
+        let tiff = clipboard_image(&pixels, ImageFormat::Tiff, image::ImageFormat::Tiff);
+        let bmp = clipboard_image(&pixels, ImageFormat::Bmp, image::ImageFormat::Bmp);
+        for input in [&tiff, &bmp] {
+            let image = prepare_clipboard_images(copy_clipboard_images(&[input]).unwrap()).unwrap();
+            assert!(image[0].bytes().len() > MAX_IMAGE_BYTES / 2);
+        }
+        let error =
+            prepare_clipboard_images(copy_clipboard_images(&[&tiff, &bmp]).unwrap()).unwrap_err();
+        assert_eq!(error, "Images can total up to 2 MiB per message.");
+    }
+
+    #[test]
+    fn clipboard_rejects_corrupt_and_oversized_native_images() {
+        let corrupt = Image::from_bytes(ImageFormat::Tiff, b"II*\0".to_vec());
+        let pixels = image::DynamicImage::new_rgb8(8193, 1);
+        let too_wide = clipboard_image(&pixels, ImageFormat::Bmp, image::ImageFormat::Bmp);
+        for input in [corrupt, too_wide] {
+            let error = prepare_clipboard_images(vec![input]).unwrap_err();
+            assert!(error.starts_with("Could not decode"));
+        }
     }
 }
