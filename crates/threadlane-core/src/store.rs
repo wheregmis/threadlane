@@ -417,6 +417,8 @@ pub trait TaskStore: Send + Sync {
 #[async_trait]
 pub trait MachineStore: Send + Sync {
     async fn register_machine(&self, machine: &NewMachine) -> StoreResult<Machine>;
+    async fn set_machine_slots(&self, id: MachineId, slots: u32) -> StoreResult<()>;
+
     async fn machine(&self, id: MachineId) -> StoreResult<Option<Machine>>;
     async fn machine_by_endpoint(&self, endpoint_id: &str) -> StoreResult<Option<Machine>>;
     async fn machines(&self) -> StoreResult<Vec<Machine>>;

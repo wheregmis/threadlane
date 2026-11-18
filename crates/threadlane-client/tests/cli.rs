@@ -283,6 +283,7 @@ impl HubApi for FakeHub {
                 ceiling: mode,
             },
             OrgRequest::SetSpaceCeiling { mode } => OrgReply::SpaceCeiling { ceiling: mode },
+            OrgRequest::SetMachineSlots { .. } => OrgReply::MachineSlotsSet,
             OrgRequest::SetMaxParallel {
                 agent,
                 max_parallel,
@@ -1124,24 +1125,17 @@ async fn the_cli_sets_the_space_ceiling_and_how_many_tasks_run_at_once() {
     assert!(!output.status.success(), "a project is not space-wide");
     expect_success(
         client_dir,
-        &["at-once", "Reviewer", "2", "-p", "api"],
-        "Reviewer may run 2 at once\n",
+        &["at-once", "1", "2"],
+        "Machine 1 has 2 run slots\n",
     )
     .await;
     assert_eq!(
         hub.fake.0.org.lock().expect("lock").last(),
-        Some(&OrgRequest::SetMaxParallel {
-            project: Some("api".to_owned()),
-            agent: "Reviewer".to_owned(),
-            max_parallel: 2,
+        Some(&OrgRequest::SetMachineSlots {
+            machine: 1.into(),
+            slots: 2
         })
     );
-    expect_success(
-        client_dir,
-        &["at-once", "Reviewer", "0"],
-        "Reviewer may run any number of tasks at once\n",
-    )
-    .await;
     hub.stop().await;
 }
 

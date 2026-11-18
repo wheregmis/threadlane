@@ -126,18 +126,6 @@ pub struct CeilingCard {
     pub choices: Vec<ModeChoice>,
 }
 
-/// The "At once" cell of an agent's row: how many of its tasks may run at
-/// the same time here, and the values its two buttons set.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AtOnce {
-    /// `1`, `3`, or `No limit`.
-    pub label: String,
-    /// One fewer; `None` at 1, or with no limit.
-    pub fewer: Option<u32>,
-    /// One more; `None` with no limit.
-    pub more: Option<u32>,
-}
-
 /// One agent's row on the Agents tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRow {
@@ -145,7 +133,6 @@ pub struct AgentRow {
     pub role: String,
     pub is_lead: bool,
     pub choices: Vec<ModeChoice>,
-    pub at_once: AtOnce,
     /// Whether its "may do here" part is expanded.
     pub open: bool,
 }
@@ -341,7 +328,6 @@ impl AppState {
                         }),
                     })
                     .collect(),
-                at_once: at_once(binding.max_parallel),
                 open: self.open_agent.as_ref()
                     == Some(&(space.to_owned(), project.to_owned(), binding.agent.clone())),
             })
@@ -586,22 +572,5 @@ impl AppState {
         {
             info.mode_ceiling = mode;
         }
-    }
-}
-
-/// The "At once" cell for a limit of `max_parallel` (0 is no limit).
-#[must_use]
-pub fn at_once(max_parallel: u32) -> AtOnce {
-    match max_parallel {
-        0 => AtOnce {
-            label: "No limit".to_owned(),
-            fewer: None,
-            more: None,
-        },
-        n => AtOnce {
-            label: n.to_string(),
-            fewer: (n > 1).then(|| n - 1),
-            more: n.checked_add(1),
-        },
     }
 }

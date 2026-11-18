@@ -1546,21 +1546,32 @@ async fn a_task_lane_is_granted_only_when_its_task_is_eligible() {
         .create_task(None, &new_task(&unlimited, single, "two", vec![]))
         .await
         .unwrap();
-    assert!(grant(one.lane_id).await.unwrap().is_some());
-    assert_eq!(grant(two.lane_id).await.unwrap(), None);
-    assert_eq!(
-        task(&hub, two.id).await.waiting_reason.as_deref(),
-        Some("its agent already runs its limit of 1 tasks at once in this project")
+    assert!(
+        grant(one.lane_id).await.unwrap().is_none(),
+        "other projects occupy both machine slots"
     );
-    let free = engineer(&hub, &unlimited, 0).await;
+    let b = machine(&hub, "b").await;
+    let other = |lane| hub.grant_lease(lane, b, T0, LEASE_TTL);
+    assert!(other(one.lane_id).await.unwrap().is_some());
+    assert!(
+        other(two.lane_id).await.unwrap().is_some(),
+        "the same agent can use both slots"
+    );
+
+    hub.set_machine_slots(b, 1).await.unwrap();
     let three = hub
-        .create_task(None, &new_task(&unlimited, free, "three", vec![]))
+        .create_task(None, &new_task(&unlimited, single, "three", vec![]))
         .await
         .unwrap();
+    assert!(other(three.lane_id).await.unwrap().is_none());
+    let later = T0 + LEASE_TTL;
     assert!(
-        grant(three.lane_id).await.unwrap().is_some(),
-        "another agent's limit"
+        hub.grant_lease(three.lane_id, b, later, LEASE_TTL)
+            .await
+            .unwrap()
+            .is_some()
     );
+    assert_eq!(hub.machine(b).await.unwrap().unwrap().max_parallel, 1);
 
     // A paused project's tasks wait and say so.
     let paused = hub
@@ -1584,7 +1595,12 @@ async fn a_task_lane_is_granted_only_when_its_task_is_eligible() {
     );
     // A task that ended is granted anyway, so its events can be skipped.
     hub.cancel_task(None, held.id, T0).await.unwrap();
-    assert!(grant(held.lane_id).await.unwrap().is_some());
+    assert!(
+        hub.grant_lease(held.lane_id, a, later, LEASE_TTL)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]

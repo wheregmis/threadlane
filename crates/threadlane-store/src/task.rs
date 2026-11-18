@@ -4,9 +4,7 @@
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{free_backends, usable_backends};
-use threadlane_core::ids::{
-    AgentId, DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId,
-};
+use threadlane_core::ids::{DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
@@ -622,7 +620,6 @@ pub(crate) async fn on_event_inserted(conn: &Connection, lane_id: LaneId) -> Sto
 async fn waiting_reason(
     conn: &Connection,
     task: &Task,
-    agent: AgentId,
     now: Timestamp,
 ) -> StoreResult<Option<String>> {
     let (paused, project_limit) = query_one(
@@ -653,40 +650,21 @@ async fn waiting_reason(
         let names: Vec<String> = waiting_for.iter().map(ToString::to_string).collect();
         return Ok(Some(format!("waiting for {} to be done", names.join(", "))));
     }
-    let running = |agent: Option<i64>| {
-        query_one(
+    if project_limit > 0 {
+        let running = query_one(
             conn,
             "SELECT COUNT(*) FROM tasks t JOIN lanes l ON l.id = t.lane_id
-             WHERE t.project_id = ?1 AND t.id != ?2 AND (?3 IS NULL OR ?3 = COALESCE(
-                 (SELECT r.reviewer FROM task_reviews r WHERE r.task_id = t.id AND r.state = 'pending'), t.agent_id))
-               AND l.lease_owner IS NOT NULL AND l.lease_expires_at > ?4
-               AND t.status NOT IN ('done', 'failed', 'cancelled')",
-            params![
-                task.project_id.get(),
-                task.id.get(),
-                agent.map_or(turso::Value::Null, turso::Value::Integer),
-                now.as_millis()
-            ],
+             WHERE t.project_id = ?1 AND t.id != ?2 AND l.lease_owner IS NOT NULL
+               AND l.lease_expires_at > ?3 AND t.status NOT IN ('done', 'failed', 'cancelled')",
+            params![task.project_id.get(), task.id.get(), now.as_millis()],
             |row| Cols(row).i64(0),
         )
-    };
-    if project_limit > 0 && running(None).await? >= project_limit {
-        return Ok(Some(format!(
-            "the project already runs its limit of {project_limit} tasks at once"
-        )));
-    }
-    let agent_limit = query_opt(
-        conn,
-        "SELECT max_parallel FROM bindings WHERE project_id = ?1 AND agent_id = ?2",
-        params![task.project_id.get(), agent.get()],
-        |row| Cols(row).i64(0),
-    )
-    .await?
-    .unwrap_or(0);
-    if agent_limit > 0 && running(Some(agent.get())).await? >= agent_limit {
-        return Ok(Some(format!(
-            "its agent already runs its limit of {agent_limit} tasks at once in this project"
-        )));
+        .await?;
+        if running >= project_limit {
+            return Ok(Some(format!(
+                "the project already runs its limit of {project_limit} tasks at once"
+            )));
+        }
     }
     Ok(None)
 }
@@ -767,14 +745,14 @@ pub(crate) async fn check_eligible(
                 Some(review) if !review.revisions.is_empty() && review.machine != machine_id => {
                     return Ok(false);
                 }
-                Some(review) => match waiting_reason(conn, task, review.reviewer, now).await? {
+                Some(_) => match waiting_reason(conn, task, now).await? {
                     Some(reason) => Some(reason),
                     None => blocked(conn, lane_id, machine_id, now).await?,
                 },
                 None => Some("Waiting for a Reviewer".to_owned()),
             }
         }
-        Some(task) => match waiting_reason(conn, task, task.agent_id, now).await? {
+        Some(task) => match waiting_reason(conn, task, now).await? {
             None if !task.repositories.is_empty() && !gh_login(conn, machine_id).await? => {
                 Some(NO_GH_REASON.to_owned())
             }

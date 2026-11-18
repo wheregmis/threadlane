@@ -10,7 +10,7 @@ use threadlane_core::client::LaneTarget;
 use threadlane_core::ids::{StandingRuleId, TaskId};
 use threadlane_core::model::{Agent, Cell, Mode};
 use threadlane_core::tools::Tier;
-use threadlane_desktop::{Activity, add_repository, at_once, copy_agent, describe, mode_label};
+use threadlane_desktop::{Activity, add_repository, copy_agent, describe, mode_label};
 
 use crate::Desktop;
 
@@ -424,41 +424,6 @@ impl Desktop {
                     this.state.report(Activity::Done(format!(
                         "Changed what {agent} may do in {space} / {project}."
                     )));
-                }
-                Err(error) => this.state.report(Activity::Failed(describe(&error))),
-            },
-            cx,
-        );
-        cx.notify();
-    }
-
-    /// Sets how many of `agent`'s tasks may run at once in `project`.
-    pub(crate) fn set_max_parallel(
-        &mut self,
-        space: String,
-        project: String,
-        agent: String,
-        max_parallel: u32,
-        cx: &mut Context<Self>,
-    ) {
-        let core = Arc::clone(&self.core);
-        self.run(
-            async move {
-                let set = core
-                    .read()
-                    .await
-                    .set_max_parallel(Some(&space), Some(&project), &agent, max_parallel)
-                    .await;
-                (space, project, set)
-            },
-            |this, (space, project, set), _| match set {
-                Ok(binding) => {
-                    this.state.report(Activity::Done(format!(
-                        "{} may run {} at once in {space} / {project}.",
-                        binding.agent,
-                        at_once(binding.max_parallel).label.to_lowercase()
-                    )));
-                    this.state.mode_set(&space, &project, binding);
                 }
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },

@@ -192,6 +192,11 @@ pub enum OrgRequest {
         agent: String,
         max_parallel: u32,
     },
+    /// Sets this machine’s shared slot limit.
+    SetMachineSlots {
+        machine: crate::ids::MachineId,
+        slots: u32,
+    },
     /// Sets the space's own ceiling, which caps every project's (Plan.md
     /// §2.3): lowering it lowers what every binding acts at, and raising it
     /// lets projects without a stricter ceiling of their own go higher.
@@ -372,6 +377,7 @@ pub enum LaneTarget {
     reason = "only with serde_json's preserve_order, which GPUI turns on in the workspace build"
 )]
 pub enum OrgReply {
+    MachineSlotsSet,
     Project {
         project: ProjectSummary,
     },

@@ -21,7 +21,8 @@ use threadlane_core::model::{
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{
-    DecisionStore, InboxStore, OrgStore, OutboxStore, SessionStore, StoreError, TaskStore,
+    DecisionStore, InboxStore, MachineStore, OrgStore, OutboxStore, SessionStore, StoreError,
+    TaskStore,
 };
 use threadlane_core::time::Timestamp;
 use threadlane_core::workspace::{valid_branch_name, valid_repository_name};
@@ -756,35 +757,17 @@ impl HubApi for ClientApi {
                     overrides,
                 })
             }
-            OrgRequest::SetMaxParallel {
-                project,
-                agent,
-                max_parallel,
-            } => {
-                let project = self.project_named(project.as_deref()).await?;
-                let agent = self.agent_named(&agent).await?;
-                let binding = db
-                    .bindings(project.id)
-                    .await
-                    .map_err(api_error)?
-                    .into_iter()
-                    .find(|binding| binding.agent_id == agent.id)
-                    .ok_or_else(|| {
-                        ApiError::NotFound(format!(
-                            "a binding of {:?} in project {:?}",
-                            agent.name, project.name
-                        ))
-                    })?;
-                let binding = db
-                    .set_binding_max_parallel(binding.id, max_parallel)
+            OrgRequest::SetMachineSlots { machine, slots } => {
+                db.set_machine_slots(machine, slots)
                     .await
                     .map_err(api_error)?;
-                // A raised limit may let a queued task start.
                 self.core.inner.wake.wake(WakeTarget::Runners);
-                Ok(OrgReply::Binding {
-                    binding: binding_summary(agent, &binding),
-                })
+                Ok(OrgReply::MachineSlotsSet)
             }
+            OrgRequest::SetMaxParallel { .. } => Err(ApiError::Invalid(
+                "Set runner.max_parallel in the machine configuration and restart its runner"
+                    .into(),
+            )),
             OrgRequest::SetSpaceCeiling { mode } => {
                 let _dispatch = self.core.inner.dispatch.lock().await;
                 let mut space = db.space().await.map_err(api_error)?;

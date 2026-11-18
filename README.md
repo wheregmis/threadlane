@@ -58,7 +58,7 @@ key is optional; unknown keys are errors. For example:
 name = "Work"
 
 [runner]
-max_parallel = 2      # lanes run at once
+max_parallel = 2      # shared slots on this machine across agents and projects; excess work stays queued
 debounce_secs = 2     # wait after a message so several get one reply
 
 [backends.claude]

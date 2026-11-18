@@ -405,60 +405,20 @@ async fn repositories_are_registered_per_project_and_a_remote_only_once_in_the_s
 }
 
 #[tokio::test]
-async fn set_max_parallel_changes_how_many_of_an_agents_tasks_run_at_once() {
+async fn legacy_agent_limit_points_to_machine_configuration() {
     let hub = TestHub::start().await;
-    let set = |agent: &str, max_parallel| OrgRequest::SetMaxParallel {
-        project: None,
-        agent: agent.to_owned(),
-        max_parallel,
-    };
-    assert_eq!(
-        org(&hub, set(LEAD_NAME, 3)).await,
-        Ok(OrgReply::Binding {
-            binding: BindingSummary {
-                max_parallel: 3,
-                ..lead(Mode::OnRequest)
-            }
-        })
-    );
-    let general = hub.general().await;
-    let stored = hub.db.lead_binding(general.id).await.unwrap().unwrap();
-    assert_eq!(stored.max_parallel, 3);
-    // 0 is no limit, and the bindings list says what is stored.
-    org(&hub, set(LEAD_NAME, 0)).await.unwrap();
-    assert_eq!(
-        org(&hub, OrgRequest::Bindings { project: None }).await,
-        Ok(OrgReply::Bindings {
-            bindings: vec![BindingSummary {
-                max_parallel: 0,
-                ..lead(Mode::OnRequest)
-            }]
-        })
-    );
-
-    org(
+    let result = org(
         &hub,
-        OrgRequest::CreateAgent {
-            name: "Reviewer".into(),
-            role: "reviewer".into(),
-            instructions: String::new(),
-            backends: Vec::new(),
+        OrgRequest::SetMaxParallel {
+            project: None,
+            agent: LEAD_NAME.into(),
+            max_parallel: 3,
         },
     )
-    .await
-    .unwrap();
-    for request in [
-        set("Reviewer", 2),
-        set("Nobody", 2),
-        OrgRequest::SetMaxParallel {
-            project: Some("Nowhere".into()),
-            agent: LEAD_NAME.into(),
-            max_parallel: 2,
-        },
-    ] {
-        let missing = org(&hub, request).await;
-        assert!(matches!(missing, Err(ApiError::NotFound(_))), "{missing:?}");
-    }
+    .await;
+    assert!(
+        matches!(result, Err(ApiError::Invalid(message)) if message.contains("runner.max_parallel"))
+    );
 }
 
 #[tokio::test]
