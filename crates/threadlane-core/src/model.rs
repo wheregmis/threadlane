@@ -464,7 +464,7 @@ pub struct NewRepository {
     pub protected_branches: Vec<String>,
 }
 
-/// A personal skill identified by its provider and installed directory name.
+/// An installed skill identified by its provider and invocation name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillBinding {
     pub backend: BackendKind,
