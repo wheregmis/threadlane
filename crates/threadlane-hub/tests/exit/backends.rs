@@ -160,8 +160,7 @@ async fn at_a_usage_limit_the_task_goes_on_on_the_other_backend_in_a_fresh_sessi
             .all(|run| run.error.as_deref() == Some("the account reached its usage limit"))
     );
 
-    // Codex's account resets first: the task goes on there. The lead runs
-    // on Claude only (Plan.md §18.4 item 12), so it waits for Claude's reset.
+    // Codex resets first. Both the task and its lead can continue there.
     sim.clock().set(codex_resets);
     sim.core.sweep_once().await.unwrap();
     sim.work_until_idle().await.unwrap();
@@ -177,19 +176,9 @@ async fn at_a_usage_limit_the_task_goes_on_on_the_other_backend_in_a_fresh_sessi
     assert_eq!(sim.task("T-0001").await.status, TaskStatus::Done);
     let lead = sim.general_lane().await.id;
     let last = |runs: Vec<Run>| runs.last().map(|run| (run.lane_id, run.backend));
-    assert_ne!(
-        last(sim.runs().await).map(|(lane, _)| lane),
-        Some(lead),
-        "the lead does not run on Codex"
-    );
-    sim.clock().set(claude_resets);
-    sim.core.sweep_once().await.unwrap();
-    sim.work_until_idle().await.unwrap();
-    sim.dispatch().await.unwrap();
     assert_eq!(
         last(sim.runs().await),
-        Some((lead, Some(BackendKind::Claude))),
-        "the lead goes on when Claude's account resets"
+        Some((lead, Some(BackendKind::Codex)))
     );
     assert_quiet(&sim, "usage limit on each backend").await;
     assert_invariants(&sim, "usage limit on each backend").await;

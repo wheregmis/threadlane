@@ -389,6 +389,10 @@ async fn a_lead_run_is_read_only_and_has_no_local_tools() {
         "apps",
         "plugins",
         "multi_agent",
+        "multi_agent_v2",
+        "computer_use",
+        "image_generation",
+        "goals",
         "memories",
     ] {
         assert!(

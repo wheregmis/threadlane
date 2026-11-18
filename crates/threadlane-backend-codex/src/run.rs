@@ -122,6 +122,10 @@ impl Launch {
                 "apps",
                 "plugins",
                 "multi_agent",
+                "multi_agent_v2",
+                "computer_use",
+                "image_generation",
+                "goals",
                 "memories",
             ] {
                 args.extend(["--disable".into(), feature.into()]);
