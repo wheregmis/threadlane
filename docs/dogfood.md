@@ -92,3 +92,13 @@ Added from the template and bound to `threadlane`; the lead started it as T-0007
 | 27 | An empty bordered box sits above the decision card in the conversation. | fixed in T-0009; to check in the real window |
 | 28 | The sidebar's "In progress" rows wrap the title across lines and overlap the next row ("lead's / final text / to the", "threadla / ne · lead"). | fixed in T-0009; to check in the real window |
 | 29 | The Chief of Staff put each option's detail in the question and used short labels for the options, so the answer buttons say little. The template should say how to split the two. | fixed in T-0009; to check in the real window |
+
+## Run 6, 2026-11-18: the first real pull request
+
+Task T-0013 in the GitHub-backed repository: add an attribution line to pull requests, then publish. The owner approved D-0003 from the card, and the runner pushed the branch and opened https://github.com/wheregmis/threadlane/pull/507 under the owner's login, as a draft against v2, with the attribution line in its body.
+
+| # | Finding | State |
+|---|---|---|
+| 30 | Publishing works end to end on the real `gh`: approval card, one push, one draft pull request, the body as the agent wrote it. | checked |
+| 31 | The "Always allow" line names the place twice when the project and repository share a name: "in threadlane, in threadlane". | open: given to Threadlane |
+| 32 | A long title in the sidebar's In progress row still runs into its time ("One plac" under "less than a minute"). | open: given to Threadlane |
