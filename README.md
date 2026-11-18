@@ -50,6 +50,10 @@ A run uses the first of its agent's backends (by default Claude, then Codex)
 that is installed, logged in, and on an account not at its usage limit.
 `threadlane-hub --data-dir DIR check` checks the database and exits.
 
+Set a machine’s shared task limit in **Machines → Run slots**, or run
+`threadlane at-once <machine-id> <slots>`. Agents can keep creating tasks while
+all slots are occupied. The next eligible task starts when a slot opens.
+
 An optional `hub.toml` in the data directory configures it. Every table and
 key is optional; unknown keys are errors. For example:
 
