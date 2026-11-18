@@ -285,7 +285,7 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
             BackendKind::Codex => "$",
             BackendKind::Antigravity => {
                 return Err(BackendError::Failed(
-                    "Antigravity does not support explicit skill bindings".into(),
+                    "Antigravity does not support profile skills".into(),
                 ));
             }
         };

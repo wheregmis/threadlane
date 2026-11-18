@@ -19,25 +19,27 @@ if read -r prompt; then touch delivered; fi
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let backend = AntigravityBackend::new(program);
-    let mut run = backend
-        .run(RunRequest {
-            working_dir: dir.path().into(),
-            prompt: "private follow-up".into(),
-            skills: Vec::new(),
-            images: Vec::new(),
-            appended_instructions: String::new(),
-            model: None,
-            session: NativeSession::Resume {
-                id: "original".into(),
-            },
-            tools: None,
-            remove_builtin_tools: true,
-            deny_rules: Vec::new(),
-            wall_time_limit: Duration::from_secs(5),
-            max_turns: Some(1),
-        })
-        .await
-        .unwrap();
+    let mut request = RunRequest {
+        working_dir: dir.path().into(),
+        prompt: "private follow-up".into(),
+        images: Vec::new(),
+        skills: vec!["review".into()],
+        appended_instructions: String::new(),
+        model: None,
+        session: NativeSession::Resume {
+            id: "original".into(),
+        },
+        tools: None,
+        remove_builtin_tools: true,
+        deny_rules: Vec::new(),
+        wall_time_limit: Duration::from_secs(5),
+        max_turns: Some(1),
+    };
+    assert!(
+        matches!(backend.run(request.clone()).await, Err(error) if error.to_string().contains("does not support profile skills"))
+    );
+    request.skills.clear();
+    let mut run = backend.run(request).await.unwrap();
     assert_eq!(run.next_event().await, Some(BackendEvent::SessionMissing));
     assert_eq!(run.next_event().await, None);
     assert!(!dir.path().join("delivered").exists());

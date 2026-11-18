@@ -186,7 +186,7 @@ threadlane mode "Frontend Developer" on_request -p web
 
 ### Agent skills
 
-In **Agents**, open **New agent** or edit an existing profile. The Claude and Codex menus list skills on the paired hub. Antigravity does not support explicit skill bindings. Check a name to bind it, or uncheck it to remove it. An existing binding that disappears from the catalog remains removable.
+In **Agents**, open **New agent** or edit an existing profile. Each provider's skills menu lists skills on the paired hub. Check a name to bind it, or uncheck it to remove it. An existing binding that disappears from the catalog remains removable.
 
 ```sh
 threadlane agent skills --space work
@@ -194,6 +194,8 @@ threadlane agent add Reviewer --role reviewer --skill codex=review --skill claud
 threadlane agent edit Reviewer --skill claude=lint
 threadlane agent edit Reviewer --clear-skills
 ```
+
+Profile skill bindings are available for Codex and Claude. Antigravity runs accept an empty binding list.
 
 Repeated `--skill` options replace the whole list. Omitting both edit options preserves it. `threadlane agents` shows saved bindings. Only provider and name travel with the profile. The runner resolves the chosen backend's names on each launch, including after fallback. If a name is missing, reinstall it on that runner or update the profile. Existing profiles start with an empty list and continue using ordinary provider discovery.
 
