@@ -29,7 +29,8 @@ struct NavigationRow {
 enum SidebarEntry<'a> {
     Row(NavigationRow),
     Space(&'a Space),
-    Team,
+    Projects,
+    App,
     Archived(&'a Space),
 }
 
@@ -105,6 +106,7 @@ impl Desktop {
                     )
                 }),
             );
+            entries.push(SidebarEntry::Projects);
             entries.extend(
                 space
                     .active_projects()
@@ -138,6 +140,7 @@ impl Desktop {
                 entries.push(SidebarEntry::Archived(space));
             }
         }
+        entries.push(SidebarEntry::App);
         entries.push(row(
             "add-space-row".into(),
             AppIcon::Plus,
@@ -150,7 +153,6 @@ impl Desktop {
             .machine_count()
             .filter(|&(_, all)| all != 0)
             .map(|(online, all)| format!("{online} / {all}").into());
-        entries.push(SidebarEntry::Team);
         entries.extend(
             [
                 (
@@ -360,7 +362,8 @@ impl Desktop {
                         bar = bar.child(meta(format!("{} more", work.more), cx).px(MD));
                     }
                 }
-                SidebarEntry::Team => bar = bar.child(meta("TEAM", cx).px(MD).pt(MD)),
+                SidebarEntry::Projects => bar = bar.child(meta("Projects", cx).px(MD).pt(SM)),
+                SidebarEntry::App => bar = bar.child(meta("Application", cx).px(MD).pt(MD)),
                 SidebarEntry::Archived(space) => {
                     let name = space.name.clone();
                     let open = space.archived_open();
@@ -445,8 +448,13 @@ impl Desktop {
         h_flex()
             .gap(XS)
             .min_w_0()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(space.to_owned()),
+            )
             .child(status_dot(status, cx))
-            .child(meta(format!("{space} · {}", connection.label), cx))
+            .child(meta(connection.label, cx))
     }
 
     pub(crate) fn page_connections(&self, when: &When, cx: &App) -> Option<Div> {
