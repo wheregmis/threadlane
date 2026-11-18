@@ -4,7 +4,6 @@
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -12,7 +11,8 @@ use threadlane_desktop::{Part, When, running_elapsed};
 
 use super::gap_line;
 use crate::components::{
-    button, composer, count, empty_state, field, heading, meta, section, status_dot,
+    button, composer, count, decision_scroller, empty_state, field, heading, meta, section,
+    status_dot,
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
@@ -22,12 +22,7 @@ use crate::tokens::{
 use crate::{Desktop, Screen};
 
 impl Desktop {
-    pub(crate) fn home(
-        &self,
-        when: &When,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(crate) fn home(&self, when: &When, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let state = &self.state;
 
@@ -100,7 +95,7 @@ impl Desktop {
             needs = needs.child(empty_state("Nothing waits on you.", None, cx));
         }
         for queued in state.needs_you() {
-            needs = needs.child(self.decision(queued, window, cx));
+            needs = needs.child(self.decision(queued, when, cx));
         }
 
         // Tasks that failed or are stuck, under "Needs you" (shown only when
@@ -240,14 +235,7 @@ impl Desktop {
             );
         }
 
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .max_w(READING_WIDTH)
-            .self_center()
-            .overflow_y_scrollbar()
-            .id("home")
+        let content = v_flex()
             .gap(XL)
             .child(heading("Home"))
             .child(chips.w_full().min_h(CONTROL_HEIGHT).flex_none())
@@ -263,7 +251,11 @@ impl Desktop {
             .children(attention)
             .child(table)
             .child(recent)
-            .child(self.home_composer(cx))
+            .child(self.home_composer(cx));
+        decision_scroller("home", content, &self.decision_scroll)
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
             .into_any_element()
     }
 
@@ -308,6 +300,7 @@ impl Desktop {
                     .primary()
                     .icon(AppIcon::Send)
                     .label("Send")
+                    .tooltip(crate::keyboard::send_hint(cx))
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             )
     }

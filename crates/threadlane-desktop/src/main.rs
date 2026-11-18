@@ -7,8 +7,11 @@
 //! (Plan.md §18.4 item 3): every hub call is spawned there and its result
 //! handed back to the view. The screens live in `screens/`.
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::future::Future;
 use std::process::{Command, ExitCode};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,13 +19,13 @@ use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
-use threadlane_core::ids::TaskId;
+use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::model::Mode;
 use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
-    Activity, AppState, Appearance, RoutineText, Tab, When, change_memory, decision_of_tag,
-    describe, load_earlier, load_memory, load_modes, load_project, load_routines, load_task, pump,
-    refresh,
+    Activity, AppState, Appearance, DecisionKey, RoutineText, Tab, When, change_memory,
+    decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project, load_routines,
+    load_task, pump, refresh,
 };
 use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
 use tokio::runtime::Runtime;
@@ -31,11 +34,13 @@ use tokio::sync::{RwLock, mpsc};
 mod actions;
 mod components;
 mod icons;
+mod keyboard;
 mod menus;
 mod screens;
 mod tokens;
 
 use icons::DesktopAssets;
+use keyboard::DecisionScroll;
 use tokens::{LG, MD, TABULAR, TYPE_BODY};
 
 /// How often the app asks every hub again, so reachability, what runs, and
@@ -131,6 +136,7 @@ fn main() -> ExitCode {
                 let appearance_view = view.clone();
                 menus::install(
                     appearance,
+                    view.clone(),
                     cx,
                     move |cx| {
                         let _gone = reload.update(cx, |this, cx| this.refresh(cx));
@@ -301,6 +307,11 @@ struct Desktop {
     core: Arc<RwLock<ClientCore>>,
     tokio: tokio::runtime::Handle,
     screen: Screen,
+    keyboard_focus: FocusHandle,
+    sidebar_collapsed: bool,
+    decision_scroll: ScrollHandle,
+    scroll_to_decision: Rc<Cell<DecisionScroll>>,
+    decision_inputs: HashMap<DecisionKey, (Entity<InputState>, Subscription)>,
     composer: Entity<InputState>,
     pacing_inputs: [Entity<InputState>; 4],
     /// The task screen's composer (wireframe 5).
@@ -357,7 +368,7 @@ struct Desktop {
 
 impl Desktop {
     fn new(
-        state: AppState,
+        mut state: AppState,
         core: Arc<RwLock<ClientCore>>,
         tokio: tokio::runtime::Handle,
         feed: Feed,
@@ -477,7 +488,7 @@ impl Desktop {
                             }
                             _ => false,
                         };
-                        if running {
+                        if running || this.state.visible_decisions().next().is_some() {
                             cx.notify();
                         }
                     })
@@ -487,11 +498,24 @@ impl Desktop {
                 }
             }
         });
+        let screen = start.unwrap_or(Screen::Home);
+        state.set_decision_scope(screen.decision_scope());
+        let keyboard_focus = cx.focus_handle();
+        keyboard_focus.focus(window, cx);
+        cx.on_focus_lost(window, |this, window, cx| {
+            this.keyboard_focus.focus(window, cx);
+        })
+        .detach();
         Self {
             state,
             core,
             tokio,
-            screen: start.unwrap_or(Screen::Home),
+            screen,
+            keyboard_focus,
+            sidebar_collapsed: false,
+            decision_scroll: ScrollHandle::default(),
+            scroll_to_decision: Rc::new(Cell::new(DecisionScroll::Card)),
+            decision_inputs: HashMap::new(),
             composer,
             pacing_inputs,
             task_composer,
@@ -743,6 +767,11 @@ impl Desktop {
         {
             self.clear_fields.push(self.dream_cadence.clone());
         }
+        if self.screen != screen {
+            self.state.set_decision_scope(screen.decision_scope());
+            self.scroll_to_decision = Rc::new(Cell::new(DecisionScroll::Card));
+            self.decision_scroll = ScrollHandle::default();
+        }
         self.screen = screen;
         self.load_screen(cx);
         cx.notify();
@@ -756,6 +785,16 @@ impl Desktop {
         note: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let Some(decision_id) = DecisionId::parse(&id) else {
+            return;
+        };
+        let key = DecisionKey {
+            space: space.clone(),
+            id: decision_id,
+        };
+        if !self.state.begin_decision_answer(key.clone()) {
+            return;
+        }
         let always = self.state.answers_always(&space, &id, &option);
         let core = Arc::clone(&self.core);
         self.state
@@ -771,24 +810,34 @@ impl Desktop {
                         .await
                 }
             },
-            |this, answered, cx| match answered {
-                Ok(answer) => {
-                    this.state.answered(&answer);
-                    cx.dismiss_system_notification(&format!(
-                        "{}/{}",
-                        answer.space, answer.decision.id
-                    ));
-                    let chosen = answer
-                        .decision
-                        .chosen()
-                        .map_or_else(String::new, |option| format!(": {}", option.label));
-                    this.state.report(Activity::Done(format!(
-                        "Answered {} / {}{chosen}.",
-                        answer.space, answer.decision.id
-                    )));
-                    this.load_screen(cx);
+            move |this, answered, cx| {
+                this.state.finish_decision_answer(&key);
+                match answered {
+                    Ok(answer) => {
+                        if this
+                            .state
+                            .current_decision()
+                            .is_some_and(|current| DecisionKey::from(current) == key)
+                        {
+                            this.scroll_to_decision.set(DecisionScroll::Card);
+                        }
+                        this.state.answered(&answer);
+                        cx.dismiss_system_notification(&format!(
+                            "{}/{}",
+                            answer.space, answer.decision.id
+                        ));
+                        let chosen = answer
+                            .decision
+                            .chosen()
+                            .map_or_else(String::new, |option| format!(": {}", option.label));
+                        this.state.report(Activity::Done(format!(
+                            "Answered {} / {}{chosen}.",
+                            answer.space, answer.decision.id
+                        )));
+                        this.load_screen(cx);
+                    }
+                    Err(error) => this.state.report(Activity::Failed(describe(&error))),
                 }
-                Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
         );
@@ -1356,15 +1405,16 @@ impl Render for Desktop {
                 field.update(cx, |field, cx| field.set_value("", window, cx));
             }
         }
+        self.prepare_decision_inputs(window, cx);
         let when = self.when();
         let body = match self.screen.clone() {
-            Screen::Home => self.home(&when, window, cx),
+            Screen::Home => self.home(&when, cx),
             Screen::Project {
                 space,
                 project,
                 tab,
-            } => self.project(&space, &project, tab, &when, window, cx),
-            Screen::Task { space, task } => self.task(&space, task, &when, window, cx),
+            } => self.project(&space, &project, tab, &when, cx),
+            Screen::Task { space, task } => self.task(&space, task, &when, cx),
             Screen::Agents => self.agents(cx),
             Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),
@@ -1378,13 +1428,16 @@ impl Render for Desktop {
             body
         };
         h_flex()
+            .id("desktop")
+            .track_focus(&self.keyboard_focus)
+            .key_context(menus::KEY_CONTEXT)
             .size_full()
             .items_stretch()
             .font_features(TABULAR.clone())
             .text_size(TYPE_BODY)
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.sidebar(cx))
+            .children((!self.sidebar_collapsed).then(|| self.sidebar(cx)))
             .child(
                 v_flex()
                     .flex_1()

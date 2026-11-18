@@ -30,6 +30,8 @@ mod attention;
 mod clock;
 mod control;
 mod conversation;
+mod decision_keys;
+mod decision_record;
 mod dreaming;
 mod machines;
 mod memory;
@@ -45,6 +47,10 @@ pub use control::{
     same_remote,
 };
 pub use conversation::{Digest, Line, belongs_in_conversation};
+pub use decision_keys::{
+    DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope,
+};
+pub use decision_record::{DecisionDisplay, DecisionRecord};
 pub use dreaming::{DreamingAction, DreamingCard, DreamingLoad, change_dreaming, load_dreaming};
 pub use machines::{MachineRow, machine_row};
 pub use memory::{
@@ -532,6 +538,10 @@ pub struct Card {
     pub options: Vec<String>,
     /// The decision's kind, on hubs that include it in the feed.
     pub kind: Option<DecisionKind>,
+    /// First line from the feed's context, when present.
+    pub context: Option<String>,
+    /// The recommended option in order, when present.
+    pub recommended: Option<usize>,
 }
 
 impl Card {
@@ -548,7 +558,7 @@ impl Card {
             .and_then(Json::as_str)
             .map(str::to_owned)
             .or_else(|| item.item.message.decision_id.map(|id| id.to_string()))?;
-        let options = body
+        let options: Vec<String> = body
             .get("options")
             .and_then(Json::as_array)
             .map(|labels| {
@@ -566,7 +576,15 @@ impl Card {
         Some(Self {
             id,
             question,
+            recommended: body["recommended"]
+                .as_str()
+                .and_then(|label| options.iter().position(|option| option == label)),
             options,
+            context: body["context"]
+                .as_str()
+                .and_then(|text| text.lines().next())
+                .filter(|line| !line.trim().is_empty())
+                .map(str::to_owned),
             kind: body
                 .get("kind")
                 .and_then(Json::as_str)
@@ -738,6 +756,7 @@ pub struct ProjectLoad {
     repositories: Result<Vec<threadlane_core::model::Repository>, ClientError>,
     bindings: Result<Vec<BindingSummary>, ClientError>,
     history: Result<Vec<ConversationEntry>, ClientError>,
+    decision_records: Vec<Decision>,
     lead: Result<(Option<Timestamp>, bool), ClientError>,
     recorded: Result<(Vec<RecordedEvent>, u64), ClientError>,
     rules: Result<Vec<StandingRuleSummary>, ClientError>,
@@ -749,13 +768,17 @@ pub struct ProjectLoad {
 /// it recorded and did not act on.
 pub async fn load_project(core: &ClientCore, space: &str, project: &str) -> ProjectLoad {
     let (in_space, named) = (Some(space), Some(project));
+    let history = core.conversation(in_space, named, None, PAGE).await;
+    let decision_records =
+        decision_record::load_records(core, space, history.as_deref().unwrap_or_default()).await;
     ProjectLoad {
         space: space.to_owned(),
         project: project.to_owned(),
         tasks: core.tasks(in_space, named).await,
         repositories: core.repositories(in_space, named).await,
         bindings: core.bindings(in_space, named).await,
-        history: core.conversation(in_space, named, None, PAGE).await,
+        history,
+        decision_records,
         lead: core.lead_status(in_space, named).await,
         recorded: core
             .recorded(in_space, named, control::RECORDED_SHOWN)
@@ -832,6 +855,7 @@ pub struct EarlierLoad {
     space: String,
     project: String,
     history: Result<Vec<ConversationEntry>, ClientError>,
+    decision_records: Vec<Decision>,
 }
 
 /// Asks for the page of a conversation before what is shown.
@@ -841,12 +865,16 @@ pub async fn load_earlier(
     project: &str,
     before: Timestamp,
 ) -> EarlierLoad {
+    let history = core
+        .conversation(Some(space), Some(project), Some(before), PAGE)
+        .await;
+    let decision_records =
+        decision_record::load_records(core, space, history.as_deref().unwrap_or_default()).await;
     EarlierLoad {
         space: space.to_owned(),
         project: project.to_owned(),
-        history: core
-            .conversation(Some(space), Some(project), Some(before), PAGE)
-            .await,
+        history,
+        decision_records,
     }
 }
 
@@ -898,6 +926,10 @@ struct Loaded {
 pub struct AppState {
     spaces: Vec<Space>,
     queue: Vec<Queued>,
+    decision_keys: decision_keys::DecisionKeys,
+    decision_records: HashMap<DecisionKey, Decision>,
+    decision_notes: HashSet<DecisionKey>,
+    answering: HashSet<DecisionKey>,
     /// Every delivered item seen, from the feed or from history, by space
     /// and feed position, so one delivered both ways is shown once.
     delivered: BTreeMap<InSpace<i64>, SpaceFeedItem>,
@@ -1044,7 +1076,7 @@ impl AppState {
         let dashed = decision.kind == DecisionKind::Proposal;
         let (context, details, would_run_as, note_label) = match decision.kind {
             DecisionKind::Proposal if decision.is_instruction_proposal() => (
-                Some("Dreaming suggested a change to project instructions.".to_owned()),
+                Some("You did not ask for this. Dreaming suggested a change to project instructions.".to_owned()),
                 context_line(decision)
                     .map(str::to_owned)
                     .into_iter()
@@ -1420,6 +1452,8 @@ impl AppState {
         self.forgotten.insert(name.to_owned());
         self.spaces.retain(|space| space.name != name);
         self.queue.retain(|queued| queued.space != name);
+        self.decision_records.retain(|key, _| key.space != name);
+        self.decision_notes.retain(|key| key.space != name);
         self.delivered.retain(|(space, _), _| space != name);
         self.said.retain(|(space, _), _| space != name);
         self.loaded.retain(|(space, _), _| space != name);
@@ -1608,11 +1642,27 @@ impl AppState {
         self.queue
             .retain(|queued| paired.contains(queued.space.as_str()));
         for (space, pending) in pending {
+            for queued in self.queue.iter().filter(|queued| queued.space == space) {
+                self.decision_records
+                    .entry(DecisionKey::from(queued))
+                    .or_insert_with(|| queued.decision.clone());
+            }
             self.queue.retain(|queued| queued.space != space);
             self.queue
-                .extend(pending.into_iter().map(|decision| Queued {
-                    space: space.clone(),
-                    decision,
+                .extend(pending.into_iter().filter_map(|decision| {
+                    let key = DecisionKey {
+                        space: space.clone(),
+                        id: decision.id,
+                    };
+                    self.decision_records
+                        .get(&key)
+                        .is_none_or(|known| {
+                            known.status == threadlane_core::model::DecisionStatus::Pending
+                        })
+                        .then(|| Queued {
+                            space: space.clone(),
+                            decision,
+                        })
                 }));
         }
         self.queue.sort_by(|a, b| {
@@ -1635,6 +1685,7 @@ impl AppState {
             repositories,
             bindings,
             history,
+            decision_records,
             lead,
             recorded,
             rules,
@@ -1656,6 +1707,7 @@ impl AppState {
         }
         let listed = history.is_ok();
         let entries = take(&mut view.answers, Part::Conversation, history);
+        self.remember_decisions(&space, decision_records);
         if listed {
             self.take_history(&space, &project, entries, true);
         }
@@ -1707,6 +1759,7 @@ impl AppState {
 
     /// Takes an earlier page of a conversation.
     pub fn apply_earlier(&mut self, load: EarlierLoad) {
+        self.remember_decisions(&load.space, load.decision_records);
         if let Ok(entries) = load.history {
             self.take_history(&load.space, &load.project, entries, false);
         }
@@ -1782,6 +1835,13 @@ impl AppState {
         let key = (load.space, load.task);
         match load.detail {
             Ok(detail) => {
+                let records: Vec<_> = detail
+                    .decisions
+                    .iter()
+                    .filter(|decision| self.is_pending(&key.0, &decision.id.to_string()))
+                    .cloned()
+                    .collect();
+                self.remember_decisions(&key.0, records);
                 self.task_failures.remove(&key);
                 self.tasks.insert(key, detail);
             }
@@ -2047,11 +2107,7 @@ impl AppState {
     /// Takes an answer its hub accepted: the decision no longer waits, even
     /// when an earlier answer was the one that counted.
     pub fn answered(&mut self, answer: &SpaceAnswer) {
-        self.always
-            .remove(&(answer.space.clone(), answer.decision.id));
-        self.queue.retain(|queued| {
-            queued.space != answer.space || queued.decision.id != answer.decision.id
-        });
+        self.remember_decisions(&answer.space, [answer.decision.clone()]);
         for ((space, _), detail) in &mut self.tasks {
             if *space != answer.space {
                 continue;

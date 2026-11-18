@@ -213,10 +213,16 @@ impl AppState {
     }
 
     /// The agent that asked decision `queued`: its task's, else the lead's.
-    fn asker(&self, queued: &Queued) -> String {
+    pub(crate) fn asker(&self, queued: &Queued) -> String {
         let space = &queued.space;
         let decision = &queued.decision;
+        if let Some(name) = &decision.proposed_by {
+            return name.clone();
+        }
         let from_task = decision.task_id.and_then(|id| {
+            if let Some(detail) = self.task(space, id) {
+                return Some(detail.summary.agent.clone());
+            }
             let known = self.space(space)?;
             known
                 .tasks

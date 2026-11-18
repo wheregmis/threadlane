@@ -7,7 +7,7 @@ use threadlane_core::ids::RunId;
 use threadlane_core::model::{Mode, OutboxKind, Run, RunOutcome, RunStatus};
 use threadlane_core::time::Timestamp;
 
-use crate::{AppState, Card, Moment, When};
+use crate::{AppState, Card, DecisionScope, Moment, When};
 
 /// One line of a conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +177,7 @@ impl AppState {
                 ));
             }
         }
+        let mut delivered_decisions = std::collections::HashSet::new();
         for item in self.delivered.values() {
             if !belongs_in_conversation(item, space, project) {
                 continue;
@@ -196,15 +197,57 @@ impl AppState {
                     time,
                 },
                 OutboxKind::Decision => match Card::of(item) {
-                    Some(card) => Line::Decision {
-                        pending: self.is_pending(space, &card.id),
-                        card,
-                        time,
-                    },
+                    Some(card) => {
+                        if !delivered_decisions.insert(card.id.clone()) {
+                            continue;
+                        }
+                        Line::Decision {
+                            pending: self.is_pending(space, &card.id),
+                            card,
+                            time,
+                        }
+                    }
                     None => continue,
                 },
             };
             lines.push((at, item.item.seq, Entry::Visible(line)));
+        }
+        let scope = DecisionScope::Project(space.to_owned(), project.to_owned());
+        let pending = self
+            .decisions_in(&scope)
+            .map(|queued| (&queued.decision, true));
+        let remembered = self
+            .decision_records
+            .iter()
+            .filter(|(key, decision)| {
+                key.space == space && self.project_name(space, decision.project_id) == Some(project)
+            })
+            .map(|(_, decision)| (decision, false));
+        for (decision, pending) in pending.chain(remembered) {
+            let id = decision.id.to_string();
+            if delivered_decisions.insert(id.clone()) {
+                let at = decision.created_at;
+                lines.push((
+                    at,
+                    decision.id.get(),
+                    Entry::Visible(Line::Decision {
+                        card: Card {
+                            id,
+                            question: decision.question.clone(),
+                            options: decision
+                                .options
+                                .iter()
+                                .map(|option| option.label.clone())
+                                .collect(),
+                            kind: Some(decision.kind),
+                            context: None,
+                            recommended: None,
+                        },
+                        time: when.time(at),
+                        pending,
+                    }),
+                ));
+            }
         }
         if let Some(view) = self.project(space, project) {
             let before = self.earlier(space, project);
