@@ -61,12 +61,15 @@ impl When {
     }
 }
 
+/// What [`duration`] says for under a minute.
+pub const UNDER_A_MINUTE: &str = "less than a minute";
+
 /// `less than a minute`, `12 min`, `2 h 5 min`.
 #[must_use]
 pub fn duration(duration: Duration) -> String {
     let minutes = duration.as_secs() / 60;
     match minutes {
-        0 => "less than a minute".to_owned(),
+        0 => UNDER_A_MINUTE.to_owned(),
         1..60 => format!("{minutes} min"),
         _ => format!("{} h {} min", minutes / 60, minutes % 60),
     }

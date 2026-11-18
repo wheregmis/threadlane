@@ -3249,6 +3249,31 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
 }
 
 #[tokio::test]
+async fn always_allow_names_the_place_once_when_repository_and_project_match() {
+    let mut offered = decision(1, 1_000);
+    offered.offers_standing_rule = true;
+    offered.arguments = json!({ "repository": "api" });
+    let mut distinct = decision(2, 2_000);
+    distinct.offers_standing_rule = true;
+    distinct.arguments = json!({ "repository": "service in api" });
+    let work = FakeHub::new("Work", vec![offered, distinct]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.always_offer(&state.queue()[0]).map(|(line, _)| line),
+        Some("Always allow the lead to open draft pull requests in api".to_owned())
+    );
+    assert_eq!(
+        state.always_offer(&state.queue()[1]).map(|(line, _)| line),
+        Some(
+            "Always allow the lead to open draft pull requests in service in api, in api"
+                .to_owned()
+        )
+    );
+}
+
+#[tokio::test]
 async fn always_allow_is_worded_from_the_decision_and_used_only_when_ticked_to_approve() {
     let mut offered = decision(1, 1_000);
     offered.offers_standing_rule = true;
@@ -4949,6 +4974,32 @@ async fn in_progress_rows_clip_long_titles_to_one_line() {
     assert_eq!(rows[0].title, "Deliver a lead's final text to the feed");
     assert_eq!(rows[0].label, "Deliver a lead's f…");
     assert_eq!(rows[0].elapsed, "12 min");
+}
+
+#[tokio::test]
+async fn in_progress_titles_leave_room_for_a_long_time() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(1, TaskStatus::Running, None);
+    running.task.title = "One place for every finding".into();
+    *work.tasks.lock().unwrap() = vec![running];
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::paired(["dev"]);
+    state.apply_at(refresh(&core).await, when().now);
+    let at = |millis| When {
+        now: Timestamp::from_millis(millis),
+        ..when()
+    };
+    for (now, label, elapsed) in [
+        (30_000, "One place for eve…", "< 1 min"),
+        (12 * 60_000, "One place for ever…", "12 min"),
+        (125 * 60_000, "One place for e…", "2 h 5 min"),
+        (725 * 60_000, "One place for…", "12 h 5 min"),
+    ] {
+        let row = &state.in_progress("dev", &at(now)).rows[0];
+        assert_eq!((row.label.as_str(), row.elapsed.as_str()), (label, elapsed));
+        // The title and the time share one row's width; the time keeps its own.
+        assert!(row.label.chars().count() + row.elapsed.chars().count() <= 25);
+    }
 }
 
 #[tokio::test]

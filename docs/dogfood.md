@@ -100,8 +100,8 @@ Task T-0013 in the GitHub-backed repository: add an attribution line to pull req
 | # | Finding | State |
 |---|---|---|
 | 30 | Publishing works end to end on the real `gh`: approval card, one push, one draft pull request, the body as the agent wrote it. | checked |
-| 31 | The "Always allow" line names the place twice when the project and repository share a name: "in threadlane, in threadlane". | open: T-0015 |
-| 32 | A long title in the sidebar's In progress row still runs into its time ("One plac" under "less than a minute"). | open: T-0015 |
+| 31 | The "Always allow" line names the place twice when the project and repository share a name: "in threadlane, in threadlane". | fixed in T-0015; to check in the real window |
+| 32 | A long title in the sidebar's In progress row still runs into its time ("One plac" under "less than a minute"). The 18-character cut assumed a short time; "less than a minute" alone is as long as the title. | fixed in T-0015: the sidebar says "< 1 min" and the title is cut to what the row leaves beside its time; to check in the real window |
 
 ## Live monitoring pass, 2026-11-18
 

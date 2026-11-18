@@ -292,6 +292,7 @@ impl Desktop {
                                 "{} · {} · {}",
                                 row.status, row.title, row.elapsed
                             ))
+                            .tooltip(row.title)
                             .child(crate::components::work_line(
                                 row.label,
                                 row.elapsed,

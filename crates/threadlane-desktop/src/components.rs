@@ -219,14 +219,7 @@ pub(super) fn work_line(label: String, elapsed: String, status: Status, cx: &App
         .gap(XS)
         .min_w_0()
         .child(status_dot(status, cx))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .child(label),
-        )
+        .child(div().flex_1().min_w_0().truncate().child(label))
         .child(
             meta(elapsed, cx)
                 .flex_none()
