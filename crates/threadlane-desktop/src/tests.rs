@@ -4367,7 +4367,10 @@ async fn a_long_question_splits_into_a_title_and_a_six_line_body_and_a_short_one
         .iter()
         .map(|queued| state.present_decision(queued, "api", &when()))
         .collect();
-    assert_eq!(shown[0].question, "Which of these should the team take on next?");
+    assert_eq!(
+        shown[0].question,
+        "Which of these should the team take on next?"
+    );
     assert_eq!(
         shown[0].body.as_deref(),
         Some(
@@ -4871,7 +4874,7 @@ async fn in_progress_caps_running_leads_and_queued_work_and_uses_the_display_clo
 }
 
 #[tokio::test]
-async fn in_progress_rows_clip_long_titles_and_project_names_to_one_line() {
+async fn in_progress_rows_clip_long_titles_to_one_line() {
     let work = FakeHub::new("Work", Vec::new());
     let mut running = task(1, TaskStatus::Running, None);
     running.task.title = "Deliver a lead's final text to the feed".into();

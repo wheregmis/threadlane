@@ -227,7 +227,12 @@ pub(super) fn work_line(label: String, elapsed: String, status: Status, cx: &App
                 .whitespace_nowrap()
                 .child(label),
         )
-        .child(meta(elapsed, cx).flex_none().whitespace_nowrap().text_right())
+        .child(
+            meta(elapsed, cx)
+                .flex_none()
+                .whitespace_nowrap()
+                .text_right(),
+        )
 }
 
 /// The shared bordered surface for groups and cards.
