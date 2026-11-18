@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use threadlane_core::forge::{CommentTarget, Forge, ForgeError, RepositoryAction};
+use threadlane_core::github::REVIEW_MARKER_PREFIX;
 use threadlane_core::workspace::valid_branch_name;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
@@ -82,7 +83,7 @@ impl GitForge {
         }
         let endpoint = format!("repos/{repository}/pulls/{number}/reviews");
         let host = format!("--hostname={host}");
-        let marker = format!("<!-- threadlane-review-{delivery_key} -->");
+        let marker = format!("{REVIEW_MARKER_PREFIX}{delivery_key} -->");
         let existing = self
             .gh(
                 Path::new("."),

@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 /// The `source` of every event the GitHub source inserts.
 pub const GITHUB_SOURCE: &str = "github";
 
+/// Prefix of the hidden footer the runner appends to each published review.
+pub const REVIEW_MARKER_PREFIX: &str = "<!-- threadlane-review-";
+
 /// How long the poller waits between passes when the service names no
 /// interval.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(60);

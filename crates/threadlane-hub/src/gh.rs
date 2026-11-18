@@ -31,7 +31,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::github::{
-    Feed, GithubError, GithubItem, GithubKind, GithubSource, PullTarget, pull_request_number,
+    Feed, GithubError, GithubItem, GithubKind, GithubSource, PullTarget, REVIEW_MARKER_PREFIX,
+    pull_request_number,
 };
 use tokio::process::Command;
 
@@ -409,14 +410,25 @@ pub(crate) fn parse_check_runs(answer: &Json, target: &PullTarget) -> Vec<Github
         .collect()
 }
 
-/// The submitted reviews of a `reviews` answer; a pending one has no
-/// submission time and is left out.
+/// Submitted reviews from GitHub, excluding verdicts already delivered inside Threadlane.
 pub(crate) fn parse_reviews(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
     answer
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|review| {
+            let body = text(review, "/body").unwrap_or_default();
+            let delivery_key = body
+                .trim_end()
+                .lines()
+                .next_back()
+                .and_then(|line| line.strip_prefix(REVIEW_MARKER_PREFIX))
+                .and_then(|rest| rest.strip_suffix(" -->"));
+            if delivery_key
+                .is_some_and(|key| key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                return None;
+            }
             Some(GithubItem {
                 id: format!("review:{}", id(review)?),
                 kind: GithubKind::Review,
@@ -428,7 +440,7 @@ pub(crate) fn parse_reviews(answer: &Json, target: &PullTarget) -> Vec<GithubIte
                     .unwrap_or_default()
                     .to_ascii_lowercase()
                     .replace('_', " "),
-                body: text(review, "/body").unwrap_or_default(),
+                body,
                 url: text(review, "/html_url"),
                 at: text(review, "/submitted_at")?,
             })
@@ -560,7 +572,11 @@ mod tests {
     #[test]
     fn submitted_reviews_and_comments_are_items() {
         let reviews = parse_reviews(&serde_json::from_str(REVIEWS).unwrap(), &target());
-        assert_eq!(reviews.len(), 1, "the pending review is left out");
+        assert_eq!(
+            reviews.len(),
+            1,
+            "only the external submitted review is ingested"
+        );
         assert_eq!(reviews[0].id, "review:80");
         assert_eq!(reviews[0].kind, GithubKind::Review);
         assert_eq!(reviews[0].title, "changes requested");
