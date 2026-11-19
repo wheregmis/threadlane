@@ -75,12 +75,13 @@ impl Desktop {
                         .flex_none()
                         .text_right(),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(self.prose(id, space, moment.text, cx)),
-                );
+                .child(div().flex_1().min_w_0().child(self.prose(
+                    id,
+                    space,
+                    Some(&summary.project),
+                    moment.text,
+                    cx,
+                )));
             moments = if let Some(text) = moment.message {
                 let view = cx.entity().downgrade();
                 moments.child(row.context_menu(move |menu, _, _| {
@@ -407,22 +408,29 @@ impl Desktop {
                             .children(decision_cards),
                     )
                     .child(related),
-            )
-            .children((!archived).then(|| {
-                v_flex()
-                    .gap(XS)
-                    .child(self.render_composer(
-                        threadlane_desktop::Draft::Task,
-                        "Add to this task",
-                        None,
-                        cx,
-                    ))
-                    .child(meta(self.state.task_hint(space, task), cx))
-            }));
-        decision_scroller("task", content, &self.decision_scroll)
+            );
+        let composer = (!archived).then(|| {
+            v_flex()
+                .flex_none()
+                .gap(XS)
+                .child(self.render_composer(
+                    threadlane_desktop::Draft::Task,
+                    "Add to this task",
+                    None,
+                    cx,
+                ))
+                .child(meta(self.state.task_hint(space, task), cx))
+        });
+        // The task view scrolls above a composer pinned at the bottom, as in project chat and Home.
+        v_flex()
+            .flex_1()
+            .min_h_0()
             .w_full()
             .max_w(READING_WIDTH)
             .self_center()
+            .gap(SM)
+            .child(decision_scroller("task", content, &self.decision_scroll))
+            .children(composer)
             .into_any_element()
     }
 }

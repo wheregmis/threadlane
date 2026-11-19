@@ -85,7 +85,8 @@ pub use permissions::{
     applied, cell_label, matrix, mode_label,
 };
 pub use prose::{
-    ProseLimit, Reference, Segment, markdown_source, markdown_source_with_time, segments,
+    ProseLimit, Reference, Segment, github_pull_url, github_repository, markdown_source,
+    markdown_source_for, markdown_source_with_time, segments,
 };
 pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
@@ -2458,6 +2459,32 @@ impl AppState {
                 self.take_history(&space, &project, entries, true, PAGE);
             }
         }
+    }
+
+    /// Records the repositories of `project` in `space`.
+    pub fn apply_repositories(
+        &mut self,
+        space: &str,
+        project: &str,
+        repositories: Result<Vec<threadlane_core::model::Repository>, ClientError>,
+    ) {
+        if self.project_absent(space, project) {
+            return;
+        }
+        let view = self
+            .projects
+            .entry((space.to_owned(), project.to_owned()))
+            .or_default();
+        view.repositories = take(&mut view.answers, Part::Repositories, repositories);
+    }
+
+    /// The `owner/repo` of `project`'s first repository with a GitHub remote.
+    #[must_use]
+    pub fn github_repository(&self, space: &str, project: &str) -> Option<String> {
+        self.project(space, project)?
+            .repositories
+            .iter()
+            .find_map(|repository| github_repository(&repository.remote_url))
     }
 
     /// Takes the bindings of each project, for the modes grid.

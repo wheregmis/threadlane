@@ -1331,10 +1331,10 @@ impl Desktop {
                                     .text_right(),
                             ),
                     )
-                    .children(
-                        (!text.is_empty())
-                            .then(|| self.prose(id, space, text.to_owned(), cx).limit(limit)),
-                    )
+                    .children((!text.is_empty()).then(|| {
+                        self.prose(id, space, Some(project), text.to_owned(), cx)
+                            .limit(limit)
+                    }))
                     .context_menu(move |menu, _, _| {
                         let text = menu_text.clone();
                         let mut menu =
@@ -1438,6 +1438,7 @@ impl Desktop {
                                 self.prose(
                                     format!("conversation-{space}-{project}-space-lead-{id}"),
                                     space,
+                                    Some(project),
                                     text.clone(),
                                     cx,
                                 )
@@ -1525,6 +1526,7 @@ impl Desktop {
                                 self.prose(
                                     format!("conversation-{space}-{project}-reply-{id}"),
                                     space,
+                                    Some(from.as_str()),
                                     text.clone(),
                                     cx,
                                 )
@@ -1558,6 +1560,7 @@ impl Desktop {
                                 self.prose(
                                     format!("conversation-{space}-{project}-notice-{seq}"),
                                     space,
+                                    Some(project),
                                     text.clone(),
                                     cx,
                                 )
@@ -1670,6 +1673,7 @@ impl Desktop {
                                 self.prose(
                                     format!("quiet-{space}-{id}-{}", reason.id),
                                     &space,
+                                    Some(project),
                                     format!("{} · {}", reason.time, reason.text),
                                     cx,
                                 )
@@ -2077,6 +2081,7 @@ impl Desktop {
                             .child(self.prose(
                                 format!("memory-body-{space}-{project}-{path}"),
                                 space,
+                                Some(project),
                                 file.content.clone(),
                                 cx,
                             )),

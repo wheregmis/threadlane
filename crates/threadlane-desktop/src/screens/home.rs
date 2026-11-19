@@ -417,9 +417,15 @@ impl Desktop {
                         Some(digest) => self.digest_entry(&space, digest, cx).into_any_element(),
                         None => {
                             let seq = item.item.seq;
-                            self.prose(format!("result-{space}-{seq}"), &space, item.text(), cx)
-                                .result(seq, state.result_expanded(&space, seq))
-                                .into_any_element()
+                            self.prose(
+                                format!("result-{space}-{seq}"),
+                                &space,
+                                entry.project,
+                                item.text(),
+                                cx,
+                            )
+                            .result(seq, state.result_expanded(&space, seq))
+                            .into_any_element()
                         }
                     };
                     (who, body)
