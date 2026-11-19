@@ -382,6 +382,20 @@ impl TaskActivity {
     }
 }
 
+#[derive(Default)]
+struct PendingProjectLoad {
+    refreshed: (bool, bool),
+    latest: (bool, bool),
+}
+
+impl PendingProjectLoad {
+    fn queue(&mut self, parts: (bool, bool)) {
+        self.refreshed.0 |= parts.0;
+        self.refreshed.1 |= parts.1;
+        self.latest = parts;
+    }
+}
+
 /// The window's one view: the shell and its screens over [`AppState`].
 struct Desktop {
     state: AppState,
@@ -391,7 +405,7 @@ struct Desktop {
     task_activity: TaskActivity,
     task_activity_request: Option<Task<()>>,
     project_load: Option<Task<()>>,
-    project_load_pending: Option<(bool, bool)>,
+    project_load_pending: Option<PendingProjectLoad>,
     keyboard_focus: FocusHandle,
     sidebar_collapsed: bool,
     decision_scroll: ScrollHandle,
@@ -790,7 +804,9 @@ impl Desktop {
                 tab,
             } => {
                 if self.project_load.is_some() {
-                    self.project_load_pending = Some(parts);
+                    self.project_load_pending
+                        .get_or_insert_with(PendingProjectLoad::default)
+                        .queue(parts);
                     return;
                 }
                 let (fresh_tasks, fresh_lead) = parts;
@@ -846,14 +862,14 @@ impl Desktop {
                         this.project_load = None;
                         let pending = this.project_load_pending.take();
                         if let Ok(mut loaded) = loaded {
-                            if let Some(parts) = pending {
-                                loaded.keep_refreshed_parts(parts);
+                            if let Some(pending) = &pending {
+                                loaded.keep_refreshed_parts(pending.refreshed);
                             }
                             this.state.apply_project(loaded);
                             cx.notify();
                         }
-                        if let Some(parts) = pending {
-                            this.load_screen_with_parts(parts, cx);
+                        if let Some(pending) = pending {
+                            this.load_screen_with_parts(pending.latest, cx);
                         }
                     });
                 }));
@@ -1796,5 +1812,24 @@ mod activity_tests {
         assert!(empty.is_empty());
         empty.error = Some((None, "request failed".into()));
         assert!(!empty.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod project_load_tests {
+    use super::PendingProjectLoad;
+
+    #[test]
+    fn queued_load_preserves_each_refreshed_part_and_uses_latest_follow_up() {
+        let mut pending = PendingProjectLoad::default();
+        pending.queue((true, false));
+        pending.queue((false, true));
+        assert_eq!(pending.refreshed, (true, true));
+        assert_eq!(pending.latest, (false, true));
+
+        // A feed event requests both parts without invalidating the refresh.
+        pending.queue((false, false));
+        assert_eq!(pending.refreshed, (true, true));
+        assert_eq!(pending.latest, (false, false));
     }
 }
