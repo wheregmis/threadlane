@@ -921,6 +921,16 @@ pub enum Rule {
 }
 
 impl Recurrence {
+    /// The dreaming cadence a project has until someone changes it: daily at
+    /// 02:00 in `zone`. A project dreams unless dreaming was turned off.
+    #[must_use]
+    pub fn default_dreaming(zone: &str) -> Self {
+        Self {
+            rule: Rule::Daily { hour: 2, minute: 0 },
+            zone: zone.to_owned(),
+        }
+    }
+
     /// Checks the rule's fields; the zone is checked by the hub, which has
     /// the zone database.
     ///

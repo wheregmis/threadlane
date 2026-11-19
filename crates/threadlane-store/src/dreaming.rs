@@ -74,6 +74,19 @@ impl HubDb {
         active_timer(&self.db.reader()?, project).await
     }
 
+    /// Whether the project has never had a dreaming setting. Turning dreaming
+    /// off leaves its cancelled timer behind, so an explicit off is not unset.
+    pub async fn dreaming_unset(&self, project: ProjectId) -> StoreResult<bool> {
+        query_one(
+            &self.db.reader()?,
+            "SELECT NOT EXISTS (SELECT 1 FROM timers WHERE project_id = ?1
+             AND created_by = 'system' AND category = 'dreaming')",
+            params![project.get()],
+            |row| Cols(row).bool(0),
+        )
+        .await
+    }
+
     /// Changes the project setting and retires pending occurrences in the same transaction.
     pub async fn set_dreaming(
         &self,

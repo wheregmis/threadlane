@@ -94,10 +94,33 @@ async fn complete(hub: &TestHub, lease: &Lease, run: &RunAssignment) -> RunOutco
 }
 
 #[tokio::test]
+async fn an_unset_project_dreams_by_default_and_an_explicit_off_stays_off() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let default = Some(Recurrence::default_dreaming("UTC").rule);
+    let rule = |status: DreamingStatus| status.cadence.map(|cadence| cadence.rule);
+    assert_eq!(rule(status(&hub, None).await), default, "General is unset");
+    set(&hub, None).await;
+    hub.api
+        .org(OrgRequest::CreateProject {
+            name: "Other".into(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(rule(status(&hub, Some("Other".into())).await), default);
+    assert_eq!(status(&hub, None).await.cadence, None, "a new project");
+    let hub = hub.restart(Arc::new(NoHooks)).await;
+    assert_eq!(status(&hub, None).await.cadence, None, "a restart");
+    assert_eq!(rule(status(&hub, Some("Other".into())).await), default);
+}
+
+#[tokio::test]
 async fn settings_are_project_scoped_validate_cadence_and_own_the_system_timer() {
     let hub = TestHub::start().await;
     hub.hello().await;
     let project = hub.general().await;
+    set(&hub, None).await;
     assert_eq!(status(&hub, None).await, DreamingStatus::default());
     hub.clock.advance(10 * HOUR);
     assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
@@ -188,6 +211,7 @@ async fn dream_filters_tools_scope_session_history_and_effects() {
         .into_iter()
         .find(|project| project.name == "Other")
         .unwrap();
+    hub.dreaming_off(Some("Other")).await;
     hub.api
         .send_message(&UserMessage {
             project: Some("Other".into()),
@@ -745,7 +769,7 @@ async fn dreaming_recovers_at_setting_scheduler_run_and_tool_boundaries() {
         assert_eq!(plan.killed(), Some(step));
 
         let hub = hub.restart(Arc::new(NoHooks)).await;
-        let enabled = status(&hub, None).await.cadence.is_some();
+        let enabled = status(&hub, None).await.cadence == Some(interval());
         assert_eq!(enabled, step != dreaming::BEFORE_SETTING);
         if !enabled {
             set(&hub, Some(interval())).await;

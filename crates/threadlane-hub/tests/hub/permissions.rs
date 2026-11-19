@@ -447,6 +447,7 @@ async fn a_decision_expires_as_declined_once() {
 #[tokio::test]
 async fn an_answered_decision_does_not_expire() {
     let hub = TestHub::with(hourly(), Arc::new(NoHooks)).await;
+    hub.dreaming_off(None).await;
     asked_with_expiry(&hub).await;
     decide(
         &hub,

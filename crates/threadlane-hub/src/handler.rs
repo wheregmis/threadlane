@@ -459,6 +459,7 @@ impl HubApi for ClientApi {
                     .map_err(|error| taken(error, "project", name))?;
                 // Give the new project its lead binding now, not at next start.
                 ensure_defaults(db).await.map_err(api_error)?;
+                self.core.ensure_dreaming().await.map_err(api_error)?;
                 Ok(OrgReply::Project {
                     project: summary(project),
                 })
