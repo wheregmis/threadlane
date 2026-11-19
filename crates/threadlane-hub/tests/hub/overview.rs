@@ -105,6 +105,14 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
     );
     assert_eq!(tasks[0].project, "General");
     assert!(tasks[1].latest_step.is_none());
+    let OverviewReply::Work { overview: work } = overview(&hub, OverviewRequest::Work).await else {
+        panic!("work");
+    };
+    assert_eq!(work.tasks, tasks);
+    assert_eq!(work.tasks[1].task.depends_on, [fix.id]);
+    assert_eq!(work.leads.len(), 1);
+    assert_eq!(work.leads[0].project, "General");
+
     let latest = tasks[0].latest_step.as_ref().unwrap();
     assert_eq!(latest.kind, "tool_use");
     assert_eq!(latest.description, "Called Bash");
@@ -134,6 +142,61 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
     assert!(task.runs[0].usage.is_none());
     assert!(task.decisions.is_empty());
     assert!(!task.stopped);
+    let page = i64::from(threadlane_core::client::CONVERSATION_PAGE);
+    let events: Vec<_> = (3..=page + 2)
+        .map(|seq| JournalEntry {
+            run_id: run.run_id,
+            seq,
+            at: step_at,
+            entry: json!({"type": "text", "text": format!("Step {seq}")}),
+        })
+        .collect();
+    hub.link.append(&lease, &events).await.unwrap();
+
+    let OverviewReply::Task { task: light } =
+        overview(&hub, OverviewRequest::TaskOverview { task: fix.id }).await
+    else {
+        panic!("task")
+    };
+    assert_eq!(light.runs[0].steps.len(), 1);
+    assert_eq!(
+        light.summary.latest_step.unwrap().description,
+        format!("Step {}", page + 2)
+    );
+
+    let OverviewReply::TaskActivity { entries, next } = overview(
+        &hub,
+        OverviewRequest::TaskActivity {
+            task: fix.id,
+            before: None,
+        },
+    )
+    .await
+    else {
+        panic!("activity")
+    };
+    assert_eq!(entries.len(), page as usize);
+    assert_eq!(entries.first().unwrap().position.seq, page + 2);
+    assert_eq!(entries.last().unwrap().position.seq, 3);
+    let OverviewReply::TaskActivity { entries, next } = overview(
+        &hub,
+        OverviewRequest::TaskActivity {
+            task: fix.id,
+            before: next,
+        },
+    )
+    .await
+    else {
+        panic!("activity")
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.position.seq)
+            .collect::<Vec<_>>(),
+        [2, 1]
+    );
+    assert!(next.is_none());
     hub.api
         .org(OrgRequest::Stop {
             target: LaneTarget::Task { task: fix.id },

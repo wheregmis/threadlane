@@ -1,6 +1,8 @@
 //! [`TaskStore`] on the hub database (Plan.md §5.2), and the task side of the
 //! run cycle's transactions.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{free_backends, usable_backends};
@@ -915,6 +917,95 @@ impl HubDb {
     }
 }
 
+impl HubDb {
+    /// Lists tasks for the supplied project membership, even if a project is archived concurrently.
+    pub async fn tasks_for_projects(&self, projects: &[ProjectId]) -> StoreResult<Vec<Task>> {
+        let ids = json_text(&json!(
+            projects
+                .iter()
+                .map(|project| project.get())
+                .collect::<Vec<_>>()
+        ))?;
+        self.tasks_with_dependencies(
+            "project_id IN (SELECT value FROM json_each(?1))",
+            params![ids],
+        )
+        .await
+    }
+
+    /// Running and in-review candidates across all projects.
+    pub async fn running_tasks(&self) -> StoreResult<Vec<Task>> {
+        self.tasks_with_dependencies("status IN ('running', 'in_review')", ())
+            .await
+    }
+
+    async fn tasks_with_dependencies(
+        &self,
+        filter: &str,
+        values: impl turso::IntoParams + Send,
+    ) -> StoreResult<Vec<Task>> {
+        let conn = self.db.reader()?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "WITH selected AS (SELECT {TASK_FIELDS} FROM tasks WHERE {filter})
+                      SELECT selected.*, d.depends_on
+                      FROM selected LEFT JOIN task_dependencies d ON d.task_id = selected.id
+                      ORDER BY selected.id, d.depends_on"
+                ),
+                values,
+            )
+            .await
+            .map_err(crate::db::db_err)?;
+        let mut tasks: Vec<Task> = Vec::new();
+        while let Some(row) = rows.next().await.map_err(crate::db::db_err)? {
+            let cols = Cols(&row);
+            let id: TaskId = cols.id(0)?;
+            let dependency = cols.opt_id(16)?;
+            if let Some(task) = tasks.last_mut().filter(|task| task.id == id) {
+                task.depends_on.extend(dependency);
+            } else {
+                tasks.push(decode_task(&row, dependency.into_iter().collect())?);
+            }
+        }
+        Ok(tasks)
+    }
+
+    /// Completion time of the current attempt for each supplied task.
+    pub async fn task_completion_times(
+        &self,
+        tasks: &[TaskId],
+    ) -> StoreResult<HashMap<TaskId, Timestamp>> {
+        if tasks.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.db.reader()?;
+        let ids = json_text(&json!(
+            tasks.iter().map(|task| task.get()).collect::<Vec<_>>()
+        ))?;
+        // The retry key's ':' delimiter sorts immediately before ';', bounding the indexed prefix.
+        let times = query_all(
+            &conn,
+            "WITH attempts AS (
+                SELECT ids.value AS task_id, (
+                    SELECT COUNT(*) FROM events
+                    WHERE source = ?1
+                    AND source_event_id >= 'retry:' || ids.value || ':'
+                    AND source_event_id <  'retry:' || ids.value || ';'
+                ) AS retries
+                FROM json_each(?2) ids
+             )
+             SELECT task_id, received_at FROM attempts JOIN events
+             ON source = ?1 AND source_event_id = 'result:' || task_id ||
+                CASE WHEN retries = 0 THEN '' ELSE ':retry' || retries END",
+            params![TASK_SOURCE, ids],
+            |row| Ok((Cols(row).id(0)?, Cols(row).ts(1)?)),
+        )
+        .await?;
+        Ok(times.into_iter().collect())
+    }
+}
+
 #[async_trait]
 impl TaskStore for HubDb {
     async fn create_task(&self, lease: Option<&Lease>, task: &NewTask) -> StoreResult<Task> {
@@ -932,31 +1023,12 @@ impl TaskStore for HubDb {
     }
 
     async fn task_completed_at(&self, id: TaskId) -> StoreResult<Option<Timestamp>> {
-        let conn = self.db.reader()?;
-        // The current attempt's report: a retried task ends under a new key.
-        let key = result_key(&conn, id).await?;
-        query_opt(
-            &conn,
-            "SELECT received_at FROM events WHERE source = ?1 AND source_event_id = ?2",
-            params![TASK_SOURCE, key],
-            |row| Cols(row).ts(0),
-        )
-        .await
+        Ok(self.task_completion_times(&[id]).await?.remove(&id))
     }
 
     async fn tasks(&self, project_id: ProjectId) -> StoreResult<Vec<Task>> {
-        let conn = self.db.reader()?;
-        let mut tasks = query_all(
-            &conn,
-            &format!("SELECT {TASK_FIELDS} FROM tasks WHERE project_id = ?1 ORDER BY id"),
-            params![project_id.get()],
-            |row| decode_task(row, Vec::new()),
-        )
-        .await?;
-        for task in &mut tasks {
-            task.depends_on = dependencies(&conn, task.id).await?;
-        }
-        Ok(tasks)
+        self.tasks_with_dependencies("project_id = ?1", params![project_id.get()])
+            .await
     }
 
     async fn update_task(

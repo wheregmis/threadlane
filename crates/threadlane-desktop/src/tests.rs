@@ -34,9 +34,12 @@ struct FakeHub {
     space: String,
     down: AtomicBool,
     old: AtomicBool,
+    batched_work: AtomicBool,
+    project_task_requests: AtomicI64,
     /// Answers like a hub from before it could list recorded events.
     no_recorded: AtomicBool,
     projects_fail: AtomicBool,
+    lead_fail: AtomicBool,
     created: Mutex<Vec<ProjectSummary>>,
     archived: Mutex<BTreeSet<ProjectId>>,
     removed_projects: Mutex<BTreeSet<ProjectId>>,
@@ -542,7 +545,10 @@ impl HubApi for FakeHub {
             return Err(ApiError::Invalid("unknown variant `recorded`".to_owned()));
         }
         match request {
-            OverviewRequest::Tasks { .. } => Ok(OverviewReply::Tasks { tasks }),
+            OverviewRequest::Tasks { .. } => {
+                self.project_task_requests.fetch_add(1, Ordering::SeqCst);
+                Ok(OverviewReply::Tasks { tasks })
+            }
             OverviewRequest::Running => Ok(OverviewReply::Tasks {
                 tasks: tasks
                     .into_iter()
@@ -580,6 +586,9 @@ impl HubApi for FakeHub {
                 machines: self.machines.lock().expect("lock").clone(),
                 accounts: self.accounts.lock().expect("lock").clone(),
             }),
+            OverviewRequest::Lead { .. } if self.lead_fail.load(Ordering::SeqCst) => {
+                Err(ApiError::Internal("lead status unavailable".to_owned()))
+            }
             OverviewRequest::Lead { project } => Ok(OverviewReply::Lead {
                 latest_step: None,
                 running_since: *self.lead.lock().expect("lock"),
@@ -641,6 +650,27 @@ impl HubApi for FakeHub {
                     }),
                 })
             }
+            OverviewRequest::Work if self.batched_work.load(Ordering::SeqCst) => {
+                use threadlane_core::client::{ProjectLeadStatus, WorkOverview};
+                let projects = self.project_list(true).await?;
+                let leads = projects
+                    .iter()
+                    .filter(|project| !project.archived)
+                    .map(|project| ProjectLeadStatus {
+                        project: project.name.clone(),
+                        running_since: *self.lead.lock().unwrap(),
+                        stopped: false,
+                    })
+                    .collect();
+                Ok(OverviewReply::Work {
+                    overview: WorkOverview {
+                        projects,
+                        tasks,
+                        leads,
+                    },
+                })
+            }
+            OverviewRequest::Work => Err(ApiError::Invalid("unknown variant `work`".to_owned())),
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -6767,5 +6797,66 @@ fn prose_humanizes_iso_timestamps_and_long_shas_outside_code_and_urls() {
             "https://github.com/org/repo/commit/9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b"
         ),
         "{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn batched_refresh_supplies_the_project_board_and_the_tasks_tab_skips_chat() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.batched_work.store(true, Ordering::SeqCst);
+    work.tasks
+        .lock()
+        .unwrap()
+        .push(task(7, TaskStatus::Queued, None));
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    let refreshed = refresh(&core).await;
+    let (tasks, lead) = refreshed.project_parts("work", "api");
+    assert_eq!((tasks, lead), (true, true));
+    assert_eq!(refreshed.project_parts("work", "General"), (true, true));
+    state.apply(refreshed);
+    assert_eq!(state.project_gap("work", "General", Part::Tasks), None);
+    let loaded = load_project_tab(&core, "work", "api", Some(Tab::Tasks), tasks, lead).await;
+    assert!(loaded.tasks.is_none());
+    assert!(loaded.lead.is_none());
+    assert!(loaded.history.is_none());
+    assert!(loaded.recorded.is_none());
+    assert!(loaded.rules.is_none());
+    assert!(loaded.lead_runs.is_none());
+    state.apply_project(loaded);
+    assert_eq!(
+        state.project("work", "api").unwrap().tasks[0].task.id,
+        TaskId(7)
+    );
+    assert_eq!(work.project_task_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_legacy_refresh_reuses_only_the_project_parts_it_supplied() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(state.project_gap("work", "api", Part::Lead), None);
+    assert_eq!(state.project_gap("work", "api", Part::Tasks), None);
+
+    work.lead_fail.store(true, Ordering::SeqCst);
+    let refreshed = refresh(&core).await;
+    let (tasks, lead) = refreshed.project_parts("work", "api");
+    assert_eq!((tasks, lead), (true, false));
+    state.apply(refreshed);
+    let loaded = load_project_tab(&core, "work", "api", Some(Tab::Tasks), tasks, lead).await;
+    assert!(loaded.tasks.is_none());
+    assert!(matches!(loaded.lead, Some(Err(_))));
+
+    let mut older = load_project_tab(&core, "work", "api", Some(Tab::Tasks), false, false).await;
+    older.keep_refreshed_parts((true, false));
+    assert!(older.tasks.is_none());
+    assert!(matches!(older.lead, Some(Err(_))));
+
+    work.projects_fail.store(true, Ordering::SeqCst);
+    assert_eq!(
+        refresh(&core).await.project_parts("work", "api"),
+        (false, false)
     );
 }
