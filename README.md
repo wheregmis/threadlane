@@ -241,11 +241,11 @@ work on follow-ups too.
 In the desktop app, open a project's **Routines** to run an active or paused
 routine once. **Run history** shows when each occurrence started, its outcome,
 and any reply or delegated tasks. A manual run keeps the original cadence.
-The space **Agenda** shows recent and upcoming runs, including tomorrow in
-your local time zone. **Space usage** groups runs by project, agent and
+In the space sidebar, **Routines → Agenda** shows recent and upcoming runs,
+including tomorrow in your local time zone. **Usage** groups runs by project, agent and
 backend and shows how often providers reported cost and tokens.
 
-From a project's **Tasks**, open **Project outputs** to search published pull
+From a project's **Tasks**, open **Outputs** to search published pull
 requests, saved reports and attached images. Open **Review workflow** to edit
 the space's implementation and review instructions, choose two specialists
 and start linked tasks for a registered repository. The owner can accept the

@@ -729,6 +729,7 @@ mod tests {
                 "PROJECTS + [dev]",
                 "api",
                 "MANAGE",
+                "Usage",
                 "Team",
                 "Routines",
             ]
