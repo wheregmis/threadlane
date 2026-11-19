@@ -28,8 +28,8 @@ use async_trait::async_trait;
 use threadlane_core::ids::{RepositoryId, RunId, TaskId};
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{
-    DiffFileStat, DiffPreview, MergeCheck, ReviewRevision, WorkspaceCounts, WorkspaceError,
-    WorkspaceRemoval, Workspaces, task_branch, valid_branch_name, valid_commit_id,
+    DiffFileStat, DiffPreview, MergeCheck, PublishPreview, ReviewRevision, WorkspaceCounts,
+    WorkspaceError, WorkspaceRemoval, Workspaces, task_branch, valid_branch_name, valid_commit_id,
     valid_repository_name,
 };
 use tokio::process::Command;
@@ -611,25 +611,23 @@ impl Workspaces for GitWorkspaces {
         Ok(checks)
     }
 
-    async fn diff_preview(
+    async fn preview_publish(
         &self,
         task: TaskId,
         repository: &Repository,
-    ) -> Result<Option<DiffPreview>, WorkspaceError> {
+    ) -> Result<PublishPreview, WorkspaceError> {
         check(repository)?;
         let _repo = self.lock_repository(repository.id).await;
         if !self.is_ready(task, repository) {
-            return Ok(None);
+            return Err(WorkspaceError("no worktree was set up".into()));
         }
-        let branch = format!("refs/heads/{}", task_branch(task));
         let commit = self.fetch_base(repository).await?;
         let worktree = self.worktree(task, repository);
-        let revision = git(Some(&worktree), ["rev-parse", "--verify", branch.as_str()])
-            .await?
-            .trim()
-            .to_owned();
-        self.compute_diff_preview(repository, &worktree, &commit, &revision)
-            .await
+        let revision = branch_revision(&worktree, &task_branch(task)).await?;
+        let diff = self
+            .compute_diff_preview(repository, &worktree, &commit, &revision)
+            .await?;
+        Ok(PublishPreview { revision, diff })
     }
 
     async fn removal_counts(&self, removal: &WorkspaceRemoval) -> WorkspaceCounts {
@@ -691,6 +689,17 @@ impl Workspaces for GitWorkspaces {
         }
         leftovers
     }
+}
+
+pub(crate) async fn branch_revision(
+    worktree: &Path,
+    branch: &str,
+) -> Result<String, WorkspaceError> {
+    let reference = format!("refs/heads/{branch}");
+    Ok(git(Some(worktree), ["rev-parse", "--verify", &reference])
+        .await?
+        .trim()
+        .to_owned())
 }
 
 fn clone_paths<'a>(

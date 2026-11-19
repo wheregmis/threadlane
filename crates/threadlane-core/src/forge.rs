@@ -54,12 +54,20 @@ pub enum CommentTarget {
 #[error("forge: {0}")]
 pub struct ForgeError(pub String);
 
+/// The approved commit and the branch it may update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovedBranch<'a> {
+    /// The writable branch name.
+    pub name: &'a str,
+    /// The full commit ID to push.
+    pub revision: &'a str,
+}
+
 /// Performs approved repository effects with the forge tools' existing logins (invariant 8).
 #[async_trait]
 pub trait Forge: Send + Sync + fmt::Debug {
-    /// Pushes `branch` from the worktree at `worktree` to its remote. Safe to
-    /// repeat.
-    async fn push(&self, worktree: &Path, branch: &str) -> Result<(), ForgeError>;
+    /// Pushes the approved commit to the named branch on the remote. Safe to repeat.
+    async fn push(&self, worktree: &Path, branch: ApprovedBranch<'_>) -> Result<(), ForgeError>;
 
     /// Pushes `branch`, then opens a draft pull request from it onto `base`.
     /// Returns the pull request's URL. Not safe to repeat: a second call may
@@ -69,7 +77,7 @@ pub trait Forge: Send + Sync + fmt::Debug {
     async fn open_draft_pull_request(
         &self,
         worktree: &Path,
-        branch: &str,
+        branch: ApprovedBranch<'_>,
         base: &str,
         title: &str,
         body: &str,
