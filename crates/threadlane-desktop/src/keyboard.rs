@@ -445,7 +445,9 @@ pub(super) fn send_hint(cx: &App) -> String {
 
 #[cfg(test)]
 mod history_scroll_tests {
-    use super::*;
+    use gpui_kit::{Bounds, point, px, size};
+
+    use super::{HistoryRow, HistoryScroll};
 
     #[test]
     fn reopening_earlier_history_keeps_the_same_visible_row_and_pixel_position() {
