@@ -618,3 +618,18 @@ async fn the_gate_refuses_a_call_it_cannot_ask_about_and_opens_nothing() {
     assert!(matches!(refused, Err(ToolError::Blocked(_))), "{refused:?}");
     assert!(hub.db.open_decisions().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_decision_reminder_is_claimed_once() {
+    let hub = asked().await;
+    for first in [true, false] {
+        let reply = hub
+            .api
+            .decisions(DecisionRequest::Remind {
+                decision: DecisionId(1),
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply, DecisionReply::Reminder { first });
+    }
+}

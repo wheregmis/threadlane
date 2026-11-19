@@ -974,6 +974,12 @@ impl HubApi for ClientApi {
                     rule: self.rule_summary(rule).await?,
                 })
             }
+            DecisionRequest::Remind { decision } => Ok(DecisionReply::Reminder {
+                first: db
+                    .claim_reminder(decision, inner.clock.now())
+                    .await
+                    .map_err(api_error)?,
+            }),
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
     }
