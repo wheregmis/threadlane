@@ -6169,6 +6169,60 @@ async fn a_saved_mixed_backend_order_can_be_kept_or_cleared() {
 }
 
 #[tokio::test]
+async fn agent_models_follow_the_provider_after_reordering_and_reopening() {
+    use BackendKind::{Claude, Codex};
+
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    work.org(OrgRequest::CreateAgent {
+        name: "Picker".into(),
+        role: "reviewer".into(),
+        instructions: String::new(),
+        backends: vec![Claude, Codex],
+    })
+    .await
+    .unwrap();
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    let mut fields = state.open_agent_edit("work", "Picker").unwrap();
+    let codex_first = BACKENDS
+        .iter()
+        .position(|(_, kinds)| *kinds == [Codex, Claude])
+        .unwrap();
+    state.agent_edit_mut().unwrap().backends = codex_first;
+    for (kind, value) in &mut fields.models {
+        match kind {
+            Claude => *value = "opus".into(),
+            Codex => *value = "private-model-id".into(),
+            _ => {}
+        }
+    }
+    for clear_fallback in [false, true] {
+        if clear_fallback {
+            fields
+                .models
+                .iter_mut()
+                .find(|(kind, _)| *kind == Claude)
+                .unwrap()
+                .1
+                .clear();
+        }
+        let request = state.agent_update(&fields).unwrap().unwrap();
+        core.update_agent(Some("work"), request).await.unwrap();
+        state.close_agent_edit();
+        state.apply(refresh(&core).await);
+        let reopened = state.open_agent_edit("work", "Picker").unwrap();
+        assert_eq!(
+            state.agent_edit().unwrap().model_backends(),
+            [Codex, Claude]
+        );
+        assert_eq!(reopened.models, fields.models);
+        assert_eq!(state.agent_update(&reopened), Ok(None));
+        fields = reopened;
+    }
+}
+
+#[tokio::test]
 async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed() {
     let work = FakeHub::new("Work", Vec::new());
     let (_dir, core) = core(&[("work", &work)]);

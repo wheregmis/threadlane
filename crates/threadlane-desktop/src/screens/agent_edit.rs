@@ -71,16 +71,22 @@ pub(super) fn backend_picker(
             BackendKind::Claude => &["sonnet", "opus", "haiku"],
             BackendKind::Codex => &["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra"],
         };
+        let selected = input.read(cx).value();
+        let current = if selected.is_empty() {
+            "Default model".into()
+        } else {
+            selected
+        };
         let target = input.clone();
         h_flex()
             .gap(SM)
             .child(meta(format!("{kind} model"), cx))
-            .child(div().flex_1().child(field(input)))
             .child(
                 button(SharedString::from(format!("{id}-{kind}-models")))
                     .outline()
-                    .label("Choose")
-                    .accessibility_label(format!("Choose {kind} model"))
+                    .label(current.clone())
+                    .icon(AppIcon::ChevronDown)
+                    .accessibility_label(format!("{kind} model, {current}"))
                     .dropdown_menu(move |mut menu, _, cx| {
                         let selected = target.read(cx).value();
                         for value in std::iter::once("").chain(presets.iter().copied()) {
@@ -94,11 +100,21 @@ pub(super) fn backend_picker(
                                 .checked(selected.trim() == value)
                                 .on_click(move |_, window, cx| {
                                     target
-                                        .update(cx, |input, cx| input.set_value(value, window, cx))
+                                        .update(cx, |input, cx| input.set_value(value, window, cx));
+                                    window.refresh();
                                 }),
                             );
                         }
-                        menu
+                        let target = target.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new("Custom model ID…")
+                                .checked(
+                                    !selected.is_empty() && !presets.contains(&selected.as_str()),
+                                )
+                                .on_click(move |_, window, cx| {
+                                    custom_model(kind, target.clone(), window, cx);
+                                }),
+                        )
                     }),
             )
     };
@@ -146,6 +162,29 @@ pub(super) fn backend_picker(
         }
     }
     rows
+}
+
+fn custom_model(kind: BackendKind, target: Entity<InputState>, window: &mut Window, cx: &mut App) {
+    let value = target.read(cx).value();
+    let draft = cx.new(|cx| {
+        let mut input = InputState::new(window, cx).placeholder("Model ID");
+        input.set_value(value, window, cx);
+        input
+    });
+    window.open_alert_dialog(cx, move |dialog, _, _| {
+        let (draft, target) = (draft.clone(), target.clone());
+        dialog
+            .confirm()
+            .title(format!("Custom {kind} model"))
+            .child(field(&draft))
+            .ok_text("Use model")
+            .on_ok(move |_, window, cx| {
+                let value = draft.read(cx).value().trim().to_owned();
+                target.update(cx, |input, cx| input.set_value(value, window, cx));
+                window.refresh();
+                true
+            })
+    });
 }
 
 impl Desktop {
