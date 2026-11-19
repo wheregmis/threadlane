@@ -9009,6 +9009,7 @@ name = "threadlane-desktop"
 version = "0.1.54"
 dependencies = [
  "async-trait",
+ "futures-util",
  "gpui-kit",
  "image",
  "jiff",

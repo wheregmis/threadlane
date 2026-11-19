@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures_util::{StreamExt as _, stream};
 use serde_json::Value as Json;
 use threadlane_client::{
     ClientCore, ClientError, FeedStream, HubStatus, IssuedCode, SpaceAnswer, SpaceDecisions,
@@ -739,9 +740,8 @@ pub fn decision_of_tag(tag: &str) -> Option<(&str, &str)> {
         .filter(|(_, id)| DecisionId::parse(id).is_some())
 }
 
-/// What one refresh learned from every paired hub. Made by [`refresh`],
-/// applied with [`AppState::apply`].
-#[derive(Debug)]
+/// What one refresh pass learned from one or more paired hubs.
+#[derive(Debug, Default)]
 pub struct Refresh {
     statuses: Vec<HubStatus>,
     projects: Vec<(String, Result<Vec<ProjectSummary>, ClientError>)>,
@@ -758,6 +758,30 @@ pub struct Refresh {
 }
 
 impl Refresh {
+    /// The paired name of a single-hub result from [`refresh_each`].
+    #[must_use]
+    pub fn refreshed_space(&self) -> Option<&str> {
+        match self.statuses.as_slice() {
+            [status] => Some(&status.name),
+            _ => None,
+        }
+    }
+
+    fn append(&mut self, other: Self) {
+        self.statuses.extend(other.statuses);
+        self.projects.extend(other.projects);
+        self.agents.extend(other.agents);
+        self.clients.extend(other.clients);
+        self.decisions.extend(other.decisions);
+        self.running.extend(other.running);
+        self.leads.extend(other.leads);
+        self.machines.extend(other.machines);
+        self.recent.extend(other.recent);
+        self.recorded.extend(other.recorded);
+        self.held.extend(other.held);
+        self.tasks.extend(other.tasks);
+    }
+
     /// Whether this refresh supplied tasks and lead status for the named project.
     pub fn project_parts(&self, space: &str, project: &str) -> (bool, bool) {
         let active = self.projects.iter().any(|(name, listed)| {
@@ -786,14 +810,66 @@ impl Refresh {
 /// clients, pending decisions, running tasks, machines, and newest items. A
 /// hub that does not answer is reported as such; the others are unaffected.
 pub async fn refresh(core: &ClientCore) -> Refresh {
-    let statuses = core.status().await;
-    let mut projects = Vec::new();
-    let mut agents = Vec::new();
-    let mut clients = Vec::new();
-    let mut tasks = Vec::new();
-    let mut leads = Vec::new();
-    for status in statuses.iter().filter(|status| status.is_reachable()) {
-        let name = status.name.as_str();
+    let mut parts = Vec::with_capacity(core.hubs().len());
+    refresh_each(core, |index, part| {
+        parts.push((index, part));
+        true
+    })
+    .await;
+    // The full snapshot API preserves the stable pairing order.
+    parts.sort_by_key(|(index, _)| *index);
+    let mut refreshed = Refresh::default();
+    for (_, part) in parts {
+        refreshed.append(part);
+    }
+    refreshed
+}
+
+const HUB_REFRESH_LIMIT: usize = 4;
+
+/// Refreshes at most four paired hubs at a time, yielding each complete hub
+/// result immediately rather than waiting for slow peers. Returning false from
+/// the callback stops the pass (such as when the desktop has closed).
+pub async fn refresh_each(core: &ClientCore, mut ready: impl FnMut(usize, Refresh) -> bool) {
+    let mut parts = stream::iter(core.hubs().iter().enumerate())
+        .map(|(index, hub)| async move { (index, refresh_hub(core, hub).await) })
+        .buffer_unordered(HUB_REFRESH_LIMIT);
+    while let Some((index, part)) = parts.next().await {
+        if !ready(index, part) {
+            break;
+        }
+    }
+}
+
+async fn refresh_hub(core: &ClientCore, hub: &threadlane_client::PairedHub) -> Refresh {
+    let name = hub.name.as_str();
+    let (mut part, decisions, running, machines, recent, recorded, held) = tokio::join!(
+        refresh_work(core, hub),
+        core.decisions(Some(name)),
+        core.running(Some(name)),
+        core.machines(Some(name)),
+        core.recent(Some(name), RECENT),
+        core.recorded_count(Some(name)),
+        core.held_results(Some(name)),
+    );
+    part.decisions = decisions.unwrap_or_default();
+    part.running = running.unwrap_or_default();
+    part.machines = machines.unwrap_or_default();
+    part.recent = recent.unwrap_or_default();
+    part.recorded = recorded.unwrap_or_default();
+    part.held = held.unwrap_or_default();
+    part
+}
+
+async fn refresh_work(core: &ClientCore, hub: &threadlane_client::PairedHub) -> Refresh {
+    let name = hub.name.as_str();
+    let status = core.status_for(hub).await;
+    let reachable = status.is_reachable();
+    let mut part = Refresh {
+        statuses: vec![status],
+        ..Refresh::default()
+    };
+    if reachable {
         let (work, space_agents, space_clients) = tokio::join!(
             core.work(name),
             core.agents(Some(name)),
@@ -801,9 +877,10 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
         );
         match work {
             Ok(work) => {
-                projects.push((name.to_owned(), Ok(work.projects)));
-                tasks.push((name.to_owned(), Ok(work.tasks)));
-                leads.extend(work.leads.into_iter().map(|lead| (name.to_owned(), lead)));
+                part.projects.push((name.to_owned(), Ok(work.projects)));
+                part.tasks.push((name.to_owned(), Ok(work.tasks)));
+                part.leads
+                    .extend(work.leads.into_iter().map(|lead| (name.to_owned(), lead)));
             }
             Err(error) => {
                 let listed = core
@@ -812,12 +889,13 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
                     .map(|listed| listed.projects);
                 if threadlane_client::unknown_overview(&error, "work") {
                     if let Ok(listed) = &listed {
-                        tasks.push((name.to_owned(), all_tasks(core, name, listed).await));
+                        part.tasks
+                            .push((name.to_owned(), all_tasks(core, name, listed).await));
                         for project in listed.iter().filter(|project| !project.archived) {
                             if let Ok((running_since, stopped)) =
                                 core.lead_status(Some(name), Some(&project.name)).await
                             {
-                                leads.push((
+                                part.leads.push((
                                     name.to_owned(),
                                     threadlane_core::client::ProjectLeadStatus {
                                         project: project.name.clone(),
@@ -829,37 +907,15 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
                         }
                     }
                 } else {
-                    tasks.push((name.to_owned(), Err(error)));
+                    part.tasks.push((name.to_owned(), Err(error)));
                 }
-                projects.push((name.to_owned(), listed));
+                part.projects.push((name.to_owned(), listed));
             }
         }
-        agents.push((name.to_owned(), space_agents));
-        clients.push((name.to_owned(), space_clients));
+        part.agents.push((name.to_owned(), space_agents));
+        part.clients.push((name.to_owned(), space_clients));
     }
-    // The only error with no space named is "no hub paired": nothing to show.
-    let (decisions, running, machines, recent, recorded, held) = tokio::join!(
-        core.decisions(None),
-        core.running(None),
-        core.machines(None),
-        core.recent(None, RECENT),
-        core.recorded_count(None),
-        core.held_results(None),
-    );
-    Refresh {
-        statuses,
-        leads,
-        projects,
-        agents,
-        clients,
-        decisions: decisions.unwrap_or_default(),
-        running: running.unwrap_or_default(),
-        machines: machines.unwrap_or_default(),
-        recent: recent.unwrap_or_default(),
-        recorded: recorded.unwrap_or_default(),
-        held: held.unwrap_or_default(),
-        tasks,
-    }
+    part
 }
 
 /// The tasks of every project in `projects` of `space`, each once; the
@@ -2138,6 +2194,27 @@ impl AppState {
     /// Applies a refresh with the timestamp of its connection check.
     pub fn apply_at(&mut self, refresh: Refresh, now: Timestamp) {
         self.checking_connections = false;
+        self.apply_snapshot(refresh, now, false);
+    }
+
+    /// Applies just the hub that answered, preserving other hubs and the
+    /// connection check in progress until the caller has all results.
+    pub fn apply_partial(&mut self, refresh: Refresh) {
+        self.apply_snapshot(refresh, SystemClock.now(), true);
+    }
+
+    /// Reconciles partial refresh state with its complete pairing roster.
+    /// In particular, a pairing operation can change the roster before its
+    /// follow-up cleanup reports an error.
+    pub fn retain_paired_spaces(&mut self, paired: &[String]) {
+        let known: HashSet<_> = paired.iter().map(String::as_str).collect();
+        self.spaces
+            .retain(|space| known.contains(space.name.as_str()));
+        self.queue
+            .retain(|queued| known.contains(queued.space.as_str()));
+    }
+
+    fn apply_snapshot(&mut self, refresh: Refresh, now: Timestamp, partial: bool) {
         let Refresh {
             statuses,
             leads,
@@ -2152,12 +2229,20 @@ impl AppState {
             held,
             tasks,
         } = refresh;
-        let mut spaces = Vec::with_capacity(statuses.len());
+        let mut spaces = if partial {
+            std::mem::take(&mut self.spaces)
+        } else {
+            Vec::with_capacity(statuses.len())
+        };
         for status in statuses {
-            let mut space = self
-                .space(&status.name)
-                .cloned()
-                .unwrap_or_else(|| Space::new(&status.name));
+            let existing = spaces.iter().position(|space| space.name == status.name);
+            let mut space = if let Some(at) = existing {
+                std::mem::replace(&mut spaces[at], Space::new(&status.name))
+            } else {
+                self.space(&status.name)
+                    .cloned()
+                    .unwrap_or_else(|| Space::new(&status.name))
+            };
             (space.reached_by, space.local_socket) = match status.reach {
                 threadlane_client::Reach::Socket { socket } => {
                     (format!("Unix socket {}", socket.display()), Some(socket))
@@ -2177,7 +2262,11 @@ impl AppState {
                     Reach::Unreachable(describe(&error))
                 }
             };
-            spaces.push(space);
+            if let Some(at) = existing {
+                spaces[at] = space;
+            } else {
+                spaces.push(space);
+            }
         }
         let find = |spaces: &mut Vec<Space>, name: &str| -> Option<usize> {
             spaces.iter().position(|space| space.name == name)

@@ -25,13 +25,15 @@ impl RefreshGate {
         self.pairing_revision = self.pairing_revision.wrapping_add(1);
     }
 
+    /// Partial results must belong to the current set of pairings.
+    pub(crate) fn is_current(&self, revision: u64) -> bool {
+        revision == self.pairing_revision
+    }
+
     /// Returns whether to apply the response and whether to start another pass.
     pub(crate) fn finish(&mut self, revision: u64) -> (bool, bool) {
         self.running = false;
-        (
-            revision == self.pairing_revision,
-            std::mem::take(&mut self.queued),
-        )
+        (self.is_current(revision), std::mem::take(&mut self.queued))
     }
 }
 
