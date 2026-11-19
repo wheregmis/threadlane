@@ -16,8 +16,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::Mode;
 use threadlane_desktop::{
-    Consequence, EmptyRegion, Line, ModeChoice, Part, TaskGroup, When, message_limit,
-    newest_message,
+    Consequence, EmptyRegion, Line, ModeChoice, Part, ProjectTasksViewMode, SpaceTasksViewMode,
+    TaskGroup, When, build_task_dag, message_limit, newest_message, status_label, work_elapsed,
 };
 
 use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
@@ -59,40 +59,75 @@ impl Desktop {
             })
             .unwrap_or_default();
 
-        let header_actions = (!active_projects.is_empty()).then(|| {
+        let view_mode = self.state.space_tasks_view_mode();
+        let mode_toggle = ButtonGroup::new("space-tasks-view-mode")
+            .child(
+                button("space-tasks-mode-list")
+                    .small()
+                    .outline()
+                    .icon(AppIcon::FileText)
+                    .label("List")
+                    .selected(view_mode == SpaceTasksViewMode::List)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state
+                            .set_space_tasks_view_mode(SpaceTasksViewMode::List);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                button("space-tasks-mode-graph")
+                    .small()
+                    .outline()
+                    .icon(AppIcon::GitFork)
+                    .label("Graph")
+                    .selected(view_mode == SpaceTasksViewMode::Graph)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state
+                            .set_space_tasks_view_mode(SpaceTasksViewMode::Graph);
+                        cx.notify();
+                    })),
+            );
+
+        let new_task_button = (!active_projects.is_empty()).then(|| {
             let in_space = space.to_owned();
             let projects = active_projects.clone();
             let view = cx.entity().downgrade();
-            h_flex().child(
-                button("space-new-task")
-                    .small()
-                    .primary()
-                    .icon(AppIcon::ListPlus)
-                    .label("New task")
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for project in &projects {
-                            let (space, project, view) =
-                                (in_space.clone(), project.clone(), view.clone());
-                            menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
-                                move |_, _, cx| {
-                                    let _ = view.update(cx, |this, cx| {
-                                        this.state.open_task_form(&space, &project, true);
-                                        this.go(
-                                            Screen::Project {
-                                                space: space.clone(),
-                                                project: project.clone(),
-                                                tab: Tab::Tasks,
-                                            },
-                                            cx,
-                                        );
-                                    });
-                                },
-                            ));
-                        }
-                        menu
-                    }),
-            )
+            button("space-new-task")
+                .small()
+                .primary()
+                .icon(AppIcon::ListPlus)
+                .label("New task")
+                .dropdown_menu(move |mut menu, _, _| {
+                    for project in &projects {
+                        let (space, project, view) =
+                            (in_space.clone(), project.clone(), view.clone());
+                        menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
+                            move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.state.open_task_form(&space, &project, true);
+                                    this.go(
+                                        Screen::Project {
+                                            space: space.clone(),
+                                            project: project.clone(),
+                                            tab: Tab::Tasks,
+                                        },
+                                        cx,
+                                    );
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                })
         });
+
+        let header_actions = Some(
+            h_flex()
+                .gap(SM)
+                .items_center()
+                .child(mode_toggle)
+                .children(new_task_button),
+        );
 
         let mut list = v_flex()
             .flex_1()
@@ -290,6 +325,27 @@ impl Desktop {
                 }
 
                 list = list.child(filters);
+
+                if view_mode == SpaceTasksViewMode::Graph {
+                    let filtered_tasks: Vec<_> = known
+                        .tasks
+                        .iter()
+                        .filter(|summary| {
+                            filter
+                                .project
+                                .as_deref()
+                                .is_none_or(|p| summary.project == p)
+                                && filter.agent.as_deref().is_none_or(|a| summary.agent == a)
+                                && filter
+                                    .status
+                                    .is_none_or(|g| TaskGroup::of(summary.task.status) == g)
+                        })
+                        .cloned()
+                        .collect();
+                    let dag = build_task_dag(&filtered_tasks, when);
+                    list = list.child(self.task_dag_view("space-task-dag", space, dag, cx));
+                    return list.into_any_element();
+                }
 
                 if view.sections.is_empty() {
                     let clear_space = space.to_owned();
@@ -845,12 +901,144 @@ impl Desktop {
         }
         let column_count = cells.len();
         let board_min = BOARD_COLUMN_MIN * column_count + SM * column_count.saturating_sub(1);
+        let view_mode = self.state.project_tasks_view();
+        let mode_switcher = h_flex().justify_between().items_center().gap(SM).child(
+            ButtonGroup::new("project-tasks-view-mode")
+                .child(
+                    button("project-tasks-mode-board")
+                        .small()
+                        .outline()
+                        .icon(AppIcon::Columns3)
+                        .label("Board")
+                        .selected(view_mode == ProjectTasksViewMode::Board)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state
+                                .set_project_tasks_view(ProjectTasksViewMode::Board);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("project-tasks-mode-list")
+                        .small()
+                        .outline()
+                        .icon(AppIcon::FileText)
+                        .label("List")
+                        .selected(view_mode == ProjectTasksViewMode::List)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state
+                                .set_project_tasks_view(ProjectTasksViewMode::List);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("project-tasks-mode-graph")
+                        .small()
+                        .outline()
+                        .icon(AppIcon::GitFork)
+                        .label("Graph")
+                        .selected(view_mode == ProjectTasksViewMode::Graph)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state
+                                .set_project_tasks_view(ProjectTasksViewMode::Graph);
+                            cx.notify();
+                        })),
+                ),
+        );
+
+        let project_tasks = self
+            .state
+            .project(space, project)
+            .map(|view| view.tasks.as_slice())
+            .unwrap_or_default();
+
         let board = match self.state.project_gap(space, project, Part::Tasks) {
             Some(gap) => div()
                 .flex_1()
                 .min_w_0()
                 .child(gap_line(&gap, "tasks", space, cx))
                 .into_any_element(),
+            None if view_mode == ProjectTasksViewMode::Graph => {
+                let dag = build_task_dag(project_tasks, when);
+                self.task_dag_view("project-task-dag", space, dag, cx)
+            }
+            None if view_mode == ProjectTasksViewMode::List => {
+                let mut ordered: Vec<_> = project_tasks.iter().collect();
+                ordered.sort_by_key(|s| {
+                    std::cmp::Reverse((s.completed_at.unwrap_or(s.task.created_at), s.task.id))
+                });
+                let mono = cx.theme().mono_font_family.clone();
+                let mut rows = v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap(XS)
+                    .overflow_y_scrollbar()
+                    .id("project-tasks-list");
+                for summary in ordered {
+                    let task = &summary.task;
+                    let screen = Screen::Task {
+                        space: space.to_owned(),
+                        task: task.id,
+                    };
+                    let status = status_label(task.status, task.waiting_reason.as_deref());
+                    let status_kind = Status::task(status);
+                    let quiet = task.status == threadlane_core::model::TaskStatus::Done;
+                    let time = work_elapsed(summary, when).unwrap_or_else(|| {
+                        when.moment(summary.completed_at.unwrap_or(task.created_at))
+                    });
+                    rows = rows.child(
+                        button(SharedString::from(format!("project-list-task-{}", task.id)))
+                            .ghost()
+                            .w_full()
+                            .min_h(CONTROL_HEIGHT)
+                            .rounded(ROW_RADIUS)
+                            .px(SM)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                            )
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap(SM)
+                                    .items_center()
+                                    .children((!quiet).then(|| status_dot(status_kind, cx)))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(TYPE_META)
+                                            .font_family(mono.clone())
+                                            .font_features(TABULAR.clone())
+                                            .text_color(muted)
+                                            .child(task.id.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(TYPE_BODY)
+                                            .text_color(if quiet {
+                                                muted
+                                            } else {
+                                                cx.theme().foreground
+                                            })
+                                            .child(task.title.clone()),
+                                    )
+                                    .child(meta(summary.agent.clone(), cx).flex_none())
+                                    .child(
+                                        meta(time, cx)
+                                            .flex_none()
+                                            .font_features(TABULAR.clone())
+                                            .text_right(),
+                                    )
+                                    .children(
+                                        (!quiet).then(|| status_badge(status, status_kind, cx)),
+                                    ),
+                            ),
+                    );
+                }
+                rows.into_any_element()
+            }
             None => div()
                 .relative()
                 .flex_1()
@@ -892,6 +1080,7 @@ impl Desktop {
             .min_h_0()
             .min_w_0()
             .gap(MD)
+            .child(mode_switcher)
             .when(!decisions.is_empty(), |column| {
                 // Capped and scrollable so decisions never push the board off the page.
                 column.child(
@@ -1377,10 +1566,7 @@ impl Desktop {
                 space: space.to_owned(),
                 task: summary.task.id,
             };
-            let status = threadlane_desktop::status_label(
-                summary.task.status,
-                summary.task.waiting_reason.as_deref(),
-            );
+            let status = status_label(summary.task.status, summary.task.waiting_reason.as_deref());
             side = side
                 .child(
                     link(

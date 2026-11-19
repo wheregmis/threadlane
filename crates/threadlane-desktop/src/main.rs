@@ -1699,7 +1699,7 @@ impl Render for Desktop {
                 tab,
             } => self.project(&space, &project, tab, &when, cx),
             Screen::Task { space, task } => self.task(&space, task, &when, cx),
-            Screen::Agents(scope) => self.agents(scope.as_deref(), cx),
+            Screen::Agents(scope) => self.agents(scope.as_deref(), &when, cx),
             Screen::SpaceTasks { space } => self.space_tasks(&space, &when, cx),
             Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),

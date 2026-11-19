@@ -3,42 +3,88 @@
 //! row per project and one cell per agent. A cell changes that agent's mode
 //! in that project, binding it there from "—".
 
-use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 use threadlane_core::model::BackendKind;
-use threadlane_desktop::{EmptyRegion, Part};
+use threadlane_desktop::{EmptyRegion, Part, TeamViewMode, When};
 
 use super::agent_edit::backend_picker;
 use super::project::{MODES, mode_name};
 use super::{empty, gap_line};
 use crate::Desktop;
-use crate::components::{button, card, field, heading, section};
+use crate::components::{button, card, field, page_header, section};
 use crate::icons::AppIcon;
 use crate::tokens::{
     AGENT_CARD_WIDTH, FORM_WIDTH, GRID_CELL_WIDTH, LG, SM, TYPE_BODY, TYPE_META, XS,
 };
 
 impl Desktop {
-    pub(crate) fn agents(&self, scope: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn agents(
+        &self,
+        scope: Option<&str>,
+        when: &When,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let view = cx.entity().downgrade();
+        let team_mode = self.state.team_view_mode();
+        let mode_toggle = h_flex().child(
+            ButtonGroup::new("team-view-mode")
+                .child(
+                    button("team-mode-overview")
+                        .small()
+                        .outline()
+                        .icon(AppIcon::Columns3)
+                        .label("Cards & Matrix")
+                        .selected(team_mode == TeamViewMode::Overview)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state.set_team_view_mode(TeamViewMode::Overview);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("team-mode-topology")
+                        .small()
+                        .outline()
+                        .icon(AppIcon::GitFork)
+                        .label("Topology")
+                        .selected(team_mode == TeamViewMode::Topology)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state.set_team_view_mode(TeamViewMode::Topology);
+                            cx.notify();
+                        })),
+                ),
+        );
         let mut screen = v_flex()
             .flex_1()
             .min_h_0()
             .overflow_y_scrollbar()
             .id("agents")
             .gap(LG)
-            .child(heading("Team"));
+            .child(page_header("Team", None, Some(mode_toggle)));
         for space in self
             .state
             .spaces()
             .iter()
             .filter(|space| scope.is_none_or(|name| space.name == name))
         {
+            if team_mode == TeamViewMode::Topology {
+                let topo = self.state.agent_topology(
+                    &space.name,
+                    self.state.topology_project(&space.name),
+                    when,
+                );
+                screen = screen
+                    .child(section(format!("{} · Org & handoffs", space.name)))
+                    .child(self.agent_topology_view(&space.name, topo, cx));
+                continue;
+            }
             let mut cards = h_flex().gap(SM).flex_wrap().items_start();
             for agent in &space.agents {
                 let backends = if agent.backends.is_empty() {
