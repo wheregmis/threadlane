@@ -80,6 +80,8 @@ pub fn question_parts(question: &str) -> (String, Option<String>) {
 pub struct DecisionDisplay {
     /// The card's space and decision ID.
     pub key: DecisionKey,
+    /// The project the decision belongs to.
+    pub project: String,
     /// The title: the whole question, or its first line or sentence when it is long.
     pub question: String,
     /// The rest of a long question, as Markdown.
@@ -122,6 +124,7 @@ impl AppState {
         let (question, body) = question_parts(&decision.question);
         DecisionDisplay {
             key,
+            project: project.to_owned(),
             question,
             body,
             options: decision
@@ -175,6 +178,7 @@ impl AppState {
         let (question, body) = question_parts(&card.question);
         Some(DecisionDisplay {
             key,
+            project: project.to_owned(),
             question,
             body,
             options: card.options.clone(),

@@ -932,9 +932,41 @@ impl Desktop {
                 if self.state.activity_open(&space, task) {
                     self.load_task_activity(space.clone(), task, None, cx);
                 }
+                let for_repos = Arc::clone(&core);
                 self.run(
                     async move { load_task_overview(&*core.read().await, &space, task).await },
-                    |this, loaded, _| this.state.apply_task(loaded),
+                    move |this, loaded, cx| {
+                        this.state.apply_task(loaded);
+                        if let Screen::Task { space, task } = &this.screen
+                            && let Some(project) = this
+                                .state
+                                .task(space, *task)
+                                .map(|detail| detail.summary.project.clone())
+                            && this.state.project_gap(
+                                space,
+                                &project,
+                                threadlane_desktop::Part::Repositories,
+                            ) == Some(threadlane_desktop::Gap::Loading)
+                        {
+                            let space = space.clone();
+                            let core = Arc::clone(&for_repos);
+                            this.run(
+                                async move {
+                                    let repositories = core
+                                        .read()
+                                        .await
+                                        .repositories(Some(&space), Some(&project))
+                                        .await;
+                                    (space, project, repositories)
+                                },
+                                |this, (space, project, repositories), _| {
+                                    this.state
+                                        .apply_repositories(&space, &project, repositories);
+                                },
+                                cx,
+                            );
+                        }
+                    },
                     cx,
                 );
             }
