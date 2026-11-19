@@ -6967,6 +6967,7 @@ async fn agent_topology_builds_three_tier_org_and_lights_up_active_delegations()
         models: Default::default(),
         tools: serde_json::json!([]),
         requirements: Default::default(),
+        skills: Vec::new(),
     });
     *hub.tasks.lock().expect("lock") = vec![running];
     let (_dir, core) = core(&[("work", &hub)]);
@@ -7020,6 +7021,7 @@ async fn agent_topology_shows_general_handoffs_and_keeps_queued_lead_edge_pendin
         models: Default::default(),
         tools: serde_json::json!([]),
         requirements: Default::default(),
+        skills: Vec::new(),
     });
     *hub.tasks.lock().expect("lock") = vec![general_run, queued_api];
     let (_dir, core) = core(&[("work", &hub)]);
