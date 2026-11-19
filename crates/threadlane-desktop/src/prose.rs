@@ -248,6 +248,14 @@ fn humanize_plain_text(text: &str, when: Option<&crate::When>) -> String {
             break;
         };
         pos += ch.len_utf8();
+        // Preserve explicit Markdown links (`[label](dest)` / `[label][ref]`)
+        // verbatim so link destinations are never rewritten.
+        if ch == '['
+            && let Some(len) = explicit_link(rest)
+        {
+            pos = start + len;
+            continue;
+        }
         if !boundary(text[..start].chars().next_back()) {
             continue;
         }

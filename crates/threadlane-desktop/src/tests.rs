@@ -6734,7 +6734,9 @@ fn prose_humanizes_iso_timestamps_and_long_shas_outside_code_and_urls() {
         offset_minutes: -300,
     };
     let input = "Merged 9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b at 2026-11-18T17:19:47Z \
-                 (keep `9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b` and \
+                 (keep `9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b`, \
+                 [commit](https://example.com/commit/bcee6b3ac19fc5a6d3039fd55d4813bdfd883568), \
+                 2026-11-18T17:19:€Z, and \
                  https://github.com/org/repo/commit/9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b).";
     let rendered = markdown_source_with_time(input, Some(&local));
     assert!(rendered.contains("Merged `9667947` at 12:19"), "{rendered}");
@@ -6742,6 +6744,13 @@ fn prose_humanizes_iso_timestamps_and_long_shas_outside_code_and_urls() {
         rendered.contains("`9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b`"),
         "{rendered}"
     );
+    assert!(
+        rendered.contains(
+            "[commit](https://example.com/commit/bcee6b3ac19fc5a6d3039fd55d4813bdfd883568)"
+        ),
+        "{rendered}"
+    );
+    assert!(rendered.contains("2026-11-18T17:19:€Z"), "{rendered}");
     assert!(
         rendered.contains(
             "https://github.com/org/repo/commit/9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b"

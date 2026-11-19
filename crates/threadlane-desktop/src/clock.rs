@@ -87,7 +87,7 @@ pub fn format_count(value: u128) -> String {
 #[must_use]
 pub fn parse_iso_utc(text: &str) -> Option<Timestamp> {
     let bytes = text.as_bytes();
-    if bytes.len() < 20 || !text.ends_with('Z') {
+    if !text.is_ascii() || bytes.len() < 20 || !text.ends_with('Z') {
         return None;
     }
     if bytes[4] != b'-'
@@ -232,6 +232,7 @@ mod tests {
         assert_eq!(frac, Timestamp::from_millis(1_794_958_200_250));
         assert!(parse_iso_utc("2026-11-17").is_none());
         assert!(parse_iso_utc("2026-13-01T00:00:00Z").is_none());
+        assert!(parse_iso_utc("2026-11-18T17:19:€Z").is_none());
         assert!(parse_iso_utc("not-a-timestamp").is_none());
     }
 }
