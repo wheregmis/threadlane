@@ -114,6 +114,15 @@ fn sidebar_entries(state: &AppState) -> Vec<SidebarEntry<'_>> {
     entries.extend(
         [
             (
+                "usage",
+                AppIcon::Columns3,
+                "Usage",
+                Screen::Work {
+                    space: space.name.clone(),
+                    page: crate::WorkPage::Usage(30),
+                },
+            ),
+            (
                 "agents",
                 AppIcon::Bot,
                 "Team",

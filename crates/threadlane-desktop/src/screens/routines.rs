@@ -150,6 +150,10 @@ impl Desktop {
         let mut gaps = self.state.routines_space_gaps();
         gaps.retain(|(space, _)| scope.is_none_or(|name| *space == name));
         let mut list = v_flex().gap(XL).max_w(READING_WIDTH);
+        if let Some(space) = scope {
+            list =
+                list.child(self.work_link("agenda", "Agenda", space, crate::WorkPage::Agenda, cx));
+        }
         if groups.is_empty() && gaps.is_empty() {
             list = list.child(empty(EmptyRegion::AllRoutines, cx));
         }
@@ -230,6 +234,14 @@ impl Desktop {
         );
         let details = {
             let heading = format!("Routine #{id}");
+            let view = cx.entity().downgrade();
+            let screen = Screen::Work {
+                space: space.to_owned(),
+                page: crate::WorkPage::History {
+                    timer: id,
+                    before: None,
+                },
+            };
             let target = format!("{space} / {project}");
             let schedule = schedule.clone();
             let (timing, history) = (row.next.clone(), format!("{} · {}", row.by, row.fired));
@@ -248,13 +260,25 @@ impl Desktop {
                         history.clone(),
                         instruction.clone(),
                     );
+                    let (view, screen) = (view.clone(), screen.clone());
                     window.open_dialog(cx, move |dialog, window, cx| {
+                        let (view, screen) = (view.clone(), screen.clone());
                         dialog.title(heading.clone()).width(FORM_WIDTH).child(
                             v_flex()
                                 .gap(SM)
                                 .child(meta(target.clone(), cx))
                                 .child(meta(format!("{schedule} · {timing}"), cx))
                                 .child(meta(history.clone(), cx))
+                                .child(
+                                    button("routine-detail-history")
+                                        .small()
+                                        .label("Run history")
+                                        .on_click(move |_, window, cx| {
+                                            window.close_dialog(cx);
+                                            let _ = view
+                                                .update(cx, |this, cx| this.go(screen.clone(), cx));
+                                        }),
+                                )
                                 .child(section("Instructions"))
                                 .child(
                                     div()
@@ -280,9 +304,21 @@ impl Desktop {
         let view = cx.entity().downgrade();
         let actions = (!self.state.is_archived(space, project)).then(|| {
             let (space, project) = (space.to_owned(), project.to_owned());
+            let manual = row.can_run_once.then(|| {
+                let (space, project) = (space.clone(), project.clone());
+                button(SharedString::from(format!("run-once-{key}")))
+                    .small()
+                    .label("Run once")
+                    .disabled(self.queuing_routine(&space, id))
+                    .accessibility_label(format!("Run routine {id} once in {project}"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.queue_routine(space.clone(), project.clone(), id, cx)
+                    }))
+            });
             let cancel = Consequence::CancelRoutine(space.clone(), project.clone(), id);
             h_flex()
                 .gap(XS)
+                .children(manual)
                 .child(
                     button(SharedString::from(format!("timer-toggle-{key}")))
                         .small()
@@ -350,7 +386,22 @@ impl Desktop {
                             .children((!row.paused).then(|| meta(row.next, cx))),
                     ),
             )
-            .child(h_flex().gap(XS).child(details).children(actions))
+            .child(
+                h_flex()
+                    .gap(XS)
+                    .child(details)
+                    .child(self.work_link(
+                        format!("history-{key}"),
+                        "Run history",
+                        space,
+                        crate::WorkPage::History {
+                            timer: id,
+                            before: None,
+                        },
+                        cx,
+                    ))
+                    .children(actions),
+            )
     }
 
     fn open_routine_form(

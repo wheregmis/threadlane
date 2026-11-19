@@ -243,7 +243,7 @@ impl TaskStatus {
             (Proposed, Queued)
             | (Queued, Running)
             | (Running, WaitingOnYou | Sleeping | Queued | InReview | Done | Failed)
-            | (InReview, Queued | Done)
+            | (InReview, Queued | WaitingOnYou | Done)
             | (WaitingOnYou | Sleeping, Queued) => true,
             _ => false,
         }
@@ -1304,6 +1304,7 @@ mod tests {
             (Running, Cancelled),
             (InReview, Queued),
             (InReview, Done),
+            (InReview, WaitingOnYou),
             (InReview, Cancelled),
             (WaitingOnYou, Queued),
             (WaitingOnYou, Cancelled),

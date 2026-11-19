@@ -571,6 +571,20 @@ pub(crate) async fn handle(core: &HubCore, request: TimerRequest) -> Result<Time
                 .map_err(api_error)?;
             Ok(TimerReply::Timer { timer })
         }
+        TimerRequest::RunOnce {
+            timer: id,
+            client_request_id,
+        } => {
+            if client_request_id.trim().is_empty() || client_request_id.len() > 128 {
+                return Err(ApiError::Invalid("Invalid run request ID".into()));
+            }
+            let timer = db
+                .run_routine_once(id, &client_request_id, inner.clock.now())
+                .await
+                .map_err(ended)?;
+            inner.wake.wake(WakeTarget::Lane(timer.lane_id));
+            Ok(TimerReply::Timer { timer })
+        }
         TimerRequest::Pause { timer: id } => {
             timer(db, id).await?;
             Ok(TimerReply::Timer {

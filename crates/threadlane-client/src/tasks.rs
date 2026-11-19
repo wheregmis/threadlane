@@ -72,6 +72,21 @@ impl ClientCore {
         self.one_task(space, request).await
     }
 
+    /// Submit an owner action for the saved review workflow.
+    pub async fn workflow(
+        &self,
+        space: &str,
+        request: TaskRequest,
+    ) -> Result<TaskReply, ClientError> {
+        let (space, api) = self.target(Some(space))?;
+        api.tasks(request).await.map_err(|e| api_error(&space, e))
+    }
+
+    /// Fresh idempotency key for one user-initiated action.
+    pub fn request_id() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
     /// Cancels task `task` (`T-0142`) of one space, and what waits on it.
     /// `None` means the only paired hub.
     ///

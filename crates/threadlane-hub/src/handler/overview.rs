@@ -288,6 +288,117 @@ pub(super) async fn handle(
 ) -> Result<OverviewReply, ApiError> {
     let db = &api.core.inner.db;
     match request {
+        OverviewRequest::RoutineHistory { timer, before } => Ok(OverviewReply::RoutineHistory {
+            rows: db
+                .routine_history(Some(timer), before)
+                .await
+                .map_err(api_error)?,
+        }),
+        OverviewRequest::Agenda { tomorrow_in } => {
+            use threadlane_core::model::{TimerCategory, TimerStatus};
+            use threadlane_core::store::TimerStore as _;
+            use threadlane_core::work::Scheduled;
+            let now = api.core.inner.clock.now();
+            let (start, until) = if let Some(zone) = tomorrow_in {
+                let (start, end) =
+                    crate::recurrence::tomorrow(now, &zone).map_err(ApiError::Invalid)?;
+                (Some(start), end)
+            } else {
+                (None, now + std::time::Duration::from_secs(7 * 86400))
+            };
+            let mut upcoming = Vec::new();
+            for project in api.project_list(false).await? {
+                for timer in db.project_timers(project.id).await.map_err(api_error)? {
+                    if timer.status != TimerStatus::Active
+                        || timer.category == TimerCategory::Dreaming
+                    {
+                        continue;
+                    }
+                    let mut due = timer.due_at;
+                    if let Some(start) = start
+                        && due < start
+                    {
+                        let Some(rule) = &timer.recurrence else {
+                            continue;
+                        };
+                        due = crate::recurrence::next_occurrence(
+                            rule,
+                            due,
+                            start - std::time::Duration::from_millis(1),
+                        )
+                        .map_err(ApiError::Invalid)?;
+                    }
+                    // Only the first 100 results can appear in the space agenda.
+                    for _ in 0..100 {
+                        if due >= until {
+                            break;
+                        }
+                        upcoming.push(Scheduled {
+                            timer: timer.id,
+                            project: project.name.clone(),
+                            instruction: timer.instruction.clone(),
+                            due,
+                        });
+                        let Some(rule) = &timer.recurrence else {
+                            break;
+                        };
+                        due = crate::recurrence::next_occurrence(rule, due, due.max(now))
+                            .map_err(ApiError::Invalid)?;
+                    }
+                    if upcoming.len() > 200 {
+                        upcoming.sort_by_key(|r| (r.due, r.timer));
+                        upcoming.truncate(100);
+                    }
+                }
+            }
+            upcoming.sort_by_key(|r| (r.due, r.timer));
+            upcoming.truncate(100);
+            Ok(OverviewReply::Agenda {
+                upcoming,
+                recent: db.routine_history(None, None).await.map_err(api_error)?,
+            })
+        }
+        OverviewRequest::SpaceUsage { days } => {
+            if !(1..=366).contains(&days) {
+                return Err(ApiError::Invalid("Choose 1 to 366 days.".into()));
+            }
+            let now = api.core.inner.clock.now();
+            Ok(OverviewReply::SpaceUsage {
+                groups: db
+                    .space_usage(
+                        now - std::time::Duration::from_secs(u64::from(days) * 86400),
+                        now,
+                    )
+                    .await
+                    .map_err(api_error)?,
+            })
+        }
+        OverviewRequest::Outputs { project, search } => {
+            let project = api.project_named(Some(&project)).await?;
+            Ok(OverviewReply::Outputs {
+                rows: db
+                    .project_outputs(project.id, &search)
+                    .await
+                    .map_err(api_error)?,
+            })
+        }
+        OverviewRequest::OutputImage {
+            project,
+            event,
+            index,
+        } => {
+            let project = api.project_named(Some(&project)).await?;
+            Ok(OverviewReply::OutputImage {
+                image: db
+                    .output_image(project.id, event, index)
+                    .await
+                    .map_err(api_error)?
+                    .ok_or_else(|| ApiError::NotFound("Attachment".into()))?,
+            })
+        }
+        OverviewRequest::ReviewRecipe => Ok(OverviewReply::ReviewRecipe {
+            recipe: db.review_recipe().await.map_err(api_error)?,
+        }),
         OverviewRequest::Tasks { project } => {
             let project = api.project_named(project.as_deref()).await?;
             let names = Names::of(db).await?;

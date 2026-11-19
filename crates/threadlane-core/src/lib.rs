@@ -19,4 +19,5 @@ pub mod runtime;
 pub mod store;
 pub mod time;
 pub mod tools;
+pub mod work;
 pub mod workspace;

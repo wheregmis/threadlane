@@ -16,6 +16,7 @@ use crate::{Answer, AppState, Gap, Part, When, count_form, gap_in, take};
 /// One routine or follow-up as a row shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutineRow {
+    pub can_run_once: bool,
     /// Its number, which pause, resume and cancel name.
     pub id: TimerId,
     /// What it asks for when it fires.
@@ -283,6 +284,7 @@ fn row_of(timer: &Timer, when: &When, confirming: bool) -> RoutineRow {
         }
     };
     RoutineRow {
+        can_run_once: timer.category == TimerCategory::Schedule,
         id: timer.id,
         instruction: timer.instruction.clone(),
         cadence,

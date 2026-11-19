@@ -98,6 +98,22 @@ fn matches(rule: &Rule, date: Date) -> bool {
     }
 }
 
+/// Half-open bounds of the next civil day in the viewer's zone.
+pub(crate) fn tomorrow(now: Timestamp, name: &str) -> Result<(Timestamp, Timestamp), String> {
+    let tz = zone(name)?;
+    let at = jiff::Timestamp::from_millisecond(now.as_millis()).map_err(|e| e.to_string())?;
+    let day = at
+        .to_zoned(tz.clone())
+        .date()
+        .tomorrow()
+        .map_err(|e| e.to_string())?;
+    let end = day.tomorrow().map_err(|e| e.to_string())?;
+    let midnight = |date: Date| {
+        instant(&tz, date.at(0, 0, 0, 0)).map(|t| Timestamp::from_millis(t.as_millisecond()))
+    };
+    Ok((midnight(day)?, midnight(end)?))
+}
+
 /// The instant of a local time in `tz`, by the rules of [`next_occurrence`].
 fn instant(tz: &TimeZone, local: DateTime) -> Result<jiff::Timestamp, String> {
     boundary(tz, local, false)
@@ -134,6 +150,27 @@ mod tests {
     /// A timestamp from RFC 3339 text.
     fn at(text: &str) -> Timestamp {
         Timestamp::from_millis(text.parse::<jiff::Timestamp>().unwrap().as_millisecond())
+    }
+
+    #[test]
+    fn tomorrow_uses_local_midnights_across_daylight_saving_changes() {
+        for (now, start, end) in [
+            (
+                "2026-03-07T20:00:00Z",
+                "2026-03-08T05:00:00Z",
+                "2026-03-09T04:00:00Z",
+            ),
+            (
+                "2026-10-31T20:00:00Z",
+                "2026-11-01T04:00:00Z",
+                "2026-11-02T05:00:00Z",
+            ),
+        ] {
+            assert_eq!(
+                tomorrow(at(now), "America/Toronto").unwrap(),
+                (at(start), at(end))
+            );
+        }
     }
 
     fn daily(hour: u8, minute: u8, zone: &str) -> Recurrence {

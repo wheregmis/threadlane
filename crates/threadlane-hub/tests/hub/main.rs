@@ -27,6 +27,7 @@ mod space_lead;
 mod tasks;
 mod timers;
 mod tools;
+mod workflows;
 
 mod agents;
 mod archive;

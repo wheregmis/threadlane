@@ -52,6 +52,23 @@ impl ClientCore {
         self.one_timer(space, request).await
     }
 
+    /// Runs a saved routine immediately while preserving its cadence.
+    pub async fn run_routine_once(
+        &self,
+        space: Option<&str>,
+        timer: TimerId,
+        client_request_id: String,
+    ) -> Result<Timer, ClientError> {
+        self.one_timer(
+            space,
+            TimerRequest::RunOnce {
+                timer,
+                client_request_id,
+            },
+        )
+        .await
+    }
+
     /// Pauses timer `timer` (its number, as `threadlane routines` lists it).
     ///
     /// # Errors
