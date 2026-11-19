@@ -13,6 +13,7 @@ use threadlane_store::TIMER_SOURCE;
 use crate::core::HubCore;
 use crate::error::api_error;
 use crate::memory::{self, MEMORY_RENAME};
+use crate::page;
 use crate::recurrence::{check, next_occurrence};
 use crate::tools::{derived_call_key, fields, invalid};
 
@@ -41,9 +42,18 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
     tools.push(ToolDefinition {
         name: PROJECT_SESSIONS.to_owned(),
         description: "Read this project's run outcomes, rationales and delivered messages \
-                      since the last dream, all project tasks, and previous Threadlane reports."
+                      since the last dream, all project tasks, and previous Threadlane reports. \
+                      Runs then tasks come in pages, long texts cut; a cut page gives the \
+                      offset of the next one."
             .to_owned(),
-        input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "offset": { "type": "integer", "minimum": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+            },
+            "additionalProperties": false
+        }),
         tier: Tier::Read,
         safe_to_repeat: true,
     });
@@ -160,7 +170,8 @@ impl HubCore {
     ) -> Result<Json, ToolError> {
         let inner = &self.inner;
         if tool == PROJECT_SESSIONS {
-            fields(arguments, &[])?;
+            let (offset, limit) =
+                page::offset_limit(fields(arguments, &["offset", "limit"])?, 50, 200)?;
             let runs = inner
                 .db
                 .dream_history(context.project_id)
@@ -171,11 +182,28 @@ impl HubCore {
                 .tasks(context.project_id)
                 .await
                 .map_err(crate::error::tool_error)?;
-            let tasks: Vec<_> = tasks.iter().map(crate::tools::task_json).collect();
-            let previous: Vec<_> = inner.db.lane_decisions(context.lease.lane_id).await
+            let mut previous: Json = inner.db.lane_decisions(context.lease.lane_id).await
                 .map_err(crate::error::tool_error)?.into_iter().filter(|d| d.tool == REPORT_LIMITATION)
                 .map(|d| json!({"title":d.arguments["title"], "status":d.status, "outcome":d.outcome})).collect();
-            return Ok(json!({ "runs": runs, "tasks": tasks, "previous_reports":previous }));
+            page::clip_fields(&mut previous);
+            // Runs then tasks, paged as one list.
+            let total_runs = runs.len();
+            let mut items: Vec<Json> = runs
+                .into_iter()
+                .chain(tasks.iter().map(crate::tools::task_json))
+                .collect();
+            items.iter_mut().for_each(page::clip_fields);
+            let (mut listed, next) = page::take(&items, offset, limit);
+            let split = total_runs.saturating_sub(offset).min(listed.len());
+            let tasks = listed.split_off(split);
+            let mut result = json!({
+                "runs": listed,
+                "tasks": tasks,
+                "previous_reports": previous,
+                "total_runs": total_runs,
+            });
+            page::mark(&mut result, PROJECT_SESSIONS, items.len(), next);
+            return Ok(result);
         }
         let by = MemoryAuthor {
             lease: context.lease,

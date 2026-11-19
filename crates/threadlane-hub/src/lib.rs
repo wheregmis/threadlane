@@ -27,6 +27,7 @@ mod memory;
 mod memory_check;
 mod node;
 mod pacing;
+mod page;
 mod pairing;
 mod placement;
 mod proposal;

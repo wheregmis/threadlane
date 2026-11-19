@@ -17,6 +17,7 @@ use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
 use threadlane_store::HubDb;
 
 use crate::error::tool_error;
+use crate::page;
 use crate::publish::Proposal;
 use crate::tools::{fields, invalid};
 
@@ -30,6 +31,30 @@ pub const MEMORY_EDIT: &str = "memory_edit";
 pub const MEMORY_DELETE: &str = "memory_delete";
 /// Moves a file.
 pub const MEMORY_RENAME: &str = "memory_rename";
+
+/// The most characters one `memory_view` page of a file may ask for.
+const MAX_VIEW: usize = 50_000;
+/// The most files one page of a listing holds.
+const LISTING: usize = 500;
+/// A file larger than this is shown in pages, so a write warns of it.
+const LARGE_FILE: usize = page::PAGE_CHARS;
+
+/// The `limit` characters of `text` from character `offset`, ending at a
+/// line break when one falls in the page, and the offset after them if any
+/// text remains.
+fn window(text: &str, offset: usize, limit: usize) -> (&str, Option<usize>) {
+    let byte = |chars: usize| text.char_indices().nth(chars).map(|(at, _)| at);
+    let Some(start) = byte(offset) else {
+        return ("", None);
+    };
+    let rest = &text[start..];
+    let Some(end) = rest.char_indices().nth(limit).map(|(at, _)| at) else {
+        return (rest, None);
+    };
+    let end = rest[..end].rfind('\n').map_or(end, |line| line + 1);
+    let shown = &rest[..end];
+    (shown, Some(offset + shown.chars().count()))
+}
 
 /// The two instructions files as an agent names them.
 const PROTECTED: [&str; 2] = ["space/instructions.md", "project/instructions.md"];
@@ -140,6 +165,8 @@ fn own_progress(project: ProjectId, task: Option<TaskId>, stored: &str) -> Resul
 enum Call {
     View {
         path: String,
+        offset: usize,
+        limit: usize,
     },
     Create {
         path: String,
@@ -185,9 +212,15 @@ fn parse(
         Ok(stored)
     };
     Ok(match tool {
-        MEMORY_VIEW => Call::View {
-            path: path(fields(arguments, &["path"])?, "path")?,
-        },
+        MEMORY_VIEW => {
+            let object = fields(arguments, &["path", "offset", "limit"])?;
+            let (offset, limit) = page::offset_limit(object, page::PAGE_CHARS, MAX_VIEW)?;
+            Call::View {
+                path: path(object, "path")?,
+                offset,
+                limit,
+            }
+        }
         MEMORY_CREATE => {
             let object = fields(arguments, &["path", "content"])?;
             Call::Create {
@@ -259,23 +292,40 @@ pub(crate) async fn execute(
         if progress(&file) {
             result[PROGRESS_WRITTEN] = json!(true);
         }
+        let size = file.content.chars().count();
+        if size > LARGE_FILE {
+            result["warning"] = json!(format!(
+                "This file is now {size} characters, more than {LARGE_FILE}, so memory_view \
+                 shows it in pages. Condense it or split it into smaller files."
+            ));
+        }
         result
     };
     match parse(project, task, tool, arguments)? {
-        Call::View { path } => {
+        Call::View {
+            path,
+            offset,
+            limit,
+        } => {
             if let Some(file) = db.read(&path).await.map_err(tool_error)? {
-                return Ok(json!({
+                let (content, next) = window(&file.content, offset, limit);
+                let mut result = json!({
                     "path": shown(&file),
                     "version": file.version,
-                    "content": file.content,
-                }));
+                    "content": content,
+                });
+                if offset > 0 || next.is_some() {
+                    result["offset"] = json!(offset);
+                    page::mark(&mut result, MEMORY_VIEW, file.content.chars().count(), next);
+                }
+                return Ok(result);
             }
-            let files: Vec<String> = db
+            let files: Vec<Json> = db
                 .list(&format!("{path}/"))
                 .await
                 .map_err(tool_error)?
                 .iter()
-                .filter_map(|file| visible(project, kind, &file.path))
+                .filter_map(|file| visible(project, kind, &file.path).map(Json::String))
                 .collect();
             // A root always exists, though it may hold nothing yet.
             let root = matches!(arguments["path"].as_str(), Some("space" | "project"));
@@ -285,7 +335,13 @@ pub(crate) async fn execute(
                     arguments["path"]
                 )));
             }
-            Ok(json!({ "files": files }))
+            // A listing pages by file, in pages of at most LISTING.
+            let (listed, next) = page::take(&files, offset, limit.min(LISTING));
+            let mut result = json!({ "files": listed });
+            if offset > 0 || next.is_some() {
+                page::mark(&mut result, MEMORY_VIEW, files.len(), next);
+            }
+            Ok(result)
         }
         Call::Create { path, content } => Ok(written(
             db.write(by, &path, &content).await.map_err(refused)?,
@@ -392,11 +448,20 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         define(
             MEMORY_VIEW,
             "Show a memory file, or list the files under a directory such as project or \
-             space/notes.",
+             space/notes. A long file comes in pages of 20000 characters; a cut page gives \
+             the offset of the next one.",
             Tier::Read,
             json!({
                 "type": "object",
-                "properties": { "path": path.clone() },
+                "properties": {
+                    "path": path.clone(),
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "The character (or, for a directory, the file) to start at."
+                    },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_VIEW }
+                },
                 "required": ["path"],
                 "additionalProperties": false
             }),
@@ -507,6 +572,20 @@ mod tests {
             visible(A, LaneKind::Task, "projects/1/notes/a.md").as_deref(),
             Some("project/notes/a.md")
         );
+    }
+
+    #[test]
+    fn a_file_is_shown_in_windows_that_end_at_a_line_break() {
+        assert_eq!(window("abc", 0, 10), ("abc", None));
+        assert_eq!(window("abc", 0, 3), ("abc", None));
+        assert_eq!(window("abcdef", 0, 4), ("abcd", Some(4)));
+        assert_eq!(window("abcdef", 4, 4), ("ef", None));
+        assert_eq!(window("abc", 3, 4), ("", None));
+        assert_eq!(window("abc", 9, 4), ("", None));
+        assert_eq!(window("ab\ncd\nef", 0, 7), ("ab\ncd\n", Some(6)));
+        assert_eq!(window("ab\ncd\nef", 6, 7), ("ef", None));
+        assert_eq!(window("é\nüx", 0, 3), ("é\n", Some(2)));
+        assert_eq!(window("é\nüx", 2, 3), ("üx", None));
     }
 
     #[test]

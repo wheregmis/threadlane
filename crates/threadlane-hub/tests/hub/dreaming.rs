@@ -387,6 +387,26 @@ async fn dream_filters_tools_scope_session_history_and_effects() {
         "Delivered update"
     );
     assert!(!history.to_string().contains("Give one update"));
+    let total = history["total"].as_u64().unwrap();
+    assert_eq!(history["total_runs"], 1);
+    assert_eq!(history.get("next_offset"), None);
+    let first = call(&*hub.link, &lease, &dream, SESSIONS, json!({"limit": 1}))
+        .await
+        .unwrap();
+    assert_eq!(first["runs"].as_array().unwrap().len(), 1);
+    assert!(first["tasks"].as_array().unwrap().is_empty());
+    assert_eq!(first.get("next_offset").is_some(), total > 1);
+    let past = call(
+        &*hub.link,
+        &lease,
+        &dream,
+        SESSIONS,
+        json!({"offset": total}),
+    )
+    .await
+    .unwrap();
+    assert!(past["runs"].as_array().unwrap().is_empty());
+    assert!(past["tasks"].as_array().unwrap().is_empty());
     assert_eq!(
         hub.db
             .session(dream.session_id)
