@@ -476,11 +476,12 @@ impl Desktop {
     }
 
     pub(crate) fn project(
-        &self,
+        &mut self,
         space: &str,
         project: &str,
         tab: Tab,
         when: &When,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if tab == Tab::Conversation && self.is_main_chat(space, project) {
@@ -528,6 +529,7 @@ impl Desktop {
                     Tab::Conversation => AppIcon::MessagesSquare,
                     Tab::Memory => AppIcon::BookOpen,
                     Tab::Team => AppIcon::Bot,
+                    Tab::Workflow => AppIcon::GitFork,
                     Tab::Routines => AppIcon::CalendarClock,
                     Tab::Setup => AppIcon::Settings,
                 };
@@ -559,6 +561,7 @@ impl Desktop {
             Tab::Conversation => self.conversation_tab(space, project, when, cx),
             Tab::Memory => self.memory_tab(space, project, when, cx),
             Tab::Team => self.agents_tab(space, project, cx),
+            Tab::Workflow => self.workflow_tab(space, project, archived, window, cx),
             Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Setup => self.setup_tab(space, project, cx),
         };
@@ -587,15 +590,6 @@ impl Desktop {
                 },
                 cx,
             ));
-            if !archived {
-                actions = actions.child(self.work_link(
-                    "project-review-workflow",
-                    "Review workflow",
-                    space,
-                    crate::WorkPage::Workflow(project.into()),
-                    cx,
-                ));
-            }
         }
         if archived {
             actions = actions.child(

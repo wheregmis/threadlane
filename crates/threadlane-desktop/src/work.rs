@@ -12,6 +12,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{InputState, Textarea, TextareaState},
+    menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     v_flex,
 };
@@ -23,7 +24,7 @@ use threadlane_client::ClientCore;
 use threadlane_core::{
     client::{OverviewReply, OverviewRequest, TaskReply, TaskRequest},
     ids::{EventId, TaskId, TimerId},
-    model::{Recurrence, Rule, Weekday},
+    model::{Mode, Recurrence, Rule, Weekday},
     work::{Occurrence, OutputSource, ReviewRecipe, UsageGroup},
 };
 use threadlane_desktop::{Activity, When, count_form, format_count};
@@ -46,7 +47,7 @@ pub(super) enum WorkPage {
         event: EventId,
         index: u32,
     },
-    Workflow(String),
+    Workflow,
 }
 
 impl WorkPage {
@@ -74,7 +75,7 @@ impl WorkPage {
                 event: *event,
                 index: *index,
             },
-            Self::Workflow(_) => OverviewRequest::ReviewRecipe,
+            Self::Workflow => OverviewRequest::ReviewRecipe,
         }
     }
     fn title(&self) -> &'static str {
@@ -84,7 +85,7 @@ impl WorkPage {
             Self::Usage(_) => "Space usage",
             Self::Outputs { .. } => "Project outputs",
             Self::Image { .. } => "Attachment",
-            Self::Workflow(_) => "Review workflow",
+            Self::Workflow => "Review workflow",
         }
     }
 }
@@ -100,10 +101,10 @@ pub(super) struct WorkView {
     retry_workflow: Option<(TaskRequest, String)>,
     implementation: Entity<TextareaState>,
     review: Entity<TextareaState>,
-    engineer: Entity<InputState>,
-    reviewer: Entity<InputState>,
+    engineer: String,
+    reviewer: String,
     goal: Entity<InputState>,
-    repository: Entity<InputState>,
+    repository: String,
     search: Entity<InputState>,
     zone: String,
     manual: std::collections::HashMap<(String, TimerId), (String, bool)>,
@@ -113,6 +114,13 @@ impl WorkView {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         let mut input =
             |value: &str| cx.new(|cx| InputState::new(window, cx).default_value(value.to_owned()));
+        let goal = input("");
+        let search = input("");
+        let implementation = cx.new(|cx| TextareaState::new(window, cx).rows(3));
+        let review = cx.new(|cx| TextareaState::new(window, cx).rows(3));
+        cx.observe(&goal, |_, _, cx| cx.notify()).detach();
+        cx.observe(&implementation, |_, _, cx| cx.notify()).detach();
+        cx.observe(&review, |_, _, cx| cx.notify()).detach();
         Self {
             data: None,
             loading: false,
@@ -123,13 +131,13 @@ impl WorkView {
             loaded_search: false,
             expanded_usage: HashSet::new(),
             retry_workflow: None,
-            engineer: input("Engineer"),
-            reviewer: input("Reviewer"),
-            goal: input(""),
-            repository: input(""),
-            search: input(""),
-            implementation: cx.new(|cx| TextareaState::new(window, cx).rows(3)),
-            review: cx.new(|cx| TextareaState::new(window, cx).rows(3)),
+            engineer: "Engineer".into(),
+            reviewer: "Reviewer".into(),
+            goal,
+            repository: String::new(),
+            search,
+            implementation,
+            review,
             zone: local_zone().unwrap_or_else(|| "UTC".into()),
         }
     }
@@ -151,6 +159,88 @@ impl WorkView {
                 || when.moment(at),
                 |time| time.strftime("%a %b %d %H:%M %Z").to_string(),
             )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WorkflowChoice {
+    Repository,
+    Engineer,
+    Reviewer,
+}
+
+impl WorkflowChoice {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Repository => "Repository",
+            Self::Engineer => "Engineer",
+            Self::Reviewer => "Reviewer",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Repository => "workflow-repository",
+            Self::Engineer => "workflow-engineer",
+            Self::Reviewer => "workflow-reviewer",
+        }
+    }
+
+    fn field(self, work: &mut WorkView) -> &mut String {
+        match self {
+            Self::Repository => &mut work.repository,
+            Self::Engineer => &mut work.engineer,
+            Self::Reviewer => &mut work.reviewer,
+        }
+    }
+}
+
+fn workflow_start_blocker(
+    dirty: bool,
+    project_off: bool,
+    roles_ready: bool,
+    repository_ready: bool,
+    goal: &str,
+) -> Option<&'static str> {
+    if dirty {
+        Some("Save the edited steps before starting.")
+    } else if project_off {
+        Some("Turn on this project before starting.")
+    } else if !roles_ready {
+        Some("Choose two enabled specialists on the project team, or install a review team.")
+    } else if !repository_ready {
+        Some("Choose a repository registered in this project.")
+    } else if goal.trim().is_empty() {
+        Some("Add a goal to start the workflow.")
+    } else {
+        None
+    }
+}
+
+struct ViewWorkflowRuns<'a> {
+    implementations: Vec<&'a threadlane_core::client::TaskSummary>,
+    reviews: std::collections::HashMap<TaskId, &'a threadlane_core::client::TaskSummary>,
+}
+
+impl<'a> ViewWorkflowRuns<'a> {
+    fn from_tasks(tasks: &'a [threadlane_core::client::TaskSummary]) -> Self {
+        let mut runs = Self {
+            implementations: Vec::new(),
+            reviews: Default::default(),
+        };
+        for row in tasks {
+            let Some(call) = row.task.created_by_call.as_deref() else {
+                continue;
+            };
+            if call.starts_with("workflow-implement:") {
+                runs.implementations.push(row);
+            } else if call.starts_with("workflow-review:")
+                && let [first] = row.task.depends_on.as_slice()
+            {
+                runs.reviews.insert(*first, row);
+            }
+        }
+        runs
     }
 }
 
@@ -655,6 +745,95 @@ impl Desktop {
         );
     }
 
+    fn workflow_picker(
+        &self,
+        choice: WorkflowChoice,
+        selected: &str,
+        options: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let view = cx.entity().downgrade();
+        let generation = self.work.generation;
+        let label = choice.label();
+        v_flex().gap(SM).child(meta(label, cx)).child(
+            button(choice.id())
+                .small()
+                .outline()
+                .icon(AppIcon::ChevronDown)
+                .label(if selected.is_empty() {
+                    format!("Choose {}", label.to_lowercase())
+                } else {
+                    selected.to_owned()
+                })
+                .accessibility_label(format!("Choose {}", label.to_lowercase()))
+                .disabled(self.work.saving || options.is_empty())
+                .dropdown_menu(move |mut menu, _, _| {
+                    for option in &options {
+                        let (picked, view) = (option.clone(), view.clone());
+                        menu = menu.item(PopupMenuItem::new(option.clone()).on_click(
+                            move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    if !this.work.saving {
+                                        *choice.field(&mut this.work) = picked.clone();
+                                        cx.notify();
+                                    }
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                }),
+        )
+    }
+
+    pub(super) fn workflow_tab(
+        &mut self,
+        space: &str,
+        project: &str,
+        archived: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut body = v_flex().gap(MD).max_w(READING_WIDTH).w_full();
+        if archived {
+            body = body.child(meta(
+                "Unarchive this project to configure or start a workflow.",
+                cx,
+            ));
+        } else {
+            match self.work.data.as_ref() {
+                None => body = body.child(meta("Loading review workflow…", cx)),
+                Some(Ok(OverviewReply::ReviewRecipe { recipe })) => {
+                    let recipe = recipe.clone();
+                    body = body.child(self.review_form(space, project, &recipe, window, cx));
+                }
+                Some(result) => {
+                    let message = result.as_ref().err().map_or(
+                        "The hub returned an unexpected workflow response.",
+                        String::as_str,
+                    );
+                    body = body.child(meta(message.to_owned(), cx)).child(
+                        button("retry-workflow-view")
+                            .small()
+                            .label("Retry")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.work.data = None;
+                                this.load_screen(cx);
+                            })),
+                    );
+                }
+            }
+        }
+        v_flex()
+            .id("project-workflow-panel")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scrollbar()
+            .child(body)
+            .into_any_element()
+    }
+
     fn review_form(
         &mut self,
         space: &str,
@@ -672,16 +851,12 @@ impl Desktop {
                 } else {
                     ""
                 };
-                for (input, value) in [
-                    (&self.work.repository, repository),
-                    (&self.work.engineer, "Engineer"),
-                    (&self.work.reviewer, "Reviewer"),
-                    (&self.work.goal, ""),
-                ] {
-                    input.update(cx, |input, cx| {
-                        input.set_value(value.to_owned(), window, cx)
-                    });
-                }
+                self.work.repository = repository.to_owned();
+                self.work.engineer = "Engineer".into();
+                self.work.reviewer = "Reviewer".into();
+                self.work
+                    .goal
+                    .update(cx, |goal, cx| goal.set_value("", window, cx));
             }
             self.work.implementation.update(cx, |f, cx| {
                 f.set_value(recipe.implementation.clone(), window, cx)
@@ -691,12 +866,49 @@ impl Desktop {
                 .update(cx, |f, cx| f.set_value(recipe.review.clone(), window, cx));
             self.work.loaded_recipe = Some(recipe.version);
         }
+        let repositories = self.state.task_repositories(space, project);
+        if self.work.repository.is_empty() && repositories.len() == 1 {
+            self.work.repository.clone_from(&repositories[0]);
+        }
+        let bound = self
+            .state
+            .project(space, project)
+            .map(|project| {
+                project
+                    .bindings
+                    .iter()
+                    .filter_map(|binding| {
+                        (!binding.is_lead && binding.mode != Mode::Off)
+                            .then_some(binding.agent.clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut specialists = bound.clone();
+        if let Some(space) = self.state.space(space) {
+            specialists.extend(space.agents.iter().map(|agent| agent.name.clone()));
+        }
+        specialists.extend(["Engineer".into(), "Reviewer".into()]);
+        specialists.sort_unstable();
+        specialists.dedup();
+        let roles_ready = self.work.engineer != self.work.reviewer
+            && bound.contains(&self.work.engineer)
+            && bound.contains(&self.work.reviewer);
+        let dirty = self.work.implementation.read(cx).value().as_str() != recipe.implementation
+            || self.work.review.read(cx).value().as_str() != recipe.review;
+        let blocker = workflow_start_blocker(
+            dirty,
+            self.state.project_ceiling(space, project) == Mode::Off,
+            roles_ready,
+            repositories.contains(&self.work.repository),
+            self.work.goal.read(cx).value().as_str(),
+        );
         let version = recipe.version;
         let (s, p) = (space.to_owned(), project.to_owned());
         let save = button("save-recipe")
             .small()
             .label("Save steps for this space")
-            .disabled(self.work.saving)
+            .disabled(self.work.saving || !dirty)
             .on_click(cx.listener(move |this, _, _, cx| {
                 let recipe = ReviewRecipe {
                     version,
@@ -715,7 +927,7 @@ impl Desktop {
         let start = button("run-review")
             .primary()
             .label("Start workflow")
-            .disabled(self.work.saving)
+            .disabled(self.work.saving || blocker.is_some())
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.work.implementation.read(cx).value().as_str() != saved.implementation
                     || this.work.review.read(cx).value().as_str() != saved.review
@@ -729,9 +941,9 @@ impl Desktop {
                 let mut request = TaskRequest::StartReviewWorkflow {
                     project: p.clone(),
                     version,
-                    engineer: this.work.engineer.read(cx).value().to_string(),
-                    reviewer: this.work.reviewer.read(cx).value().to_string(),
-                    repository: this.work.repository.read(cx).value().to_string(),
+                    engineer: this.work.engineer.clone(),
+                    reviewer: this.work.reviewer.clone(),
+                    repository: this.work.repository.clone(),
                     goal: this.work.goal.read(cx).value().to_string(),
                     client_request_id: String::new(),
                 };
@@ -758,10 +970,10 @@ impl Desktop {
         let preset = button("preview-team")
             .small()
             .label("Preview PR review team…")
-            .disabled(self.work.saving)
+            .disabled(self.work.saving || self.work.engineer == self.work.reviewer)
             .on_click(cx.listener(move |this, _, window, cx| {
-                let engineer = this.work.engineer.read(cx).value().trim().to_owned();
-                let reviewer = this.work.reviewer.read(cx).value().trim().to_owned();
+                let engineer = this.work.engineer.clone();
+                let reviewer = this.work.reviewer.clone();
                 let recurrence = Recurrence {
                     zone: this.work.zone.clone(),
                     rule: Rule::Weekdays {
@@ -854,30 +1066,80 @@ impl Desktop {
             }));
         v_flex()
             .gap(MD)
+            .child(section("Review workflow"))
+            .child(meta("An engineer implements the goal, a reviewer checks the result, and you decide whether to accept it.", cx))
             .child(section("Reusable steps"))
-            .child("Implementation")
+            .child("1. Implementation")
             .child(
                 Textarea::new(&self.work.implementation).aria_label("Implementation instructions"),
             )
-            .child("Review")
+            .child("2. Review")
             .child(Textarea::new(&self.work.review).aria_label("Review instructions"))
-            .child(meta(
-                "The owner accepts the review or requests changes.",
-                cx,
-            ))
             .child(save)
             .child(section("Project team"))
-            .child("Engineer")
-            .child(field(&self.work.engineer).aria_label("Engineer name"))
-            .child("Reviewer")
-            .child(field(&self.work.reviewer).aria_label("Reviewer name"))
+            .child(self.workflow_picker(WorkflowChoice::Engineer, &self.work.engineer, specialists.clone(), cx))
+            .child(self.workflow_picker(WorkflowChoice::Reviewer, &self.work.reviewer, specialists, cx))
             .child(preset)
             .child(section("Start a review workflow"))
-            .child("Repository")
-            .child(field(&self.work.repository).aria_label("Registered repository name"))
+            .child(self.workflow_picker(WorkflowChoice::Repository, &self.work.repository, repositories, cx))
             .child("Goal")
             .child(field(&self.work.goal).aria_label("Workflow goal"))
+            .children(blocker.map(|reason| meta(reason, cx)))
             .child(start)
+            .child(self.workflow_runs(space, project, cx))
+    }
+
+    fn workflow_runs(&self, space: &str, project: &str, cx: &mut Context<Self>) -> Div {
+        let mut panel = v_flex().gap(SM).child(section("Recent workflow runs"));
+        let Some(view) = self.state.project(space, project) else {
+            return panel.child(meta("Loading tasks…", cx));
+        };
+        let runs = ViewWorkflowRuns::from_tasks(&view.tasks);
+        if runs.implementations.is_empty() {
+            return panel.child(meta("No review workflows started in this project yet.", cx));
+        }
+        for first in runs.implementations.into_iter().rev().take(5) {
+            let review = runs.reviews.get(&first.task.id);
+            let label = |step: &str, row: &threadlane_core::client::TaskSummary| {
+                format!(
+                    "{step} · {} · {} · {}",
+                    row.task.id, row.agent, row.task.status
+                )
+            };
+            panel = panel.child(
+                v_flex()
+                    .gap(SM)
+                    .child(meta(first.task.title.clone(), cx))
+                    .child(self.source_task_label(
+                        space,
+                        first.task.id,
+                        label("Implement", first),
+                        cx,
+                    ))
+                    .children(review.map(|row| {
+                        self.source_task_label(space, row.task.id, label("Review", row), cx)
+                    })),
+            );
+        }
+        panel
+    }
+
+    fn source_task_label(
+        &self,
+        space: &str,
+        id: TaskId,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        let screen = Screen::Task {
+            space: space.to_owned(),
+            task: id,
+        };
+        button(SharedString::from(format!("workflow-task-{id}")))
+            .small()
+            .outline()
+            .label(label)
+            .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
     }
 
     fn occurrence_row(
@@ -944,9 +1206,9 @@ impl Desktop {
     ) -> AnyElement {
         let mut body = v_flex().gap(MD);
         let header = match page {
-            WorkPage::Workflow(p)
-            | WorkPage::Outputs { project: p, .. }
-            | WorkPage::Image { project: p, .. } => format!("{space} / {p}"),
+            WorkPage::Outputs { project: p, .. } | WorkPage::Image { project: p, .. } => {
+                format!("{space} / {p}")
+            }
             WorkPage::History { timer, .. } => format!("{space} / Routine #{timer}"),
             _ => space.to_owned(),
         };
@@ -1200,10 +1462,6 @@ impl Desktop {
                         cx,
                     ));
             }
-            (Some(Ok(OverviewReply::ReviewRecipe { recipe })), WorkPage::Workflow(project)) => {
-                let recipe = recipe.clone();
-                body = body.child(self.review_form(space, project, &recipe, window, cx));
-            }
             _ => body = body.child("The hub returned an unexpected response."),
         }
         v_flex()
@@ -1229,7 +1487,40 @@ impl Desktop {
 
 #[cfg(test)]
 mod usage_tests {
-    use super::reported_cost;
+    use super::{reported_cost, workflow_start_blocker};
+
+    #[test]
+    fn workflow_start_explains_each_missing_requirement() {
+        assert!(
+            workflow_start_blocker(true, false, true, true, "Goal")
+                .unwrap()
+                .contains("Save")
+        );
+        assert!(
+            workflow_start_blocker(false, true, true, true, "Goal")
+                .unwrap()
+                .contains("Turn on")
+        );
+        assert!(
+            workflow_start_blocker(false, false, false, true, "Goal")
+                .unwrap()
+                .contains("specialists")
+        );
+        assert!(
+            workflow_start_blocker(false, false, true, false, "Goal")
+                .unwrap()
+                .contains("repository")
+        );
+        assert!(
+            workflow_start_blocker(false, false, true, true, "  ")
+                .unwrap()
+                .contains("goal")
+        );
+        assert_eq!(
+            workflow_start_blocker(false, false, true, true, "Goal"),
+            None
+        );
+    }
 
     #[test]
     fn missing_cost_differs_from_reported_zero() {

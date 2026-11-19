@@ -869,6 +869,9 @@ impl Desktop {
                     return;
                 }
                 let (fresh_tasks, fresh_lead) = parts;
+                if tab == Tab::Workflow && !self.state.is_archived(&space, &project) {
+                    self.load_work(space.clone(), WorkPage::Workflow, cx);
+                }
                 if tab == Tab::Routines {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }
@@ -1849,7 +1852,7 @@ impl Render for Desktop {
                 space,
                 project,
                 tab,
-            } => self.project(&space, &project, tab, &when, cx),
+            } => self.project(&space, &project, tab, &when, window, cx),
             Screen::Task { space, task } => self.task(&space, task, &when, cx),
             Screen::Agents(scope) => self.agents(scope.as_deref(), &when, cx),
             Screen::SpaceTasks { space } => self.space_tasks(&space, &when, cx),
