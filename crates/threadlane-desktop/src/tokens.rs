@@ -68,6 +68,8 @@ pub(super) const READING_WIDTH: Pixels = px(880.);
 
 /// Sidebar width in logical pixels.
 pub(super) const SIDEBAR_WIDTH: Pixels = px(220.);
+/// Maximum height of a scrolling list inside a sidebar.
+pub(super) const SIDEBAR_SECTION_MAX_HEIGHT: Pixels = px(280.);
 /// Panel width in logical pixels.
 pub(super) const PANEL_WIDTH: Pixels = px(250.);
 /// Board column min in logical pixels.
