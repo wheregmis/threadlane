@@ -32,6 +32,7 @@ impl Desktop {
     pub(super) fn decision_display(&self, display: DecisionDisplay, cx: &mut Context<Self>) -> Div {
         let DecisionDisplay {
             key,
+            project,
             question,
             body,
             options,
@@ -111,11 +112,17 @@ impl Desktop {
             )
             .child(decision_title(question))
             .children(body.map(|body| {
-                self.prose(format!("question-{prefix}"), &key.space, body, cx)
-                    .limit(ProseLimit::Question)
+                self.prose(
+                    format!("question-{prefix}"),
+                    &key.space,
+                    Some(&project),
+                    body,
+                    cx,
+                )
+                .limit(ProseLimit::Question)
             }))
             .children(contents.context.map(|line| {
-                self.decision_context(format!("context-{prefix}"), &key.space, line, cx)
+                self.decision_context(format!("context-{prefix}"), &key.space, &project, line, cx)
             }))
             .children(contents.details.into_iter().map(|line| div().child(line)))
             .children(
@@ -125,15 +132,27 @@ impl Desktop {
                     .map(|diff| self.diff_preview(format!("decision-{prefix}"), diff, cx)),
             )
             .children(contents.would_run_as.map(|line| {
-                self.decision_context(format!("would-run-{prefix}"), &key.space, line, cx)
+                self.decision_context(
+                    format!("would-run-{prefix}"),
+                    &key.space,
+                    &project,
+                    line,
+                    cx,
+                )
             }))
             .child(v_flex().gap(XS).children(option_rows));
         if let Some(record) = record {
-            card = card.child(meta(record.status, cx)).children(
-                record
-                    .note
-                    .map(|note| self.prose(format!("note-{prefix}"), &key.space, note, cx)),
-            );
+            card = card
+                .child(meta(record.status, cx))
+                .children(record.note.map(|note| {
+                    self.prose(
+                        format!("note-{prefix}"),
+                        &key.space,
+                        Some(&project),
+                        note,
+                        cx,
+                    )
+                }));
         } else if show_note {
             if let Some((note, _)) = self.decision_inputs.get(&key) {
                 card = card.child(v_flex().gap(XS).child(contents.note_label).child(
@@ -231,9 +250,16 @@ impl Desktop {
             })
     }
 
-    fn decision_context(&self, id: String, space: &str, line: String, cx: &Context<Self>) -> Div {
+    fn decision_context(
+        &self,
+        id: String,
+        space: &str,
+        project: &str,
+        line: String,
+        cx: &Context<Self>,
+    ) -> Div {
         div()
             .text_color(cx.theme().muted_foreground)
-            .child(self.prose(id, space, line, cx))
+            .child(self.prose(id, space, Some(project), line, cx))
     }
 }

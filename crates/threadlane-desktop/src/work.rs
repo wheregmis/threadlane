@@ -597,6 +597,7 @@ impl Desktop {
             line = line.child(self.prose(
                 format!("occurrence-{space}-{}", row.event),
                 space,
+                Some(&row.project),
                 result.clone(),
                 cx,
             ));
