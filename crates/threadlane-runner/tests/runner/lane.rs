@@ -424,6 +424,40 @@ async fn a_failed_backend_run_fails_with_error() {
 }
 
 #[tokio::test]
+async fn a_refused_model_runs_once_more_on_the_backends_default_model() {
+    let h = Harness::new();
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment(11))));
+    h.backend
+        .scripted
+        .push(Script::new().fail("The 'opus' model is not supported with this account."));
+    h.backend.scripted.push(Script::new().finish("done"));
+
+    h.runner.work_once().await.expect("work_once");
+
+    let models: Vec<_> = h
+        .backend
+        .scripted
+        .received()
+        .into_iter()
+        .map(|run| run.model)
+        .collect();
+    assert_eq!(models, [Some("opus".to_owned()), None]);
+    let calls = h.calls();
+    assert!(
+        calls.contains(&Call::Complete {
+            run: RunId(11),
+            final_text: Some("done".into()),
+        }),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(call, Call::Fail { .. })),
+        "{calls:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_backend_that_cannot_start_fails_the_run() {
     let h = Harness::new();
     h.link.grant(lease(LANE));

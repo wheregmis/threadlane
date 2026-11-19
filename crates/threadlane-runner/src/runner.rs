@@ -439,10 +439,39 @@ impl Inner {
         started: (&dyn AgentBackend, &RunRequest),
     ) -> Result<AfterRun, LaneExit> {
         let mut mirror = Mirror::new(assignment.run_id);
-        let failure = match self
+        let mut ended = self
             .mirror_events(lane, assignment, run, &mut mirror, deadline)
-            .await?
+            .await?;
+        // The backend refused the agent's model: go once more on the
+        // backend's default model instead of failing the task.
+        let default_model = RunRequest {
+            model: None,
+            ..started.1.clone()
+        };
+        let mut fallback = None;
+        if let Ended::Terminal(BackendEvent::Failed { error }) = &ended
+            && started.1.model.is_some()
+            && threadlane_core::backend::rejects_model(error)
+            && let Ok(again) = started.0.run(default_model.clone()).await
         {
+            warn!(run = %assignment.run_id, %error, "model refused; running on the backend's default model");
+            fallback = Some(again);
+        }
+        let (run, started) = match fallback.as_mut() {
+            Some(again) => {
+                let again = again.as_mut();
+                let followed = self
+                    .mirror_events(lane, assignment, again, &mut mirror, deadline)
+                    .await;
+                if followed.is_err() {
+                    stop_backend(again).await;
+                }
+                ended = followed?;
+                (again, (started.0, &default_model))
+            }
+            None => (run, started),
+        };
+        let failure = match ended {
             Ended::Terminal(BackendEvent::Finished { final_text, .. }) => {
                 // A run waiting on you ends now; it is resumed with the answer.
                 if assignment.lane_kind == LaneKind::Task

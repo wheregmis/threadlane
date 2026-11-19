@@ -14,9 +14,14 @@ pub(super) fn result_error(result: &Value) -> BackendError {
     let error = result["error"].as_str().unwrap_or("Antigravity run failed");
     if ["RESOURCE_EXHAUSTED", "QUOTA_EXCEEDED"]
         .contains(&result["finished_reason"].as_str().unwrap_or(""))
-        || ["quota exceeded", "rate limit", "usage limit"]
-            .iter()
-            .any(|s| error.to_lowercase().contains(s))
+        || [
+            "quota exceeded",
+            "quota reached",
+            "rate limit",
+            "usage limit",
+        ]
+        .iter()
+        .any(|s| error.to_lowercase().contains(s))
     {
         BackendError::UsageLimit { resets_at: None }
     } else {
@@ -205,5 +210,23 @@ impl BackendRun for Run {
     async fn stop(&mut self) -> Result<(), BackendError> {
         self.done = true;
         self.child.kill().await.map_err(failed)
+    }
+}
+
+#[cfg(test)]
+mod quota_tests {
+    use super::*;
+
+    #[test]
+    fn a_reached_quota_is_a_usage_limit_so_the_task_waits_for_the_reset() {
+        let result = json!({ "error": "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 37m3s." });
+        assert!(matches!(
+            result_error(&result),
+            BackendError::UsageLimit { resets_at: None }
+        ));
+        assert!(matches!(
+            result_error(&json!({ "error": "boom" })),
+            BackendError::Failed(_)
+        ));
     }
 }
