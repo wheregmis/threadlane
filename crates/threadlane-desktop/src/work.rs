@@ -915,8 +915,16 @@ impl Desktop {
                 cx,
             ));
         }
-        if let Some(result) = &row.result {
-            line = line.child(result.clone());
+        if let Some(result) = &row.result
+            && !result.trim().is_empty()
+        {
+            line = line.child(self.prose(
+                format!("occurrence-{space}-{}", row.event),
+                space,
+                Some(&row.project),
+                result.clone(),
+                cx,
+            ));
         }
         line.child(
             h_flex().flex_wrap().gap(SM).children(

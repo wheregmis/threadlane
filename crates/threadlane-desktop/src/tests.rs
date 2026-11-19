@@ -6638,8 +6638,8 @@ fn timeline_of(state: &AppState) -> Vec<String> {
         .iter()
         .map(|entry| {
             let who = match entry.spoken {
-                Spoken::Said(_, Author::You) => "you".to_owned(),
-                Spoken::Said(_, by) => by.label(),
+                Spoken::Said(_, _, Author::You) => "you".to_owned(),
+                Spoken::Said(_, _, by) => by.label(),
                 Spoken::Delivered(_) => "lead".to_owned(),
             };
             format!(
@@ -6876,7 +6876,70 @@ async fn the_space_lead_s_asks_and_the_replies_are_labeled_and_linked() {
         ]
     );
     let reply = state.timeline()[0];
-    assert!(matches!(reply.spoken, Spoken::Said(_, Author::ProjectLead(from)) if from == "api"));
+    assert!(matches!(reply.spoken, Spoken::Said(_, _, Author::ProjectLead(from)) if from == "api"));
+}
+
+#[tokio::test]
+async fn home_timeline_entries_have_stable_prose_ids_and_disclosure_for_said_messages() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    work.histories.lock().unwrap().insert(
+        "General".to_owned(),
+        vec![
+            said_by_you(1, "See **T-0042** and `code`", 1_000),
+            said_by_lead(1, "General", "Done", 2_000),
+        ],
+    );
+    home.histories.lock().unwrap().insert(
+        "General".to_owned(),
+        vec![said_by_you(1, "Water plants", 1_500)],
+    );
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
+
+    let ids: Vec<String> = state
+        .timeline()
+        .iter()
+        .map(TimelineEntry::prose_id)
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "result-work-1",
+            "timeline-said-home-1",
+            "timeline-said-work-1",
+        ]
+    );
+    let work_said_id = ids[2].clone();
+    assert_eq!(
+        markdown_source(&state.timeline()[2].text()),
+        "See **[T-0042](threadlane:T-0042)** and `code`"
+    );
+
+    // Expanding a Spoken::Said entry uses its stable prose_id with ProseLimit::Result.
+    assert_eq!(
+        ProseLimit::Result.disclosure(state.message_expanded(&work_said_id), true),
+        (Some(3), Some("Show more"))
+    );
+    state.toggle_message(&work_said_id);
+    assert_eq!(
+        ProseLimit::Result.disclosure(state.message_expanded(&work_said_id), true),
+        (None, Some("Show less"))
+    );
+    assert!(!state.message_expanded("timeline-said-home-1"));
+
+    // Adding a newer message shifts list indices without changing the existing prose_id.
+    work.histories
+        .lock()
+        .unwrap()
+        .get_mut("General")
+        .unwrap()
+        .push(said_by_you(2, "Follow-up", 3_000));
+    state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
+    assert_eq!(state.timeline()[3].prose_id(), work_said_id);
+    assert!(state.message_expanded(&work_said_id));
 }
 
 #[tokio::test]
