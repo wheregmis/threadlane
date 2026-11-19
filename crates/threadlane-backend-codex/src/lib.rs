@@ -49,7 +49,7 @@ use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::backend::{
     AgentBackend, AskRequest, BackendError, BackendEvent, BackendRun, NativeSession, Probe,
-    RunRequest,
+    RunRequest, with_warnings,
 };
 use threadlane_core::model::BackendKind;
 use threadlane_mcp::McpServer;
@@ -196,7 +196,7 @@ impl AgentBackend for CodexBackend {
     }
 
     async fn run(&self, mut request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
-        self.apply_skills(&mut request).await?;
+        let warnings = self.apply_skills(&mut request).await?;
         let working_dir = request.working_dir.canonicalize().map_err(|error| {
             BackendError::Failed(format!(
                 "working directory {}: {error}",
@@ -256,6 +256,7 @@ impl AgentBackend for CodexBackend {
             ..self.launch(working_dir, request.prompt, request.model)
         };
         start(launch, &request.session, server, rules, scratch)
+            .map(|run| with_warnings(warnings, run))
     }
 
     async fn ask(&self, request: AskRequest) -> Result<Json, BackendError> {

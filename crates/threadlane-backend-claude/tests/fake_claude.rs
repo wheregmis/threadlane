@@ -857,7 +857,7 @@ exit 0"#,
 }
 
 #[tokio::test]
-async fn personal_skills_reach_claude_stdin_and_a_removed_skill_fails_before_launch() {
+async fn personal_skills_reach_claude_stdin_and_a_removed_skill_is_skipped_with_a_warning() {
     let fake = recorder();
     let account = fake.dir.path().join("account");
     let backend = ClaudeBackend::new(ClaudeConfig {
@@ -886,13 +886,17 @@ async fn personal_skills_reach_claude_stdin_and_a_removed_skill_fails_before_lau
         ["Use these installed skills for this run: /review\n\nSay hello."]
     );
     std::fs::remove_file(account.join("skills/review/SKILL.md")).unwrap();
-    assert!(
-        backend
-            .run(request)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("review")
+    let mut run = backend.run(request).await.unwrap();
+    let events = collect(run.as_mut()).await;
+    assert_eq!(
+        events[0],
+        BackendEvent::Warning {
+            message: "claude skill \"review\" was skipped for this run: it is not installed on this runner.".into()
+        }
     );
-    assert_eq!(fake.invocations().len(), 2);
+    assert_eq!(
+        recorded_prompts(&fake),
+        ["Use these installed skills for this run: /tests\n\nSay hello."]
+    );
+    assert_eq!(fake.invocations().len(), 3);
 }

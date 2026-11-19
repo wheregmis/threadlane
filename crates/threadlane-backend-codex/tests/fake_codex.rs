@@ -767,12 +767,87 @@ fi
         fake.work.path().canonicalize().unwrap()
     );
     request.skills = vec!["disabled".into()];
-    assert!(
-        backend
-            .run(request)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("missing")
+    let mut run = backend.run(request).await.unwrap();
+    let events = collect(run.as_mut()).await;
+    assert_eq!(
+        events[0],
+        BackendEvent::Warning {
+            message: "codex skill \"disabled\" was skipped for this run: it is not installed on this runner.".into()
+        }
     );
+    assert_eq!(fake.record("stdin"), "Say hello.");
+}
+
+/// A name the repository shadows, and a repository-only name, are skipped
+/// with a warning; the run starts with the remaining skill.
+#[tokio::test]
+async fn a_shadowed_or_repository_only_skill_is_skipped_with_a_warning() {
+    let fake = Fake::new(&format!(
+        r#"if [ "$1" = app-server ]; then
+    read -r init
+    echo '{{"id":1,"result":{{}}}}'
+    read -r initialized
+    read -r list
+    if [ -e repo ]; then
+        echo '{{"id":2,"result":{{"data":[{{"skills":[{{"name":"gpui","enabled":true,"scope":"user"}},{{"name":"gpui","enabled":true,"scope":"repo"}},{{"name":"local","enabled":true,"scope":"repo"}},{{"name":"review","enabled":true,"scope":"user"}}]}}]}}}}'
+    else
+        echo '{{"id":2,"result":{{"data":[{{"skills":[{{"name":"gpui","enabled":true,"scope":"user"}},{{"name":"review","enabled":true,"scope":"user"}}]}}]}}}}'
+    fi
+    exit
+fi
+{FAKE}"#
+    ));
+    std::fs::write(fake.work.path().join("repo"), "").unwrap();
+    let backend = fake.backend();
+    assert_eq!(
+        backend.installed_skills(Some(fake.work.path())).await,
+        Ok(vec!["review".to_owned()])
+    );
+    let mut request = fake.request(NativeSession::Start { id: String::new() });
+    request.skills = vec!["gpui".into(), "local".into(), "review".into()];
+    let mut run = backend.run(request).await.unwrap();
+    let events = collect(run.as_mut()).await;
+    assert_eq!(
+        events[..2],
+        [
+            BackendEvent::Warning {
+                message: "codex skill \"gpui\" was skipped for this run: the repository has a skill with the same name as the personal one.".into()
+            },
+            BackendEvent::Warning {
+                message: "codex skill \"local\" was skipped for this run: it is not installed on this runner.".into()
+            },
+        ]
+    );
+    assert!(matches!(events.last(), Some(BackendEvent::Finished { .. })));
+    assert_eq!(
+        fake.record("stdin"),
+        "Use these installed skills for this run: $review\n\nSay hello."
+    );
+}
+
+/// A skill list that cannot be read skips the bound skills; the run still starts.
+#[tokio::test]
+async fn an_unreadable_skill_list_skips_bound_skills_with_a_warning() {
+    let fake = Fake::new(&format!(
+        r#"if [ "$1" = app-server ]; then
+    exit 0
+fi
+{FAKE}"#
+    ));
+    let backend = fake.backend();
+    let mut request = fake.request(NativeSession::Start { id: String::new() });
+    request.skills = vec!["gpui".into()];
+    let mut run = backend.run(request).await.unwrap();
+    let events = collect(run.as_mut()).await;
+    let BackendEvent::Warning { message } = &events[0] else {
+        panic!("expected a warning first: {events:?}");
+    };
+    assert!(
+        message.starts_with(
+            "codex skill \"gpui\" was skipped for this run: the skill list could not be read ("
+        ),
+        "{message}"
+    );
+    assert!(matches!(events.last(), Some(BackendEvent::Finished { .. })));
+    assert_eq!(fake.record("stdin"), "Say hello.");
 }
