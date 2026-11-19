@@ -824,3 +824,30 @@ fi
         "Use these installed skills for this run: $review\n\nSay hello."
     );
 }
+
+/// A skill list that cannot be read skips the bound skills; the run still starts.
+#[tokio::test]
+async fn an_unreadable_skill_list_skips_bound_skills_with_a_warning() {
+    let fake = Fake::new(&format!(
+        r#"if [ "$1" = app-server ]; then
+    exit 0
+fi
+{FAKE}"#
+    ));
+    let backend = fake.backend();
+    let mut request = fake.request(NativeSession::Start { id: String::new() });
+    request.skills = vec!["gpui".into()];
+    let mut run = backend.run(request).await.unwrap();
+    let events = collect(run.as_mut()).await;
+    let BackendEvent::Warning { message } = &events[0] else {
+        panic!("expected a warning first: {events:?}");
+    };
+    assert!(
+        message.starts_with(
+            "codex skill \"gpui\" was skipped for this run: the skill list could not be read ("
+        ),
+        "{message}"
+    );
+    assert!(matches!(events.last(), Some(BackendEvent::Finished { .. })));
+    assert_eq!(fake.record("stdin"), "Say hello.");
+}

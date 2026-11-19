@@ -306,7 +306,23 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
             // Headless Antigravity runs use name-based activation with slash commands disabled.
             BackendKind::Antigravity => "",
         };
-        let installed = self.installed_skills(Some(&request.working_dir)).await?;
+        let installed = match self.installed_skills(Some(&request.working_dir)).await {
+            Ok(installed) => installed,
+            Err(BackendError::NotInstalled) => return Err(BackendError::NotInstalled),
+            // A listing that fails must not block the run: skip every bound skill instead.
+            Err(error) => {
+                return Ok(request
+                    .skills
+                    .iter()
+                    .map(|name| {
+                        format!(
+                            "{} skill {name:?} was skipped for this run: the skill list could not be read ({error}).",
+                            self.kind()
+                        )
+                    })
+                    .collect());
+            }
+        };
         let mut personal = None;
         let mut mentions = Vec::new();
         let mut warnings = Vec::new();
