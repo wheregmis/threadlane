@@ -41,6 +41,7 @@ desktop_icons!(
     ExternalLink,
     FileText,
     Folder,
+    FolderOpen,
     FolderPlus,
     GitFork,
     Inbox,

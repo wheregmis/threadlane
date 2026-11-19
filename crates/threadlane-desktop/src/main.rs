@@ -37,6 +37,7 @@ mod components;
 mod icons;
 mod keyboard;
 mod menus;
+mod repository;
 mod screens;
 mod tokens;
 
@@ -465,6 +466,8 @@ struct Desktop {
     agent_models: Vec<Entity<InputState>>,
     agent_edit_models: Vec<Entity<InputState>>,
     /// The "+ Add repository" form's name, remote and default branch.
+    repository_hint: Option<String>,
+    repository_picking: Option<Rc<()>>,
     repository_name: Entity<InputState>,
     repository_remote: Entity<InputState>,
     repository_branch: Entity<InputState>,
@@ -545,7 +548,7 @@ impl Desktop {
         let agent_models = model_fields();
         let agent_edit_models = model_fields();
         let repository_name = field("Name in the project", cx);
-        let repository_remote = field("Remote, git@github.com:you/repo.git", cx);
+        let repository_remote = field("Clone URL or path on the hub", cx);
         let repository_branch = field("Default branch (main)", cx);
         let task_title = field("Title", cx);
         let task_goal = field("Goal: what done looks like", cx);
@@ -708,6 +711,8 @@ impl Desktop {
             agent_edit_instructions,
             agent_models,
             agent_edit_models,
+            repository_hint: None,
+            repository_picking: None,
             repository_name,
             repository_remote,
             repository_branch,
