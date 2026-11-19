@@ -609,6 +609,24 @@ impl AppState {
             Some(ms) => format!("{ms} ms"),
             None => "Empty".to_owned(),
         };
+        let delivery = metrics.delivery_health.as_ref().map_or_else(
+            || "Unavailable on this hub".to_owned(),
+            |health| {
+                let timing = |at, label| match at {
+                    Some(at) if at <= metrics.at => format!(" · {label} due"),
+                    Some(at) => format!(" · {label} {}", when.moment(at)),
+                    None => String::new(),
+                };
+                format!(
+                    "{} held{}; {} retrying{}; {} permanently failed (created in the past 7 days)",
+                    health.held,
+                    timing(health.next_hold_check, "pacing check"),
+                    health.retrying,
+                    timing(health.next_retry, "retry"),
+                    health.failed_created_in_last_week,
+                )
+            },
+        );
         Ok(vec![
             ("Snapshot", when.moment(metrics.at)),
             (
@@ -642,6 +660,7 @@ impl AppState {
             ("Dead events", metrics.dead_events.to_string()),
             ("Timer lateness", latency(&metrics.timer_lateness)),
             ("Outbox lag", age(metrics.outbox_lag_ms)),
+            ("Delivery health", delivery),
             (
                 "Messages per day",
                 number(
