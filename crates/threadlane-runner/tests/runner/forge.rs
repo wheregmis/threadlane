@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use threadlane_core::forge::Forge;
+use threadlane_core::forge::{ApprovedBranch, Forge};
 use threadlane_core::ids::{ProjectId, RepositoryId, TaskId};
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{Workspaces, task_branch};
@@ -49,8 +49,13 @@ async fn push_publishes_the_task_branch_to_the_remote_and_is_safe_to_repeat() {
     let (worktree, remote) = worktree_with_work(dir.path()).await;
     let branch = task_branch(TASK);
     let forge = GitForge::default();
-    forge.push(&worktree, &branch).await.unwrap();
-    forge.push(&worktree, &branch).await.unwrap();
+    let revision = git(&worktree, &["rev-parse", "HEAD"]);
+    let approved = ApprovedBranch {
+        name: &branch,
+        revision: revision.trim(),
+    };
+    forge.push(&worktree, approved).await.unwrap();
+    forge.push(&worktree, approved).await.unwrap();
     assert_eq!(
         git(&remote, &["rev-parse", &branch]),
         git(&worktree, &["rev-parse", "HEAD"]),
@@ -61,6 +66,30 @@ async fn push_publishes_the_task_branch_to_the_remote_and_is_safe_to_repeat() {
         git(&worktree, &["rev-parse", "HEAD~1"]),
         "and nothing else moved"
     );
+}
+
+#[tokio::test]
+async fn push_uses_the_approved_commit_even_if_the_local_ref_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let (worktree, remote) = worktree_with_work(dir.path()).await;
+    let branch = task_branch(TASK);
+    let revision = git(&worktree, &["rev-parse", "HEAD"]);
+    git(
+        &worktree,
+        &["commit", "--allow-empty", "-m", "Later checkpoint"],
+    );
+    GitForge::default()
+        .push(
+            &worktree,
+            ApprovedBranch {
+                name: &branch,
+                revision: revision.trim(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(git(&remote, &["rev-parse", &branch]), revision);
+    assert_ne!(git(&worktree, &["rev-parse", &branch]), revision);
 }
 
 /// A fake `gh` that appends its arguments, NUL-separated and ended by a
@@ -143,12 +172,16 @@ async fn a_draft_pull_request_is_opened_with_exact_arguments_after_the_push() {
     let gh = FakeGh::new();
     let forge = GitForge::with_gh(gh.program());
     let branch = task_branch(TASK);
+    let revision = git(&worktree, &["rev-parse", "HEAD"]);
 
     assert_eq!(forge.find_pull_request(&worktree, &branch).await, Ok(None));
     let url = forge
         .open_draft_pull_request(
             &worktree,
-            &branch,
+            ApprovedBranch {
+                name: &branch,
+                revision: revision.trim(),
+            },
             "main",
             "--title=hijack",
             "Adds the page.\n\n- one\n- two\n",
@@ -221,9 +254,14 @@ async fn a_failed_login_lookup_keeps_the_agent_attribution_and_is_not_repeated()
     let gh = FakeGh::with_login(false);
     let forge = GitForge::with_gh(gh.program());
     let branch = task_branch(TASK);
+    let revision = git(&worktree, &["rev-parse", "HEAD"]);
+    let approved = ApprovedBranch {
+        name: &branch,
+        revision: revision.trim(),
+    };
     for _ in 0..2 {
         let url = forge
-            .open_draft_pull_request(&worktree, &branch, "main", "t", "Body", "Engineer, T-0001")
+            .open_draft_pull_request(&worktree, approved, "main", "t", "Body", "Engineer, T-0001")
             .await
             .unwrap();
         assert_eq!(url, "https://github.test/me/app/pull/7");

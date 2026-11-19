@@ -13,16 +13,20 @@ use std::time::Duration;
 
 use serde_json::{Value as Json, json};
 use threadlane_core::client::{DecisionReply, DecisionRequest};
+use threadlane_core::ids::TaskId;
+use threadlane_core::link::PUBLISH_REVISION;
 use threadlane_core::model::{
     DecisionKind, DecisionOption, DecisionStatus, NewDecision, OutboxKind, RunOutcome, RunStatus,
     TaskStatus,
 };
 use threadlane_core::runtime::Step;
-use threadlane_core::store::{DecisionStore, SessionStore};
+use threadlane_core::store::{DecisionStore, OrgStore, SessionStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{FINISH_TASK, HubError, OPEN_PULL_REQUEST, derived_call_key};
-use threadlane_runner::RunnerError;
+use threadlane_core::workspace::Workspaces;
+use threadlane_hub::{FINISH_TASK, HubError, OPEN_PULL_REQUEST, PUBLISH_BRANCH, derived_call_key};
+use threadlane_runner::{GitWorkspaces, RunnerError};
 use threadlane_testkit::fakes::ForgeCall;
+use threadlane_testkit::git::git;
 use threadlane_testkit::{CrashPlan, Script};
 
 use crate::harness::{
@@ -275,6 +279,67 @@ async fn a_finished_task_asks_before_publishing_and_after_the_answer_opens_one_d
         "https://forge.test/pull/1",
     ] {
         assert!(resumed.contains(told), "{told:?} in {resumed}");
+    }
+}
+
+#[tokio::test]
+async fn a_branch_changed_after_approval_requires_a_new_publish_request() {
+    for (tool, arguments) in [
+        (PUBLISH_BRANCH, json!({ "repository": "app" })),
+        (OPEN_PULL_REQUEST, pull_request()),
+    ] {
+        let script = Script::new()
+            .call("toolu_publish", tool, arguments)
+            .finish("Waiting on the user.");
+        let world = publish_world(World::new().await, script).await;
+        let project = world.db.general_project().await.unwrap();
+        let repositories = world.db.repositories(project.id).await.unwrap();
+        let workspaces = GitWorkspaces::new(world.workspaces());
+        let task = TaskId(1);
+        let paths = workspaces.prepare(task, &repositories).await.unwrap();
+        let [worktree] = paths.as_slice() else {
+            panic!("expected the task's worktree");
+        };
+        std::fs::write(worktree.join("page.html"), "<h1>Reviewed</h1>\n").unwrap();
+        workspaces
+            .checkpoint(task, &repositories, "Reviewed")
+            .await
+            .unwrap();
+        let revision = git(worktree, &["rev-parse", "HEAD"]);
+
+        let sim = world.boot(CrashPlan::new()).await;
+        sim.send("m-1", "Publish the page").await;
+        live(&sim).await.unwrap();
+        let decisions = sim.decisions().await;
+        assert_eq!(decisions[0].arguments[PUBLISH_REVISION], revision.trim());
+        assert!(
+            decisions[0].arguments["diff_preview"]["patch"]
+                .as_str()
+                .unwrap()
+                .contains("+<h1>Reviewed</h1>")
+        );
+        assert_eq!(answer_all(&sim, "approve", None).await, 1);
+
+        std::fs::write(worktree.join("page.html"), "<h1>Changed</h1>\n").unwrap();
+        workspaces
+            .checkpoint(task, &repositories, "Changed")
+            .await
+            .unwrap();
+        live(&sim).await.unwrap();
+
+        assert!(
+            sim.world.forge.calls().is_empty(),
+            "{tool} touched the forge"
+        );
+        let decisions = sim.decisions().await;
+        let outcome = decisions[0].outcome.as_ref().unwrap();
+        assert_eq!(outcome["performed"], false, "{tool}: {outcome}");
+        assert!(
+            outcome["error"]
+                .as_str()
+                .unwrap()
+                .contains("request approval again")
+        );
     }
 }
 

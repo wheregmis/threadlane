@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::forge::{OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::ids::{RunId, TaskId};
-use threadlane_core::link::{DIFF_PREVIEW, FINISH_TASK, HubLink, MERGE_CHECKS, PROGRESS_WRITTEN};
+use threadlane_core::link::{
+    DIFF_PREVIEW, FINISH_TASK, HubLink, MERGE_CHECKS, PROGRESS_WRITTEN, PUBLISH_REVISION,
+};
 use threadlane_core::model::Repository;
 use threadlane_core::tools::{ToolDefinition, ToolEndpoint, ToolError};
 use threadlane_core::workspace::Workspaces;
@@ -89,39 +91,36 @@ impl LaneTools {
     }
 
     /// `publish_branch` / `open_pull_request` arguments with a runner-computed
-    /// diff preview attached so the approval card can show what will be pushed.
-    async fn with_diff_preview(&self, mut arguments: Json) -> Json {
+    /// revision and diff so the approval card can show what will be pushed.
+    async fn with_publish_preview(&self, mut arguments: Json) -> Result<Json, ToolError> {
         if let Some(object) = arguments.as_object_mut() {
             object.remove(DIFF_PREVIEW);
+            object.remove(PUBLISH_REVISION);
         }
         let Some((task, repositories)) = &self.task else {
-            return arguments;
+            return Ok(arguments);
         };
         let Some(repo_name) = arguments.get("repository").and_then(Json::as_str) else {
-            return arguments;
+            return Ok(arguments);
         };
         let Some(repository) = repositories.iter().find(|repo| repo.name == repo_name) else {
-            return arguments;
+            return Ok(arguments);
         };
         let message = format!("Threadlane: work of {task}, run {}", self.run_id);
-        let preview = match self
-            .workspaces
+        self.workspaces
             .checkpoint(*task, std::slice::from_ref(repository), &message)
             .await
-        {
-            Ok(()) => self.workspaces.diff_preview(*task, repository).await,
-            Err(error) => Err(error),
-        };
-        match preview {
-            Ok(Some(diff)) => {
-                if let Some(object) = arguments.as_object_mut() {
-                    object.insert(DIFF_PREVIEW.to_owned(), serde_json::json!(diff));
-                }
-            }
-            Ok(None) => {}
-            Err(error) => warn!(%task, %error, "could not compute diff preview for publish"),
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let preview = self
+            .workspaces
+            .preview_publish(*task, repository)
+            .await
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        arguments[PUBLISH_REVISION] = serde_json::json!(preview.revision);
+        if let Some(diff) = preview.diff {
+            arguments[DIFF_PREVIEW] = serde_json::json!(diff);
         }
-        arguments
+        Ok(arguments)
     }
 }
 
@@ -151,7 +150,7 @@ impl ToolEndpoint for LaneTools {
         let arguments = if name == FINISH_TASK {
             self.with_merge_checks(arguments).await
         } else if matches!(name, PUBLISH_BRANCH | OPEN_PULL_REQUEST) {
-            self.with_diff_preview(arguments).await
+            self.with_publish_preview(arguments).await?
         } else {
             arguments
         };

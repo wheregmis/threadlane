@@ -75,6 +75,15 @@ pub struct DiffPreview {
     pub truncated: bool,
 }
 
+/// The commit to publish and its diff, which is absent when there are no changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishPreview {
+    /// The full commit ID of the task branch.
+    pub revision: String,
+    /// The bounded diff against the repository's default branch.
+    pub diff: Option<DiffPreview>,
+}
+
 /// Where a task branch stands against its repository's default branch
 /// (docs/merge-help.md): checked when the task finishes, and when a run
 /// starts.
@@ -183,15 +192,12 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
     /// Removes local worktrees and clones, reporting paths it could not remove.
     async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String>;
 
-    /// Computes a bounded diff preview of the task branch against the
-    /// repository's default branch, when the worktree is ready.
-    async fn diff_preview(
+    /// Resolves the task branch and computes its diff against the default branch.
+    async fn preview_publish(
         &self,
-        _task: TaskId,
-        _repository: &Repository,
-    ) -> Result<Option<DiffPreview>, WorkspaceError> {
-        Ok(None)
-    }
+        task: TaskId,
+        repository: &Repository,
+    ) -> Result<PublishPreview, WorkspaceError>;
 }
 
 /// The branch a task works on: `threadlane/T-0142`.

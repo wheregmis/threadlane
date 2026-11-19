@@ -42,6 +42,10 @@ pub const MERGE_CHECKS: &str = "merge";
 /// pushed inside the approval card. An agent's own value is replaced or removed.
 pub const DIFF_PREVIEW: &str = "diff_preview";
 
+/// The runner-resolved commit approved for a publish or draft pull request.
+/// The preview, when present, is built from this commit.
+pub const PUBLISH_REVISION: &str = "publish_revision";
+
 /// Everything a runner needs to execute one run. Built by the hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunAssignment {
