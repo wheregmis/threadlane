@@ -185,6 +185,7 @@ async fn summary(
             .cloned()
             .unwrap_or_else(|| task.agent_id.to_string()),
         machine,
+        active_machine_id: active.as_ref().map(|run| run.machine_id),
         running_since: active.map(|run| run.started_at),
         latest_step,
         completed_at,

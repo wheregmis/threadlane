@@ -10,19 +10,26 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
-use threadlane_core::ids::MachineId;
+use threadlane_core::{ids::MachineId, model::MachineStatus};
 use threadlane_desktop::{
-    Consequence, Destination, EmptyRegion, MachineRun, Part, When, count_form, machine_row,
+    Consequence, Destination, EmptyRegion, MachineRun, Part, Reach, When, count_form, machine_row,
 };
 
 use super::{empty, gap_line, link};
-use crate::components::{button, card, field, heading, meta, section, status_badge, status_dot};
+use crate::components::{button, card, field, heading, icon_button, meta, section, status_badge};
 use crate::icons::AppIcon;
 use crate::tokens::{
-    KEY_RADIUS, READING_WIDTH, ROW_RADIUS, SM, SPACE_NAME_WIDTH, Status, TYPE_BODY, TYPE_META, XL,
-    XS,
+    KEY_RADIUS, READING_WIDTH, ROW_RADIUS, SM, SPACE_NAME_WIDTH, Status, TABULAR, TYPE_BODY,
+    TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
+
+fn running_tasks_label(running: Option<usize>) -> String {
+    running.map_or_else(
+        || "Running task count unavailable".to_owned(),
+        |count| format!("{count} {} running", count_form(count, "task", "tasks")),
+    )
+}
 
 impl Desktop {
     pub(crate) fn machine(
@@ -42,7 +49,7 @@ impl Desktop {
             .overflow_y_scrollbar()
             .id("machine-detail")
             .child(
-                link("back-to-machines", "Machines".to_owned())
+                link("back-to-machines", "All machines".to_owned())
                     .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx))),
             );
         let Some(detail) = self.state.machine_detail(space, id, when) else {
@@ -58,91 +65,101 @@ impl Desktop {
                 .into_any_element();
         };
         let report = detail.report;
-        page = page
-            .child(heading(report.name))
-            .child(
-                h_flex()
-                    .gap(XS)
-                    .child(status_dot(detail.status.into(), cx))
-                    .child(meta(detail.status.to_string(), cx)),
-            )
-            .children(detail.platform.map(|platform| meta(platform, cx)))
-            .children(
-                detail
-                    .last_seen
-                    .map(|seen| meta(format!("Last seen {seen}"), cx)),
-            )
-            .child(section("Tools"))
-            .child(if detail.tools_reported {
-                h_flex().gap(XS).flex_wrap().children(
-                    report
-                        .backends
-                        .into_iter()
-                        .chain([report.gh])
-                        .map(|tool| status_badge(tool, Status::Idle, cx)),
-                )
-            } else {
-                empty(EmptyRegion::Tools, cx)
-            })
-            .children((!detail.accounts.is_empty()).then(|| section("Model accounts")))
-            .children(
-                detail
-                    .accounts
-                    .into_iter()
-                    .map(|account| status_badge(account, Status::Idle, cx)),
-            )
-            .child(section("Run slots"));
-        let step = |name: &'static str, icon, slots: Option<u32>| {
-            let space = space.to_owned();
-            crate::components::icon_button(name, icon, name.into())
-                .disabled(slots.is_none())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let Some(slots) = slots else { return };
-                    let core = this.core.clone();
-                    let space = space.clone();
-                    this.run(
-                        async move {
-                            core.read()
-                                .await
-                                .set_machine_slots(Some(&space), id, slots)
-                                .await
-                        },
-                        |this, result, cx| match result {
-                            Ok(()) => this.refresh(cx),
-                            Err(error) => this.state.report(threadlane_desktop::Activity::Failed(
-                                threadlane_desktop::describe(&error),
-                            )),
-                        },
-                        cx,
-                    );
-                }))
-        };
-        page = page.child(
+        page = page.child(heading(report.name)).child(
             h_flex()
                 .gap(XS)
-                .items_center()
-                .child(step(
-                    "Fewer run slots",
-                    AppIcon::Minus,
-                    (detail.slots > 1).then(|| detail.slots - 1),
+                .flex_wrap()
+                .child(meta(space.to_owned(), cx))
+                .child(status_badge(
+                    detail.status.to_string(),
+                    detail.status.into(),
+                    cx,
                 ))
-                .child(meta(detail.slots.to_string(), cx))
-                .child(step(
-                    "More run slots",
-                    AppIcon::Plus,
-                    (detail.slots < detail.runner_slots).then(|| detail.slots + 1),
-                )),
+                .children(detail.local.then(|| meta("This computer", cx)))
+                .children(detail.platform.map(|platform| meta(platform, cx)))
+                .children(
+                    detail
+                        .last_seen
+                        .map(|seen| meta(format!("Last seen {seen}"), cx)),
+                ),
         );
-        page = if let Some(value) = detail.occupancy {
-            page.child(meta(report.load.clone(), cx)).child(
-                Progress::new("machine-occupancy")
-                    .value(value)
-                    .accessibility_label(report.load),
+        let step = |name: &'static str, icon, slots: Option<u32>| {
+            let space = space.to_owned();
+            icon_button(name, icon, name.into())
+                .tab_stop(true)
+                .disabled(!detail.limit_writable || self.machine_limit_saving || slots.is_none())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(slots) = slots {
+                        this.set_task_limit(space.clone(), id, slots, cx);
+                    }
+                }))
+        };
+        let mut capacity = card(cx)
+            .child(section(running_tasks_label(detail.running_tasks)))
+            .children(detail.occupancy.map(|value| {
+                let label = format!("{} (including lead runs)", report.load);
+                v_flex().gap(XS).child(meta(label.clone(), cx)).child(
+                    Progress::new("machine-occupancy")
+                        .value(value)
+                        .accessibility_label(label),
+                )
+            }))
+            .child(
+                h_flex()
+                    .gap(SM)
+                    .flex_wrap()
+                    .child("Task limit")
+                    .child(step(
+                        "Decrease task limit",
+                        AppIcon::Minus,
+                        detail.slots.checked_sub(1).filter(|slots| *slots > 0),
+                    ))
+                    .child(
+                        div()
+                            .font_features(TABULAR.clone())
+                            .child(if detail.slots == 0 {
+                                "—".to_owned()
+                            } else {
+                                detail.slots.to_string()
+                            }),
+                    )
+                    .child(step(
+                        "Increase task limit",
+                        AppIcon::Plus,
+                        (detail.slots < detail.runner_slots).then(|| detail.slots + 1),
+                    ))
+                    .children(self.machine_limit_saving.then(|| meta("Saving…", cx))),
+            );
+        if detail.runner_slots > 0 {
+            capacity = capacity.child(meta(
+                format!(
+                    "Tasks and lead conversations share these slots. Runner maximum: {}.",
+                    detail.runner_slots
+                ),
+                cx,
+            ));
+        }
+        if let Some(reason) = if detail.status == MachineStatus::Revoked {
+            Some("This machine's access has been revoked.")
+        } else if !detail.limit_writable {
+            Some("Current capacity is unavailable. Reconnect to the space to edit the limit.")
+        } else if detail.slots == detail.runner_slots {
+            Some(
+                "To raise the runner maximum, change runner.max_parallel on this machine and restart its runner.",
             )
         } else {
-            page.child(meta("This machine has not reported its run slots.", cx))
-        };
-        page = page.child(meta("To raise the runner ceiling, increase runner.max_parallel on this machine and restart its runner.", cx));
+            None
+        } {
+            capacity = capacity.child(meta(reason, cx));
+        }
+        if let Some((_, _, error)) = self
+            .machine_limit_error
+            .as_ref()
+            .filter(|(failed_space, failed_id, _)| failed_space == space && *failed_id == id)
+        {
+            capacity = capacity.child(meta(error.clone(), cx).text_color(cx.theme().danger));
+        }
+        page = page.child(capacity);
         match self.state.machine_runs(space, id) {
             Ok((active, recent)) => {
                 for (title, rows, empty_region) in [
@@ -162,7 +179,72 @@ impl Desktop {
                     .child(gap_line(&gap, "machine runs", space, cx))
             }
         }
-        page.into_any_element()
+        page.child(section("Tools"))
+            .child(if detail.tools_reported {
+                h_flex().gap(XS).flex_wrap().children(
+                    report
+                        .backends
+                        .into_iter()
+                        .chain([report.gh])
+                        .map(|tool| status_badge(tool, Status::Idle, cx)),
+                )
+            } else {
+                empty(EmptyRegion::Tools, cx)
+            })
+            .children((!detail.accounts.is_empty()).then(|| section("Model accounts")))
+            .children(
+                detail
+                    .accounts
+                    .into_iter()
+                    .map(|account| status_badge(account, Status::Idle, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn set_task_limit(
+        &mut self,
+        space: String,
+        machine: MachineId,
+        slots: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if self.machine_limit_saving {
+            return;
+        }
+        self.machine_limit_saving = true;
+        self.machine_limit_error = None;
+        let core = self.core.clone();
+        self.run(
+            async move {
+                let result = core
+                    .read()
+                    .await
+                    .set_machine_slots(Some(&space), machine, slots)
+                    .await;
+                (space, result)
+            },
+            move |this, (space, result), cx| {
+                this.machine_limit_saving = false;
+                match result {
+                    Ok(()) => {
+                        this.state.machine_slots_changed(&space, machine, slots);
+                        this.refresh(cx);
+                    }
+                    Err(error) => {
+                        this.machine_limit_error = Some((
+                            space,
+                            machine,
+                            format!(
+                                "Could not save the task limit. {}",
+                                threadlane_desktop::describe(&error)
+                            ),
+                        ))
+                    }
+                }
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     fn machine_run(run: &MachineRun, cx: &mut Context<Self>) -> Button {
@@ -186,10 +268,19 @@ impl Desktop {
         let mut screen = v_flex()
             .flex_1()
             .min_h_0()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
             .overflow_y_scrollbar()
             .id("machines")
             .gap(XL)
-            .child(heading("Machines"));
+            .child(heading("Machines"))
+            .children(self.state.local_running_tasks().map(|running| {
+                meta(
+                    format!("{} on this computer", running_tasks_label(Some(running))),
+                    cx,
+                )
+            }));
         if self.state.spaces().is_empty() {
             screen = screen.child(empty(EmptyRegion::Pairing, cx));
         }
@@ -198,12 +289,15 @@ impl Desktop {
             part = match space.gap(Part::Machines) {
                 Some(gap) => part.child(gap_line(&gap, "machines", &space.name, cx)),
                 None if space.machines.is_empty() => part.child(empty(EmptyRegion::Machines, cx)),
+                None if space.reach != Reach::Reachable => {
+                    part.child(meta("Space unavailable · showing last known machines", cx))
+                }
                 None => part.child(meta(
                     format!(
-                        "{} {} joined · {} running",
+                        "{} of {} {} online",
+                        space.online(),
                         space.machines.len(),
-                        count_form(space.machines.len(), "machine", "machines"),
-                        space.running.len()
+                        count_form(space.machines.len(), "machine", "machines")
                     ),
                     cx,
                 )),
@@ -215,6 +309,11 @@ impl Desktop {
                     space: space.name.clone(),
                     machine: machine.id,
                 };
+                let task_limit = if machine.max_parallel > 0 {
+                    format!("Task limit {}", machine.max_parallel)
+                } else {
+                    "Task limit".to_owned()
+                };
                 part = part.child(
                     v_flex()
                         .gap(XS)
@@ -224,18 +323,19 @@ impl Desktop {
                         .child(
                             h_flex()
                                 .gap(SM)
+                                .flex_wrap()
                                 .child(
-                                    link(
-                                        format!("machine-{}-{}", space.name, machine.id),
-                                        row.name,
-                                    )
-                                    .flex_1()
-                                    .min_w_0()
-                                    .on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.go(open.clone(), cx)
-                                        }),
-                                    ),
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            div().font_weight(FontWeight::SEMIBOLD).child(row.name),
+                                        )
+                                        .children(
+                                            space
+                                                .is_local_machine(machine)
+                                                .then(|| meta("This computer", cx)),
+                                        ),
                                 )
                                 .child(
                                     status_badge(row.state, machine.status.into(), cx).flex_none(),
@@ -245,12 +345,25 @@ impl Desktop {
                             h_flex()
                                 .gap(SM)
                                 .flex_wrap()
-                                .child(div().text_size(TYPE_BODY).child(format!(
-                                    "Tools: {} · {}",
-                                    row.backends.join(" · "),
-                                    row.gh
-                                )))
-                                .child(meta(format!("Load: {}", row.load), cx)),
+                                .justify_between()
+                                .child(meta(
+                                    running_tasks_label(space.machine_running_tasks(machine)),
+                                    cx,
+                                ))
+                                .child(
+                                    button(format!("machine-{}-{}", space.name, machine.id))
+                                        .small()
+                                        .outline()
+                                        .label(task_limit.clone())
+                                        .accessibility_label(format!(
+                                            "{} · {task_limit} · View machine details",
+                                            machine.name,
+                                        ))
+                                        .tab_stop(true)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.go(open.clone(), cx)
+                                        })),
+                                ),
                         ),
                 );
             }

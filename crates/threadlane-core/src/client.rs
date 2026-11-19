@@ -14,7 +14,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::admission::AdmittedKey;
-use crate::ids::{DecisionId, EventId, LaneId, ProjectId, RunId, StandingRuleId, TaskId, TimerId};
+use crate::ids::{
+    DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, StandingRuleId, TaskId, TimerId,
+};
 use crate::model::{
     Account, Agent, BackendKind, Cell, Decision, EventKind, Machine, MemoryFile, Mode,
     OutboxMessage, Recurrence, Repository, Run, StandingRule, Task, Timer,
@@ -227,10 +229,7 @@ pub enum OrgRequest {
         max_parallel: u32,
     },
     /// Sets this machine’s shared slot limit.
-    SetMachineSlots {
-        machine: crate::ids::MachineId,
-        slots: u32,
-    },
+    SetMachineSlots { machine: MachineId, slots: u32 },
     /// Sets the space's own ceiling, which caps every project's (Plan.md
     /// §2.3): lowering it lowers what every binding acts at, and raising it
     /// lets projects without a stricter ceiling of their own go higher.
@@ -595,6 +594,9 @@ pub struct TaskSummary {
     pub agent: String,
     /// The machine of its active run, else the one it last ran on.
     pub machine: Option<String>,
+    /// The machine of its active run. Machine display names can repeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_machine_id: Option<MachineId>,
     /// When its active run started; `None` while no run is active.
     pub running_since: Option<Timestamp>,
     /// The latest journal step in the active run, if recorded.

@@ -17,7 +17,7 @@ use super::{gap_line, menu_item};
 use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
 use crate::tokens::{
     CONTROL_HEIGHT, LG, MD, READING_WIDTH, ROW_HEIGHT, ROW_RADIUS, SM, Status, TABULAR, TYPE_BODY,
-    TYPE_META, XL, XS,
+    TYPE_META, XS,
 };
 use crate::{Desktop, Screen};
 
@@ -116,7 +116,7 @@ impl Desktop {
             cx,
         );
         let failed = self.inbox_tasks(
-            "Failed",
+            "Recent failures",
             &state.recent_failures(when),
             Part::Tasks,
             Status::Failed,
@@ -165,7 +165,6 @@ impl Desktop {
                     cx,
                 ))
             });
-        let _ = XL;
         // The page scrolls above a composer pinned at the bottom, as in a project's Chat tab.
         v_flex()
             .flex_1()
@@ -243,11 +242,17 @@ impl Desktop {
                 space: space.to_owned(),
                 task: task.id,
             };
-            let place = if multi_space {
+            let mut place = if multi_space {
                 format!("{space} / {} · {}", summary.project, summary.agent)
             } else {
                 format!("{} · {}", summary.project, summary.agent)
             };
+            if part == Part::Running
+                && let Some(machine) = &summary.machine
+            {
+                place.push_str(" · ");
+                place.push_str(machine);
+            }
             section = section.child(
                 button(SharedString::from(format!("{part:?}-{space}-{}", task.id)))
                     .ghost()
@@ -255,10 +260,7 @@ impl Desktop {
                     .rounded(ROW_RADIUS)
                     .px(SM)
                     .tab_stop(true)
-                    .tooltip(format!(
-                        "{} {} · {space} / {}",
-                        task.id, task.title, summary.project
-                    ))
+                    .tooltip(format!("{} {} · {place}", task.id, task.title))
                     .accessibility_label(format!(
                         "Open {} {} in {space} / {}",
                         task.id, task.title, summary.project
@@ -293,7 +295,7 @@ impl Desktop {
                                     .truncate()
                                     .child(task.title.clone()),
                             )
-                            .child(meta(place, cx).flex_none()),
+                            .child(meta(place, cx).max_w(relative(0.45)).truncate()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
             );
@@ -341,7 +343,7 @@ impl Desktop {
                         "Hide quiet updates".to_owned()
                     } else {
                         format!(
-                            "{quiet_count} quiet {} hidden",
+                            "Show {quiet_count} quiet {}",
                             count_form(quiet_count, "update", "updates")
                         )
                     })

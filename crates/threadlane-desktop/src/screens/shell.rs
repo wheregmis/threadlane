@@ -16,7 +16,8 @@ use crate::components::{button, icon_button, meta, row, status_dot};
 use crate::icons::AppIcon;
 use crate::menus::{GoHome, OpenSettings, SidebarShortcut, shortcut_hint};
 use crate::tokens::{
-    BAR_HEIGHT, LG, MD, ROW_HEIGHT, SIDEBAR_WIDTH, SM, Status, TYPE_EMPHASIS, TYPE_SECTION, XS,
+    BAR_HEIGHT, LG, MD, ROW_HEIGHT, ROW_RADIUS, SIDEBAR_WIDTH, SM, Status, TYPE_EMPHASIS,
+    TYPE_SECTION, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -527,11 +528,15 @@ impl Desktop {
 
     /// Machines and app settings, pinned below the scrolling list.
     fn sidebar_footer(&self, cx: &mut Context<Self>) -> Div {
-        let machines = self
-            .state
-            .machine_count()
-            .filter(|&(_, all)| all != 0)
-            .map(|(online, all)| format!("{online} / {all}").into());
+        let running = self.state.local_running_tasks();
+        let machine_label = running.map_or_else(
+            || "Machines and task limits".to_owned(),
+            |running| format!("Machines · {running} running on this computer"),
+        );
+        let style = ButtonCustomVariant::new(cx)
+            .foreground(cx.theme().sidebar_foreground)
+            .hover(cx.theme().muted)
+            .active(cx.theme().sidebar_accent);
         let mut settings = icon_button("go-settings", AppIcon::Settings, "App settings".to_owned())
             .selected(self.screen == Screen::Settings(None));
         if let Some(hint) = shortcut_hint(cx, &OpenSettings) {
@@ -545,16 +550,32 @@ impl Desktop {
             .border_color(cx.theme().sidebar_border)
             .child(
                 div().flex_1().min_w_0().child(
-                    row(
-                        "go-machines",
-                        AppIcon::Monitor,
-                        "Machines",
-                        machines,
-                        false,
-                        matches!(self.screen, Screen::Machines | Screen::Machine { .. }),
-                        cx,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx))),
+                    button("go-machines")
+                        .custom(style)
+                        .rounded(ROW_RADIUS)
+                        .w_full()
+                        .h_auto()
+                        .min_h(ROW_HEIGHT)
+                        .py_1()
+                        .selected(matches!(
+                            self.screen,
+                            Screen::Machines | Screen::Machine { .. }
+                        ))
+                        .accessibility_label(machine_label.clone())
+                        .tooltip(machine_label)
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap(SM)
+                                .child(Icon::new(AppIcon::Monitor).size(TYPE_SECTION))
+                                .child(
+                                    v_flex().items_start().min_w_0().child("Machines").children(
+                                        running
+                                            .map(|running| meta(format!("{running} running"), cx)),
+                                    ),
+                                ),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx))),
                 ),
             )
             .child(

@@ -20,7 +20,7 @@ use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
 use threadlane_core::client::{ActivityCursor, TaskActivityEntry};
-use threadlane_core::ids::{DecisionId, TaskId};
+use threadlane_core::ids::{DecisionId, MachineId, TaskId};
 use threadlane_core::model::Mode;
 use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
@@ -260,7 +260,7 @@ enum Screen {
     /// One machine in a space.
     Machine {
         space: String,
-        machine: threadlane_core::ids::MachineId,
+        machine: MachineId,
     },
     /// Routines in the selected space, or all spaces from the debug route.
     Routines(Option<String>),
@@ -425,6 +425,8 @@ struct Desktop {
     decision_inputs: HashMap<DecisionKey, (Entity<InputState>, Subscription)>,
     composer: Entity<TextareaState>,
     composer_shown: Option<threadlane_desktop::Destination>,
+    machine_limit_saving: bool,
+    machine_limit_error: Option<(String, MachineId, String)>,
     pacing_inputs: [Entity<InputState>; 4],
     /// The task screen's composer (wireframe 5).
     task_composer: Entity<TextareaState>,
@@ -695,6 +697,8 @@ impl Desktop {
             decision_inputs: HashMap::new(),
             composer,
             composer_shown: None,
+            machine_limit_saving: false,
+            machine_limit_error: None,
             pacing_inputs,
             task_composer,
             memory_editor,

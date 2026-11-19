@@ -257,6 +257,7 @@ pub struct Space {
     pub info: Option<HubInfo>,
     /// How this app reaches it: `Unix socket …` or `Network, hub key …`.
     pub reached_by: String,
+    local_socket: Option<PathBuf>,
     /// How many events it recorded and did not act on; `None` while its
     /// hub has not said, or cannot (one from before it could).
     pub recorded: Option<u64>,
@@ -290,6 +291,7 @@ impl Space {
             agents: Vec::new(),
             info: None,
             reached_by: String::new(),
+            local_socket: None,
             recorded: None,
             held: None,
             tasks: Vec::new(),
@@ -2127,12 +2129,12 @@ impl AppState {
                 .space(&status.name)
                 .cloned()
                 .unwrap_or_else(|| Space::new(&status.name));
-            space.reached_by = match &status.reach {
+            (space.reached_by, space.local_socket) = match status.reach {
                 threadlane_client::Reach::Socket { socket } => {
-                    format!("Unix socket {}", socket.display())
+                    (format!("Unix socket {}", socket.display()), Some(socket))
                 }
                 threadlane_client::Reach::Iroh { hub, .. } => {
-                    format!("Network, hub key {}", hub.fmt_short())
+                    (format!("Network, hub key {}", hub.fmt_short()), None)
                 }
             };
             space.reach = match status.info {

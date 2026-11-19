@@ -5,12 +5,13 @@ use std::{rc::Rc, sync::Arc, time::Duration};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState, Undo};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex};
 use gpui_kit::*;
 use threadlane_core::time::{Clock as _, SystemClock};
 use threadlane_desktop::{Activity, AppState, Destination, Draft, Outgoing, sends_on_enter};
 
-use super::{button, chat_images, composer_surface, meta};
+use super::{button, chat_images, composer_surface, icon_button, meta};
 use crate::icons::AppIcon;
 use crate::tokens::{COMPOSER_MAX_ROWS, FIELD_RADIUS, SM, TYPE_BODY, XS};
 use crate::{Desktop, Screen, Tab};
@@ -23,7 +24,7 @@ pub(crate) fn input(
     cx.new(|cx| {
         TextareaState::new(window, cx)
             .placeholder(placeholder)
-            .auto_grow(1, COMPOSER_MAX_ROWS)
+            .auto_grow(2, COMPOSER_MAX_ROWS)
             .submit_on_enter(sends_on_enter(false, false))
     })
 }
@@ -124,10 +125,14 @@ impl Desktop {
         let choose = Rc::new(choose);
         let view = cx.entity().downgrade();
         button("target")
+            .ghost()
+            .small()
             .label(label)
+            .dropdown_caret(true)
             .tab_stop(true)
             .disabled(locked)
-            .accessibility_label(accessibility)
+            .accessibility_label(accessibility.clone())
+            .tooltip(accessibility)
             .dropdown_menu(move |mut menu, _, _| {
                 for (name, space, project, checked) in &items {
                     let (space, project) = (space.clone(), project.clone());
@@ -209,80 +214,99 @@ impl Desktop {
         });
         let paste_to = attach_to.clone();
         let view = cx.weak_entity();
-        v_flex()
-            .gap(XS)
-            .children(attach_to.as_ref().map(|target| {
+        let surface = cx.theme().muted;
+        let images = attach_to.as_ref().and_then(|target| {
+            let images = self.state.draft_images(target);
+            (!images.is_empty()).then(|| {
                 h_flex()
+                    .h_auto()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .overflow_x_scrollbar()
+                    .id("composer-attachments")
                     .gap(XS)
-                    .flex_wrap()
-                    .children(self.state.draft_images(target).iter().map(|image| {
+                    .children(images.iter().map(|image| {
                         use std::hash::{BuildHasher as _, RandomState};
                         use std::sync::LazyLock;
                         static HASHER: LazyLock<RandomState> = LazyLock::new(RandomState::new);
                         let target = target.clone();
                         let id = HASHER.hash_one(image) as usize;
                         let selected = image.clone();
-                        v_flex()
-                            .gap(XS)
+                        h_flex()
+                            .items_start()
+                            .flex_none()
                             .child(chat_images::preview_button(
                                 ("preview-image", id).into(),
                                 image,
                                 cx,
                             ))
                             .child(
-                                button(("remove-image", id))
-                                    .small()
-                                    .ghost()
-                                    .tab_stop(true)
-                                    .label("Remove")
-                                    .accessibility_label(format!("Remove {}", image.name()))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                icon_button(
+                                    ("remove-image", id),
+                                    AppIcon::X,
+                                    format!("Remove {}", image.name()),
+                                )
+                                .tab_stop(true)
+                                .outline()
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.state.remove_image(&target, &selected);
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                     }))
-            }))
+            })
+        });
+        composer_surface(cx)
+            .children(images)
             .child(
-                composer_surface(cx)
-                    .children(picker)
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Textarea::new(self.draft_input(draft))
-                                .rounded(FIELD_RADIUS)
-                                .text_size(TYPE_BODY)
-                                .aria_label(label)
-                                .on_paste(move |item, _, cx| {
-                                    if let Some(target) = &paste_to {
-                                        let _ = view.update(cx, |this, cx| {
-                                            this.paste_images(target, item, cx);
-                                        });
-                                    }
-                                    false
-                                }),
-                        ),
-                    )
+                Textarea::new(self.draft_input(draft))
+                    .rounded(FIELD_RADIUS)
+                    .bg(surface)
+                    .border_color(surface)
+                    .text_size(TYPE_BODY)
+                    .disabled(destination.is_none())
+                    .aria_label(label)
+                    .on_paste(move |item, _, cx| {
+                        if let Some(target) = &paste_to {
+                            let _ = view.update(cx, |this, cx| {
+                                this.paste_images(target, item, cx);
+                            });
+                        }
+                        false
+                    }),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
                     .children(attach_to.map(|target| {
-                        button("attach-images")
-                            .ghost()
+                        icon_button("attach-images", AppIcon::Plus, "Attach images…".to_owned())
                             .tab_stop(true)
-                            .label("Attach images…")
+                            .disabled(loading_images)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.choose_images(target.clone(), window, cx);
                             }))
                     }))
+                    .children(
+                        picker.map(|picker| div().min_w_0().max_w(relative(0.55)).child(picker)),
+                    )
+                    .child(div().flex_1())
                     .child(
                         button("send")
                             .primary()
+                            .flex_none()
                             .tab_stop(true)
                             .icon(AppIcon::Send)
                             .label(if sending { "Sending…" } else { "Send" })
                             .loading(sending)
                             .disabled(!enabled)
                             .tooltip(crate::keyboard::send_hint(cx))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.submit_draft(window, cx)),
-                            ),
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.submit_draft(window, cx);
+                                this.draft_input(draft).focus_handle(cx).focus(window, cx);
+                            })),
                     ),
             )
             .children(loading_images.then(|| meta("Preparing images…", cx)))
@@ -315,6 +339,11 @@ impl Desktop {
                             .text_color(cx.theme().danger)
                             .child(why.to_owned())
                     }),
+            )
+            .children(
+                destination
+                    .is_none()
+                    .then(|| meta("Choose a conversation to send a message.", cx)),
             )
     }
 

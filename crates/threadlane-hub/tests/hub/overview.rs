@@ -127,6 +127,8 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
         [fix.id]
     );
     assert_eq!(running[0].latest_step.as_ref(), Some(latest));
+    assert_eq!(running[0].active_machine_id, Some(lease.machine_id));
+    assert_eq!(tasks[1].active_machine_id, None);
 
     let OverviewReply::Task { task } = overview(&hub, OverviewRequest::Task { task: fix.id }).await
     else {
