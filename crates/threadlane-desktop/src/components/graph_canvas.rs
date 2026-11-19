@@ -929,6 +929,7 @@ impl Desktop {
 
         let _ = BADGE_RADIUS;
         v_flex()
+            .flex_1()
             .w_full()
             .gap(SM)
             .child(bar)
@@ -936,7 +937,9 @@ impl Desktop {
                 div()
                     .relative()
                     .w_full()
-                    .h(px(canvas_h.clamp(280.0, 520.0)))
+                    .flex_1()
+                    // Floor keeps each canvas usable when several spaces stack.
+                    .min_h(px(280.0))
                     .rounded(ROW_RADIUS)
                     .border_1()
                     .border_color(cx.theme().border)

@@ -53,25 +53,25 @@ impl Desktop {
             }),
         );
 
+        let topology = team_mode == TeamViewMode::Topology;
         let mut spaces = v_flex()
             .gap(XL)
-            .when(team_mode == TeamViewMode::Overview, |body| {
-                body.max_w(READING_WIDTH)
-            });
+            .when(topology, |body| body.flex_1())
+            .when(!topology, |body| body.max_w(READING_WIDTH));
         for space in self
             .state
             .spaces()
             .iter()
             .filter(|space| scope.is_none_or(|name| space.name == name))
         {
-            let mut part = v_flex().gap(MD);
+            let mut part = v_flex().gap(MD).when(topology, |part| part.flex_1());
             if scope.is_none() {
                 part = part.child(section(space.name.clone()));
             }
             if let Some(gap) = space.gap(Part::Agents) {
                 part = part.child(gap_line(&gap, "agents", &space.name, cx));
             }
-            if team_mode == TeamViewMode::Topology {
+            if topology {
                 let topo = self.state.agent_topology(
                     &space.name,
                     self.state.topology_project(&space.name),
