@@ -1849,7 +1849,7 @@ impl Render for Desktop {
                 space,
                 project,
                 tab,
-            } => self.project(&space, &project, tab, &when, cx),
+            } => self.project(&space, &project, tab, &when, window, cx),
             Screen::Task { space, task } => self.task(&space, task, &when, cx),
             Screen::Agents(scope) => self.agents(scope.as_deref(), &when, cx),
             Screen::SpaceTasks { space } => self.space_tasks(&space, &when, cx),
