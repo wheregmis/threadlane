@@ -773,7 +773,7 @@ impl Desktop {
                         menu = menu.item(PopupMenuItem::new(option.clone()).on_click(
                             move |_, _, cx| {
                                 let _ = view.update(cx, |this, cx| {
-                                    if !this.work.saving {
+                                    if this.work.generation == generation && !this.work.saving {
                                         *choice.field(&mut this.work) = picked.clone();
                                         cx.notify();
                                     }

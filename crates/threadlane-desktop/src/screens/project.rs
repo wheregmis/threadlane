@@ -510,6 +510,7 @@ impl Desktop {
         // under it instead of carrying a half-finished slide from another tab.
         let bar = TabBar::new(SharedString::from(format!("project-tabs-{}", tab.label())))
             .underline()
+            .menu(true)
             .selected_index(tab.index())
             .on_click(cx.listener(move |this, index: &usize, _, cx| {
                 let tab = Tab::at(*index).unwrap_or(Tab::Tasks);
@@ -533,13 +534,10 @@ impl Desktop {
                     Tab::Routines => AppIcon::CalendarClock,
                     Tab::Setup => AppIcon::Settings,
                 };
-                KitTab::new().aria_label(label).child(
-                    h_flex()
-                        .gap(XS)
-                        .flex_none()
-                        .child(Icon::new(icon).size(TYPE_BODY))
-                        .child(label),
-                )
+                KitTab::new()
+                    .label(label)
+                    .aria_label(label)
+                    .icon(Icon::new(icon).size(TYPE_BODY))
             }));
         let archived = self.state.is_archived(space, project);
         let paused = self.state.is_paused(space, project);
