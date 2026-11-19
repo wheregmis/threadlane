@@ -5105,7 +5105,7 @@ T-0002
 #[test]
 fn bare_github_references_link_only_outside_words_code_and_urls() {
     let text = "Fix #565 (#572) **#1**, skip abc#5, foo_#6, foo-#7, #, #0, #05, #5abc, \
-                ##565, &#33;, foo/#5, `#565`, # Heading, https://example.test/page#565, \
+                ##565, &#33;, foo/#5, \\#5, `#565`, # Heading, https://example.test/page#565, \
                 <https://example.test/page#566>, and [see #567](https://example.test/page#568).";
     let references = segments(text)
         .into_iter()
@@ -5145,11 +5145,11 @@ fn bare_github_references_link_only_outside_words_code_and_urls() {
 
     assert_eq!(
         markdown_source_for(
-            "See #565, abc#5, #, and https://example.test/page#565.",
+            "See #565, \\#5, abc#5, #, and https://example.test/page#565.",
             None,
             Some(&https_repo),
         ),
-        "See [#565](https://github.com/wheregmis/threadlane/pull/565), abc#5, #, and https://example.test/page#565."
+        "See [#565](https://github.com/wheregmis/threadlane/pull/565), \\#5, abc#5, #, and https://example.test/page#565."
     );
     assert_eq!(
         markdown_source_for("See #565.", None, Some(&ssh_repo)),
