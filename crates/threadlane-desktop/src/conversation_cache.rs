@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use crate::{AppState, Line, When};
+use crate::{AppState, Destination, Line, When};
 
 // Bound retention when navigating through many long conversations.
 const RETAINED_CONVERSATIONS: usize = 4;
@@ -20,8 +20,9 @@ struct Projection {
 
 /// Desktop state with reusable ordered conversation rows.
 ///
-/// Read-only renders reuse the same allocation. Every mutable borrow invalidates
-/// the projections *before* handing out state, so feed/history merges, optimistic
+/// Read-only renders and draft-text edits reuse the same allocation. Every
+/// general mutable borrow invalidates the projections *before* handing out
+/// state, so feed/history merges, optimistic
 /// sends, decisions, disclosure toggles, unread state and future mutators cannot
 /// leave stale rows. Invalidation is deliberately conservative across projects.
 /// The underlying state remains the sole authority; this does not cache elements,
@@ -57,6 +58,13 @@ impl DerefMut for ConversationState {
 }
 
 impl ConversationState {
+    /// Typing changes only the composer's unsubmitted draft text/error, neither of
+    /// which participates in conversation rows. Keep this explicit seam narrow:
+    /// submissions and every other mutation still use conservative invalidation.
+    pub fn edit_draft(&mut self, destination: &Destination, text: &str) {
+        self.state.edit_draft(destination, text);
+    }
+
     /// Ordered rows for one conversation. Time labels depend on the local date
     /// and offset, not the frame's exact timestamp (`conversation` uses day/time,
     /// never relative durations). Midnight and timezone changes rebuild them.
@@ -168,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn long_chat_repeated_renders_do_not_reproject_or_clone_payloads() {
+    fn long_chat_typing_and_renders_do_not_reproject_or_clone_payloads() {
         let mut state = ConversationState::from(AppState::default());
         for id in 0..10_000 {
             state.sent(
@@ -181,9 +189,18 @@ mod tests {
         }
         let first = state.conversation("work", "api", &when(0, 0));
         assert_eq!(first.len(), 10_001);
-        // Deterministic work measurement: 100 render reads retain the very same
-        // 10,001-row allocation rather than sorting/formatting/cloning it again.
+        // Exercise the production InputEvent::Change -> edit_draft seam, not
+        // just read-only frames. Every keystroke must retain the allocation and
+        // agree with the authoritative uncached projection.
+        let destination = Destination::Lead("work".to_owned(), "api".to_owned());
         for frame in 0..100 {
+            let text = "x".repeat(frame as usize);
+            state.edit_draft(&destination, &text);
+            assert_eq!(state.draft(&destination), text);
+            assert_eq!(
+                &*state.conversation("work", "api", &when(frame, 0)),
+                state.state.conversation("work", "api", &when(frame, 0))
+            );
             assert!(Arc::ptr_eq(
                 &first,
                 &state.conversation("work", "api", &when(frame, 0))
