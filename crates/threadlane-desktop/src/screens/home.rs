@@ -5,19 +5,27 @@
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::client::TaskSummary;
 use threadlane_core::model::OutboxKind;
-use threadlane_desktop::{Author, Part, Spoken, When};
+use threadlane_desktop::{Author, Part, Spoken, When, count_form, is_quiet_update};
 
 use super::{gap_line, menu_item};
 use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
 use crate::tokens::{
-    CONTROL_HEIGHT, LG, READING_WIDTH, ROW_HEIGHT, SM, Status, TIMESTAMP_WIDTH, TYPE_BODY, XL, XS,
+    CONTROL_HEIGHT, LG, MD, READING_WIDTH, ROW_HEIGHT, ROW_RADIUS, SM, Status, TABULAR, TYPE_BODY,
+    TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen};
+
+/// How many failed tasks Inbox shows before folding behind "Show all".
+const INBOX_FAILURES_SHOWN: usize = 3;
+
+/// How many recent messages Inbox shows before folding behind "Show more".
+const INBOX_RECENT_SHOWN: usize = 3;
 
 impl Desktop {
     pub(crate) fn home(&self, when: &When, cx: &mut Context<Self>) -> AnyElement {
@@ -98,11 +106,14 @@ impl Desktop {
             needs = needs.child(self.decision(queued, when, cx));
         }
 
+        let multi_space = state.spaces().len() > 1;
         let running = self.inbox_tasks(
             "Running tasks",
             &state.running(),
             Part::Running,
             Status::Running,
+            multi_space,
+            None,
             cx,
         );
         let failed = self.inbox_tasks(
@@ -110,22 +121,26 @@ impl Desktop {
             &state.recent_failures(when),
             Part::Tasks,
             Status::Failed,
+            multi_space,
+            Some((INBOX_FAILURES_SHOWN, state.inbox_show_all_failures())),
             cx,
         );
 
+        let show_running = running.is_some();
+        let show_failed = failed.is_some();
         let recent_empty = state.timeline().is_empty()
             && state.gaps(Part::Recent).is_empty()
             && !state.timeline_has_earlier();
         let quiet = !show_needs
-            && running.is_none()
-            && failed.is_none()
+            && !show_running
+            && !show_failed
             && recent_empty
             && banners.is_empty();
 
         let content = v_flex()
-            .gap(XL)
+            .gap(LG)
             .child(heading("Inbox"))
-            .when(state.spaces().len() > 1, |view| {
+            .when(multi_space, |view| {
                 view.child(chips.w_full().min_h(CONTROL_HEIGHT).flex_none())
             })
             .children(
@@ -136,8 +151,18 @@ impl Desktop {
             )
             .children(banners)
             .when(show_needs, |view| view.child(needs))
+            .when(show_needs && show_running, |view| {
+                view.child(Separator::horizontal())
+            })
             .children(running)
+            .when((show_needs || show_running) && show_failed, |view| {
+                view.child(Separator::horizontal())
+            })
             .children(failed)
+            .when(
+                (show_needs || show_running || show_failed) && !recent_empty,
+                |view| view.child(Separator::horizontal()),
+            )
             .when(!recent_empty, |view| view.child(self.timeline(when, cx)))
             .when(quiet, |view| {
                 view.child(meta(
@@ -145,6 +170,7 @@ impl Desktop {
                     cx,
                 ))
             });
+        let _ = XL;
         // The page scrolls above a composer pinned at the bottom, as in a project's Chat tab.
         v_flex()
             .flex_1()
@@ -160,21 +186,49 @@ impl Desktop {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn inbox_tasks(
         &self,
         title: &'static str,
         tasks: &[(&str, &TaskSummary)],
         part: Part,
         status: Status,
+        multi_space: bool,
+        fold: Option<(usize, bool)>,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
         let gaps = self.state.gaps(part);
         if tasks.is_empty() && gaps.is_empty() {
             return None;
         }
-        let mut section = v_flex()
-            .gap(XS)
-            .child(section(title).children(count(tasks.len(), cx)));
+        let visible = match fold {
+            Some((limit, false)) => tasks.len().min(limit),
+            _ => tasks.len(),
+        };
+        let mut header = h_flex()
+            .gap(SM)
+            .items_center()
+            .children(count(tasks.len(), cx));
+        if let Some((limit, show_all)) = fold
+            && tasks.len() > limit
+        {
+            header = header.child(
+                button("inbox-toggle-failures")
+                    .small()
+                    .ghost()
+                    .tab_stop(true)
+                    .label(if show_all {
+                        "Show fewer".to_owned()
+                    } else {
+                        format!("Show all {}", tasks.len())
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.toggle_inbox_all_failures();
+                        cx.notify();
+                    })),
+            );
+        }
+        let mut section = v_flex().gap(XS).child(section(title).child(header));
         for (space, gap) in &gaps {
             section = section.child(gap_line(
                 gap,
@@ -187,16 +241,25 @@ impl Desktop {
                 cx,
             ));
         }
-        for &(space, summary) in tasks {
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        for &(space, summary) in &tasks[..visible] {
             let task = &summary.task;
             let screen = Screen::Task {
                 space: space.to_owned(),
                 task: task.id,
             };
+            let place = if multi_space {
+                format!("{space} / {} · {}", summary.project, summary.agent)
+            } else {
+                format!("{} · {}", summary.project, summary.agent)
+            };
             section = section.child(
                 button(SharedString::from(format!("{part:?}-{space}-{}", task.id)))
-                    .text()
+                    .ghost()
                     .w_full()
+                    .rounded(ROW_RADIUS)
+                    .px(SM)
                     .tab_stop(true)
                     .tooltip(format!(
                         "{} {} · {space} / {}",
@@ -211,18 +274,32 @@ impl Desktop {
                             .w_full()
                             .gap(SM)
                             .min_h(ROW_HEIGHT)
-                            .child(h_flex().size(LG).flex_none().child(status_dot(status, cx)))
+                            .items_center()
+                            .child(
+                                h_flex()
+                                    .size(LG)
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(status_dot(status, cx)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(TYPE_META)
+                                    .font_family(mono.clone())
+                                    .font_features(TABULAR.clone())
+                                    .text_color(muted)
+                                    .child(task.id.to_string()),
+                            )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .child(format!("{} {}", task.id, task.title)),
+                                    .child(task.title.clone()),
                             )
-                            .child(meta(
-                                format!("{space} / {} · {}", summary.project, summary.agent),
-                                cx,
-                            )),
+                            .child(meta(place, cx).flex_none()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
             );
@@ -236,13 +313,81 @@ impl Desktop {
     /// project and opens that conversation.
     fn timeline(&self, when: &When, cx: &mut Context<Self>) -> Div {
         let state = &self.state;
-        let mut list = v_flex().gap(SM).child(section("Recent"));
-        let entries = state.timeline();
+        let multi_space = state.spaces().len() > 1;
+        let all_entries = state.timeline();
+        let show_quiet = state.inbox_show_quiet_updates();
+        let quiet_count = all_entries
+            .iter()
+            .filter(|entry| {
+                matches!(entry.spoken, Spoken::Delivered(_)) && is_quiet_update(&entry.text())
+            })
+            .count();
+        let filtered: Vec<_> = all_entries
+            .iter()
+            .filter(|entry| {
+                show_quiet
+                    || !(matches!(entry.spoken, Spoken::Delivered(_))
+                        && is_quiet_update(&entry.text()))
+            })
+            .collect();
+        let show_all_recent = state.inbox_show_all_recent();
+        let visible_len = if show_all_recent {
+            filtered.len()
+        } else {
+            filtered.len().min(INBOX_RECENT_SHOWN)
+        };
+
+        let mut header_actions = h_flex().gap(XS).items_center();
+        if quiet_count > 0 {
+            header_actions = header_actions.child(
+                button("inbox-toggle-quiet")
+                    .small()
+                    .ghost()
+                    .label(if show_quiet {
+                        "Hide quiet updates".to_owned()
+                    } else {
+                        format!(
+                            "{quiet_count} quiet {} hidden",
+                            count_form(quiet_count, "update", "updates")
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.toggle_inbox_quiet_updates();
+                        cx.notify();
+                    })),
+            );
+        }
+        if filtered.len() > INBOX_RECENT_SHOWN {
+            header_actions = header_actions.child(
+                button("inbox-toggle-recent")
+                    .small()
+                    .ghost()
+                    .label(if show_all_recent {
+                        "Show fewer".to_owned()
+                    } else {
+                        format!("Show {} more", filtered.len() - INBOX_RECENT_SHOWN)
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.toggle_inbox_all_recent();
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let mut list = v_flex()
+            .gap(MD)
+            .child(section("Recent").child(header_actions));
         let gaps = state.gaps(Part::Recent);
         for (space, gap) in &gaps {
             list = list.child(gap_line(gap, "recent results", space, cx));
         }
-        for (index, entry) in entries.iter().enumerate() {
+        if filtered.is_empty() && quiet_count > 0 {
+            list = list.child(meta(
+                "Only quiet routine updates recently. Click above to view them.",
+                cx,
+            ));
+        }
+        for (index, entry) in filtered[..visible_len].iter().enumerate() {
             let space = entry.space.to_owned();
             // A reply in General links to the conversation it came from.
             let mut from = None;
@@ -279,9 +424,11 @@ impl Desktop {
                     (who, body)
                 }
             };
-            let place = entry
-                .project
-                .map_or_else(|| space.clone(), |project| format!("{space} / {project}"));
+            let place = match (multi_space, entry.project) {
+                (true, Some(project)) => format!("{space} / {project}"),
+                (false, Some(project)) => project.to_owned(),
+                (_, None) => space.clone(),
+            };
             let screen = entry.project.map(|project| Screen::Project {
                 space: space.clone(),
                 project: project.to_owned(),
@@ -289,9 +436,10 @@ impl Desktop {
             });
             let title = h_flex()
                 .gap(SM)
+                .items_center()
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(place.clone()))
                 .child(meta(who.clone(), cx));
-            let header = match &screen {
+            let header_left = match &screen {
                 Some(screen) => {
                     let screen = screen.clone();
                     button(SharedString::from(format!("timeline-{index}")))
@@ -303,6 +451,17 @@ impl Desktop {
                 }
                 None => title.into_any_element(),
             };
+            let header = h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .gap(SM)
+                .child(header_left)
+                .child(
+                    meta(when.moment(entry.at), cx)
+                        .flex_none()
+                        .font_features(TABULAR.clone()),
+                );
             let from = from.map(|project| {
                 let screen = Screen::Project {
                     space: space.clone(),
@@ -323,26 +482,15 @@ impl Desktop {
                 who != "Notice" && self.main_chat_screen(&space).as_ref() == Some(screen)
             });
             list = list.child(
-                h_flex()
+                v_flex()
                     .id(SharedString::from(format!("timeline-menu-{index}")))
+                    .w_full()
+                    .gap(XS)
                     .items_start()
-                    .gap(SM)
-                    .child(
-                        meta(when.moment(entry.at), cx)
-                            .w(TIMESTAMP_WIDTH)
-                            .flex_none()
-                            .text_right(),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .items_start()
-                            .child(header)
-                            .child(body)
-                            .children(crate::components::chat_images::previews(entry.images, cx))
-                            .children(from),
-                    )
+                    .child(header)
+                    .child(div().w_full().child(body))
+                    .children(crate::components::chat_images::previews(entry.images, cx))
+                    .children(from)
                     .context_menu(move |menu, _, _| {
                         let copy = text.clone();
                         let mut menu =
@@ -360,10 +508,12 @@ impl Desktop {
                     }),
             );
         }
-        if state.timeline_has_earlier() {
+        if show_all_recent && state.timeline_has_earlier() {
             list = list.child(
                 button("timeline-earlier")
                     .small()
+                    .ghost()
+                    .self_start()
                     .tab_stop(true)
                     .label("Show earlier")
                     .on_click(cx.listener(|this, _, _, cx| {
