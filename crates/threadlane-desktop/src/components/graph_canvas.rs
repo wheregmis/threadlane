@@ -417,21 +417,31 @@ impl Desktop {
         v_flex()
             .flex_1()
             .min_h_0()
+            .min_w_0()
             .w_full()
+            .h_full()
             .gap(SM)
             .child(legend)
             .child(
                 div()
-                    .id(SharedString::from(format!("{id}-viewport")))
+                    .relative()
                     .flex_1()
-                    .min_h(px(300.))
+                    .min_h_0()
+                    .min_w_0()
                     .w_full()
                     .rounded(ROW_RADIUS)
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().background)
-                    .overflow_scrollbar()
-                    .child(surface),
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("{id}-viewport")))
+                            .size_full()
+                            .overflow_scroll()
+                            .track_scroll(&self.dag_scroll)
+                            .child(surface),
+                    )
+                    .scrollbar(&self.dag_scroll, ScrollbarAxis::Both),
             )
             .into_any_element()
     }
@@ -797,23 +807,29 @@ impl Desktop {
                 )
             });
 
-        let _ = (BADGE_RADIUS, ScrollbarAxis::Both);
+        let _ = BADGE_RADIUS;
         v_flex()
             .w_full()
             .gap(SM)
             .child(bar)
             .child(
                 div()
-                    .id(SharedString::from(format!("topo-viewport-{space}")))
+                    .relative()
                     .w_full()
-                    .min_h(px(280.))
-                    .max_h(px(520.))
+                    .h(px(canvas_h.clamp(280.0, 520.0)))
                     .rounded(ROW_RADIUS)
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().background)
-                    .overflow_scrollbar()
-                    .child(surface),
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("topo-viewport-{space}")))
+                            .size_full()
+                            .overflow_scroll()
+                            .track_scroll(&self.topo_scroll)
+                            .child(surface),
+                    )
+                    .scrollbar(&self.topo_scroll, ScrollbarAxis::Both),
             )
             .children(dial)
             .into_any_element()

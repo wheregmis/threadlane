@@ -193,8 +193,13 @@ pub fn build_task_dag(tasks: &[TaskSummary], when: &When) -> TaskDag {
                 };
                 let sa = by_id[a];
                 let sb = by_id[b];
+                // Keep connected roots at the top of Layer 0 so dependency
+                // chains stay compact and aligned with their children.
+                let connected =
+                    |id: TaskId| -> u8 { u8::from(layer != 0 || !children.contains_key(&id)) };
                 bary(*a)
                     .cmp(&bary(*b))
+                    .then_with(|| connected(*a).cmp(&connected(*b)))
                     .then_with(|| {
                         status_priority(sa.task.status).cmp(&status_priority(sb.task.status))
                     })

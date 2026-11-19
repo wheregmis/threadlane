@@ -132,8 +132,9 @@ impl Desktop {
         let mut list = v_flex()
             .flex_1()
             .min_h_0()
+            .min_w_0()
+            .h_full()
             .gap(MD)
-            .overflow_y_scrollbar()
             .id("space-tasks")
             .child(page_header(
                 "Tasks",
@@ -471,7 +472,7 @@ impl Desktop {
                 }
             }
         }
-        list.into_any_element()
+        list.overflow_y_scrollbar().into_any_element()
     }
 
     pub(crate) fn project(
