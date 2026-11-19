@@ -5103,6 +5103,143 @@ T-0002
 }
 
 #[test]
+fn bare_github_references_link_only_outside_words_code_and_urls() {
+    let text = "Fix #565 (#572) **#1**, skip abc#5, foo_#6, foo-#7, #, #0, #05, #5abc, \
+                ##565, &#33;, foo/#5, `#565`, # Heading, https://example.test/page#565, \
+                <https://example.test/page#566>, and [see #567](https://example.test/page#568).";
+    let references = segments(text)
+        .into_iter()
+        .filter_map(|segment| match segment {
+            Segment::Link(label, target) => Some((label, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        references,
+        [
+            ("#565", Reference::Github(565)),
+            ("#572", Reference::Github(572)),
+            ("#1", Reference::Github(1)),
+            (
+                "https://example.test/page#565",
+                Reference::Web("https://example.test/page#565")
+            ),
+            (
+                "<https://example.test/page#566>",
+                Reference::Web("https://example.test/page#566")
+            ),
+        ]
+    );
+
+    let https_repo = github_repository("https://github.com/Wheregmis/Threadlane.git").unwrap();
+    let ssh_repo = github_repository("git@github.com:wheregmis/threadlane.git").unwrap();
+    let ssh_url_repo = github_repository("ssh://git@github.com/wheregmis/threadlane").unwrap();
+    assert_eq!(https_repo, "wheregmis/threadlane");
+    assert_eq!(ssh_repo, "wheregmis/threadlane");
+    assert_eq!(ssh_url_repo, "wheregmis/threadlane");
+    assert_eq!(
+        github_repository("https://gitlab.com/acme/widgets.git"),
+        None
+    );
+    assert_eq!(github_repository("/srv/git/notes"), None);
+
+    assert_eq!(
+        markdown_source_for(
+            "See #565, abc#5, #, and https://example.test/page#565.",
+            None,
+            Some(&https_repo),
+        ),
+        "See [#565](https://github.com/wheregmis/threadlane/pull/565), abc#5, #, and https://example.test/page#565."
+    );
+    assert_eq!(
+        markdown_source_for("See #565.", None, Some(&ssh_repo)),
+        "See [#565](https://github.com/wheregmis/threadlane/pull/565)."
+    );
+    // Without a GitHub remote, `#N` stays plain text.
+    assert_eq!(markdown_source_for("See #565.", None, None), "See #565.");
+    assert_eq!(markdown_source("See #565."), "See #565.");
+
+    assert_eq!(
+        Reference::from_link("threadlane:#565"),
+        Some(Reference::Github(565))
+    );
+    assert_eq!(Reference::from_link("threadlane:#"), None);
+    assert_eq!(Reference::from_link("threadlane:#0"), None);
+}
+
+#[tokio::test]
+async fn project_github_repository_uses_first_github_remote() {
+    let hub = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    // No repositories yet -> None.
+    assert_eq!(state.github_repository("work", "api"), None);
+
+    // Non-GitHub remotes only -> None.
+    state.apply_repositories(
+        "work",
+        "api",
+        Ok(vec![
+            Repository {
+                id: RepositoryId(1),
+                project_id: ProjectId(1),
+                name: "local".into(),
+                remote_url: "/srv/git/local".into(),
+                default_branch: "main".into(),
+                protected_branches: Vec::new(),
+            },
+            Repository {
+                id: RepositoryId(2),
+                project_id: ProjectId(1),
+                name: "gitlab".into(),
+                remote_url: "git@gitlab.com:acme/docs.git".into(),
+                default_branch: "main".into(),
+                protected_branches: Vec::new(),
+            },
+        ]),
+    );
+    assert_eq!(state.github_repository("work", "api"), None);
+
+    // First GitHub remote wins, skipping non-GitHub remotes before it.
+    state.apply_repositories(
+        "work",
+        "api",
+        Ok(vec![
+            Repository {
+                id: RepositoryId(1),
+                project_id: ProjectId(1),
+                name: "local".into(),
+                remote_url: "/srv/git/local".into(),
+                default_branch: "main".into(),
+                protected_branches: Vec::new(),
+            },
+            Repository {
+                id: RepositoryId(2),
+                project_id: ProjectId(1),
+                name: "ssh".into(),
+                remote_url: "git@github.com:Acme/Widgets.git".into(),
+                default_branch: "main".into(),
+                protected_branches: Vec::new(),
+            },
+            Repository {
+                id: RepositoryId(3),
+                project_id: ProjectId(1),
+                name: "https".into(),
+                remote_url: "https://github.com/acme/other.git".into(),
+                default_branch: "main".into(),
+                protected_branches: Vec::new(),
+            },
+        ]),
+    );
+    assert_eq!(
+        state.github_repository("work", "api").as_deref(),
+        Some("acme/widgets")
+    );
+}
+
+#[test]
 fn switching_spaces_keeps_drafts_and_failed_sends_with_their_original_chat() {
     let mut state = AppState::default();
     let work = Destination::Lead("work".into(), "General".into());

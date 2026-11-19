@@ -9,6 +9,8 @@ pub enum Reference<'a> {
     Task(TaskId),
     /// A decision in the current space.
     Decision(DecisionId),
+    /// A GitHub pull request or issue number in the project's repository.
+    Github(u64),
     /// An HTTP or HTTPS URL.
     Web(&'a str),
 }
@@ -21,11 +23,38 @@ impl<'a> Reference<'a> {
             return match id.as_bytes().first()? {
                 b'T' => TaskId::parse(id).map(Self::Task),
                 b'D' => DecisionId::parse(id).map(Self::Decision),
+                b'#' => parse_github_number(id).map(Self::Github),
                 _ => None,
             };
         }
         (url.starts_with("https://") || url.starts_with("http://")).then_some(Self::Web(url))
     }
+}
+
+/// Extracts `owner/repo` from a GitHub remote URL (HTTPS or SSH).
+#[must_use]
+pub fn github_repository(remote_url: &str) -> Option<String> {
+    threadlane_core::github::normalize_remote(remote_url)?
+        .strip_prefix("github.com/")
+        .map(str::to_owned)
+}
+
+/// The GitHub URL for a bare `#N` reference against a `owner/repo` slug.
+/// GitHub redirects `/pull/N` to `/issues/N` when `N` is an issue.
+#[must_use]
+pub fn github_pull_url(repository: &str, number: u64) -> String {
+    format!("https://github.com/{repository}/pull/{number}")
+}
+
+fn parse_github_number(text: &str) -> Option<u64> {
+    let digits = text.strip_prefix('#')?;
+    if digits.is_empty()
+        || digits.starts_with('0')
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// One slice of the original Markdown source.
@@ -94,6 +123,19 @@ pub fn segments(text: &str) -> Vec<Segment<'_>> {
                         .map(Reference::Task)
                         .or_else(|| DecisionId::parse(id).map(Reference::Decision))
                         .map(|reference| Segment::Link(id, reference))
+                } else {
+                    None
+                }
+            } else if ch == '#'
+                && !matches!(text[..start].chars().next_back(), Some('#' | '&' | '/'))
+            {
+                let digits = rest[1..].bytes().take_while(u8::is_ascii_digit).count();
+                let token = &rest[..1 + digits];
+                if digits > 0 && boundary(rest[token.len()..].chars().next()) {
+                    parse_github_number(token).map(|number| {
+                        end = start + token.len();
+                        Segment::Link(token, Reference::Github(number))
+                    })
                 } else {
                     None
                 }
@@ -204,7 +246,7 @@ fn code_length(text: &str, start: usize, marker: char) -> Option<usize> {
 /// Prepares source for the Markdown view, keeping HTML as literal text.
 #[must_use]
 pub fn markdown_source(text: &str) -> String {
-    markdown_source_with_time(text, None)
+    markdown_source_for(text, None, None)
 }
 
 /// Prepares source for the Markdown view, keeping HTML as literal text and
@@ -212,6 +254,17 @@ pub fn markdown_source(text: &str) -> String {
 /// outside code and URLs.
 #[must_use]
 pub fn markdown_source_with_time(text: &str, when: Option<&crate::When>) -> String {
+    markdown_source_for(text, when, None)
+}
+
+/// Prepares source for the Markdown view, optionally humanizing timestamps and
+/// linking bare `#N` references to `github_repo` (`owner/repo`).
+#[must_use]
+pub fn markdown_source_for(
+    text: &str,
+    when: Option<&crate::When>,
+    github_repo: Option<&str>,
+) -> String {
     let mut source = String::with_capacity(text.len());
     for segment in segments(text) {
         match segment {
@@ -222,7 +275,18 @@ pub fn markdown_source_with_time(text: &str, when: Option<&crate::When>) -> Stri
             Segment::ImageMarker => source.push_str("&#33;"),
             Segment::Angle => source.push_str("&lt;"),
             Segment::Code(code) | Segment::Link(code, Reference::Web(_)) => source.push_str(code),
-            Segment::Link(label, _) => {
+            Segment::Link(label, Reference::Github(number)) => {
+                if let Some(repo) = github_repo {
+                    source.push('[');
+                    source.push_str(label);
+                    source.push_str("](");
+                    source.push_str(&github_pull_url(repo, number));
+                    source.push(')');
+                } else {
+                    source.push_str(label);
+                }
+            }
+            Segment::Link(label, Reference::Task(_) | Reference::Decision(_)) => {
                 source.push('[');
                 source.push_str(label);
                 source.push_str("](threadlane:");

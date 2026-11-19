@@ -177,7 +177,7 @@ impl Desktop {
             )
             .children(digest.results.into_iter().map(|result| {
                 let mut row = v_flex().gap(XS).pl(MD).min_w_0().items_start();
-                if let Some(project) = result.project {
+                if let Some(project) = &result.project {
                     let screen = Screen::Project {
                         space: space.clone(),
                         project: project.clone(),
@@ -201,6 +201,7 @@ impl Desktop {
                 row.w_full().child(self.prose(
                     format!("digest-body-{space}-{seq}-{}", result.id),
                     &space,
+                    result.project.as_deref(),
                     result.text,
                     cx,
                 ))
