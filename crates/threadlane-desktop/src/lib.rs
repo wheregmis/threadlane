@@ -77,8 +77,8 @@ pub use machines::{
     MachineDetail, MachineHistory, MachineRow, MachineRun, load_machine_history, machine_row,
 };
 pub use memory::{
-    LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, change_memory, editable,
-    load_memory,
+    LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, MemoryVersionRow, change_memory,
+    editable, load_memory,
 };
 pub use permissions::{
     AgentRow, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement, allows,

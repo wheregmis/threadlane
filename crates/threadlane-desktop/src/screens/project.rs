@@ -2106,13 +2106,55 @@ impl Desktop {
                     }
                 };
                 detail = detail.child(section("Versions"));
-                let versions = self.state.memory_versions(space, project, when);
+                let versions = self.state.memory_version_rows(space, project, when);
                 if let Some(gap) = self.state.memory_versions_gap(space, project) {
                     detail = detail.child(gap_line(&gap, "memory versions", space, cx));
                 } else if versions.is_empty() {
                     detail = detail.child(empty(EmptyRegion::MemoryVersions, cx));
                 }
-                detail = detail.children(versions.into_iter().map(|line| meta(line, cx)));
+                detail = detail.children(versions.into_iter().map(|row| {
+                    let (in_space, named) = (space.to_owned(), project.to_owned());
+                    let label = if row.current {
+                        format!("{} · current", row.label)
+                    } else {
+                        row.label
+                    };
+                    button(format!(
+                        "memory-version-{space}-{project}-{path}-{}",
+                        row.version
+                    ))
+                    .ghost()
+                    .label(label.clone())
+                    .accessibility_label(format!("Inspect {label}"))
+                    .tab_stop(true)
+                    .selected(row.selected)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state
+                            .inspect_memory_version(&in_space, &named, row.version);
+                        cx.notify();
+                    }))
+                }));
+                if let Some(version) = self.state.memory_inspected(space, project) {
+                    detail =
+                        detail.child(section(format!("Version {} · read-only", version.version)));
+                    if version.deleted {
+                        detail = detail.child(meta(
+                            "This version records a deletion; it has no file contents.",
+                            cx,
+                        ));
+                    } else {
+                        detail = detail.child(self.prose(
+                            format!(
+                                "memory-history-{space}-{project}-{path}-{}",
+                                version.version
+                            ),
+                            space,
+                            Some(project),
+                            version.content.clone(),
+                            cx,
+                        ));
+                    }
+                }
             }
         }
         h_flex()

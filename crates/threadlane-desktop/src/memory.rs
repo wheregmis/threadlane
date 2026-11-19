@@ -52,6 +52,15 @@ pub struct MemoryRow {
     pub selected: bool,
 }
 
+/// A read-only entry in the selected file's version history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryVersionRow {
+    pub version: i64,
+    pub label: String,
+    pub selected: bool,
+    pub current: bool,
+}
+
 /// What the "What the lead knows" card says (wireframe 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeadKnows {
@@ -119,6 +128,7 @@ pub(crate) struct MemoryView {
     selected: Option<String>,
     /// The selected file's versions, oldest first.
     versions: Vec<MemoryFile>,
+    inspected_version: Option<i64>,
     /// Whether the selected file is open for editing.
     editing: bool,
     /// Why your last change was refused.
@@ -257,6 +267,13 @@ impl AppState {
             && view.selected.as_deref() == Some(path.as_str())
         {
             view.versions = take(&mut view.answers, crate::Part::MemoryVersions, listed);
+            if !view
+                .versions
+                .iter()
+                .any(|file| Some(file.version) == view.inspected_version)
+            {
+                view.inspected_version = None;
+            }
         }
     }
 
@@ -314,6 +331,7 @@ impl AppState {
         if view.selected.as_deref() != Some(path) {
             view.selected = Some(path.to_owned());
             view.versions.clear();
+            view.inspected_version = None;
             view.answers.remove(&crate::Part::MemoryVersions);
             view.editing = false;
             view.refused = None;
@@ -339,6 +357,60 @@ impl AppState {
     pub fn memory_versions_gap(&self, space: &str, project: &str) -> Option<Gap> {
         let view = self.memory_view(space, project)?;
         gap_in(&view.answers, crate::Part::MemoryVersions)
+    }
+
+    /// Inspect only a version already loaded for this file. This never changes
+    /// the current file, the editor, or the server.
+    pub fn inspect_memory_version(&mut self, space: &str, project: &str, version: i64) {
+        let view = self.memory_view_mut(space, project);
+        view.inspected_version = view
+            .versions
+            .iter()
+            .find(|file| {
+                file.version == version && Some(file.path.as_str()) == view.selected.as_deref()
+            })
+            .map(|file| file.version);
+    }
+
+    /// Leave history inspection on navigation without discarding current edits.
+    pub fn clear_memory_inspection(&mut self) {
+        for view in self.memory.values_mut() {
+            view.inspected_version = None;
+        }
+    }
+
+    #[must_use]
+    pub fn memory_inspected(&self, space: &str, project: &str) -> Option<&MemoryFile> {
+        let view = self.memory_view(space, project)?;
+        let version = view.inspected_version?;
+        view.versions.iter().find(|file| {
+            file.version == version && Some(file.path.as_str()) == view.selected.as_deref()
+        })
+    }
+
+    #[must_use]
+    pub fn memory_version_rows(
+        &self,
+        space: &str,
+        project: &str,
+        when: &When,
+    ) -> Vec<MemoryVersionRow> {
+        let Some(view) = self.memory_view(space, project) else {
+            return Vec::new();
+        };
+        view.versions
+            .iter()
+            .rev()
+            .zip(self.memory_versions(space, project, when))
+            .map(|(file, label)| MemoryVersionRow {
+                version: file.version,
+                label,
+                selected: view.inspected_version == Some(file.version),
+                current: self
+                    .memory_file(space, project)
+                    .is_some_and(|current| current.version == file.version),
+            })
+            .collect()
     }
 
     /// The selected file's versions, newest first: `v3 · 09:20 · by you`,
@@ -463,5 +535,110 @@ impl AppState {
             notes: count("Space notes") + count("Project notes"),
             progress: count("Task progress files"),
         })
+    }
+}
+
+#[cfg(test)]
+mod history_inspection_tests {
+    use super::*;
+    use threadlane_core::{
+        ids::{MemoryFileId, RunId},
+        time::Timestamp,
+    };
+
+    const PATH: &str = "project/notes/example.md";
+
+    fn file(version: i64, deleted: bool) -> MemoryFile {
+        MemoryFile {
+            id: MemoryFileId(version),
+            path: PATH.to_owned(),
+            content: format!("Synthetic version {version}"),
+            version,
+            written_by_run: (version == 1).then_some(RunId(7)),
+            deleted,
+            written_at: Timestamp::from_millis(version * 60_000),
+        }
+    }
+
+    fn load(space: &str, project: &str, versions: Vec<MemoryFile>) -> MemoryLoad {
+        MemoryLoad {
+            space: space.to_owned(),
+            project: project.to_owned(),
+            files: Ok(versions
+                .last()
+                .filter(|file| !file.deleted)
+                .cloned()
+                .into_iter()
+                .collect()),
+            versions: Some((PATH.to_owned(), Ok(versions))),
+        }
+    }
+
+    #[test]
+    fn historical_text_and_provenance_do_not_change_current_editing() {
+        let mut state = AppState::default();
+        state.select_memory("work", "api", PATH);
+        state.apply_memory(load("work", "api", vec![file(1, false), file(2, false)]));
+        let draft = state.edit_memory("work", "api", true);
+        state.inspect_memory_version("work", "api", 1);
+        assert_eq!(
+            state.memory_inspected("work", "api").unwrap(),
+            &file(1, false)
+        );
+        assert_eq!(state.memory_file("work", "api").unwrap(), &file(2, false));
+        assert!(state.memory_editing("work", "api"));
+        assert_eq!(draft.as_deref(), Some("Synthetic version 2"));
+        let when = When {
+            now: Timestamp::from_millis(120_000),
+            offset_minutes: 0,
+        };
+        let rows = state.memory_version_rows("work", "api", &when);
+        assert_eq!(
+            rows.iter().map(|row| row.version).collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert!(rows[0].current && !rows[0].selected);
+        assert!(rows[0].label.ends_with("by you"));
+        assert!(rows[1].selected && !rows[1].current);
+        assert!(rows[1].label.ends_with("by run 7"));
+        state.clear_memory_inspection();
+        assert!(state.memory_inspected("work", "api").is_none());
+        assert!(state.memory_editing("work", "api"));
+    }
+
+    #[test]
+    fn history_selection_is_scoped_and_cleared_when_unavailable() {
+        let mut state = AppState::default();
+        for (space, project) in [("work", "api"), ("home", "api"), ("work", "web")] {
+            state.select_memory(space, project, PATH);
+            state.apply_memory(load(space, project, vec![file(1, false), file(2, true)]));
+        }
+        state.inspect_memory_version("work", "api", 2);
+        assert!(state.memory_inspected("work", "api").unwrap().deleted);
+        assert!(state.memory_file("work", "api").is_none());
+        assert!(state.memory_inspected("home", "api").is_none());
+        assert!(state.memory_inspected("work", "web").is_none());
+        state.inspect_memory_version("work", "api", 99);
+        assert!(state.memory_inspected("work", "api").is_none());
+        state.inspect_memory_version("work", "api", 1);
+        state.apply_memory(load("work", "api", vec![file(2, true)]));
+        assert!(state.memory_inspected("work", "api").is_none());
+        state.inspect_memory_version("work", "api", 2);
+        state.select_memory("work", "api", "project/instructions.md");
+        assert!(state.memory_inspected("work", "api").is_none());
+        // A late response for the old path cannot restore its preview.
+        state.apply_memory(load("work", "api", vec![file(1, false)]));
+        assert!(
+            state
+                .memory_version_rows(
+                    "work",
+                    "api",
+                    &When {
+                        now: Timestamp::from_millis(0),
+                        offset_minutes: 0,
+                    }
+                )
+                .is_empty()
+        );
     }
 }
