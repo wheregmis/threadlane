@@ -1125,10 +1125,12 @@ impl Desktop {
                         .justify_between()
                         .w_full()
                         .child(status_badge(status, Status::task(status), cx))
-                        .children(
-                            threadlane_desktop::work_elapsed(summary, when)
-                                .map(|elapsed| meta(elapsed, cx).text_right()),
-                        ),
+                        .children(threadlane_desktop::work_started(summary).map(|since| {
+                            crate::components::Elapsed::new(
+                                format!("elapsed-{space}-{}", summary.task.id),
+                                since,
+                            )
+                        })),
                 );
         }
         side = side.child(section("Open decisions"));

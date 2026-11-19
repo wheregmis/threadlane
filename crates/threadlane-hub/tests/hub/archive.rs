@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use threadlane_core::client::{
-    ApiError, DecisionRequest, MemoryRequest, OrgReply, OrgRequest, OverviewRequest,
+    ApiError, DecisionRequest, MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest,
     ProjectSummary, TaskRequest, TimerReply, TimerRequest, UserMessage,
 };
 use threadlane_core::model::{
@@ -265,6 +265,24 @@ async fn archive_keeps_history_and_repository_ownership_and_restores_the_project
         prior_conversation
     );
     assert_eq!(hub.api.overview(tasks).await.unwrap(), prior_tasks);
+    let OverviewReply::Work { overview } = hub.api.overview(OverviewRequest::Work).await.unwrap()
+    else {
+        panic!("work");
+    };
+    assert!(overview.projects.contains(&archived));
+    assert!(
+        overview
+            .leads
+            .iter()
+            .all(|lead| lead.project != archived.name)
+    );
+    assert!(
+        overview
+            .tasks
+            .iter()
+            .all(|task| task.task.project_id != project.id)
+    );
+
     let reply = hub.api.decisions(answer).await.unwrap();
     assert!(
         matches!(reply, threadlane_core::client::DecisionReply::Answered {

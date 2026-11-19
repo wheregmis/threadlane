@@ -9,8 +9,7 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::TaskId;
 use threadlane_desktop::{
-    Consequence, EmptyRegion, Queued, TaskControl, When, activity_runs, changes, status_label,
-    task_header, usage,
+    Consequence, EmptyRegion, Queued, TaskControl, When, changes, status_label, task_header, usage,
 };
 
 use super::{empty, gap_line, link, menu_item};
@@ -255,18 +254,61 @@ impl Desktop {
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.toggle_activity(&in_space, task);
+                    if this.state.activity_open(&in_space, task) {
+                        this.load_task_activity(in_space.clone(), task, None, cx);
+                    }
                     cx.notify();
                 })),
         );
         if expanded {
-            let runs = activity_runs(detail, when);
-            if runs.is_empty() {
+            let data = &self.task_activity;
+            if data.loading && !data.loaded {
+                activity = activity.child(meta("Loading activity…", cx));
+            } else if data.loaded && data.entries.is_empty() {
                 activity = activity.child(empty(EmptyRegion::Activity, cx));
             }
-            for (run, steps) in runs {
+            for group in data
+                .entries
+                .chunk_by(|a, b| a.position.run == b.position.run)
+            {
+                let run = group[0].position.run;
+                let mut title = format!("Run {run}");
+                if let Some(summary) = detail.runs.iter().find(|summary| summary.run.id == run) {
+                    title.push_str(&format!(" · {}", when.moment(summary.run.started_at)));
+                }
                 activity = activity
-                    .child(section(run))
-                    .children(steps.into_iter().map(|step| meta(step, cx)));
+                    .child(section(title))
+                    .children(group.iter().rev().map(|entry| {
+                        meta(
+                            format!(
+                                "{} · {}",
+                                when.moment(entry.step.at),
+                                entry.step.description
+                            ),
+                            cx,
+                        )
+                    }));
+            }
+            if let Some((_, error)) = &data.error {
+                activity = activity.child(meta(error.clone(), cx));
+            }
+            if !data.loading && (data.next.is_some() || data.error.is_some()) {
+                let in_space = space.to_owned();
+                let before = data.error.as_ref().map_or(data.next, |(before, _)| *before);
+                activity = activity.child(
+                    button("task-activity-earlier")
+                        .small()
+                        .ghost()
+                        .label(if data.error.is_some() {
+                            "Retry"
+                        } else {
+                            "Load earlier activity"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.load_task_activity(in_space.clone(), task, before, cx);
+                            cx.notify();
+                        })),
+                );
             }
         }
         let actions = h_flex()

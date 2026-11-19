@@ -4,10 +4,11 @@
 use std::collections::HashMap;
 
 use threadlane_core::client::{
-    ApiError, ConversationEntry, DigestResult, FeedItem, LeadRun, OverviewReply, OverviewRequest,
-    RecordedEvent, RunStep, RunSummary, RunUsage, TaskDetail, TaskSummary,
+    ActivityCursor, ApiError, ConversationEntry, DigestResult, FeedItem, HubApi as _, LeadRun,
+    OverviewReply, OverviewRequest, RecordedEvent, RunStep, RunSummary, RunUsage,
+    TaskActivityEntry, TaskDetail, TaskSummary, WorkOverview,
 };
-use threadlane_core::ids::{AgentId, MachineId, ProjectId};
+use threadlane_core::ids::{AgentId, MachineId, ProjectId, TaskId};
 use threadlane_core::model::{
     Event, EventKind, JournalEntry, OutboxMessage, Run, RunOutcome, RunStatus, Task, TaskStatus,
 };
@@ -149,17 +150,14 @@ async fn summary(
     names: &Names,
     task: Task,
     runs: Option<&[RunSummary]>,
+    completed_at: Option<Timestamp>,
 ) -> Result<TaskSummary, ApiError> {
     let active = if let Some(runs) = runs {
         runs.iter()
             .rfind(|row| row.run.status == RunStatus::Active)
             .map(|row| row.run.clone())
     } else if matches!(task.status, TaskStatus::Running | TaskStatus::InReview) {
-        db.lane_runs(task.lane_id)
-            .await
-            .map_err(api_error)?
-            .into_iter()
-            .rfind(|run| run.status == RunStatus::Active)
+        db.active_lane_run(task.lane_id).await.map_err(api_error)?
     } else {
         None
     };
@@ -189,11 +187,7 @@ async fn summary(
         machine,
         running_since: active.map(|run| run.started_at),
         latest_step,
-        completed_at: if task.status == TaskStatus::Done {
-            db.task_completed_at(task.id).await.map_err(api_error)?
-        } else {
-            None
-        },
+        completed_at,
         task,
     })
 }
@@ -203,9 +197,16 @@ async fn summaries(
     names: &Names,
     tasks: Vec<Task>,
 ) -> Result<Vec<TaskSummary>, ApiError> {
+    let done: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Done)
+        .map(|task| task.id)
+        .collect();
+    let completed = db.task_completion_times(&done).await.map_err(api_error)?;
     let mut summaries = Vec::with_capacity(tasks.len());
     for task in tasks {
-        summaries.push(summary(db, names, task, None).await?);
+        let completed_at = completed.get(&task.id).copied();
+        summaries.push(summary(db, names, task, None, completed_at).await?);
     }
     Ok(summaries)
 }
@@ -294,99 +295,68 @@ pub(super) async fn handle(
                 tasks: summaries(db, &names, tasks).await?,
             })
         }
+        OverviewRequest::Work => {
+            let names = Names::of(db).await?;
+            let tasks = db.active_project_tasks().await.map_err(api_error)?;
+            let leads = db.active_project_leads().await.map_err(api_error)?;
+            let projects = api.project_list(true).await?;
+            Ok(OverviewReply::Work {
+                overview: WorkOverview {
+                    projects,
+                    tasks: summaries(db, &names, tasks).await?,
+                    leads,
+                },
+            })
+        }
         OverviewRequest::Running => {
             let names = Names::of(db).await?;
-            let mut running = Vec::new();
-            for project in names.projects.keys() {
-                running.extend(
-                    db.tasks(*project)
-                        .await
-                        .map_err(api_error)?
-                        .into_iter()
-                        .filter(|task| {
-                            matches!(task.status, TaskStatus::Running | TaskStatus::InReview)
-                        }),
-                );
-            }
-            running.sort_by_key(|task| task.id);
+            let running = db.running_tasks().await.map_err(api_error)?;
             let mut tasks = summaries(db, &names, running).await?;
             tasks.retain(|summary| {
                 summary.task.status == TaskStatus::Running || summary.running_since.is_some()
             });
             Ok(OverviewReply::Tasks { tasks })
         }
-        OverviewRequest::Task { task } => {
+        OverviewRequest::TaskActivity { task, before } => {
             let task = db
                 .task(task)
                 .await
                 .map_err(api_error)?
                 .ok_or_else(|| ApiError::NotFound(format!("task {task}")))?;
-            let names = Names::of(db).await?;
-            let repositories = db
-                .repositories(task.project_id)
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .filter(|repository| task.repositories.contains(&repository.id))
-                .map(|repository| repository.name)
-                .collect();
-            let mut runs = Vec::new();
-            for run in db.lane_runs(task.lane_id).await.map_err(api_error)? {
-                let journal = db.journal(run.id).await.map_err(api_error)?;
-                runs.push(RunSummary {
-                    machine: names.machine(run.machine_id),
-                    usage: if run.status == RunStatus::Active {
-                        None
-                    } else {
-                        journal
-                            .iter()
-                            .rev()
-                            .find(|entry| entry.entry["type"] == "finished")
-                            .and_then(usage)
-                    },
-                    steps: journal.iter().filter_map(step).collect(),
-                    run,
-                });
-            }
-            let summary = summary(db, &names, task.clone(), Some(&runs)).await?;
-            let decisions = db.lane_decisions(task.lane_id).await.map_err(api_error)?;
-            let related = db
-                .tasks(task.project_id)
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .filter(|other| {
-                    task.depends_on.contains(&other.id) || other.depends_on.contains(&task.id)
-                })
-                .collect();
-            let related = summaries(db, &names, related).await?;
-            let mut messages: Vec<ConversationEntry> = db
-                .user_messages(task.lane_id, None, FEED_PAGE)
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .map(|event| you(event, false))
-                .collect();
-            messages.reverse();
-            let proposed_by = crate::proposal::accepted_author(db, &task)
+            let size = threadlane_core::client::CONVERSATION_PAGE as usize;
+            let mut journal = db
+                .lane_journal_page(
+                    task.lane_id,
+                    before.map(|cursor| (cursor.run, cursor.seq)),
+                    size as u32 + 1,
+                )
                 .await
                 .map_err(api_error)?;
-            let stopped = db.lane_stopped(task.lane_id).await.map_err(api_error)?;
-            Ok(OverviewReply::Task {
-                task: Box::new(TaskDetail {
-                    branch: task_branch(task.id),
-                    repositories,
-                    runs,
-                    reviews: db.task_reviews(task.id).await.map_err(api_error)?,
-                    decisions,
-                    related,
-                    messages,
-                    summary,
-                    stopped,
-                    proposed_by,
-                }),
-            })
+            let next = if journal.len() > size {
+                journal.pop();
+                journal.last().map(|entry| ActivityCursor {
+                    run: entry.run_id,
+                    seq: entry.seq,
+                })
+            } else {
+                None
+            };
+            let entries = journal
+                .iter()
+                .filter_map(|entry| {
+                    step(entry).map(|step| TaskActivityEntry {
+                        position: ActivityCursor {
+                            run: entry.run_id,
+                            seq: entry.seq,
+                        },
+                        step,
+                    })
+                })
+                .collect();
+            Ok(OverviewReply::TaskActivity { entries, next })
         }
+        OverviewRequest::Task { task } => task_detail(db, task, true).await,
+        OverviewRequest::TaskOverview { task } => task_detail(db, task, false).await,
         OverviewRequest::Conversation {
             project,
             before,
@@ -478,11 +448,9 @@ pub(super) async fn handle(
         OverviewRequest::Lead { project } => {
             let project = api.project_named(project.as_deref()).await?;
             let active = db
-                .lane_runs(project.lead_lane_id)
+                .active_lane_run(project.lead_lane_id)
                 .await
-                .map_err(api_error)?
-                .into_iter()
-                .rfind(|run| run.status == RunStatus::Active);
+                .map_err(api_error)?;
             let stopped = db
                 .lane_stopped(project.lead_lane_id)
                 .await
@@ -566,4 +534,93 @@ pub(super) async fn handle(
         }),
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }
+}
+
+async fn task_detail(db: &HubDb, task: TaskId, full: bool) -> Result<OverviewReply, ApiError> {
+    let task = db
+        .task(task)
+        .await
+        .map_err(api_error)?
+        .ok_or_else(|| ApiError::NotFound(format!("task {task}")))?;
+    let names = Names::of(db).await?;
+    let repositories = db
+        .repositories(task.project_id)
+        .await
+        .map_err(api_error)?
+        .into_iter()
+        .filter(|repository| task.repositories.contains(&repository.id))
+        .map(|repository| repository.name)
+        .collect();
+    let mut runs = Vec::new();
+    for run in db.lane_runs(task.lane_id).await.map_err(api_error)? {
+        let active = run.status == RunStatus::Active;
+        let (steps, usage) = if full {
+            let journal = db.journal(run.id).await.map_err(api_error)?;
+            let usage = if active {
+                None
+            } else {
+                journal
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.entry["type"] == "finished")
+                    .and_then(usage)
+            };
+            (journal.iter().filter_map(step).collect(), usage)
+        } else if active {
+            (latest(db, Some(&run)).await?.into_iter().collect(), None)
+        } else {
+            let result = db
+                .latest_journal_entry(run.id, Some("finished"))
+                .await
+                .map_err(api_error)?;
+            (Vec::new(), result.as_ref().and_then(usage))
+        };
+        runs.push(RunSummary {
+            machine: names.machine(run.machine_id),
+            usage,
+            steps,
+            run,
+        });
+    }
+    let completed_at = if task.status == TaskStatus::Done {
+        db.task_completed_at(task.id).await.map_err(api_error)?
+    } else {
+        None
+    };
+    let summary = summary(db, &names, task.clone(), Some(&runs), completed_at).await?;
+    let decisions = db.lane_decisions(task.lane_id).await.map_err(api_error)?;
+    let related = db
+        .tasks(task.project_id)
+        .await
+        .map_err(api_error)?
+        .into_iter()
+        .filter(|other| task.depends_on.contains(&other.id) || other.depends_on.contains(&task.id))
+        .collect();
+    let related = summaries(db, &names, related).await?;
+    let mut messages: Vec<ConversationEntry> = db
+        .user_messages(task.lane_id, None, FEED_PAGE)
+        .await
+        .map_err(api_error)?
+        .into_iter()
+        .map(|event| you(event, false))
+        .collect();
+    messages.reverse();
+    let proposed_by = crate::proposal::accepted_author(db, &task)
+        .await
+        .map_err(api_error)?;
+    let stopped = db.lane_stopped(task.lane_id).await.map_err(api_error)?;
+    Ok(OverviewReply::Task {
+        task: Box::new(TaskDetail {
+            branch: task_branch(task.id),
+            repositories,
+            runs,
+            reviews: db.task_reviews(task.id).await.map_err(api_error)?,
+            decisions,
+            related,
+            messages,
+            summary,
+            stopped,
+            proposed_by,
+        }),
+    })
 }

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{
@@ -237,6 +238,9 @@ enum Ended {
     /// The agent went on working after a call of the run opened a decision.
     Deferred,
 }
+
+const JOURNAL_BATCH: usize = 16;
+const JOURNAL_FLUSH_DELAY: Duration = Duration::from_millis(50);
 
 /// What woke the event loop.
 enum Next {
@@ -560,7 +564,7 @@ impl Inner {
     }
 
     /// Races the event stream against the wall-time limit and the lane's
-    /// stop signal, appending one journal entry per event. Every entry has
+    /// stop signal, appending journal entries in bounded batches. Every entry has
     /// been appended when this returns `Ended::Terminal` or `Ended::Closed`.
     async fn mirror_events(
         &self,
@@ -571,15 +575,41 @@ impl Inner {
         deadline: Timestamp,
     ) -> Result<Ended, LaneExit> {
         let mut limit = self.clock.sleep_until(deadline);
+        let flush_timer = tokio::time::sleep(JOURNAL_FLUSH_DELAY);
+        tokio::pin!(flush_timer);
+        let mut buffered = 0;
         loop {
-            let next = tokio::select! {
-                biased;
-                stop = lane.stopped() => Next::Stop(stop),
-                () = &mut limit => Next::WallTime,
-                event = run.next_event() => Next::Event(event),
+            // The timer may flush while the backend is producing its next event.
+            // Keep that read alive across a flush: it can include a tool call.
+            let next = {
+                let event = run.next_event();
+                tokio::pin!(event);
+                loop {
+                    tokio::select! {
+                        biased;
+                        stop = lane.stopped() => break Next::Stop(stop),
+                        () = &mut limit => break Next::WallTime,
+                        () = &mut flush_timer, if buffered > 0 => {
+                            mirror.flush(self.link.as_ref(), &lane.lease(), Flush::WhenReachable).await?;
+                            buffered = 0;
+                        }
+                        event = &mut event => break Next::Event(event),
+                    }
+                }
             };
             let event = match next {
-                Next::Stop(stop) => return Err(stop.into()),
+                Next::Stop(stop) => {
+                    if matches!(stop, Stop::User | Stop::Shutdown) {
+                        match mirror
+                            .flush(self.link.as_ref(), &lane.lease(), Flush::WhenReachable)
+                            .await
+                        {
+                            Ok(()) | Err(LinkError::Stopped) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    return Err(stop.into());
+                }
                 Next::WallTime => return Ok(Ended::WallTime),
                 Next::Event(event) => event,
             };
@@ -597,14 +627,29 @@ impl Inner {
                 return Ok(Ended::Closed);
             };
             mirror.record(&event, self.clock.now());
-            let flush = if event.is_terminal() {
-                Flush::Required
-            } else {
-                Flush::WhenReachable
-            };
-            mirror
-                .flush(self.link.as_ref(), &lane.lease(), flush)
-                .await?;
+            if buffered == 0 {
+                flush_timer
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + JOURNAL_FLUSH_DELAY);
+            }
+            buffered += 1;
+            let boundary = matches!(
+                event,
+                BackendEvent::SessionStarted { .. }
+                    | BackendEvent::TurnBoundary
+                    | BackendEvent::ToolUse { .. }
+            );
+            if event.is_terminal() || boundary || buffered >= JOURNAL_BATCH {
+                let flush = if event.is_terminal() {
+                    Flush::Required
+                } else {
+                    Flush::WhenReachable
+                };
+                mirror
+                    .flush(self.link.as_ref(), &lane.lease(), flush)
+                    .await?;
+                buffered = 0;
+            }
             if let BackendEvent::SessionStarted { native_session_id } = &event {
                 self.native_session(lane, assignment, native_session_id)
                     .await?;

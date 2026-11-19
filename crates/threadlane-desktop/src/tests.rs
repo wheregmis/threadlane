@@ -34,6 +34,8 @@ struct FakeHub {
     space: String,
     down: AtomicBool,
     old: AtomicBool,
+    batched_work: AtomicBool,
+    project_task_requests: AtomicI64,
     /// Answers like a hub from before it could list recorded events.
     no_recorded: AtomicBool,
     projects_fail: AtomicBool,
@@ -542,7 +544,10 @@ impl HubApi for FakeHub {
             return Err(ApiError::Invalid("unknown variant `recorded`".to_owned()));
         }
         match request {
-            OverviewRequest::Tasks { .. } => Ok(OverviewReply::Tasks { tasks }),
+            OverviewRequest::Tasks { .. } => {
+                self.project_task_requests.fetch_add(1, Ordering::SeqCst);
+                Ok(OverviewReply::Tasks { tasks })
+            }
             OverviewRequest::Running => Ok(OverviewReply::Tasks {
                 tasks: tasks
                     .into_iter()
@@ -641,6 +646,27 @@ impl HubApi for FakeHub {
                     }),
                 })
             }
+            OverviewRequest::Work if self.batched_work.load(Ordering::SeqCst) => {
+                use threadlane_core::client::{ProjectLeadStatus, WorkOverview};
+                let projects = self.project_list(true).await?;
+                let leads = projects
+                    .iter()
+                    .filter(|project| !project.archived)
+                    .map(|project| ProjectLeadStatus {
+                        project: project.name.clone(),
+                        running_since: *self.lead.lock().unwrap(),
+                        stopped: false,
+                    })
+                    .collect();
+                Ok(OverviewReply::Work {
+                    overview: WorkOverview {
+                        projects,
+                        tasks,
+                        leads,
+                    },
+                })
+            }
+            OverviewRequest::Work => Err(ApiError::Invalid("unknown variant `work`".to_owned())),
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -6563,4 +6589,30 @@ async fn image_only_drafts_are_scoped_and_survive_undo_failure_and_history_reloa
         1
     );
     assert!(state.conversation("work", "api", &when()).is_empty());
+}
+
+#[tokio::test]
+async fn batched_refresh_supplies_the_project_board_and_the_tasks_tab_skips_chat() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.batched_work.store(true, Ordering::SeqCst);
+    work.tasks
+        .lock()
+        .unwrap()
+        .push(task(7, TaskStatus::Queued, None));
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    let loaded = load_project_tab(&core, "work", "api", Some(Tab::Tasks), true, true).await;
+    assert!(loaded.tasks.is_none());
+    assert!(loaded.lead.is_none());
+    assert!(loaded.history.is_none());
+    assert!(loaded.recorded.is_none());
+    assert!(loaded.rules.is_none());
+    assert!(loaded.lead_runs.is_none());
+    state.apply_project(loaded);
+    assert_eq!(
+        state.project("work", "api").unwrap().tasks[0].task.id,
+        TaskId(7)
+    );
+    assert_eq!(work.project_task_requests.load(Ordering::SeqCst), 0);
 }

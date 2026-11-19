@@ -472,9 +472,15 @@ pub struct InProgress {
 /// The elapsed time shown for running and queued work.
 #[must_use]
 pub fn work_elapsed(summary: &TaskSummary, when: &When) -> Option<String> {
+    work_started(summary).map(|start| when.since(start))
+}
+
+/// The start behind a task's running or queued duration.
+#[must_use]
+pub fn work_started(summary: &TaskSummary) -> Option<Timestamp> {
     match summary.task.status {
-        TaskStatus::Queued => Some(when.since(summary.task.created_at)),
-        TaskStatus::Running | TaskStatus::InReview => running_elapsed(summary, when),
+        TaskStatus::Queued => Some(summary.task.created_at),
+        TaskStatus::Running | TaskStatus::InReview => summary.running_since,
         _ => None,
     }
 }

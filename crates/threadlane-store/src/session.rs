@@ -663,6 +663,89 @@ impl SessionStore for HubDb {
 }
 
 impl HubDb {
+    /// Newest journal entries for a lane, before an optional exclusive position.
+    pub async fn lane_journal_page(
+        &self,
+        lane: LaneId,
+        before: Option<(RunId, i64)>,
+        limit: u32,
+    ) -> StoreResult<Vec<JournalEntry>> {
+        let conn = self.db.reader()?;
+        let mut entries = Vec::new();
+        let (before_run, before_seq) =
+            before.map_or((i64::MAX, None), |(run, seq)| (run.get(), Some(seq)));
+        let mut runs = conn
+            .query(
+                "SELECT id FROM runs WHERE lane_id = ?1 AND id <= ?2 ORDER BY id DESC",
+                params![lane.get(), before_run],
+            )
+            .await
+            .map_err(crate::db::db_err)?;
+        while entries.len() < limit as usize {
+            let Some(run) = runs.next().await.map_err(crate::db::db_err)? else {
+                break;
+            };
+            let run = Cols(&run).i64(0)?;
+            let remaining = i64::from(limit) - entries.len() as i64;
+            let (bound, seq) = if run == before_run
+                && let Some(seq) = before_seq
+            {
+                ("<", seq)
+            } else {
+                ("<=", i64::MAX)
+            };
+            entries.extend(
+                query_all(
+                    &conn,
+                    &format!(
+                        "SELECT run_id, seq, at, entry FROM journal
+                          WHERE run_id = ?1 AND seq {bound} ?2 ORDER BY seq DESC LIMIT ?3"
+                    ),
+                    params![run, seq, remaining],
+                    decode_journal_entry,
+                )
+                .await?,
+            );
+        }
+        Ok(entries)
+    }
+
+    /// Lead status for every active project.
+    pub async fn active_project_leads(
+        &self,
+    ) -> StoreResult<Vec<threadlane_core::client::ProjectLeadStatus>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            "SELECT p.name, r.started_at, l.stopped FROM projects p
+             JOIN lanes l ON l.project_id = p.id AND l.kind = 'lead'
+             LEFT JOIN runs r ON r.lane_id = l.id AND r.status = 'active'
+             WHERE p.archived_at IS NULL ORDER BY p.id",
+            (),
+            |row| {
+                let row = Cols(row);
+                Ok(threadlane_core::client::ProjectLeadStatus {
+                    project: row.text(0)?,
+                    running_since: row.opt_ts(1)?,
+                    stopped: row.bool(2)?,
+                })
+            },
+        )
+        .await
+    }
+
+    /// The active run on this lane, if any.
+    pub async fn active_lane_run(&self, lane_id: LaneId) -> StoreResult<Option<Run>> {
+        let conn = self.db.reader()?;
+        query_opt(
+            &conn,
+            &format!("SELECT {RUN_FIELDS} FROM runs WHERE lane_id = ?1 AND status = 'active'"),
+            params![lane_id.get()],
+            decode_run,
+        )
+        .await
+    }
+
     /// Reads one journal entry, optionally selecting the newest one of a given backend kind.
     pub async fn latest_journal_entry(
         &self,

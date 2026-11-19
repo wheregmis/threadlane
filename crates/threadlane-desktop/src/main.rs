@@ -19,13 +19,14 @@ use gpui_kit::component::input::{InputState, TextareaState, Undo};
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
+use threadlane_core::client::{ActivityCursor, TaskActivityEntry};
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::model::Mode;
 use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
     Activity, AppState, Appearance, DecisionKey, RoutineText, Tab, When, change_memory,
-    decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project, load_routines,
-    load_task, load_timeline, pump, refresh,
+    decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project_tab,
+    load_routines, load_task_overview, load_timeline, pump, refresh,
 };
 use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
 use tokio::runtime::Runtime;
@@ -327,12 +328,24 @@ struct Feed {
     received: mpsc::UnboundedReceiver<SpaceFeedItem>,
 }
 
+#[derive(Default)]
+struct TaskActivity {
+    entries: Vec<TaskActivityEntry>,
+    next: Option<ActivityCursor>,
+    loading: bool,
+    error: Option<(Option<ActivityCursor>, String)>,
+    loaded: bool,
+}
+
 /// The window's one view: the shell and its screens over [`AppState`].
 struct Desktop {
     state: AppState,
     core: Arc<RwLock<ClientCore>>,
     tokio: tokio::runtime::Handle,
     screen: Screen,
+    task_activity: TaskActivity,
+    task_activity_request: Option<Task<()>>,
+    project_load: Option<Task<()>>,
     keyboard_focus: FocusHandle,
     sidebar_collapsed: bool,
     decision_scroll: ScrollHandle,
@@ -517,11 +530,25 @@ impl Desktop {
             }
         });
         let clock = cx.spawn(async move |this, cx| {
+            let mut last_minute = None;
             loop {
                 cx.background_executor().timer(CLOCK_EVERY).await;
                 if this
                     .update(cx, |this, cx| {
-                        if this.state.has_ticking_work()
+                        let minute = SystemClock.now().as_millis().div_euclid(60_000);
+                        let minute_changed = last_minute.replace(minute) != Some(minute);
+                        // Chat history uses calendar labels. Its elapsed labels tick independently.
+                        if matches!(
+                            this.screen,
+                            Screen::Project {
+                                tab: Tab::Conversation,
+                                ..
+                            }
+                        ) {
+                            if minute_changed {
+                                cx.notify();
+                            }
+                        } else if this.state.has_ticking_work()
                             || this.state.visible_decisions().next().is_some()
                         {
                             cx.notify();
@@ -558,6 +585,9 @@ impl Desktop {
             core,
             tokio,
             screen,
+            task_activity: TaskActivity::default(),
+            task_activity_request: None,
+            project_load: None,
             keyboard_focus,
             sidebar_collapsed: false,
             decision_scroll: ScrollHandle::default(),
@@ -676,7 +706,7 @@ impl Desktop {
                     )));
                     this.go(Screen::Home, cx);
                 } else {
-                    this.load_screen(cx);
+                    this.load_screen_after_refresh(true, cx);
                 }
             },
             cx,
@@ -685,6 +715,10 @@ impl Desktop {
 
     /// Loads what the open screen shows beyond what a refresh brings.
     fn load_screen(&mut self, cx: &mut Context<Self>) {
+        self.load_screen_after_refresh(false, cx);
+    }
+
+    fn load_screen_after_refresh(&mut self, refreshed: bool, cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
         match self.screen.clone() {
             Screen::Routines(scope) => {
@@ -718,31 +752,70 @@ impl Desktop {
                         cx,
                     );
                 }
-                // The Conversation tab's card and the Memory tab need the memory.
-                let selected = self
-                    .state
-                    .memory_selected(&space, &project)
-                    .map(str::to_owned);
-                let (in_space, named) = (space.clone(), project.clone());
-                let for_memory = Arc::clone(&core);
+                if matches!(tab, Tab::Conversation | Tab::Memory) {
+                    let selected = (tab == Tab::Memory)
+                        .then(|| {
+                            self.state
+                                .memory_selected(&space, &project)
+                                .map(str::to_owned)
+                        })
+                        .flatten();
+                    let (in_space, named) = (space.clone(), project.clone());
+                    let for_memory = Arc::clone(&core);
+                    self.run(
+                        async move {
+                            load_memory(&*for_memory.read().await, &in_space, &named, selected)
+                                .await
+                        },
+                        |this, loaded, _| this.state.apply_memory(loaded),
+                        cx,
+                    );
+                }
+                let fresh = |part| {
+                    refreshed
+                        && !self.state.is_archived(&space, &project)
+                        && self.state.project_gap(&space, &project, part).is_none()
+                };
+                let fresh_tasks = fresh(threadlane_desktop::Part::Tasks)
+                    && self
+                        .state
+                        .space(&space)
+                        .is_some_and(|space| space.gap(threadlane_desktop::Part::Tasks).is_none());
+                let fresh_lead = fresh(threadlane_desktop::Part::Lead)
+                    && self
+                        .state
+                        .space(&space)
+                        .is_some_and(|space| space.gap(threadlane_desktop::Part::Tasks).is_none());
+                let job = self.tokio.spawn(async move {
+                    load_project_tab(
+                        &*core.read().await,
+                        &space,
+                        &project,
+                        Some(tab),
+                        fresh_tasks,
+                        fresh_lead,
+                    )
+                    .await
+                });
+                self.project_load = Some(cx.spawn(async move |this, cx| {
+                    if let Ok(loaded) = job.await {
+                        let _ = this.update(cx, |this, cx| {
+                            this.state.apply_project(loaded);
+                            cx.notify();
+                        });
+                    }
+                }));
+            }
+            Screen::Task { space, task } => {
+                if self.state.activity_open(&space, task) {
+                    self.load_task_activity(space.clone(), task, None, cx);
+                }
                 self.run(
-                    async move { load_project(&*core.read().await, &space, &project).await },
-                    |this, loaded, _| this.state.apply_project(loaded),
-                    cx,
-                );
-                self.run(
-                    async move {
-                        load_memory(&*for_memory.read().await, &in_space, &named, selected).await
-                    },
-                    |this, loaded, _| this.state.apply_memory(loaded),
+                    async move { load_task_overview(&*core.read().await, &space, task).await },
+                    |this, loaded, _| this.state.apply_task(loaded),
                     cx,
                 );
             }
-            Screen::Task { space, task } => self.run(
-                async move { load_task(&*core.read().await, &space, task).await },
-                |this, loaded, _| this.state.apply_task(loaded),
-                cx,
-            ),
             Screen::Agents(scope) => {
                 let projects = self
                     .state
@@ -822,6 +895,53 @@ impl Desktop {
         );
     }
 
+    fn load_task_activity(
+        &mut self,
+        space: String,
+        task: TaskId,
+        before: Option<ActivityCursor>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.task_activity.loading {
+            return;
+        }
+        self.task_activity.loading = true;
+        self.task_activity.error = None;
+        let core = Arc::clone(&self.core);
+        let job = self
+            .tokio
+            .spawn(async move { core.read().await.task_activity(&space, task, before).await });
+        self.task_activity_request = Some(cx.spawn(async move |this, cx| {
+            let Ok(result) = job.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                let activity = &mut this.task_activity;
+                activity.loading = false;
+                match result {
+                    Ok((entries, next)) => {
+                        if before.is_none() {
+                            if let Some(overlap) = activity.entries.iter().position(|entry| {
+                                entries
+                                    .last()
+                                    .is_some_and(|last| last.position == entry.position)
+                            }) {
+                                activity.entries.splice(..=overlap, entries);
+                            } else {
+                                activity.entries = entries;
+                                activity.next = next;
+                            }
+                        } else {
+                            activity.entries.extend(entries);
+                            activity.next = next;
+                        }
+                        activity.loaded = true;
+                    }
+                    Err(error) => activity.error = Some((before, describe(&error))),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
     fn receive(&mut self, item: SpaceFeedItem, cx: &mut Context<Self>) {
         // An item from a hub that was away or refused a part: it is back.
         let back = self
@@ -899,6 +1019,9 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.project_load = None;
+            self.task_activity_request = None;
+            self.task_activity = TaskActivity::default();
             self.state.reset_chat_target();
             self.project_name_missing = false;
             self.reveal_linked_decision = None;
