@@ -297,6 +297,11 @@ impl Screen {
         }
     }
 
+    /// Unscoped views load auxiliary data once the full roster is refreshed.
+    fn loads_after_refresh_pass(&self) -> bool {
+        matches!(self, Self::Home | Self::Agents(None) | Self::Routines(None))
+    }
+
     /// The screen `THREADLANE_DESKTOP_OPEN` names: `home` or `inbox`, `agents`,
     /// `machines`, `<space>/<project>[/chat|tasks|team|routines|memory|setup]`
     /// or `<space>/T-0001`. For looking at a screen without clicking to it.
@@ -843,7 +848,7 @@ impl Desktop {
                     this.state.retain_paired_spaces(&roster);
                     // These unscoped screens fetch auxiliary data across all hubs.
                     // Load once, rather than re-querying every hub on each result.
-                    if matches!(this.screen, Screen::Agents(None) | Screen::Routines(None)) {
+                    if this.screen.loads_after_refresh_pass() {
                         this.load_screen(cx);
                     }
                 }
@@ -2054,6 +2059,21 @@ mod activity_tests {
         assert!(empty.is_empty());
         empty.error = Some((None, "request failed".into()));
         assert!(!empty.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod refresh_screen_tests {
+    use super::Screen;
+
+    #[test]
+    fn refresh_end_loads_unscoped_auxiliary_screens_including_home() {
+        assert!(Screen::Home.loads_after_refresh_pass());
+        assert!(Screen::Agents(None).loads_after_refresh_pass());
+        assert!(Screen::Routines(None).loads_after_refresh_pass());
+        assert!(!Screen::Agents(Some("Work".into())).loads_after_refresh_pass());
+        assert!(!Screen::Routines(Some("Work".into())).loads_after_refresh_pass());
+        assert!(!Screen::Machines.loads_after_refresh_pass());
     }
 }
 
