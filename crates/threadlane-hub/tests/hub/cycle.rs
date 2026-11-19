@@ -1,6 +1,7 @@
 //! The whole run cycle, batching, and the initiative check (Plan.md §4.3, §4.8).
 
 use serde_json::json;
+use threadlane_core::forge::REPORT_LIMITATION;
 use threadlane_core::link::Begin;
 use threadlane_core::model::{
     EventKind, EventStatus, LaneKind, OutboxKind, RunOutcome, RunStatus, Trust,
@@ -56,6 +57,7 @@ async fn a_message_produces_one_sent_reply_in_the_feed() {
             CANCEL_TIMER,
             ASK_USER,
             ASK_PROJECT_LEAD,
+            REPORT_LIMITATION,
         ]
     );
     assert_eq!(assignment.max_turns, Some(150));

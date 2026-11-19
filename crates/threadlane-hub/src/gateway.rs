@@ -89,6 +89,12 @@ impl LocalLink {
             .await?;
         let asked = match verdict {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
+            _ if tool == REPORT_LIMITATION && arguments["require_approval"] == true => {
+                Some(Asked::You {
+                    offers_rule: false,
+                    proposal: false,
+                })
+            }
             _ if dream.is_some() && memory::protected(tool, arguments) => Some(Asked::Dream),
             Verdict::Allow { rule: None } if dream.is_some() => None,
             _ if dream.is_some() && tool != REPORT_LIMITATION => {

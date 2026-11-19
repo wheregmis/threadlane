@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    COMMENT, CREATE_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH, REPORT_LIMITATION,
 };
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
@@ -59,14 +59,13 @@ const MAX_LABEL: usize = 80;
 #[must_use]
 pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
     match tool {
-        threadlane_core::forge::REPORT_LIMITATION
-        | crate::dreaming::PROJECT_SESSIONS
-        | FINISH_REVIEW => false,
+        crate::dreaming::PROJECT_SESSIONS | FINISH_REVIEW => false,
         // ask_project_lead is offered to the General lead only (begin_run).
         SEND_MESSAGE
         | UPDATE_TASK
         | CANCEL_TASK
         | LIST_TASKS
+        | REPORT_LIMITATION
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
         FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE
         | MARK_READY => kind == LaneKind::Task,
@@ -1146,6 +1145,7 @@ impl ToolRegistry for HubTools {
         definitions.extend(crate::timers::definitions());
         definitions.push(ask_user_definition());
         definitions.push(crate::space_lead::definition());
+        definitions.push(crate::dreaming::report_definition());
         definitions
     }
 
@@ -1199,11 +1199,10 @@ impl ToolRegistry for HubTools {
                 .await
             }
             // The gate asks before these, and the runner performs them.
-            PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE | MARK_READY => {
-                Err(ToolError::Blocked(format!(
-                    "{name} is performed only once the user approves it"
-                )))
-            }
+            PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE | MARK_READY
+            | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
+                "{name} is performed only once the user approves it"
+            ))),
             // The gate always asks: the answer is the outcome.
             ASK_USER => Err(ToolError::Blocked(format!(
                 "{name} is answered by the user, through a decision"
@@ -1359,6 +1358,7 @@ mod tests {
             );
             names.push(ASK_USER.to_owned());
             names.push(crate::space_lead::ASK_PROJECT_LEAD.to_owned());
+            names.push(crate::dreaming::report_definition().name);
             names
                 .into_iter()
                 .filter(|name| offered_in(name, kind))
@@ -1387,7 +1387,7 @@ mod tests {
                     LIST_TASKS
                 ][..],
                 &memory,
-                &[crate::space_lead::ASK_PROJECT_LEAD]
+                &[crate::space_lead::ASK_PROJECT_LEAD, REPORT_LIMITATION]
             ]
             .concat()
         );
