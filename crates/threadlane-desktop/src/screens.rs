@@ -17,6 +17,7 @@ mod agents;
 mod decision;
 mod delete_project;
 mod home;
+pub(crate) use home::Inbox;
 pub(crate) mod machines;
 mod new_project;
 mod project;

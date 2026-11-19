@@ -1,24 +1,29 @@
-//! The Inbox (wireframe 1, `Screen::Home`): everything that needs you across
-//! every space, then running tasks and recent failures, then every conversation as one
-//! timeline, above a composer to any space's Lead.
+//! The Inbox triages decisions across spaces and keeps task and conversation activity nearby.
 
 use gpui_kit::component::alert::Alert;
-use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::separator::Separator;
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::client::TaskSummary;
 use threadlane_core::model::OutboxKind;
-use threadlane_desktop::{Author, Part, ProseLimit, Spoken, When, count_form, is_quiet_update};
+use threadlane_desktop::{
+    Author, DecisionKey, DecisionScope, Draft, Part, Spoken, TimelineEntry, When, count_form,
+    is_quiet_update, question_parts,
+};
 
 use super::{gap_line, menu_item};
-use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
-use crate::tokens::{
-    CONTROL_HEIGHT, LG, MD, READING_WIDTH, ROW_HEIGHT, ROW_RADIUS, SCROLLBAR_GUTTER, SM, Status,
-    TABULAR, TYPE_BODY, TYPE_META, XS,
+use crate::components::{
+    button, count, decision_scroller, icon_button, meta, page_header, section,
 };
+use crate::icons::AppIcon;
+use crate::keyboard::DecisionScroll;
+use crate::menus::{FocusComposer, shortcut_hint};
+use crate::tokens::{LG, MD, READING_WIDTH, ROW_HEIGHT, SCROLLBAR_GUTTER, SM, TYPE_BODY, XS};
 use crate::{Desktop, Screen};
 
 /// How many failed tasks Inbox shows before folding behind "Show all".
@@ -27,14 +32,123 @@ const INBOX_FAILURES_SHOWN: usize = 3;
 /// How many recent messages Inbox shows before folding behind "Show more".
 const INBOX_RECENT_SHOWN: usize = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum InboxTab {
+    #[default]
+    NeedsYou,
+    Activity,
+}
+
+impl InboxTab {
+    fn decision_scope(self) -> DecisionScope {
+        match self {
+            Self::NeedsYou => DecisionScope::Home,
+            Self::Activity => DecisionScope::None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct Inbox {
+    tab: InboxTab,
+    composer_return_focus: Option<FocusHandle>,
+    composing: bool,
+    open_update: Option<String>,
+}
+
+impl Inbox {
+    pub(crate) fn composing(&self) -> bool {
+        self.composing
+    }
+}
+
 impl Desktop {
     pub(crate) fn home(&self, when: &When, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let state = &self.state;
+        let message = button("message-lead")
+            .icon(AppIcon::MessagesSquare)
+            .label("Message a lead")
+            .selected(self.inbox.composing)
+            .tab_stop(true)
+            .disabled(self.state.target().is_none())
+            .when_some(shortcut_hint(cx, &FocusComposer), |button, key| {
+                button.tooltip(format!("Message a lead  {key}"))
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.focus_composer(window, cx)));
+        let pending = self.state.needs_you().count();
+        let tabs = TabBar::new("inbox-tabs")
+            .underline()
+            .selected_index(usize::from(self.inbox.tab == InboxTab::Activity))
+            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                this.set_inbox_tab(
+                    if *index == 0 {
+                        InboxTab::NeedsYou
+                    } else {
+                        InboxTab::Activity
+                    },
+                    cx,
+                );
+            }))
+            .child(
+                Tab::new()
+                    .aria_label(format!("Needs you, {pending} pending"))
+                    .child(
+                        h_flex()
+                            .gap(SM)
+                            .child("Needs you")
+                            .children(count(pending, cx)),
+                    ),
+            )
+            .child(Tab::new().aria_label("Activity").child("Activity"));
+        let content = match self.inbox.tab {
+            InboxTab::NeedsYou => self.inbox_needs_you(when, cx),
+            InboxTab::Activity => self.inbox_activity(when, cx),
+        };
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
+            .gap(MD)
+            .child(
+                v_flex()
+                    .flex_none()
+                    .gap(SM)
+                    .mr(SCROLLBAR_GUTTER)
+                    .child(page_header("Inbox", None, Some(h_flex().child(message))))
+                    .child(tabs)
+                    .children((self.state.spaces().len() > 1).then(|| self.inbox_space_filter(cx))),
+            )
+            .child(decision_scroller("home", content, &self.decision_scroll))
+            .children(
+                self.inbox
+                    .composing
+                    .then(|| self.home_composer(cx).mr(SCROLLBAR_GUTTER)),
+            )
+            .into_any_element()
+    }
 
+    fn set_inbox_tab(&mut self, tab: InboxTab, cx: &mut Context<Self>) {
+        if self.inbox.tab == tab {
+            return;
+        }
+        self.inbox.tab = tab;
+        self.state.set_decision_scope(tab.decision_scope());
+        self.state.clear_current_decision();
+        self.decision_scroll = ScrollHandle::default();
+        self.scroll_to_decision.set(DecisionScroll::None);
+        cx.notify();
+    }
+
+    fn inbox_space_filter(&self, cx: &mut Context<Self>) -> Div {
+        let state = &self.state;
         let mut chips = h_flex().gap(XS).flex_wrap().child(
             button("filter-all")
-                .label("All")
+                .small()
+                .ghost()
+                .tab_stop(true)
+                .label("All spaces")
                 .selected(state.filter().is_none())
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.set_filter(None);
@@ -46,6 +160,9 @@ impl Desktop {
             let name = space.name.clone();
             chips = chips.child(
                 button(SharedString::from(format!("filter-{name}")))
+                    .small()
+                    .ghost()
+                    .tab_stop(true)
                     .label(name.clone())
                     .selected(state.filter() == Some(name.as_str()))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -55,7 +172,11 @@ impl Desktop {
                     })),
             );
         }
+        chips
+    }
 
+    fn inbox_needs_you(&self, when: &When, cx: &mut Context<Self>) -> Div {
+        let state = &self.state;
         let banners: Vec<_> = state
             .spaces()
             .iter()
@@ -71,7 +192,7 @@ impl Desktop {
                                 SharedString::from(format!("blocked-{}", space.name)),
                                 text,
                             )
-                            .title(format!("System · {} is blocked", space.name)),
+                            .title(format!("{} is blocked", space.name)),
                         )
                         .child(
                             button(SharedString::from(format!("accounts-{}", space.name)))
@@ -87,102 +208,105 @@ impl Desktop {
             })
             .collect();
 
-        let mut needs = v_flex()
-            .gap(SM)
-            .child(section("Needs you").children(count(state.needs_you().count(), cx)));
+        let mut needs = v_flex().gap(SM).pb(SM);
         let gaps = state.gaps(Part::Decisions);
-        let show_needs =
-            state.spaces().is_empty() || state.needs_you().next().is_some() || !gaps.is_empty();
+        if banners.is_empty() && gaps.is_empty() && state.needs_you().next().is_none() {
+            return needs
+                .pt(LG)
+                .items_start()
+                .child(section("You’re caught up"))
+                .child(meta("No decisions or blockers in the spaces shown.", cx))
+                .child(
+                    button("inbox-view-activity")
+                        .outline()
+                        .small()
+                        .tab_stop(true)
+                        .label("View activity")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_inbox_tab(InboxTab::Activity, cx);
+                            this.keyboard_focus.focus(window, cx);
+                        })),
+                );
+        }
+        needs = needs.children(banners);
         for (space, gap) in &gaps {
             needs = needs.child(gap_line(gap, "decisions", space, cx));
         }
-        if state.spaces().is_empty() {
-            needs = needs.child(div().text_color(muted).child(
-                "No hub is paired. Pair one with `threadlane hub add <name> <data-dir>` or \
-                 `threadlane hub join <name> <code>`, then reopen the app.",
-            ));
-        }
+        let current = state.current_decision().map(DecisionKey::from);
         for queued in state.needs_you() {
-            needs = needs.child(self.decision(queued, when, cx));
+            let key = DecisionKey::from(queued);
+            let open = current.as_ref() == Some(&key);
+            let (question, _) = question_parts(&queued.decision.question);
+            let project = state.project_name(&key.space, queued.decision.project_id);
+            let place = inbox_place(&key.space, project);
+            let when_label = when.moment(queued.decision.created_at);
+            let label = disclosure_label(open, &question, &place);
+            needs = needs.child(
+                v_flex()
+                    .gap(XS)
+                    .child(
+                        inbox_row(
+                            format!("inbox-decision-{}-{}", key.space, key.id),
+                            question,
+                            place,
+                            disclosure(open, when_label, cx),
+                            cx,
+                        )
+                        .selected(open)
+                        .accessibility_label(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this
+                                .state
+                                .current_decision()
+                                .map(DecisionKey::from)
+                                .as_ref()
+                                == Some(&key)
+                            {
+                                this.state.clear_current_decision();
+                                this.scroll_to_decision.set(DecisionScroll::None);
+                            } else {
+                                this.state.select_decision(key.clone());
+                                this.scroll_to_decision.set(DecisionScroll::Card);
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .children(open.then(|| self.decision(queued, when, cx))),
+            );
         }
+        needs
+    }
 
-        let multi_space = state.spaces().len() > 1;
+    fn inbox_activity(&self, when: &When, cx: &mut Context<Self>) -> Div {
+        let state = &self.state;
         let running = self.inbox_tasks(
             "Running tasks",
             &state.running(),
             Part::Running,
-            Status::Running,
             None,
+            when,
             cx,
         );
         let failed = self.inbox_tasks(
             "Recent failures",
             &state.recent_failures(when),
             Part::Tasks,
-            Status::Failed,
             Some((INBOX_FAILURES_SHOWN, state.inbox_show_all_failures())),
+            when,
             cx,
         );
 
-        let show_running = running.is_some();
-        let show_failed = failed.is_some();
-        let recent_empty = state.timeline().is_empty()
-            && state.gaps(Part::Recent).is_empty()
-            && !state.timeline_has_earlier();
-        let quiet =
-            !show_needs && !show_running && !show_failed && recent_empty && banners.is_empty();
-
-        let content = v_flex()
-            .gap(LG)
-            .child(heading("Inbox"))
-            .when(multi_space, |view| {
-                view.child(chips.w_full().min_h(CONTROL_HEIGHT).flex_none())
-            })
-            .children(
-                state
-                    .held_lines(when)
-                    .into_iter()
-                    .map(|line| div().text_size(TYPE_BODY).text_color(muted).child(line)),
-            )
-            .children(banners)
-            .when(show_needs, |view| view.child(needs))
-            .when(show_needs && show_running, |view| {
-                view.child(Separator::horizontal())
-            })
-            .children(running)
-            .when((show_needs || show_running) && show_failed, |view| {
-                view.child(Separator::horizontal())
-            })
-            .children(failed)
-            .when(
-                (show_needs || show_running || show_failed) && !recent_empty,
-                |view| view.child(Separator::horizontal()),
-            )
-            .when(!recent_empty, |view| view.child(self.timeline(when, cx)))
-            .when(quiet, |view| {
-                view.child(meta(
-                    "Nothing needs you. Tell your team what you need below.",
-                    cx,
-                ))
-            });
-        // The page scrolls above a composer pinned at the bottom, as in a project's Chat tab.
+        let held = state.held_lines(when);
+        let recent = self.timeline(when, cx);
+        let empty = running.is_none() && failed.is_none() && recent.is_none() && held.is_empty();
         v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .max_w(READING_WIDTH)
-            .self_center()
-            .gap(SM)
-            .child(decision_scroller("home", content, &self.decision_scroll))
-            .when(!state.spaces().is_empty(), |view| {
-                view.child(
-                    self.home_composer(cx)
-                        .flex_none()
-                        .w_auto()
-                        .mr(SCROLLBAR_GUTTER),
-                )
-            })
-            .into_any_element()
+            .gap(LG)
+            .pb(SM)
+            .children(held.into_iter().map(|line| meta(line, cx)))
+            .children(running)
+            .children(failed)
+            .children(recent)
+            .children(empty.then(|| meta("No activity in the spaces shown.", cx).pt(LG)))
     }
 
     fn inbox_tasks(
@@ -190,11 +314,10 @@ impl Desktop {
         title: &'static str,
         tasks: &[(&str, &TaskSummary)],
         part: Part,
-        status: Status,
         fold: Option<(usize, bool)>,
+        when: &When,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        let multi_space = self.state.spaces().len() > 1;
         let gaps = self.state.gaps(part);
         if tasks.is_empty() && gaps.is_empty() {
             return None;
@@ -239,83 +362,64 @@ impl Desktop {
                 cx,
             ));
         }
-        let muted = cx.theme().muted_foreground;
-        let mono = cx.theme().mono_font_family.clone();
         for &(space, summary) in &tasks[..visible] {
             let task = &summary.task;
             let screen = Screen::Task {
                 space: space.to_owned(),
                 task: task.id,
             };
-            let mut place = if multi_space {
-                format!("{space} / {} · {}", summary.project, summary.agent)
-            } else {
-                format!("{} · {}", summary.project, summary.agent)
-            };
+            let mut place = format!(
+                "{} · {space} / {} · {}",
+                task.id, summary.project, summary.agent
+            );
             if part == Part::Running
                 && let Some(machine) = &summary.machine
             {
                 place.push_str(" · ");
                 place.push_str(machine);
             }
+            let time = if part == Part::Running {
+                summary.running_since.map(|at| when.since(at))
+            } else {
+                Some(summary.completed_at.map_or_else(
+                    || format!("Created {}", when.moment(task.created_at)),
+                    |at| when.moment(at),
+                ))
+            };
             section = section.child(
-                button(SharedString::from(format!("{part:?}-{space}-{}", task.id)))
-                    .ghost()
-                    .w_full()
-                    .rounded(ROW_RADIUS)
-                    .px(SM)
-                    .tab_stop(true)
-                    .tooltip(format!("{} {} · {place}", task.id, task.title))
-                    .accessibility_label(format!(
-                        "Open {} {} in {space} / {}",
-                        task.id, task.title, summary.project
-                    ))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap(SM)
-                            .min_h(ROW_HEIGHT)
-                            .items_center()
-                            .child(
-                                h_flex()
-                                    .size(LG)
-                                    .flex_none()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(status_dot(status, cx)),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(TYPE_META)
-                                    .font_family(mono.clone())
-                                    .font_features(TABULAR.clone())
-                                    .text_color(muted)
-                                    .child(task.id.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(task.title.clone()),
-                            )
-                            .child(meta(place, cx).max_w(relative(0.45)).truncate()),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+                inbox_row(
+                    format!("{part:?}-{space}-{}", task.id),
+                    task.title.clone(),
+                    place,
+                    h_flex()
+                        .gap(XS)
+                        .children(time.map(|time| meta(time, cx)))
+                        .child(
+                            Icon::new(AppIcon::ChevronRight)
+                                .small()
+                                .text_color(cx.theme().muted_foreground),
+                        ),
+                    cx,
+                )
+                .accessibility_label(format!(
+                    "Open {} {} in {space} / {}",
+                    task.id, task.title, summary.project
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
             );
         }
 
         Some(section)
     }
 
-    /// The Inbox timeline (docs/one-place-to-talk.md): every conversation in
-    /// the spaces shown, newest first; each entry names its space and
-    /// project and opens that conversation.
-    fn timeline(&self, when: &When, cx: &mut Context<Self>) -> Div {
+    fn timeline(&self, when: &When, cx: &mut Context<Self>) -> Option<Div> {
         let state = &self.state;
-        let multi_space = state.spaces().len() > 1;
         let all_entries = state.timeline();
+        let gaps = state.gaps(Part::Recent);
+        let has_earlier = state.timeline_has_earlier();
+        if all_entries.is_empty() && gaps.is_empty() && !has_earlier {
+            return None;
+        }
         let show_quiet = state.inbox_show_quiet_updates();
         let quiet_count = all_entries
             .iter()
@@ -338,12 +442,13 @@ impl Desktop {
             filtered.len().min(INBOX_RECENT_SHOWN)
         };
 
-        let mut header_actions = h_flex().gap(XS).items_center();
+        let mut header_actions = h_flex().gap(XS).flex_wrap();
         if quiet_count > 0 {
             header_actions = header_actions.child(
                 button("inbox-toggle-quiet")
                     .small()
                     .ghost()
+                    .tab_stop(true)
                     .label(if show_quiet {
                         "Hide quiet updates".to_owned()
                     } else {
@@ -363,6 +468,7 @@ impl Desktop {
                 button("inbox-toggle-recent")
                     .small()
                     .ghost()
+                    .tab_stop(true)
                     .label(if show_all_recent {
                         "Show fewer".to_owned()
                     } else {
@@ -376,9 +482,8 @@ impl Desktop {
         }
 
         let mut list = v_flex()
-            .gap(MD)
-            .child(section("Recent").child(header_actions));
-        let gaps = state.gaps(Part::Recent);
+            .gap(XS)
+            .child(section("Recent updates").flex_wrap().child(header_actions));
         for (space, gap) in &gaps {
             list = list.child(gap_line(gap, "recent results", space, cx));
         }
@@ -388,127 +493,12 @@ impl Desktop {
                 cx,
             ));
         }
-        for entry in &filtered[..visible_len] {
-            let space = entry.space.to_owned();
-            let entry_id = entry.prose_id();
-            // A reply in General links to the conversation it came from.
-            let mut from = None;
-            let (who, body) = match entry.spoken {
-                Spoken::Said(_, text, by) => {
-                    if let Author::ProjectLead(project) = by {
-                        from = Some(project.clone());
-                    }
-                    let body = (!text.trim().is_empty()).then(|| {
-                        self.prose(entry_id.clone(), &space, entry.project, text.to_owned(), cx)
-                            .limit(ProseLimit::Result)
-                            .into_any_element()
-                    });
-                    (by.label(), body)
-                }
-                Spoken::Delivered(item) => {
-                    let who = if item.kind() == OutboxKind::SystemNotice {
-                        "Notice"
-                    } else {
-                        "Lead"
-                    }
-                    .to_owned();
-                    let body = match state.digest(item) {
-                        Some(digest) => self.digest_entry(&space, digest, cx).into_any_element(),
-                        None => {
-                            let seq = item.item.seq;
-                            self.prose(entry_id.clone(), &space, entry.project, item.text(), cx)
-                                .result(seq, state.result_expanded(&space, seq))
-                                .into_any_element()
-                        }
-                    };
-                    (who, Some(body))
-                }
-            };
-            let place = match (multi_space, entry.project) {
-                (true, Some(project)) => format!("{space} / {project}"),
-                (false, Some(project)) => project.to_owned(),
-                (_, None) => space.clone(),
-            };
-            let screen = entry.project.map(|project| Screen::Project {
-                space: space.clone(),
-                project: project.to_owned(),
-                tab: crate::Tab::Conversation,
-            });
-            let title = h_flex()
-                .gap(SM)
-                .items_center()
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(place.clone()))
-                .child(meta(who.clone(), cx));
-            let header_left = match &screen {
-                Some(screen) => {
-                    let screen = screen.clone();
-                    button(SharedString::from(format!("timeline-{entry_id}")))
-                        .text()
-                        .accessibility_label(format!("Open chat history for {place}"))
-                        .child(title)
-                        .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
-                        .into_any_element()
-                }
-                None => title.into_any_element(),
-            };
-            let header = h_flex()
-                .w_full()
-                .justify_between()
-                .items_center()
-                .gap(SM)
-                .child(header_left)
-                .child(
-                    meta(when.moment(entry.at), cx)
-                        .flex_none()
-                        .font_features(TABULAR.clone()),
-                );
-            let from = from.map(|project| {
-                let screen = Screen::Project {
-                    space: space.clone(),
-                    project: project.clone(),
-                    tab: crate::Tab::Conversation,
-                };
-                button(SharedString::from(format!("timeline-from-{entry_id}")))
-                    .small()
-                    .ghost()
-                    .tab_stop(true)
-                    .label(format!("Open {project}"))
-                    .accessibility_label(format!("Open chat history for {space} / {project}"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
-            });
-            let view = cx.entity().downgrade();
-            let text = entry.text();
-            let reply = screen.filter(|screen| {
-                who != "Notice" && self.main_chat_screen(&space).as_ref() == Some(screen)
-            });
-            list = list.child(
-                v_flex()
-                    .id(SharedString::from(format!("timeline-menu-{entry_id}")))
-                    .w_full()
-                    .gap(XS)
-                    .items_start()
-                    .child(header)
-                    .children(body.map(|body| div().w_full().child(body)))
-                    .children(crate::components::chat_images::previews(entry.images, cx))
-                    .children(from)
-                    .context_menu(move |menu, _, _| {
-                        let copy = text.clone();
-                        let mut menu =
-                            menu.item(menu_item(&view, "Copy text", move |this, _, cx| {
-                                this.copy(copy.clone(), cx)
-                            }));
-                        if let Some(screen) = &reply {
-                            let (screen, quote) = (screen.clone(), text.clone());
-                            menu = menu.item(menu_item(&view, "Reply", move |this, window, cx| {
-                                this.go(screen.clone(), cx);
-                                this.reply_to(&quote, window, cx);
-                            }));
-                        }
-                        menu
-                    }),
-            );
-        }
-        if show_all_recent && state.timeline_has_earlier() {
+        list = list.children(
+            filtered[..visible_len]
+                .iter()
+                .map(|entry| self.timeline_entry(entry, when, cx)),
+        );
+        if has_earlier && (show_all_recent || filtered.len() <= INBOX_RECENT_SHOWN) {
             list = list.child(
                 button("timeline-earlier")
                     .small()
@@ -524,23 +514,276 @@ impl Desktop {
                     })),
             );
         }
-        list
+        Some(list)
     }
 
-    /// The Inbox composer sends to the lead chosen in its "To:" picker.
+    fn timeline_entry(
+        &self,
+        entry: &TimelineEntry<'_>,
+        when: &When,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let space = entry.space;
+        let id = entry.prose_id();
+        let text = entry.text();
+        let title = update_title(&text, !entry.images.is_empty()).to_owned();
+        let place = inbox_place(space, entry.project);
+        let open = self.inbox.open_update.as_ref() == Some(&id);
+        let (who, source, notice) = match entry.spoken {
+            Spoken::Said(_, _, author) => (
+                author.label(),
+                match author {
+                    Author::ProjectLead(project) => Some(project.as_str()),
+                    _ => None,
+                },
+                false,
+            ),
+            Spoken::Delivered(item) if item.kind() == OutboxKind::SystemNotice => {
+                ("Notice".to_owned(), None, true)
+            }
+            Spoken::Delivered(_) => ("Lead".to_owned(), None, false),
+        };
+        let conversation = |project: &str| Screen::Project {
+            space: space.to_owned(),
+            project: project.to_owned(),
+            tab: crate::Tab::Conversation,
+        };
+        let screen = entry.project.map(conversation);
+        let label = disclosure_label(open, &title, &place);
+        let toggle_id = id.clone();
+        let row = inbox_row(
+            format!("timeline-toggle-{id}"),
+            title,
+            format!("{place} · {who}"),
+            disclosure(open, when.moment(entry.at), cx),
+            cx,
+        )
+        .selected(open)
+        .accessibility_label(label)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.inbox.open_update =
+                (this.inbox.open_update.as_ref() != Some(&toggle_id)).then(|| toggle_id.clone());
+            cx.notify();
+        }));
+        let details = open.then(|| {
+            let digest = match entry.spoken {
+                Spoken::Delivered(item) => self.state.digest(item),
+                Spoken::Said(..) => None,
+            };
+            let body = if let Some(digest) = digest {
+                Some(self.digest_entry(space, digest, cx).into_any_element())
+            } else {
+                (!text.trim().is_empty()).then(|| {
+                    self.prose(id.clone(), space, entry.project, text.clone(), cx)
+                        .into_any_element()
+                })
+            };
+            let open_conversation = |key, label, screen: Screen| {
+                button(key)
+                    .small()
+                    .ghost()
+                    .tab_stop(true)
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
+            };
+            let actions = h_flex()
+                .flex_wrap()
+                .gap(XS)
+                .children(screen.clone().map(|screen| {
+                    open_conversation(
+                        format!("timeline-{id}"),
+                        "Open conversation".to_owned(),
+                        screen,
+                    )
+                }))
+                .children(source.map(|project| {
+                    open_conversation(
+                        format!("timeline-from-{id}"),
+                        format!("Open {project}"),
+                        conversation(project),
+                    )
+                }));
+            v_flex()
+                .gap(SM)
+                .p(MD)
+                .bg(cx.theme().group_box)
+                .rounded(cx.theme().radius)
+                .children(body)
+                .children(crate::components::chat_images::previews(entry.images, cx))
+                .children((screen.is_some() || source.is_some()).then_some(actions))
+        });
+        let reply = screen
+            .filter(|screen| !notice && self.main_chat_screen(space).as_ref() == Some(screen));
+        let view = cx.entity().downgrade();
+        v_flex()
+            .id(SharedString::from(format!("timeline-menu-{id}")))
+            .gap(XS)
+            .child(row)
+            .children(details)
+            .context_menu(move |menu, _, _| {
+                let copy = text.clone();
+                let mut menu = menu.item(menu_item(&view, "Copy text", move |this, _, cx| {
+                    this.copy(copy.clone(), cx)
+                }));
+                if let Some(screen) = &reply {
+                    let (screen, quote) = (screen.clone(), text.clone());
+                    menu = menu.item(menu_item(&view, "Reply", move |this, window, cx| {
+                        this.go(screen.clone(), cx);
+                        this.reply_to(&quote, window, cx);
+                    }));
+                }
+                menu
+            })
+            .into_any_element()
+    }
+
+    pub(crate) fn open_inbox_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.target().is_none() {
+            return;
+        }
+        if !self.inbox.composing {
+            self.inbox.composer_return_focus = window.focused(cx);
+            self.inbox.composing = true;
+        }
+        self.scroll_to_decision.set(DecisionScroll::None);
+        let focus = self.composer.focus_handle(cx);
+        window.on_next_frame(move |window, cx| focus.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn close_inbox_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.inbox.composing = false;
+        self.inbox
+            .composer_return_focus
+            .take()
+            .filter(|focus| self.keyboard_focus.contains(focus, window))
+            .unwrap_or_else(|| self.keyboard_focus.clone())
+            .focus(window, cx);
+        cx.notify();
+    }
+
     fn home_composer(&self, cx: &mut Context<Self>) -> Div {
-        let picker = self.state.target().map(|current| {
+        let recipient = self.state.target().map(|current| {
             self.to_picker(
                 current,
                 |state, space, project| state.set_target(space, project),
                 cx,
             )
         });
-        self.render_composer(
-            threadlane_desktop::Draft::Lead,
-            "Message the lead",
-            picker,
-            cx,
+        v_flex()
+            .flex_none()
+            .gap(XS)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .gap(SM)
+                    .child(
+                        div().max_w_full().min_w_0().flex_1().child(
+                            recipient.unwrap_or_else(|| {
+                                meta("No lead available", cx).into_any_element()
+                            }),
+                        ),
+                    )
+                    .child(
+                        icon_button(
+                            "close-inbox-composer",
+                            AppIcon::X,
+                            "Close composer".to_owned(),
+                        )
+                        .tab_stop(true)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_inbox_composer(window, cx);
+                        })),
+                    ),
+            )
+            .child(self.render_composer(Draft::Lead, "Message the lead", None, cx))
+    }
+}
+
+fn inbox_place(space: &str, project: Option<&str>) -> String {
+    project.map_or_else(
+        || space.to_owned(),
+        |project| format!("{space} / {project}"),
+    )
+}
+
+fn update_title(text: &str, has_images: bool) -> &str {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            let heading = line.trim_start_matches('#');
+            heading.strip_prefix(' ').map_or(line, str::trim_start)
+        })
+        .unwrap_or(if has_images {
+            "Image attachment"
+        } else {
+            "Update"
+        })
+}
+
+fn disclosure_label(open: bool, title: &str, place: &str) -> String {
+    let action = if open { "Hide" } else { "Show" };
+    format!("{action} details for {title} ({place})")
+}
+
+fn disclosure(open: bool, time: String, cx: &App) -> Div {
+    h_flex().gap(XS).child(meta(time, cx)).child(
+        Icon::new(if open {
+            AppIcon::ChevronDown
+        } else {
+            AppIcon::ChevronRight
+        })
+        .small()
+        .text_color(cx.theme().muted_foreground),
+    )
+}
+
+fn inbox_row(
+    id: impl Into<ElementId>,
+    title: String,
+    context: String,
+    trailing: Div,
+    cx: &App,
+) -> Button {
+    button(id)
+        .ghost()
+        .w_full()
+        .h_auto()
+        .min_h(ROW_HEIGHT)
+        .py(XS)
+        .px(SM)
+        .tab_stop(true)
+        .tooltip(format!("{title} — {context}"))
+        .child(
+            h_flex()
+                .w_full()
+                .gap(MD)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(TYPE_BODY)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(meta(context, cx).truncate()),
+                )
+                .child(trailing.flex_none()),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::update_title;
+
+    #[test]
+    fn compact_updates_use_the_first_nonblank_line() {
+        assert_eq!(update_title("\n  ## Result \nMore detail", false), "Result");
+        assert_eq!(update_title("#578 was merged", false), "#578 was merged");
+        assert_eq!(update_title("   ", true), "Image attachment");
     }
 }
