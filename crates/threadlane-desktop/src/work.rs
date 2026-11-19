@@ -92,6 +92,7 @@ pub(super) struct WorkView {
     saving: bool,
     loaded_recipe: Option<i64>,
     loaded_search: bool,
+    retry_workflow: Option<(TaskRequest, String)>,
     implementation: Entity<TextareaState>,
     review: Entity<TextareaState>,
     engineer: Entity<InputState>,
@@ -115,6 +116,7 @@ impl WorkView {
             manual: Default::default(),
             loaded_recipe: None,
             loaded_search: false,
+            retry_workflow: None,
             engineer: input("Engineer"),
             reviewer: input("Reviewer"),
             goal: input(""),
@@ -131,6 +133,7 @@ impl WorkView {
         self.loading = false;
         self.loaded_recipe = None;
         self.loaded_search = false;
+        self.retry_workflow = None;
         self.saving = false;
     }
     fn moment(&self, at: threadlane_core::time::Timestamp, when: &When) -> String {
@@ -399,15 +402,32 @@ impl Desktop {
                     cx.notify();
                     return;
                 }
-                let request = TaskRequest::StartReviewWorkflow {
+                let mut request = TaskRequest::StartReviewWorkflow {
                     project: p.clone(),
                     version,
                     engineer: this.work.engineer.read(cx).value().to_string(),
                     reviewer: this.work.reviewer.read(cx).value().to_string(),
                     repository: this.work.repository.read(cx).value().to_string(),
                     goal: this.work.goal.read(cx).value().to_string(),
-                    client_request_id: ClientCore::request_id(),
+                    client_request_id: String::new(),
                 };
+                if this
+                    .work
+                    .retry_workflow
+                    .as_ref()
+                    .is_none_or(|(draft, _)| draft != &request)
+                {
+                    this.work.retry_workflow = Some((request.clone(), ClientCore::request_id()));
+                }
+                if let (
+                    TaskRequest::StartReviewWorkflow {
+                        client_request_id, ..
+                    },
+                    Some((_, id)),
+                ) = (&mut request, &this.work.retry_workflow)
+                {
+                    client_request_id.clone_from(id);
+                }
                 this.workflow_action(s.clone(), p.clone(), request, cx);
             }));
         let (s, p) = (space.to_owned(), project.to_owned());
@@ -756,6 +776,7 @@ impl Desktop {
                         g.cost,
                         g.cost_reports
                     );
+                    let info = meta(totals, cx);
                     let tasks = g.tasks.iter().map(|id| {
                         self.source_task(space, *id, format!("usage-{heading}-{id}"), cx)
                     });
@@ -763,7 +784,7 @@ impl Desktop {
                         v_flex()
                             .gap(SM)
                             .child(section(heading.clone()))
-                            .child(meta(totals, cx))
+                            .child(info)
                             .child(h_flex().gap(SM).flex_wrap().children(tasks)),
                     );
                 }
