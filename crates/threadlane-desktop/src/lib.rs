@@ -831,8 +831,11 @@ const HUB_REFRESH_LIMIT: usize = 4;
 /// result immediately rather than waiting for slow peers. Returning false from
 /// the callback stops the pass (such as when the desktop has closed).
 pub async fn refresh_each(core: &ClientCore, mut ready: impl FnMut(usize, Refresh) -> bool) {
-    let mut parts = stream::iter(core.hubs().iter().enumerate())
-        .map(|(index, hub)| async move { (index, refresh_hub(core, hub).await) })
+    // Own the pairing values so the buffered futures are Send when the
+    // desktop runs the refresh on Tokio.
+    let hubs = core.hubs().to_vec();
+    let mut parts = stream::iter(hubs.into_iter().enumerate())
+        .map(|(index, hub)| async move { (index, refresh_hub(core, &hub).await) })
         .buffer_unordered(HUB_REFRESH_LIMIT);
     while let Some((index, part)) = parts.next().await {
         if !ready(index, part) {
