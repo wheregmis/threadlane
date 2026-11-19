@@ -119,6 +119,7 @@ impl HubApi for FakeHub {
             space: "Work".to_owned(),
             mode_ceiling: Mode::Assisted,
             schema_version: 1,
+            update_version: None,
         })
     }
 

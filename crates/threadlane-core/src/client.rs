@@ -29,6 +29,17 @@ pub struct HubInfo {
     pub space: String,
     pub mode_ceiling: Mode,
     pub schema_version: i64,
+    /// Running release version when the hub supports in-app updates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_version: Option<String>,
+}
+
+/// An update request can select a release version, never a download location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum HubUpdate {
+    Check,
+    Install { version: String },
 }
 
 /// A project as a client lists it.
@@ -978,6 +989,12 @@ pub enum ApiError {
 #[async_trait]
 pub trait HubApi: Send + Sync + fmt::Debug {
     async fn info(&self) -> Result<HubInfo, ApiError>;
+    /// Checks for or installs a signed hub release.
+    async fn update_hub(&self, _request: HubUpdate) -> Result<Option<String>, ApiError> {
+        Err(ApiError::Invalid(
+            "This hub does not support in-app updates".into(),
+        ))
+    }
     async fn projects(&self) -> Result<Vec<ProjectSummary>, ApiError>;
     /// Lists active projects and, when requested, archived ones as well.
     async fn project_list(&self, _include_archived: bool) -> Result<Vec<ProjectSummary>, ApiError> {
@@ -1023,6 +1040,9 @@ pub trait HubApi: Send + Sync + fmt::Debug {
 #[non_exhaustive]
 pub enum ClientRequest {
     Info,
+    UpdateHub {
+        request: HubUpdate,
+    },
     /// Lists projects, omitting archived projects by default.
     Projects {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1075,6 +1095,7 @@ pub enum ClientRequest {
 )]
 pub enum ClientResponse {
     Info { info: HubInfo },
+    UpdateHub { version: Option<String> },
     Projects { projects: Vec<ProjectSummary> },
     Accepted { accepted: Accepted },
     Feed { items: Vec<FeedItem> },
@@ -1093,6 +1114,10 @@ pub enum ClientResponse {
 pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientResponse {
     let result = match request {
         ClientRequest::Info => api.info().await.map(|info| ClientResponse::Info { info }),
+        ClientRequest::UpdateHub { request } => api
+            .update_hub(request)
+            .await
+            .map(|version| ClientResponse::UpdateHub { version }),
         ClientRequest::Projects { include_archived } => api
             .project_list(include_archived)
             .await

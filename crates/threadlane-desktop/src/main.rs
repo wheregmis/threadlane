@@ -40,6 +40,7 @@ mod menus;
 mod repository;
 mod screens;
 mod tokens;
+mod updates;
 
 use icons::DesktopAssets;
 use keyboard::DecisionScroll;
@@ -402,6 +403,8 @@ impl PendingProjectLoad {
 /// The window's one view: the shell and its screens over [`AppState`].
 struct Desktop {
     state: AppState,
+    desktop_updatable: bool,
+    updates: HashMap<Option<String>, updates::UpdateState>,
     core: Arc<RwLock<ClientCore>>,
     tokio: tokio::runtime::Handle,
     screen: Screen,
@@ -731,6 +734,8 @@ impl Desktop {
             clear_fields: Vec::new(),
             full_screen: false,
             offset_minutes: local_offset_minutes(),
+            desktop_updatable: threadlane_updater::Component::Desktop.available(),
+            updates: HashMap::new(),
             _tasks: vec![follow, refresh_loop, clock],
             _subscriptions: subscriptions,
         }

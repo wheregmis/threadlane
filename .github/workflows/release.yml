@@ -7,6 +7,11 @@ on:
         description: Release tag created by Release Please
         required: true
         type: string
+    secrets:
+      CARGO_PACKAGER_SIGN_PRIVATE_KEY:
+        required: true
+      CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD:
+        required: false
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
@@ -79,8 +84,13 @@ jobs:
       - name: Build and archive
         env:
           PLATFORM: ${{ matrix.platform }}
+          THREADLANE_UPDATER_PUBLIC_KEY: ${{ vars.THREADLANE_UPDATER_PUBLIC_KEY }}
         shell: bash
         run: |
+          if [[ -z "$THREADLANE_UPDATER_PUBLIC_KEY" ]]; then
+            echo "::error::Repository variable THREADLANE_UPDATER_PUBLIC_KEY is not configured"
+            exit 1
+          fi
           if [[ "$RUNNER_OS" == macOS ]]; then
             scripts/bundle-desktop.sh
           else
@@ -106,18 +116,45 @@ jobs:
   publish:
     name: Publish release packages
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Install release signer
+        run: cargo install --locked cargo-packager --version 0.11.8
+
       - uses: actions/download-artifact@v8.0.2
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Attach packages and checksums
+      - name: Sign update manifest
         working-directory: artifacts
+        shell: bash
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]]; then
+            echo "::error::Updater signing key is not configured"
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          packages=("Threadlane-$version-linux-x86_64.tar.gz"
+                    "Threadlane-$version-linux-aarch64.tar.gz"
+                    "Threadlane-$version-macos-arm64.zip")
+          shasum -a 256 "${packages[@]}" > SHA256SUMS
+          jq -Rn --arg version "$version" '
+            {version: $version, packages: (reduce inputs as $line
+              ({}; ($line | split("  ")) as $entry | .[$entry[1]] = $entry[0]))}
+          ' < SHA256SUMS > threadlane-update.json
+          cargo packager signer sign threadlane-update.json
+
+      - name: Attach packages and signed manifest
+        working-directory: artifacts
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -126,8 +163,8 @@ jobs:
           packages=("Threadlane-$version-linux-x86_64.tar.gz"
                     "Threadlane-$version-linux-aarch64.tar.gz"
                     "Threadlane-$version-macos-arm64.zip")
-          sha256sum "${packages[@]}" > SHA256SUMS
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --generate-notes
           fi
           gh release upload "$RELEASE_TAG" "${packages[@]}" SHA256SUMS --clobber
+          gh release upload "$RELEASE_TAG" threadlane-update.json threadlane-update.json.sig --clobber

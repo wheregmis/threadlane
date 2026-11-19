@@ -22,6 +22,7 @@ threadlane-store = { path = "crates/threadlane-store" }
 threadlane-testkit = { path = "crates/threadlane-testkit" }
 threadlane-transport-local = { path = "crates/threadlane-transport-local" }
 threadlane-transport-iroh = { path = "crates/threadlane-transport-iroh" }
+threadlane-updater = { path = "crates/threadlane-updater" }
 
 anyhow = "1"
 base64 = "0.22"

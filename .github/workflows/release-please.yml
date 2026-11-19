@@ -55,3 +55,6 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       release_tag: ${{ needs.release.outputs.release_tag }}
+    secrets:
+      CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
+      CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}

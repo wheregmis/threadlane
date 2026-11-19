@@ -55,6 +55,16 @@ Use Conventional Commit titles for squash merges. Release Please maintains a
 release PR on main. Merging it tags the workspace and attaches the desktop app,
 CLI and hub for Apple Silicon and Linux (x86_64 and aarch64), with SHA-256 checksums.
 
+Use **App settings → Check for updates** to update the desktop app. In a
+paired space, use **Space settings → Check for updates** to update its hub,
+including hubs reached over the network. Updating a hub stops its active runs
+and briefly disconnects clients while it restarts.
+
+Install an updater-enabled release manually once to use these controls. The
+app and hub need write access to their installation directory. Releases sign
+the update manifest with the existing Cargo Packager signing key so both
+components can verify the package before replacing anything.
+
 ## Run a hub
 
 ```sh

@@ -61,6 +61,7 @@ fn info() -> HubInfo {
         space: "Work".to_owned(),
         mode_ceiling: Mode::Assisted,
         schema_version: 1,
+        update_version: None,
     }
 }
 
@@ -87,6 +88,18 @@ fn projects() -> Vec<ProjectSummary> {
 
 #[async_trait]
 impl HubApi for FakeHub {
+    async fn update_hub(
+        &self,
+        request: threadlane_core::client::HubUpdate,
+    ) -> Result<Option<String>, ApiError> {
+        use threadlane_core::client::HubUpdate;
+
+        Ok(Some(match request {
+            HubUpdate::Check => "1.2.3".to_owned(),
+            HubUpdate::Install { version } => version,
+        }))
+    }
+
     async fn info(&self) -> Result<HubInfo, ApiError> {
         Ok(info())
     }
@@ -307,6 +320,19 @@ async fn every_request_kind_round_trips() {
     let client = LocalClient::new(&server.socket);
 
     assert_eq!(client.info().await, Ok(info()));
+    use threadlane_core::client::HubUpdate;
+    assert_eq!(
+        client.update_hub(HubUpdate::Check).await,
+        Ok(Some("1.2.3".to_owned()))
+    );
+    assert_eq!(
+        client
+            .update_hub(HubUpdate::Install {
+                version: "1.2.3".to_owned()
+            })
+            .await,
+        Ok(Some("1.2.3".to_owned()))
+    );
     assert_eq!(client.projects().await, Ok(projects()));
 
     let message = UserMessage {

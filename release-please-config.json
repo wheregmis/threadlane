@@ -26,7 +26,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name.value == 'threadlane-backend-antigravity' || @.name.value == 'threadlane-backend-claude' || @.name.value == 'threadlane-backend-codex' || @.name.value == 'threadlane-client' || @.name.value == 'threadlane-core' || @.name.value == 'threadlane-desktop' || @.name.value == 'threadlane-hub' || @.name.value == 'threadlane-mcp' || @.name.value == 'threadlane-runner' || @.name.value == 'threadlane-store' || @.name.value == 'threadlane-testkit' || @.name.value == 'threadlane-transport-iroh' || @.name.value == 'threadlane-transport-local')].version"
+          "jsonpath": "$.package[?(@.name.value == 'threadlane-backend-antigravity' || @.name.value == 'threadlane-backend-claude' || @.name.value == 'threadlane-backend-codex' || @.name.value == 'threadlane-client' || @.name.value == 'threadlane-core' || @.name.value == 'threadlane-desktop' || @.name.value == 'threadlane-hub' || @.name.value == 'threadlane-mcp' || @.name.value == 'threadlane-runner' || @.name.value == 'threadlane-store' || @.name.value == 'threadlane-testkit' || @.name.value == 'threadlane-transport-iroh' || @.name.value == 'threadlane-transport-local' || @.name.value == 'threadlane-updater')].version"
         }
       ]
     }

@@ -101,6 +101,11 @@ impl Desktop {
                             row.reached_by
                         },
                     ))
+                    .child(self.update_controls(
+                        Some(&row.paired_as),
+                        row.update_version.as_deref(),
+                        cx,
+                    ))
                     .child(ceiling)
                     .child(pacing)
                     .child(metrics),
@@ -156,7 +161,8 @@ impl Desktop {
                             })),
                     )
                     .child(line("Client directory", dir))
-                    .child(line("Version", env!("CARGO_PKG_VERSION").to_owned())),
+                    .child(line("Version", env!("CARGO_PKG_VERSION").to_owned()))
+                    .child(self.update_controls(None, None, cx)),
             )
             .into_any_element()
     }
