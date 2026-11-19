@@ -464,18 +464,19 @@ impl Desktop {
             )
     }
 
-    /// What the app shows while no hub is paired: how to start one and
-    /// pair with it, by its data directory or a join code.
+    /// What the app shows while no hub is paired: how to pair a space
+    /// (by its data directory or a join code) and start a hub for it.
     pub(crate) fn first_run(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let step = |title: &'static str, text: &'static str| {
-            card(cx).child(section(title)).child(meta(text, cx))
-        };
         let command = first_run_hub_command(
             self.state.client_dir(),
             &self.space_name.read(cx).value(),
             &self.hub_dir.read(cx).value(),
         );
+        let join_form = self.join_form(cx);
+        let muted = cx.theme().muted_foreground;
+        let step = |title: &'static str, text: &'static str| {
+            card(cx).child(section(title)).child(meta(text, cx))
+        };
         v_flex()
             .flex_1()
             .min_h_0()
@@ -490,13 +491,9 @@ impl Desktop {
                 "A hub keeps one space's projects, agents and memory. This app shows every \
                  hub it is paired with.",
             ))
+            .child(step(FIRST_RUN_PAIR_STEP.0, FIRST_RUN_PAIR_STEP.1).child(join_form))
             .child(
-                step(
-                    "1. Start a hub",
-                    "On the computer that will run the work, start one with its own data \
-                     directory. It keeps running in the terminal.",
-                )
-                .child(
+                step(FIRST_RUN_START_STEP.0, FIRST_RUN_START_STEP.1).child(
                     div()
                         .p(SM)
                         .text_size(TYPE_BODY)
@@ -506,20 +503,22 @@ impl Desktop {
                         .child(command),
                 ),
             )
-            .child(
-                step(
-                    "2. Pair with it",
-                    "Leave the directory blank to create the suggested folder first (then start \
-                     the hub there), choose an existing hub folder, or use a join code from \
-                     another computer.",
-                )
-                .child(self.join_form(cx)),
-            )
             .into_any_element()
     }
 }
 
 const SOCKET_FILE: &str = "hub.sock";
+
+const FIRST_RUN_PAIR_STEP: (&str, &str) = (
+    "1. Pair a space",
+    "Name the space and connect. Leave the directory blank to create the suggested folder, \
+     choose an existing hub folder, or use a join code from another computer.",
+);
+
+const FIRST_RUN_START_STEP: (&str, &str) = (
+    "2. Start the hub",
+    "If no hub is running in that folder yet, start one in a terminal. It keeps running there.",
+);
 
 /// Trims the directory field from the pairing form and expands a leading `~/`.
 /// Whitespace-only input means "use the suggested space directory".
@@ -560,8 +559,8 @@ fn hub_run_command(dir: &str) -> String {
     format!("threadlane-hub --data-dir {} run", shell_quote_path(dir))
 }
 
-/// The command shown in Step 1 of the first-run screen so it matches the folder
-/// Step 2 will pair: the explicit directory if entered, otherwise the suggested
+/// The command shown in Step 2 of the first-run screen so it matches the folder
+/// Step 1 will pair: the explicit directory if entered, otherwise the suggested
 /// `<client-root>/spaces/<name>` directory.
 pub(crate) fn first_run_hub_command(
     client_dir: Option<&std::path::Path>,
@@ -571,7 +570,12 @@ pub(crate) fn first_run_hub_command(
     let entered = hub_dir.trim();
     if !entered.is_empty() {
         let path = std::path::Path::new(entered);
-        let dir = if path.file_name() == Some(std::ffi::OsStr::new(SOCKET_FILE)) {
+        let dir = if path.file_name() == Some(std::ffi::OsStr::new(SOCKET_FILE))
+            && !parse_hub_dir(entered, std::env::var_os("HOME").as_deref())
+                .as_deref()
+                .unwrap_or(path)
+                .is_dir()
+        {
             match path.parent() {
                 Some(parent) if !parent.as_os_str().is_empty() => parent.display().to_string(),
                 _ => ".".to_owned(),
@@ -612,9 +616,15 @@ pub(crate) fn paired_directory_message(
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
 
-    use super::{first_run_hub_command, paired_directory_message, parse_hub_dir};
+    use threadlane_client::{ClientCore, ClientDirs, ClientError, Reach};
+
+    use super::{
+        FIRST_RUN_PAIR_STEP, FIRST_RUN_START_STEP, SOCKET_FILE, first_run_hub_command,
+        paired_directory_message, parse_hub_dir,
+    };
 
     #[test]
     fn first_run_command_matches_the_suggested_or_entered_directory() {
@@ -648,6 +658,59 @@ mod tests {
             first_run_hub_command(None, "work", ""),
             "threadlane-hub --data-dir ~/threadlane/work run"
         );
+    }
+
+    #[test]
+    fn first_run_command_keeps_an_existing_directory_named_hub_sock() {
+        let temp = tempfile::tempdir().unwrap();
+        let sock_dir = temp.path().join(SOCKET_FILE);
+        std::fs::create_dir(&sock_dir).unwrap();
+        let entered = sock_dir.display().to_string();
+        assert_eq!(
+            first_run_hub_command(Some(temp.path()), "work", &entered),
+            format!(
+                "threadlane-hub --data-dir {} run",
+                super::shell_quote_path(&entered)
+            )
+        );
+    }
+
+    #[test]
+    fn first_run_documented_order_pairs_then_starts_hub_and_keeps_collision_protection() {
+        assert!(FIRST_RUN_PAIR_STEP.0.starts_with("1."));
+        assert!(FIRST_RUN_START_STEP.0.starts_with("2."));
+
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = ClientDirs::new(temp.path().join("client"));
+        let mut core = ClientCore::load(dirs.clone()).unwrap();
+
+        // Step 1: pair with a blank directory to create the suggested folder.
+        let parsed = parse_hub_dir("   ", None);
+        assert_eq!(parsed, None);
+        core.pair_directory("work", parsed).unwrap();
+
+        let suggested = dirs.space_dir("work").unwrap();
+        assert!(suggested.is_dir());
+        let expected_cmd = first_run_hub_command(Some(&dirs.root), "work", "");
+        assert_eq!(
+            paired_directory_message("work", Some(&suggested), false),
+            format!("Paired work. Start a hub with: {expected_cmd}")
+        );
+
+        // Step 2: start the hub in that folder (which creates hub.sock inside it).
+        std::fs::create_dir_all(&suggested).unwrap();
+        let socket = suggested.join(SOCKET_FILE);
+        let _listener = UnixListener::bind(&socket).unwrap();
+        assert_eq!(core.hubs().len(), 1);
+        assert_eq!(core.hubs()[0].reach, Reach::Socket { socket });
+
+        // Implicit pairing still refuses an already-existing suggested folder.
+        let taken = dirs.space_dir("taken").unwrap();
+        std::fs::create_dir_all(&taken).unwrap();
+        assert!(matches!(
+            core.pair_directory("taken", None),
+            Err(ClientError::DirectoryTaken(path)) if path == taken
+        ));
     }
 
     #[test]

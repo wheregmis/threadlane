@@ -1,6 +1,6 @@
 //! Inspect an existing checkout before registering its clone source with a hub.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 
@@ -9,6 +9,46 @@ use threadlane_client::Reach;
 use threadlane_desktop::Activity;
 
 use crate::Desktop;
+
+const GIT_ENV_OVERRIDES: [&str; 6] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_INDEX_FILE",
+];
+
+fn git_command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir);
+    for var in GIT_ENV_OVERRIDES {
+        command.env_remove(var);
+    }
+    command
+}
+
+fn canonicalize_local_path(root: &Path, url: &str) -> PathBuf {
+    let joined = root.join(url);
+    if let Ok(canonical) = std::fs::canonicalize(&joined) {
+        return canonical;
+    }
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => normalized.push(component.as_os_str()),
+            },
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
 
 struct Checkout {
     name: String,
@@ -19,13 +59,8 @@ struct Checkout {
 
 fn inspect(folder: &Path, local_hub: bool) -> Result<Checkout, String> {
     let git = |args: &[&str]| -> Result<String, String> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(folder)
+        let out = git_command(folder)
             .args(args)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
             .output()
             .map_err(|e| format!("Could not run Git: {e}"))?;
         if !out.status.success() {
@@ -78,7 +113,9 @@ fn inspect(folder: &Path, local_hub: bool) -> Result<Checkout, String> {
                 " The remote is a local path. Enter a clone source accessible to the hub.",
             );
         } else if path_source {
-            source = Path::new(&root).join(url).display().to_string();
+            source = canonicalize_local_path(Path::new(&root), &url)
+                .display()
+                .to_string();
         } else {
             source = url;
         }
@@ -196,12 +233,10 @@ impl Desktop {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, Path, inspect};
+    use super::{Path, git_command, inspect};
 
     fn git(dir: &Path, args: &[&str]) {
-        let result = Command::new("git")
-            .arg("-C")
-            .arg(dir)
+        let result = git_command(dir)
             .args([
                 "-c",
                 "user.name=Test",
@@ -258,13 +293,25 @@ mod tests {
         assert!(inspect(&nested, true).unwrap().branch.is_empty());
         git(dir.path(), &["remote", "add", "another", "../elsewhere"]);
         assert!(inspect(&nested, true).unwrap().source.is_empty());
+        let preferred = dir.path().join("preferred");
+        std::fs::create_dir(&preferred).unwrap();
         git(dir.path(), &["remote", "add", "origin", "../preferred"]);
         assert!(inspect(&nested, false).unwrap().source.is_empty());
-        assert!(
-            inspect(&nested, true)
-                .unwrap()
-                .source
-                .ends_with("/site/../preferred")
+        let expected_preferred = preferred.canonicalize().unwrap();
+        let checkout = inspect(&nested, true).unwrap();
+        assert_eq!(Path::new(&checkout.source), expected_preferred);
+        assert!(threadlane_desktop::same_remote(
+            &checkout.source,
+            &expected_preferred.display().to_string(),
+        ));
+        git(
+            dir.path(),
+            &["remote", "set-url", "origin", "../not-created-yet"],
+        );
+        let expected_missing = dir.path().canonicalize().unwrap().join("not-created-yet");
+        assert_eq!(
+            Path::new(&inspect(&nested, true).unwrap().source),
+            expected_missing
         );
         git(
             dir.path(),

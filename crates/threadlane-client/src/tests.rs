@@ -311,6 +311,13 @@ fn directory_pairing_accepts_a_socket_file_path_without_creating_a_socket_direct
     assert!(pending_dir.is_dir());
     assert!(!pending_socket.exists());
 
+    // Existing directory literally named hub.sock: pair it as a directory instead of its parent.
+    let dir_named_socket = temp.path().join(SOCKET_FILE);
+    fs::create_dir(&dir_named_socket).unwrap();
+    core.pair_directory("named-socket", Some(dir_named_socket.clone()))
+        .unwrap();
+    let nested_socket = dir_named_socket.join(SOCKET_FILE);
+
     // A regular file not named hub.sock is still rejected.
     let stray = temp.path().join("notes.txt");
     fs::write(&stray, "keep").unwrap();
@@ -320,13 +327,13 @@ fn directory_pairing_accepts_a_socket_file_path_without_creating_a_socket_direct
     ));
 
     let saved = ClientCore::load(dirs).unwrap();
-    assert_eq!(saved.hubs().len(), 3);
-    for (hub, expected) in
-        saved
-            .hubs()
-            .iter()
-            .zip([running_socket, existing_socket, pending_socket])
-    {
+    assert_eq!(saved.hubs().len(), 4);
+    for (hub, expected) in saved.hubs().iter().zip([
+        running_socket,
+        existing_socket,
+        pending_socket,
+        nested_socket,
+    ]) {
         assert_eq!(hub.reach, Reach::Socket { socket: expected });
     }
 }

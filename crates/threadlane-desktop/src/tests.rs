@@ -318,8 +318,20 @@ impl HubApi for FakeHub {
                         .map(|backend| backend.parse().expect("a backend"))
                         .collect();
                 }
-                for (backend, model) in models.unwrap_or_default() {
-                    agent.models[backend] = json!(model);
+                if let Some(models) = models {
+                    if !agent.models.is_object() {
+                        agent.models = json!({});
+                    }
+                    if let Some(map) = agent.models.as_object_mut() {
+                        for (backend, model) in models {
+                            let model = model.trim();
+                            if model.is_empty() {
+                                map.remove(&backend);
+                            } else {
+                                map.insert(backend, json!(model));
+                            }
+                        }
+                    }
                 }
                 for binding in bindings.iter_mut().filter(|b| b.agent == from) {
                     binding.agent.clone_from(&agent.name);
@@ -6218,6 +6230,14 @@ async fn agent_models_follow_the_provider_after_reordering_and_reopening() {
         );
         assert_eq!(reopened.models, fields.models);
         assert_eq!(state.agent_update(&reopened), Ok(None));
+        if clear_fallback {
+            assert!(
+                state.space("work").unwrap().agents[0]
+                    .models
+                    .get("claude")
+                    .is_none()
+            );
+        }
         fields = reopened;
     }
 }
