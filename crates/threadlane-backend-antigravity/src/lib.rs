@@ -11,7 +11,9 @@ use std::{
 };
 use tempfile::TempDir;
 use threadlane_core::{
-    backend::{AgentBackend, AskRequest, BackendError, BackendRun, Probe, RunRequest},
+    backend::{
+        AgentBackend, AskRequest, BackendError, BackendRun, Probe, RunRequest, with_warnings,
+    },
     model::{BackendKind, SkillBinding},
 };
 use threadlane_mcp::{McpServer, SERVER_NAME};
@@ -232,7 +234,7 @@ impl AgentBackend for AntigravityBackend {
     }
 
     async fn run(&self, mut request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
-        self.apply_skills(&mut request).await?;
+        let warnings = self.apply_skills(&mut request).await?;
         if !request.images.is_empty() {
             return Err(failed("Antigravity CLI stream input supports text only"));
         }
@@ -246,7 +248,10 @@ impl AgentBackend for AntigravityBackend {
             .collect();
         cmd.args(["--sandbox", "--settings"])
             .arg(json!({"toolPermission":"proceed-in-sandbox","permissions":{"deny":deny,"allow":["mcp(threadlane/*)"]}}).to_string());
-        Ok(Box::new(run::Run::start(cmd, profile, request)?))
+        Ok(with_warnings(
+            warnings,
+            Box::new(run::Run::start(cmd, profile, request)?),
+        ))
     }
 
     async fn ask(&self, request: AskRequest) -> Result<Value, BackendError> {

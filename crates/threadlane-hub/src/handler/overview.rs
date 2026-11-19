@@ -113,6 +113,7 @@ fn step(entry: &JournalEntry) -> Option<RunStep> {
         "turn_boundary" => "Finished a turn".to_owned(),
         "finished" => "Finished the run".to_owned(),
         "failed" => "Run failed".to_owned(),
+        "warning" => one_line(entry.entry["message"].as_str().unwrap_or("Warning")),
         _ => "Run activity".to_owned(),
     };
     Some(RunStep {
@@ -740,4 +741,25 @@ async fn task_detail(db: &HubDb, task: TaskId, full: bool) -> Result<OverviewRep
             proposed_by,
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_warning_entry_shows_its_message_as_the_step() {
+        let entry = JournalEntry {
+            run_id: 1.into(),
+            seq: 1,
+            at: Timestamp::from_millis(0),
+            entry: serde_json::json!({"type": "warning", "message": "codex skill \"gpui\" was skipped for this run: it is not installed on this runner."}),
+        };
+        let step = step(&entry).expect("a step");
+        assert_eq!(step.kind, "warning");
+        assert_eq!(
+            step.description,
+            "codex skill \"gpui\" was skipped for this run: it is not installed on this runner."
+        );
+    }
 }

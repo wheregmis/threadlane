@@ -209,6 +209,8 @@ pub enum BackendEvent {
     Failed { error: String },
     /// The backend is between turns and can accept another user message.
     TurnBoundary,
+    /// The runner changed the run to keep it going, such as skipping a skill it could not resolve.
+    Warning { message: String },
 }
 
 /// Failure text meaning the backend will not run the chosen model at all.
@@ -293,9 +295,10 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
     }
 
     /// Resolve identifiers on the runner and ask the provider to use its own installed skills.
-    async fn apply_skills(&self, request: &mut RunRequest) -> Result<(), BackendError> {
+    /// A skill the runner cannot resolve is skipped; the returned warnings say which and why.
+    async fn apply_skills(&self, request: &mut RunRequest) -> Result<Vec<String>, BackendError> {
         if request.skills.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let prefix = match self.kind() {
             BackendKind::Claude => "/",
@@ -303,16 +306,50 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
             // Headless Antigravity runs use name-based activation with slash commands disabled.
             BackendKind::Antigravity => "",
         };
-        let installed = self.installed_skills(Some(&request.working_dir)).await?;
-        let mut mentions = Vec::new();
-        for name in &request.skills {
-            if !crate::model::SkillBinding::valid_name(name) || !installed.contains(name) {
-                return Err(BackendError::Failed(format!(
-                    "{} skill {name:?} is missing on this runner. Install it or edit the agent profile.",
-                    self.kind()
-                )));
+        let installed = match self.installed_skills(Some(&request.working_dir)).await {
+            Ok(installed) => installed,
+            Err(BackendError::NotInstalled) => return Err(BackendError::NotInstalled),
+            // A listing that fails must not block the run: skip every bound skill instead.
+            Err(error) => {
+                return Ok(request
+                    .skills
+                    .iter()
+                    .map(|name| {
+                        format!(
+                            "{} skill {name:?} was skipped for this run: the skill list could not be read ({error}).",
+                            self.kind()
+                        )
+                    })
+                    .collect());
             }
-            mentions.push(format!("{prefix}{name}"));
+        };
+        let mut personal = None;
+        let mut mentions = Vec::new();
+        let mut warnings = Vec::new();
+        for name in &request.skills {
+            if crate::model::SkillBinding::valid_name(name) && installed.contains(name) {
+                mentions.push(format!("{prefix}{name}"));
+                continue;
+            }
+            // Listed outside any repository, a personal skill the run directory drops is shadowed.
+            if personal.is_none() {
+                personal = Some(self.installed_skills(None).await.unwrap_or_default());
+            }
+            let reason = if personal
+                .as_ref()
+                .is_some_and(|skills| skills.contains(name))
+            {
+                "the repository has a skill with the same name as the personal one"
+            } else {
+                "it is not installed on this runner"
+            };
+            warnings.push(format!(
+                "{} skill {name:?} was skipped for this run: {reason}.",
+                self.kind()
+            ));
+        }
+        if mentions.is_empty() {
+            return Ok(warnings);
         }
         if request.remove_builtin_tools {
             return Err(BackendError::Failed(format!(
@@ -329,13 +366,49 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
                 request.prompt
             ),
         };
-        Ok(())
+        Ok(warnings)
     }
 
     async fn probe(&self) -> Result<Probe, BackendError>;
     /// Starts a new session or resumes `request.resume`.
     async fn run(&self, request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError>;
     async fn ask(&self, request: AskRequest) -> Result<Json, BackendError>;
+}
+
+/// Puts `warnings` ahead of the run's own events, as [`BackendEvent::Warning`].
+#[must_use]
+pub fn with_warnings(warnings: Vec<String>, run: Box<dyn BackendRun>) -> Box<dyn BackendRun> {
+    if warnings.is_empty() {
+        return run;
+    }
+    Box::new(Warned {
+        warnings: warnings.into_iter(),
+        run,
+    })
+}
+
+#[derive(Debug)]
+struct Warned {
+    warnings: std::vec::IntoIter<String>,
+    run: Box<dyn BackendRun>,
+}
+
+#[async_trait]
+impl BackendRun for Warned {
+    async fn next_event(&mut self) -> Option<BackendEvent> {
+        match self.warnings.next() {
+            Some(message) => Some(BackendEvent::Warning { message }),
+            None => self.run.next_event().await,
+        }
+    }
+
+    async fn fold_in(&mut self, message: &str) -> Result<bool, BackendError> {
+        self.run.fold_in(message).await
+    }
+
+    async fn stop(&mut self) -> Result<(), BackendError> {
+        self.run.stop().await
+    }
 }
 
 #[cfg(test)]
