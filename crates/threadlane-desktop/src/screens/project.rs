@@ -2698,7 +2698,7 @@ impl Desktop {
         cx.notify();
     }
 
-    pub(crate) fn restore_new_task_focus(&mut self, window: &mut Window, cx: &App) {
+    pub(crate) fn restore_new_task_focus(&mut self, window: &mut Window, cx: &mut App) {
         let return_to = self.task_form_return_focus.take();
         if self.task_form_focus.contains_focused(window, cx) {
             return_to
