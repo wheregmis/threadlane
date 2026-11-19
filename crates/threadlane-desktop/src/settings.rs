@@ -115,6 +115,8 @@ pub struct SpaceRow {
     pub ceiling: Option<Mode>,
     /// The hub's schema version.
     pub schema_version: Option<i64>,
+    /// The installed release version if the hub supports updates.
+    pub update_version: Option<String>,
     /// The machine that hosts the hub, as its hub lists it.
     pub host: Option<String>,
     /// `Unix socket /…/hub.sock` or `Network, hub key 1a2b3c4d5e`.
@@ -263,6 +265,10 @@ impl AppState {
                 space: space.info.as_ref().map(|info| info.space.clone()),
                 ceiling: space.info.as_ref().map(|info| info.mode_ceiling),
                 schema_version: space.info.as_ref().map(|info| info.schema_version),
+                update_version: space
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.update_version.clone()),
                 host: space
                     .machines
                     .iter()

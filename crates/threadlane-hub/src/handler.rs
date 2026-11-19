@@ -51,11 +51,15 @@ const FEED_PAGE: u32 = 200;
 #[derive(Debug, Clone)]
 pub(crate) struct ClientApi {
     core: HubCore,
+    pub(crate) updates: Option<std::sync::Arc<crate::updater::HubUpdates>>,
 }
 
 impl ClientApi {
     pub(crate) fn new(core: HubCore) -> Self {
-        Self { core }
+        Self {
+            core,
+            updates: None,
+        }
     }
 
     async fn project_named(&self, name: Option<&str>) -> Result<Project, ApiError> {
@@ -280,6 +284,16 @@ impl ClientApi {
 
 #[async_trait]
 impl HubApi for ClientApi {
+    async fn update_hub(
+        &self,
+        request: threadlane_core::client::HubUpdate,
+    ) -> Result<Option<String>, ApiError> {
+        let updates = self.updates.as_ref().ok_or_else(|| {
+            ApiError::Invalid("Install the official hub package to enable in-app updates".into())
+        })?;
+        updates.request(request).await
+    }
+
     async fn info(&self) -> Result<HubInfo, ApiError> {
         let db = &self.core.inner.db;
         let space = db.space().await.map_err(api_error)?;
@@ -287,6 +301,10 @@ impl HubApi for ClientApi {
             space: space.name,
             mode_ceiling: space.mode_ceiling,
             schema_version: db.schema_version().await.map_err(api_error)?,
+            update_version: self
+                .updates
+                .as_ref()
+                .map(|_| env!("CARGO_PKG_VERSION").to_owned()),
         })
     }
 

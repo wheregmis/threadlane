@@ -2,6 +2,7 @@
 //! roles.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -21,6 +22,8 @@ use crate::DirLock;
 use crate::config::{DataDir, HubConfig};
 use crate::core::HubCore;
 use crate::gh::GhSource;
+use crate::handler::ClientApi;
+use crate::updater::HubUpdates;
 
 /// An opened hub: its configuration, lock, and stores.
 #[derive(Debug)]
@@ -144,6 +147,42 @@ impl Hub {
     /// Fails if the socket or the endpoint cannot be bound, the key cannot be
     /// read or created, or a role stops with an error.
     pub async fn run(&self, shutdown: impl Future<Output = ()> + Send) -> anyhow::Result<()> {
+        self.serve(shutdown, None).await
+    }
+
+    /// Runs the packaged hub and returns the new executable after an update.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same startup and shutdown errors as [Self::run].
+    pub async fn run_updatable(
+        &self,
+        shutdown: impl Future<Output = ()> + Send,
+    ) -> anyhow::Result<Option<PathBuf>> {
+        if !threadlane_updater::Component::Hub.available() {
+            self.run(shutdown).await?;
+            return Ok(None);
+        }
+        let (restart, mut installed) = watch::channel(None);
+        let updates = Arc::new(HubUpdates::new(restart));
+        self.serve(
+            async {
+                tokio::select! {
+                    () = shutdown => {}
+                    _ = installed.changed() => {}
+                }
+            },
+            Some(updates),
+        )
+        .await?;
+        Ok(installed.borrow().clone())
+    }
+
+    async fn serve(
+        &self,
+        shutdown: impl Future<Output = ()> + Send,
+        updates: Option<Arc<HubUpdates>>,
+    ) -> anyhow::Result<()> {
         let mut core = self.core().await?;
         let iroh = &self.config.iroh;
         let endpoint = if iroh.enabled {
@@ -162,6 +201,9 @@ impl Hub {
         };
         let (stop, stopped) = watch::channel(false);
         let socket = self.data_dir.socket();
+        let mut api = ClientApi::new(core.clone());
+        api.updates = updates;
+        let api = Arc::new(api);
         let work = async {
             tokio::try_join!(
                 async {
@@ -174,7 +216,7 @@ impl Hub {
                     if let Some(endpoint) = endpoint {
                         threadlane_transport_iroh::serve(
                             endpoint,
-                            core.api(),
+                            api.clone(),
                             core.gate(),
                             until_stopped(stopped.clone()),
                         )
@@ -185,7 +227,7 @@ impl Hub {
                 async {
                     threadlane_transport_local::serve(
                         &socket,
-                        core.api(),
+                        api.clone(),
                         until_stopped(stopped.clone()),
                     )
                     .await
@@ -456,7 +498,7 @@ mod tests {
     }
 
     /// Every file and directory under `root`, resolved to its real path.
-    fn files_under(root: &Path) -> std::collections::BTreeSet<std::path::PathBuf> {
+    fn files_under(root: &Path) -> std::collections::BTreeSet<PathBuf> {
         let mut found = std::collections::BTreeSet::new();
         let mut pending = vec![root.to_path_buf()];
         while let Some(dir) = pending.pop() {
@@ -516,7 +558,7 @@ mod tests {
     /// A fake `claude`: answers the probe as logged in, and runs as a lead
     /// that says nothing and gives a reason.
     #[cfg(unix)]
-    fn fake_claude(dir: &Path) -> std::path::PathBuf {
+    fn fake_claude(dir: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
         let script = r#"#!/bin/sh

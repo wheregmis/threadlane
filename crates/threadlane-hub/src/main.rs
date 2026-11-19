@@ -8,6 +8,7 @@
 //! `run` serves the client interface on `<data dir>/hub.sock` and runs the
 //! hub's roles until Ctrl-C; `check` checks the database and exits.
 
+use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
@@ -54,12 +55,21 @@ async fn main() -> anyhow::Result<()> {
     match command {
         Command::Check => Ok(()),
         Command::Run => {
-            hub.run(async {
-                if let Err(error) = tokio::signal::ctrl_c().await {
-                    tracing::error!(%error, "cannot listen for shutdown; stopping");
-                }
-            })
-            .await
+            let restart = hub
+                .run_updatable(async {
+                    if let Err(error) = tokio::signal::ctrl_c().await {
+                        tracing::error!(%error, "cannot listen for shutdown; stopping");
+                    }
+                })
+                .await?;
+            drop(hub);
+            if let Some(executable) = restart {
+                return Err(std::process::Command::new(executable)
+                    .args(std::env::args_os().skip(1))
+                    .exec())
+                .context("The update was installed, but the hub could not restart");
+            }
+            Ok(())
         }
     }
 }

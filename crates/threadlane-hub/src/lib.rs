@@ -39,6 +39,7 @@ mod space_lead;
 mod templates;
 mod timers;
 mod tools;
+mod updater;
 mod wake;
 
 use std::fs::{File, OpenOptions};

@@ -37,6 +37,7 @@ impl HubApi for FakeHub {
             space: self.space.clone(),
             mode_ceiling: Mode::Assisted,
             schema_version: 1,
+            update_version: None,
         })
     }
 

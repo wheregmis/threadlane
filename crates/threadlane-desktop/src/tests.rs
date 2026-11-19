@@ -111,6 +111,7 @@ impl HubApi for FakeHub {
             space: self.space.clone(),
             mode_ceiling: self.ceiling.lock().expect("lock").unwrap_or(Mode::Assisted),
             schema_version: 1,
+            update_version: None,
         })
     }
 

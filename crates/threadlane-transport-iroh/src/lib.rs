@@ -734,6 +734,22 @@ impl IrohClient {
 
 #[async_trait]
 impl HubApi for IrohClient {
+    async fn update_hub(
+        &self,
+        request: threadlane_core::client::HubUpdate,
+    ) -> Result<Option<String>, ApiError> {
+        match self
+            .call(
+                &ClientRequest::UpdateHub { request },
+                Duration::from_secs(360),
+            )
+            .await?
+        {
+            ClientResponse::UpdateHub { version } => Ok(version),
+            other => Err(unexpected(other, "hub update")),
+        }
+    }
+
     async fn info(&self) -> Result<HubInfo, ApiError> {
         match self.call(&ClientRequest::Info, REQUEST_TIMEOUT).await? {
             ClientResponse::Info { info } => Ok(info),

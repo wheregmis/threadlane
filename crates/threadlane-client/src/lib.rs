@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, DirBuilder, File};
+use std::future::Future;
 use std::io::{self, Write as _};
 use std::net::SocketAddr;
 use std::os::unix::fs::DirBuilderExt;
@@ -1541,6 +1542,45 @@ impl ClientCore {
         let (space, api) = self.target(space)?;
         let reply = api.org(request).await.map_err(|e| api_error(&space, e))?;
         Ok((space, reply))
+    }
+
+    /// Checks for a hub update or installs it and waits for the new hub to report its version.
+    pub fn update_hub(
+        &self,
+        space: &str,
+        request: threadlane_core::client::HubUpdate,
+    ) -> impl Future<Output = Result<Option<String>, ClientError>> + use<> {
+        use threadlane_core::client::HubUpdate;
+
+        let target = self.target(Some(space));
+        async move {
+            let (space, api) = target?;
+            let result = api.update_hub(request.clone()).await;
+            let HubUpdate::Install { version } = request else {
+                return result.map_err(|error| api_error(&space, error));
+            };
+            // An update can close the connection before its acknowledgment arrives.
+            if let Err(error) = result
+                && !matches!(&error, ApiError::Unreachable(_))
+            {
+                return Err(api_error(&space, error));
+            }
+            tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    if let Ok(info) = api.info().await
+                        && info.update_version.as_deref() == Some(version.as_str())
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            })
+            .await
+            .map_err(|_| api_error(&space, ApiError::Unreachable(format!(
+                "Could not confirm the hub restarted on version {version}. Check its connection and try again."
+            ))))?;
+            Ok(Some(version))
+        }
     }
 
     /// Asks one hub for a new join code. `None` means the only paired hub.
