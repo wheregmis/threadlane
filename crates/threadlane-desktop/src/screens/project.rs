@@ -53,20 +53,6 @@ fn chat_details_in_sheet(viewport_width: Pixels, rem: Pixels, sidebar_collapsed:
     available - SIDEBAR_WIDTH - LG < rem * 24.
 }
 
-#[cfg(test)]
-mod chat_details_tests {
-    use super::*;
-
-    #[test]
-    fn narrow_chat_uses_drawer_without_changing_global_sidebar() {
-        assert!(chat_details_in_sheet(px(640.), px(16.), false));
-        assert!(chat_details_in_sheet(px(760.), px(16.), false));
-        assert!(!chat_details_in_sheet(px(760.), px(16.), true));
-        assert!(!chat_details_in_sheet(px(1024.), px(16.), false));
-        assert!(chat_details_in_sheet(px(1024.), px(24.), false));
-    }
-}
-
 impl Desktop {
     pub(crate) fn space_tasks(
         &self,
@@ -3074,4 +3060,18 @@ fn handoff_preview(text: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or(trimmed);
     first_line.to_owned()
+}
+
+#[cfg(test)]
+mod chat_details_tests {
+    use super::*;
+
+    #[test]
+    fn narrow_chat_uses_drawer_without_changing_global_sidebar() {
+        assert!(chat_details_in_sheet(px(640.), px(16.), false));
+        assert!(chat_details_in_sheet(px(760.), px(16.), false));
+        assert!(!chat_details_in_sheet(px(760.), px(16.), true));
+        assert!(!chat_details_in_sheet(px(1024.), px(16.), false));
+        assert!(chat_details_in_sheet(px(1024.), px(24.), false));
+    }
 }
