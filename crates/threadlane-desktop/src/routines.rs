@@ -1,4 +1,4 @@
-//! Routines and follow-ups as a project's Setup tab and the Routines
+//! Routines and follow-ups as a project's Routines tab and the space
 //! screen show them (Plan.md §7, wireframe sidebar "Routines"): what each
 //! does, when, who set it, and the "+ New routine" form.
 
@@ -11,7 +11,7 @@ use threadlane_core::model::{
 };
 use threadlane_core::time::Timestamp;
 
-use crate::{Answer, AppState, Gap, Part, When, gap_in, take};
+use crate::{Answer, AppState, Gap, Part, When, count_form, gap_in, take};
 
 /// One routine or follow-up as a row shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,8 +76,8 @@ impl Cadence {
 /// The picks of the "+ New routine" form; its text fields live in the view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutineForm {
-    /// Whether the form is shown.
-    pub open: bool,
+    /// The space and project whose form is open.
+    pub open_for: Option<(String, String)>,
     /// The cadence picked.
     pub cadence: Cadence,
     /// Whether "every N" counts hours rather than minutes.
@@ -89,7 +89,7 @@ pub struct RoutineForm {
 impl Default for RoutineForm {
     fn default() -> Self {
         Self {
-            open: false,
+            open_for: None,
             cadence: Cadence::default(),
             hours: false,
             days: vec![Weekday::Mon],
@@ -111,6 +111,14 @@ pub struct RoutineText<'a> {
 }
 
 impl RoutineForm {
+    /// Whether this project owns the open routine draft.
+    #[must_use]
+    pub fn is_open_for(&self, space: &str, project: &str) -> bool {
+        self.open_for
+            .as_ref()
+            .is_some_and(|(in_space, named)| in_space == space && named == project)
+    }
+
     /// The recurrence the form describes, or what is wrong with it.
     ///
     /// # Errors
@@ -227,6 +235,16 @@ fn row_of(timer: &Timer, when: &When, confirming: bool) -> RoutineRow {
         .filter(|recurrence| !matches!(recurrence.rule, Rule::Interval { .. }))
         .map(|recurrence| recurrence.zone.clone());
     let cadence = match (&timer.recurrence, timer.category) {
+        (
+            Some(Recurrence {
+                rule: Rule::Interval { minutes },
+                ..
+            }),
+            _,
+        ) if *minutes >= 60 && minutes.is_multiple_of(60) => {
+            let hours = minutes / 60;
+            format!("every {hours} {}", count_form(hours, "hour", "hours"))
+        }
         (Some(recurrence), _) => {
             let full = recurrence.to_string();
             match &zone {

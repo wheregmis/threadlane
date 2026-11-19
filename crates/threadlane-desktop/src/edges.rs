@@ -74,7 +74,7 @@ impl EmptyRegion {
             Self::Board => "No tasks yet. Use New task or ask the lead to start work.",
             Self::Repositories => "No repositories yet. Use Add repository to connect one.",
             Self::ProjectAgents => "No agents are bound to this project yet.",
-            Self::Agents => "No agents are listed yet. Add one on the Agents page.",
+            Self::Agents => "No agent profiles yet. Create one to use it across projects.",
             Self::Conversation => "No messages yet. Give the lead a goal below.",
             Self::MemoryVersions => "This file has no recorded versions yet.",
             Self::Memory => "Nothing remembered yet. The lead’s memory files will appear here.",
@@ -84,9 +84,7 @@ impl EmptyRegion {
             Self::Routines => {
                 "No routines yet. Add one to have the lead check something on a cadence."
             }
-            Self::AllRoutines => {
-                "No routines or follow-ups yet. Add one from a project’s Setup tab."
-            }
+            Self::AllRoutines => "No routines or follow-ups in these projects yet.",
             Self::Related => "No other tasks depend on this task or need to finish before it.",
             Self::Activity => "No steps have been recorded for this task yet.",
             Self::Timeline => {

@@ -1,28 +1,23 @@
-//! The agents of each space (wireframe 6): the definitions as cards, with
-//! "+ New agent" and "Copy an agent to <space>…", and the modes grid, one
-//! row per project and one cell per agent. A cell changes that agent's mode
-//! in that project, binding it there from "—".
+//! Space agent profiles, project assignments, and team topology.
 
 use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::BackendKind;
-use threadlane_desktop::{EmptyRegion, Part, TeamViewMode, When};
+use threadlane_desktop::{EmptyRegion, Part, Space, TeamViewMode, When, count_form};
 
 use super::agent_edit::backend_picker;
-use super::project::{MODES, mode_name};
 use super::{empty, gap_line};
-use crate::Desktop;
-use crate::components::{button, card, field, page_header, section};
+use crate::components::{button, card, count, field, meta, page_header, section};
 use crate::icons::AppIcon;
-use crate::tokens::{
-    AGENT_CARD_WIDTH, FORM_WIDTH, GRID_CELL_WIDTH, LG, SM, TYPE_BODY, TYPE_META, XS,
-};
+use crate::tokens::{FORM_WIDTH, LG, MD, READING_WIDTH, SM, TYPE_META, XL, XS};
+use crate::{Desktop, Screen, Tab};
 
 impl Desktop {
     pub(crate) fn agents(
@@ -31,287 +26,308 @@ impl Desktop {
         when: &When,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let view = cx.entity().downgrade();
+        if let Some(edit) = self
+            .state
+            .agent_edit()
+            .filter(|edit| scope.is_none_or(|space| space == edit.space))
+        {
+            return self.agent_edit_view(edit, cx).into_any_element();
+        }
         let team_mode = self.state.team_view_mode();
-        let mode_toggle = h_flex().child(
-            ButtonGroup::new("team-view-mode")
-                .child(
-                    button("team-mode-overview")
-                        .small()
-                        .outline()
-                        .icon(AppIcon::Columns3)
-                        .label("Cards & Matrix")
-                        .selected(team_mode == TeamViewMode::Overview)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.set_team_view_mode(TeamViewMode::Overview);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    button("team-mode-topology")
-                        .small()
-                        .outline()
-                        .icon(AppIcon::GitFork)
-                        .label("Topology")
-                        .selected(team_mode == TeamViewMode::Topology)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.set_team_view_mode(TeamViewMode::Topology);
-                            cx.notify();
-                        })),
-                ),
+        let mode_toggle = ButtonGroup::new("team-view-mode").children(
+            [
+                (TeamViewMode::Overview, "Agents"),
+                (TeamViewMode::Topology, "Topology"),
+            ]
+            .into_iter()
+            .map(|(mode, label)| {
+                button(label)
+                    .small()
+                    .outline()
+                    .label(label)
+                    .selected(team_mode == mode)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.set_team_view_mode(mode);
+                        cx.notify();
+                    }))
+            }),
         );
-        let mut screen = v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .id("agents")
-            .gap(LG)
-            .child(page_header("Team", None, Some(mode_toggle)));
+
+        let mut spaces = v_flex()
+            .gap(XL)
+            .when(team_mode == TeamViewMode::Overview, |body| {
+                body.max_w(READING_WIDTH)
+            });
         for space in self
             .state
             .spaces()
             .iter()
             .filter(|space| scope.is_none_or(|name| space.name == name))
         {
+            let mut part = v_flex().gap(MD);
+            if scope.is_none() {
+                part = part.child(section(space.name.clone()));
+            }
+            if let Some(gap) = space.gap(Part::Agents) {
+                part = part.child(gap_line(&gap, "agents", &space.name, cx));
+            }
             if team_mode == TeamViewMode::Topology {
                 let topo = self.state.agent_topology(
                     &space.name,
                     self.state.topology_project(&space.name),
                     when,
                 );
-                let mut part = v_flex()
-                    .gap(SM)
-                    .child(section(format!("{} · Org & handoffs", space.name)));
-                if let Some(gap) = space.gap(Part::Agents) {
-                    part = part.child(gap_line(&gap, "agents", &space.name, cx));
-                }
                 if let Some(gap) = space.gap(Part::Projects) {
                     part = part.child(gap_line(&gap, "projects", &space.name, cx));
                 }
                 part = part.child(self.agent_topology_view(&space.name, topo, cx));
-                if self.state.agent_edit().map(|edit| edit.space.as_str())
-                    == Some(space.name.as_str())
-                    && let Some(view) = self.agent_edit_view(cx)
-                {
-                    part = part.child(view);
-                }
-                screen = screen.child(part);
-                continue;
+            } else {
+                part = part
+                    .child(self.space_agent_roster(space, cx))
+                    .child(self.space_project_assignments(space, cx));
             }
-            let mut cards = h_flex().gap(SM).flex_wrap().items_start();
-            for agent in &space.agents {
-                let backends = if agent.backends.is_empty() {
-                    "Any backend".to_owned()
-                } else {
-                    agent
-                        .backends
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" then ")
-                };
-                let open = {
-                    let (space, agent) = (space.name.clone(), agent.name.clone());
-                    move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
-                        this.open_agent_edit(&space, &agent, window, cx);
-                    }
-                };
-                let edit = open.clone();
-                let id = format!("agent-card-{}-{}", space.name, agent.name);
-                cards = cards.child(
-                    div()
-                        .id(SharedString::from(id.clone()))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
-                        .child(
-                            card(cx)
-                                .w(AGENT_CARD_WIDTH)
-                                .child(
-                                    h_flex()
-                                        .justify_between()
-                                        .items_center()
-                                        .gap(SM)
-                                        .child(
-                                            div()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(agent.name.clone()),
-                                        )
-                                        .child(
-                                            button(SharedString::from(format!("{id}-edit")))
-                                                .small()
-                                                .ghost()
-                                                .label("Edit")
-                                                .accessibility_label(format!("Edit {}", agent.name))
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        cx.stop_propagation();
-                                                        edit(this, window, cx);
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .child(div().text_size(TYPE_BODY).child(agent.role.clone()))
-                                .child(div().text_size(TYPE_BODY).text_color(muted).child(backends))
-                                .children((!agent.skills.is_empty()).then(|| {
-                                    let skills: Vec<_> = agent
-                                        .skills
-                                        .iter()
-                                        .map(|s| format!("{}/{}", s.backend, s.name))
-                                        .collect();
-                                    div()
-                                        .text_size(TYPE_BODY)
-                                        .text_color(muted)
-                                        .child(format!("Skills: {}", skills.join(", ")))
-                                }))
-                                .children(self.state.agent_runs_on(&space.name, agent).map(
-                                    |line| div().text_size(TYPE_BODY).text_color(muted).child(line),
-                                )),
-                        ),
-                );
-            }
+            spaces = spaces.child(part);
+        }
 
-            let grid = self.state.modes(&space.name);
-            let mut table =
-                v_flex().gap(XS).child(
-                    h_flex()
-                        .gap(SM)
-                        .text_size(TYPE_META)
-                        .text_color(muted)
-                        .child(div().w(GRID_CELL_WIDTH).flex_none().child("Project"))
-                        .children(grid.agents.iter().map(|agent| {
-                            div().w(GRID_CELL_WIDTH).flex_none().child(agent.clone())
-                        })),
-                );
-            for row in grid.rows {
-                let mut line = h_flex().gap(SM).child(
-                    div()
-                        .w(GRID_CELL_WIDTH)
-                        .flex_none()
-                        .text_size(TYPE_BODY)
-                        .child(row.project.clone()),
-                );
-                match row.modes {
-                    Err(gap) => line = line.child(gap_line(&gap, "agent modes", &space.name, cx)),
-                    Ok(modes) => {
-                        for (agent, mode) in grid.agents.iter().zip(modes) {
-                            let (space, project, agent) =
-                                (space.name.clone(), row.project.clone(), agent.clone());
-                            let view = view.clone();
-                            let id = format!("mode-{space}-{project}-{agent}");
-                            let label = mode.map_or("—", mode_name);
-                            let cell = button(SharedString::from(id))
-                                .small()
-                                .w(GRID_CELL_WIDTH)
-                                .label(label)
-                                .accessibility_label(format!("{agent} in {project}: {label}"))
-                                .dropdown_menu(move |mut menu, _, _| {
-                                    for (choice, name) in MODES {
-                                        let (space, project, agent, view) = (
-                                            space.clone(),
-                                            project.clone(),
-                                            agent.clone(),
-                                            view.clone(),
-                                        );
-                                        menu = menu.item(PopupMenuItem::new(name).on_click(
-                                            move |_, _, cx| {
-                                                let _gone = view.update(cx, |this, cx| {
-                                                    this.set_mode(
-                                                        space.clone(),
-                                                        project.clone(),
-                                                        agent.clone(),
-                                                        choice,
-                                                        cx,
-                                                    );
-                                                });
-                                            },
-                                        ));
-                                    }
-                                    menu
-                                });
-                            line = line.child(cell);
-                        }
-                    }
-                }
-                table = table.child(line);
-            }
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .gap(LG)
+            .child(page_header(
+                "Team",
+                scope.map(|space| meta(space.to_owned(), cx)),
+                Some(h_flex().child(mode_toggle)),
+            ))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_y_scrollbar()
+                    .id("agents")
+                    .child(spaces),
+            )
+            .into_any_element()
+    }
 
-            let mut actions = h_flex().gap(SM).flex_wrap().child(
-                button(SharedString::from(format!("new-agent-{}", space.name)))
-                    .small()
-                    .primary()
-                    .icon(AppIcon::UserPlus)
-                    .label("New agent")
-                    .accessibility_label(format!("New agent in {}", space.name))
-                    .on_click({
-                        let space = space.name.clone();
-                        cx.listener(move |this, _, _, cx| {
-                            this.open_agent_form(space.clone(), cx);
-                        })
-                    }),
-            );
-            for (to, agents) in self.state.copy_targets(&space.name) {
-                let label = format!("Copy an agent to {to}…");
-                let view = view.clone();
-                let button = button(SharedString::from(format!(
+    fn space_agent_roster(&self, space: &Space, cx: &mut Context<Self>) -> Div {
+        let open = self.state.agent_form().space.as_deref() == Some(&space.name);
+        let view = cx.entity().downgrade();
+        let mut actions = h_flex().gap(SM).flex_wrap();
+        for (to, agents) in self.state.copy_targets(&space.name) {
+            let label = format!("Copy an agent to {to}…");
+            let view = view.clone();
+            actions = actions.child(
+                button(SharedString::from(format!(
                     "copy-agents-{}-{to}",
                     space.name
                 )))
                 .small()
+                .ghost()
                 .icon(AppIcon::Copy)
-                .label(label.clone())
-                .accessibility_label(label)
+                .label(label)
                 .disabled(agents.is_empty())
                 .dropdown_menu(move |mut menu, _, _| {
                     for agent in &agents {
                         let (agent, to, view) = (agent.clone(), to.clone(), view.clone());
                         menu = menu.item(PopupMenuItem::new(agent.name.clone()).on_click(
                             move |_, _, cx| {
-                                let _gone = view.update(cx, |this, cx| {
+                                let _ = view.update(cx, |this, cx| {
                                     this.copy_agent(agent.clone(), to.clone(), cx);
                                 });
                             },
                         ));
                     }
                     menu
-                });
-                actions = actions.child(button);
-            }
-            let mut part = v_flex().gap(SM).child(
-                h_flex()
-                    .justify_between()
-                    .gap(SM)
-                    .child(section(format!("Definitions in {}", space.name)))
-                    .child(actions),
-            );
-            if self.state.agent_form().space.as_deref() == Some(space.name.as_str()) {
-                part = part.child(self.agent_form(&space.name, cx));
-            }
-            if self.state.agent_edit().map(|edit| edit.space.as_str()) == Some(space.name.as_str())
-                && let Some(view) = self.agent_edit_view(cx)
-            {
-                part = part.child(view);
-            }
-            if let Some(gap) = space.gap(Part::Agents) {
-                part = part.child(gap_line(&gap, "agents", &space.name, cx));
-            } else if space.agents.is_empty() {
-                part = part.child(empty(EmptyRegion::Agents, cx));
-            }
-            part = part
-                .child(cards)
-                .child(section(format!("Modes by project in {}", space.name)).pt(SM));
-            if let Some(gap) = space.gap(Part::Projects) {
-                part = part.child(gap_line(&gap, "projects", &space.name, cx));
-            }
-            screen = screen.child(
-                part.child(
-                    table
-                        .overflow_x_scrollbar()
-                        .id(SharedString::from(format!("mode-grid-{}", space.name))),
-                ),
+                }),
             );
         }
-        screen.into_any_element()
+        let name = space.name.clone();
+        let mut roster = v_flex().gap(SM).child(
+            h_flex()
+                .justify_between()
+                .flex_wrap()
+                .gap(SM)
+                .child(section("Agent profiles").children(count(space.agents.len(), cx)))
+                .child(actions.children((!open).then(|| {
+                    button(SharedString::from(format!("new-agent-{}", space.name)))
+                        .small()
+                        .icon(AppIcon::UserPlus)
+                        .label("New agent")
+                        .accessibility_label(format!("New agent in {}", space.name))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_agent_form(name.clone(), cx);
+                            this.agent_name.focus_handle(cx).focus(window, cx);
+                        }))
+                }))),
+        );
+        if open {
+            roster = roster.child(self.agent_form(&space.name, cx));
+        }
+        if space.agents.is_empty() && space.gap(Part::Agents).is_none() && !open {
+            roster = roster.child(empty(EmptyRegion::Agents, cx));
+        }
+
+        let assignments_loaded = space.gap(Part::Projects).is_none()
+            && space.active_projects().all(|project| {
+                self.state
+                    .project_gap(&space.name, &project.name, Part::Bindings)
+                    .is_none()
+            });
+        let mut agents = v_flex();
+        for agent in &space.agents {
+            let backends = if agent.backends.is_empty() {
+                "Any backend".to_owned()
+            } else {
+                agent
+                    .backends
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" → ")
+            };
+            let projects = assignments_loaded.then(|| {
+                let count = self.state.agent_bindings(&space.name, &agent.name).len();
+                meta(
+                    format!("{count} {}", count_form(count, "project", "projects")),
+                    cx,
+                )
+            });
+            let skills = agent.skills.len();
+            let execution = self
+                .state
+                .agent_runs_on(&space.name, agent)
+                .filter(|line| line != "Runs on hub");
+            let (space_name, agent_name) = (space.name.clone(), agent.name.clone());
+            agents = agents.child(
+                h_flex()
+                    .gap(MD)
+                    .py(SM)
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(XS)
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(agent.name.clone()),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap(SM)
+                                    .flex_wrap()
+                                    .children(
+                                        (!agent.role.eq_ignore_ascii_case(&agent.name))
+                                            .then(|| meta(agent.role.clone(), cx)),
+                                    )
+                                    .child(meta(backends, cx))
+                                    .children(projects)
+                                    .children((skills > 0).then(|| {
+                                        meta(
+                                            format!(
+                                                "{skills} {}",
+                                                count_form(skills, "skill", "skills")
+                                            ),
+                                            cx,
+                                        )
+                                    }))
+                                    .children(execution.map(|line| meta(line, cx))),
+                            ),
+                    )
+                    .child(
+                        button(SharedString::from(format!(
+                            "edit-{}-{}",
+                            space.name, agent.name
+                        )))
+                        .small()
+                        .ghost()
+                        .icon(AppIcon::Pencil)
+                        .label("Edit")
+                        .accessibility_label(format!("Edit {}", agent.name))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.open_agent_edit(&space_name, &agent_name, window, cx);
+                            },
+                        )),
+                    ),
+            );
+        }
+        roster.child(agents)
+    }
+
+    fn space_project_assignments(&self, space: &Space, cx: &mut Context<Self>) -> Div {
+        let projects = v_flex()
+            .gap(SM)
+            .pt(SM)
+            .child(section("Project assignments"));
+        if let Some(gap) = space.gap(Part::Projects) {
+            return projects.child(gap_line(&gap, "projects", &space.name, cx));
+        }
+        let mut rows = v_flex();
+        for project in space.active_projects() {
+            let open = Screen::Project {
+                space: space.name.clone(),
+                project: project.name.clone(),
+                tab: Tab::Team,
+            };
+            let gap = self
+                .state
+                .project_gap(&space.name, &project.name, Part::Bindings);
+            rows = rows.child(
+                h_flex()
+                    .gap(MD)
+                    .py(SM)
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(Icon::new(AppIcon::Folder).text_color(cx.theme().muted_foreground))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(XS)
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(project.name.clone()),
+                            )
+                            .child(if let Some(gap) = gap {
+                                gap_line(&gap, "assignments", &space.name, cx)
+                            } else {
+                                let assigned = self
+                                    .state
+                                    .project(&space.name, &project.name)
+                                    .map_or(0, |view| view.bindings.len());
+                                meta(
+                                    format!(
+                                        "{assigned} {} assigned",
+                                        count_form(assigned, "agent", "agents")
+                                    ),
+                                    cx,
+                                )
+                            }),
+                    )
+                    .child(
+                        button(SharedString::from(format!(
+                            "team-{}-{}",
+                            space.name, project.name
+                        )))
+                        .small()
+                        .ghost()
+                        .label("Open team")
+                        .icon(AppIcon::ChevronRight)
+                        .accessibility_label(format!("Open team for {}", project.name))
+                        .on_click(cx.listener(move |this, _, _, cx| this.go(open.clone(), cx))),
+                    ),
+            );
+        }
+        if space.active_projects().next().is_none() {
+            return projects.child(empty(EmptyRegion::Projects, cx));
+        }
+        projects.child(rows)
     }
 }
 
@@ -385,8 +401,11 @@ impl Desktop {
             .max_w(FORM_WIDTH)
             .child(section(format!("New agent in {space}")))
             .child(start)
+            .child(meta("Name", cx))
             .child(field(&self.agent_name))
+            .child(meta("Role", cx))
             .child(field(&self.agent_role))
+            .child(meta("Instructions", cx))
             .child(field(&self.agent_instructions))
             .child(backends)
             .child(self.skill_picker(false, cx))
@@ -394,7 +413,7 @@ impl Desktop {
                 div()
                     .text_size(TYPE_META)
                     .text_color(cx.theme().muted_foreground)
-                    .child("It is bound to no project yet: pick its mode in a — cell below."),
+                    .child("After creating the agent, add it from a project’s Team tab."),
             )
             .child(
                 h_flex()

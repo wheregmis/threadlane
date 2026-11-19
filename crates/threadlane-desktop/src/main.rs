@@ -26,7 +26,7 @@ use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
     Activity, AppState, Appearance, DecisionKey, RoutineText, Tab, When, change_memory,
     decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project_tab,
-    load_routines, load_task_overview, load_timeline, pump, refresh,
+    load_routines, load_task_overview, load_timeline, mode_label, pump, refresh,
 };
 use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
 use tokio::runtime::Runtime;
@@ -287,9 +287,8 @@ impl Screen {
     }
 
     /// The screen `THREADLANE_DESKTOP_OPEN` names: `home` or `inbox`, `agents`,
-    /// `machines`, `<space>/<project>[/chat|tasks|memory|setup]`
-    /// (`agents/<agent>` expands that agent's row), or
-    /// `<space>/T-0001`. For looking at a screen without clicking to it.
+    /// `machines`, `<space>/<project>[/chat|tasks|team|routines|memory|setup]`
+    /// or `<space>/T-0001`. For looking at a screen without clicking to it.
     fn named(open: &str) -> Option<Self> {
         let parts: Vec<&str> = open.split('/').collect();
         Some(match parts.as_slice() {
@@ -452,7 +451,8 @@ struct Desktop {
     remote_pairing: bool,
     /// The "+ New routine" form's instruction, N, time, day of the month
     /// and zone.
-    routine_instruction: Entity<InputState>,
+    routine_instruction: Entity<TextareaState>,
+    routine_adding: bool,
     routine_every: Entity<InputState>,
     routine_at: Entity<InputState>,
     routine_day: Entity<InputState>,
@@ -511,7 +511,7 @@ impl Desktop {
         let composer = components::composer::input("Tell your team what you need…", window, cx);
         let task_composer = components::composer::input("Add to this task…", window, cx);
         let memory_editor = cx.new(|cx| TextareaState::new(window, cx).rows(16));
-        let agent_edit_instructions = cx.new(|cx| TextareaState::new(window, cx).rows(16));
+        let agent_edit_instructions = cx.new(|cx| TextareaState::new(window, cx).rows(7));
         let dream_cadence =
             cx.new(|cx| InputState::new(window, cx).placeholder("daily 02:00 or every 6h"));
         let space_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name for the space"));
@@ -524,7 +524,9 @@ impl Desktop {
         let project_description =
             cx.new(|cx| InputState::new(window, cx).placeholder("Description (optional)"));
         let routine_instruction = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("What should the lead do each time?")
+            TextareaState::new(window, cx)
+                .rows(3)
+                .placeholder("What should the lead do each time?")
         });
         let routine_every = cx.new(|cx| InputState::new(window, cx).default_value("60"));
         let routine_at = cx.new(|cx| InputState::new(window, cx).default_value("09:00"));
@@ -714,6 +716,7 @@ impl Desktop {
             project_name_missing: false,
             remote_pairing: false,
             routine_instruction,
+            routine_adding: false,
             routine_every,
             routine_at,
             routine_day,
@@ -849,7 +852,7 @@ impl Desktop {
                     return;
                 }
                 let (fresh_tasks, fresh_lead) = parts;
-                if tab == Tab::Setup {
+                if tab == Tab::Routines {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }
                 if tab == Tab::Memory {
@@ -1267,7 +1270,8 @@ impl Desktop {
                 Ok(binding) => {
                     this.state.report(Activity::Done(format!(
                         "{} is now {} in {space} / {project}.",
-                        binding.agent, binding.mode
+                        binding.agent,
+                        mode_label(binding.mode)
                     )));
                     this.state.mode_set(&space, &project, binding);
                 }
@@ -1595,6 +1599,9 @@ impl Desktop {
     /// Creates the routine the "+ New routine" form describes in `project`
     /// of `space`, as yours.
     fn add_routine(&mut self, space: String, project: String, cx: &mut Context<Self>) {
+        if self.routine_adding || !self.state.routine_form().is_open_for(&space, &project) {
+            return;
+        }
         let instruction = self.routine_instruction.read(cx).value().trim().to_owned();
         let (every, at, day, zone) = (
             self.routine_every.read(cx).value(),
@@ -1621,6 +1628,7 @@ impl Desktop {
             }
         };
         let core = Arc::clone(&self.core);
+        self.routine_adding = true;
         self.state.report(Activity::Working(format!(
             "Adding a routine to {space} / {project}…"
         )));
@@ -1633,17 +1641,22 @@ impl Desktop {
                     .await;
                 (space, project, added)
             },
-            |this, (space, project, added), _| match added {
-                Ok(timer) => {
-                    this.state.report(Activity::Done(format!(
-                        "Added routine {} to {space} / {project}.",
-                        timer.id
-                    )));
-                    this.state.timer_changed(&space, &project, timer);
-                    this.state.routine_form_mut().open = false;
-                    this.clear_routine = true;
+            |this, (space, project, added), _| {
+                this.routine_adding = false;
+                match added {
+                    Ok(timer) => {
+                        this.state.report(Activity::Done(format!(
+                            "Added routine {} to {space} / {project}.",
+                            timer.id
+                        )));
+                        this.state.timer_changed(&space, &project, timer);
+                        if this.state.routine_form().is_open_for(&space, &project) {
+                            this.state.routine_form_mut().open_for = None;
+                            this.clear_routine = true;
+                        }
+                    }
+                    Err(error) => this.state.report(Activity::Failed(describe(&error))),
                 }
-                Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
         );

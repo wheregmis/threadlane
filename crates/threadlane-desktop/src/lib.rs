@@ -464,13 +464,24 @@ pub enum Tab {
     Conversation,
     /// The memory its runs can see.
     Memory,
-    /// Its repositories, agent modes, routines and machines.
+    /// Its agents and their permissions.
+    Team,
+    /// Its routines and follow-ups.
+    Routines,
+    /// Its repositories and machines.
     Setup,
 }
 
 impl Tab {
     /// Every tab, in the order the tab bar shows them: Chat first.
-    pub const ALL: [Self; 4] = [Self::Conversation, Self::Tasks, Self::Memory, Self::Setup];
+    pub const ALL: [Self; 6] = [
+        Self::Conversation,
+        Self::Tasks,
+        Self::Team,
+        Self::Routines,
+        Self::Memory,
+        Self::Setup,
+    ];
 
     /// Its label on the tab bar.
     #[must_use]
@@ -479,6 +490,8 @@ impl Tab {
             Self::Tasks => "Tasks",
             Self::Conversation => "Chat",
             Self::Memory => "Memory",
+            Self::Team => "Team",
+            Self::Routines => "Routines",
             Self::Setup => "Setup",
         }
     }
@@ -497,14 +510,11 @@ impl Tab {
     }
 
     /// The tab named `name` in lower case, as `THREADLANE_DESKTOP_OPEN` says.
-    /// `agents` and `routines`, tabs before Setup took them in, open Setup.
+    /// `agents` remains an alias for Team.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
-        if ["agents", "routines"]
-            .iter()
-            .any(|old| old.eq_ignore_ascii_case(name))
-        {
-            return Some(Self::Setup);
+        if name.eq_ignore_ascii_case("agents") {
+            return Some(Self::Team);
         }
         Self::ALL
             .into_iter()
@@ -911,7 +921,7 @@ pub async fn load_project_tab(
 ) -> ProjectLoad {
     let (in_space, named) = (Some(space), Some(project));
     let chat = tab.is_none_or(|tab| tab == Tab::Conversation);
-    let setup = tab.is_none_or(|tab| tab == Tab::Setup);
+    let team = tab.is_none_or(|tab| tab == Tab::Team);
     let (tasks, repositories, bindings, history, lead, recorded, rules, lead_runs) = tokio::join!(
         async {
             if !fresh_tasks {
@@ -947,7 +957,7 @@ pub async fn load_project_tab(
             }
         },
         async {
-            if setup {
+            if team {
                 Some(core.standing_rules(in_space, named).await)
             } else {
                 None
@@ -1249,7 +1259,7 @@ pub struct AppState {
     expanded_messages: HashSet<String>,
     /// Where this app keeps its files.
     client_dir: Option<PathBuf>,
-    /// The agent row expanded on a project's Setup tab: space, project,
+    /// The agent row expanded on a project's Team tab: space, project,
     /// agent.
     open_agent: Option<(String, String, String)>,
     /// The standing rule you asked to revoke, until you confirm or keep it.

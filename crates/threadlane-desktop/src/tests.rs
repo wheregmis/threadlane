@@ -2580,6 +2580,32 @@ async fn routines_list_and_pause_resume_and_cancel_only_once_confirmed() {
     );
 }
 
+#[test]
+fn routine_cadences_display_whole_hours_and_keep_other_intervals_in_minutes() {
+    let mut state = AppState::default();
+    for (id, minutes) in [(1, 45), (2, 60), (3, 120)] {
+        state.timer_changed(
+            "work",
+            "api",
+            timer(
+                id,
+                ProjectId(1),
+                Some(Recurrence {
+                    rule: Rule::Interval { minutes },
+                    zone: "Europe/Berlin".to_owned(),
+                }),
+                TimerCreator::User,
+            ),
+        );
+    }
+    let rows = state.routine_rows("work", "api", &when());
+    let cadences: Vec<_> = rows.iter().map(|row| row.cadence.as_str()).collect();
+    assert_eq!(
+        cadences,
+        ["every 45 minutes", "every 1 hour", "every 2 hours"]
+    );
+}
+
 #[tokio::test]
 async fn the_routines_screen_groups_by_space_and_project_and_shows_a_refusal() {
     let work = FakeHub::new("Work", Vec::new());
@@ -2641,6 +2667,11 @@ fn the_new_routine_form_makes_each_cadence_and_says_what_is_wrong() {
         hours: true,
         ..RoutineForm::default()
     };
+    assert!(!form.is_open_for("work", "api"));
+    form.open_for = Some(("work".to_owned(), "api".to_owned()));
+    assert!(form.is_open_for("work", "api"));
+    assert!(!form.is_open_for("work", "web"));
+    assert!(!form.is_open_for("personal", "api"));
     assert_eq!(
         form.recurrence(text("2", "", "")).map(|r| r.rule),
         Ok(Rule::Interval { minutes: 120 })
@@ -2704,13 +2735,15 @@ fn every_tab_is_selected_where_it_is_shown() {
         assert_eq!(labels[tab.index()], tab.label(), "{tab:?}");
         assert_eq!(Tab::named(&tab.label().to_lowercase()), Some(tab));
     }
-    assert_eq!(labels, ["Chat", "Tasks", "Memory", "Setup"], "Chat first");
+    assert_eq!(
+        labels,
+        ["Chat", "Tasks", "Team", "Routines", "Memory", "Setup"]
+    );
 }
 
 #[test]
-fn the_old_agents_and_routines_tab_names_open_setup() {
-    assert_eq!(Tab::named("agents"), Some(Tab::Setup));
-    assert_eq!(Tab::named("Routines"), Some(Tab::Setup));
+fn the_legacy_agents_tab_name_opens_team() {
+    assert_eq!(Tab::named("agents"), Some(Tab::Team));
     assert_eq!(Tab::named("board"), None);
 }
 

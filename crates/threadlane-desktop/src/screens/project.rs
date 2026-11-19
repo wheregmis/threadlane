@@ -22,13 +22,13 @@ use threadlane_desktop::{
 
 use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
 use crate::components::{
-    button, card, count, count_badge, decision_scroller, field, icon_button, meta, page_header,
-    section, status_badge, status_dot,
+    button, card, count, count_badge, decision_scroller, field, meta, page_header, section,
+    status_badge, status_dot,
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
-    BOARD_COLUMN_MIN, CONTROL_HEIGHT, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, MODE_WIDTH,
-    READING_WIDTH, ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status, TABULAR,
+    BOARD_COLUMN_MIN, CONTROL_HEIGHT, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, READING_WIDTH,
+    ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status, TABULAR,
     TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
@@ -527,6 +527,8 @@ impl Desktop {
                     Tab::Tasks => AppIcon::Columns3,
                     Tab::Conversation => AppIcon::MessagesSquare,
                     Tab::Memory => AppIcon::BookOpen,
+                    Tab::Team => AppIcon::Bot,
+                    Tab::Routines => AppIcon::CalendarClock,
                     Tab::Setup => AppIcon::Settings,
                 };
                 KitTab::new().aria_label(label).child(
@@ -556,7 +558,9 @@ impl Desktop {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
             Tab::Conversation => self.conversation_tab(space, project, when, cx),
             Tab::Memory => self.memory_tab(space, project, when, cx),
-            Tab::Setup => self.setup_tab(space, project, when, cx),
+            Tab::Team => self.agents_tab(space, project, cx),
+            Tab::Routines => self.routines_tab(space, project, when, cx),
+            Tab::Setup => self.setup_tab(space, project, cx),
         };
         let (pause_space, pause_project) = (space.to_owned(), project.to_owned());
         let (task_space, task_project) = (space.to_owned(), project.to_owned());
@@ -1102,15 +1106,8 @@ impl Desktop {
             .into_any_element()
     }
 
-    /// Repositories, agents, routines and machines: what the project runs
-    /// with, as flat sections.
-    fn setup_tab(
-        &self,
-        space: &str,
-        project: &str,
-        when: &When,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// Repositories and machines the project runs with.
+    fn setup_tab(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let archived = self.state.is_archived(space, project);
         let view = self.state.project(space, project);
@@ -1139,20 +1136,6 @@ impl Desktop {
             );
         }
         side = side.children((!archived).then(|| self.repository_form(space, project, cx)));
-        let team = Screen::Agents(Some(space.to_owned()));
-        let agents = v_flex()
-            .gap(SM)
-            .child(
-                section("Agents").child(
-                    link("setup-edit-agents", "Edit agents in Team".to_owned())
-                        .w_auto()
-                        .flex_none()
-                        .text_size(TYPE_BODY)
-                        .font_weight(FontWeight::NORMAL)
-                        .on_click(cx.listener(move |this, _, _, cx| this.go(team.clone(), cx))),
-                ),
-            )
-            .child(self.agents_tab(space, project, cx));
         let mut machines = v_flex().gap(SM).child(section("Machines"));
         if let Some(gap) = self
             .state
@@ -1202,8 +1185,6 @@ impl Desktop {
             .id("setup")
             .gap(XL)
             .child(side)
-            .child(agents)
-            .child(self.routines_tab(space, project, when, cx))
             .child(machines)
             .into_any_element()
     }
@@ -2185,10 +2166,7 @@ impl Desktop {
             )
     }
 
-    /// The project ceiling, then one row per agent bound here: its mode a
-    /// segmented control with what is above the ceiling locked, how many of
-    /// its tasks run at once, and, expanded, what it may do here without
-    /// asking and its standing rules (wireframe 4).
+    /// The autonomy ceiling and each assigned agent's mode and permissions.
     fn agents_tab(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let card = self.state.ceiling_card(space, project);
@@ -2207,6 +2185,14 @@ impl Desktop {
             }),
         );
         let mut rows = v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
+            .overflow_y_scrollbar()
+            .id("project-team")
             .gap(MD)
             .child(
                 h_flex()
@@ -2217,7 +2203,7 @@ impl Desktop {
                     .bg(cx.theme().muted)
                     .rounded(ROW_RADIUS)
                     .child(
-                        v_flex().min_w_0().child(section("Project ceiling")).child(
+                        v_flex().min_w_0().child(section("Autonomy ceiling")).child(
                             div()
                                 .text_size(TYPE_BODY)
                                 .text_color(muted)
@@ -2229,6 +2215,35 @@ impl Desktop {
             .children(locked_note(&card.choices, muted));
         let gap = self.state.project_gap(space, project, Part::Bindings);
         let agents = self.state.agent_rows(space, project);
+        let team = Screen::Agents(Some(space.to_owned()));
+        let add = (!archived && gap.is_none())
+            .then(|| self.add_project_agent(space, project, &agents, cx))
+            .flatten();
+        rows = rows.child(
+            h_flex()
+                .justify_between()
+                .flex_wrap()
+                .gap(SM)
+                .child(
+                    section("Assigned agents")
+                        .children(gap.is_none().then(|| count(agents.len(), cx)).flatten()),
+                )
+                .child(
+                    h_flex()
+                        .gap(SM)
+                        .flex_wrap()
+                        .child(
+                            button("project-space-team")
+                                .small()
+                                .ghost()
+                                .label("Space team")
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.go(team.clone(), cx)),
+                                ),
+                        )
+                        .children(add),
+                ),
+        );
         if let Some(gap) = &gap {
             rows = rows.child(gap_line(gap, "agents", space, cx));
         } else if agents.is_empty() {
@@ -2257,55 +2272,131 @@ impl Desktop {
             );
             let (toggle_space, toggle_project, toggle_agent) =
                 (space.to_owned(), project.to_owned(), agent.clone());
-            let expand = icon_button(
-                format!("expand-{agent}"),
-                if row.open {
+            let expand = button(SharedString::from(format!("expand-{agent}")))
+                .small()
+                .ghost()
+                .icon(if row.open {
                     AppIcon::ChevronDown
                 } else {
                     AppIcon::ChevronRight
-                },
-                if row.open {
-                    format!("Hide what {agent} may do here")
-                } else {
-                    format!("Show what {agent} may do here")
-                },
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.state
-                    .toggle_agent(&toggle_space, &toggle_project, &toggle_agent);
-                cx.notify();
-            }));
-            let lead = if row.is_lead { " · lead" } else { "" };
+                })
+                .label("Permissions")
+                .selected(row.open)
+                .accessibility_label(format!(
+                    "{} permissions for {agent}",
+                    if row.open { "Hide" } else { "Show" }
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state
+                        .toggle_agent(&toggle_space, &toggle_project, &toggle_agent);
+                    cx.notify();
+                }));
+            let role = if row.is_lead {
+                Some("Project lead".to_owned())
+            } else {
+                (!agent.eq_ignore_ascii_case(&row.role)).then_some(row.role)
+            };
+            let above_ceiling = row
+                .choices
+                .iter()
+                .any(|choice| choice.selected && choice.locked.is_some());
             rows = rows.child(
-                h_flex()
-                    .gap(LG)
-                    .items_center()
-                    .flex_wrap()
+                v_flex()
+                    .gap(SM)
+                    .py(SM)
+                    .border_t_1()
+                    .border_color(cx.theme().border)
                     .child(
-                        v_flex()
-                            .w(MODE_WIDTH)
-                            .flex_none()
+                        h_flex()
+                            .gap(SM)
+                            .justify_between()
+                            .flex_wrap()
                             .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("{agent}{lead}")),
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_32()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(agent.clone()),
+                                    )
+                                    .children(role.map(|role| meta(role, cx))),
                             )
-                            .child(
-                                div()
-                                    .text_size(TYPE_BODY)
-                                    .text_color(muted)
-                                    .child(row.role.clone()),
-                            ),
+                            .child(control.disabled(archived))
+                            .child(expand),
                     )
-                    .child(control.disabled(archived))
-                    .child(expand),
+                    .children(
+                        above_ceiling
+                            .then(|| locked_note(&row.choices, muted))
+                            .flatten(),
+                    )
+                    .children(
+                        row.open
+                            .then(|| self.may_do(space, project, &agent, cx))
+                            .flatten(),
+                    ),
             );
-            rows = rows.children(locked_note(&row.choices, muted));
-            if row.open {
-                rows = rows.children(self.may_do(space, project, &agent, cx));
-            }
         }
         rows.into_any_element()
+    }
+
+    fn add_project_agent(
+        &self,
+        space: &str,
+        project: &str,
+        assigned: &[threadlane_desktop::AgentRow],
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let available: Vec<_> = self
+            .state
+            .space(space)?
+            .agents
+            .iter()
+            .filter(|agent| !assigned.iter().any(|row| row.agent == agent.name))
+            .map(|agent| agent.name.clone())
+            .collect();
+        if available.is_empty() {
+            return None;
+        }
+        let view = cx.entity().downgrade();
+        let (space, project) = (space.to_owned(), project.to_owned());
+        let ceiling = self.state.project_ceiling(&space, &project);
+        Some(
+            button("project-add-agent")
+                .small()
+                .icon(AppIcon::UserPlus)
+                .label("Add agent")
+                .dropdown_menu(move |mut menu, window, cx| {
+                    for agent in &available {
+                        let (space, project, agent, view) =
+                            (space.clone(), project.clone(), agent.clone(), view.clone());
+                        menu = menu.submenu(agent.clone(), window, cx, move |mut menu, _, _| {
+                            for (mode, label) in MODES {
+                                let (space, project, agent, view) =
+                                    (space.clone(), project.clone(), agent.clone(), view.clone());
+                                menu = menu.item(
+                                    PopupMenuItem::new(label).disabled(mode > ceiling).on_click(
+                                        move |_, _, cx| {
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.set_mode(
+                                                    space.clone(),
+                                                    project.clone(),
+                                                    agent.clone(),
+                                                    mode,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                            menu
+                        });
+                    }
+                    menu
+                })
+                .into_any_element(),
+        )
     }
 
     /// The expanded part of `agent`'s row: the matrix as plain statements,
@@ -2547,7 +2638,7 @@ impl Desktop {
             div()
                 .text_size(TYPE_BODY)
                 .text_color(muted)
-                .child("No agent here is on. Turn one on in the Setup tab.")
+                .child("Turn on an agent in the Team tab to assign this task.")
         } else {
             let mut row = h_flex().gap(XS).flex_wrap();
             for agent in agents {
