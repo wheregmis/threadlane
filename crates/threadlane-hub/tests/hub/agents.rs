@@ -438,3 +438,66 @@ async fn one_backend_failing_to_list_skills_leaves_the_others_listed() {
     );
     assert_eq!(unavailable, [BackendKind::Codex]);
 }
+
+#[tokio::test]
+async fn a_task_run_falling_back_from_codex_keeps_only_claude_s_skills() {
+    use threadlane_core::model::{LaneKind, SkillBinding};
+    let hub = TestHub::start().await;
+    let agent = create(&hub, "Reviewer").await;
+    let bindings = vec![
+        SkillBinding {
+            backend: BackendKind::Codex,
+            name: "codex-only".into(),
+        },
+        SkillBinding {
+            backend: BackendKind::Claude,
+            name: "claude-only".into(),
+        },
+    ];
+    let change = edit(
+        "Reviewer",
+        Changes {
+            backends: Some(vec!["codex".into(), "claude".into()]),
+            skills: Some(bindings),
+            ..Changes::default()
+        },
+    );
+    hub.api.org(change).await.unwrap();
+    let general = hub.db.general_project().await.unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: general.id,
+            agent_id: agent.id,
+            mode: Mode::OnRequest,
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    hub.db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: general.id,
+                agent_id: agent.id,
+                title: "review".into(),
+                goal: "x".into(),
+                repositories: Vec::new(),
+                parent_task_id: None,
+                depends_on: Vec::new(),
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    hub.hello().await; // Only Claude is usable on the runner.
+
+    let (_, assignment) = crate::common::begin(&*hub.link).await;
+    assert_eq!(assignment.lane_kind, LaneKind::Task);
+    assert_eq!(assignment.backend, BackendKind::Claude);
+    assert_eq!(assignment.skills, ["claude-only"]);
+}

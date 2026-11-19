@@ -127,10 +127,22 @@ impl AgentBackend for ClaudeBackend {
                 let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                     continue;
                 };
-                if threadlane_core::model::SkillBinding::valid_name(&name)
-                    && entry.path().join("SKILL.md").is_file()
-                {
-                    names.push(name);
+                if !threadlane_core::model::SkillBinding::valid_name(&name) {
+                    continue;
+                }
+                match std::fs::metadata(entry.path().join("SKILL.md")) {
+                    Ok(meta) if meta.is_file() => names.push(name),
+                    Ok(_) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) => {}
+                    Err(e) => {
+                        return Err(BackendError::Failed(format!(
+                            "cannot read personal skill {name}: {e}"
+                        )));
+                    }
                 }
             }
         }

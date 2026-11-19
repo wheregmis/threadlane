@@ -25,7 +25,7 @@ pub(super) async fn list(
         .expect("a working directory");
     let mut command = Command::new(&config.program);
     command
-        .args(["app-server", "--stdio"])
+        .arg("app-server")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -36,7 +36,9 @@ pub(super) async fn list(
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(BackendError::NotInstalled);
+        }
         Err(e) => return Err(failed(e)),
     };
     let mut stdin = child.stdin.take().expect("piped stdin");

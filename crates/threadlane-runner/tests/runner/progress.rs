@@ -91,6 +91,10 @@ async fn a_run_that_did_not_write_it_takes_exactly_one_extra_turn_in_the_same_se
         }
     );
     assert_eq!(received[1].working_dir, received[0].working_dir);
+    // The resumed session already loaded the run's skills; they are not
+    // applied a second time.
+    assert_eq!(received[0].skills, vec!["review".to_owned()]);
+    assert!(received[1].skills.is_empty());
     // The run ends as it would have, with its own rationale, and the extra
     // turn is in its journal.
     assert_eq!(completed(&h), vec![Some("done".to_owned())]);

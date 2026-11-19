@@ -532,6 +532,8 @@ impl Inner {
         let request = RunRequest {
             prompt,
             session: NativeSession::Resume { id },
+            // The resumed session already has the run's skills loaded.
+            skills: Vec::new(),
             ..started.clone()
         };
         let mut run = match backend.run(request).await {

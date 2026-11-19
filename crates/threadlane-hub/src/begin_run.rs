@@ -697,9 +697,6 @@ impl LocalLink {
     }
 }
 
-/// The model for `backend`: the binding's choice, else the agent's, else the
-/// hub's configured default for the backend, else `None` (the backend's own
-/// default).
 /// The agent's skills for `backend`. A lead run has no native tools to run
 /// them with, so it gets none rather than failing at launch.
 fn run_skills(agent: &Agent, backend: BackendKind, lane: LaneKind) -> Vec<String> {
@@ -714,6 +711,9 @@ fn run_skills(agent: &Agent, backend: BackendKind, lane: LaneKind) -> Vec<String
         .collect()
 }
 
+/// The model for `backend`: the binding's choice, else the agent's, else the
+/// hub's configured default for the backend, else `None` (the backend's own
+/// default).
 fn model_for(
     binding: Option<&Binding>,
     agent: &Agent,

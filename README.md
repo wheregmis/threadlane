@@ -204,7 +204,7 @@ Codex uses the installed app server's `skills/list` and passes explicit `$name` 
 
 For Claude, the picker lists personal directories containing `SKILL.md` under the configured Claude home. With one binding, Threadlane invokes `/directory-name` directly and passes the task as its argument. With multiple bindings, it requests each by name and Claude decides whether to invoke its Skill tool. Its print-mode CLI expands only the first skill in a stack of leading slash commands. Project, managed, and plugin skills remain under Claude's normal discovery and precedence. [Claude Code skills](https://code.claude.com/docs/en/skills)
 
-Explicit bindings require native tools. Runs that disable built-in tools, including lead and dreaming runs, report a launch error if their selected provider has bindings. Removing a binding affects future requests. Previously loaded instructions may persist in a resumed provider session.
+Explicit bindings require native tools, so lead runs get no skills and run as if the profile had none. Removing a binding affects future requests. Previously loaded instructions may persist in a resumed provider session.
 
 An agent set to `off` never runs in that project, and `send` to a project
 whose lead is off is refused. Until milestone 9 every mode above `off` acts as

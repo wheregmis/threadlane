@@ -706,6 +706,10 @@ async fn a_missing_program_is_not_installed() {
             account_label: None,
         })
     );
+    assert_eq!(
+        backend.installed_skills(None).await,
+        Err(BackendError::NotInstalled)
+    );
     let fake = Fake::new("exit 0");
     let request = fake.request(NativeSession::Start { id: String::new() });
     assert_eq!(
