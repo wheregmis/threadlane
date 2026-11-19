@@ -61,6 +61,9 @@ pub(crate) fn subscribe(
 
 impl Desktop {
     pub(crate) fn visible_draft(&self) -> Option<Draft> {
+        if self.screen == Screen::Home && !self.inbox.composing() {
+            return None;
+        }
         self.composer_destination()
             .map(|destination| destination.draft())
     }
@@ -127,6 +130,8 @@ impl Desktop {
         button("target")
             .ghost()
             .small()
+            .max_w_full()
+            .min_w_0()
             .label(label)
             .dropdown_caret(true)
             .tab_stop(true)
@@ -367,7 +372,9 @@ impl Desktop {
             };
             let _ = this.update_in(cx, |this, window, cx| {
                 this.state.attach_images(&target, images);
-                if this.composer_destination().as_ref() == Some(&target) {
+                if this.visible_draft().is_some()
+                    && this.composer_destination().as_ref() == Some(&target)
+                {
                     this.draft_input(target.draft())
                         .focus_handle(cx)
                         .focus(window, cx);
@@ -472,6 +479,10 @@ impl Desktop {
             return false;
         }
         self.sync_drafts(window, cx);
+        if self.screen == Screen::Home && !self.inbox.composing() {
+            self.focus_composer(window, cx);
+            return true;
+        }
         self.draft_input(destination.draft())
             .focus_handle(cx)
             .focus(window, cx);
