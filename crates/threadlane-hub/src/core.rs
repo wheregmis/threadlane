@@ -45,6 +45,8 @@ pub(crate) struct Inner {
     pub(crate) backends: Vec<Arc<dyn threadlane_core::backend::AgentBackend>>,
     /// Where the GitHub poller reads; `None` runs no poller.
     pub(crate) github: Option<Arc<dyn GithubSource>>,
+    // Serialize cursor readers independently of the project-deletion lock.
+    pub(crate) github_poll: Arc<tokio::sync::Mutex<()>>,
     pub(crate) workspaces: Option<PathBuf>,
     pub(crate) workspace_files: Option<Arc<dyn Workspaces>>,
     pub(crate) project_removal: Arc<tokio::sync::Mutex<()>>,
@@ -94,6 +96,7 @@ impl HubCore {
                 channels: vec![Arc::new(ClientChannel)],
                 iroh: None,
                 github: None,
+                github_poll: Arc::default(),
                 workspaces: None,
                 workspace_files: None,
                 project_removal: Arc::default(),

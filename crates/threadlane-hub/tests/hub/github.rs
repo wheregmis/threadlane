@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use threadlane_core::github::{GITHUB_SOURCE, GithubItem, GithubKind, PullTarget};
+use threadlane_core::client::OrgRequest;
+use threadlane_core::github::{
+    Feed, GITHUB_SOURCE, GithubError, GithubItem, GithubKind, GithubSource, PullTarget,
+};
 use threadlane_core::ids::EventId;
 use threadlane_core::model::{
     DecisionAnswer, DecisionKind, DecisionOption, Event, EventKind, MachineReport, NewDecision,
@@ -96,18 +99,27 @@ async fn task_with_pull_request(hub: &TestHub) -> Task {
 /// A queued task T-0001 in `widgets`, with its lane leased.
 async fn leased_task(hub: &TestHub) -> (Task, threadlane_core::model::Lease) {
     let general = hub.general().await;
-    let widgets = hub.db.repositories(general.id).await.unwrap()[0].clone();
+    let (task, lease) = leased_task_for(hub, &general).await;
+    assert_eq!(task.id.to_string(), "T-0001");
+    (task, lease)
+}
+
+async fn leased_task_for(
+    hub: &TestHub,
+    project: &Project,
+) -> (Task, threadlane_core::model::Lease) {
+    let repository = hub.db.repositories(project.id).await.unwrap()[0].clone();
     let agent = hub.db.agents().await.unwrap()[0].id;
     let task = hub
         .db
         .create_task(
             None,
             &NewTask {
-                project_id: general.id,
+                project_id: project.id,
                 agent_id: agent,
                 title: "Add the settings page".into(),
                 goal: "The page saves".into(),
-                repositories: vec![widgets.id],
+                repositories: vec![repository.id],
                 parent_task_id: None,
                 depends_on: Vec::new(),
                 origin: TaskOrigin::User,
@@ -119,7 +131,6 @@ async fn leased_task(hub: &TestHub) -> (Task, threadlane_core::model::Lease) {
         )
         .await
         .unwrap();
-    assert_eq!(task.id.to_string(), "T-0001");
     let lease = hub
         .db
         .grant_lease(
@@ -817,4 +828,150 @@ async fn archived_repository_github_events_are_recorded_and_never_run() {
             .is_empty()
     );
     assert!(hub.link.request_work().await.unwrap().is_none());
+}
+
+/// Gate one source operation without sleeping so deletion can be attempted while
+/// that operation is provably still waiting.
+#[derive(Debug, Default)]
+struct PausedGithub {
+    source: FakeGithub,
+    pause_pull: bool,
+    entered: tokio::sync::Notify,
+    released: tokio::sync::Notify,
+}
+
+impl PausedGithub {
+    async fn pause(&self) {
+        self.entered.notify_one();
+        self.released.notified().await;
+    }
+}
+
+#[async_trait::async_trait]
+impl GithubSource for PausedGithub {
+    async fn notifications(&self, cursor: Option<&str>) -> Result<Feed, GithubError> {
+        if !self.pause_pull {
+            self.pause().await;
+        }
+        self.source.notifications(cursor).await
+    }
+
+    async fn pull_request(
+        &self,
+        target: &PullTarget,
+        since: Option<&str>,
+    ) -> Result<Vec<GithubItem>, GithubError> {
+        if self.pause_pull && target.repository == "acme/gadgets" {
+            self.pause().await;
+        }
+        self.source.pull_request(target, since).await
+    }
+}
+
+#[tokio::test]
+async fn deletion_completes_during_notification_fetch_and_only_live_routes_receive_events() {
+    let github = Arc::new(PausedGithub::default());
+    let (hub, gadgets) = start(&github.source, Arc::new(NoHooks)).await;
+    let when = "2026-11-17T08:00:00Z";
+    github.source.notify(item(
+        "deleted",
+        GithubKind::Mention,
+        "acme/gadgets",
+        None,
+        when,
+    ));
+    github.source.notify(item(
+        "valid",
+        GithubKind::Mention,
+        "acme/widgets",
+        None,
+        when,
+    ));
+    let core = hub.core.clone().with_github(github.clone());
+    let polling = tokio::spawn(async move { core.poll_github_once().await });
+    assert_deleted_while_paused(&hub, &github, &gadgets.name).await;
+    assert_eq!(polling.await.unwrap().unwrap().inserted, 1);
+    assert_eq!(ids(&github_events(&hub).await), ["valid"]);
+    assert!(
+        hub.db
+            .source_cursor("github:notifications")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn deletion_completes_during_pull_fetch_and_discarded_targets_do_not_advance() {
+    let github = Arc::new(PausedGithub {
+        pause_pull: true,
+        ..PausedGithub::default()
+    });
+    let (hub, gadgets) = start(&github.source, Arc::new(NoHooks)).await;
+    let kept = task_with_pull_request(&hub).await;
+    let (task, lease) = leased_task_for(&hub, &gadgets).await;
+    record_performed(
+        &hub, &task, &lease, OPEN_PULL_REQUEST,
+        json!({ "repository": "gadgets", "title": "Work in Gadgets" }),
+        json!({ "performed": true, "repository": "gadgets", "branch": "topic", "pull_request": "https://github.com/acme/gadgets/pull/7" }),
+    ).await;
+    hub.db.release_lease(&lease).await.unwrap();
+    let when = "2026-11-17T08:00:00Z";
+    github
+        .source
+        .add_to("acme/widgets", BRANCH, check("valid", when));
+    github.source.add_to(
+        "acme/gadgets",
+        "topic",
+        GithubItem {
+            branch: Some("topic".into()),
+            ..item(
+                "deleted",
+                GithubKind::CheckResult,
+                "acme/gadgets",
+                Some(7),
+                when,
+            )
+        },
+    );
+    let core = hub.core.clone().with_github(github.clone());
+    let polling = tokio::spawn(async move { core.poll_github_once().await });
+    assert_deleted_while_paused(&hub, &github, &gadgets.name).await;
+    assert_eq!(polling.await.unwrap().unwrap().inserted, 1);
+    let events = hub.db.pending_events(kept.lane_id).await.unwrap();
+    assert!(ids(&events).contains(&"valid"));
+    assert_eq!(
+        hub.db
+            .source_cursor("github:acme/gadgets@topic")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        hub.db
+            .source_cursor(&format!("github:acme/widgets@{BRANCH}"))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(when),
+    );
+}
+
+async fn assert_deleted_while_paused(hub: &TestHub, github: &PausedGithub, project: &str) {
+    let within = Duration::from_secs(5);
+    tokio::time::timeout(within, github.entered.notified())
+        .await
+        .unwrap();
+    let deleted = tokio::time::timeout(
+        within,
+        hub.api.org(OrgRequest::DeleteProject {
+            project: project.into(),
+            confirm_name: project.into(),
+        }),
+    )
+    .await;
+    github.released.notify_one();
+    deleted
+        .expect("deletion completed while GitHub was blocked")
+        .unwrap();
 }
