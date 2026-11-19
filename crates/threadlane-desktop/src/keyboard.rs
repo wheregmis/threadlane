@@ -175,15 +175,12 @@ impl Desktop {
         });
     }
 
-    pub(super) fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.first_run() || window.has_active_dialog(cx) {
             return;
         }
         let field = match &self.screen {
-            Screen::Home => {
-                self.decision_scroll.scroll_to_bottom();
-                &self.composer
-            }
+            Screen::Home => return self.open_inbox_composer(window, cx),
             Screen::Task { space, task } if self.state.task(space, *task).is_some() => {
                 self.decision_scroll.scroll_to_bottom();
                 &self.task_composer
@@ -327,6 +324,10 @@ impl Desktop {
 
     pub(super) fn dismiss_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_dialog(cx) {
+            return;
+        }
+        if self.screen == Screen::Home && self.inbox.composing() {
+            self.close_inbox_composer(window, cx);
             return;
         }
         if window.has_focused_input(cx) {

@@ -417,6 +417,7 @@ struct Desktop {
     tokio: tokio::runtime::Handle,
     screen: Screen,
     work: WorkView,
+    inbox: screens::Inbox,
     task_activity: TaskActivity,
     task_activity_request: Option<Task<()>>,
     project_load: Option<Task<()>>,
@@ -666,6 +667,9 @@ impl Desktop {
         let screen = start.unwrap_or(Screen::Home);
         screens::shell::follow_screen(&mut state, &screen);
         state.set_decision_scope(screen.decision_scope());
+        if screen == Screen::Home {
+            state.clear_current_decision();
+        }
         let conversation = if let Screen::Project {
             space,
             project,
@@ -685,6 +689,7 @@ impl Desktop {
         .detach();
         Self {
             work: WorkView::new(window, cx),
+            inbox: screens::Inbox::default(),
             state,
             core,
             tokio,
@@ -1191,6 +1196,7 @@ impl Desktop {
         }
         if self.screen != screen {
             self.work.leave();
+            self.inbox = screens::Inbox::default();
             self.project_load = None;
             self.project_load_pending = None;
             self.task_activity_request = None;
@@ -1210,6 +1216,9 @@ impl Desktop {
                 self.conversation_follow.set(true);
             }
             self.state.set_decision_scope(screen.decision_scope());
+            if screen == Screen::Home {
+                self.state.clear_current_decision();
+            }
             self.scroll_to_decision = Rc::new(Cell::new(if self.conversation_follow.get() {
                 DecisionScroll::None
             } else {

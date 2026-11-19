@@ -4790,6 +4790,22 @@ async fn decision_keys_step_through_home_and_only_the_open_project() {
     );
     state.decision_command(DecisionCommand::Next, false);
     assert_eq!(current(&state), Some(DecisionId(1)));
+
+    let key = |id| DecisionKey {
+        space: "work".into(),
+        id: DecisionId(id),
+    };
+    state.select_decision(key(3));
+    assert_eq!(current(&state), Some(DecisionId(3)));
+    state.select_decision(key(2));
+    assert_eq!(current(&state), Some(DecisionId(3)));
+
+    state.set_decision_scope(DecisionScope::None);
+    state.select_decision(key(3));
+    assert_eq!(
+        state.decision_command(DecisionCommand::Pick(0), false),
+        None
+    );
 }
 
 #[tokio::test]
