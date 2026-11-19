@@ -399,6 +399,10 @@ impl HubTools {
                 object.get("task_id").ok_or_else(|| missing("task_id"))?,
             )
             .await?;
+        // Cancelling a task that has ended leaves it as it is.
+        if task.status.is_terminal() {
+            return Ok(task_json(&task));
+        }
         let cancelled = self
             .db
             .cancel_task(Some(&context.lease), task.id, self.clock.now())

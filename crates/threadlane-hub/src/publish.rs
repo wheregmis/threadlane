@@ -225,16 +225,34 @@ pub(crate) async fn proposal(
         .await
         .map_err(tool_error)?
         .ok_or_else(|| ToolError::Failed(format!("task {task_id} not found")))?;
+    let registered = db.repositories(lane.project_id).await.map_err(tool_error)?;
+    // Says which names would have worked: agents often give the forge's
+    // owner/name, or another repository of the project.
+    let names = |of_task: bool| {
+        registered
+            .iter()
+            .filter(|repository| !of_task || task.repositories.contains(&repository.id))
+            .map(|repository| repository.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let name = match arguments.get("repository") {
         Some(Json::String(name)) if valid_repository_name(name) => name.as_str(),
-        _ => return Err(invalid("repository must be a registered repository name")),
+        _ => {
+            return Err(ToolError::InvalidArguments(format!(
+                "repository must be the name of a repository registered in this project: {}",
+                names(false)
+            )));
+        }
     };
-    let registered = db.repositories(lane.project_id).await.map_err(tool_error)?;
     let repository = registered
         .iter()
         .find(|repository| repository.name == name)
         .ok_or_else(|| {
-            ToolError::InvalidArguments(format!("no repository {name:?} in this project"))
+            ToolError::InvalidArguments(format!(
+                "no repository {name:?} in this project; it has {}",
+                names(false)
+            ))
         })?;
     if matches!(tool, COMMENT | CREATE_ISSUE | MERGE | MARK_READY) {
         repository_action(tool, arguments)?;
@@ -275,7 +293,8 @@ pub(crate) async fn proposal(
     let object = fields(arguments, allowed)?;
     if !task.repositories.contains(&repository.id) {
         return Err(ToolError::InvalidArguments(format!(
-            "repository {name:?} is not one this task works in"
+            "repository {name:?} is not one this task works in; it works in {}",
+            names(true)
         )));
     }
     let revision = object

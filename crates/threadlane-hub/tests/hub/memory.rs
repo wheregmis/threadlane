@@ -248,6 +248,24 @@ async fn each_memory_tool_works_and_every_write_carries_its_run() {
         .await,
         "no file or directory",
     );
+    // The instructions file and the fixed directories exist before anything
+    // is written to them.
+    assert_eq!(
+        run.call(
+            "v6",
+            MEMORY_VIEW,
+            json!({ "path": "project/instructions.md" })
+        )
+        .await
+        .unwrap()["content"],
+        json!("")
+    );
+    assert_eq!(
+        run.call("v7", MEMORY_VIEW, json!({ "path": "project/repos" }))
+            .await
+            .unwrap(),
+        json!({ "files": [] })
+    );
     refused(
         run.call(
             "d2",

@@ -327,8 +327,25 @@ pub(crate) async fn execute(
                 .iter()
                 .filter_map(|file| visible(project, kind, &file.path).map(Json::String))
                 .collect();
-            // A root always exists, though it may hold nothing yet.
-            let root = matches!(arguments["path"].as_str(), Some("space" | "project"));
+            // The roots, their fixed directories and the instructions files
+            // always exist, though they may hold nothing yet.
+            let named = arguments["path"].as_str().unwrap_or_default();
+            if files.is_empty() && named.ends_with("/instructions.md") {
+                return Ok(json!({
+                    "path": named,
+                    "content": "",
+                    "note": "This file has not been written yet.",
+                }));
+            }
+            let root = matches!(
+                named,
+                "space"
+                    | "project"
+                    | "space/notes"
+                    | "project/notes"
+                    | "project/tasks"
+                    | "project/repos"
+            );
             if files.is_empty() && !root {
                 return Err(ToolError::InvalidArguments(format!(
                     "there is no file or directory at {}",
