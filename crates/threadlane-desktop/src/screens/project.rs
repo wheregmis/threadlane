@@ -28,8 +28,8 @@ use crate::components::{
 use crate::icons::AppIcon;
 use crate::tokens::{
     BOARD_COLUMN_MIN, CONTROL_HEIGHT, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, READING_WIDTH,
-    ROW_RADIUS, RULES_WIDTH, SCROLLBAR_GUTTER, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status,
-    TABULAR, TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XL, XS,
+    ROW_RADIUS, RULES_WIDTH, SCROLLBAR_GUTTER, SHORT_LABEL_WIDTH, SIDEBAR_SECTION_MAX_HEIGHT,
+    SIDEBAR_WIDTH, SM, Status, TABULAR, TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -1814,13 +1814,15 @@ impl Desktop {
                 .then_with(|| b.task.id.cmp(&a.task.id))
         });
         const SIDEBAR_TASKS_SHOWN: usize = 10;
+        // Capped with its own scroll so open decisions stay in view below.
+        let mut task_list = v_flex().gap(SM).pr(SCROLLBAR_GUTTER);
         for summary in sorted_tasks.into_iter().take(SIDEBAR_TASKS_SHOWN) {
             let screen = Screen::Task {
                 space: space.to_owned(),
                 task: summary.task.id,
             };
             let status = status_label(summary.task.status, summary.task.waiting_reason.as_deref());
-            side = side
+            task_list = task_list
                 .child(
                     link(
                         format!("from-{}", summary.task.id),
@@ -1842,6 +1844,13 @@ impl Desktop {
                         })),
                 );
         }
+        side = side.child(
+            task_list
+                .id("conversation-sidebar-tasks")
+                .flex_none()
+                .max_h(SIDEBAR_SECTION_MAX_HEIGHT)
+                .overflow_y_scrollbar(),
+        );
         if total_tasks > SIDEBAR_TASKS_SHOWN {
             let all_screen = Screen::Project {
                 space: space.to_owned(),

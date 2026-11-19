@@ -127,7 +127,10 @@ pub fn segments(text: &str) -> Vec<Segment<'_>> {
                     None
                 }
             } else if ch == '#'
-                && !matches!(text[..start].chars().next_back(), Some('#' | '&' | '/'))
+                && !matches!(
+                    text[..start].chars().next_back(),
+                    Some('#' | '&' | '/' | '\\')
+                )
             {
                 let digits = rest[1..].bytes().take_while(u8::is_ascii_digit).count();
                 let token = &rest[..1 + digits];

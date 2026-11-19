@@ -86,6 +86,42 @@ impl ClaudeBackend {
     }
 }
 
+impl ClaudeBackend {
+    /// Personal skills: `skills` under the configured Claude home.
+    fn skills_dir(&self) -> Option<PathBuf> {
+        self.config
+            .config_dir
+            .clone()
+            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
+            .or_else(|| std::env::home_dir().map(|dir| dir.join(".claude")))
+            .map(|dir| dir.join("skills"))
+    }
+}
+
+/// Whether the SKILL.md frontmatter sets `disable-model-invocation: true`, which keeps
+/// Claude's Skill tool from starting it. Reads only that one key.
+fn model_invocation_disabled(file: &Path) -> bool {
+    std::fs::read_to_string(file).is_ok_and(|text| frontmatter_disables_model_invocation(&text))
+}
+
+// shortcut: a top-level `key: value` line, not full YAML; switch to a YAML parser if skills use block forms.
+fn frontmatter_disables_model_invocation(text: &str) -> bool {
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return false;
+    }
+    lines
+        .take_while(|line| line.trim_end() != "---")
+        .filter_map(|line| line.split_once(':'))
+        .any(|(key, value)| {
+            let unquote = |text: &str| text.trim().trim_matches(['"', '\'']).to_owned();
+            let value = value.split(" #").next().unwrap_or_default();
+            !key.starts_with(char::is_whitespace)
+                && unquote(key) == "disable-model-invocation"
+                && matches!(unquote(value).as_str(), "true" | "True" | "TRUE")
+        })
+}
+
 impl Default for ClaudeBackend {
     fn default() -> Self {
         Self::new(ClaudeConfig::default())
@@ -105,14 +141,8 @@ impl AgentBackend for ClaudeBackend {
     }
 
     async fn installed_skills(&self, _cwd: Option<&Path>) -> Result<Vec<String>, BackendError> {
-        let config = self
-            .config
-            .config_dir
-            .clone()
-            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
-            .or_else(|| std::env::home_dir().map(|dir| dir.join(".claude")));
         let mut names = Vec::new();
-        if let Some(root) = config.map(|dir| dir.join("skills")) {
+        if let Some(root) = self.skills_dir() {
             let entries = match std::fs::read_dir(root) {
                 Ok(entries) => entries,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -131,7 +161,11 @@ impl AgentBackend for ClaudeBackend {
                     continue;
                 }
                 match std::fs::metadata(entry.path().join("SKILL.md")) {
-                    Ok(meta) if meta.is_file() => names.push(name),
+                    Ok(meta) if meta.is_file() => {
+                        if !model_invocation_disabled(&entry.path().join("SKILL.md")) {
+                            names.push(name);
+                        }
+                    }
                     Ok(_) => {}
                     Err(e)
                         if matches!(
@@ -148,6 +182,16 @@ impl AgentBackend for ClaudeBackend {
         }
         names.sort();
         Ok(names)
+    }
+
+    async fn unusable_skill(&self, name: &str) -> Option<String> {
+        let file = self.skills_dir()?.join(name).join("SKILL.md");
+        (threadlane_core::model::SkillBinding::valid_name(name) && model_invocation_disabled(&file))
+            .then(|| {
+                "sets disable-model-invocation and can only be started by slash command; \
+                 remove that line from its SKILL.md or unbind it"
+                    .to_owned()
+            })
     }
 
     async fn probe(&self) -> Result<Probe, BackendError> {
@@ -338,4 +382,29 @@ async fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     let mut file = options.open(path).await?;
     file.write_all(contents.as_bytes()).await?;
     file.flush().await
+}
+
+#[cfg(test)]
+mod frontmatter_tests {
+    use super::frontmatter_disables_model_invocation as disables;
+
+    #[test]
+    fn reads_the_flag_in_its_yaml_spellings() {
+        for text in [
+            "---\ndisable-model-invocation: true\n---",
+            "---\ndisable-model-invocation: true # manual only\n---",
+            "---\n\"disable-model-invocation\": True\n---",
+            "---\r\n'disable-model-invocation':TRUE\r\n---\r\n",
+        ] {
+            assert!(disables(text), "{text:?}");
+        }
+        for text in [
+            "---\ndisable-model-invocation: false\n---",
+            "---\nname: x\n---\ndisable-model-invocation: true",
+            "disable-model-invocation: true",
+            "---\n  disable-model-invocation: true\n---",
+        ] {
+            assert!(!disables(text), "{text:?}");
+        }
+    }
 }

@@ -900,3 +900,40 @@ async fn personal_skills_reach_claude_stdin_and_a_removed_skill_is_skipped_with_
     );
     assert_eq!(fake.invocations().len(), 3);
 }
+
+#[tokio::test]
+async fn a_skill_claude_may_not_invoke_is_not_offered_and_is_skipped_with_a_warning() {
+    let fake = recorder();
+    let account = fake.dir.path().join("account");
+    let backend = ClaudeBackend::new(ClaudeConfig {
+        program: fake.program(),
+        config_dir: Some(account.clone()),
+    });
+    for (name, body) in [
+        ("tests", "---\nname: tests\n---\nbody"),
+        (
+            "deploy",
+            "---\nname: deploy\ndisable-model-invocation: true\n---\nbody",
+        ),
+    ] {
+        let folder = account.join("skills").join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("SKILL.md"), body).unwrap();
+    }
+    assert_eq!(backend.installed_skills(None).await.unwrap(), ["tests"]);
+    // Bound before the flag was added: the run skips it and says why.
+    let mut request = fake.request(NativeSession::Start { id: SESSION.into() });
+    request.skills = vec!["deploy".into(), "tests".into()];
+    let mut run = backend.run(request).await.unwrap();
+    let events = collect(run.as_mut()).await;
+    assert_eq!(
+        events[0],
+        BackendEvent::Warning {
+            message: "claude skill \"deploy\" was skipped for this run: it sets disable-model-invocation and can only be started by slash command; remove that line from its SKILL.md or unbind it.".into()
+        }
+    );
+    assert_eq!(
+        recorded_prompts(&fake),
+        ["Use these installed skills for this run: /tests\n\nSay hello."]
+    );
+}
