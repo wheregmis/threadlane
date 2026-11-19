@@ -19,6 +19,8 @@ pub const CREATE_ISSUE: &str = "create_issue";
 pub const REPORT_LIMITATION: &str = "report_threadlane_limitation";
 /// Merge a registered repository's pull request.
 pub const MERGE: &str = "merge";
+/// Mark a registered repository's draft pull request ready for review.
+pub const MARK_READY: &str = "mark_ready";
 
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -33,6 +35,8 @@ pub enum RepositoryAction {
     CreateIssue { title: String, body: String },
     /// Merge the numbered pull request.
     Merge { number: std::num::NonZeroU64 },
+    /// Mark the numbered draft pull request ready for review.
+    MarkReady { number: std::num::NonZeroU64 },
 }
 
 /// Kind of numbered GitHub item to comment on.

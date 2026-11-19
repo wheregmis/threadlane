@@ -7,7 +7,7 @@ use threadlane_core::model::{EventKind, EventStatus, Mode, NewEvent, OutboxKind,
 use threadlane_core::runtime::steps::perform;
 use threadlane_core::store::InboxStore;
 use threadlane_core::time::Clock;
-use threadlane_hub::{COMMENT, CREATE_ISSUE, MERGE};
+use threadlane_hub::{COMMENT, CREATE_ISSUE, MARK_READY, MERGE};
 use threadlane_testkit::{CrashPlan, Script};
 
 use crate::harness::{PAST_LEASE, Sim, World, plan_tasks_in};
@@ -15,7 +15,7 @@ use crate::invariants::assert_invariants;
 use crate::permissions::engineer_in;
 use crate::publish::{drive, publish_world};
 
-pub(super) fn actions() -> [(&'static str, Json); 3] {
+pub(super) fn actions() -> [(&'static str, Json); 4] {
     [
         (
             COMMENT,
@@ -26,6 +26,7 @@ pub(super) fn actions() -> [(&'static str, Json); 3] {
             json!({"repository":"app","title":"Fix the footer","body":"The link is broken."}),
         ),
         (MERGE, json!({"repository":"app","number":12})),
+        (MARK_READY, json!({"repository":"app","number":12})),
     ]
 }
 

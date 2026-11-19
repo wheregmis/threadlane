@@ -154,6 +154,105 @@ async fn reopening_a_file_keeps_data_and_does_not_rebootstrap() {
 }
 
 #[tokio::test]
+async fn a_decision_reminder_is_claimed_once_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.db");
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let id = {
+        let hub = HubDb::open(&path, &Bootstrap::default(), clock.clone())
+            .await
+            .unwrap();
+        let general = hub.general_project().await.unwrap();
+        let decision = hub
+            .open_decision(
+                None,
+                &NewDecision {
+                    project_id: general.id,
+                    lane_id: general.lead_lane_id,
+                    task_id: None,
+                    session_id: None,
+                    run_id: Some(RunId(9)),
+                    tool_call_id: Some("call-1".into()),
+                    tool: "publish_branch".into(),
+                    arguments: json!({ "repository": "app" }),
+                    arguments_hash: "publish_branch:abc".into(),
+                    kind: DecisionKind::Approval,
+                    question: "Push?".into(),
+                    context: String::new(),
+                    options: vec![DecisionOption {
+                        label: "approve".into(),
+                        effect: json!({ "approve": true }),
+                    }],
+                    recommended: None,
+                    offers_standing_rule: false,
+                    expires_at: None,
+                    created_at: T0,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(hub.claim_reminder(decision.id, T0).await.unwrap());
+        assert!(!hub.claim_reminder(decision.id, T0).await.unwrap());
+        decision.id
+    };
+    let hub = HubDb::open(&path, &Bootstrap::default(), clock.clone())
+        .await
+        .unwrap();
+    let general = hub.general_project().await.unwrap();
+    let answered = hub
+        .open_decision(
+            None,
+            &NewDecision {
+                project_id: general.id,
+                lane_id: general.lead_lane_id,
+                task_id: None,
+                session_id: None,
+                run_id: Some(RunId(9)),
+                tool_call_id: Some("call-2".into()),
+                tool: "publish_branch".into(),
+                arguments: json!({ "repository": "app" }),
+                arguments_hash: "publish_branch:def".into(),
+                kind: DecisionKind::Approval,
+                question: "Push again?".into(),
+                context: String::new(),
+                options: vec![DecisionOption {
+                    label: "approve".into(),
+                    effect: json!({ "approve": true }),
+                }],
+                recommended: None,
+                offers_standing_rule: false,
+                expires_at: None,
+                created_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    hub.answer(
+        answered.id,
+        &DecisionAnswer {
+            option: 0,
+            note: None,
+            standing_rule: false,
+            answered_at: T0,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !hub.claim_reminder(answered.id, T0).await.unwrap(),
+        "an answered decision gets no reminder"
+    );
+    drop(hub);
+    let hub = HubDb::open(&path, &Bootstrap::default(), clock)
+        .await
+        .unwrap();
+    assert!(
+        !hub.claim_reminder(id, T0).await.unwrap(),
+        "no second reminder after a restart"
+    );
+}
+
+#[tokio::test]
 async fn organization_rules_are_enforced() {
     let hub = hub().await;
     let mut space = hub.space().await.unwrap();

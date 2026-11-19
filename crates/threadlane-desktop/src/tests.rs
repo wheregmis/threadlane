@@ -2998,6 +2998,17 @@ async fn a_new_task_goes_to_an_agent_that_is_on_and_waits_for_open_tasks() {
     assert_eq!(spec.depends_on, [TaskId(1)]);
     assert_eq!(spec.project.as_deref(), Some("api"));
     assert!(spec.draft_pr);
+    let refused = describe(
+        &core
+            .create_task(Some("work"), spec.clone())
+            .await
+            .expect_err("a draft pull request needs a repository"),
+    );
+    assert!(refused.contains("needs a repository"), "{refused}");
+    let spec = threadlane_client::NewTaskSpec {
+        repositories: vec!["app".to_owned()],
+        ..spec
+    };
     let created = core.create_task(Some("work"), spec).await.expect("created");
     assert!(
         created.goal.starts_with("Make it pass")

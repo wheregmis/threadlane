@@ -665,7 +665,7 @@ impl Desktop {
                 // Refreshes run every REFRESH_EVERY, so this re-checks well within a minute.
                 for alert in this.state.reminders(SystemClock.now()) {
                     if this.state.notifies(&alert) {
-                        this.notify(&alert, cx);
+                        this.remind(alert, cx);
                     }
                 }
                 if let Some((space, project)) = open_project
@@ -871,6 +871,40 @@ impl Desktop {
     }
 
     /// Raises the system notification for `alert`.
+    /// Raises a reminder unless the hub says it already went out, before a
+    /// restart of this app or the hub.
+    fn remind(&self, alert: threadlane_desktop::Alert, cx: &mut Context<Self>) {
+        let claim = match &alert {
+            threadlane_desktop::Alert::Decision { space, card, .. } => {
+                DecisionId::parse(&card.id).map(|id| (space.clone(), id))
+            }
+            threadlane_desktop::Alert::Notice { .. } => None,
+        };
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let first = match claim {
+                    // A hub from before reminders were kept, or out of
+                    // reach, still gets this run's one reminder.
+                    Some((space, id)) => core
+                        .read()
+                        .await
+                        .claim_reminder(Some(&space), id)
+                        .await
+                        .unwrap_or(true),
+                    None => true,
+                };
+                (alert, first)
+            },
+            |this, (alert, first), cx| {
+                if first {
+                    this.notify(&alert, cx);
+                }
+            },
+            cx,
+        );
+    }
+
     fn notify(&self, alert: &threadlane_desktop::Alert, cx: &mut Context<Self>) {
         cx.show_system_notification(SystemNotification {
             tag: alert.tag().into(),
