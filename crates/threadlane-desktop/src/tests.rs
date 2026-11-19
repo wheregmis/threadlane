@@ -39,6 +39,7 @@ struct FakeHub {
     /// Answers like a hub from before it could list recorded events.
     no_recorded: AtomicBool,
     projects_fail: AtomicBool,
+    lead_fail: AtomicBool,
     created: Mutex<Vec<ProjectSummary>>,
     archived: Mutex<BTreeSet<ProjectId>>,
     removed_projects: Mutex<BTreeSet<ProjectId>>,
@@ -585,6 +586,9 @@ impl HubApi for FakeHub {
                 machines: self.machines.lock().expect("lock").clone(),
                 accounts: self.accounts.lock().expect("lock").clone(),
             }),
+            OverviewRequest::Lead { .. } if self.lead_fail.load(Ordering::SeqCst) => {
+                Err(ApiError::Internal("lead status unavailable".to_owned()))
+            }
             OverviewRequest::Lead { project } => Ok(OverviewReply::Lead {
                 latest_step: None,
                 running_since: *self.lead.lock().expect("lock"),
@@ -6612,8 +6616,13 @@ async fn batched_refresh_supplies_the_project_board_and_the_tasks_tab_skips_chat
         .push(task(7, TaskStatus::Queued, None));
     let (_dir, core) = core(&[("work", &work)]);
     let mut state = AppState::default();
-    state.apply(refresh(&core).await);
-    let loaded = load_project_tab(&core, "work", "api", Some(Tab::Tasks), true, true).await;
+    let refreshed = refresh(&core).await;
+    let (tasks, lead) = refreshed.project_parts("work", "api");
+    assert_eq!((tasks, lead), (true, true));
+    assert_eq!(refreshed.project_parts("work", "General"), (true, true));
+    state.apply(refreshed);
+    assert_eq!(state.project_gap("work", "General", Part::Tasks), None);
+    let loaded = load_project_tab(&core, "work", "api", Some(Tab::Tasks), tasks, lead).await;
     assert!(loaded.tasks.is_none());
     assert!(loaded.lead.is_none());
     assert!(loaded.history.is_none());
@@ -6626,4 +6635,34 @@ async fn batched_refresh_supplies_the_project_board_and_the_tasks_tab_skips_chat
         TaskId(7)
     );
     assert_eq!(work.project_task_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_legacy_refresh_reuses_only_the_project_parts_it_supplied() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(state.project_gap("work", "api", Part::Lead), None);
+    assert_eq!(state.project_gap("work", "api", Part::Tasks), None);
+
+    work.lead_fail.store(true, Ordering::SeqCst);
+    let refreshed = refresh(&core).await;
+    let (tasks, lead) = refreshed.project_parts("work", "api");
+    assert_eq!((tasks, lead), (true, false));
+    state.apply(refreshed);
+    let loaded = load_project_tab(&core, "work", "api", Some(Tab::Tasks), tasks, lead).await;
+    assert!(loaded.tasks.is_none());
+    assert!(matches!(loaded.lead, Some(Err(_))));
+
+    let mut older = load_project_tab(&core, "work", "api", Some(Tab::Tasks), false, false).await;
+    older.keep_refreshed_parts((true, false));
+    assert!(older.tasks.is_none());
+    assert!(matches!(older.lead, Some(Err(_))));
+
+    work.projects_fail.store(true, Ordering::SeqCst);
+    assert_eq!(
+        refresh(&core).await.project_parts("work", "api"),
+        (false, false)
+    );
 }

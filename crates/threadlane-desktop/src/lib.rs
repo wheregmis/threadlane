@@ -725,6 +725,31 @@ pub struct Refresh {
     tasks: Vec<(String, Result<Vec<TaskSummary>, ClientError>)>,
 }
 
+impl Refresh {
+    /// Whether this refresh supplied tasks and lead status for the named project.
+    pub fn project_parts(&self, space: &str, project: &str) -> (bool, bool) {
+        let active = self.projects.iter().any(|(name, listed)| {
+            name == space
+                && listed.as_ref().is_ok_and(|projects| {
+                    projects
+                        .iter()
+                        .any(|row| row.name == project && !row.archived)
+                })
+        });
+        let tasks = active
+            && self
+                .tasks
+                .iter()
+                .any(|(name, listed)| name == space && listed.is_ok());
+        let lead = active
+            && self
+                .leads
+                .iter()
+                .any(|(name, lead)| name == space && lead.project == project);
+        (tasks, lead)
+    }
+}
+
 /// Asks every paired hub about itself, its projects, agents, admitted
 /// clients, pending decisions, running tasks, machines, and newest items. A
 /// hub that does not answer is reported as such; the others are unaffected.
@@ -839,6 +864,18 @@ pub struct ProjectLoad {
     recorded: Option<Result<(Vec<RecordedEvent>, u64), ClientError>>,
     rules: Option<Result<Vec<StandingRuleSummary>, ClientError>>,
     lead_runs: Option<Result<Vec<LeadRun>, ClientError>>,
+}
+
+impl ProjectLoad {
+    /// Keeps work already applied by a refresh that arrived during this load.
+    pub fn keep_refreshed_parts(&mut self, (tasks, lead): (bool, bool)) {
+        if tasks {
+            self.tasks = None;
+        }
+        if lead {
+            self.lead = None;
+        }
+    }
 }
 
 /// Asks a project's hub for its tasks, repositories, bindings, the newest
@@ -1930,7 +1967,12 @@ impl AppState {
             }
         }
         for (name, lead) in leads {
-            if let Some(at) = find(&mut spaces, &name) {
+            if let Some(at) = find(&mut spaces, &name)
+                && spaces[at]
+                    .projects
+                    .iter()
+                    .any(|project| project.name == lead.project && !project.archived)
+            {
                 spaces[at].leads.retain(|(known, _)| *known != lead.project);
                 if let Some(start) = lead.running_since {
                     spaces[at].leads.push((lead.project.clone(), start));
@@ -1975,7 +2017,12 @@ impl AppState {
             if let Some(at) = find(&mut spaces, &name)
                 && let Some(listed) = spaces[at].take(Part::Tasks, listed)
             {
-                if matches!(spaces[at].answers.get(&Part::Tasks), Some(Answer::Answered)) {
+                if matches!(spaces[at].answers.get(&Part::Tasks), Some(Answer::Answered))
+                    && matches!(
+                        spaces[at].answers.get(&Part::Projects),
+                        Some(Answer::Answered)
+                    )
+                {
                     let mut by_project = HashMap::<_, Vec<_>>::new();
                     for summary in &listed {
                         by_project

@@ -297,9 +297,14 @@ pub(super) async fn handle(
         }
         OverviewRequest::Work => {
             let names = Names::of(db).await?;
-            let tasks = db.active_project_tasks().await.map_err(api_error)?;
-            let leads = db.active_project_leads().await.map_err(api_error)?;
             let projects = api.project_list(true).await?;
+            let active: Vec<_> = projects
+                .iter()
+                .filter(|project| !project.archived)
+                .map(|project| project.id)
+                .collect();
+            let tasks = db.tasks_for_projects(&active).await.map_err(api_error)?;
+            let leads = db.active_project_leads().await.map_err(api_error)?;
             Ok(OverviewReply::Work {
                 overview: WorkOverview {
                     projects,

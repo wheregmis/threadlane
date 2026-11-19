@@ -265,6 +265,12 @@ async fn archive_keeps_history_and_repository_ownership_and_restores_the_project
         prior_conversation
     );
     assert_eq!(hub.api.overview(tasks).await.unwrap(), prior_tasks);
+    let covered = hub.db.tasks_for_projects(&[project.id]).await.unwrap();
+    assert_eq!(
+        covered.iter().map(|task| task.id).collect::<Vec<_>>(),
+        [task.id]
+    );
+
     let OverviewReply::Work { overview } = hub.api.overview(OverviewRequest::Work).await.unwrap()
     else {
         panic!("work");

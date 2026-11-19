@@ -264,8 +264,20 @@ impl Desktop {
             let data = &self.task_activity;
             if data.loading && !data.loaded {
                 activity = activity.child(meta("Loading activity…", cx));
-            } else if data.loaded && data.entries.is_empty() {
+            } else if data.is_empty() {
                 activity = activity.child(empty(EmptyRegion::Activity, cx));
+            }
+            if !data.loading && data.newest.is_some() {
+                activity = activity.child(
+                    button("task-activity-newest")
+                        .small()
+                        .ghost()
+                        .label("Show newest activity")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.task_activity.show_newest();
+                            cx.notify();
+                        })),
+                );
             }
             for group in data
                 .entries

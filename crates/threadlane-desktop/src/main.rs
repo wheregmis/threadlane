@@ -335,6 +335,51 @@ struct TaskActivity {
     loading: bool,
     error: Option<(Option<ActivityCursor>, String)>,
     loaded: bool,
+    newest: Option<(Vec<TaskActivityEntry>, Option<ActivityCursor>)>,
+}
+
+impl TaskActivity {
+    fn apply_page(
+        &mut self,
+        before: Option<ActivityCursor>,
+        entries: Vec<TaskActivityEntry>,
+        next: Option<ActivityCursor>,
+    ) {
+        if before.is_some() {
+            self.entries.extend(entries);
+            self.next = next;
+        } else if let Some(overlap) = entries.last().and_then(|last| {
+            self.entries
+                .iter()
+                .position(|entry| last.position == entry.position)
+        }) {
+            self.entries.splice(..=overlap, entries);
+            self.newest = None;
+        } else if self.entries.is_empty() && (!entries.is_empty() || !self.loaded) {
+            self.entries = entries;
+            self.next = next;
+            self.newest = None;
+        } else if !entries.is_empty() {
+            self.newest = Some((entries, next));
+        }
+        self.loaded = true;
+    }
+
+    fn show_newest(&mut self) {
+        if let Some((entries, next)) = self.newest.take() {
+            self.entries = entries;
+            self.next = next;
+            self.error = None;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.loaded
+            && self.entries.is_empty()
+            && self.next.is_none()
+            && self.error.is_none()
+            && self.newest.is_none()
+    }
 }
 
 /// The window's one view: the shell and its screens over [`AppState`].
@@ -346,6 +391,7 @@ struct Desktop {
     task_activity: TaskActivity,
     task_activity_request: Option<Task<()>>,
     project_load: Option<Task<()>>,
+    project_load_pending: Option<(bool, bool)>,
     keyboard_focus: FocusHandle,
     sidebar_collapsed: bool,
     decision_scroll: ScrollHandle,
@@ -588,6 +634,7 @@ impl Desktop {
             task_activity: TaskActivity::default(),
             task_activity_request: None,
             project_load: None,
+            project_load_pending: None,
             keyboard_focus,
             sidebar_collapsed: false,
             decision_scroll: ScrollHandle::default(),
@@ -691,6 +738,12 @@ impl Desktop {
                         .map(|detail| (space.clone(), detail.summary.project.clone())),
                     _ => None,
                 };
+                let parts = match &this.screen {
+                    Screen::Project { space, project, .. } => {
+                        refreshed.project_parts(space, project)
+                    }
+                    _ => (false, false),
+                };
                 this.state.apply(refreshed);
                 // Refreshes run every REFRESH_EVERY, so this re-checks well within a minute.
                 for alert in this.state.reminders(SystemClock.now()) {
@@ -706,7 +759,7 @@ impl Desktop {
                     )));
                     this.go(Screen::Home, cx);
                 } else {
-                    this.load_screen_after_refresh(true, cx);
+                    this.load_screen_with_parts(parts, cx);
                 }
             },
             cx,
@@ -715,10 +768,10 @@ impl Desktop {
 
     /// Loads what the open screen shows beyond what a refresh brings.
     fn load_screen(&mut self, cx: &mut Context<Self>) {
-        self.load_screen_after_refresh(false, cx);
+        self.load_screen_with_parts((false, false), cx);
     }
 
-    fn load_screen_after_refresh(&mut self, refreshed: bool, cx: &mut Context<Self>) {
+    fn load_screen_with_parts(&mut self, parts: (bool, bool), cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
         match self.screen.clone() {
             Screen::Routines(scope) => {
@@ -736,6 +789,11 @@ impl Desktop {
                 project,
                 tab,
             } => {
+                if self.project_load.is_some() {
+                    self.project_load_pending = Some(parts);
+                    return;
+                }
+                let (fresh_tasks, fresh_lead) = parts;
                 if tab == Tab::Setup {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }
@@ -771,21 +829,6 @@ impl Desktop {
                         cx,
                     );
                 }
-                let fresh = |part| {
-                    refreshed
-                        && !self.state.is_archived(&space, &project)
-                        && self.state.project_gap(&space, &project, part).is_none()
-                };
-                let fresh_tasks = fresh(threadlane_desktop::Part::Tasks)
-                    && self
-                        .state
-                        .space(&space)
-                        .is_some_and(|space| space.gap(threadlane_desktop::Part::Tasks).is_none());
-                let fresh_lead = fresh(threadlane_desktop::Part::Lead)
-                    && self
-                        .state
-                        .space(&space)
-                        .is_some_and(|space| space.gap(threadlane_desktop::Part::Tasks).is_none());
                 let job = self.tokio.spawn(async move {
                     load_project_tab(
                         &*core.read().await,
@@ -798,12 +841,21 @@ impl Desktop {
                     .await
                 });
                 self.project_load = Some(cx.spawn(async move |this, cx| {
-                    if let Ok(loaded) = job.await {
-                        let _ = this.update(cx, |this, cx| {
+                    let loaded = job.await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.project_load = None;
+                        let pending = this.project_load_pending.take();
+                        if let Ok(mut loaded) = loaded {
+                            if let Some(parts) = pending {
+                                loaded.keep_refreshed_parts(parts);
+                            }
                             this.state.apply_project(loaded);
                             cx.notify();
-                        });
-                    }
+                        }
+                        if let Some(parts) = pending {
+                            this.load_screen_with_parts(parts, cx);
+                        }
+                    });
                 }));
             }
             Screen::Task { space, task } => {
@@ -917,24 +969,7 @@ impl Desktop {
                 let activity = &mut this.task_activity;
                 activity.loading = false;
                 match result {
-                    Ok((entries, next)) => {
-                        if before.is_none() {
-                            if let Some(overlap) = activity.entries.iter().position(|entry| {
-                                entries
-                                    .last()
-                                    .is_some_and(|last| last.position == entry.position)
-                            }) {
-                                activity.entries.splice(..=overlap, entries);
-                            } else {
-                                activity.entries = entries;
-                                activity.next = next;
-                            }
-                        } else {
-                            activity.entries.extend(entries);
-                            activity.next = next;
-                        }
-                        activity.loaded = true;
-                    }
+                    Ok((entries, next)) => activity.apply_page(before, entries, next),
                     Err(error) => activity.error = Some((before, describe(&error))),
                 }
                 cx.notify();
@@ -1054,6 +1089,7 @@ impl Desktop {
         }
         if self.screen != screen {
             self.project_load = None;
+            self.project_load_pending = None;
             self.task_activity_request = None;
             self.task_activity = TaskActivity::default();
             self.state.reset_chat_target();
@@ -1698,5 +1734,67 @@ impl Render for Desktop {
                     .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
                     .children(self.activity(cx)),
             )
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::TaskActivity;
+    use threadlane_core::{
+        client::{ActivityCursor, RunStep, TaskActivityEntry},
+        ids::RunId,
+        time::Timestamp,
+    };
+
+    fn position(seq: i64) -> ActivityCursor {
+        ActivityCursor { run: RunId(1), seq }
+    }
+
+    fn steps(from: i64, to: i64) -> Vec<TaskActivityEntry> {
+        (from..=to)
+            .rev()
+            .map(|seq| TaskActivityEntry {
+                position: position(seq),
+                step: RunStep {
+                    kind: "text".into(),
+                    description: seq.to_string(),
+                    at: Timestamp::from_millis(0),
+                },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn non_overlapping_refresh_keeps_history_and_its_cursor_until_requested() {
+        let mut activity = TaskActivity::default();
+        activity.apply_page(None, steps(21, 40), Some(position(21)));
+        activity.apply_page(Some(position(21)), steps(1, 20), None);
+        activity.apply_page(None, steps(42, 61), Some(position(42)));
+
+        assert_eq!(activity.entries, steps(1, 40));
+        assert_eq!(activity.next, None);
+        assert!(activity.newest.is_some());
+
+        activity.show_newest();
+        assert_eq!(activity.entries, steps(42, 61));
+        assert_eq!(activity.next, Some(position(42)));
+    }
+
+    #[test]
+    fn overlapping_refresh_extends_history_and_empty_pages_can_continue() {
+        let mut activity = TaskActivity::default();
+        activity.apply_page(None, Vec::new(), Some(position(5)));
+        assert!(!activity.is_empty());
+        activity.apply_page(Some(position(5)), steps(1, 4), None);
+        activity.apply_page(None, steps(3, 6), Some(position(3)));
+        assert_eq!(activity.entries, steps(1, 6));
+        assert_eq!(activity.next, None);
+        assert!(activity.newest.is_none());
+
+        let mut empty = TaskActivity::default();
+        empty.apply_page(None, Vec::new(), None);
+        assert!(empty.is_empty());
+        empty.error = Some((None, "request failed".into()));
+        assert!(!empty.is_empty());
     }
 }

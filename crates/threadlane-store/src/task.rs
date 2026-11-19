@@ -918,11 +918,17 @@ impl HubDb {
 }
 
 impl HubDb {
-    /// Lists tasks across active projects.
-    pub async fn active_project_tasks(&self) -> StoreResult<Vec<Task>> {
+    /// Lists tasks for the supplied project membership, even if a project is archived concurrently.
+    pub async fn tasks_for_projects(&self, projects: &[ProjectId]) -> StoreResult<Vec<Task>> {
+        let ids = json_text(&json!(
+            projects
+                .iter()
+                .map(|project| project.get())
+                .collect::<Vec<_>>()
+        ))?;
         self.tasks_with_dependencies(
-            "project_id IN (SELECT id FROM projects WHERE archived_at IS NULL)",
-            (),
+            "project_id IN (SELECT value FROM json_each(?1))",
+            params![ids],
         )
         .await
     }
