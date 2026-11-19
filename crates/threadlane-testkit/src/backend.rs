@@ -205,6 +205,8 @@ struct State {
     received: Vec<ReceivedRun>,
     /// Native session ids this backend knows, in the order they were created.
     sessions: Vec<String>,
+    /// What [`AgentBackend::installed_skills`] answers.
+    skills: Result<Vec<String>, BackendError>,
 }
 
 impl State {
@@ -259,6 +261,7 @@ impl ScriptedBackend {
                 questions: Vec::new(),
                 received: Vec::new(),
                 sessions: Vec::new(),
+                skills: Ok(Vec::new()),
             })),
         }
     }
@@ -305,6 +308,11 @@ impl ScriptedBackend {
     /// Queues the answer for the next one-shot question.
     pub fn push_answer(&self, answer: Result<Json, BackendError>) {
         self.state().answers.push_back(answer);
+    }
+
+    /// Replaces what [`AgentBackend::installed_skills`] answers.
+    pub fn set_skills(&self, skills: Result<Vec<String>, BackendError>) {
+        self.state().skills = skills;
     }
 
     /// Replaces what [`AgentBackend::probe`] reports.
@@ -356,6 +364,13 @@ impl ScriptedBackend {
 impl AgentBackend for ScriptedBackend {
     fn kind(&self) -> BackendKind {
         self.kind
+    }
+
+    async fn installed_skills(
+        &self,
+        _cwd: Option<&std::path::Path>,
+    ) -> Result<Vec<String>, BackendError> {
+        self.state().skills.clone()
     }
 
     async fn probe(&self) -> Result<Probe, BackendError> {

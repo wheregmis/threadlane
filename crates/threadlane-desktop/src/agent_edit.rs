@@ -21,7 +21,7 @@ pub struct AgentEdit {
     /// The selected preset, or `BACKENDS.len()` for the saved order.
     pub backends: usize,
     pub skills: Vec<threadlane_core::model::SkillBinding>,
-    pub installed_skills: Option<Result<Vec<threadlane_core::model::SkillBinding>, String>>,
+    pub installed_skills: Option<Result<crate::control::InstalledSkills, String>>,
     /// The index it opened with: Save sends backends only when it moved.
     opened_with: usize,
     saved_backends: Vec<BackendKind>,

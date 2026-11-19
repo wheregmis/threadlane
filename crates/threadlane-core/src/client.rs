@@ -404,6 +404,9 @@ pub enum LaneTarget {
 pub enum OrgReply {
     InstalledSkills {
         skills: Vec<crate::model::SkillBinding>,
+        /// Backends that failed to list theirs; their bindings can't be checked.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable: Vec<BackendKind>,
     },
     MachineSlotsSet,
     Project {

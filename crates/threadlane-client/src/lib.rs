@@ -812,16 +812,23 @@ impl ClientCore {
         }
     }
 
-    /// Lists personal skill names on the selected hub.
+    /// Lists personal skill names on the selected hub, with the backends
+    /// that could not list theirs.
     ///
     /// # Errors
     /// Returns pairing, discovery or hub errors.
     pub async fn installed_skills(
         &self,
         space: Option<&str>,
-    ) -> Result<Vec<threadlane_core::model::SkillBinding>, ClientError> {
+    ) -> Result<(Vec<threadlane_core::model::SkillBinding>, Vec<BackendKind>), ClientError> {
         match self.org(space, OrgRequest::InstalledSkills).await? {
-            (_, OrgReply::InstalledSkills { skills }) => Ok(skills),
+            (
+                _,
+                OrgReply::InstalledSkills {
+                    skills,
+                    unavailable,
+                },
+            ) => Ok((skills, unavailable)),
             (space, _) => Err(wrong_reply(&space, "installed skills")),
         }
     }

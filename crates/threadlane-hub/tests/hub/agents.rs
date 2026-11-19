@@ -1,6 +1,7 @@
 //! Editing and deleting agents through the Organization capability.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use threadlane_core::client::{ApiError, OrgReply, OrgRequest, OverviewReply, OverviewRequest};
 use threadlane_core::memory::INSTRUCTIONS_BUDGET;
@@ -348,7 +349,7 @@ async fn delete_refuses_the_lead_a_wrong_name_and_open_tasks() {
 }
 
 #[tokio::test]
-async fn fallback_assignment_carries_only_the_selected_providers_skills() {
+async fn a_lead_s_saved_skills_stay_out_of_its_runs() {
     use threadlane_core::model::SkillBinding;
     let hub = TestHub::start().await;
     hub.hello().await; // Only Claude is usable on the runner.
@@ -381,7 +382,8 @@ async fn fallback_assignment_carries_only_the_selected_providers_skills() {
     hub.send("bound", "hello").await;
     let (_, assignment) = crate::common::begin(&*hub.link).await;
     assert_eq!(assignment.backend, BackendKind::Claude);
-    assert_eq!(assignment.skills, ["claude-only"]);
+    // The lead runs without native tools, so its skills stay out of the run.
+    assert!(assignment.skills.is_empty());
     let clear = edit(
         LEAD_NAME,
         Changes {
@@ -399,4 +401,40 @@ async fn fallback_assignment_carries_only_the_selected_providers_skills() {
             .skills
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn one_backend_failing_to_list_skills_leaves_the_others_listed() {
+    use threadlane_core::backend::BackendError;
+    use threadlane_core::model::SkillBinding;
+    use threadlane_testkit::ScriptedBackend;
+    let hub = TestHub::start().await;
+    let clock = Arc::new(hub.clock.clone());
+    let claude = ScriptedBackend::new(BackendKind::Claude, clock.clone());
+    claude.set_skills(Ok(vec!["review".into()]));
+    let codex = ScriptedBackend::new(BackendKind::Codex, clock);
+    codex.set_skills(Err(BackendError::Failed("no home".into())));
+    let hub = TestHub::around(
+        hub.core
+            .with_backends(vec![Arc::new(claude), Arc::new(codex)]),
+        hub.clock,
+    )
+    .await;
+
+    let reply = hub.api.org(OrgRequest::InstalledSkills).await.unwrap();
+    let OrgReply::InstalledSkills {
+        skills,
+        unavailable,
+    } = reply
+    else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(
+        skills,
+        [SkillBinding {
+            backend: BackendKind::Claude,
+            name: "review".into(),
+        }]
+    );
+    assert_eq!(unavailable, [BackendKind::Codex]);
 }

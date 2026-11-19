@@ -34,6 +34,9 @@ pub(crate) const RECORDED_SHOWN: u32 = 20;
 /// How many characters of a recorded event's first line are shown.
 const RECORDED_CHARS: usize = 160;
 
+/// The hub's installed skills and the backends that could not list theirs.
+pub type InstalledSkills = (Vec<threadlane_core::model::SkillBinding>, Vec<BackendKind>);
+
 /// The picks of the "+ New agent" form; its text fields live in the view.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentForm {
@@ -42,7 +45,8 @@ pub struct AgentForm {
     /// The index in [`BACKENDS`] picked.
     pub backends: usize,
     pub skills: Vec<threadlane_core::model::SkillBinding>,
-    pub installed_skills: Option<Result<Vec<threadlane_core::model::SkillBinding>, String>>,
+    /// The hub's skills and the backends that could not list theirs.
+    pub installed_skills: Option<Result<InstalledSkills, String>>,
     /// What "Start from a template" offers: `None` while the hub has not
     /// answered, else its templates or why it could not list them.
     pub templates: Option<Result<Vec<AgentTemplate>, String>>,

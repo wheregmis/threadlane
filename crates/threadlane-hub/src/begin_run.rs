@@ -373,12 +373,7 @@ impl LocalLink {
             events: events.iter().map(|event| event.id).collect(),
             perform,
             backend,
-            skills: agent
-                .skills
-                .iter()
-                .filter(|s| s.backend == backend)
-                .map(|s| s.name.clone())
-                .collect(),
+            skills: run_skills(&agent, backend, lane.kind),
             model: model_for(
                 binding.as_ref(),
                 &agent,
@@ -705,6 +700,20 @@ impl LocalLink {
 /// The model for `backend`: the binding's choice, else the agent's, else the
 /// hub's configured default for the backend, else `None` (the backend's own
 /// default).
+/// The agent's skills for `backend`. A lead run has no native tools to run
+/// them with, so it gets none rather than failing at launch.
+fn run_skills(agent: &Agent, backend: BackendKind, lane: LaneKind) -> Vec<String> {
+    if lane == LaneKind::Lead {
+        return Vec::new();
+    }
+    agent
+        .skills
+        .iter()
+        .filter(|s| s.backend == backend)
+        .map(|s| s.name.clone())
+        .collect()
+}
+
 fn model_for(
     binding: Option<&Binding>,
     agent: &Agent,
@@ -755,6 +764,27 @@ mod tests {
             max_parallel: 1,
             overrides: json!({}),
         }
+    }
+
+    #[test]
+    fn skills_go_to_task_runs_for_their_backend_and_never_to_lead_runs() {
+        use threadlane_core::model::SkillBinding;
+        let mut bound = agent(json!({}));
+        bound.skills = vec![
+            SkillBinding {
+                backend: BackendKind::Codex,
+                name: "codex-only".into(),
+            },
+            SkillBinding {
+                backend: BackendKind::Claude,
+                name: "claude-only".into(),
+            },
+        ];
+        assert_eq!(
+            run_skills(&bound, BackendKind::Claude, LaneKind::Task),
+            ["claude-only"]
+        );
+        assert!(run_skills(&bound, BackendKind::Claude, LaneKind::Lead).is_empty());
     }
 
     #[test]

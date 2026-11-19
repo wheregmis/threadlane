@@ -759,8 +759,12 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         Command::Agent {
             command: AgentCommand::Skills { space },
         } => {
-            for skill in core.installed_skills(space.as_deref()).await? {
+            let (skills, unavailable) = core.installed_skills(space.as_deref()).await?;
+            for skill in skills {
                 println!("{}={}", skill.backend, skill.name);
+            }
+            for backend in unavailable {
+                eprintln!("{backend}: could not list skills");
             }
         }
         Command::Agents { space } => {

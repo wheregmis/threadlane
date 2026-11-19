@@ -512,20 +512,25 @@ impl HubApi for ClientApi {
                 })
             }
             OrgRequest::InstalledSkills => {
-                let mut skills = Vec::new();
+                let (mut skills, mut unavailable) = (Vec::new(), Vec::new());
                 for backend in &self.core.inner.backends {
-                    for name in backend
-                        .installed_skills(None)
-                        .await
-                        .map_err(|e| ApiError::Invalid(e.to_string()))?
-                    {
-                        skills.push(threadlane_core::model::SkillBinding {
-                            backend: backend.kind(),
-                            name,
-                        });
+                    match backend.installed_skills(None).await {
+                        Ok(names) => skills.extend(names.into_iter().map(|name| {
+                            threadlane_core::model::SkillBinding {
+                                backend: backend.kind(),
+                                name,
+                            }
+                        })),
+                        Err(error) => {
+                            tracing::warn!(backend = %backend.kind(), %error, "could not list skills");
+                            unavailable.push(backend.kind());
+                        }
                     }
                 }
-                Ok(OrgReply::InstalledSkills { skills })
+                Ok(OrgReply::InstalledSkills {
+                    skills,
+                    unavailable,
+                })
             }
             OrgRequest::Agents => Ok(OrgReply::Agents {
                 agents: db.agents().await.map_err(api_error)?,

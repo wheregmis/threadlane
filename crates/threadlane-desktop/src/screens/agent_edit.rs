@@ -156,7 +156,10 @@ impl Desktop {
         } else {
             (&form.skills, &form.installed_skills)
         };
-        let installed = catalog.as_ref().and_then(|r| r.as_ref().ok());
+        let (installed, unavailable) = match catalog {
+            Some(Ok((list, unavailable))) => (Some(list), unavailable.as_slice()),
+            _ => (None, &[][..]),
+        };
         let mut choices = installed.cloned().unwrap_or_default();
         for skill in picked {
             if !choices.contains(skill) {
@@ -166,7 +169,15 @@ impl Desktop {
         let note = match catalog {
             None => Some("Loading installed skills…".to_owned()),
             Some(Err(e)) => Some(format!("Could not list installed skills: {e}")),
-            Some(Ok(list)) if list.is_empty() => {
+            Some(Ok((_, unavailable))) if !unavailable.is_empty() => Some(format!(
+                "Could not list {} skills.",
+                unavailable
+                    .iter()
+                    .map(|b| b.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Some(Ok((list, _))) if list.is_empty() => {
                 Some("No personal skills installed on this hub.".into())
             }
             _ => None,
@@ -178,7 +189,8 @@ impl Desktop {
                 .iter()
                 .filter(|s| s.backend == *kind)
                 .map(|s| {
-                    let missing = installed.is_some_and(|list| !list.contains(s));
+                    let missing = installed.is_some_and(|list| !list.contains(s))
+                        && !unavailable.contains(kind);
                     let label = if missing {
                         format!("{} (missing on hub)", s.name)
                     } else {
@@ -228,7 +240,8 @@ impl Desktop {
         if let Some(note) = note {
             rows = rows.child(meta(note, cx));
         }
-        rows
+        // Lead runs have no native tools, so the hub leaves skills out of them.
+        rows.child(meta("Skills apply to task runs only, not lead runs.", cx))
     }
 
     /// Opens `agent`'s edit view and fills its fields.
