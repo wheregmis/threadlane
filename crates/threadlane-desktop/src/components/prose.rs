@@ -55,7 +55,6 @@ pub(crate) struct Prose {
     desktop: WeakEntity<Desktop>,
     limit: ProseLimit,
     expanded: bool,
-    result_seq: Option<i64>,
 }
 
 impl Desktop {
@@ -78,7 +77,6 @@ impl Desktop {
             desktop: cx.entity().downgrade(),
             limit: ProseLimit::Full,
             expanded: self.state.message_expanded(&id),
-            result_seq: None,
         }
     }
 
@@ -184,13 +182,6 @@ impl Prose {
         self.limit = limit;
         self
     }
-
-    pub(crate) fn result(mut self, seq: i64, expanded: bool) -> Self {
-        self.limit = ProseLimit::Result;
-        self.result_seq = Some(seq);
-        self.expanded = expanded;
-        self
-    }
 }
 
 struct CachedProse {
@@ -272,11 +263,7 @@ impl RenderOnce for Prose {
                     .label(label)
                     .on_click(move |_, _, cx| {
                         let _gone = self.desktop.update(cx, |view, cx| {
-                            if let Some(seq) = self.result_seq {
-                                view.state.toggle_result(&self.space, seq);
-                            } else {
-                                view.state.toggle_message(&self.id);
-                            }
+                            view.state.toggle_message(&self.id);
                             cx.notify();
                         });
                     })
