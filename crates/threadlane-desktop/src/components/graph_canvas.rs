@@ -41,14 +41,13 @@ fn cubic_point(
     (x, y)
 }
 
-/// Paints the subtle architectural dot grid, cubic Bézier edges, directional
-/// arrowheads, and (when `pulse` is `Some(phase)`) traveling beads along active edges.
-fn edge_layer(
+/// Paints the viewport-clipped architectural dot grid, cubic Bézier edges,
+/// port dots, and directional arrowheads (static; does not repaint on pulse frames).
+fn static_edge_layer(
     id: impl Into<ElementId>,
     edges: Vec<GraphEdge>,
     width: f32,
     height: f32,
-    pulse: Option<f32>,
 ) -> AnyElement {
     let layer = canvas(
         |bounds, _, _| bounds,
@@ -56,14 +55,21 @@ fn edge_layer(
             let theme = cx.theme();
             let ox = bounds.origin.x;
             let oy = bounds.origin.y;
+            let viewport = window.viewport_size();
 
-            // Subtle architectural dot grid.
+            // Subtle architectural dot grid clipped strictly to the visible viewport.
             let dot_color = theme.border.opacity(0.32);
             let step = 28.0_f32;
-            let mut gx = step * 0.5;
-            while gx < width {
-                let mut gy = step * 0.5;
-                while gy < height {
+            let min_x = (-f32::from(ox)).max(0.0);
+            let max_x = (f32::from(viewport.width) - f32::from(ox)).min(width);
+            let min_y = (-f32::from(oy)).max(0.0);
+            let max_y = (f32::from(viewport.height) - f32::from(oy)).min(height);
+            let start_col = ((min_x - step * 0.5).max(0.0) / step).floor() as i32;
+            let start_row = ((min_y - step * 0.5).max(0.0) / step).floor() as i32;
+            let mut gx = step * 0.5 + start_col as f32 * step;
+            while gx <= max_x {
+                let mut gy = step * 0.5 + start_row as f32 * step;
+                while gy <= max_y {
                     window.paint_quad(
                         fill(
                             Bounds::new(point(ox + px(gx), oy + px(gy)), size(px(2.), px(2.))),
@@ -142,35 +148,67 @@ fn edge_layer(
                 if let Ok(path) = arrow.build() {
                     window.paint_path(path, stroke_color);
                 }
+            }
+        },
+    )
+    .w(px(width))
+    .h(px(height));
 
-                // Animated traveling pulse beads along active edges.
-                if edge.state == EdgeState::Active
-                    && let Some(phase) = pulse
-                {
-                    for offset in [0.0_f32, 0.5_f32] {
-                        let t = (phase + offset) % 1.0;
-                        let (bx, by) = cubic_point(p0, c1, c2, p3, t);
-                        window.paint_quad(
-                            fill(
-                                Bounds::new(
-                                    point(ox + px(bx - 5.5), oy + px(by - 5.5)),
-                                    size(px(11.), px(11.)),
-                                ),
-                                run_tint,
-                            )
-                            .corner_radii(px(5.5)),
-                        );
-                        window.paint_quad(
-                            fill(
-                                Bounds::new(
-                                    point(ox + px(bx - 3.0), oy + px(by - 3.0)),
-                                    size(px(6.), px(6.)),
-                                ),
-                                run_ink,
-                            )
-                            .corner_radii(px(3.0)),
-                        );
-                    }
+    div()
+        .id(id)
+        .absolute()
+        .top_0()
+        .left_0()
+        .w(px(width))
+        .h(px(height))
+        .child(layer)
+        .into_any_element()
+}
+
+/// Paints ONLY the traveling pulse beads along active edges (independent of
+/// the static dot grid and curves).
+fn pulse_overlay_layer(
+    id: impl Into<ElementId>,
+    active_edges: Vec<GraphEdge>,
+    width: f32,
+    height: f32,
+    phase: f32,
+) -> AnyElement {
+    let layer = canvas(
+        |bounds, _, _| bounds,
+        move |bounds, _, window, cx| {
+            let (run_ink, run_tint) = Status::Running.colors(cx.theme());
+            let ox = bounds.origin.x;
+            let oy = bounds.origin.y;
+            for edge in &active_edges {
+                let p0 = (edge.x1, edge.y1);
+                let p3 = (edge.x2 - 5.0, edge.y2);
+                let dx = ((p3.0 - p0.0).abs() * 0.48).max(36.0);
+                let c1 = (p0.0 + dx, p0.1);
+                let c2 = (p3.0 - dx, p3.1);
+                for offset in [0.0_f32, 0.5_f32] {
+                    let t = (phase + offset) % 1.0;
+                    let (bx, by) = cubic_point(p0, c1, c2, p3, t);
+                    window.paint_quad(
+                        fill(
+                            Bounds::new(
+                                point(ox + px(bx - 5.5), oy + px(by - 5.5)),
+                                size(px(11.), px(11.)),
+                            ),
+                            run_tint,
+                        )
+                        .corner_radii(px(5.5)),
+                    );
+                    window.paint_quad(
+                        fill(
+                            Bounds::new(
+                                point(ox + px(bx - 3.0), oy + px(by - 3.0)),
+                                size(px(6.), px(6.)),
+                            ),
+                            run_ink,
+                        )
+                        .corner_radii(px(3.0)),
+                    );
                 }
             }
         },
@@ -189,8 +227,8 @@ fn edge_layer(
         .into_any_element()
 }
 
-/// Wraps [`edge_layer`] in a repeating GPUI animation when there is at least
-/// one active edge, or renders statically (0% idle CPU) otherwise.
+/// Composes the static dot-grid + edge layer with an optional lightweight
+/// animated pulse overlay when there is at least one active edge.
 fn animated_edges(
     id: &'static str,
     edges: Vec<GraphEdge>,
@@ -198,8 +236,23 @@ fn animated_edges(
     height: f32,
     has_active: bool,
 ) -> AnyElement {
-    if !has_active {
-        return edge_layer(id, edges, width, height, None);
+    let active_only: Vec<GraphEdge> = if has_active {
+        edges
+            .iter()
+            .filter(|e| e.state == EdgeState::Active)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let static_layer = static_edge_layer(
+        SharedString::from(format!("{id}-static")),
+        edges,
+        width,
+        height,
+    );
+    if active_only.is_empty() {
+        return static_layer;
     }
     div()
         .absolute()
@@ -207,18 +260,27 @@ fn animated_edges(
         .left_0()
         .w(px(width))
         .h(px(height))
-        .with_animation(
-            id,
-            Animation::new(Duration::from_millis(1600)).repeat(),
-            move |container, delta| {
-                container.child(edge_layer(
-                    SharedString::from(format!("{id}-frame")),
-                    edges.clone(),
-                    width,
-                    height,
-                    Some(delta),
-                ))
-            },
+        .child(static_layer)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(width))
+                .h(px(height))
+                .with_animation(
+                    id,
+                    Animation::new(Duration::from_millis(1600)).repeat(),
+                    move |container, delta| {
+                        container.child(pulse_overlay_layer(
+                            SharedString::from(format!("{id}-pulse")),
+                            active_only.clone(),
+                            width,
+                            height,
+                            delta,
+                        ))
+                    },
+                ),
         )
         .into_any_element()
 }
@@ -333,81 +395,88 @@ impl Desktop {
             };
 
             let card = div()
-                .id(SharedString::from(format!("{id}-node-{}", node.id)))
                 .absolute()
                 .left(px(node.x))
                 .top(px(node.y))
                 .w(px(node.width))
                 .h(px(node.height))
-                .p(SM)
-                .rounded(ROW_RADIUS)
-                .border_1()
-                .border_color(border_color)
-                .bg(bg)
-                .hover(|s| s.border_color(cx.theme().primary))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
                 .child(
-                    v_flex()
+                    button(SharedString::from(format!("{id}-node-{}", node.id)))
+                        .ghost()
+                        .tab_stop(true)
                         .size_full()
-                        .justify_between()
-                        .gap(XXS)
+                        .p(SM)
+                        .rounded(ROW_RADIUS)
+                        .border_1()
+                        .border_color(border_color)
+                        .bg(bg)
+                        .accessibility_label(format!(
+                            "Open {} {}, {}",
+                            node.id, node.title, node.status
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
                         .child(
-                            h_flex()
-                                .w_full()
+                            v_flex()
+                                .size_full()
                                 .justify_between()
-                                .items_center()
-                                .gap(XS)
+                                .gap(XXS)
                                 .child(
                                     h_flex()
-                                        .gap(XS)
+                                        .w_full()
+                                        .justify_between()
                                         .items_center()
-                                        .child(status_dot(status_kind, cx))
+                                        .gap(XS)
                                         .child(
-                                            div()
-                                                .text_size(TYPE_META)
-                                                .font_family(mono.clone())
-                                                .font_features(TABULAR.clone())
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(node.id.to_string()),
-                                        ),
-                                )
-                                .children(if node.is_bottleneck {
-                                    Some(status_badge(
-                                        format!("Blocks {}", node.downstream_blocked),
-                                        if is_failed {
-                                            Status::Failed
+                                            h_flex()
+                                                .gap(XS)
+                                                .items_center()
+                                                .child(status_dot(status_kind, cx))
+                                                .child(
+                                                    div()
+                                                        .text_size(TYPE_META)
+                                                        .font_family(mono.clone())
+                                                        .font_features(TABULAR.clone())
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(node.id.to_string()),
+                                                ),
+                                        )
+                                        .children(if node.is_bottleneck {
+                                            Some(status_badge(
+                                                format!("Blocks {}", node.downstream_blocked),
+                                                if is_failed {
+                                                    Status::Failed
+                                                } else {
+                                                    Status::Waiting
+                                                },
+                                                cx,
+                                            ))
+                                        } else if !node.quiet {
+                                            Some(status_badge(node.status, status_kind, cx))
                                         } else {
-                                            Status::Waiting
-                                        },
-                                        cx,
-                                    ))
-                                } else if !node.quiet {
-                                    Some(status_badge(node.status, status_kind, cx))
-                                } else {
-                                    None
-                                }),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(TYPE_BODY)
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(title_color)
-                                .child(node.title),
-                        )
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .justify_between()
-                                .gap(XS)
-                                .child(meta(node.agent, cx).truncate())
+                                            None
+                                        }),
+                                )
                                 .child(
-                                    meta(node.time, cx)
-                                        .flex_none()
-                                        .font_features(TABULAR.clone()),
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(TYPE_BODY)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(title_color)
+                                        .child(node.title),
+                                )
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .gap(XS)
+                                        .child(meta(node.agent, cx).truncate())
+                                        .child(
+                                            meta(node.time, cx)
+                                                .flex_none()
+                                                .font_features(TABULAR.clone()),
+                                        ),
                                 ),
                         ),
                 );
@@ -557,6 +626,19 @@ impl Desktop {
             );
         }
 
+        // Snapshot current specialist names so the dial only shows for an agent
+        // still present in the graph after refreshes/renames.
+        let current_agents: Vec<String> = topo
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.kind {
+                TopologyNodeKind::Agent {
+                    space: s, agent, ..
+                } if s == space => Some(agent.clone()),
+                _ => None,
+            })
+            .collect();
+
         for node in topo.nodes {
             let is_selected = matches!(
                 &node.kind,
@@ -595,21 +677,26 @@ impl Desktop {
                 TopologyNodeKind::Project { .. } => AppIcon::Folder,
                 TopologyNodeKind::Agent { .. } => AppIcon::Bot,
             };
+            let aria = match &node.kind {
+                TopologyNodeKind::SpaceLead { .. } => format!("Open {} space chat", node.title),
+                TopologyNodeKind::Project { project, .. } => {
+                    format!("Filter topology to project {project}")
+                }
+                TopologyNodeKind::Agent { agent, .. } => {
+                    format!("Select {agent} to adjust autonomy mode")
+                }
+            };
 
-            let mut card = div()
-                .id(SharedString::from(node.id.clone()))
-                .absolute()
-                .left(px(node.x))
-                .top(px(node.y))
-                .w(px(node.width))
-                .h(px(node.height))
+            let card_btn = button(SharedString::from(node.id.clone()))
+                .ghost()
+                .tab_stop(true)
+                .size_full()
                 .p(SM)
                 .rounded(ROW_RADIUS)
                 .border_1()
                 .border_color(border_color)
                 .bg(bg)
-                .hover(|s| s.border_color(cx.theme().primary))
-                .cursor_pointer()
+                .accessibility_label(aria)
                 .child(
                     v_flex()
                         .size_full()
@@ -664,9 +751,9 @@ impl Desktop {
                         ),
                 );
 
-            card = match node.kind {
+            let card_btn = match node.kind {
                 TopologyNodeKind::SpaceLead { space } => {
-                    card.on_click(cx.listener(move |this, _, _, cx| {
+                    card_btn.on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(screen) = this.main_chat_screen(&space) {
                             this.go(screen, cx);
                         }
@@ -674,40 +761,104 @@ impl Desktop {
                 }
                 TopologyNodeKind::Project { space, project, .. } => {
                     let already = topo.selected_project.as_deref() == Some(project.as_str());
-                    card.on_click(cx.listener(move |this, _, _, cx| {
+                    card_btn.on_click(cx.listener(move |this, _, _, cx| {
                         let next = if already { None } else { Some(project.clone()) };
                         this.state.set_topology_project(&space, next);
                         cx.notify();
                     }))
                 }
                 TopologyNodeKind::Agent { space, agent, .. } => {
-                    card.on_click(cx.listener(move |this, _, _, cx| {
+                    card_btn.on_click(cx.listener(move |this, _, _, cx| {
                         this.state.toggle_topology_agent(&space, &agent);
                         cx.notify();
                     }))
                 }
             };
 
-            surface = surface.child(card);
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .left(px(node.x))
+                    .top(px(node.y))
+                    .w(px(node.width))
+                    .h(px(node.height))
+                    .child(card_btn),
+            );
         }
 
-        // Inline Autonomy Dial bar when an agent node is selected on this space.
+        // Inline Autonomy Dial bar when an agent node still present in the graph is selected.
         let dial = selected_agent
-            .filter(|(s, _)| *s == space)
+            .filter(|(s, a)| *s == space && current_agents.iter().any(|name| name == a))
             .map(|(_, agent)| {
+                let grid = self.state.modes(space);
+                let agent_idx = grid.agents.iter().position(|a| a == agent);
+                // Only auto-pick a project when scoped, when there is 1 project,
+                // or when the agent is bound to exactly 1 project.
+                let bound_projects: Vec<&str> = agent_idx
+                    .map(|idx| {
+                        grid.rows
+                            .iter()
+                            .filter(|r| {
+                                r.project != "General"
+                                    && r.modes
+                                        .as_ref()
+                                        .ok()
+                                        .and_then(|m| m.get(idx).copied().flatten())
+                                        .is_some()
+                            })
+                            .map(|r| r.project.as_str())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let target_project = topo
                     .selected_project
                     .clone()
-                    .or_else(|| topo.projects.first().cloned());
+                    .or_else(|| (topo.projects.len() == 1).then(|| topo.projects[0].clone()))
+                    .or_else(|| (bound_projects.len() == 1).then(|| bound_projects[0].to_owned()));
                 let current_mode = target_project.as_deref().and_then(|proj| {
-                    let grid = self.state.modes(space);
-                    let agent_idx = grid.agents.iter().position(|a| a == agent)?;
+                    let idx = agent_idx?;
                     let row = grid.rows.iter().find(|r| r.project == proj)?;
-                    row.modes.as_ref().ok()?.get(agent_idx).copied().flatten()
+                    row.modes.as_ref().ok()?.get(idx).copied().flatten()
                 });
                 let ceiling = target_project
                     .as_deref()
                     .map(|proj| self.state.project_ceiling(space, proj));
+
+                let project_control: Option<AnyElement> = if topo.projects.len() > 1 {
+                    let projects = topo.projects.clone();
+                    let space_p = space.to_owned();
+                    let view = cx.entity().downgrade();
+                    let label = target_project
+                        .as_deref()
+                        .map_or_else(|| "Pick a project…".to_owned(), |p| format!("in {p}"));
+                    Some(
+                        button("topo-dial-project")
+                            .small()
+                            .outline()
+                            .icon(AppIcon::ChevronDown)
+                            .label(label)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for p in &projects {
+                                    let (s, p, v) = (space_p.clone(), p.clone(), view.clone());
+                                    menu = menu.item(PopupMenuItem::new(p.clone()).on_click(
+                                        move |_, _, cx| {
+                                            let _ = v.update(cx, |this, cx| {
+                                                this.state
+                                                    .set_topology_project(&s, Some(p.clone()));
+                                                cx.notify();
+                                            });
+                                        },
+                                    ));
+                                }
+                                menu
+                            })
+                            .into_any_element(),
+                    )
+                } else {
+                    target_project
+                        .as_ref()
+                        .map(|proj| meta(format!("in {proj}"), cx).into_any_element())
+                };
 
                 let mut dial_bar = h_flex()
                     .w_full()
@@ -731,67 +882,36 @@ impl Desktop {
                                     .text_size(TYPE_BODY)
                                     .child(agent.to_owned()),
                             )
-                            .children(target_project.as_ref().map(|proj| {
-                                if topo.projects.len() > 1 {
-                                    let projects = topo.projects.clone();
-                                    let space_p = space.to_owned();
-                                    let view = cx.entity().downgrade();
-                                    button("topo-dial-project")
-                                        .small()
-                                        .outline()
-                                        .icon(AppIcon::ChevronDown)
-                                        .label(format!("in {proj}"))
-                                        .dropdown_menu(move |mut menu, _, _| {
-                                            for p in &projects {
-                                                let (s, p, v) =
-                                                    (space_p.clone(), p.clone(), view.clone());
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(p.clone()).on_click(
-                                                        move |_, _, cx| {
-                                                            let _ = v.update(cx, |this, cx| {
-                                                                this.state.set_topology_project(
-                                                                    &s,
-                                                                    Some(p.clone()),
-                                                                );
-                                                                cx.notify();
-                                                            });
-                                                        },
-                                                    ),
-                                                );
-                                            }
-                                            menu
-                                        })
-                                        .into_any_element()
-                                } else {
-                                    meta(format!("in {proj}"), cx).into_any_element()
-                                }
-                            })),
+                            .children(project_control),
                     );
 
                 if let Some(proj) = target_project {
-                    let mut group = ButtonGroup::new("topo-autonomy-dial");
-                    for (choice, label) in MODES {
+                    let buttons = MODES.into_iter().map(|(choice, label)| {
                         let (s, p, a) = (space.to_owned(), proj.clone(), agent.to_owned());
                         let capped = ceiling.is_some_and(|cap| choice > cap);
-                        group = group.child(
-                            button(SharedString::from(format!("topo-dial-{label}")))
-                                .small()
-                                .outline()
-                                .selected(current_mode == Some(choice))
-                                .disabled(capped)
-                                .label(label)
-                                .when(capped, |btn| {
-                                    btn.tooltip(format!(
-                                        "Capped by project ceiling ({})",
-                                        ceiling.map(mode_label).unwrap_or_default()
-                                    ))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                        button(SharedString::from(format!("topo-dial-{label}")))
+                            .small()
+                            .outline()
+                            .selected(current_mode == Some(choice))
+                            .disabled(capped)
+                            .label(label)
+                            .when(capped, |btn| {
+                                btn.tooltip(format!(
+                                    "Capped by project ceiling ({})",
+                                    ceiling.map(mode_label).unwrap_or_default()
+                                ))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let cap = this.state.project_ceiling(&s, &p);
+                                if choice <= cap {
                                     this.set_mode(s.clone(), p.clone(), a.clone(), choice, cx);
-                                })),
-                        );
-                    }
-                    dial_bar = dial_bar.child(group);
+                                }
+                            }))
+                    });
+                    dial_bar =
+                        dial_bar.child(ButtonGroup::new("topo-autonomy-dial").children(buttons));
+                } else {
+                    dial_bar = dial_bar.child(meta("Pick a project to adjust autonomy mode.", cx));
                 }
 
                 let (edit_space, edit_agent) = (space.to_owned(), agent.to_owned());

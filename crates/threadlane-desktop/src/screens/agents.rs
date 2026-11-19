@@ -80,9 +80,23 @@ impl Desktop {
                     self.state.topology_project(&space.name),
                     when,
                 );
-                screen = screen
-                    .child(section(format!("{} · Org & handoffs", space.name)))
-                    .child(self.agent_topology_view(&space.name, topo, cx));
+                let mut part = v_flex()
+                    .gap(SM)
+                    .child(section(format!("{} · Org & handoffs", space.name)));
+                if let Some(gap) = space.gap(Part::Agents) {
+                    part = part.child(gap_line(&gap, "agents", &space.name, cx));
+                }
+                if let Some(gap) = space.gap(Part::Projects) {
+                    part = part.child(gap_line(&gap, "projects", &space.name, cx));
+                }
+                part = part.child(self.agent_topology_view(&space.name, topo, cx));
+                if self.state.agent_edit().map(|edit| edit.space.as_str())
+                    == Some(space.name.as_str())
+                    && let Some(view) = self.agent_edit_view(cx)
+                {
+                    part = part.child(view);
+                }
+                screen = screen.child(part);
                 continue;
             }
             let mut cards = h_flex().gap(SM).flex_wrap().items_start();

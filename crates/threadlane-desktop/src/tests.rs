@@ -6921,6 +6921,10 @@ fn task_dag_handles_cycles_and_flat_lists_without_panicking() {
     b.task.depends_on = vec![TaskId(10)];
     let cyclic = build_task_dag(&[a, b], &when());
     assert_eq!(cyclic.nodes.len(), 2);
+    // Root must never be counted in its own downstream_blocked count.
+    for node in &cyclic.nodes {
+        assert_eq!(node.downstream_blocked, 1);
+    }
 
     let flat = build_task_dag(
         &[
@@ -6978,8 +6982,52 @@ async fn agent_topology_builds_three_tier_org_and_lights_up_active_delegations()
     // Toggling an agent selects and deselects it for the inline autonomy dial.
     state.toggle_topology_agent("work", "Engineer");
     assert_eq!(state.topology_selected_agent(), Some(("work", "Engineer")));
-    state.toggle_topology_agent("work", "Engineer");
+    state.set_topology_project("work", Some("api".into()));
+    state.space_removed("work");
+    assert_eq!(state.topology_project("work"), None);
     assert_eq!(state.topology_selected_agent(), None);
+}
+
+#[tokio::test]
+async fn agent_topology_shows_general_handoffs_and_keeps_queued_lead_edge_pending() {
+    let mut general_run = task(30, TaskStatus::Running, None);
+    general_run.project = "General".into();
+    general_run.agent = "Engineer".into();
+    let mut queued_api = task(31, TaskStatus::Queued, None);
+    queued_api.project = "api".into();
+    queued_api.agent = "Engineer".into();
+    let hub = FakeHub::new("Work", Vec::new());
+    hub.agents.lock().expect("lock").push(Agent {
+        id: AgentId(1),
+        name: "Engineer".into(),
+        role: "engineer".into(),
+        instructions: String::new(),
+        backends: vec![BackendKind::Claude],
+        models: Default::default(),
+        tools: serde_json::json!([]),
+        requirements: Default::default(),
+    });
+    *hub.tasks.lock().expect("lock") = vec![general_run, queued_api];
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+
+    let topo = state.agent_topology("work", None, &when());
+    // General task lights up a direct Space Lead -> Engineer edge in All projects.
+    assert!(
+        topo.edges
+            .iter()
+            .any(|e| e.id == "topo-edge-general-Engineer"
+                && e.state == EdgeState::Active
+                && e.label.as_deref() == Some("T-0030"))
+    );
+    // Queued work in api alone must not animate the Space Lead -> api edge.
+    let lead_api = topo
+        .edges
+        .iter()
+        .find(|e| e.id == "topo-edge-lead-api")
+        .unwrap();
+    assert_eq!(lead_api.state, EdgeState::Pending);
 }
 
 #[test]

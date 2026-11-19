@@ -2046,6 +2046,14 @@ impl AppState {
         self.recorded_open.retain(|(space, _)| space != name);
         self.always.retain(|(space, _)| space != name);
         self.expanded_quiet.retain(|(space, _)| space != name);
+        self.topology_project.remove(name);
+        if self
+            .topology_selected_agent
+            .as_ref()
+            .is_some_and(|(space, _)| space == name)
+        {
+            self.topology_selected_agent = None;
+        }
         if self
             .open_agent
             .as_ref()

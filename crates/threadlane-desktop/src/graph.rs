@@ -135,7 +135,7 @@ pub fn build_task_dag(tasks: &[TaskSummary], when: &When) -> TaskDag {
     let mut downstream_counts: HashMap<TaskId, usize> = HashMap::with_capacity(tasks.len());
     for summary in tasks {
         let root = summary.task.id;
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::from([root]);
         let mut stack = children.get(&root).cloned().unwrap_or_default();
         let mut blocked = 0usize;
         while let Some(next) = stack.pop() {
@@ -574,23 +574,28 @@ impl AppState {
         }
 
         // Tier 2: Specialists
+        let include_general = selected_project.is_none();
+        let matches_scope = |task_project: &str| {
+            visible_projects.iter().any(|p| p == task_project)
+                || (include_general && task_project == "General")
+        };
         let spec_top = col_top(specialists.len().max(1));
         for (idx, agent) in specialists.iter().enumerate() {
             let id = format!("topo-agent-{space_name}-{}", agent.name);
             let y = spec_top + idx as f32 * (TOPO_NODE_H + TOPO_ROW_GAP);
             let active_task = space.tasks.iter().find(|t| {
                 t.agent == agent.name
-                    && visible_projects.iter().any(|p| p == &t.project)
+                    && matches_scope(&t.project)
                     && matches!(t.task.status, TaskStatus::Running | TaskStatus::InReview)
             });
             let waiting = space.tasks.iter().any(|t| {
                 t.agent == agent.name
-                    && visible_projects.iter().any(|p| p == &t.project)
+                    && matches_scope(&t.project)
                     && t.task.status == TaskStatus::WaitingOnYou
             });
             let failed = space.tasks.iter().any(|t| {
                 t.agent == agent.name
-                    && visible_projects.iter().any(|p| p == &t.project)
+                    && matches_scope(&t.project)
                     && t.task.status == TaskStatus::Failed
             });
             let mode = selected_project
@@ -659,17 +664,17 @@ impl AppState {
         let mut edges = Vec::new();
         let mut active_delegations = 0usize;
 
-        // Space Lead -> Project edges
+        // Space Lead -> Project edges (animate only on active lead runs, not queued work alone)
         for project in &visible_projects {
             let proj_id = format!("topo-project-{space_name}-{project}");
             let (lx, ly) = node_coords[&space_lead_id];
             let (px, py) = node_coords[&proj_id];
-            let running = self.is_working(space_name, project);
+            let lead_running = self.lead_stop(space_name, project).is_some();
             let waiting = space
                 .tasks
                 .iter()
                 .any(|t| t.project == *project && t.task.status == TaskStatus::WaitingOnYou);
-            let state = if running {
+            let state = if lead_running {
                 active_delegations += 1;
                 EdgeState::Active
             } else if waiting {
@@ -686,6 +691,43 @@ impl AppState {
                 state,
                 label: None,
             });
+        }
+
+        // Direct Space Lead -> Specialist edges for tasks in General (when viewing All projects)
+        if include_general {
+            let (lx, ly) = node_coords[&space_lead_id];
+            for agent in &specialists {
+                let active_task = space.tasks.iter().find(|t| {
+                    t.project == "General"
+                        && t.agent == agent.name
+                        && matches!(t.task.status, TaskStatus::Running | TaskStatus::InReview)
+                });
+                let waiting_or_failed = space.tasks.iter().any(|t| {
+                    t.project == "General"
+                        && t.agent == agent.name
+                        && matches!(t.task.status, TaskStatus::WaitingOnYou | TaskStatus::Failed)
+                });
+                if active_task.is_none() && !waiting_or_failed {
+                    continue;
+                }
+                let agent_id = format!("topo-agent-{space_name}-{}", agent.name);
+                let (ax, ay) = node_coords[&agent_id];
+                let (state, label) = if let Some(task) = active_task {
+                    active_delegations += 1;
+                    (EdgeState::Active, Some(task.task.id.to_string()))
+                } else {
+                    (EdgeState::Blocked, None)
+                };
+                edges.push(GraphEdge {
+                    id: format!("topo-edge-general-{}", agent.name),
+                    x1: lx + TOPO_NODE_W,
+                    y1: ly + TOPO_NODE_H * 0.5,
+                    x2: ax,
+                    y2: ay + TOPO_NODE_H * 0.5,
+                    state,
+                    label,
+                });
+            }
         }
 
         // Project -> Specialist edges
