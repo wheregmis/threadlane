@@ -131,7 +131,10 @@ impl Desktop {
             .p(SM)
             .child(self.copyable("copy-branch", change.branch, cx))
             .child(change.state)
-            .children(change.merge);
+            .children(change.merge)
+            .children(change.diffs.iter().enumerate().map(|(index, diff)| {
+                self.diff_preview(format!("task-{space}-{task}-{index}"), diff, cx)
+            }));
         if let Some(url) = change.pull_request {
             let open = url.clone();
             published = published.child(

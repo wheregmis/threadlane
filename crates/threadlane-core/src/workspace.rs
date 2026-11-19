@@ -38,6 +38,43 @@ pub struct WorkspaceCounts {
     pub clones: u64,
 }
 
+/// One file's line counts in a task branch diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFileStat {
+    /// Repository-relative path of the changed file.
+    pub path: String,
+    /// Added lines.
+    pub insertions: u64,
+    /// Deleted lines.
+    pub deletions: u64,
+    /// Whether git reported the file as binary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
+}
+
+/// A bounded file-stat summary and unified diff preview of a task branch
+/// against its repository's default branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffPreview {
+    /// The repository's name.
+    pub repository: String,
+    /// The base branch the diff was computed against.
+    pub base_branch: String,
+    /// Per-file insertion and deletion counts.
+    #[serde(default)]
+    pub files: Vec<DiffFileStat>,
+    /// Total added lines across all files.
+    pub insertions: u64,
+    /// Total deleted lines across all files.
+    pub deletions: u64,
+    /// Bounded unified diff lines (`git diff --unified=3 --no-color`).
+    #[serde(default)]
+    pub patch: String,
+    /// Whether `patch` was clipped to stay within the preview budget.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
 /// Where a task branch stands against its repository's default branch
 /// (docs/merge-help.md): checked when the task finishes, and when a run
 /// starts.
@@ -54,6 +91,9 @@ pub struct MergeCheck {
     pub revision: Option<String>,
     /// The files that conflict; empty when it merges cleanly.
     pub conflicts: Vec<String>,
+    /// Optional bounded diff preview against the base branch. Older results omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffPreview>,
 }
 
 /// An implementation commit for a review, keyed by the project's repository ID.
@@ -142,6 +182,16 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
 
     /// Removes local worktrees and clones, reporting paths it could not remove.
     async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String>;
+
+    /// Computes a bounded diff preview of the task branch against the
+    /// repository's default branch, when the worktree is ready.
+    async fn diff_preview(
+        &self,
+        _task: TaskId,
+        _repository: &Repository,
+    ) -> Result<Option<DiffPreview>, WorkspaceError> {
+        Ok(None)
+    }
 }
 
 /// The branch a task works on: `threadlane/T-0142`.

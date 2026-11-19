@@ -12,7 +12,7 @@ use gpui_kit::component::{Sizable as _, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::DecisionId;
 use threadlane_desktop::{
-    Activity, ProseLimit, Reference, describe, load_decision_link, markdown_source,
+    Activity, ProseLimit, Reference, describe, load_decision_link, markdown_source_with_time,
 };
 
 use super::button;
@@ -65,9 +65,10 @@ impl Desktop {
         cx: &Context<Self>,
     ) -> Prose {
         let id = id.into();
+        let when = self.when();
         Prose {
             id: id.clone(),
-            source: markdown_source(&text),
+            source: markdown_source_with_time(&text, Some(&when)),
             space: space.to_owned(),
             desktop: cx.entity().downgrade(),
             limit: ProseLimit::Full,

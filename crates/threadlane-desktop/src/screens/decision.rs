@@ -118,6 +118,12 @@ impl Desktop {
                 self.decision_context(format!("context-{prefix}"), &key.space, line, cx)
             }))
             .children(contents.details.into_iter().map(|line| div().child(line)))
+            .children(
+                contents
+                    .diff
+                    .as_ref()
+                    .map(|diff| self.diff_preview(format!("decision-{prefix}"), diff, cx)),
+            )
             .children(contents.would_run_as.map(|line| {
                 self.decision_context(format!("would-run-{prefix}"), &key.space, line, cx)
             }))

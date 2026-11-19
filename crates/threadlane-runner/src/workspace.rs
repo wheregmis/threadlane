@@ -28,8 +28,9 @@ use async_trait::async_trait;
 use threadlane_core::ids::{RepositoryId, RunId, TaskId};
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{
-    MergeCheck, ReviewRevision, WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces,
-    task_branch, valid_branch_name, valid_commit_id, valid_repository_name,
+    DiffFileStat, DiffPreview, MergeCheck, ReviewRevision, WorkspaceCounts, WorkspaceError,
+    WorkspaceRemoval, Workspaces, task_branch, valid_branch_name, valid_commit_id,
+    valid_repository_name,
 };
 use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -314,6 +315,98 @@ impl GitWorkspaces {
         git(Some(path), args).await?;
         Ok(())
     }
+
+    /// Computes a bounded diffstat + unified diff preview between `base` and
+    /// `revision` inside `worktree`. Returns `Ok(None)` when the two commits
+    /// have no changes between them.
+    async fn compute_diff_preview(
+        &self,
+        repository: &Repository,
+        worktree: &Path,
+        base: &str,
+        revision: &str,
+    ) -> Result<Option<DiffPreview>, WorkspaceError> {
+        let range = format!("{base}...{revision}");
+        let numstat = git(
+            Some(worktree),
+            ["diff", "--numstat", "--no-renames", range.as_str()],
+        )
+        .await?;
+        let files = parse_numstat(&numstat);
+        if files.is_empty() {
+            return Ok(None);
+        }
+        let insertions = files.iter().map(|f| f.insertions).sum();
+        let deletions = files.iter().map(|f| f.deletions).sum();
+        let raw_patch = git(
+            Some(worktree),
+            [
+                "diff",
+                "--unified=3",
+                "--no-color",
+                "--no-renames",
+                range.as_str(),
+            ],
+        )
+        .await?;
+        let (patch, truncated) = truncate_patch(&raw_patch, DIFF_MAX_LINES, DIFF_MAX_BYTES);
+        Ok(Some(DiffPreview {
+            repository: repository.name.clone(),
+            base_branch: repository.default_branch.clone(),
+            files,
+            insertions,
+            deletions,
+            patch,
+            truncated,
+        }))
+    }
+}
+
+/// Maximum unified diff lines stored in a [`DiffPreview`].
+const DIFF_MAX_LINES: usize = 160;
+/// Maximum UTF-8 bytes stored in a [`DiffPreview`] patch.
+const DIFF_MAX_BYTES: usize = 12 * 1024;
+
+fn parse_numstat(output: &str) -> Vec<DiffFileStat> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let added = parts.next()?;
+            let removed = parts.next()?;
+            let path = parts.next()?.trim();
+            if path.is_empty() {
+                return None;
+            }
+            if added == "-" && removed == "-" {
+                return Some(DiffFileStat {
+                    path: path.to_owned(),
+                    insertions: 0,
+                    deletions: 0,
+                    binary: true,
+                });
+            }
+            Some(DiffFileStat {
+                path: path.to_owned(),
+                insertions: added.parse().ok()?,
+                deletions: removed.parse().ok()?,
+                binary: false,
+            })
+        })
+        .collect()
+}
+
+fn truncate_patch(raw: &str, max_lines: usize, max_bytes: usize) -> (String, bool) {
+    let mut out = String::new();
+    let mut truncated = false;
+    for (index, line) in raw.split_inclusive('\n').enumerate() {
+        if index >= max_lines || out.len() + line.len() > max_bytes {
+            truncated = true;
+            break;
+        }
+        out.push_str(line);
+    }
+    (out.trim_end_matches('\n').to_owned(), truncated)
 }
 
 #[async_trait]
@@ -471,18 +564,21 @@ impl Workspaces for GitWorkspaces {
                 continue;
             }
             let commit = self.fetch_base(repository).await?;
-            let revision = git(
-                Some(&self.worktree(task, repository)),
-                ["rev-parse", "--verify", branch.as_str()],
-            )
-            .await?;
+            let worktree = self.worktree(task, repository);
+            let revision = git(Some(&worktree), ["rev-parse", "--verify", branch.as_str()]).await?;
             let revision = revision.trim().to_owned();
+            let diff = self
+                .compute_diff_preview(repository, &worktree, &commit, &revision)
+                .await
+                .ok()
+                .flatten();
             checks.push(MergeCheck {
                 repository: repository.name.clone(),
                 branch: repository.default_branch.clone(),
                 conflicts: self.conflicts(repository, &commit, &revision).await?,
                 base: commit,
                 revision: Some(revision),
+                diff,
             });
         }
         Ok(checks)
@@ -509,9 +605,31 @@ impl Workspaces for GitWorkspaces {
                 conflicts: self.rebase(repository, &path, &commit, &branch).await?,
                 base: commit,
                 revision: None,
+                diff: None,
             });
         }
         Ok(checks)
+    }
+
+    async fn diff_preview(
+        &self,
+        task: TaskId,
+        repository: &Repository,
+    ) -> Result<Option<DiffPreview>, WorkspaceError> {
+        check(repository)?;
+        let _repo = self.lock_repository(repository.id).await;
+        if !self.is_ready(task, repository) {
+            return Ok(None);
+        }
+        let branch = format!("refs/heads/{}", task_branch(task));
+        let commit = self.fetch_base(repository).await?;
+        let worktree = self.worktree(task, repository);
+        let revision = git(Some(&worktree), ["rev-parse", "--verify", branch.as_str()])
+            .await?
+            .trim()
+            .to_owned();
+        self.compute_diff_preview(repository, &worktree, &commit, &revision)
+            .await
     }
 
     async fn removal_counts(&self, removal: &WorkspaceRemoval) -> WorkspaceCounts {
@@ -837,5 +955,49 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn parse_numstat_handles_text_and_binary_files() {
+        let parsed = parse_numstat("12\t3\tsrc/main.rs\n-\t-\tassets/logo.png\n0\t5\tREADME.md\n");
+        assert_eq!(
+            parsed,
+            vec![
+                DiffFileStat {
+                    path: "src/main.rs".into(),
+                    insertions: 12,
+                    deletions: 3,
+                    binary: false,
+                },
+                DiffFileStat {
+                    path: "assets/logo.png".into(),
+                    insertions: 0,
+                    deletions: 0,
+                    binary: true,
+                },
+                DiffFileStat {
+                    path: "README.md".into(),
+                    insertions: 0,
+                    deletions: 5,
+                    binary: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn truncate_patch_clips_by_lines_and_bytes() {
+        let raw = "line1\nline2\nline3\nline4\n";
+        let (clipped, truncated) = truncate_patch(raw, 2, 1024);
+        assert!(truncated);
+        assert_eq!(clipped, "line1\nline2");
+
+        let (clipped_bytes, truncated_bytes) = truncate_patch(raw, 10, 12);
+        assert!(truncated_bytes);
+        assert_eq!(clipped_bytes, "line1\nline2");
+
+        let (full, not_truncated) = truncate_patch(raw, 10, 1024);
+        assert!(!not_truncated);
+        assert_eq!(full, "line1\nline2\nline3\nline4");
     }
 }
