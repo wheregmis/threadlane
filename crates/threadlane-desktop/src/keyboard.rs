@@ -13,7 +13,7 @@ use threadlane_desktop::{
 
 use crate::components::{key_hint, meta, section};
 use crate::menus;
-use crate::tokens::{FORM_WIDTH, MD, SHORTCUTS_HEIGHT_FRACTION, SM, XS};
+use crate::tokens::{FORM_WIDTH, MD, SCROLLBAR_GUTTER, SHORTCUTS_HEIGHT_FRACTION, SM, XS};
 use crate::{Desktop, Screen, Tab};
 
 /// Which part of the current card should be revealed after layout.
@@ -275,6 +275,7 @@ impl Desktop {
                         .absolute()
                         .bottom(MD)
                         .w_full()
+                        .pr(SCROLLBAR_GUTTER)
                         .flex()
                         .justify_center()
                         .child(
