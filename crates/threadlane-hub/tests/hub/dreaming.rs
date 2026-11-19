@@ -206,6 +206,7 @@ async fn settings_are_project_scoped_validate_cadence_and_own_the_system_timer()
 async fn dreams_learn_from_project_choices_and_give_the_lead_current_evidence() {
     let hub = TestHub::start().await;
     hub.hello().await;
+    set(&hub, None).await;
     hub.api
         .org(OrgRequest::CreateProject {
             name: "Other".into(),
