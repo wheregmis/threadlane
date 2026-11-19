@@ -545,6 +545,7 @@ fn timer(
         created_by_call: None,
         last_fired_at: None,
         fire_count: 0,
+        missed_grace_minutes: None,
         requested: true,
     }
 }

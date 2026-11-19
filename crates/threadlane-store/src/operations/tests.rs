@@ -319,3 +319,41 @@ async fn agent_skills_migrate_onto_a_version_20_database() -> StoreResult<()> {
     assert_eq!(version, crate::SCHEMA_VERSION);
     Ok(())
 }
+
+#[tokio::test]
+async fn existing_version_22_routines_retain_their_missed_run_policy() -> StoreResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v22.db");
+    {
+        let sqlite = rusqlite::Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..22] {
+            sqlite.execute_batch(sql).unwrap();
+        }
+        sqlite
+            .execute_batch(
+                r#"PRAGMA user_version = 22;
+                 INSERT INTO projects(id, name, max_parallel_tasks, created_at)
+                 VALUES(1, 'General', 1, 0);
+                 INSERT INTO lanes(id, project_id, kind) VALUES(1, 1, 'lead');
+                 INSERT INTO timers(id, project_id, lane_id, category, due_at,
+                     recurrence, instruction, status, created_by, requested)
+                 VALUES(1, 1, 1, 'schedule', 60,
+                     '{"rule":"interval","minutes":5,"zone":"UTC"}',
+                     'Keep the first routine', 'active', 'user', 1);"#,
+            )
+            .unwrap();
+    }
+    let db = Db::open(DbLocation::File(&path)).await?;
+    let conn = db.reader()?;
+    let (due, grace) = query_one(
+        &conn,
+        "SELECT due_at, missed_grace_minutes FROM timers WHERE id = 1",
+        (),
+        |row| Ok((Cols(row).i64(0)?, Cols(row).opt_i64(1)?)),
+    )
+    .await?;
+    assert_eq!((due, grace), (60, None));
+    let version = query_one(&conn, "PRAGMA user_version", (), |row| Cols(row).i64(0)).await?;
+    assert_eq!(version, crate::SCHEMA_VERSION);
+    Ok(())
+}
