@@ -61,6 +61,7 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
     match tool {
         threadlane_core::forge::REPORT_LIMITATION
         | crate::dreaming::PROJECT_SESSIONS
+        | crate::dreaming::PROJECT_DECISIONS
         | FINISH_REVIEW => false,
         // ask_project_lead is offered to the General lead only (begin_run).
         SEND_MESSAGE
