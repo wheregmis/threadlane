@@ -12,6 +12,7 @@ use threadlane_core::client::{
     PairingRequest, ProjectSummary, StandingRuleSummary, UserMessage,
 };
 use threadlane_core::client::{TaskReply, TaskRequest, TimerReply, TimerRequest};
+use threadlane_core::github::normalize_remote;
 use threadlane_core::ids::{DecisionId, ProjectId};
 use threadlane_core::memory::INSTRUCTIONS_BUDGET;
 use threadlane_core::model::{
@@ -472,21 +473,19 @@ impl HubApi for ClientApi {
                         "{default_branch:?} is not a valid branch name"
                     )));
                 }
-                if let Some(existing) = db
-                    .repository_by_remote(remote_url)
-                    .await
-                    .map_err(api_error)?
-                {
-                    let owner = db
-                        .project(existing.project_id)
-                        .await
-                        .map_err(api_error)?
-                        .map_or_else(|| existing.project_id.to_string(), |project| project.name);
-                    return Err(ApiError::Invalid(format!(
-                        "the remote {remote_url} is already registered in this space, as \
-                         repository {:?} of project {owner:?}",
-                        existing.name
-                    )));
+                // One repository is one registration, whatever the spelling of
+                // its remote or which branch a task wants of it.
+                let identity = repository_identity(remote_url).await;
+                for owner in db.projects().await.map_err(api_error)? {
+                    for existing in db.repositories(owner.id).await.map_err(api_error)? {
+                        if repository_identity(&existing.remote_url).await == identity {
+                            return Err(ApiError::Invalid(format!(
+                                "the remote {remote_url} is already registered in this space, \
+                                 as repository {:?} of project {:?}",
+                                existing.name, owner.name
+                            )));
+                        }
+                    }
                 }
                 let repository = db
                     .create_repository(&NewRepository {
@@ -1018,6 +1017,12 @@ impl HubApi for ClientApi {
                     rule: self.rule_summary(rule).await?,
                 })
             }
+            DecisionRequest::Remind { decision } => Ok(DecisionReply::Reminder {
+                first: db
+                    .claim_reminder(decision, inner.clock.now())
+                    .await
+                    .map_err(api_error)?,
+            }),
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
     }
@@ -1172,3 +1177,29 @@ impl ClientApi {
 }
 
 mod operations;
+
+/// What a remote names, so one repository matches under any spelling: its
+/// [`normalize_remote`] address; for a local folder, its `origin`'s address,
+/// else its canonical path; else the remote as typed.
+async fn repository_identity(remote: &str) -> String {
+    let remote = remote.trim();
+    if let Some(address) = normalize_remote(remote) {
+        return address;
+    }
+    let folder = remote.strip_prefix("file://").unwrap_or(remote);
+    let Ok(folder) = tokio::fs::canonicalize(folder).await else {
+        return remote.to_owned();
+    };
+    let origin = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(&folder)
+        .args(["config", "--get", "remote.origin.url"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await;
+    origin
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| normalize_remote(String::from_utf8_lossy(&output.stdout).trim()))
+        .unwrap_or_else(|| folder.to_string_lossy().into_owned())
+}

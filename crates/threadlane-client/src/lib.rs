@@ -382,6 +382,12 @@ fn paired_list(paired: &[String]) -> String {
 }
 
 /// The error for an organization reply of the wrong kind.
+/// Whether a hub predates a particular overview request.
+pub fn unknown_overview(error: &ClientError, op: &str) -> bool {
+    matches!(error, ClientError::Api { source: ApiError::Invalid(message), .. }
+        if message.contains(&format!("unknown variant `{op}`")))
+}
+
 fn wrong_reply(space: &str, request: &str) -> ClientError {
     api_error(
         space,
@@ -1220,6 +1226,93 @@ impl ClientCore {
         match self.overview(space, request).await? {
             (_, OverviewReply::Tasks { tasks }) => Ok(tasks),
             (space, _) => Err(wrong_reply(&space, "tasks")),
+        }
+    }
+
+    /// Batches the active project tasks and lead status for one hub.
+    pub async fn work(
+        &self,
+        space: &str,
+    ) -> Result<threadlane_core::client::WorkOverview, ClientError> {
+        match self.overview(Some(space), OverviewRequest::Work).await? {
+            (_, OverviewReply::Work { overview }) => Ok(overview),
+            (space, _) => Err(wrong_reply(&space, "work")),
+        }
+    }
+
+    /// Task details without historical activity, with a fallback for older hubs.
+    pub async fn task_overview(
+        &self,
+        space: &str,
+        task: TaskId,
+    ) -> Result<TaskDetail, ClientError> {
+        match self
+            .overview(Some(space), OverviewRequest::TaskOverview { task })
+            .await
+        {
+            Ok((_, OverviewReply::Task { task })) => Ok(*task),
+            Ok((space, _)) => Err(wrong_reply(&space, "task")),
+            Err(error) if unknown_overview(&error, "task_overview") => {
+                self.task(Some(space), &task.to_string()).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A newest-first page of activity, or fabricated pages from older hubs' full detail.
+    pub async fn task_activity(
+        &self,
+        space: &str,
+        task: TaskId,
+        before: Option<threadlane_core::client::ActivityCursor>,
+    ) -> Result<
+        (
+            Vec<threadlane_core::client::TaskActivityEntry>,
+            Option<threadlane_core::client::ActivityCursor>,
+        ),
+        ClientError,
+    > {
+        use threadlane_core::client::{ActivityCursor, CONVERSATION_PAGE, TaskActivityEntry};
+        match self
+            .overview(Some(space), OverviewRequest::TaskActivity { task, before })
+            .await
+        {
+            Ok((_, OverviewReply::TaskActivity { entries, next })) => Ok((entries, next)),
+            Ok((space, _)) => Err(wrong_reply(&space, "task activity")),
+            Err(error) if unknown_overview(&error, "task_activity") => {
+                let detail = self.task(Some(space), &task.to_string()).await?;
+                let mut entries = detail
+                    .runs
+                    .into_iter()
+                    .rev()
+                    .flat_map(|summary| {
+                        let run = summary.run.id;
+                        summary
+                            .steps
+                            .into_iter()
+                            .enumerate()
+                            .rev()
+                            .map(move |(index, step)| TaskActivityEntry {
+                                position: ActivityCursor {
+                                    run,
+                                    seq: index as i64 + 1,
+                                },
+                                step,
+                            })
+                    })
+                    .filter(|entry| {
+                        before.is_none_or(|before| {
+                            (entry.position.run, entry.position.seq) < (before.run, before.seq)
+                        })
+                    });
+                let size = CONVERSATION_PAGE as usize;
+                let page: Vec<_> = entries.by_ref().take(size).collect();
+                let next = entries
+                    .next()
+                    .and_then(|_| page.last().map(|entry| entry.position));
+                Ok((page, next))
+            }
+            Err(error) => Err(error),
         }
     }
 

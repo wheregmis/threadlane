@@ -34,9 +34,12 @@ struct FakeHub {
     space: String,
     down: AtomicBool,
     old: AtomicBool,
+    batched_work: AtomicBool,
+    project_task_requests: AtomicI64,
     /// Answers like a hub from before it could list recorded events.
     no_recorded: AtomicBool,
     projects_fail: AtomicBool,
+    lead_fail: AtomicBool,
     created: Mutex<Vec<ProjectSummary>>,
     archived: Mutex<BTreeSet<ProjectId>>,
     removed_projects: Mutex<BTreeSet<ProjectId>>,
@@ -547,7 +550,10 @@ impl HubApi for FakeHub {
             return Err(ApiError::Invalid("unknown variant `recorded`".to_owned()));
         }
         match request {
-            OverviewRequest::Tasks { .. } => Ok(OverviewReply::Tasks { tasks }),
+            OverviewRequest::Tasks { .. } => {
+                self.project_task_requests.fetch_add(1, Ordering::SeqCst);
+                Ok(OverviewReply::Tasks { tasks })
+            }
             OverviewRequest::Running => Ok(OverviewReply::Tasks {
                 tasks: tasks
                     .into_iter()
@@ -585,6 +591,9 @@ impl HubApi for FakeHub {
                 machines: self.machines.lock().expect("lock").clone(),
                 accounts: self.accounts.lock().expect("lock").clone(),
             }),
+            OverviewRequest::Lead { .. } if self.lead_fail.load(Ordering::SeqCst) => {
+                Err(ApiError::Internal("lead status unavailable".to_owned()))
+            }
             OverviewRequest::Lead { project } => Ok(OverviewReply::Lead {
                 latest_step: None,
                 running_since: *self.lead.lock().expect("lock"),
@@ -646,6 +655,27 @@ impl HubApi for FakeHub {
                     }),
                 })
             }
+            OverviewRequest::Work if self.batched_work.load(Ordering::SeqCst) => {
+                use threadlane_core::client::{ProjectLeadStatus, WorkOverview};
+                let projects = self.project_list(true).await?;
+                let leads = projects
+                    .iter()
+                    .filter(|project| !project.archived)
+                    .map(|project| ProjectLeadStatus {
+                        project: project.name.clone(),
+                        running_since: *self.lead.lock().unwrap(),
+                        stopped: false,
+                    })
+                    .collect();
+                Ok(OverviewReply::Work {
+                    overview: WorkOverview {
+                        projects,
+                        tasks,
+                        leads,
+                    },
+                })
+            }
+            OverviewRequest::Work => Err(ApiError::Invalid("unknown variant `work`".to_owned())),
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -3004,6 +3034,17 @@ async fn a_new_task_goes_to_an_agent_that_is_on_and_waits_for_open_tasks() {
     assert_eq!(spec.depends_on, [TaskId(1)]);
     assert_eq!(spec.project.as_deref(), Some("api"));
     assert!(spec.draft_pr);
+    let refused = describe(
+        &core
+            .create_task(Some("work"), spec.clone())
+            .await
+            .expect_err("a draft pull request needs a repository"),
+    );
+    assert!(refused.contains("needs a repository"), "{refused}");
+    let spec = threadlane_client::NewTaskSpec {
+        repositories: vec!["app".to_owned()],
+        ..spec
+    };
     let created = core.create_task(Some("work"), spec).await.expect("created");
     assert!(
         created.goal.starts_with("Make it pass")
@@ -6577,4 +6618,259 @@ async fn image_only_drafts_are_scoped_and_survive_undo_failure_and_history_reloa
         1
     );
     assert!(state.conversation("work", "api", &when()).is_empty());
+}
+
+#[tokio::test]
+async fn space_tasks_view_groups_sorts_newest_first_collapses_done_and_filters() {
+    let make = |id: i64, title: &str, project: &str, agent: &str, status: TaskStatus, at: i64| {
+        let mut summary = task(id, status, None);
+        summary.task.title = title.into();
+        summary.task.created_at = Timestamp::from_millis(at);
+        summary.project = project.into();
+        summary.agent = agent.into();
+        summary.machine = Some("hub".into());
+        summary.running_since = (status == TaskStatus::Running).then(|| Timestamp::from_millis(at));
+        summary.completed_at =
+            (status == TaskStatus::Done).then(|| Timestamp::from_millis(at + 60_000));
+        summary
+    };
+    let tasks = vec![
+        make(1, "Old done", "api", "Engineer", TaskStatus::Done, 100_000),
+        make(2, "New done", "web", "Reviewer", TaskStatus::Done, 300_000),
+        make(
+            3,
+            "Broken build",
+            "api",
+            "Engineer",
+            TaskStatus::Failed,
+            200_000,
+        ),
+        make(
+            4,
+            "Waiting on approval",
+            "web",
+            "Lead",
+            TaskStatus::WaitingOnYou,
+            150_000,
+        ),
+        make(
+            5,
+            "Active work",
+            "api",
+            "Engineer",
+            TaskStatus::Running,
+            250_000,
+        ),
+        make(
+            6,
+            "Queued work",
+            "web",
+            "Engineer",
+            TaskStatus::Queued,
+            180_000,
+        ),
+    ];
+    let hub = FakeHub::new("Work", Vec::new());
+    *hub.tasks.lock().expect("lock") = tasks;
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+
+    let view = state.space_tasks_view("work", &when());
+    assert_eq!(view.total, 6);
+    assert_eq!(view.projects, vec!["api", "web"]);
+    assert_eq!(view.agents, vec!["Engineer", "Lead", "Reviewer"]);
+    let groups: Vec<TaskGroup> = view.sections.iter().map(|s| s.group).collect();
+    assert_eq!(
+        groups,
+        vec![
+            TaskGroup::NeedsYou,
+            TaskGroup::Failed,
+            TaskGroup::Running,
+            TaskGroup::Queued,
+            TaskGroup::Done,
+        ]
+    );
+    // Done starts collapsed when active/failed work exists.
+    let done = view.sections.last().unwrap();
+    assert!(done.collapsed);
+    assert_eq!(done.total, 2);
+    assert!(done.rows.is_empty());
+
+    // Expanding Done shows newest first and marks Done rows as quiet.
+    state.toggle_done_tasks_expanded("work");
+    let expanded = state.space_tasks_view("work", &when());
+    let done_rows = &expanded.sections.last().unwrap().rows;
+    assert_eq!(done_rows.len(), 2);
+    assert_eq!(done_rows[0].id, TaskId(2));
+    assert_eq!(done_rows[1].id, TaskId(1));
+    assert!(done_rows[0].quiet);
+    assert!(!expanded.sections[1].rows[0].quiet);
+
+    // Filtering by project + status narrows sections cleanly.
+    state.set_space_task_project_filter("work", Some("api".into()));
+    state.set_space_task_status_filter("work", Some(TaskGroup::Failed));
+    let filtered = state.space_tasks_view("work", &when());
+    assert_eq!(filtered.matched, 1);
+    assert_eq!(filtered.sections.len(), 1);
+    assert_eq!(filtered.sections[0].rows[0].id, TaskId(3));
+
+    state.clear_space_task_filter("work");
+    assert!(!state.space_task_filter("work").is_active());
+}
+
+#[test]
+fn decision_card_and_changes_extract_diff_preview_without_leaking_into_details() {
+    let preview = threadlane_core::workspace::DiffPreview {
+        repository: "threadlane".into(),
+        base_branch: "main".into(),
+        files: vec![threadlane_core::workspace::DiffFileStat {
+            path: "crates/threadlane-desktop/src/tasks.rs".into(),
+            insertions: 42,
+            deletions: 7,
+            binary: false,
+        }],
+        insertions: 42,
+        deletions: 7,
+        patch: "@@ -1,2 +1,3 @@\n+hello".into(),
+        truncated: false,
+    };
+    let mut decision = decision(1, 100_000);
+    decision.question = "Push branch threadlane/T-0001 of threadlane?".into();
+    decision.tool = "publish_branch".into();
+    decision.arguments = serde_json::json!({
+        "repository": "threadlane",
+        threadlane_core::link::DIFF_PREVIEW: preview,
+    });
+    let card = AppState::decision_card(&Queued {
+        space: "work".into(),
+        decision,
+    });
+    assert_eq!(card.diff.as_ref(), Some(&preview));
+    assert!(
+        card.details
+            .iter()
+            .all(|line| !line.contains("diff_preview"))
+    );
+
+    let mut summary = task(1, TaskStatus::Done, None);
+    summary.task.title = "Ship diff preview".into();
+    summary.task.result = Some(serde_json::json!({
+        threadlane_core::link::MERGE_CHECKS: [threadlane_core::workspace::MergeCheck {
+            repository: "threadlane".into(),
+            branch: "main".into(),
+            base: "abcdef1234567890".into(),
+            revision: Some("1234567890abcdef".into()),
+            conflicts: Vec::new(),
+            diff: Some(preview.clone()),
+        }]
+    }));
+    let detail = TaskDetail {
+        summary,
+        branch: "threadlane/T-0001".into(),
+        proposed_by: None,
+        repositories: Vec::new(),
+        stopped: false,
+        runs: Vec::new(),
+        reviews: Vec::new(),
+        decisions: Vec::new(),
+        messages: Vec::new(),
+        related: Vec::new(),
+    };
+    assert_eq!(changes(&detail).diffs, vec![preview]);
+}
+
+#[test]
+fn prose_humanizes_iso_timestamps_and_long_shas_outside_code_and_urls() {
+    // 2026-11-18 18:00 UTC, offset -5h -> 13:00 local.
+    let now = parse_iso_utc("2026-11-18T18:00:00Z").unwrap();
+    let local = When {
+        now,
+        offset_minutes: -300,
+    };
+    let input = "Merged 9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b at 2026-11-18T17:19:47Z \
+                 (keep `9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b`, \
+                 [commit](https://example.com/commit/bcee6b3ac19fc5a6d3039fd55d4813bdfd883568), \
+                 2026-11-18T17:19:€Z, and \
+                 https://github.com/org/repo/commit/9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b).";
+    let rendered = markdown_source_with_time(input, Some(&local));
+    assert!(rendered.contains("Merged `9667947` at 12:19"), "{rendered}");
+    assert!(
+        rendered.contains("`9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b`"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "[commit](https://example.com/commit/bcee6b3ac19fc5a6d3039fd55d4813bdfd883568)"
+        ),
+        "{rendered}"
+    );
+    assert!(rendered.contains("2026-11-18T17:19:€Z"), "{rendered}");
+    assert!(
+        rendered.contains(
+            "https://github.com/org/repo/commit/9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b"
+        ),
+        "{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn batched_refresh_supplies_the_project_board_and_the_tasks_tab_skips_chat() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.batched_work.store(true, Ordering::SeqCst);
+    work.tasks
+        .lock()
+        .unwrap()
+        .push(task(7, TaskStatus::Queued, None));
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    let refreshed = refresh(&core).await;
+    let (tasks, lead) = refreshed.project_parts("work", "api");
+    assert_eq!((tasks, lead), (true, true));
+    assert_eq!(refreshed.project_parts("work", "General"), (true, true));
+    state.apply(refreshed);
+    assert_eq!(state.project_gap("work", "General", Part::Tasks), None);
+    let loaded = load_project_tab(&core, "work", "api", Some(Tab::Tasks), tasks, lead).await;
+    assert!(loaded.tasks.is_none());
+    assert!(loaded.lead.is_none());
+    assert!(loaded.history.is_none());
+    assert!(loaded.recorded.is_none());
+    assert!(loaded.rules.is_none());
+    assert!(loaded.lead_runs.is_none());
+    state.apply_project(loaded);
+    assert_eq!(
+        state.project("work", "api").unwrap().tasks[0].task.id,
+        TaskId(7)
+    );
+    assert_eq!(work.project_task_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_legacy_refresh_reuses_only_the_project_parts_it_supplied() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    assert_eq!(state.project_gap("work", "api", Part::Lead), None);
+    assert_eq!(state.project_gap("work", "api", Part::Tasks), None);
+
+    work.lead_fail.store(true, Ordering::SeqCst);
+    let refreshed = refresh(&core).await;
+    let (tasks, lead) = refreshed.project_parts("work", "api");
+    assert_eq!((tasks, lead), (true, false));
+    state.apply(refreshed);
+    let loaded = load_project_tab(&core, "work", "api", Some(Tab::Tasks), tasks, lead).await;
+    assert!(loaded.tasks.is_none());
+    assert!(matches!(loaded.lead, Some(Err(_))));
+
+    let mut older = load_project_tab(&core, "work", "api", Some(Tab::Tasks), false, false).await;
+    older.keep_refreshed_parts((true, false));
+    assert!(older.tasks.is_none());
+    assert!(matches!(older.lead, Some(Err(_))));
+
+    work.projects_fail.store(true, Ordering::SeqCst);
+    assert_eq!(
+        refresh(&core).await.project_parts("work", "api"),
+        (false, false)
+    );
 }

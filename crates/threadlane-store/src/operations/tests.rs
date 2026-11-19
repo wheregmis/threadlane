@@ -291,3 +291,28 @@ async fn migration_backfills_existing_traces_from_the_oldest_event() -> StoreRes
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn agent_skills_migrate_onto_a_version_20_database() -> StoreResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v20.db");
+    {
+        let sqlite = rusqlite::Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..20] {
+            sqlite.execute_batch(sql).unwrap();
+        }
+        sqlite
+            .execute_batch(
+                "PRAGMA user_version = 20;
+                 INSERT INTO agents (id, name, role) VALUES (1, 'Old', 'helper');",
+            )
+            .unwrap();
+    }
+    let db = Db::open(DbLocation::File(&path)).await?;
+    let conn = db.reader()?;
+    let skills = query_one(&conn, "SELECT skills FROM agents", (), |row| Cols(row).text(0)).await?;
+    assert_eq!(skills, "[]");
+    let version = query_one(&conn, "PRAGMA user_version", (), |row| Cols(row).i64(0)).await?;
+    assert_eq!(version, crate::SCHEMA_VERSION);
+    Ok(())
+}

@@ -39,13 +39,23 @@ impl ClientCore {
     ///
     /// # Errors
     ///
-    /// No such hub, several hubs and none named, or the hub's error, for
-    /// example an agent that is not bound in the project.
+    /// No such hub, several hubs and none named, a draft pull request asked
+    /// for without a repository, or the hub's error, for example an agent
+    /// that is not bound in the project.
     pub async fn create_task(
         &self,
         space: Option<&str>,
         spec: NewTaskSpec,
     ) -> Result<Task, ClientError> {
+        if spec.draft_pr && spec.repositories.is_empty() {
+            let (name, _api) = self.target(space)?;
+            return Err(api_error(
+                &name,
+                ApiError::Invalid(
+                    "A draft pull request needs a repository: choose one for the task.".to_owned(),
+                ),
+            ));
+        }
         let request = TaskRequest::Create {
             project: spec.project,
             title: spec.title,

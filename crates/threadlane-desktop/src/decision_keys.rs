@@ -1,6 +1,8 @@
 //! Keyboard selection and submission for the decisions a screen displays.
 
-use threadlane_core::forge::{COMMENT, CREATE_ISSUE, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{
+    COMMENT, CREATE_ISSUE, MARK_READY, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+};
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::model::{Decision, DecisionKind, DecisionStatus};
 
@@ -297,6 +299,7 @@ fn confirms_number(decision: &Decision) -> bool {
         COMMENT
             | threadlane_core::forge::REPORT_LIMITATION
             | CREATE_ISSUE
+            | MARK_READY
             | OPEN_PULL_REQUEST
             | PUBLISH_BRANCH
             | "memory_view"

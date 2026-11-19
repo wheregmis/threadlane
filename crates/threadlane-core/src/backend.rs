@@ -107,6 +107,8 @@ pub const DENY_RULES: &[&str] = &[
     "gh pr merge",
     "gh release",
     "gh repo delete",
+    // Registering a repository is the user's call, not a task agent's.
+    "threadlane repo add",
 ];
 
 /// Whether a run starts the backend's session or resumes it (Plan.md §4.6).

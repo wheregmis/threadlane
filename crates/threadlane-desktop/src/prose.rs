@@ -204,11 +204,20 @@ fn code_length(text: &str, start: usize, marker: char) -> Option<usize> {
 /// Prepares source for the Markdown view, keeping HTML as literal text.
 #[must_use]
 pub fn markdown_source(text: &str) -> String {
+    markdown_source_with_time(text, None)
+}
+
+/// Prepares source for the Markdown view, keeping HTML as literal text and
+/// optionally humanizing bare ISO-8601 UTC timestamps and full 40-char git SHAs
+/// outside code and URLs.
+#[must_use]
+pub fn markdown_source_with_time(text: &str, when: Option<&crate::When>) -> String {
     let mut source = String::with_capacity(text.len());
     for segment in segments(text) {
         match segment {
             Segment::Text(text) => {
-                source.push_str(&text.replace('<', "&lt;").replace("![", "&#33;["))
+                let humanized = humanize_plain_text(text, when);
+                source.push_str(&humanized.replace('<', "&lt;").replace("![", "&#33;["));
             }
             Segment::ImageMarker => source.push_str("&#33;"),
             Segment::Angle => source.push_str("&lt;"),
@@ -223,6 +232,79 @@ pub fn markdown_source(text: &str) -> String {
         }
     }
     source
+}
+
+/// Rewrites standalone ISO-8601 UTC timestamps (`2026-11-18T17:19:47Z`) to
+/// local moments (when `when` is provided) and bare 40-char lowercase hex git
+/// SHAs to short inline code spans (`` `9667947` ``).
+fn humanize_plain_text(text: &str, when: Option<&crate::When>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    let mut plain = 0;
+    while pos < text.len() {
+        let start = pos;
+        let rest = &text[start..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        pos += ch.len_utf8();
+        // Preserve explicit Markdown links (`[label](dest)` / `[label][ref]`)
+        // verbatim so link destinations are never rewritten.
+        if ch == '['
+            && let Some(len) = explicit_link(rest)
+        {
+            pos = start + len;
+            continue;
+        }
+        if !boundary(text[..start].chars().next_back()) {
+            continue;
+        }
+        // Check for ISO-8601 UTC timestamp: YYYY-MM-DDTHH:MM:SS[.fff]Z
+        if let Some(when) = when
+            && ch.is_ascii_digit()
+            && rest.len() >= 20
+            && rest.as_bytes().get(4) == Some(&b'-')
+            && rest.as_bytes().get(10) == Some(&b'T')
+            && let Some(z_offset) = rest.find('Z')
+            && (19..=30).contains(&z_offset)
+        {
+            let candidate = &rest[..=z_offset];
+            if boundary(rest[candidate.len()..].chars().next())
+                && let Some(ts) = crate::clock::parse_iso_utc(candidate)
+            {
+                out.push_str(&text[plain..start]);
+                out.push_str(&when.moment(ts));
+                pos = start + candidate.len();
+                plain = pos;
+                continue;
+            }
+        }
+        // Check for bare 40-char lowercase hex commit SHA (must contain at least one a-f
+        // and one digit so plain 40-digit numbers aren't touched).
+        if (ch.is_ascii_digit() || matches!(ch, 'a'..='f')) && rest.len() >= 40 {
+            let hex_len = rest
+                .bytes()
+                .take_while(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+                .count();
+            if hex_len == 40 && boundary(rest[40..].chars().next()) {
+                let sha = &rest[..40];
+                let has_alpha = sha.bytes().any(|b| matches!(b, b'a'..=b'f'));
+                let has_digit = sha.bytes().any(|b| b.is_ascii_digit());
+                if has_alpha && has_digit {
+                    out.push_str(&text[plain..start]);
+                    out.push('`');
+                    out.push_str(&sha[..7]);
+                    out.push('`');
+                    pos = start + 40;
+                    plain = pos;
+                }
+            }
+        }
+    }
+    if plain < text.len() {
+        out.push_str(&text[plain..]);
+    }
+    out
 }
 
 /// A rendered prose disclosure. The kit reports overflow after layout.

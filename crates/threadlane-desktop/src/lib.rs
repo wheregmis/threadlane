@@ -48,7 +48,7 @@ mod tasks;
 mod timeline;
 
 pub use agent_edit::{AgentBinding, AgentEdit, AgentFields};
-pub use clock::{When, duration};
+pub use clock::{When, duration, format_count, parse_iso_utc};
 pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
 pub use control::{
     AgentDraft, AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository,
@@ -78,7 +78,9 @@ pub use permissions::{
     AgentRow, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement, allows,
     applied, cell_label, matrix, mode_label,
 };
-pub use prose::{ProseLimit, Reference, Segment, markdown_source, segments};
+pub use prose::{
+    ProseLimit, Reference, Segment, markdown_source, markdown_source_with_time, segments,
+};
 pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
 };
@@ -87,9 +89,10 @@ pub use settings::{
     parse_pacing,
 };
 pub use tasks::{
-    BoardCard, Changes, Column, InProgress, LatestStep, Moment, TaskHeader, WorkRow, activity_runs,
-    changes, chips, merge_state, running_elapsed, status_label, task_header, timeline, usage,
-    work_elapsed,
+    BoardCard, Changes, Column, InProgress, LatestStep, Moment, SpaceTaskFilter, SpaceTasksView,
+    TaskGroup, TaskHeader, TaskTriageRow, TaskTriageSection, WorkRow, activity_runs, changes,
+    chips, merge_state, running_elapsed, status_label, task_header, timeline, usage, work_elapsed,
+    work_started,
 };
 pub use timeline::{Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, load_timeline};
 
@@ -525,6 +528,8 @@ pub struct DecisionCard {
     pub note_label: &'static str,
     /// The recommended option's index, if the hub picked one.
     pub recommended: Option<usize>,
+    /// Optional bounded diff preview attached to a publish approval decision.
+    pub diff: Option<threadlane_core::workspace::DiffPreview>,
 }
 
 fn decision_label(kind: DecisionKind) -> &'static str {
@@ -717,12 +722,37 @@ pub struct Refresh {
     clients: Vec<(String, Result<Vec<AdmittedKey>, ClientError>)>,
     decisions: Vec<SpaceDecisions>,
     running: Vec<SpaceListing<Vec<TaskSummary>>>,
-    leads: Vec<(String, String, Result<Option<Timestamp>, ClientError>)>,
+    leads: Vec<(String, threadlane_core::client::ProjectLeadStatus)>,
     machines: Vec<SpaceListing<SpaceMachines>>,
     recent: Vec<SpaceListing<Vec<SpaceFeedItem>>>,
     recorded: Vec<SpaceListing<u64>>,
     held: Vec<SpaceListing<Option<HeldResults>>>,
     tasks: Vec<(String, Result<Vec<TaskSummary>, ClientError>)>,
+}
+
+impl Refresh {
+    /// Whether this refresh supplied tasks and lead status for the named project.
+    pub fn project_parts(&self, space: &str, project: &str) -> (bool, bool) {
+        let active = self.projects.iter().any(|(name, listed)| {
+            name == space
+                && listed.as_ref().is_ok_and(|projects| {
+                    projects
+                        .iter()
+                        .any(|row| row.name == project && !row.archived)
+                })
+        });
+        let tasks = active
+            && self
+                .tasks
+                .iter()
+                .any(|(name, listed)| name == space && listed.is_ok());
+        let lead = active
+            && self
+                .leads
+                .iter()
+                .any(|(name, lead)| name == space && lead.project == project);
+        (tasks, lead)
+    }
 }
 
 /// Asks every paired hub about itself, its projects, agents, admitted
@@ -737,34 +767,70 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
     let mut leads = Vec::new();
     for status in statuses.iter().filter(|status| status.is_reachable()) {
         let name = status.name.as_str();
-        let listed = core
-            .project_list(Some(name), true)
-            .await
-            .map(|listed| listed.projects);
-        if let Ok(listed) = &listed {
-            tasks.push((name.to_owned(), all_tasks(core, name, listed).await));
-            for project in listed.iter().filter(|project| !project.archived) {
-                let running = core.lead(Some(name), Some(&project.name)).await;
-                leads.push((name.to_owned(), project.name.clone(), running));
+        let (work, space_agents, space_clients) = tokio::join!(
+            core.work(name),
+            core.agents(Some(name)),
+            core.clients(Some(name))
+        );
+        match work {
+            Ok(work) => {
+                projects.push((name.to_owned(), Ok(work.projects)));
+                tasks.push((name.to_owned(), Ok(work.tasks)));
+                leads.extend(work.leads.into_iter().map(|lead| (name.to_owned(), lead)));
+            }
+            Err(error) => {
+                let listed = core
+                    .project_list(Some(name), true)
+                    .await
+                    .map(|listed| listed.projects);
+                if threadlane_client::unknown_overview(&error, "work") {
+                    if let Ok(listed) = &listed {
+                        tasks.push((name.to_owned(), all_tasks(core, name, listed).await));
+                        for project in listed.iter().filter(|project| !project.archived) {
+                            if let Ok((running_since, stopped)) =
+                                core.lead_status(Some(name), Some(&project.name)).await
+                            {
+                                leads.push((
+                                    name.to_owned(),
+                                    threadlane_core::client::ProjectLeadStatus {
+                                        project: project.name.clone(),
+                                        running_since,
+                                        stopped,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    tasks.push((name.to_owned(), Err(error)));
+                }
+                projects.push((name.to_owned(), listed));
             }
         }
-        projects.push((name.to_owned(), listed));
-        agents.push((name.to_owned(), core.agents(Some(name)).await));
-        clients.push((name.to_owned(), core.clients(Some(name)).await));
+        agents.push((name.to_owned(), space_agents));
+        clients.push((name.to_owned(), space_clients));
     }
     // The only error with no space named is "no hub paired": nothing to show.
+    let (decisions, running, machines, recent, recorded, held) = tokio::join!(
+        core.decisions(None),
+        core.running(None),
+        core.machines(None),
+        core.recent(None, RECENT),
+        core.recorded_count(None),
+        core.held_results(None),
+    );
     Refresh {
         statuses,
         leads,
         projects,
         agents,
         clients,
-        decisions: core.decisions(None).await.unwrap_or_default(),
-        running: core.running(None).await.unwrap_or_default(),
-        machines: core.machines(None).await.unwrap_or_default(),
-        recent: core.recent(None, RECENT).await.unwrap_or_default(),
-        recorded: core.recorded_count(None).await.unwrap_or_default(),
-        held: core.held_results(None).await.unwrap_or_default(),
+        decisions: decisions.unwrap_or_default(),
+        running: running.unwrap_or_default(),
+        machines: machines.unwrap_or_default(),
+        recent: recent.unwrap_or_default(),
+        recorded: recorded.unwrap_or_default(),
+        held: held.unwrap_or_default(),
         tasks,
     }
 }
@@ -777,9 +843,10 @@ async fn all_tasks(
     projects: &[ProjectSummary],
 ) -> Result<Vec<TaskSummary>, ClientError> {
     let mut all: Vec<TaskSummary> = Vec::new();
+    let mut seen = HashSet::new();
     for project in projects.iter().filter(|project| !project.archived) {
         for summary in core.tasks(Some(space), Some(&project.name)).await? {
-            if !all.iter().any(|known| known.task.id == summary.task.id) {
+            if seen.insert(summary.task.id) {
                 all.push(summary);
             }
         }
@@ -793,39 +860,113 @@ async fn all_tasks(
 pub struct ProjectLoad {
     space: String,
     project: String,
-    tasks: Result<Vec<TaskSummary>, ClientError>,
-    repositories: Result<Vec<threadlane_core::model::Repository>, ClientError>,
-    bindings: Result<Vec<BindingSummary>, ClientError>,
-    history: Result<Vec<ConversationEntry>, ClientError>,
+    tasks: Option<Result<Vec<TaskSummary>, ClientError>>,
+    repositories: Option<Result<Vec<threadlane_core::model::Repository>, ClientError>>,
+    bindings: Option<Result<Vec<BindingSummary>, ClientError>>,
+    history: Option<Result<Vec<ConversationEntry>, ClientError>>,
     decision_records: Vec<Decision>,
-    lead: Result<(Option<Timestamp>, bool), ClientError>,
-    recorded: Result<(Vec<RecordedEvent>, u64), ClientError>,
-    rules: Result<Vec<StandingRuleSummary>, ClientError>,
-    lead_runs: Result<Vec<LeadRun>, ClientError>,
+    lead: Option<Result<(Option<Timestamp>, bool), ClientError>>,
+    recorded: Option<Result<(Vec<RecordedEvent>, u64), ClientError>>,
+    rules: Option<Result<Vec<StandingRuleSummary>, ClientError>>,
+    lead_runs: Option<Result<Vec<LeadRun>, ClientError>>,
+}
+
+impl ProjectLoad {
+    /// Keeps work already applied by a refresh that arrived during this load.
+    pub fn keep_refreshed_parts(&mut self, (tasks, lead): (bool, bool)) {
+        if tasks {
+            self.tasks = None;
+        }
+        if lead {
+            self.lead = None;
+        }
+    }
 }
 
 /// Asks a project's hub for its tasks, repositories, bindings, the newest
 /// page of its conversation, whether its lead is working, and the events
 /// it recorded and did not act on.
 pub async fn load_project(core: &ClientCore, space: &str, project: &str) -> ProjectLoad {
+    load_project_tab(core, space, project, None, false, false).await
+}
+
+/// Fetches the parts used by the current tab. A successful space refresh already supplied work.
+pub async fn load_project_tab(
+    core: &ClientCore,
+    space: &str,
+    project: &str,
+    tab: Option<Tab>,
+    fresh_tasks: bool,
+    fresh_lead: bool,
+) -> ProjectLoad {
     let (in_space, named) = (Some(space), Some(project));
-    let history = core.conversation(in_space, named, None, PAGE).await;
-    let decision_records =
-        decision_record::load_records(core, space, history.as_deref().unwrap_or_default()).await;
+    let chat = tab.is_none_or(|tab| tab == Tab::Conversation);
+    let setup = tab.is_none_or(|tab| tab == Tab::Setup);
+    let (tasks, repositories, bindings, history, lead, recorded, rules, lead_runs) = tokio::join!(
+        async {
+            if !fresh_tasks {
+                Some(core.tasks(in_space, named).await)
+            } else {
+                None
+            }
+        },
+        async { Some(core.repositories(in_space, named).await) },
+        async { Some(core.bindings(in_space, named).await) },
+        async {
+            if chat {
+                Some(core.conversation(in_space, named, None, PAGE).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if fresh_lead {
+                None
+            } else {
+                Some(core.lead_status(in_space, named).await)
+            }
+        },
+        async {
+            if chat {
+                Some(
+                    core.recorded(in_space, named, control::RECORDED_SHOWN)
+                        .await,
+                )
+            } else {
+                None
+            }
+        },
+        async {
+            if setup {
+                Some(core.standing_rules(in_space, named).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if chat {
+                Some(core.lead_runs(in_space, named).await)
+            } else {
+                None
+            }
+        },
+    );
+    let decision_records = match &history {
+        Some(Ok(history)) => decision_record::load_records(core, space, history).await,
+        _ => Vec::new(),
+    };
     ProjectLoad {
         space: space.to_owned(),
         project: project.to_owned(),
-        tasks: core.tasks(in_space, named).await,
-        repositories: core.repositories(in_space, named).await,
-        bindings: core.bindings(in_space, named).await,
+        tasks,
+        repositories,
+        bindings,
         history,
         decision_records,
-        lead: core.lead_status(in_space, named).await,
-        recorded: core
-            .recorded(in_space, named, control::RECORDED_SHOWN)
-            .await,
-        rules: core.standing_rules(in_space, named).await,
-        lead_runs: core.lead_runs(in_space, named).await,
+        lead,
+        recorded,
+        rules,
+        lead_runs,
     }
 }
 
@@ -867,6 +1008,15 @@ pub async fn load_task(core: &ClientCore, space: &str, task: TaskId) -> TaskLoad
         space: space.to_owned(),
         task,
         detail: core.task(Some(space), &task.to_string()).await,
+    }
+}
+
+/// Asks the hub for the task screen's initial details.
+pub async fn load_task_overview(core: &ClientCore, space: &str, task: TaskId) -> TaskLoad {
+    TaskLoad {
+        space: space.to_owned(),
+        task,
+        detail: core.task_overview(space, task).await,
     }
 }
 
@@ -1020,6 +1170,12 @@ pub struct AppState {
     expanded: HashSet<InSpace<i64>>,
     /// The space Home shows; `None` for all.
     filter: Option<String>,
+    /// Per-space filters on the space-wide Tasks triage screen.
+    space_task_filters: HashMap<String, SpaceTaskFilter>,
+    /// Spaces where the collapsed `Done` section on Tasks has been expanded.
+    done_tasks_expanded: HashSet<String>,
+    /// Diff preview blocks expanded by the user (keyed by UI element id).
+    expanded_diffs: HashSet<String>,
     /// Where the Home composer sends: space and project.
     target_space: Option<String>,
     last_targets: BTreeMap<String, String>,
@@ -1144,6 +1300,71 @@ impl AppState {
         }
     }
 
+    /// Active filters on the space-wide Tasks triage screen.
+    #[must_use]
+    pub fn space_task_filter(&self, space: &str) -> SpaceTaskFilter {
+        self.space_task_filters
+            .get(space)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Filters the space-wide Tasks screen by status group (`None` = all).
+    pub fn set_space_task_status_filter(&mut self, space: &str, status: Option<TaskGroup>) {
+        self.space_task_filters
+            .entry(space.to_owned())
+            .or_default()
+            .status = status;
+    }
+
+    /// Filters the space-wide Tasks screen by project (`None` = all).
+    pub fn set_space_task_project_filter(&mut self, space: &str, project: Option<String>) {
+        self.space_task_filters
+            .entry(space.to_owned())
+            .or_default()
+            .project = project;
+    }
+
+    /// Filters the space-wide Tasks screen by agent (`None` = all).
+    pub fn set_space_task_agent_filter(&mut self, space: &str, agent: Option<String>) {
+        self.space_task_filters
+            .entry(space.to_owned())
+            .or_default()
+            .agent = agent;
+    }
+
+    /// Clears all filters on the space-wide Tasks screen.
+    pub fn clear_space_task_filter(&mut self, space: &str) {
+        self.space_task_filters.remove(space);
+    }
+
+    /// Whether the `Done` section on the space-wide Tasks screen is expanded.
+    #[must_use]
+    pub fn is_done_tasks_expanded(&self, space: &str) -> bool {
+        self.done_tasks_expanded.contains(space)
+    }
+
+    /// Toggles the `Done` section on the space-wide Tasks screen.
+    pub fn toggle_done_tasks_expanded(&mut self, space: &str) {
+        if !self.done_tasks_expanded.remove(space) {
+            self.done_tasks_expanded.insert(space.to_owned());
+        }
+    }
+
+    /// Whether a diff preview block is expanded.
+    #[must_use]
+    pub fn diff_expanded(&self, id: &str) -> bool {
+        self.expanded_diffs.contains(id)
+    }
+
+    /// Toggles a diff preview block's expanded state.
+    pub fn toggle_diff_expanded(&mut self, id: impl Into<String>) {
+        let id = id.into();
+        if !self.expanded_diffs.remove(&id) {
+            self.expanded_diffs.insert(id);
+        }
+    }
+
     fn shown(&self, space: &str) -> bool {
         self.filter.as_deref().is_none_or(|only| only == space)
     }
@@ -1220,6 +1441,10 @@ impl AppState {
                 "Note (optional)",
             ),
         };
+        let diff = decision
+            .arguments
+            .get(threadlane_core::link::DIFF_PREVIEW)
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
         DecisionCard {
             chip: (decision.kind != DecisionKind::Approval).then(|| decision_label(decision.kind)),
             dashed,
@@ -1230,6 +1455,7 @@ impl AppState {
             recommended: decision
                 .recommended
                 .and_then(|index| usize::try_from(index).ok()),
+            diff,
         }
     }
 
@@ -1821,14 +2047,21 @@ impl AppState {
                 spaces[at].projects = listed;
             }
         }
-        for (name, project, running) in leads {
+        for (name, lead) in leads {
             if let Some(at) = find(&mut spaces, &name)
-                && let Ok(running) = running
+                && spaces[at]
+                    .projects
+                    .iter()
+                    .any(|project| project.name == lead.project && !project.archived)
             {
-                spaces[at].leads.retain(|(known, _)| *known != project);
-                if let Some(start) = running {
-                    spaces[at].leads.push((project, start));
+                spaces[at].leads.retain(|(known, _)| *known != lead.project);
+                if let Some(start) = lead.running_since {
+                    spaces[at].leads.push((lead.project.clone(), start));
                 }
+                let view = self.projects.entry((name, lead.project)).or_default();
+                view.lead = lead.running_since;
+                view.stopped = lead.stopped;
+                view.answers.insert(Part::Lead, Answer::Answered);
             }
         }
         for (name, listed) in agents {
@@ -1865,6 +2098,32 @@ impl AppState {
             if let Some(at) = find(&mut spaces, &name)
                 && let Some(listed) = spaces[at].take(Part::Tasks, listed)
             {
+                if matches!(spaces[at].answers.get(&Part::Tasks), Some(Answer::Answered))
+                    && matches!(
+                        spaces[at].answers.get(&Part::Projects),
+                        Some(Answer::Answered)
+                    )
+                {
+                    let mut by_project = HashMap::<_, Vec<_>>::new();
+                    for summary in &listed {
+                        by_project
+                            .entry(summary.task.project_id)
+                            .or_default()
+                            .push(summary.clone());
+                    }
+                    for project in spaces[at]
+                        .projects
+                        .iter()
+                        .filter(|project| !project.archived)
+                    {
+                        let view = self
+                            .projects
+                            .entry((name.clone(), project.name.clone()))
+                            .or_default();
+                        view.tasks = by_project.remove(&project.id).unwrap_or_default();
+                        view.answers.insert(Part::Tasks, Answer::Answered);
+                    }
+                }
                 spaces[at].tasks = listed;
             }
         }
@@ -2032,21 +2291,34 @@ impl AppState {
             .projects
             .entry((space.clone(), project.clone()))
             .or_default();
-        view.tasks = take(&mut view.answers, Part::Tasks, tasks);
-        view.repositories = take(&mut view.answers, Part::Repositories, repositories);
-        view.bindings = take(&mut view.answers, Part::Bindings, bindings);
-        (view.lead, view.stopped) = take(&mut view.answers, Part::Lead, lead);
-        view.recorded = Some(recorded.map_err(|error| describe(&error)));
-        view.rules = take(&mut view.answers, Part::Rules, rules);
-        // An older hub can still serve the rest of the conversation.
-        if let Ok(runs) = lead_runs {
+        if let Some(tasks) = tasks {
+            view.tasks = take(&mut view.answers, Part::Tasks, tasks);
+        }
+        if let Some(repositories) = repositories {
+            view.repositories = take(&mut view.answers, Part::Repositories, repositories);
+        }
+        if let Some(bindings) = bindings {
+            view.bindings = take(&mut view.answers, Part::Bindings, bindings);
+        }
+        if let Some(lead) = lead {
+            (view.lead, view.stopped) = take(&mut view.answers, Part::Lead, lead);
+        }
+        if let Some(recorded) = recorded {
+            view.recorded = Some(recorded.map_err(|error| describe(&error)));
+        }
+        if let Some(rules) = rules {
+            view.rules = take(&mut view.answers, Part::Rules, rules);
+        }
+        if let Some(Ok(runs)) = lead_runs {
             view.lead_runs = runs;
         }
-        let listed = history.is_ok();
-        let entries = take(&mut view.answers, Part::Conversation, history);
-        self.remember_decisions(&space, decision_records);
-        if listed {
-            self.take_history(&space, &project, entries, true, PAGE);
+        if let Some(history) = history {
+            let listed = history.is_ok();
+            let entries = take(&mut view.answers, Part::Conversation, history);
+            self.remember_decisions(&space, decision_records);
+            if listed {
+                self.take_history(&space, &project, entries, true, PAGE);
+            }
         }
     }
 

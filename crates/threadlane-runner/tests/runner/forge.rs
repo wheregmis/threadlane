@@ -342,6 +342,10 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
         .apply(remote, &RepositoryAction::Merge { number })
         .await
         .unwrap();
+    forge
+        .apply(remote, &RepositoryAction::MarkReady { number })
+        .await
+        .unwrap();
     let repo = "--repo=github.test/acme/app";
     assert_eq!(
         gh.invocations(),
@@ -356,6 +360,7 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
                 repo
             ],
             vec!["pr", "merge", "12", "--merge", repo],
+            vec!["pr", "ready", "12", repo],
         ]
     );
 }

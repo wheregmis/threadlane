@@ -37,6 +37,7 @@ impl Desktop {
             options,
             origin,
             asked,
+            asked_at,
             contents,
             record,
             current,
@@ -99,7 +100,14 @@ impl Desktop {
                     .child(copy_id)
                     .child(meta(origin, cx))
                     .children(contents.chip.map(|chip| count_badge(chip, cx)))
-                    .child(meta(asked, cx)),
+                    .child(asked_at.map_or_else(
+                        || meta(asked, cx).into_any_element(),
+                        |at| {
+                            crate::components::Elapsed::new(format!("asked-{prefix}"), at)
+                                .asked()
+                                .into_any_element()
+                        },
+                    )),
             )
             .child(decision_title(question))
             .children(body.map(|body| {
@@ -110,6 +118,12 @@ impl Desktop {
                 self.decision_context(format!("context-{prefix}"), &key.space, line, cx)
             }))
             .children(contents.details.into_iter().map(|line| div().child(line)))
+            .children(
+                contents
+                    .diff
+                    .as_ref()
+                    .map(|diff| self.diff_preview(format!("decision-{prefix}"), diff, cx)),
+            )
             .children(contents.would_run_as.map(|line| {
                 self.decision_context(format!("would-run-{prefix}"), &key.space, line, cx)
             }))

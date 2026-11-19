@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::admission::AdmittedKey;
-use crate::ids::{DecisionId, EventId, LaneId, ProjectId, StandingRuleId, TaskId, TimerId};
+use crate::ids::{DecisionId, EventId, LaneId, ProjectId, RunId, StandingRuleId, TaskId, TimerId};
 use crate::model::{
     Account, Agent, BackendKind, Cell, Decision, EventKind, Machine, MemoryFile, Mode,
     OutboxMessage, Recurrence, Repository, Run, StandingRule, Task, Timer,
@@ -497,6 +497,9 @@ pub enum DecisionRequest {
     StandingRules { project: Option<String> },
     /// Revokes a standing rule; the next matching call asks again.
     RevokeRule { rule: StandingRuleId },
+    /// Claims the one reminder for a decision still waiting. Answered with
+    /// [`DecisionReply::Reminder`], `first` only for the first claim.
+    Remind { decision: DecisionId },
 }
 
 /// A standing rule as a client lists it.
@@ -529,6 +532,10 @@ pub enum DecisionReply {
     /// The rule as it now stands.
     StandingRule {
         rule: StandingRuleSummary,
+    },
+    /// Whether this was the first claim of the decision's reminder.
+    Reminder {
+        first: bool,
     },
 }
 
@@ -651,7 +658,7 @@ pub struct TaskDetail {
 /// A submitted revision and its committed review outcome, if available.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskReviewActivity {
-    pub submission: crate::ids::RunId,
+    pub submission: RunId,
     pub reviewer: crate::ids::AgentId,
     pub reviewer_name: String,
     pub revisions: Vec<crate::workspace::ReviewRevision>,
@@ -728,6 +735,16 @@ pub enum OverviewRequest {
     Running,
     /// One task in full.
     Task { task: TaskId },
+    /// The task details used on the desktop before Activity is opened.
+    TaskOverview { task: TaskId },
+    /// One page of a task's journal steps, newest first.
+    TaskActivity {
+        task: TaskId,
+        before: Option<ActivityCursor>,
+    },
+    /// Active projects' task and lead summaries.
+    Work,
+
     /// The newest `limit` entries of the conversation with a project's lead
     /// before `before` (the newest of all when `None`), oldest first. `None`
     /// as the project means the General project. Requests larger than
@@ -770,11 +787,46 @@ pub struct RecordedEvent {
     pub received_at: Timestamp,
 }
 
+/// Active projects' lead status and tasks, refreshed together.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkOverview {
+    pub projects: Vec<ProjectSummary>,
+    pub tasks: Vec<TaskSummary>,
+    pub leads: Vec<ProjectLeadStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectLeadStatus {
+    pub project: String,
+    pub running_since: Option<Timestamp>,
+    pub stopped: bool,
+}
+
+/// Exclusive position in the newest-first task activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityCursor {
+    pub run: RunId,
+    pub seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskActivityEntry {
+    pub position: ActivityCursor,
+    pub step: RunStep,
+}
+
 /// The answer to an [`OverviewRequest`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OverviewReply {
+    Work {
+        overview: WorkOverview,
+    },
+    TaskActivity {
+        entries: Vec<TaskActivityEntry>,
+        next: Option<ActivityCursor>,
+    },
     Tasks {
         tasks: Vec<TaskSummary>,
     },
@@ -1293,7 +1345,7 @@ pub struct LaneInspection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TracedToolCall {
     /// The run that started the call.
-    pub run_id: crate::ids::RunId,
+    pub run_id: RunId,
     /// Idempotency key within that run.
     pub key: String,
     /// Name of the system tool.

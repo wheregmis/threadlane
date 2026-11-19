@@ -458,7 +458,11 @@ impl LocalLink {
         }
         if matches!(
             decision.tool.as_str(),
-            crate::COMMENT | crate::CREATE_ISSUE | crate::MERGE | REPORT_LIMITATION
+            crate::COMMENT
+                | crate::CREATE_ISSUE
+                | crate::MERGE
+                | crate::MARK_READY
+                | REPORT_LIMITATION
         ) {
             let (remote, action) = if decision.tool == REPORT_LIMITATION {
                 let (title, body) = dreaming::report_issue(&decision.arguments)

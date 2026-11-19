@@ -98,8 +98,7 @@ async fn one_run_follows_the_cycle_exactly() {
             Call::Pending { lane: LANE_ID },
             Call::BeginRun { lane: LANE_ID },
             Call::Append { seqs: vec![1] },
-            Call::Append { seqs: vec![2] },
-            Call::Append { seqs: vec![3] },
+            Call::Append { seqs: vec![2, 3] },
             Call::Complete {
                 run: RunId(11),
                 final_text: Some("done".into()),
@@ -323,6 +322,14 @@ async fn journal_entries_are_numbered_from_one_and_all_appended_before_complete(
     assert!(journal.iter().all(|entry| entry.at == h.now()));
 
     let calls = h.calls();
+    let batches: Vec<_> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Append { seqs } => Some(seqs.as_slice()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(batches, [&[1][..], &[2, 3], &[4, 5, 6]]);
     let complete = calls
         .iter()
         .position(|call| matches!(call, Call::Complete { .. }))
@@ -351,8 +358,9 @@ async fn an_unreachable_append_is_retried_with_the_next_event() {
         appends,
         vec![
             Call::Append { seqs: vec![1] },
-            Call::Append { seqs: vec![1, 2] },
-            Call::Append { seqs: vec![3] },
+            Call::Append {
+                seqs: vec![1, 2, 3]
+            },
         ]
     );
     let seqs: Vec<i64> = h.link.journal().iter().map(|entry| entry.seq).collect();
@@ -373,7 +381,6 @@ async fn an_unreachable_append_is_retried_with_the_next_event() {
 async fn a_run_is_never_completed_with_entries_left_unsent() {
     let h = Harness::new();
     script_one_run(&h);
-    h.link.push_append(Ok(()));
     h.link.push_append(Ok(()));
     h.link.push_append(Err(LinkError::Unreachable));
 
@@ -444,6 +451,13 @@ async fn a_run_past_its_wall_time_is_stopped_and_fails_with_limit_exceeded() {
         .push(Script::new().text("thinking").then(ScriptStep::Hang));
 
     let task = h.spawn_work_once();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while h.link.journal().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the pending journal batch flushes even while the backend waits");
     eventually("the run hangs", || {
         h.link.journal().len() == 2 && h.clock.sleepers() == 1
     })

@@ -7,7 +7,7 @@ use threadlane_core::client::{
     ApiError, BindingSummary, DecisionReply, DecisionRequest, OrgReply, OrgRequest,
     StandingRuleSummary,
 };
-use threadlane_core::ids::StandingRuleId;
+use threadlane_core::ids::{DecisionId, StandingRuleId};
 use threadlane_core::model::{Cell, Mode};
 use threadlane_core::tools::Tier;
 
@@ -190,6 +190,26 @@ impl ClientCore {
         {
             (_, OrgReply::SpaceCeiling { ceiling }) => Ok(ceiling),
             (space, _) => Err(wrong_reply(&space, "set space ceiling")),
+        }
+    }
+
+    /// Claims the one reminder for decision `decision`: `true` only the
+    /// first time, across restarts of the hub or this client.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn claim_reminder(
+        &self,
+        space: Option<&str>,
+        decision: DecisionId,
+    ) -> Result<bool, ClientError> {
+        match self
+            .decision_request(space, DecisionRequest::Remind { decision })
+            .await?
+        {
+            (_, DecisionReply::Reminder { first }) => Ok(first),
+            (space, _) => Err(wrong_reply(&space, "remind")),
         }
     }
 

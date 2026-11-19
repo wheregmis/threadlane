@@ -90,6 +90,8 @@ pub struct DecisionDisplay {
     pub origin: String,
     /// When the decision was asked.
     pub asked: String,
+    /// Creation time for a live relative timestamp.
+    pub asked_at: Option<Timestamp>,
     /// Context, call details, and the treatment for this decision kind.
     pub contents: DecisionCard,
     /// The closed decision's record, when it is no longer pending.
@@ -129,6 +131,7 @@ impl AppState {
                 .collect(),
             origin: format!("{} / {project} · {agent}{task}", queued.space),
             asked: format!("Asked {} ago", when.since(decision.created_at)),
+            asked_at: Some(decision.created_at),
             contents: Self::decision_card(queued),
             record,
             current: self.current_decision().is_some_and(|current| {
@@ -177,6 +180,7 @@ impl AppState {
             options: card.options.clone(),
             origin: format!("{space} / {project}"),
             asked: format!("Asked {time}"),
+            asked_at: None,
             contents: DecisionCard {
                 dashed,
                 chip: card
@@ -191,6 +195,7 @@ impl AppState {
                 would_run_as: None,
                 note_label: "Note (optional)",
                 recommended: card.recommended,
+                diff: None,
             },
             record: Some(DecisionRecord {
                 status: "Answer details unavailable".to_owned(),
