@@ -65,6 +65,18 @@ impl TestHub {
         Self::around(core, clock).await
     }
 
+    /// Turns a project's dreaming off, as a user would, for a test that is
+    /// not about dreaming and runs its clock past the default 02:00.
+    pub async fn dreaming_off(&self, project: Option<&str>) {
+        self.api
+            .memory(threadlane_core::client::MemoryRequest::SetDreaming {
+                project: project.map(str::to_owned),
+                cadence: None,
+            })
+            .await
+            .unwrap();
+    }
+
     /// The harness around an already built core.
     pub async fn around(core: HubCore, clock: FakeClock) -> Self {
         let machine = core.local_machine().await.unwrap();

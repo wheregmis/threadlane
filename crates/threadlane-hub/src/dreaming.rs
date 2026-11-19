@@ -6,7 +6,7 @@ use threadlane_core::forge::REPORT_LIMITATION;
 use threadlane_core::ids::ProjectId;
 use threadlane_core::model::{Event, EventKind, MemoryAuthor, Project, Recurrence, Rule, Trust};
 use threadlane_core::runtime::steps::dreaming;
-use threadlane_core::store::{DecisionStore, MemoryStore, StoreResult, TaskStore};
+use threadlane_core::store::{DecisionStore, MemoryStore, OrgStore, StoreResult, TaskStore};
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError};
 use threadlane_store::{HubDb, TIMER_SOURCE};
 
@@ -152,6 +152,29 @@ pub(crate) fn check_paths(tool: &str, arguments: &Json) -> Result<(), ToolError>
 }
 
 impl HubCore {
+    /// Turns dreaming on, at the default cadence in this computer's zone, for
+    /// every project that has never had a dreaming setting. Idempotent.
+    pub(crate) async fn ensure_dreaming(&self) -> StoreResult<()> {
+        let inner = &self.inner;
+        let system = jiff::tz::TimeZone::system();
+        let zone = system
+            .iana_name()
+            .filter(|zone| check(&Recurrence::default_dreaming(zone)).is_ok());
+        let cadence = Recurrence::default_dreaming(zone.unwrap_or("UTC"));
+        let now = inner.clock.now();
+        // A daily rule in a checked zone always has a next occurrence.
+        let Ok(due) = next_occurrence(&cadence, now, now) else {
+            return Ok(());
+        };
+        for project in inner.db.projects().await? {
+            inner
+                .db
+                .default_dreaming(project.id, project.lead_lane_id, &cadence, due)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn set_dreaming(
         &self,
         project: &Project,

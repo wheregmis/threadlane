@@ -176,7 +176,7 @@ async fn a_follow_up_fires_once_into_the_lane_that_set_it_and_its_run_reads_it()
     assert!(events[0].requested, "set in a run you asked for");
     let timer = hub
         .db
-        .timer(threadlane_core::ids::TimerId(1))
+        .timer(threadlane_core::ids::TimerId(2))
         .await
         .unwrap()
         .unwrap();
@@ -186,7 +186,7 @@ async fn a_follow_up_fires_once_into_the_lane_that_set_it_and_its_run_reads_it()
     assert_eq!(run.events, [events[0].id]);
     assert!(
         run.prompt.contains(
-            "Follow-up 1 fired. Set by an agent, in an earlier run; due at \
+            "Follow-up 2 fired. Set by an agent, in an earlier run; due at \
              2026-01-01T00:05:00Z. Its instruction:\nCheck whether the build is green."
         ),
         "{}",
@@ -246,7 +246,7 @@ async fn a_task_sets_its_follow_up_in_its_own_lane() {
     assert_eq!(set["due_at"], json!("2026-01-01T01:00:00Z"));
     let timer = hub
         .db
-        .timer(threadlane_core::ids::TimerId(1))
+        .timer(threadlane_core::ids::TimerId(2))
         .await
         .unwrap()
         .unwrap();
@@ -420,10 +420,10 @@ async fn an_agents_routine_asks_first_and_is_created_once_when_you_approve() {
     };
     assert_eq!(outcome["performed"], json!(true), "{outcome}");
     // 2026-01-01 is a Thursday; the next Monday 09:00 in Berlin is 08:00Z.
-    // Timer 1 is the decision's expiry.
+    // Timer 1 is General's default dreaming, timer 2 the decision's expiry.
     assert_eq!(
         outcome["summary"],
-        json!("Routine 2 is created; it is next due at 2026-01-05T08:00:00Z.")
+        json!("Routine 3 is created; it is next due at 2026-01-05T08:00:00Z.")
     );
     assert_eq!(
         hub.link

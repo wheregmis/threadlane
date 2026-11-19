@@ -140,12 +140,10 @@ impl AppState {
         };
         let cadence = match action {
             DreamingAction::Toggle(false) => None,
-            DreamingAction::Toggle(true) => view.previous.clone().or_else(|| {
-                Some(Recurrence {
-                    rule: Rule::Daily { hour: 2, minute: 0 },
-                    zone: zone.to_owned(),
-                })
-            }),
+            DreamingAction::Toggle(true) => view
+                .previous
+                .clone()
+                .or_else(|| Some(Recurrence::default_dreaming(zone))),
             DreamingAction::Cadence(text) => {
                 let zone = status
                     .cadence
