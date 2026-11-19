@@ -229,6 +229,72 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
 }
 
 #[tokio::test]
+async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
+    let hub = TestHub::with(Default::default(), std::sync::Arc::new(NoHooks)).await;
+    hub.hello().await;
+    let project = hub.general().await;
+    let engineer = engineer(&hub, 1).await;
+    let reviewer = hub
+        .db
+        .create_agent(&NewAgent::named("Checker", "reviewer"))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: project.id,
+            agent_id: reviewer.id,
+            mode: Mode::OnRequest,
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    let report = hub
+        .db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: project.id,
+                agent_id: engineer,
+                title: "Draft report".into(),
+                goal: "Draft a report".into(),
+                repositories: vec![],
+                parent_task_id: None,
+                depends_on: vec![],
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    let (lease, run) = begin(&*hub.link).await;
+    write_progress(&hub, &lease, &run, &report.id.to_string()).await;
+    let submitted = call(
+        &hub,
+        &lease,
+        &run,
+        "finish",
+        FINISH_TASK,
+        json!({"summary": "Ready"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        submitted["submitted_for_review"],
+        json!(true),
+        "{submitted}"
+    );
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    assert_eq!(
+        task(&hub, &report.id.to_string()).await.status,
+        TaskStatus::InReview
+    );
+}
+
+#[tokio::test]
 async fn the_reviewers_own_task_finishes_without_a_review_round() {
     let hub = TestHub::with(
         threadlane_hub::HubSettings {

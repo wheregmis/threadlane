@@ -46,6 +46,9 @@ pub struct HubSettings {
     /// How long a decision waits on you before it expires as declined with
     /// "no response" (docs/milestone-9.md decision 8).
     pub decision_expiry: Duration,
+    /// An ended task's worktrees are removed once it has had no run for
+    /// this long; `None` keeps them.
+    pub worktree_cleanup: Option<Duration>,
 }
 
 impl Default for HubSettings {
@@ -67,6 +70,7 @@ impl Default for HubSettings {
             scheduler: Duration::from_secs(10),
             default_models: HashMap::new(),
             decision_expiry: Duration::from_secs(24 * 60 * 60),
+            worktree_cleanup: Some(Duration::from_secs(3 * 24 * 60 * 60)),
         }
     }
 }

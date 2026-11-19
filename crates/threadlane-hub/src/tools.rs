@@ -12,8 +12,8 @@ use threadlane_core::forge::{
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::model::{
-    Decision, DecisionOption, LaneKind, MemoryAuthor, NewOutboxMessage, NewTask, OutboxKind, Run,
-    Task, TaskOrigin, TaskReviewVerdict, TaskStatus, Urgency,
+    Decision, DecisionOption, LaneKind, MemoryAuthor, Mode, NewOutboxMessage, NewTask, OutboxKind,
+    Run, Task, TaskOrigin, TaskReviewVerdict, TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{LeadReply, OrgStore, SessionStore, StoreError, TaskStore};
@@ -538,23 +538,36 @@ impl HubTools {
             }
             result[MERGE_CHECKS] = merge.clone();
         }
-        if let Some(name) = &self.reviewer {
-            let task_id = context
-                .task_id
-                .ok_or_else(|| ToolError::Blocked("only a task can request review".into()))?;
+        // A named Reviewer must exist. With none named, the project's own
+        // agent of role "reviewer" reviews, if it has one that is not off.
+        let agents = self.db.agents().await.map_err(tool_error)?;
+        let reviewer = match &self.reviewer {
+            Some(name) => Some(
+                agents
+                    .into_iter()
+                    .find(|agent| agent.name == *name)
+                    .ok_or_else(|| {
+                        ToolError::Blocked(format!("Space Reviewer {name:?} is unavailable"))
+                    })?,
+            ),
+            None => {
+                let bindings = self
+                    .db
+                    .bindings(context.project_id)
+                    .await
+                    .map_err(tool_error)?;
+                agents.into_iter().find(|agent| {
+                    agent.role.eq_ignore_ascii_case("reviewer")
+                        && bindings.iter().any(|binding| {
+                            binding.agent_id == agent.id && binding.mode != Mode::Off
+                        })
+                })
+            }
+        };
+        if let (Some(reviewer), Some(task_id)) = (reviewer, context.task_id) {
             let task = self
                 .project_task(context, &json!(task_id.to_string()))
                 .await?;
-            let reviewer = self
-                .db
-                .agents()
-                .await
-                .map_err(tool_error)?
-                .into_iter()
-                .find(|agent| agent.name == *name)
-                .ok_or_else(|| {
-                    ToolError::Blocked(format!("Space Reviewer {name:?} is unavailable"))
-                })?;
             // The Reviewer cannot review its own task: that finishes unreviewed.
             if reviewer.id != task.agent_id {
                 let revisions = self.review_revisions(&task, &result).await?;

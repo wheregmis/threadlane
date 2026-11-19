@@ -155,6 +155,9 @@ pub struct RunsConfig {
     pub max_turns: u32,
     /// How many recent messages a new lead session is shown.
     pub recent_messages: u32,
+    /// An ended task's worktrees are removed after this many days without a
+    /// run; its work stays on its branch. `0` keeps them.
+    pub worktree_cleanup_days: u32,
 }
 
 impl Default for RunsConfig {
@@ -167,6 +170,7 @@ impl Default for RunsConfig {
             wall_time_limit_secs: 30 * 60,
             max_turns: 150,
             recent_messages: 5,
+            worktree_cleanup_days: 3,
         }
     }
 }
@@ -492,6 +496,8 @@ impl HubConfig {
             wall_time_limit: Duration::from_secs(runs.wall_time_limit_secs),
             max_turns: (runs.max_turns > 0).then_some(runs.max_turns),
             recent_messages: runs.recent_messages,
+            worktree_cleanup: (runs.worktree_cleanup_days > 0)
+                .then(|| Duration::from_secs(u64::from(runs.worktree_cleanup_days) * 24 * 60 * 60)),
             usage_limit_fallback: Duration::from_secs(timing.usage_limit_fallback_secs),
             scheduler: Duration::from_secs(timing.scheduler_secs),
             decision_expiry: Duration::from_secs(timing.decision_expiry_secs),
@@ -606,6 +612,7 @@ mod tests {
             wall_time_limit_secs = 300
             max_turns = 0
             recent_messages = 2
+            worktree_cleanup_days = 0
             "#,
         )
         .unwrap();
@@ -620,6 +627,11 @@ mod tests {
         assert_eq!(settings.wall_time_limit, Duration::from_secs(300));
         assert_eq!(settings.max_turns, None, "0 means no turn limit");
         assert_eq!(settings.recent_messages, 2);
+        assert_eq!(settings.worktree_cleanup, None);
+        assert_eq!(
+            HubConfig::default().settings().worktree_cleanup,
+            Some(Duration::from_secs(3 * 24 * 60 * 60))
+        );
         assert_eq!(settings.lease_ttl, Duration::from_secs(60));
     }
 

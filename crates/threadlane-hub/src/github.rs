@@ -22,11 +22,11 @@ use std::time::Duration;
 
 use threadlane_core::forge::{COMMENT, MARK_READY, MERGE};
 use threadlane_core::github::{
-    DEFAULT_POLL_INTERVAL, GITHUB_SOURCE, GithubItem, PullTarget, normalize_remote,
+    DEFAULT_POLL_INTERVAL, GITHUB_SOURCE, GithubItem, GithubKind, PullTarget, normalize_remote,
     pull_request_number,
 };
 use threadlane_core::ids::{LaneId, ProjectId};
-use threadlane_core::model::{EventKind, Inserted, NewEvent, Trust};
+use threadlane_core::model::{EventKind, Inserted, NewEvent, TaskStatus, Trust};
 use threadlane_core::runtime::steps::github::{
     AFTER_CURSOR, AFTER_FETCH, AFTER_INSERT, AFTER_WAKE,
 };
@@ -76,6 +76,9 @@ struct Work {
 struct Routes {
     registered: Vec<Registered>,
     work: Vec<Work>,
+    /// The work of tasks that have ended, routed to their project's lead
+    /// lane. It is read only when the feed reports activity on it.
+    ended: Vec<Work>,
 }
 
 /// The normalized remote of a repository GitHub names `owner/name`.
@@ -83,7 +86,36 @@ fn github_key(repository: &str) -> Option<String> {
     normalize_remote(&format!("https://{GITHUB_HOST}{repository}"))
 }
 
+impl Work {
+    /// Whether `item`, in the repository of normalized remote `key`, is
+    /// about this work's pull request or branch.
+    fn is_about(&self, item: &GithubItem, key: &str) -> bool {
+        github_key(&self.target.repository).as_deref() == Some(key)
+            && ((item.pull_request.is_some() && item.pull_request == self.target.number)
+                || item.branch.as_deref() == Some(self.target.branch.as_str()))
+    }
+}
+
+/// Whether an item about an ended task's work needs anyone: a check that
+/// passed does not.
+fn needs_attention(item: &GithubItem) -> bool {
+    item.kind != GithubKind::CheckResult
+        || ["failure", "timed_out", "action_required", "startup_failure"]
+            .iter()
+            .any(|conclusion| item.title.ends_with(&format!(": {conclusion}")))
+}
+
 impl Routes {
+    /// The ended task's work `item` is about, unless a running task has
+    /// taken that work over.
+    fn ended_for(&self, item: &GithubItem) -> Option<&Work> {
+        let key = github_key(&item.repository)?;
+        if self.work.iter().any(|work| work.is_about(item, &key)) {
+            return None;
+        }
+        self.ended.iter().find(|work| work.is_about(item, &key))
+    }
+
     /// Reads every registered repository and every active task's work.
     async fn read(db: &HubDb) -> Result<Self, StoreError> {
         let mut routes = Self::default();
@@ -99,9 +131,16 @@ impl Routes {
                     })
                 }));
             for task in db.tasks(project.id).await? {
-                if task.status.is_terminal() {
+                // A cancelled task's work was given up; a finished one's pull
+                // request still gets checks and reviews, which go to the lead.
+                if task.status == TaskStatus::Cancelled {
                     continue;
                 }
+                let (list, lane) = if task.status.is_terminal() {
+                    (&mut routes.ended, project.lead_lane_id)
+                } else {
+                    (&mut routes.work, task.lane_id)
+                };
                 for decision in db.lane_decisions(task.lane_id).await? {
                     let Some(outcome) = decision.outcome.as_ref() else {
                         continue;
@@ -142,8 +181,8 @@ impl Routes {
                     else {
                         continue;
                     };
-                    match routes.work.iter_mut().find(|work| {
-                        work.lane == task.lane_id
+                    match list.iter_mut().find(|work| {
+                        work.lane == lane
                             && work.target.repository == repository
                             && ((!branch.is_empty() && work.target.branch == branch)
                                 || (number.is_some() && work.target.number == number))
@@ -154,9 +193,9 @@ impl Routes {
                                 branch.clone_into(&mut work.target.branch);
                             }
                         }
-                        None => routes.work.push(Work {
+                        None => list.push(Work {
                             project: project.id,
-                            lane: task.lane_id,
+                            lane,
                             target: PullTarget {
                                 repository,
                                 branch: branch.to_owned(),
@@ -175,11 +214,7 @@ impl Routes {
     fn route(&self, item: &GithubItem) -> Option<(ProjectId, LaneId, bool)> {
         let key = github_key(&item.repository)?;
         let registered = self.registered.iter().find(|repo| repo.key == key)?;
-        let task = self.work.iter().find(|work| {
-            github_key(&work.target.repository).as_deref() == Some(key.as_str())
-                && ((item.pull_request.is_some() && item.pull_request == work.target.number)
-                    || item.branch.as_deref() == Some(work.target.branch.as_str()))
-        });
+        let task = self.work.iter().find(|work| work.is_about(item, &key));
         Some(match task {
             Some(work) => (work.project, work.lane, true),
             None => (registered.project, registered.lead_lane, false),
@@ -219,6 +254,8 @@ impl HubCore {
         let _removal = inner.project_removal.lock().await;
         let routes = Routes::read(&inner.db).await?;
         let mut lanes = BTreeSet::new();
+        // Ended tasks' work the feed reported activity on in this pass.
+        let mut refresh: Vec<&Work> = Vec::new();
 
         let cursor = inner.db.source_cursor(FEED_CURSOR).await?;
         match source.notifications(cursor.as_deref()).await {
@@ -228,6 +265,11 @@ impl HubCore {
                     pass.next_in = interval.max(Duration::from_secs(1));
                 }
                 for item in &feed.items {
+                    if let Some(work) = routes.ended_for(item)
+                        && !refresh.iter().any(|seen| std::ptr::eq(*seen, work))
+                    {
+                        refresh.push(work);
+                    }
                     if let Some((project, lane, requested)) = routes.route(item) {
                         pass.inserted += self
                             .insert(project, lane, requested, item, &mut lanes)
@@ -246,7 +288,8 @@ impl HubCore {
             Err(error) => tracing::warn!(%error, "could not read the GitHub notifications"),
         }
 
-        for work in &routes.work {
+        let followed = routes.work.iter().map(|work| (work, false));
+        for (work, ended) in followed.chain(refresh.into_iter().map(|work| (work, true))) {
             let key = match (work.target.branch.as_str(), work.target.number) {
                 ("", Some(number)) => format!("github:{}#{number}", work.target.repository),
                 (branch, _) => format!("github:{}@{branch}", work.target.repository),
@@ -261,6 +304,9 @@ impl HubCore {
             };
             inner.hook.reach(AFTER_FETCH)?;
             for item in &items {
+                if ended && !needs_attention(item) {
+                    continue;
+                }
                 pass.inserted += self
                     .insert(work.project, work.lane, true, item, &mut lanes)
                     .await?;

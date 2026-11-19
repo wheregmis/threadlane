@@ -444,6 +444,125 @@ async fn items_go_to_their_task_their_lead_or_nowhere() {
     );
 }
 
+/// Runs `task` to its end: its progress file, `finish_task`, and the commit.
+async fn finish(hub: &TestHub, task: &Task) {
+    let (lease, run) = crate::common::begin(&*hub.link).await;
+    for (id, tool, arguments) in [
+        (
+            "p",
+            threadlane_hub::MEMORY_CREATE,
+            json!({ "path": "project/tasks/T-0001.md", "content": "# T-0001\nDone." }),
+        ),
+        (
+            "f",
+            threadlane_hub::FINISH_TASK,
+            json!({ "summary": "Done" }),
+        ),
+    ] {
+        hub.link
+            .call_tool(&lease, run.run_id, Some(id), tool, &arguments)
+            .await
+            .unwrap();
+    }
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+    assert_eq!(
+        hub.db.task(task.id).await.unwrap().unwrap().status,
+        TaskStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn an_ended_tasks_worktrees_are_removed_after_three_days_without_a_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = FakeClock::at_default_start();
+    let db = HubDb::open_in_memory(&Bootstrap::default(), Arc::new(clock.clone()))
+        .await
+        .unwrap();
+    let core = HubCore::new(
+        db,
+        Arc::new(clock.clone()),
+        Arc::new(NoHooks),
+        HubSettings::default(),
+    )
+    .await
+    .unwrap()
+    .with_workspaces(dir.path().to_owned());
+    let hub = TestHub::around(core, clock.clone()).await;
+    hub.hello().await;
+    register(&hub, &hub.general().await, "widgets", WIDGETS).await;
+    let task = task_with_pull_request(&hub).await;
+    let worktrees = dir.path().join("worktrees");
+    let ended = worktrees.join("T-0001");
+    // No task T-0099 exists here: its directory is not the hub's to remove.
+    let unknown = worktrees.join("T-0099");
+    for tree in [&ended, &unknown] {
+        std::fs::create_dir_all(tree.join("widgets")).unwrap();
+    }
+
+    hub.core.sweep_once().await.unwrap();
+    assert!(ended.exists(), "a running task keeps its worktrees");
+    finish(&hub, &task).await;
+    clock.advance(Duration::from_secs(2 * 24 * 60 * 60));
+    hub.core.sweep_once().await.unwrap();
+    assert!(ended.exists(), "kept while the task ended recently");
+    clock.advance(Duration::from_secs(24 * 60 * 60 + 1));
+    hub.core.sweep_once().await.unwrap();
+    assert!(!ended.exists(), "removed after three idle days");
+    assert!(unknown.exists());
+}
+
+#[tokio::test]
+async fn activity_on_a_finished_tasks_pull_request_reaches_the_lead_with_its_details() {
+    let github = FakeGithub::default();
+    let (hub, _gadgets) = start(&github, Arc::new(NoHooks)).await;
+    let general = hub.general().await;
+    let task = task_with_pull_request(&hub).await;
+    finish(&hub, &task).await;
+
+    // Nothing is read for a finished task until GitHub reports activity.
+    github.add_to(
+        "acme/widgets",
+        BRANCH,
+        GithubItem {
+            title: "test: failure".into(),
+            ..check("check_run:9", "2026-01-01T00:00:01Z")
+        },
+    );
+    github.add_to(
+        "acme/widgets",
+        BRANCH,
+        GithubItem {
+            title: "lint: success".into(),
+            ..check("check_run:8", "2026-01-01T00:00:01Z")
+        },
+    );
+    hub.core.poll_github_once().await.unwrap();
+    assert!(github_events(&hub).await.is_empty());
+
+    github.notify(item(
+        "n:ci-42",
+        GithubKind::CheckResult,
+        WIDGETS_NAME,
+        Some(42),
+        "2026-01-01T00:00:02Z",
+    ));
+    hub.core.poll_github_once().await.unwrap();
+    let events = github_events(&hub).await;
+    let failed = events
+        .iter()
+        .find(|event| event.source_event_id == "check_run:9")
+        .expect("the failed check reached a lane");
+    assert_eq!(
+        (failed.lane_id, failed.requested),
+        (general.lead_lane_id, true)
+    );
+    assert!(
+        !ids(&events).contains(&"check_run:8"),
+        "a check that passed needs nobody"
+    );
+}
+
 #[tokio::test]
 async fn the_same_item_twice_inserts_once_and_an_unchanged_answer_nothing() {
     let github = FakeGithub::default();

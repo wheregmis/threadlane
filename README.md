@@ -90,7 +90,7 @@ key is optional; unknown keys are errors. For example:
 ```toml
 [space]
 name = "Work"
-# reviewer = "Reviewer"  # an agent that reviews every finished task before it is done
+# reviewer = "Reviewer"  # reviews every finished task before it is done; left out, a project's agent of role "reviewer" does
 
 [runner]
 max_parallel = 2      # shared slots on this machine across agents and projects; excess work stays queued
@@ -116,6 +116,10 @@ session_max_age_secs = 86400   # a session older than this is closed and a fresh
 [github]
 gh = "gh"             # the gh the GitHub source and the runner run; path or name on PATH
 ```
+
+A task's worktrees are removed once it has ended and had no run for three
+days; its work stays on its branch. `worktree_cleanup_days` under `[runs]`
+changes that, and `0` keeps them.
 
 `[log]`, the rest of `[timing]`, and `[runs]` are described in
 `crates/threadlane-hub/src/config.rs`.

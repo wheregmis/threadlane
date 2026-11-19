@@ -10,10 +10,10 @@ use threadlane_core::github::GithubSource;
 use threadlane_core::ids::{LaneId, MachineId, ProjectId};
 use threadlane_core::link::HubLink;
 use threadlane_core::runtime::{StepHook, WakeTarget, Waker};
-use threadlane_core::store::{InboxStore, MachineStore};
-use threadlane_core::time::Clock;
+use threadlane_core::store::{InboxStore, MachineStore, OrgStore, SessionStore, TaskStore};
+use threadlane_core::time::{Clock, Timestamp};
 use threadlane_core::tools::ToolRegistry;
-use threadlane_core::workspace::{WorkspaceRemoval, Workspaces};
+use threadlane_core::workspace::{WorkspaceRemoval, Workspaces, task_ref};
 use threadlane_runner::GitWorkspaces;
 use threadlane_store::HubDb;
 use threadlane_transport_iroh::{EndpointAddr, Gate};
@@ -231,6 +231,79 @@ impl HubCore {
             .ok_or(HubError::NoHubMachine)
     }
 
+    /// Removes the worktrees of ended tasks that have had no run for
+    /// `worktree_cleanup`. Anything uncommitted is committed on the task's
+    /// branch first, so a retried task rebuilds its worktree from the branch.
+    async fn remove_idle_worktrees(&self, now: Timestamp) -> Result<(), HubError> {
+        let inner = &self.inner;
+        let (Some(idle), Some(root), Some(files)) = (
+            inner.settings.worktree_cleanup,
+            &inner.workspaces,
+            &inner.workspace_files,
+        ) else {
+            return Ok(());
+        };
+        let Ok(mut entries) = tokio::fs::read_dir(root.join("worktrees")).await else {
+            return Ok(());
+        };
+        let _removal = inner.project_removal.lock().await;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            let Some(id) = name
+                .to_str()
+                .and_then(|name| task_ref(&serde_json::json!(name)))
+            else {
+                continue;
+            };
+            let Some(task) = inner.db.task(id).await? else {
+                continue;
+            };
+            if !task.status.is_terminal() {
+                continue;
+            }
+            let last_run = inner
+                .db
+                .lane_runs(task.lane_id)
+                .await?
+                .iter()
+                .map(|run| run.ended_at.unwrap_or(run.started_at))
+                .max()
+                .unwrap_or(task.created_at);
+            if now.saturating_since(last_run) < idle {
+                continue;
+            }
+            let repositories: Vec<_> = inner
+                .db
+                .repositories(task.project_id)
+                .await?
+                .into_iter()
+                .filter(|repository| task.repositories.contains(&repository.id))
+                .collect();
+            if let Err(error) = files
+                .checkpoint(
+                    task.id,
+                    &repositories,
+                    "Threadlane: work kept before cleanup",
+                )
+                .await
+            {
+                tracing::warn!(task = %task.id, %error, "kept a worktree whose work could not be committed");
+                continue;
+            }
+            let removal = WorkspaceRemoval {
+                tasks: vec![task.id],
+                repositories: repositories
+                    .iter()
+                    .map(|repository| (repository.id, repository.name.clone()))
+                    .collect(),
+                clones: Vec::new(),
+            };
+            let leftovers = files.remove(&removal).await;
+            tracing::info!(task = %task.id, ?leftovers, "removed an ended task's worktrees");
+        }
+        Ok(())
+    }
+
     /// Releases expired leases (their claimed events return to pending),
     /// sends the account notices that are due (Plan.md §5.3), and nudges
     /// runners if any lane is ready. Returns the released lanes.
@@ -248,6 +321,7 @@ impl HubCore {
                 self.cleanup_project(id, &removal).await;
             }
         }
+        self.remove_idle_worktrees(now).await?;
         // A cooldown may have ended, or the space may have run out of
         // accounts without a notice yet (a crash in between).
         self.notice_accounts().await?;
