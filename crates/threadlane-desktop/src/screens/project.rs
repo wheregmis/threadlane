@@ -2708,10 +2708,10 @@ impl Desktop {
         }
     }
 
-    fn task_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> Div {
+    fn task_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let Some(form) = self.state.task_form(space, project) else {
-            return div();
+            return div().into_any_element();
         };
         let label = |text: &'static str| {
             div()
@@ -2867,6 +2867,7 @@ impl Desktop {
                             })),
                     ),
             )
+            .into_any_element()
     }
 
     /// Select a checkout or enter its clone details manually.
