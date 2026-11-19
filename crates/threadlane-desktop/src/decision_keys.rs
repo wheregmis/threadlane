@@ -143,6 +143,13 @@ impl AppState {
         self.decision_keys.current = Current::Cleared;
     }
 
+    /// Selects a pending decision row in the current scope.
+    pub fn select_decision(&mut self, key: DecisionKey) {
+        if self.visible_decisions().any(|queued| key.matches(queued)) {
+            self.decision_keys.current = Current::Selected(key);
+        }
+    }
+
     /// Applies a shortcut if the user is outside a text field.
     pub fn decision_command(
         &mut self,

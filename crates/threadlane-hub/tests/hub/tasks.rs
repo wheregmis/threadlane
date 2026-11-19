@@ -4,6 +4,7 @@
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::NativeSession;
 use threadlane_core::client::{ApiError, TaskReply, TaskRequest};
+use threadlane_core::forge::REPORT_LIMITATION;
 use threadlane_core::ids::{AgentId, TaskId};
 use threadlane_core::link::{Begin, RunAssignment, RunFailure};
 use threadlane_core::model::{
@@ -725,6 +726,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             CANCEL_TIMER,
             ASK_USER,
             ASK_PROJECT_LEAD,
+            REPORT_LIMITATION,
         ]
     );
     assert!(
@@ -1572,6 +1574,78 @@ async fn the_lead_can_attach_repositories_and_wake_a_sleeping_task() {
             .prompt
             .contains("Verify the existing PR head and resume the fix.")
     );
+}
+
+#[tokio::test]
+async fn a_lead_wake_survives_the_active_implementation_finishing() {
+    let (hub, lead, run) = lead_run(2).await;
+    call(
+        &hub,
+        &lead,
+        &run,
+        "create",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lead, &run).await;
+
+    let (lease, implementation) = begin(&*hub.link).await;
+    write_progress(&hub, &lease, &implementation, "T-0001").await;
+    hub.send("m-2", "Add a correction to T-0001").await;
+    let (lead, run) = begin(&*hub.link).await;
+    assert_eq!(run.lane_kind, LaneKind::Lead);
+    let instruction = "Include the corrected total.";
+    call(
+        &hub,
+        &lead,
+        &run,
+        "correct",
+        UPDATE_TASK,
+        json!({"task_id": "T-0001", "wake": instruction}),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lead, &run).await;
+
+    call(
+        &hub,
+        &lease,
+        &implementation,
+        "first-result",
+        FINISH_TASK,
+        json!({"summary": "Original total"}),
+    )
+    .await
+    .unwrap();
+    hub.link
+        .complete(&lease, implementation.run_id, None)
+        .await
+        .unwrap();
+
+    let queued = task(&hub, "T-0001").await;
+    assert_eq!(queued.status, TaskStatus::Queued);
+    assert!(queued.result.is_none());
+    assert!(task_results(&hub).await.is_empty());
+    let Begin::Run(resumed) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("the pending wake should start a new implementation run");
+    };
+    assert!(resumed.prompt.contains(instruction));
+    call(
+        &hub,
+        &lease,
+        &resumed,
+        "final-result",
+        FINISH_TASK,
+        json!({"summary": "Corrected total"}),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &resumed).await;
+    let done = task(&hub, "T-0001").await;
+    assert_eq!(done.status, TaskStatus::Done);
+    assert_eq!(done.result.unwrap()["summary"], "Corrected total");
 }
 
 #[tokio::test]

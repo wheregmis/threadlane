@@ -459,6 +459,7 @@ impl HubApi for ClientApi {
                     .map_err(|error| taken(error, "project", name))?;
                 // Give the new project its lead binding now, not at next start.
                 ensure_defaults(db).await.map_err(api_error)?;
+                self.core.ensure_dreaming().await.map_err(api_error)?;
                 Ok(OrgReply::Project {
                     project: summary(project),
                 })
@@ -593,7 +594,7 @@ impl HubApi for ClientApi {
                 models,
                 skills,
             } => {
-                validate_skills(&skills)?;
+                validate_skills(&self.core.inner.backends, &skills).await?;
                 let name = required("agent name", &name)?;
                 let role = required("agent role", &role)?;
                 let mut preferred = Vec::with_capacity(backends.len());
@@ -669,7 +670,7 @@ impl HubApi for ClientApi {
                     })
                     .transpose()?;
                 if let Some(skills) = &skills {
-                    validate_skills(skills)?;
+                    validate_skills(&self.core.inner.backends, skills).await?;
                 }
                 let agent_name = agent.trim();
                 let target_name = name.unwrap_or(agent_name);
@@ -1119,7 +1120,10 @@ fn binding_summary(agent: Agent, binding: &Binding) -> BindingSummary {
     }
 }
 
-fn validate_skills(skills: &[threadlane_core::model::SkillBinding]) -> Result<(), ApiError> {
+async fn validate_skills(
+    backends: &[std::sync::Arc<dyn threadlane_core::backend::AgentBackend>],
+    skills: &[threadlane_core::model::SkillBinding],
+) -> Result<(), ApiError> {
     for (i, skill) in skills.iter().enumerate() {
         if !threadlane_core::model::SkillBinding::valid_name(&skill.name)
             || skills[..i].contains(skill)
@@ -1128,6 +1132,14 @@ fn validate_skills(skills: &[threadlane_core::model::SkillBinding]) -> Result<()
                 "invalid or duplicate {} skill {:?}",
                 skill.backend, skill.name
             )));
+        }
+        for backend in backends.iter().filter(|b| b.kind() == skill.backend) {
+            if let Some(reason) = backend.unusable_skill(&skill.name).await {
+                return Err(ApiError::Invalid(format!(
+                    "{} skill {:?} {reason}",
+                    skill.backend, skill.name
+                )));
+            }
         }
     }
     Ok(())

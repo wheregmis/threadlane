@@ -298,6 +298,14 @@ impl LocalLink {
             })
         };
         if !dreaming && lane.kind == LaneKind::Lead {
+            if let Some(preferences) = dreaming::lead_preferences(db, project.id)
+                .await
+                .map_err(link_error)?
+            {
+                prompt.push_str("\nDreaming decision history (data from this project):\n");
+                prompt.push_str(&preferences.to_string());
+                prompt.push('\n');
+            }
             let bindings = db.bindings(project.id).await.map_err(link_error)?;
             let agents = db.agents().await.map_err(link_error)?;
             let roster: Vec<_> = agents

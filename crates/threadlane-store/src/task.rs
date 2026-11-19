@@ -260,6 +260,18 @@ pub(crate) async fn transition(
     Ok(())
 }
 
+/// Queues another implementation run and clears the previous result.
+pub(crate) async fn requeue_after_result(conn: &Connection, task: &Task) -> StoreResult<()> {
+    transition(conn, task, TaskStatus::Queued).await?;
+    exec(
+        conn,
+        "UPDATE tasks SET result = NULL, waiting_reason = NULL WHERE id = ?1",
+        params![task.id.get()],
+    )
+    .await?;
+    Ok(())
+}
+
 async fn insert_start_event(conn: &Connection, task: &Task) -> StoreResult<()> {
     insert_event_in(
         conn,
@@ -477,8 +489,8 @@ pub(crate) async fn on_run_started(
 }
 
 /// [`SessionStore::commit_run`]: a running task with a pending decision
-/// waits on you; one that recorded its result is done, with the branch and
-/// pull request performed for it; otherwise it sleeps until an event
+/// waits on you; one that recorded its result finishes unless a lead wake
+/// is pending; otherwise it sleeps until an event
 /// arrives, or is queued again if one already has. A task left sleeping
 /// with nothing to wake it, neither a timer of its own nor a published
 /// branch, carries [`UNWOKEN_REASON`], and its lead lane is told once per
@@ -504,6 +516,16 @@ pub(crate) async fn on_run_committed(
         return task_review::start_review(conn, &task, run_id, now).await;
     }
     if task.result.is_some() {
+        let wake = query_opt(
+            conn,
+            "SELECT 1 FROM events WHERE lane_id = ?1 AND status = 'pending' AND source = ?2 LIMIT 1",
+            params![lane_id.get(), TASK_WAKE_SOURCE],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        if wake.is_some() {
+            return requeue_after_result(conn, &task).await;
+        }
         let result = with_published(conn, &task).await?;
         exec(
             conn,

@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use serde_json::json;
-use threadlane_core::client::{TimerReply, TimerRequest};
+use threadlane_core::client::{MemoryRequest, TimerReply, TimerRequest};
 use threadlane_core::model::{Event, EventKind, Recurrence, Rule, TimerStatus};
 use threadlane_core::runtime::steps::scheduler::AFTER_WAKE;
 use threadlane_core::store::TimerStore;
@@ -97,6 +97,14 @@ async fn an_agent_sets_a_follow_up_and_wakes_on_time() {
 async fn a_routine_you_created_fires_at_the_right_local_time_across_a_daylight_saving_change() {
     let sim = Sim::start().await;
     sim.backend().set_default(reply_script());
+    // Only the routine fires: General's default dreaming is turned off.
+    sim.api
+        .memory(MemoryRequest::SetDreaming {
+            project: None,
+            cadence: None,
+        })
+        .await
+        .unwrap();
     // New York moves its clocks forward on 8 March 2026: 09:00 is 14:00Z
     // the day before and 13:00Z that day.
     sim.clock().set(Timestamp::from_millis(1_772_809_200_000)); // 2026-03-06T15:00:00Z
@@ -144,7 +152,7 @@ async fn a_routine_you_created_fires_at_the_right_local_time_across_a_daylight_s
     assert_eq!(received.len(), 2);
     assert!(
         received[1].prompt.contains(
-            "Routine 1 fired. Set by the user; due at 2026-03-08T13:00:00Z. Its instruction:\n\
+            "Routine 2 fired. Set by the user; due at 2026-03-08T13:00:00Z. Its instruction:\n\
              Post the morning summary."
         ),
         "{}",

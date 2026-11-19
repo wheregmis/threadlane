@@ -18,7 +18,7 @@ use threadlane_core::runtime::{
     steps::{begin_run, dreaming, scheduler, tool_call},
 };
 use threadlane_core::store::{
-    InboxStore, MemoryStore, OrgStore, SessionStore, TaskStore, TimerStore,
+    DecisionStore, InboxStore, MemoryStore, OrgStore, SessionStore, TaskStore, TimerStore,
 };
 use threadlane_core::time::Clock;
 use threadlane_core::tools::ToolError;
@@ -31,6 +31,7 @@ use crate::common::{PAST_LEASE, TestHub, begin};
 
 const HOUR: Duration = Duration::from_secs(3600);
 const SESSIONS: &str = "project_sessions";
+const DECISIONS: &str = "project_decisions";
 
 fn interval() -> Recurrence {
     Recurrence {
@@ -94,10 +95,33 @@ async fn complete(hub: &TestHub, lease: &Lease, run: &RunAssignment) -> RunOutco
 }
 
 #[tokio::test]
+async fn an_unset_project_dreams_by_default_and_an_explicit_off_stays_off() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let default = Some(Recurrence::default_dreaming("UTC").rule);
+    let rule = |status: DreamingStatus| status.cadence.map(|cadence| cadence.rule);
+    assert_eq!(rule(status(&hub, None).await), default, "General is unset");
+    set(&hub, None).await;
+    hub.api
+        .org(OrgRequest::CreateProject {
+            name: "Other".into(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(rule(status(&hub, Some("Other".into())).await), default);
+    assert_eq!(status(&hub, None).await.cadence, None, "a new project");
+    let hub = hub.restart(Arc::new(NoHooks)).await;
+    assert_eq!(status(&hub, None).await.cadence, None, "a restart");
+    assert_eq!(rule(status(&hub, Some("Other".into())).await), default);
+}
+
+#[tokio::test]
 async fn settings_are_project_scoped_validate_cadence_and_own_the_system_timer() {
     let hub = TestHub::start().await;
     hub.hello().await;
     let project = hub.general().await;
+    set(&hub, None).await;
     assert_eq!(status(&hub, None).await, DreamingStatus::default());
     hub.clock.advance(10 * HOUR);
     assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
@@ -134,6 +158,14 @@ async fn settings_are_project_scoped_validate_cadence_and_own_the_system_timer()
     set(&hub, Some(daily.clone())).await;
     assert_eq!(status(&hub, None).await.cadence, Some(daily.clone()));
     let (id, _) = hub.db.dreaming_timer(project.id).await.unwrap().unwrap();
+    assert_eq!(
+        hub.db.timer(id).await.unwrap().unwrap().due_at,
+        hub.clock.now()
+    );
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 1);
+    let (lease, first) = begin(&*hub.link).await;
+    assert!(first.dreaming);
+    complete(&hub, &lease, &first).await;
     let due = hub.db.timer(id).await.unwrap().unwrap().due_at;
     assert_eq!(due, hub.clock.now() + Duration::from_secs(5400));
     hub.clock.advance(HOUR);
@@ -165,7 +197,127 @@ async fn settings_are_project_scoped_validate_cadence_and_own_the_system_timer()
     );
     hub.clock.advance(48 * HOUR);
     assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
-    assert_eq!(status(&hub, None).await, DreamingStatus::default());
+    let disabled = status(&hub, None).await;
+    assert!(disabled.cadence.is_none());
+    assert!(disabled.last.is_some());
+}
+
+#[tokio::test]
+async fn dreams_learn_from_project_choices_and_give_the_lead_current_evidence() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    hub.api
+        .org(OrgRequest::CreateProject {
+            name: "Other".into(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+
+    for (index, project, question, answer, note) in [
+        (1, None, "Which report format?", "Table", None),
+        (2, None, "Which report format?", "Table", None),
+        (
+            3,
+            None,
+            "Which report format?",
+            "Table",
+            Some("For weekly reports"),
+        ),
+        (4, Some("Other"), "Other project preference", "Prose", None),
+    ] {
+        hub.api
+            .send_message(&UserMessage {
+                project: project.map(str::to_owned),
+                text: "Prepare a weekly report".into(),
+                images: Vec::new(),
+                client_message_id: format!("report-{index}"),
+                task: None,
+            })
+            .await
+            .unwrap();
+        let (lease, lead) = begin(&*hub.link).await;
+        assert_eq!(
+            call(
+                &*hub.link,
+                &lease,
+                &lead,
+                "ask_user",
+                json!({
+                    "question": question, "options": ["Table", "Prose"]
+                })
+            )
+            .await,
+            Err(ToolError::WaitingOnYou)
+        );
+        complete(&hub, &lease, &lead).await;
+        let decisions = hub.db.pending_decisions(lease.lane_id).await.unwrap();
+        hub.api
+            .decisions(DecisionRequest::Answer {
+                decision: decisions[0].id,
+                option: answer.into(),
+                note: note.map(str::to_owned),
+            })
+            .await
+            .unwrap();
+        let (lease, resumed) = begin(&*hub.link).await;
+        complete(&hub, &lease, &resumed).await;
+    }
+
+    set(&hub, Some(interval())).await;
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 1);
+    let (lease, dream) = begin(&*hub.link).await;
+    assert!(dream.dreaming);
+    let result = call(&*hub.link, &lease, &dream, DECISIONS, json!({}))
+        .await
+        .unwrap();
+    let choices = result["recent_user_choices"].as_array().unwrap();
+    assert_eq!(choices.len(), 3);
+    assert!(choices.iter().all(|choice| choice["chosen"] == "Table"));
+    assert!(
+        choices
+            .iter()
+            .all(|choice| choice["question"] == "Which report format?")
+    );
+    assert_eq!(choices[0]["note"], "For weekly reports");
+    call(
+        &*hub.link,
+        &lease,
+        &dream,
+        MEMORY_CREATE,
+        json!({
+            "path": "project/notes/user-preferences.md",
+            "content": "# User preferences\nRecurring choices for this project.\n\nUse a table for weekly reports."
+        }),
+    )
+    .await
+    .unwrap();
+    complete(&hub, &lease, &dream).await;
+
+    hub.send("next-report", "Prepare this week's report").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(lead.prompt.contains("Dreaming decision history"));
+    assert!(lead.prompt.contains("Use a table for weekly reports."));
+    assert!(lead.prompt.contains("For weekly reports"));
+    assert!(lead.appended_instructions.contains("all tool approvals"));
+    assert!(
+        call(&*hub.link, &lease, &lead, DECISIONS, json!({}))
+            .await
+            .is_err()
+    );
+    complete(&hub, &lease, &lead).await;
+
+    set(&hub, None).await;
+    hub.send("dreaming-off", "Prepare this week's report").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(!lead.prompt.contains("Dreaming decision history"));
+    assert!(!lead.prompt.contains("Use a table for weekly reports."));
+    assert!(
+        !lead
+            .appended_instructions
+            .contains("Use a table for weekly reports.")
+    );
+    complete(&hub, &lease, &lead).await;
 }
 
 #[tokio::test]
@@ -188,6 +340,7 @@ async fn dream_filters_tools_scope_session_history_and_effects() {
         .into_iter()
         .find(|project| project.name == "Other")
         .unwrap();
+    hub.dreaming_off(Some("Other")).await;
     hub.api
         .send_message(&UserMessage {
             project: Some("Other".into()),
@@ -295,6 +448,7 @@ async fn dream_filters_tools_scope_session_history_and_effects() {
         names,
         [
             SESSIONS,
+            DECISIONS,
             threadlane_core::forge::REPORT_LIMITATION,
             MEMORY_VIEW,
             MEMORY_CREATE,
@@ -745,7 +899,7 @@ async fn dreaming_recovers_at_setting_scheduler_run_and_tool_boundaries() {
         assert_eq!(plan.killed(), Some(step));
 
         let hub = hub.restart(Arc::new(NoHooks)).await;
-        let enabled = status(&hub, None).await.cadence.is_some();
+        let enabled = status(&hub, None).await.cadence == Some(interval());
         assert_eq!(enabled, step != dreaming::BEFORE_SETTING);
         if !enabled {
             set(&hub, Some(interval())).await;

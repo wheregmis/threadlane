@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde_json::json;
 use threadlane_core::backend::NativeSession;
 use threadlane_core::client::{ApiError, OrgRequest, UserMessage};
+use threadlane_core::forge::REPORT_LIMITATION;
 use threadlane_core::model::{
     BackendKind, EventStatus, Mode, NewAgent, OutboxKind, RunOutcome, RunStatus,
 };
@@ -83,6 +84,7 @@ async fn a_message_produces_exactly_one_reply() {
             CANCEL_TIMER,
             ASK_USER,
             ASK_PROJECT_LEAD,
+            REPORT_LIMITATION,
         ],
         "a lead gets the lead's tools only"
     );

@@ -347,6 +347,7 @@ async fn archived_placement_routines_and_dreaming_are_inert_on_the_fake_clock() 
     let hub = TestHub::start().await;
     hub.hello().await;
     let project = project(&hub).await;
+    hub.dreaming_off(Some("General")).await;
     let task = task(&hub).await;
     hub.api
         .tasks(TaskRequest::Cancel { task: task.id })

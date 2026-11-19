@@ -1595,7 +1595,7 @@ The two ways work can start or continue without a message from you.
 
 **Status:** done on the scripted backend, without guest machines; design in `docs/milestone-11.md`. Not yet checked: a dream on the real `claude`; the six live evals in `docs/evals.md`, which are ignored by default and have never been run, so "measurably reduces" is shown only for a scripted dream; the large load test. Deferred with the second machine: guest machines, machine kills in the load test, the continuity eval, drain and revoke as operator tools.
 
-- [x] Dreaming per project on a system schedule. Off by default.
+- [x] Dreaming per project on a system schedule. On by default (daily at 02:00); an explicit off stays off.
 - [x] Eval suites from section 14.2. Running them on every prompt or model change is by hand.
 - [x] Metrics, tracing, operator tools.
 - [ ] Guest machines: deferred.
