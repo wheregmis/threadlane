@@ -174,7 +174,7 @@ impl HubDb {
         let inserted = insert_event_in(conn, &NewEvent {
             project_id: routine.project_id, lane_id: routine.lane_id,
             source: TIMER_SOURCE.into(), source_event_id: format!("{id}:manual:{request}"),
-            kind: EventKind::TimerFired, trust: Trust::System, requested: routine.requested,
+            kind: EventKind::TimerFired, trust: Trust::System, requested: true,
             payload: json!({"timer_id":id,"category":routine.category,"instruction":routine.instruction,
                 "occurrence":now,"task_ref":routine.task_ref,"created_by":routine.created_by,"manual":true}),
             session_ref: None, decision_ref: None, reply_to_ref: None, received_at: now,

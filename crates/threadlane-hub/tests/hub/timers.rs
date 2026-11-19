@@ -483,6 +483,26 @@ async fn an_agents_routine_asks_first_and_is_created_once_when_you_approve() {
             .len(),
         1
     );
+
+    hub.api
+        .timers(TimerRequest::RunOnce {
+            timer: routine.id,
+            client_request_id: "manual-agent-routine".into(),
+        })
+        .await
+        .unwrap();
+    let (lease, run) = begin(&*hub.link).await;
+    let event = hub.db.event(run.events[0]).await.unwrap().unwrap();
+    assert!(event.requested);
+    assert_eq!(event.payload["manual"], true);
+    assert!(!hub.db.timer(routine.id).await.unwrap().unwrap().requested);
+    Running {
+        link: &*hub.link,
+        lease,
+        run,
+    }
+    .end()
+    .await;
 }
 
 #[tokio::test]

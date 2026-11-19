@@ -320,7 +320,7 @@ pub(crate) async fn perform_schedule(
     .await
 }
 
-/// Creates an agent's routine in `lane_id`, keyed on `key`. Its events are
+/// Creates an agent's routine in `lane_id`, keyed on `key`. Its scheduled events are
 /// never requested work (Plan.md §7.3).
 #[allow(clippy::too_many_arguments, reason = "the routine and where it goes")]
 async fn routine(
