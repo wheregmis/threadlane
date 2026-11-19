@@ -18,6 +18,7 @@ use threadlane_core::store::{
     TaskStore,
 };
 use threadlane_core::time::Timestamp;
+use threadlane_core::workspace::ReviewRevision;
 use uuid::Uuid;
 
 use crate::accounts::cooling;
@@ -343,7 +344,12 @@ impl LocalLink {
         } else {
             appended_instructions(&agent, lane.kind, &memory)
         };
-        let repositories = self.task_repositories(task.as_ref()).await?;
+        let repositories = self
+            .task_repositories(
+                task.as_ref(),
+                review.as_ref().map(|round| round.revisions.as_slice()),
+            )
+            .await?;
         let space_lead_ask = if lane.kind == LaneKind::Lead {
             crate::space_lead::answered_ask(db, &events)
                 .await
@@ -591,11 +597,26 @@ impl LocalLink {
             .filter(|session| session.status == SessionStatus::Open && session.lane_id == lane.id))
     }
 
-    /// The task's repositories, in the order it named them.
-    async fn task_repositories(&self, task: Option<&Task>) -> Result<Vec<Repository>, LinkError> {
-        let Some(task) = task.filter(|task| !task.repositories.is_empty()) else {
+    /// A review keeps the repositories of its submission even if the lead
+    /// attaches more for the next implementation run.
+    async fn task_repositories(
+        &self,
+        task: Option<&Task>,
+        reviewed: Option<&[ReviewRevision]>,
+    ) -> Result<Vec<Repository>, LinkError> {
+        let Some(task) = task else {
             return Ok(Vec::new());
         };
+        let reviewed = reviewed.map(|revisions| {
+            revisions
+                .iter()
+                .map(|revision| revision.repository)
+                .collect::<Vec<_>>()
+        });
+        let ids = reviewed.as_deref().unwrap_or(&task.repositories);
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let registered = self
             .core
             .inner
@@ -603,8 +624,7 @@ impl LocalLink {
             .repositories(task.project_id)
             .await
             .map_err(link_error)?;
-        task.repositories
-            .iter()
+        ids.iter()
             .map(|id| {
                 registered
                     .iter()

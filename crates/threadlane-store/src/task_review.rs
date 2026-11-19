@@ -18,7 +18,7 @@ use crate::inbox::{check_lease, insert_event_in};
 use crate::memory::live_in;
 use crate::row::{Cols, json_text, params};
 use crate::session::active_run;
-use crate::task::{complete_result, task_of_lane, transition, with_published};
+use crate::task::{TASK_WAKE_SOURCE, complete_result, task_of_lane, transition, with_published};
 
 pub const TASK_REVIEW_SOURCE: &str = "task-review";
 
@@ -294,7 +294,8 @@ pub(crate) async fn finish_review(
         FROM task_reviews r JOIN agents ON agents.id = r.reviewer
         JOIN json_each(r.revisions) revision
         JOIN repositories repos ON repos.id = json_extract(revision.value, '$.repository')
-        JOIN decisions d ON d.lane_id = ?2 AND d.tool IN ('open_pull_request', 'publish_branch')
+        JOIN decisions d ON d.lane_id = ?2
+            AND d.tool IN ('open_pull_request', 'publish_branch', 'fast_forward_pull_request')
         WHERE r.submission_run = ?1 AND json_extract(d.outcome, '$.performed') = 1
         AND json_extract(d.outcome, '$.repository') = repos.name
         AND json_type(d.outcome, '$.pull_request') = 'text'",
@@ -327,16 +328,16 @@ pub(crate) async fn finish_review(
         exec(conn, "INSERT INTO github_reviews (submission, pull_url, revision, body) VALUES (?1, ?2, ?3, ?4)",
             params![submission.get(), url.as_str(), commit.as_str(), body.as_str()]).await?;
     }
-    let new_owner_message = query_opt(
+    let more_work = query_opt(
         conn,
         "SELECT 1 FROM events WHERE lane_id = ?1 AND status = 'pending'
-        AND kind = 'user_message' AND trust = 'user' LIMIT 1",
-        params![task.lane_id.get()],
+        AND ((kind = 'user_message' AND trust = 'user') OR source = ?2) LIMIT 1",
+        params![task.lane_id.get(), TASK_WAKE_SOURCE],
         |row| Cols(row).i64(0),
     )
     .await?
     .is_some();
-    if verdict == TaskReviewVerdict::Approved && !new_owner_message {
+    if verdict == TaskReviewVerdict::Approved && !more_work {
         result["review"] = json!({"reviewer": reviewer, "feedback": feedback, "submission": submission, "run": run});
         let mut reviewed = task.clone();
         reviewed.result = Some(result);

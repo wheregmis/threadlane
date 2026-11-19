@@ -11,7 +11,7 @@ use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
 };
-use threadlane_core::store::{StoreError, StoreResult, TaskStore};
+use threadlane_core::store::{StoreError, StoreResult, TaskStore, TaskUpdate};
 use threadlane_core::time::Timestamp;
 use turso::{Connection, Row};
 
@@ -24,6 +24,7 @@ use crate::task_review;
 
 /// Source name of `task_start` and `task_result` events.
 pub const TASK_SOURCE: &str = "task";
+pub(crate) const TASK_WAKE_SOURCE: &str = "task-wake";
 
 /// The `waiting_reason` of a task that may not start for lack of a model
 /// account (Plan.md §5.3 "blocked, not failed").
@@ -1062,13 +1063,11 @@ impl TaskStore for HubDb {
         &self,
         lease: &Lease,
         id: TaskId,
-        title: Option<&str>,
-        goal: Option<&str>,
-        priority: Option<i64>,
+        update: TaskUpdate<'_>,
     ) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
-        let task = existing_task(conn, id).await?;
+        let mut task = existing_task(conn, id).await?;
         check_run_lease(conn, Some(lease), task.project_id).await?;
         if task.status.is_terminal() {
             return Err(StoreError::Conflict(format!(
@@ -1076,17 +1075,56 @@ impl TaskStore for HubDb {
                 task.status
             )));
         }
+        for repository in update.repositories {
+            if task.repositories.contains(repository) {
+                continue;
+            }
+            let registered = query_opt(
+                conn,
+                "SELECT 1 FROM repositories WHERE project_id = ?1 AND id = ?2",
+                params![task.project_id.get(), repository.get()],
+                |row| Cols(row).i64(0),
+            )
+            .await?;
+            if registered.is_none() {
+                return Err(StoreError::Invalid(format!(
+                    "repository {repository} is not registered in this task's project"
+                )));
+            }
+            task.repositories.push(*repository);
+        }
         exec(
             conn,
-            "UPDATE tasks SET title = ?1, goal = ?2, priority = ?3 WHERE id = ?4",
+            "UPDATE tasks SET title = ?1, goal = ?2, priority = ?3, repositories = ?4 WHERE id = ?5",
             params![
-                title.unwrap_or(&task.title),
-                goal.unwrap_or(&task.goal),
-                priority.unwrap_or(task.priority),
+                update.title.unwrap_or(&task.title),
+                update.goal.unwrap_or(&task.goal),
+                update.priority.unwrap_or(task.priority),
+                json_text(&task.repositories)?,
                 id.get()
             ],
         )
         .await?;
+        if let Some(wake) = update.wake {
+            insert_event_in(
+                conn,
+                &NewEvent {
+                    project_id: task.project_id,
+                    lane_id: task.lane_id,
+                    source: TASK_WAKE_SOURCE.to_owned(),
+                    source_event_id: format!("{id}:{}", wake.call_key),
+                    kind: EventKind::System,
+                    payload: json!({"text": format!("The project lead asks you to resume: {}", wake.instruction)}),
+                    trust: Trust::System,
+                    requested: task.origin.is_requested() || wake.requested,
+                    session_ref: None,
+                    decision_ref: None,
+                    reply_to_ref: None,
+                    received_at: wake.at,
+                },
+            )
+            .await?;
+        }
         let updated = existing_task(conn, id).await?;
         tx.commit().await?;
         Ok(updated)

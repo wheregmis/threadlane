@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST, MARK_READY, MERGE, OPEN_PULL_REQUEST,
+    PUBLISH_BRANCH,
 };
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
@@ -16,7 +17,9 @@ use threadlane_core::model::{
     Run, Task, TaskOrigin, TaskReviewVerdict, TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{LeadReply, OrgStore, SessionStore, StoreError, TaskStore};
+use threadlane_core::store::{
+    LeadReply, OrgStore, SessionStore, StoreError, TaskStore, TaskUpdate, TaskWake,
+};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry};
 use threadlane_core::workspace::{MergeCheck, ReviewRevision};
@@ -32,7 +35,7 @@ pub const SEND_MESSAGE: &str = "send_message";
 
 /// Creates a task; in a task lane, a subtask (Plan.md §5.1).
 pub const CREATE_TASK: &str = "create_task";
-/// The lead changes a task's title, goal, or priority.
+/// The lead edits an unfinished task, attaches repositories, or wakes it.
 pub const UPDATE_TASK: &str = "update_task";
 /// The lead cancels a task.
 pub const CANCEL_TASK: &str = "cancel_task";
@@ -68,7 +71,13 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | CANCEL_TASK
         | LIST_TASKS
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
-        FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE
+        FINISH_TASK
+        | PUBLISH_BRANCH
+        | OPEN_PULL_REQUEST
+        | FAST_FORWARD_PULL_REQUEST
+        | COMMENT
+        | CREATE_ISSUE
+        | MERGE
         | MARK_READY => kind == LaneKind::Task,
         _ => true,
     }
@@ -366,24 +375,58 @@ impl HubTools {
         context: &ToolContext,
         arguments: &Json,
     ) -> Result<Json, ToolError> {
-        let object = fields(arguments, &["task_id", "title", "goal", "priority"])?;
+        let object = fields(
+            arguments,
+            &[
+                "task_id",
+                "title",
+                "goal",
+                "priority",
+                "repositories",
+                "wake",
+            ],
+        )?;
         let task = self
             .project_task(
                 context,
                 object.get("task_id").ok_or_else(|| missing("task_id"))?,
             )
             .await?;
+        let repositories = named_repositories(&self.db, context.project_id, object)
+            .await?
+            .unwrap_or_default();
+        let instruction = text_field(object, "wake")?;
+        let wake = if let Some(instruction) = instruction {
+            let run = self.run(context).await?;
+            Some(TaskWake {
+                call_key: effect_key(context, &run, UPDATE_TASK, arguments),
+                instruction,
+                requested: crate::timers::run_requested(&self.db, run.id, context.task_id)
+                    .await
+                    .map_err(tool_error)?,
+                at: self.clock.now(),
+            })
+        } else {
+            None
+        };
         let updated = self
             .db
             .update_task(
                 &context.lease,
                 task.id,
-                text_field(object, "title")?,
-                text_field(object, "goal")?,
-                priority_field(object)?,
+                TaskUpdate {
+                    title: text_field(object, "title")?,
+                    goal: text_field(object, "goal")?,
+                    priority: priority_field(object)?,
+                    repositories: &repositories,
+                    wake,
+                },
             )
             .await
             .map_err(tool_error)?;
+        if instruction.is_some() {
+            self.waker.wake(WakeTarget::Lane(updated.lane_id));
+        }
         Ok(task_json(&updated))
     }
 
@@ -1023,7 +1066,7 @@ fn task_definitions() -> Vec<ToolDefinition> {
         ),
         define(
             UPDATE_TASK,
-            "Change the title, goal, or priority of a task that has not ended.",
+            "Edit an unfinished task, attach registered repositories, or wake it with an instruction.",
             Tier::Local,
             json!({
                 "type": "object",
@@ -1031,7 +1074,16 @@ fn task_definitions() -> Vec<ToolDefinition> {
                     "task_id": task_id.clone(),
                     "title": { "type": "string" },
                     "goal": { "type": "string" },
-                    "priority": { "type": "integer" }
+                    "priority": { "type": "integer" },
+                    "repositories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Registered repository names to add. Worktrees are available on the next run."
+                    },
+                    "wake": {
+                        "type": "string",
+                        "description": "Instruction to queue in this task's lane. Wakes a sleeping task without answering pending decisions or resuming a user-stopped lane."
+                    }
                 },
                 "required": ["task_id"],
                 "additionalProperties": false
@@ -1199,11 +1251,15 @@ impl ToolRegistry for HubTools {
                 .await
             }
             // The gate asks before these, and the runner performs them.
-            PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE | MARK_READY => {
-                Err(ToolError::Blocked(format!(
-                    "{name} is performed only once the user approves it"
-                )))
-            }
+            PUBLISH_BRANCH
+            | OPEN_PULL_REQUEST
+            | FAST_FORWARD_PULL_REQUEST
+            | COMMENT
+            | CREATE_ISSUE
+            | MERGE
+            | MARK_READY => Err(ToolError::Blocked(format!(
+                "{name} is performed only once the user approves it"
+            ))),
             // The gate always asks: the answer is the outcome.
             ASK_USER => Err(ToolError::Blocked(format!(
                 "{name} is answered by the user, through a decision"
@@ -1399,6 +1455,7 @@ mod tests {
                     FINISH_TASK,
                     PUBLISH_BRANCH,
                     OPEN_PULL_REQUEST,
+                    FAST_FORWARD_PULL_REQUEST,
                     COMMENT,
                     CREATE_ISSUE,
                     MERGE,

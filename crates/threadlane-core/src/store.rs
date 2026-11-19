@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use serde_json::Value as Json;
 
 use crate::ids::{
-    AgentId, BindingId, DecisionId, EventId, LaneId, MachineId, OutboxId, ProjectId, RunId,
-    SessionId, StandingRuleId, TaskId, TimerId,
+    AgentId, BindingId, DecisionId, EventId, LaneId, MachineId, OutboxId, ProjectId, RepositoryId,
+    RunId, SessionId, StandingRuleId, TaskId, TimerId,
 };
 use crate::model::{
     Account, Agent, Answered, BackendKind, Binding, Decision, DecisionAnswer, Event, FailedRun,
@@ -339,6 +339,25 @@ pub trait TimerStore: Send + Sync {
     async fn resume_timer(&self, id: TimerId, due_at: Option<Timestamp>) -> StoreResult<Timer>;
 }
 
+/// Changes to an unfinished task. Repository attachments are additive.
+#[derive(Debug, Default)]
+pub struct TaskUpdate<'a> {
+    pub title: Option<&'a str>,
+    pub goal: Option<&'a str>,
+    pub priority: Option<i64>,
+    pub repositories: &'a [RepositoryId],
+    pub wake: Option<TaskWake<'a>>,
+}
+
+/// An instruction from the project lead to queue in the task's lane.
+#[derive(Debug)]
+pub struct TaskWake<'a> {
+    pub call_key: String,
+    pub instruction: &'a str,
+    pub requested: bool,
+    pub at: Timestamp,
+}
+
 /// Tasks and checkpoints (Plan.md §5.2, §5.5).
 ///
 /// The run cycle moves a task through its lifecycle inside the lane's own
@@ -371,14 +390,12 @@ pub trait TaskStore: Send + Sync {
     /// `false` for a lead lane.
     async fn left_unwoken(&self, lane_id: LaneId) -> StoreResult<bool>;
     async fn tasks(&self, project_id: ProjectId) -> StoreResult<Vec<Task>>;
-    /// Changes what a task that has not ended is about. `None` keeps a field.
+    /// Edits a task and queues its wake instruction in the same transaction.
     async fn update_task(
         &self,
         lease: &Lease,
         id: TaskId,
-        title: Option<&str>,
-        goal: Option<&str>,
-        priority: Option<i64>,
+        update: TaskUpdate<'_>,
     ) -> StoreResult<Task>;
     /// Cancels a task that has not ended and reports it to the lead lane.
     /// Cancelling a cancelled task changes nothing. Pending events in its
