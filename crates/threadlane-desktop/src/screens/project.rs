@@ -16,8 +16,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::Mode;
 use threadlane_desktop::{
-    Consequence, EmptyRegion, Line, ModeChoice, Part, TaskGroup, When, message_limit,
-    newest_message,
+    Consequence, EmptyRegion, Line, ModeChoice, Part, ProjectTasksViewMode, SpaceTasksViewMode,
+    TaskGroup, When, build_task_dag, message_limit, newest_message, status_label, work_elapsed,
 };
 
 use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
@@ -59,46 +59,82 @@ impl Desktop {
             })
             .unwrap_or_default();
 
-        let header_actions = (!active_projects.is_empty()).then(|| {
+        let view_mode = self.state.space_tasks_view_mode();
+        let mode_toggle = ButtonGroup::new("space-tasks-view-mode")
+            .child(
+                button("space-tasks-mode-list")
+                    .small()
+                    .outline()
+                    .icon(AppIcon::FileText)
+                    .label("List")
+                    .selected(view_mode == SpaceTasksViewMode::List)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state
+                            .set_space_tasks_view_mode(SpaceTasksViewMode::List);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                button("space-tasks-mode-graph")
+                    .small()
+                    .outline()
+                    .icon(AppIcon::GitFork)
+                    .label("Graph")
+                    .selected(view_mode == SpaceTasksViewMode::Graph)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state
+                            .set_space_tasks_view_mode(SpaceTasksViewMode::Graph);
+                        cx.notify();
+                    })),
+            );
+
+        let new_task_button = (!active_projects.is_empty()).then(|| {
             let in_space = space.to_owned();
             let projects = active_projects.clone();
             let view = cx.entity().downgrade();
-            h_flex().child(
-                button("space-new-task")
-                    .small()
-                    .primary()
-                    .icon(AppIcon::ListPlus)
-                    .label("New task")
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for project in &projects {
-                            let (space, project, view) =
-                                (in_space.clone(), project.clone(), view.clone());
-                            menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
-                                move |_, _, cx| {
-                                    let _ = view.update(cx, |this, cx| {
-                                        this.state.open_task_form(&space, &project, true);
-                                        this.go(
-                                            Screen::Project {
-                                                space: space.clone(),
-                                                project: project.clone(),
-                                                tab: Tab::Tasks,
-                                            },
-                                            cx,
-                                        );
-                                    });
-                                },
-                            ));
-                        }
-                        menu
-                    }),
-            )
+            button("space-new-task")
+                .small()
+                .primary()
+                .icon(AppIcon::ListPlus)
+                .label("New task")
+                .dropdown_menu(move |mut menu, _, _| {
+                    for project in &projects {
+                        let (space, project, view) =
+                            (in_space.clone(), project.clone(), view.clone());
+                        menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
+                            move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.state.open_task_form(&space, &project, true);
+                                    this.go(
+                                        Screen::Project {
+                                            space: space.clone(),
+                                            project: project.clone(),
+                                            tab: Tab::Tasks,
+                                        },
+                                        cx,
+                                    );
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                })
         });
+
+        let header_actions = Some(
+            h_flex()
+                .gap(SM)
+                .items_center()
+                .child(mode_toggle)
+                .children(new_task_button),
+        );
 
         let mut list = v_flex()
             .flex_1()
             .min_h_0()
+            .min_w_0()
+            .h_full()
             .gap(MD)
-            .overflow_y_scrollbar()
             .id("space-tasks")
             .child(page_header(
                 "Tasks",
@@ -291,6 +327,27 @@ impl Desktop {
 
                 list = list.child(filters);
 
+                if view_mode == SpaceTasksViewMode::Graph {
+                    let filtered_tasks: Vec<_> = known
+                        .tasks
+                        .iter()
+                        .filter(|summary| {
+                            filter
+                                .project
+                                .as_deref()
+                                .is_none_or(|p| summary.project == p)
+                                && filter.agent.as_deref().is_none_or(|a| summary.agent == a)
+                                && filter
+                                    .status
+                                    .is_none_or(|g| TaskGroup::of(summary.task.status) == g)
+                        })
+                        .cloned()
+                        .collect();
+                    let dag = build_task_dag(&filtered_tasks, when);
+                    list = list.child(self.task_dag_view("space-task-dag", space, dag, cx));
+                    return list.into_any_element();
+                }
+
                 if view.sections.is_empty() {
                     let clear_space = space.to_owned();
                     list = list.child(
@@ -415,7 +472,7 @@ impl Desktop {
                 }
             }
         }
-        list.into_any_element()
+        list.overflow_y_scrollbar().into_any_element()
     }
 
     pub(crate) fn project(
@@ -845,12 +902,144 @@ impl Desktop {
         }
         let column_count = cells.len();
         let board_min = BOARD_COLUMN_MIN * column_count + SM * column_count.saturating_sub(1);
+        let view_mode = self.state.project_tasks_view();
+        let mode_switcher = h_flex().justify_between().items_center().gap(SM).child(
+            ButtonGroup::new("project-tasks-view-mode")
+                .child(
+                    button("project-tasks-mode-board")
+                        .small()
+                        .outline()
+                        .icon(AppIcon::Columns3)
+                        .label("Board")
+                        .selected(view_mode == ProjectTasksViewMode::Board)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state
+                                .set_project_tasks_view(ProjectTasksViewMode::Board);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("project-tasks-mode-list")
+                        .small()
+                        .outline()
+                        .icon(AppIcon::FileText)
+                        .label("List")
+                        .selected(view_mode == ProjectTasksViewMode::List)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state
+                                .set_project_tasks_view(ProjectTasksViewMode::List);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("project-tasks-mode-graph")
+                        .small()
+                        .outline()
+                        .icon(AppIcon::GitFork)
+                        .label("Graph")
+                        .selected(view_mode == ProjectTasksViewMode::Graph)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state
+                                .set_project_tasks_view(ProjectTasksViewMode::Graph);
+                            cx.notify();
+                        })),
+                ),
+        );
+
+        let project_tasks = self
+            .state
+            .project(space, project)
+            .map(|view| view.tasks.as_slice())
+            .unwrap_or_default();
+
         let board = match self.state.project_gap(space, project, Part::Tasks) {
             Some(gap) => div()
                 .flex_1()
                 .min_w_0()
                 .child(gap_line(&gap, "tasks", space, cx))
                 .into_any_element(),
+            None if view_mode == ProjectTasksViewMode::Graph => {
+                let dag = build_task_dag(project_tasks, when);
+                self.task_dag_view("project-task-dag", space, dag, cx)
+            }
+            None if view_mode == ProjectTasksViewMode::List => {
+                let mut ordered: Vec<_> = project_tasks.iter().collect();
+                ordered.sort_by_key(|s| {
+                    std::cmp::Reverse((s.completed_at.unwrap_or(s.task.created_at), s.task.id))
+                });
+                let mono = cx.theme().mono_font_family.clone();
+                let mut rows = v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap(XS)
+                    .overflow_y_scrollbar()
+                    .id("project-tasks-list");
+                for summary in ordered {
+                    let task = &summary.task;
+                    let screen = Screen::Task {
+                        space: space.to_owned(),
+                        task: task.id,
+                    };
+                    let status = status_label(task.status, task.waiting_reason.as_deref());
+                    let status_kind = Status::task(status);
+                    let quiet = task.status == threadlane_core::model::TaskStatus::Done;
+                    let time = work_elapsed(summary, when).unwrap_or_else(|| {
+                        when.moment(summary.completed_at.unwrap_or(task.created_at))
+                    });
+                    rows = rows.child(
+                        button(SharedString::from(format!("project-list-task-{}", task.id)))
+                            .ghost()
+                            .w_full()
+                            .min_h(CONTROL_HEIGHT)
+                            .rounded(ROW_RADIUS)
+                            .px(SM)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                            )
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap(SM)
+                                    .items_center()
+                                    .children((!quiet).then(|| status_dot(status_kind, cx)))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(TYPE_META)
+                                            .font_family(mono.clone())
+                                            .font_features(TABULAR.clone())
+                                            .text_color(muted)
+                                            .child(task.id.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(TYPE_BODY)
+                                            .text_color(if quiet {
+                                                muted
+                                            } else {
+                                                cx.theme().foreground
+                                            })
+                                            .child(task.title.clone()),
+                                    )
+                                    .child(meta(summary.agent.clone(), cx).flex_none())
+                                    .child(
+                                        meta(time, cx)
+                                            .flex_none()
+                                            .font_features(TABULAR.clone())
+                                            .text_right(),
+                                    )
+                                    .children(
+                                        (!quiet).then(|| status_badge(status, status_kind, cx)),
+                                    ),
+                            ),
+                    );
+                }
+                rows.into_any_element()
+            }
             None => div()
                 .relative()
                 .flex_1()
@@ -892,6 +1081,7 @@ impl Desktop {
             .min_h_0()
             .min_w_0()
             .gap(MD)
+            .child(mode_switcher)
             .when(!decisions.is_empty(), |column| {
                 // Capped and scrollable so decisions never push the board off the page.
                 column.child(
@@ -1044,7 +1234,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let mut lines = v_flex().gap(SM);
+        let mut lines = v_flex().gap(MD);
         if let Some(before) = self.state.earlier(space, project) {
             let (space, project) = (space.to_owned(), project.to_owned());
             lines = lines.child(button("earlier").small().label("Show earlier").on_click(
@@ -1082,9 +1272,16 @@ impl Desktop {
         }
         let recorded = self.state.recorded(space, project, when);
         let newest = newest_message(&conversation);
+        let (run_ink, run_tint) = Status::Running.colors(cx.theme());
+        let (fail_ink, fail_tint) = Status::Failed.colors(cx.theme());
         for (index, line) in conversation.iter().enumerate() {
             let limit = message_limit(newest, index);
-            let said = |id: String, who: &str, time: &str, text: &str, reply: bool| {
+            let said = |id: String,
+                        who: &str,
+                        icon: Option<AppIcon>,
+                        time: &str,
+                        text: &str,
+                        reply: bool| {
                 let reply = reply && main_chat;
                 let id = format!("conversation-{space}-{project}-{id}");
                 let quote = text.to_owned();
@@ -1092,10 +1289,23 @@ impl Desktop {
                 let menu_view = cx.entity().downgrade();
                 v_flex()
                     .id(SharedString::from(format!("menu-{id}")))
+                    .w_full()
                     .gap(XS)
                     .child(
                         h_flex()
+                            .w_full()
                             .gap(SM)
+                            .items_center()
+                            .children(icon.map(|ic| {
+                                h_flex()
+                                    .size(px(22.))
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(run_tint)
+                                    .child(Icon::new(ic).size(TYPE_META).text_color(run_ink))
+                            }))
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -1113,7 +1323,11 @@ impl Desktop {
                                         this.reply_to(&quote, window, cx)
                                     }))
                             }))
-                            .child(meta(time.to_owned(), cx).text_right()),
+                            .child(
+                                meta(time.to_owned(), cx)
+                                    .font_features(TABULAR.clone())
+                                    .text_right(),
+                            ),
                     )
                     .children(
                         (!text.is_empty())
@@ -1145,16 +1359,92 @@ impl Desktop {
                     time,
                     images,
                 } => lines.child(
-                    said(format!("you-{id}"), "You", time, text, !text.is_empty())
-                        .children(crate::components::chat_images::previews(images, cx)),
+                    div()
+                        .w_full()
+                        .px(MD)
+                        .py(SM)
+                        .rounded(ROW_RADIUS)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().group_box)
+                        .child(
+                            said(
+                                format!("you-{id}"),
+                                "You",
+                                None,
+                                time,
+                                text,
+                                !text.is_empty(),
+                            )
+                            .children(crate::components::chat_images::previews(images, cx)),
+                        ),
                 ),
-                Line::SpaceLead { id, text, time } => lines.child(said(
-                    format!("space-lead-{id}"),
-                    "General lead",
-                    time,
-                    text,
-                    false,
-                )),
+                Line::SpaceLead { id, text, time } => {
+                    let toggle_key = format!("handoff-space-{space}-{project}-{id}");
+                    let expanded = self.state.message_expanded(&toggle_key);
+                    let preview = handoff_preview(text);
+                    let key_for_click = toggle_key.clone();
+                    lines.child(
+                        v_flex()
+                            .w_full()
+                            .gap(XS)
+                            .px(MD)
+                            .py(SM)
+                            .rounded(ROW_RADIUS)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().group_box)
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap(SM)
+                                    .items_center()
+                                    .child(
+                                        Icon::new(AppIcon::GitFork)
+                                            .size(TYPE_META)
+                                            .text_color(muted),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(TYPE_META)
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("Space lead ask"),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(
+                                        button(SharedString::from(format!("toggle-{toggle_key}")))
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(if expanded {
+                                                AppIcon::ChevronDown
+                                            } else {
+                                                AppIcon::ChevronRight
+                                            })
+                                            .label(if expanded { "Hide" } else { "Show" })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.state.toggle_message(&key_for_click);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        meta(time.clone(), cx)
+                                            .font_features(TABULAR.clone())
+                                            .text_right(),
+                                    ),
+                            )
+                            .child(if expanded {
+                                self.prose(
+                                    format!("conversation-{space}-{project}-space-lead-{id}"),
+                                    space,
+                                    text.clone(),
+                                    cx,
+                                )
+                                .into_any_element()
+                            } else {
+                                meta(preview, cx).truncate().into_any_element()
+                            }),
+                    )
+                }
                 Line::ProjectReply {
                     id,
                     project: from,
@@ -1166,55 +1456,173 @@ impl Desktop {
                         project: from.clone(),
                         tab: Tab::Conversation,
                     };
+                    let toggle_key = format!("handoff-reply-{space}-{project}-{id}");
+                    let expanded = self.state.message_expanded(&toggle_key);
+                    let preview = handoff_preview(text);
+                    let key_for_click = toggle_key.clone();
                     lines.child(
                         v_flex()
+                            .w_full()
                             .gap(XS)
-                            .child(said(
-                                format!("reply-{id}"),
-                                &format!("{from} lead"),
-                                time,
-                                text,
-                                false,
-                            ))
+                            .px(MD)
+                            .py(SM)
+                            .rounded(ROW_RADIUS)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().group_box)
                             .child(
-                                h_flex().child(
-                                    button(SharedString::from(format!("open-reply-{id}")))
-                                        .small()
-                                        .ghost()
-                                        .tab_stop(true)
-                                        .label(format!("Open {from}"))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.go(screen.clone(), cx)
-                                        })),
-                                ),
-                            ),
+                                h_flex()
+                                    .w_full()
+                                    .gap(SM)
+                                    .items_center()
+                                    .child(
+                                        Icon::new(AppIcon::GitFork)
+                                            .size(TYPE_META)
+                                            .text_color(run_ink),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(TYPE_META)
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(format!("{from} lead")),
+                                    )
+                                    .child(meta("handoff", cx))
+                                    .child(
+                                        button(SharedString::from(format!("open-reply-{id}")))
+                                            .xsmall()
+                                            .outline()
+                                            .tab_stop(true)
+                                            .label(format!("Open {from}"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.go(screen.clone(), cx)
+                                            })),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(
+                                        button(SharedString::from(format!("toggle-{toggle_key}")))
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(if expanded {
+                                                AppIcon::ChevronDown
+                                            } else {
+                                                AppIcon::ChevronRight
+                                            })
+                                            .label(if expanded { "Hide" } else { "Show" })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.state.toggle_message(&key_for_click);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        meta(time.clone(), cx)
+                                            .font_features(TABULAR.clone())
+                                            .text_right(),
+                                    ),
+                            )
+                            .child(if expanded {
+                                self.prose(
+                                    format!("conversation-{space}-{project}-reply-{id}"),
+                                    space,
+                                    text.clone(),
+                                    cx,
+                                )
+                                .into_any_element()
+                            } else {
+                                meta(preview, cx).truncate().into_any_element()
+                            }),
                     )
                 }
                 Line::Lead { seq, text, time } => {
-                    lines.child(said(format!("lead-{seq}"), "Lead", time, text, true))
+                    let speaker = if main_chat { "Space Lead" } else { "Lead" };
+                    lines.child(div().w_full().py(XS).child(said(
+                        format!("lead-{seq}"),
+                        speaker,
+                        Some(AppIcon::Bot),
+                        time,
+                        text,
+                        true,
+                    )))
                 }
-                Line::Notice { seq, text, time } => {
-                    lines.child(said(format!("notice-{seq}"), "Notice", time, text, false))
-                }
+                Line::Notice { seq, text, time } => lines.child(
+                    h_flex()
+                        .w_full()
+                        .gap(SM)
+                        .items_start()
+                        .px(SM)
+                        .py(XS)
+                        .child(status_dot(Status::Idle, cx))
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                self.prose(
+                                    format!("conversation-{space}-{project}-notice-{seq}"),
+                                    space,
+                                    text.clone(),
+                                    cx,
+                                )
+                                .limit(limit),
+                            ),
+                        )
+                        .child(
+                            meta(time.clone(), cx)
+                                .flex_none()
+                                .font_features(TABULAR.clone()),
+                        ),
+                ),
                 Line::Sending {
                     id,
                     text,
                     time,
                     images,
                 } => lines.child(
-                    said(format!("sending-{id}"), "You · Sending…", time, text, false)
-                        .children(crate::components::chat_images::previews(images, cx)),
+                    div()
+                        .w_full()
+                        .px(MD)
+                        .py(SM)
+                        .rounded(ROW_RADIUS)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().group_box)
+                        .child(
+                            said(
+                                format!("sending-{id}"),
+                                "You · Sending…",
+                                None,
+                                time,
+                                text,
+                                false,
+                            )
+                            .children(crate::components::chat_images::previews(images, cx)),
+                        ),
                 ),
-                Line::Stopped { time } => {
-                    lines.child(said(String::new(), "Lead run stopped", time, "", false))
-                }
-                Line::DeliveryFailure { id, text, time } => lines.child(said(
-                    format!("failed-{id}"),
-                    "Delivery failed",
-                    time,
-                    text,
-                    false,
-                )),
+                Line::Stopped { time } => lines.child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .items_center()
+                        .px(SM)
+                        .py(XS)
+                        .child(meta("Lead run stopped", cx))
+                        .child(meta(time.clone(), cx).font_features(TABULAR.clone())),
+                ),
+                Line::DeliveryFailure { id, text, time } => lines.child(
+                    v_flex()
+                        .w_full()
+                        .gap(XS)
+                        .px(MD)
+                        .py(SM)
+                        .rounded(ROW_RADIUS)
+                        .border_1()
+                        .border_color(fail_ink)
+                        .bg(fail_tint)
+                        .child(said(
+                            format!("failed-{id}"),
+                            "Delivery failed",
+                            None,
+                            time,
+                            text,
+                            false,
+                        )),
+                ),
                 Line::Digest { digest, time } => lines.child(
                     v_flex()
                         .gap(XS)
@@ -1275,6 +1683,7 @@ impl Desktop {
                         None => lines.child(said(
                             format!("decision-{}", card.id),
                             card.label(),
+                            None,
                             time,
                             &format!("{}: {}", card.id, card.question),
                             false,
@@ -1372,15 +1781,36 @@ impl Desktop {
         {
             side = side.child(empty(EmptyRegion::Board, cx));
         }
-        for summary in tasks {
+        let total_tasks = tasks.len();
+        let mut sorted_tasks: Vec<_> = tasks.iter().collect();
+        sorted_tasks.sort_by(|a, b| {
+            let active = |status: threadlane_core::model::TaskStatus| match status {
+                threadlane_core::model::TaskStatus::WaitingOnYou
+                | threadlane_core::model::TaskStatus::Proposed => 0u8,
+                threadlane_core::model::TaskStatus::Failed => 1,
+                threadlane_core::model::TaskStatus::Running
+                | threadlane_core::model::TaskStatus::InReview => 2,
+                threadlane_core::model::TaskStatus::Queued
+                | threadlane_core::model::TaskStatus::Sleeping => 3,
+                threadlane_core::model::TaskStatus::Done
+                | threadlane_core::model::TaskStatus::Cancelled => 4,
+            };
+            active(a.task.status)
+                .cmp(&active(b.task.status))
+                .then_with(|| {
+                    b.completed_at
+                        .unwrap_or(b.task.created_at)
+                        .cmp(&a.completed_at.unwrap_or(a.task.created_at))
+                })
+                .then_with(|| b.task.id.cmp(&a.task.id))
+        });
+        const SIDEBAR_TASKS_SHOWN: usize = 10;
+        for summary in sorted_tasks.into_iter().take(SIDEBAR_TASKS_SHOWN) {
             let screen = Screen::Task {
                 space: space.to_owned(),
                 task: summary.task.id,
             };
-            let status = threadlane_desktop::status_label(
-                summary.task.status,
-                summary.task.waiting_reason.as_deref(),
-            );
+            let status = status_label(summary.task.status, summary.task.waiting_reason.as_deref());
             side = side
                 .child(
                     link(
@@ -1402,6 +1832,21 @@ impl Desktop {
                             )
                         })),
                 );
+        }
+        if total_tasks > SIDEBAR_TASKS_SHOWN {
+            let all_screen = Screen::Project {
+                space: space.to_owned(),
+                project: project.to_owned(),
+                tab: Tab::Tasks,
+            };
+            side = side.child(
+                button("sidebar-all-tasks")
+                    .small()
+                    .ghost()
+                    .self_start()
+                    .label(format!("View all {total_tasks} tasks"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(all_screen.clone(), cx))),
+            );
         }
         side = side.child(section("Open decisions"));
         let open: Vec<_> = self
@@ -2350,4 +2795,20 @@ impl Desktop {
         }
         part
     }
+}
+
+/// Strips internal relay boilerplate ("The lead of <p> replied to your ask (event N): ")
+/// and collapses whitespace into a clean single-line preview for collapsed handoff cards.
+fn handoff_preview(text: &str) -> String {
+    let trimmed = text.trim();
+    let body = trimmed
+        .strip_prefix("The lead of ")
+        .and_then(|rest| rest.split_once("): "))
+        .map_or(trimmed, |(_, tail)| tail.trim_start());
+    let first_line = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(trimmed);
+    first_line.to_owned()
 }

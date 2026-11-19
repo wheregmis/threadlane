@@ -150,7 +150,7 @@ pub(super) fn backend_picker(
 
 impl Desktop {
     /// Opens `agent`'s edit view and fills its fields.
-    pub(super) fn open_agent_edit(
+    pub(crate) fn open_agent_edit(
         &mut self,
         space: &str,
         agent: &str,

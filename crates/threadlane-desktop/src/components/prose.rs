@@ -182,12 +182,28 @@ impl Prose {
     }
 }
 
+struct CachedProse {
+    source: String,
+    view: Entity<TextViewState>,
+}
+
 impl RenderOnce for Prose {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| {
-            TextViewState::markdown(&self.source, cx)
+        let cached = window.use_keyed_state(self.id.clone(), cx, |_, cx| CachedProse {
+            source: self.source.clone(),
+            view: cx.new(|cx| TextViewState::markdown(&self.source, cx)),
         });
-        state.update(cx, |state, cx| state.set_text(&self.source, cx));
+        let state = {
+            let needs_update = cached.read(cx).source != self.source;
+            if needs_update {
+                let source = self.source.clone();
+                cached.update(cx, |entry, cx| {
+                    entry.source = source.clone();
+                    entry.view.update(cx, |view, cx| view.set_text(&source, cx));
+                });
+            }
+            cached.read(cx).view.clone()
+        };
         let (cap, label) = self
             .limit
             .disclosure(self.expanded, state.read(cx).is_clamped());
@@ -238,6 +254,7 @@ impl RenderOnce for Prose {
                 button("toggle-prose")
                     .ghost()
                     .small()
+                    .self_start()
                     .tab_stop(true)
                     .label(label)
                     .on_click(move |_, _, cx| {

@@ -410,6 +410,8 @@ struct Desktop {
     sidebar_collapsed: bool,
     decision_scroll: ScrollHandle,
     board_scroll: ScrollHandle,
+    dag_scroll: ScrollHandle,
+    topo_scroll: ScrollHandle,
     reveal_linked_decision: Option<DecisionKey>,
     conversation_at_bottom: bool,
     conversation_follow: Rc<Cell<bool>>,
@@ -653,6 +655,8 @@ impl Desktop {
             sidebar_collapsed: false,
             decision_scroll: ScrollHandle::default(),
             board_scroll: ScrollHandle::default(),
+            dag_scroll: ScrollHandle::default(),
+            topo_scroll: ScrollHandle::default(),
             reveal_linked_decision: None,
             conversation_at_bottom: true,
             conversation_follow: Rc::new(Cell::new(conversation)),
@@ -1130,6 +1134,8 @@ impl Desktop {
             }));
             self.decision_scroll = ScrollHandle::default();
             self.board_scroll = ScrollHandle::default();
+            self.dag_scroll = ScrollHandle::default();
+            self.topo_scroll = ScrollHandle::default();
         }
         screens::shell::follow_screen(&mut self.state, &screen);
         self.screen = screen;
@@ -1699,7 +1705,7 @@ impl Render for Desktop {
                 tab,
             } => self.project(&space, &project, tab, &when, cx),
             Screen::Task { space, task } => self.task(&space, task, &when, cx),
-            Screen::Agents(scope) => self.agents(scope.as_deref(), cx),
+            Screen::Agents(scope) => self.agents(scope.as_deref(), &when, cx),
             Screen::SpaceTasks { space } => self.space_tasks(&space, &when, cx),
             Screen::NewProject { space } => self.new_project(&space, cx),
             Screen::Machines => self.machines(&when, cx),

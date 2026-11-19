@@ -6860,3 +6860,186 @@ async fn a_legacy_refresh_reuses_only_the_project_parts_it_supplied() {
         (false, false)
     );
 }
+
+#[test]
+fn task_dag_layers_dependencies_highlights_bottlenecks_and_classifies_edges() {
+    let mut t1 = task(1, TaskStatus::Done, None);
+    t1.task.title = "Foundation".into();
+
+    let mut t2 = task(2, TaskStatus::Running, None);
+    t2.task.title = "Build feature".into();
+    t2.task.depends_on = vec![TaskId(1)];
+
+    let mut t3 = task(3, TaskStatus::Queued, None);
+    t3.task.title = "Ship feature".into();
+    t3.task.depends_on = vec![TaskId(2)];
+
+    let mut t4 = task(4, TaskStatus::Failed, None);
+    t4.task.title = "Broken step".into();
+    t4.task.depends_on = vec![TaskId(1)];
+
+    let mut t5 = task(5, TaskStatus::Queued, None);
+    t5.task.title = "Blocked downstream".into();
+    t5.task.depends_on = vec![TaskId(4)];
+
+    let dag = build_task_dag(&[t1, t2, t3, t4, t5], &when());
+    assert!(dag.has_dependencies);
+    assert_eq!(dag.nodes.len(), 5);
+    assert_eq!(dag.edges.len(), 4);
+
+    let node = |id: i64| dag.nodes.iter().find(|n| n.id == TaskId(id)).unwrap();
+    assert_eq!(node(1).layer, 0);
+    assert_eq!(node(2).layer, 1);
+    assert_eq!(node(3).layer, 2);
+    assert_eq!(node(4).layer, 1);
+    assert_eq!(node(5).layer, 2);
+
+    // T-0002 (Running -> Queued T-0003) and T-0004 (Failed -> Queued T-0005) are bottlenecks.
+    assert!(!node(1).is_bottleneck);
+    assert!(node(2).is_bottleneck);
+    assert_eq!(node(2).downstream_blocked, 1);
+    assert!(node(4).is_bottleneck);
+    assert_eq!(node(4).downstream_blocked, 1);
+    assert_eq!(dag.bottlenecks, 2);
+
+    let edge = |from: i64, to: i64| {
+        let id = format!("edge-{}-{}", TaskId(from), TaskId(to));
+        dag.edges.iter().find(|e| e.id == id).unwrap().state
+    };
+    assert_eq!(edge(1, 2), EdgeState::Active);
+    assert_eq!(edge(2, 3), EdgeState::Active);
+    assert_eq!(edge(1, 4), EdgeState::Satisfied);
+    assert_eq!(edge(4, 5), EdgeState::Blocked);
+    assert_eq!(dag.active_edges, 2);
+}
+
+#[test]
+fn task_dag_handles_cycles_and_flat_lists_without_panicking() {
+    let mut a = task(10, TaskStatus::Queued, None);
+    a.task.depends_on = vec![TaskId(11)];
+    let mut b = task(11, TaskStatus::Queued, None);
+    b.task.depends_on = vec![TaskId(10)];
+    let cyclic = build_task_dag(&[a, b], &when());
+    assert_eq!(cyclic.nodes.len(), 2);
+    // Root must never be counted in its own downstream_blocked count.
+    for node in &cyclic.nodes {
+        assert_eq!(node.downstream_blocked, 1);
+    }
+
+    let flat = build_task_dag(
+        &[
+            task(1, TaskStatus::Done, None),
+            task(2, TaskStatus::Running, None),
+        ],
+        &when(),
+    );
+    assert!(!flat.has_dependencies);
+    assert_eq!(flat.nodes.len(), 2);
+    assert!(flat.edges.is_empty());
+}
+
+#[tokio::test]
+async fn agent_topology_builds_three_tier_org_and_lights_up_active_delegations() {
+    let mut running = task(21, TaskStatus::Running, None);
+    running.project = "api".into();
+    running.agent = "Engineer".into();
+    let hub = FakeHub::new("Work", Vec::new());
+    hub.agents.lock().expect("lock").push(Agent {
+        id: AgentId(1),
+        name: "Engineer".into(),
+        role: "engineer".into(),
+        instructions: String::new(),
+        backends: vec![BackendKind::Claude],
+        models: Default::default(),
+        tools: serde_json::json!([]),
+        requirements: Default::default(),
+    });
+    *hub.tasks.lock().expect("lock") = vec![running];
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+
+    let topo = state.agent_topology("work", None, &when());
+    assert!(topo.nodes.iter().any(|n| matches!(
+        n.kind,
+        TopologyNodeKind::SpaceLead { ref space } if space == "work"
+    )));
+    assert!(topo.nodes.iter().any(|n| matches!(
+        n.kind,
+        TopologyNodeKind::Project { ref project, .. } if project == "api"
+    )));
+    assert!(topo.nodes.iter().any(|n| matches!(
+        n.kind,
+        TopologyNodeKind::Agent { ref agent, .. } if agent == "Engineer"
+    )));
+    assert!(
+        topo.edges
+            .iter()
+            .any(|e| e.state == EdgeState::Active && e.label.as_deref() == Some("T-0021"))
+    );
+    assert!(topo.active_delegations >= 1);
+
+    // Toggling an agent selects and deselects it for the inline autonomy dial.
+    state.toggle_topology_agent("work", "Engineer");
+    assert_eq!(state.topology_selected_agent(), Some(("work", "Engineer")));
+    state.set_topology_project("work", Some("api".into()));
+    state.space_removed("work");
+    assert_eq!(state.topology_project("work"), None);
+    assert_eq!(state.topology_selected_agent(), None);
+}
+
+#[tokio::test]
+async fn agent_topology_shows_general_handoffs_and_keeps_queued_lead_edge_pending() {
+    let mut general_run = task(30, TaskStatus::Running, None);
+    general_run.project = "General".into();
+    general_run.agent = "Engineer".into();
+    let mut queued_api = task(31, TaskStatus::Queued, None);
+    queued_api.project = "api".into();
+    queued_api.agent = "Engineer".into();
+    let hub = FakeHub::new("Work", Vec::new());
+    hub.agents.lock().expect("lock").push(Agent {
+        id: AgentId(1),
+        name: "Engineer".into(),
+        role: "engineer".into(),
+        instructions: String::new(),
+        backends: vec![BackendKind::Claude],
+        models: Default::default(),
+        tools: serde_json::json!([]),
+        requirements: Default::default(),
+    });
+    *hub.tasks.lock().expect("lock") = vec![general_run, queued_api];
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+
+    let topo = state.agent_topology("work", None, &when());
+    // General task lights up a direct Space Lead -> Engineer edge in All projects.
+    assert!(
+        topo.edges
+            .iter()
+            .any(|e| e.id == "topo-edge-general-Engineer"
+                && e.state == EdgeState::Active
+                && e.label.as_deref() == Some("T-0030"))
+    );
+    // Queued work in api alone must not animate the Space Lead -> api edge.
+    let lead_api = topo
+        .edges
+        .iter()
+        .find(|e| e.id == "topo-edge-lead-api")
+        .unwrap();
+    assert_eq!(lead_api.state, EdgeState::Pending);
+}
+
+#[test]
+fn quiet_update_detector_flags_internal_no_op_messages_only() {
+    assert!(is_quiet_update(
+        "I didn't send a message. T-0066 found no issues."
+    ));
+    assert!(is_quiet_update(
+        "I didn’t message the user. Nothing new to tell them."
+    ));
+    assert!(is_quiet_update("No message sent. Waiting on CI."));
+    assert!(!is_quiet_update(
+        "I've queued T-0069 for the Backend Developer."
+    ));
+}
