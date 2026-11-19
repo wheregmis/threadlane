@@ -6,7 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
-use threadlane_core::forge::{COMMENT, CREATE_ISSUE, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{
+    COMMENT, CREATE_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+};
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::model::{
@@ -66,9 +68,8 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | CANCEL_TASK
         | LIST_TASKS
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
-        FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE => {
-            kind == LaneKind::Task
-        }
+        FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE
+        | MARK_READY => kind == LaneKind::Task,
         _ => true,
     }
 }
@@ -1085,7 +1086,7 @@ impl ToolRegistry for HubTools {
                 .await
             }
             // The gate asks before these, and the runner performs them.
-            PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE => {
+            PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE | MARK_READY => {
                 Err(ToolError::Blocked(format!(
                     "{name} is performed only once the user approves it"
                 )))
@@ -1254,7 +1255,8 @@ mod tests {
                     OPEN_PULL_REQUEST,
                     COMMENT,
                     CREATE_ISSUE,
-                    MERGE
+                    MERGE,
+                    MARK_READY
                 ][..],
                 &memory
             ]
