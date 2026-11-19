@@ -110,16 +110,7 @@ impl Desktop {
                         },
                     )),
             )
-            .child(decision_title(
-                self.prose(
-                    format!("title-{prefix}"),
-                    &key.space,
-                    Some(&project),
-                    question,
-                    cx,
-                )
-                .text_size(crate::tokens::TYPE_EMPHASIS),
-            ))
+            .child(decision_title(question))
             .children(body.map(|body| {
                 self.prose(
                     format!("question-{prefix}"),
@@ -133,7 +124,6 @@ impl Desktop {
             .children(contents.context.map(|line| {
                 self.decision_context(format!("context-{prefix}"), &key.space, &project, line, cx)
             }))
-            // Approval details are raw tool arguments: shown verbatim, never as Markdown.
             .children(contents.details.into_iter().map(|line| div().child(line)))
             .children(
                 contents

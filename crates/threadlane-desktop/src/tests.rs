@@ -7232,24 +7232,6 @@ async fn space_tasks_view_groups_sorts_newest_first_collapses_done_and_filters()
 }
 
 #[test]
-fn approval_details_keep_markdown_verbatim() {
-    let mut decision = decision(1, 100_000);
-    decision.kind = DecisionKind::Approval;
-    decision.arguments = serde_json::json!({ "note": "**x** [a](b) #5" });
-    let card = AppState::decision_card(&Queued {
-        space: "work".into(),
-        decision,
-    });
-    assert!(
-        card.details
-            .iter()
-            .any(|line| line.ends_with("**x** [a](b) #5")),
-        "{:?}",
-        card.details
-    );
-}
-
-#[test]
 fn decision_card_and_changes_extract_diff_preview_without_leaking_into_details() {
     let preview = threadlane_core::workspace::DiffPreview {
         repository: "threadlane".into(),

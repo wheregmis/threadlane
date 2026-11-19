@@ -375,7 +375,7 @@ pub(super) fn key_hint(label: impl Into<SharedString>, cx: &App) -> Div {
 }
 
 /// The question is the main text of the decision.
-pub(super) fn decision_title(question: impl IntoElement) -> Div {
+pub(super) fn decision_title(question: String) -> Div {
     div()
         .text_size(crate::tokens::TYPE_EMPHASIS)
         .font_weight(FontWeight::SEMIBOLD)

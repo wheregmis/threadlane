@@ -56,7 +56,6 @@ pub(crate) struct Prose {
     limit: ProseLimit,
     expanded: bool,
     result_seq: Option<i64>,
-    text_size: Pixels,
 }
 
 impl Desktop {
@@ -80,7 +79,6 @@ impl Desktop {
             limit: ProseLimit::Full,
             expanded: self.state.message_expanded(&id),
             result_seq: None,
-            text_size: TYPE_BODY,
         }
     }
 
@@ -193,11 +191,6 @@ impl Prose {
         self.expanded = expanded;
         self
     }
-
-    pub(crate) fn text_size(mut self, size: Pixels) -> Self {
-        self.text_size = size;
-        self
-    }
 }
 
 struct CachedProse {
@@ -268,7 +261,7 @@ impl RenderOnce for Prose {
             .w_full()
             .min_w_0()
             .gap(XS)
-            .text_size(self.text_size)
+            .text_size(TYPE_BODY)
             .child(view)
             .children(label.map(|label| {
                 button("toggle-prose")
