@@ -101,9 +101,11 @@ impl ClaudeBackend {
 /// Whether the SKILL.md frontmatter sets `disable-model-invocation: true`, which keeps
 /// Claude's Skill tool from starting it. Reads only that one key.
 fn model_invocation_disabled(file: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(file) else {
-        return false;
-    };
+    std::fs::read_to_string(file).is_ok_and(|text| frontmatter_disables_model_invocation(&text))
+}
+
+// shortcut: a top-level `key: value` line, not full YAML; switch to a YAML parser if skills use block forms.
+fn frontmatter_disables_model_invocation(text: &str) -> bool {
     let mut lines = text.lines();
     if lines.next().map(str::trim_end) != Some("---") {
         return false;
@@ -112,7 +114,11 @@ fn model_invocation_disabled(file: &Path) -> bool {
         .take_while(|line| line.trim_end() != "---")
         .filter_map(|line| line.split_once(':'))
         .any(|(key, value)| {
-            key == "disable-model-invocation" && value.trim().trim_matches(['"', '\'']) == "true"
+            let unquote = |text: &str| text.trim().trim_matches(['"', '\'']).to_owned();
+            let value = value.split(" #").next().unwrap_or_default();
+            !key.starts_with(char::is_whitespace)
+                && unquote(key) == "disable-model-invocation"
+                && matches!(unquote(value).as_str(), "true" | "True" | "TRUE")
         })
 }
 
@@ -376,4 +382,29 @@ async fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     let mut file = options.open(path).await?;
     file.write_all(contents.as_bytes()).await?;
     file.flush().await
+}
+
+#[cfg(test)]
+mod frontmatter_tests {
+    use super::frontmatter_disables_model_invocation as disables;
+
+    #[test]
+    fn reads_the_flag_in_its_yaml_spellings() {
+        for text in [
+            "---\ndisable-model-invocation: true\n---",
+            "---\ndisable-model-invocation: true # manual only\n---",
+            "---\n\"disable-model-invocation\": True\n---",
+            "---\r\n'disable-model-invocation':TRUE\r\n---\r\n",
+        ] {
+            assert!(disables(text), "{text:?}");
+        }
+        for text in [
+            "---\ndisable-model-invocation: false\n---",
+            "---\nname: x\n---\ndisable-model-invocation: true",
+            "disable-model-invocation: true",
+            "---\n  disable-model-invocation: true\n---",
+        ] {
+            assert!(!disables(text), "{text:?}");
+        }
+    }
 }
