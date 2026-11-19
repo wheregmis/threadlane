@@ -1781,7 +1781,31 @@ impl Desktop {
         {
             side = side.child(empty(EmptyRegion::Board, cx));
         }
-        for summary in tasks {
+        let total_tasks = tasks.len();
+        let mut sorted_tasks: Vec<_> = tasks.iter().collect();
+        sorted_tasks.sort_by(|a, b| {
+            let active = |status: threadlane_core::model::TaskStatus| match status {
+                threadlane_core::model::TaskStatus::WaitingOnYou
+                | threadlane_core::model::TaskStatus::Proposed => 0u8,
+                threadlane_core::model::TaskStatus::Failed => 1,
+                threadlane_core::model::TaskStatus::Running
+                | threadlane_core::model::TaskStatus::InReview => 2,
+                threadlane_core::model::TaskStatus::Queued
+                | threadlane_core::model::TaskStatus::Sleeping => 3,
+                threadlane_core::model::TaskStatus::Done
+                | threadlane_core::model::TaskStatus::Cancelled => 4,
+            };
+            active(a.task.status)
+                .cmp(&active(b.task.status))
+                .then_with(|| {
+                    b.completed_at
+                        .unwrap_or(b.task.created_at)
+                        .cmp(&a.completed_at.unwrap_or(a.task.created_at))
+                })
+                .then_with(|| b.task.id.cmp(&a.task.id))
+        });
+        const SIDEBAR_TASKS_SHOWN: usize = 10;
+        for summary in sorted_tasks.into_iter().take(SIDEBAR_TASKS_SHOWN) {
             let screen = Screen::Task {
                 space: space.to_owned(),
                 task: summary.task.id,
@@ -1808,6 +1832,21 @@ impl Desktop {
                             )
                         })),
                 );
+        }
+        if total_tasks > SIDEBAR_TASKS_SHOWN {
+            let all_screen = Screen::Project {
+                space: space.to_owned(),
+                project: project.to_owned(),
+                tab: Tab::Tasks,
+            };
+            side = side.child(
+                button("sidebar-all-tasks")
+                    .small()
+                    .ghost()
+                    .self_start()
+                    .label(format!("View all {total_tasks} tasks"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(all_screen.clone(), cx))),
+            );
         }
         side = side.child(section("Open decisions"));
         let open: Vec<_> = self
