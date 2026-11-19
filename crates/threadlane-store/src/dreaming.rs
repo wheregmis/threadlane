@@ -30,6 +30,27 @@ async fn active_timer(
     .await
 }
 
+fn dreaming_timer(
+    project: ProjectId,
+    lane: LaneId,
+    cadence: Recurrence,
+    due_at: Timestamp,
+) -> NewTimer {
+    NewTimer {
+        project_id: project,
+        lane_id: lane,
+        agent_id: None,
+        task_ref: None,
+        category: TimerCategory::Dreaming,
+        due_at,
+        recurrence: Some(cadence),
+        instruction: "Curate project memory".into(),
+        created_by: TimerCreator::System,
+        created_by_call: None,
+        requested: true,
+    }
+}
+
 /// The event membership is immutable for a dream and survives retries and restarts.
 pub(crate) async fn dream_run_in(conn: &Connection, run: RunId) -> StoreResult<bool> {
     query_one(
@@ -74,17 +95,36 @@ impl HubDb {
         active_timer(&self.db.reader()?, project).await
     }
 
-    /// Whether the project has never had a dreaming setting. Turning dreaming
-    /// off leaves its cancelled timer behind, so an explicit off is not unset.
-    pub async fn dreaming_unset(&self, project: ProjectId) -> StoreResult<bool> {
-        query_one(
-            &self.db.reader()?,
+    /// Gives the project the default cadence if it has never had a dreaming
+    /// setting, checked and written in one transaction. Turning dreaming off
+    /// leaves its cancelled timer behind, so an explicit off is never replaced.
+    pub async fn default_dreaming(
+        &self,
+        project: ProjectId,
+        lane: LaneId,
+        cadence: &Recurrence,
+        due_at: Timestamp,
+    ) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let unset = query_one(
+            conn,
             "SELECT NOT EXISTS (SELECT 1 FROM timers WHERE project_id = ?1
              AND created_by = 'system' AND category = 'dreaming')",
             params![project.get()],
             |row| Cols(row).bool(0),
         )
-        .await
+        .await?;
+        if !unset {
+            return Ok(());
+        }
+        insert_timer_in(
+            conn,
+            &dreaming_timer(project, lane, cadence.clone(), due_at),
+            None,
+        )
+        .await?;
+        tx.commit().await
     }
 
     /// Changes the project setting and retires pending occurrences in the same transaction.
@@ -118,24 +158,7 @@ impl HubDb {
         )
         .await?;
         if let Some((cadence, due_at)) = schedule {
-            insert_timer_in(
-                conn,
-                &NewTimer {
-                    project_id: project,
-                    lane_id: lane,
-                    agent_id: None,
-                    task_ref: None,
-                    category: TimerCategory::Dreaming,
-                    due_at,
-                    recurrence: Some(cadence),
-                    instruction: "Curate project memory".into(),
-                    created_by: TimerCreator::System,
-                    created_by_call: None,
-                    requested: true,
-                },
-                None,
-            )
-            .await?;
+            insert_timer_in(conn, &dreaming_timer(project, lane, cadence, due_at), None).await?;
         }
         tx.commit().await
     }

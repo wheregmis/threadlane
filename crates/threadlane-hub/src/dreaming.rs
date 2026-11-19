@@ -123,13 +123,10 @@ impl HubCore {
             return Ok(());
         };
         for project in inner.db.projects().await? {
-            if inner.db.dreaming_unset(project.id).await? {
-                let schedule = Some((cadence.clone(), due));
-                inner
-                    .db
-                    .set_dreaming(project.id, project.lead_lane_id, schedule)
-                    .await?;
-            }
+            inner
+                .db
+                .default_dreaming(project.id, project.lead_lane_id, &cadence, due)
+                .await?;
         }
         Ok(())
     }
