@@ -104,7 +104,8 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         .await
         .is_err()
     );
-    super::github::record_pull_request(&hub, &created, &lease).await;
+    // The review is posted on the pull request the task pushed onto, too.
+    super::github::record_updated_pull_request(&hub, &created, &lease).await;
     write_progress(&hub, &lease, &implementation, &id.to_string()).await;
     call(
         &hub,
@@ -212,7 +213,10 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         assert_eq!(delivery.revision, sha.repeat(40));
         assert_eq!(
             delivery.body,
-            format!("**{verdict}**\n\n{feedback}\n\n🤖 Reviewed by Threadlane (Reviewer, {id})")
+            format!(
+                "**{verdict}**\n\nReviewed at `{}`.\n\n{feedback}\n\n🤖 Reviewed by Threadlane (Reviewer, {id})",
+                sha.repeat(8)
+            )
         );
         hub.db.delivered_github_review(delivery).await.unwrap();
     }
@@ -222,6 +226,74 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
     assert_eq!(history[0].reviewer, reviewer.id);
     assert_eq!(history[0].feedback.as_deref(), Some("Include the totals"));
     assert_eq!(history[1].feedback.as_deref(), Some("Totals match"));
+}
+
+#[tokio::test]
+async fn the_reviewers_own_task_finishes_without_a_review_round() {
+    let hub = TestHub::with(
+        threadlane_hub::HubSettings {
+            reviewer: Some("Reviewer".into()),
+            ..Default::default()
+        },
+        std::sync::Arc::new(NoHooks),
+    )
+    .await;
+    hub.hello().await;
+    let project = hub.general().await;
+    let reviewer = hub
+        .db
+        .create_agent(&NewAgent::named("Reviewer", "reviewer"))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: project.id,
+            agent_id: reviewer.id,
+            mode: Mode::OnRequest,
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    let scan = hub
+        .db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: project.id,
+                agent_id: reviewer.id,
+                title: "Scan open pull requests".into(),
+                goal: "Review the open pull requests".into(),
+                repositories: vec![],
+                parent_task_id: None,
+                depends_on: vec![],
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    let (lease, run) = begin(&*hub.link).await;
+    write_progress(&hub, &lease, &run, &scan.id.to_string()).await;
+    let finished = call(
+        &hub,
+        &lease,
+        &run,
+        "finish",
+        FINISH_TASK,
+        json!({"summary": "Reviewed"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(finished["finished"], json!(true), "{finished}");
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    assert_eq!(
+        task(&hub, &scan.id.to_string()).await.status,
+        TaskStatus::Done
+    );
 }
 
 #[tokio::test]

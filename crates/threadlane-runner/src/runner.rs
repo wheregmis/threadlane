@@ -954,11 +954,19 @@ impl Inner {
         };
         let mut outcome = json!({ "performed": true, "repository": name, "branch": target });
         match tool {
-            PUBLISH_BRANCH => self
-                .forge
-                .push(worktree, approved)
-                .await
-                .map_err(|error| error.to_string())?,
+            PUBLISH_BRANCH => {
+                self.forge
+                    .push(worktree, approved)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                // Names the pull request an onto_task push updated, so a
+                // review of this task is posted there.
+                if target != branch
+                    && let Ok(Some(url)) = self.forge.find_pull_request(worktree, &target).await
+                {
+                    outcome["pull_request"] = json!(url);
+                }
+            }
             OPEN_PULL_REQUEST => {
                 let text = |field: &str| {
                     arguments

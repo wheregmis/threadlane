@@ -155,6 +155,28 @@ pub(super) async fn record_pull_request(
     .await;
 }
 
+/// A push onto an earlier task's branch, which updated that task's pull request.
+pub(super) async fn record_updated_pull_request(
+    hub: &TestHub,
+    task: &Task,
+    lease: &threadlane_core::model::Lease,
+) {
+    record_performed(
+        hub,
+        task,
+        lease,
+        threadlane_hub::PUBLISH_BRANCH,
+        json!({ "repository": "widgets", "onto_task": "T-0001" }),
+        json!({
+            "performed": true,
+            "repository": "widgets",
+            "branch": BRANCH,
+            "pull_request": "https://github.com/acme/widgets/pull/42",
+        }),
+    )
+    .await;
+}
+
 /// Records an approved call of `tool` as performed with `outcome`.
 async fn record_performed(
     hub: &TestHub,

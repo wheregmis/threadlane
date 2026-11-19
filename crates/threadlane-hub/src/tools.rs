@@ -551,20 +551,23 @@ impl HubTools {
                 .ok_or_else(|| {
                     ToolError::Blocked(format!("Space Reviewer {name:?} is unavailable"))
                 })?;
-            let revisions = self.review_revisions(&task, &result).await?;
-            self.db
-                .submit_for_review(
-                    &context.lease,
-                    context.run_id,
-                    reviewer.id,
-                    &revisions,
-                    &result,
-                )
-                .await
-                .map_err(tool_error)?;
-            return Ok(
-                json!({"task_id": task.id, "submitted_for_review": true, "merge": result[MERGE_CHECKS], "next": "End your turn so the Reviewer can start."}),
-            );
+            // The Reviewer cannot review its own task: that finishes unreviewed.
+            if reviewer.id != task.agent_id {
+                let revisions = self.review_revisions(&task, &result).await?;
+                self.db
+                    .submit_for_review(
+                        &context.lease,
+                        context.run_id,
+                        reviewer.id,
+                        &revisions,
+                        &result,
+                    )
+                    .await
+                    .map_err(tool_error)?;
+                return Ok(
+                    json!({"task_id": task.id, "submitted_for_review": true, "merge": result[MERGE_CHECKS], "next": "End your turn so the Reviewer can start."}),
+                );
+            }
         }
         let task =
             self.db

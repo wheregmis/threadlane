@@ -294,7 +294,7 @@ pub(crate) async fn finish_review(
         FROM task_reviews r JOIN agents ON agents.id = r.reviewer
         JOIN json_each(r.revisions) revision
         JOIN repositories repos ON repos.id = json_extract(revision.value, '$.repository')
-        JOIN decisions d ON d.lane_id = ?2 AND d.tool = 'open_pull_request'
+        JOIN decisions d ON d.lane_id = ?2 AND d.tool IN ('open_pull_request', 'publish_branch')
         WHERE r.submission_run = ?1 AND json_extract(d.outcome, '$.performed') = 1
         AND json_extract(d.outcome, '$.repository') = repos.name
         AND json_type(d.outcome, '$.pull_request') = 'text'",
@@ -320,7 +320,8 @@ pub(crate) async fn finish_review(
             TaskReviewVerdict::ChangesRequested => "Changes requested",
         };
         let body = format!(
-            "**{decision}**\n\n{feedback}\n\n🤖 Reviewed by Threadlane ({name}, {})",
+            "**{decision}**\n\nReviewed at `{}`.\n\n{feedback}\n\n🤖 Reviewed by Threadlane ({name}, {})",
+            commit.get(..8).unwrap_or(&commit),
             task.id
         );
         exec(conn, "INSERT INTO github_reviews (submission, pull_url, revision, body) VALUES (?1, ?2, ?3, ?4)",
