@@ -881,7 +881,10 @@ async fn personal_skills_reach_claude_stdin_and_a_removed_skill_is_skipped_with_
     single.skills.truncate(1);
     let mut run = backend.run(single).await.unwrap();
     collect(run.as_mut()).await;
-    assert_eq!(recorded_prompts(&fake), ["/review Say hello."]);
+    assert_eq!(
+        recorded_prompts(&fake),
+        ["Use these installed skills for this run: /review\n\nSay hello."]
+    );
     std::fs::remove_file(account.join("skills/review/SKILL.md")).unwrap();
     let mut run = backend.run(request).await.unwrap();
     let events = collect(run.as_mut()).await;
@@ -891,6 +894,9 @@ async fn personal_skills_reach_claude_stdin_and_a_removed_skill_is_skipped_with_
             message: "claude skill \"review\" was skipped for this run: it is not installed on this runner.".into()
         }
     );
-    assert_eq!(recorded_prompts(&fake), ["/tests Say hello."]);
+    assert_eq!(
+        recorded_prompts(&fake),
+        ["Use these installed skills for this run: /tests\n\nSay hello."]
+    );
     assert_eq!(fake.invocations().len(), 3);
 }

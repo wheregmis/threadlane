@@ -12,7 +12,8 @@ use gpui_kit::component::{Sizable as _, v_flex};
 use gpui_kit::*;
 use threadlane_core::ids::DecisionId;
 use threadlane_desktop::{
-    Activity, ProseLimit, Reference, describe, load_decision_link, markdown_source_with_time,
+    Activity, ProseLimit, Reference, describe, github_pull_url, load_decision_link,
+    markdown_source_for,
 };
 
 use super::button;
@@ -50,6 +51,7 @@ pub(crate) struct Prose {
     id: SharedString,
     source: String,
     space: String,
+    github_repo: Option<String>,
     desktop: WeakEntity<Desktop>,
     limit: ProseLimit,
     expanded: bool,
@@ -61,15 +63,18 @@ impl Desktop {
         &self,
         id: impl Into<SharedString>,
         space: &str,
+        project: Option<&str>,
         text: String,
         cx: &Context<Self>,
     ) -> Prose {
         let id = id.into();
         let when = self.when();
+        let github_repo = project.and_then(|project| self.state.github_repository(space, project));
         Prose {
             id: id.clone(),
-            source: markdown_source_with_time(&text, Some(&when)),
+            source: markdown_source_for(&text, Some(&when), github_repo.as_deref()),
             space: space.to_owned(),
+            github_repo,
             desktop: cx.entity().downgrade(),
             limit: ProseLimit::Full,
             expanded: self.state.message_expanded(&id),
@@ -80,6 +85,7 @@ impl Desktop {
     pub(crate) fn open_prose_link(
         &mut self,
         space: &str,
+        github_repo: Option<&str>,
         reference: Reference<'_>,
         cx: &mut Context<Self>,
     ) {
@@ -92,6 +98,11 @@ impl Desktop {
                 cx,
             ),
             Reference::Decision(id) => self.open_linked_decision(space, id, cx),
+            Reference::Github(number) => {
+                if let Some(repo) = github_repo {
+                    cx.open_url(&github_pull_url(repo, number));
+                }
+            }
             Reference::Web(url) => cx.open_url(url),
         }
     }
@@ -210,6 +221,7 @@ impl RenderOnce for Prose {
         let id = self.id.clone();
         let desktop = self.desktop.clone();
         let space = self.space.clone();
+        let github_repo = self.github_repo.clone();
         let mut view = TextView::new(&state)
             .style(TextViewStyle::default().heading_font_size(|level, base| {
                 base * match level {
@@ -236,8 +248,9 @@ impl RenderOnce for Prose {
                     ClickEvent::Touch(click) => !click.long_press,
                 };
                 if activate && let Some(reference) = Reference::from_link(url) {
-                    let _gone =
-                        desktop.update(cx, |view, cx| view.open_prose_link(&space, reference, cx));
+                    let _gone = desktop.update(cx, |view, cx| {
+                        view.open_prose_link(&space, github_repo.as_deref(), reference, cx)
+                    });
                 }
             })
             .w_full();

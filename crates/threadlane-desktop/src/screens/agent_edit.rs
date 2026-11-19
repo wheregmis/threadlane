@@ -510,6 +510,7 @@ impl Desktop {
                 .child(self.prose(
                     format!("agent-edit-preview-{}-{}", edit.space, edit.agent),
                     &edit.space,
+                    None,
                     text,
                     cx,
                 ))
