@@ -48,7 +48,7 @@ mod tasks;
 mod timeline;
 
 pub use agent_edit::{AgentBinding, AgentEdit, AgentFields};
-pub use clock::{When, duration};
+pub use clock::{When, duration, format_count, parse_iso_utc};
 pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
 pub use control::{
     AgentDraft, AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository,
@@ -78,7 +78,9 @@ pub use permissions::{
     AgentRow, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement, allows,
     applied, cell_label, matrix, mode_label,
 };
-pub use prose::{ProseLimit, Reference, Segment, markdown_source, segments};
+pub use prose::{
+    ProseLimit, Reference, Segment, markdown_source, markdown_source_with_time, segments,
+};
 pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
 };
@@ -87,9 +89,9 @@ pub use settings::{
     parse_pacing,
 };
 pub use tasks::{
-    BoardCard, Changes, Column, InProgress, LatestStep, Moment, TaskHeader, WorkRow, activity_runs,
-    changes, chips, merge_state, running_elapsed, status_label, task_header, timeline, usage,
-    work_elapsed,
+    BoardCard, Changes, Column, InProgress, LatestStep, Moment, SpaceTaskFilter, SpaceTasksView,
+    TaskGroup, TaskHeader, TaskTriageRow, TaskTriageSection, WorkRow, activity_runs, changes,
+    chips, merge_state, running_elapsed, status_label, task_header, timeline, usage, work_elapsed,
 };
 pub use timeline::{Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, load_timeline};
 
@@ -525,6 +527,8 @@ pub struct DecisionCard {
     pub note_label: &'static str,
     /// The recommended option's index, if the hub picked one.
     pub recommended: Option<usize>,
+    /// Optional bounded diff preview attached to a publish approval decision.
+    pub diff: Option<threadlane_core::workspace::DiffPreview>,
 }
 
 fn decision_label(kind: DecisionKind) -> &'static str {
@@ -1020,6 +1024,12 @@ pub struct AppState {
     expanded: HashSet<InSpace<i64>>,
     /// The space Home shows; `None` for all.
     filter: Option<String>,
+    /// Per-space filters on the space-wide Tasks triage screen.
+    space_task_filters: HashMap<String, SpaceTaskFilter>,
+    /// Spaces where the collapsed `Done` section on Tasks has been expanded.
+    done_tasks_expanded: HashSet<String>,
+    /// Diff preview blocks expanded by the user (keyed by UI element id).
+    expanded_diffs: HashSet<String>,
     /// Where the Home composer sends: space and project.
     target_space: Option<String>,
     last_targets: BTreeMap<String, String>,
@@ -1144,6 +1154,71 @@ impl AppState {
         }
     }
 
+    /// Active filters on the space-wide Tasks triage screen.
+    #[must_use]
+    pub fn space_task_filter(&self, space: &str) -> SpaceTaskFilter {
+        self.space_task_filters
+            .get(space)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Filters the space-wide Tasks screen by status group (`None` = all).
+    pub fn set_space_task_status_filter(&mut self, space: &str, status: Option<TaskGroup>) {
+        self.space_task_filters
+            .entry(space.to_owned())
+            .or_default()
+            .status = status;
+    }
+
+    /// Filters the space-wide Tasks screen by project (`None` = all).
+    pub fn set_space_task_project_filter(&mut self, space: &str, project: Option<String>) {
+        self.space_task_filters
+            .entry(space.to_owned())
+            .or_default()
+            .project = project;
+    }
+
+    /// Filters the space-wide Tasks screen by agent (`None` = all).
+    pub fn set_space_task_agent_filter(&mut self, space: &str, agent: Option<String>) {
+        self.space_task_filters
+            .entry(space.to_owned())
+            .or_default()
+            .agent = agent;
+    }
+
+    /// Clears all filters on the space-wide Tasks screen.
+    pub fn clear_space_task_filter(&mut self, space: &str) {
+        self.space_task_filters.remove(space);
+    }
+
+    /// Whether the `Done` section on the space-wide Tasks screen is expanded.
+    #[must_use]
+    pub fn is_done_tasks_expanded(&self, space: &str) -> bool {
+        self.done_tasks_expanded.contains(space)
+    }
+
+    /// Toggles the `Done` section on the space-wide Tasks screen.
+    pub fn toggle_done_tasks_expanded(&mut self, space: &str) {
+        if !self.done_tasks_expanded.remove(space) {
+            self.done_tasks_expanded.insert(space.to_owned());
+        }
+    }
+
+    /// Whether a diff preview block is expanded.
+    #[must_use]
+    pub fn diff_expanded(&self, id: &str) -> bool {
+        self.expanded_diffs.contains(id)
+    }
+
+    /// Toggles a diff preview block's expanded state.
+    pub fn toggle_diff_expanded(&mut self, id: impl Into<String>) {
+        let id = id.into();
+        if !self.expanded_diffs.remove(&id) {
+            self.expanded_diffs.insert(id);
+        }
+    }
+
     fn shown(&self, space: &str) -> bool {
         self.filter.as_deref().is_none_or(|only| only == space)
     }
@@ -1220,6 +1295,10 @@ impl AppState {
                 "Note (optional)",
             ),
         };
+        let diff = decision
+            .arguments
+            .get(threadlane_core::link::DIFF_PREVIEW)
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
         DecisionCard {
             chip: (decision.kind != DecisionKind::Approval).then(|| decision_label(decision.kind)),
             dashed,
@@ -1230,6 +1309,7 @@ impl AppState {
             recommended: decision
                 .recommended
                 .and_then(|index| usize::try_from(index).ok()),
+            diff,
         }
     }
 

@@ -191,6 +191,7 @@ impl AppState {
                 would_run_as: None,
                 note_label: "Note (optional)",
                 recommended: card.recommended,
+                diff: None,
             },
             record: Some(DecisionRecord {
                 status: "Answer details unavailable".to_owned(),

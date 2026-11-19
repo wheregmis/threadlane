@@ -9,9 +9,9 @@ use threadlane_core::model::{
     DecisionKind, DecisionStatus, RunOutcome, RunStatus, TaskOrigin, TaskStatus,
 };
 use threadlane_core::time::Timestamp;
-use threadlane_core::workspace::MergeCheck;
+use threadlane_core::workspace::{DiffPreview, MergeCheck};
 
-use crate::{AppState, Destination, When, count_form, duration, proposed_assignee};
+use crate::{AppState, Destination, When, count_form, duration, format_count, proposed_assignee};
 
 /// The start of a `waiting_reason` that says no model account is free
 /// (`threadlane-store`'s `BLOCKED_REASON`, Plan.md §5.3).
@@ -109,6 +109,105 @@ fn column_of(status: TaskStatus, waiting_reason: Option<&str>) -> &'static str {
         TaskStatus::Failed => "Failed",
         TaskStatus::Cancelled => "Cancelled",
     }
+}
+
+/// The triage groups on the space-wide Tasks screen, in priority order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskGroup {
+    NeedsYou,
+    Failed,
+    Running,
+    Queued,
+    Done,
+}
+
+impl TaskGroup {
+    /// All groups in triage order.
+    pub const ALL: [Self; 5] = [
+        Self::NeedsYou,
+        Self::Failed,
+        Self::Running,
+        Self::Queued,
+        Self::Done,
+    ];
+
+    /// Section / chip label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "Needs you",
+            Self::Failed => "Failed",
+            Self::Running => "Running",
+            Self::Queued => "Queued",
+            Self::Done => "Done",
+        }
+    }
+
+    /// Maps a task status to its triage group.
+    #[must_use]
+    pub const fn of(status: TaskStatus) -> Self {
+        match status {
+            TaskStatus::WaitingOnYou | TaskStatus::Proposed => Self::NeedsYou,
+            TaskStatus::Failed => Self::Failed,
+            TaskStatus::Running | TaskStatus::InReview => Self::Running,
+            TaskStatus::Queued | TaskStatus::Sleeping => Self::Queued,
+            TaskStatus::Done | TaskStatus::Cancelled => Self::Done,
+        }
+    }
+}
+
+/// Active filters on the space-wide Tasks triage view.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpaceTaskFilter {
+    /// Optional status group filter.
+    pub status: Option<TaskGroup>,
+    /// Optional project name filter.
+    pub project: Option<String>,
+    /// Optional agent name filter.
+    pub agent: Option<String>,
+}
+
+impl SpaceTaskFilter {
+    /// Whether any filter is currently active.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.status.is_some() || self.project.is_some() || self.agent.is_some()
+    }
+}
+
+/// One row in a triage section of the space-wide Tasks screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskTriageRow {
+    pub id: TaskId,
+    pub title: String,
+    pub project: String,
+    pub agent: String,
+    pub status: &'static str,
+    pub group: TaskGroup,
+    /// Elapsed time (for active/queued) or completion/creation moment (for done/failed).
+    pub time: String,
+    /// Whether to dim the row and omit the status pill (ordinary Done rows).
+    pub quiet: bool,
+}
+
+/// One grouped section of the space-wide Tasks screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskTriageSection {
+    pub group: TaskGroup,
+    pub total: usize,
+    pub collapsed: bool,
+    pub rows: Vec<TaskTriageRow>,
+}
+
+/// Everything the space-wide Tasks triage screen renders.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpaceTasksView {
+    pub total: usize,
+    pub matched: usize,
+    pub projects: Vec<String>,
+    pub agents: Vec<String>,
+    pub group_counts: Vec<(TaskGroup, usize)>,
+    pub sections: Vec<TaskTriageSection>,
 }
 
 /// How the task screen names a status.
@@ -223,6 +322,124 @@ impl AppState {
                 })
             })
             .collect()
+    }
+
+    /// The grouped, filtered, newest-first triage view for the space-wide
+    /// `Tasks` screen.
+    #[must_use]
+    pub fn space_tasks_view(&self, space: &str, when: &When) -> SpaceTasksView {
+        let Some(known) = self.space(space) else {
+            return SpaceTasksView::default();
+        };
+        let filter = self.space_task_filter(space);
+        let mut projects = std::collections::BTreeSet::new();
+        let mut agents = std::collections::BTreeSet::new();
+        for summary in &known.tasks {
+            projects.insert(summary.project.clone());
+            agents.insert(summary.agent.clone());
+        }
+
+        // Count per group after project + agent filters (so status chips show
+        // accurate counts for the selected project/agent).
+        let base_filtered: Vec<&TaskSummary> = known
+            .tasks
+            .iter()
+            .filter(|summary| {
+                filter
+                    .project
+                    .as_deref()
+                    .is_none_or(|project| summary.project == project)
+                    && filter
+                        .agent
+                        .as_deref()
+                        .is_none_or(|agent| summary.agent == agent)
+            })
+            .collect();
+
+        let group_counts: Vec<(TaskGroup, usize)> = TaskGroup::ALL
+            .into_iter()
+            .map(|group| {
+                let count = base_filtered
+                    .iter()
+                    .filter(|summary| TaskGroup::of(summary.task.status) == group)
+                    .count();
+                (group, count)
+            })
+            .filter(|(_, count)| *count > 0)
+            .collect();
+
+        let has_active_work = base_filtered
+            .iter()
+            .any(|summary| TaskGroup::of(summary.task.status) != TaskGroup::Done);
+        let done_expanded = self.is_done_tasks_expanded(space);
+
+        let mut sections = Vec::new();
+        let mut matched = 0usize;
+        for group in TaskGroup::ALL {
+            if filter.status.is_some_and(|only| only != group) {
+                continue;
+            }
+            let mut matching: Vec<&TaskSummary> = base_filtered
+                .iter()
+                .copied()
+                .filter(|summary| TaskGroup::of(summary.task.status) == group)
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            // Newest first by completion time (if any), then creation time, then id.
+            matching.sort_by_key(|summary| {
+                std::cmp::Reverse((
+                    summary.completed_at.unwrap_or(summary.task.created_at),
+                    summary.task.id,
+                ))
+            });
+            let total = matching.len();
+            matched += total;
+            let collapsed = group == TaskGroup::Done
+                && filter.status != Some(TaskGroup::Done)
+                && has_active_work
+                && !done_expanded;
+            let rows = if collapsed {
+                Vec::new()
+            } else {
+                matching
+                    .into_iter()
+                    .map(|summary| {
+                        let task = &summary.task;
+                        let status = status_label(task.status, task.waiting_reason.as_deref());
+                        let time = work_elapsed(summary, when).unwrap_or_else(|| {
+                            when.moment(summary.completed_at.unwrap_or(task.created_at))
+                        });
+                        TaskTriageRow {
+                            id: task.id,
+                            title: task.title.clone(),
+                            project: summary.project.clone(),
+                            agent: summary.agent.clone(),
+                            status,
+                            group,
+                            time,
+                            quiet: task.status == TaskStatus::Done,
+                        }
+                    })
+                    .collect()
+            };
+            sections.push(TaskTriageSection {
+                group,
+                total,
+                collapsed,
+                rows,
+            });
+        }
+
+        SpaceTasksView {
+            total: known.tasks.len(),
+            matched,
+            projects: projects.into_iter().collect(),
+            agents: agents.into_iter().collect(),
+            group_counts,
+            sections,
+        }
     }
 
     /// The same waiting reason on the board and task page.
@@ -703,7 +920,7 @@ pub fn usage(detail: &TaskDetail, when: &When) -> Vec<String> {
         if !counts.is_empty() {
             let total: u128 = counts.into_iter().map(u128::from).sum();
             let tokens = count_form(total, "token", "tokens");
-            fields.push(format!("{total} {direction} {tokens}"));
+            fields.push(format!("{} {direction} {tokens}", format_count(total)));
         }
     }
     let mut costs = reported.iter().filter_map(|u| u.cost_usd).peekable();
@@ -729,6 +946,8 @@ pub struct Changes {
     pub pull_request: Option<String>,
     /// Whether its branch merges into its base, from [`merge_state`].
     pub merge: Option<String>,
+    /// Optional bounded diff previews recorded on the task's merge checks.
+    pub diffs: Vec<DiffPreview>,
 }
 
 /// Where a task's branches stood against their bases when it last finished
@@ -813,11 +1032,17 @@ pub fn changes(detail: &TaskDetail) -> Changes {
         (None, false, Some(last)) => last,
         (None, false, None) => "Not pushed".to_owned(),
     };
+    let diffs = result
+        .and_then(|json| json.get(MERGE_CHECKS))
+        .and_then(|value| serde_json::from_value::<Vec<MergeCheck>>(value.clone()).ok())
+        .map(|checks| checks.into_iter().filter_map(|check| check.diff).collect())
+        .unwrap_or_default();
     Changes {
         branch: detail.branch.clone(),
         state,
         pull_request,
         merge: merge_state(result),
+        diffs,
     }
 }
 

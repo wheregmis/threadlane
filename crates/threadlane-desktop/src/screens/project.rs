@@ -16,19 +16,20 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::Mode;
 use threadlane_desktop::{
-    Consequence, EmptyRegion, Line, ModeChoice, Part, When, message_limit, newest_message,
+    Consequence, EmptyRegion, Line, ModeChoice, Part, TaskGroup, When, message_limit,
+    newest_message,
 };
 
 use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
 use crate::components::{
     button, card, count, count_badge, decision_scroller, field, icon_button, meta, page_header,
-    section, status_badge,
+    section, status_badge, status_dot,
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
-    BOARD_COLUMN_MIN, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, MODE_WIDTH, READING_WIDTH,
-    ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status, TIMESTAMP_WIDTH,
-    TYPE_BODY, TYPE_META, XL, XS,
+    BOARD_COLUMN_MIN, CONTROL_HEIGHT, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, MODE_WIDTH,
+    READING_WIDTH, ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status, TABULAR,
+    TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -41,108 +42,377 @@ pub(super) const MODES: [(Mode, &str); 4] = [
 ];
 
 impl Desktop {
-    pub(crate) fn space_tasks(&self, space: &str, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn space_tasks(
+        &self,
+        space: &str,
+        when: &When,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let known = self.state.space(space);
+        let active_projects: Vec<String> = known
+            .map(|known| {
+                known
+                    .active_projects()
+                    .filter(|p| !p.is_general)
+                    .map(|p| p.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let header_actions = (!active_projects.is_empty()).then(|| {
+            let in_space = space.to_owned();
+            let projects = active_projects.clone();
+            let view = cx.entity().downgrade();
+            h_flex().child(
+                button("space-new-task")
+                    .small()
+                    .primary()
+                    .icon(AppIcon::ListPlus)
+                    .label("New task")
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for project in &projects {
+                            let (space, project, view) =
+                                (in_space.clone(), project.clone(), view.clone());
+                            menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
+                                move |_, _, cx| {
+                                    let _ = view.update(cx, |this, cx| {
+                                        this.state.open_task_form(&space, &project, true);
+                                        this.go(
+                                            Screen::Project {
+                                                space: space.clone(),
+                                                project: project.clone(),
+                                                tab: Tab::Tasks,
+                                            },
+                                            cx,
+                                        );
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    }),
+            )
+        });
+
         let mut list = v_flex()
             .flex_1()
             .min_h_0()
-            .gap(SM)
+            .gap(MD)
             .overflow_y_scrollbar()
             .id("space-tasks")
-            .child(page_header("Tasks", Some(meta(space.to_owned(), cx)), None));
-        if let Some(known) = self.state.space(space) {
+            .child(page_header(
+                "Tasks",
+                Some(meta(space.to_owned(), cx)),
+                header_actions,
+            ));
+
+        if let Some(known) = known {
             if let Some(gap) = known.gap(Part::Tasks) {
                 list = list.child(gap_line(&gap, "tasks", space, cx));
             } else if known.tasks.is_empty() {
                 list = list.child(meta("No tasks in this space yet.", cx));
+                if active_projects.is_empty() && known.gap(Part::Projects).is_none() {
+                    let in_space = space.to_owned();
+                    list = list.child(
+                        h_flex()
+                            .gap(SM)
+                            .child(
+                                button("space-create-project")
+                                    .primary()
+                                    .label("Create a project")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.go(
+                                            Screen::NewProject {
+                                                space: in_space.clone(),
+                                            },
+                                            cx,
+                                        )
+                                    })),
+                            )
+                            .children(self.main_chat_screen(space).map(|screen| {
+                                button("space-open-chat")
+                                    .outline()
+                                    .label("Open space chat")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.go(screen.clone(), cx)
+                                    }))
+                            })),
+                    );
+                }
             }
-            let projects: Vec<_> = known
-                .active_projects()
-                .filter(|p| !p.is_general)
-                .map(|p| p.name.clone())
-                .collect();
-            let in_space = space.to_owned();
-            if !projects.is_empty() {
-                let view = cx.entity().downgrade();
-                list = list.child(
-                    button("space-new-task")
-                        .primary()
-                        .self_start()
-                        .label("New task")
-                        .dropdown_menu(move |mut menu, _, _| {
-                            for project in &projects {
-                                let (space, project, view) =
-                                    (in_space.clone(), project.clone(), view.clone());
-                                menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
+
+            if !known.tasks.is_empty() {
+                let filter = self.state.space_task_filter(space);
+                let view = self.state.space_tasks_view(space, when);
+
+                // Inline filter bar: status chips + Project & Agent dropdowns.
+                let all_space = space.to_owned();
+                let mut filters = h_flex().gap(XS).flex_wrap().items_center().child(
+                    button("tasks-filter-all")
+                        .small()
+                        .outline()
+                        .label(format!("All  {}", view.total))
+                        .selected(filter.status.is_none())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.set_space_task_status_filter(&all_space, None);
+                            cx.notify();
+                        })),
+                );
+                for &(group, total) in &view.group_counts {
+                    let in_space = space.to_owned();
+                    filters = filters.child(
+                        button(SharedString::from(format!(
+                            "tasks-filter-status-{}",
+                            group.label()
+                        )))
+                        .small()
+                        .outline()
+                        .label(format!("{}  {total}", group.label()))
+                        .selected(filter.status == Some(group))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let next =
+                                if this.state.space_task_filter(&in_space).status == Some(group) {
+                                    None
+                                } else {
+                                    Some(group)
+                                };
+                            this.state.set_space_task_status_filter(&in_space, next);
+                            cx.notify();
+                        })),
+                    );
+                }
+
+                if view.projects.len() > 1 {
+                    let projects = view.projects.clone();
+                    let in_space = space.to_owned();
+                    let entity = cx.entity().downgrade();
+                    let label = filter
+                        .project
+                        .as_deref()
+                        .map_or_else(|| "Project: All".to_owned(), |p| format!("Project: {p}"));
+                    filters = filters.child(
+                        button("tasks-filter-project")
+                            .small()
+                            .outline()
+                            .selected(filter.project.is_some())
+                            .icon(AppIcon::ChevronDown)
+                            .label(label)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                let (space_all, entity_all) = (in_space.clone(), entity.clone());
+                                menu = menu.item(PopupMenuItem::new("All projects").on_click(
                                     move |_, _, cx| {
-                                        let _ = view.update(cx, |this, cx| {
-                                            this.state.open_task_form(&space, &project, true);
-                                            this.go(
-                                                Screen::Project {
-                                                    space: space.clone(),
-                                                    project: project.clone(),
-                                                    tab: Tab::Tasks,
-                                                },
-                                                cx,
-                                            );
+                                        let _ = entity_all.update(cx, |this, cx| {
+                                            this.state
+                                                .set_space_task_project_filter(&space_all, None);
+                                            cx.notify();
                                         });
                                     },
                                 ));
-                            }
-                            menu
-                        }),
-                );
-            } else if known.tasks.is_empty() && known.gap(Part::Projects).is_none() {
-                list = list.child(
-                    h_flex()
-                        .gap(SM)
-                        .child(
-                            button("space-create-project")
-                                .primary()
-                                .label("Create a project")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.go(
-                                        Screen::NewProject {
-                                            space: in_space.clone(),
+                                for project in &projects {
+                                    let (space_p, project_p, entity_p) =
+                                        (in_space.clone(), project.clone(), entity.clone());
+                                    menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
+                                        move |_, _, cx| {
+                                            let _ = entity_p.update(cx, |this, cx| {
+                                                this.state.set_space_task_project_filter(
+                                                    &space_p,
+                                                    Some(project_p.clone()),
+                                                );
+                                                cx.notify();
+                                            });
                                         },
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .children(self.main_chat_screen(space).map(|screen| {
-                            button("space-open-chat")
-                                .outline()
-                                .label("Open space chat")
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
+                                    ));
+                                }
+                                menu
+                            }),
+                    );
+                }
+
+                if view.agents.len() > 1 {
+                    let agents = view.agents.clone();
+                    let in_space = space.to_owned();
+                    let entity = cx.entity().downgrade();
+                    let label = filter
+                        .agent
+                        .as_deref()
+                        .map_or_else(|| "Agent: All".to_owned(), |a| format!("Agent: {a}"));
+                    filters = filters.child(
+                        button("tasks-filter-agent")
+                            .small()
+                            .outline()
+                            .selected(filter.agent.is_some())
+                            .icon(AppIcon::ChevronDown)
+                            .label(label)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                let (space_all, entity_all) = (in_space.clone(), entity.clone());
+                                menu = menu.item(PopupMenuItem::new("All agents").on_click(
+                                    move |_, _, cx| {
+                                        let _ = entity_all.update(cx, |this, cx| {
+                                            this.state
+                                                .set_space_task_agent_filter(&space_all, None);
+                                            cx.notify();
+                                        });
+                                    },
+                                ));
+                                for agent in &agents {
+                                    let (space_a, agent_a, entity_a) =
+                                        (in_space.clone(), agent.clone(), entity.clone());
+                                    menu = menu.item(PopupMenuItem::new(agent.clone()).on_click(
+                                        move |_, _, cx| {
+                                            let _ = entity_a.update(cx, |this, cx| {
+                                                this.state.set_space_task_agent_filter(
+                                                    &space_a,
+                                                    Some(agent_a.clone()),
+                                                );
+                                                cx.notify();
+                                            });
+                                        },
+                                    ));
+                                }
+                                menu
+                            }),
+                    );
+                }
+
+                if filter.is_active() {
+                    let clear_space = space.to_owned();
+                    filters = filters.child(
+                        button("tasks-filter-clear")
+                            .small()
+                            .ghost()
+                            .icon(AppIcon::X)
+                            .label("Clear filters")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.clear_space_task_filter(&clear_space);
+                                cx.notify();
+                            })),
+                    );
+                }
+
+                list = list.child(filters);
+
+                if view.sections.is_empty() {
+                    let clear_space = space.to_owned();
+                    list = list.child(
+                        h_flex()
+                            .gap(SM)
+                            .items_center()
+                            .child(meta("No tasks match these filters.", cx))
+                            .child(
+                                button("tasks-empty-clear")
+                                    .small()
+                                    .ghost()
+                                    .label("Clear filters")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.state.clear_space_task_filter(&clear_space);
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                }
+
+                let mono = cx.theme().mono_font_family.clone();
+                for group_section in view.sections {
+                    let mut block = v_flex().gap(XS);
+                    if group_section.group == TaskGroup::Done
+                        && filter.status != Some(TaskGroup::Done)
+                    {
+                        let toggle_space = space.to_owned();
+                        block = block.child(
+                            button("tasks-toggle-done")
+                                .ghost()
+                                .small()
+                                .self_start()
+                                .icon(if group_section.collapsed {
+                                    AppIcon::ChevronRight
+                                } else {
+                                    AppIcon::ChevronDown
+                                })
+                                .child(
+                                    h_flex()
+                                        .gap(SM)
+                                        .items_center()
+                                        .child(group_section.group.label())
+                                        .children(count(group_section.total, cx)),
                                 )
-                        })),
-                );
-            }
-            for summary in &known.tasks {
-                let task = &summary.task;
-                let screen = Screen::Task {
-                    space: space.to_owned(),
-                    task: task.id,
-                };
-                let status =
-                    threadlane_desktop::status_label(task.status, task.waiting_reason.as_deref());
-                list = list.child(
-                    h_flex()
-                        .gap(MD)
-                        .child(
-                            link(
-                                format!("space-task-{}", task.id),
-                                format!("{} {}", task.id, task.title),
-                            )
-                            .flex_1()
-                            .min_w_0()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.state.toggle_done_tasks_expanded(&toggle_space);
+                                    cx.notify();
+                                })),
+                        );
+                    } else {
+                        block = block.child(
+                            section(group_section.group.label())
+                                .children(count(group_section.total, cx)),
+                        );
+                    }
+
+                    for row in group_section.rows {
+                        let screen = Screen::Task {
+                            space: space.to_owned(),
+                            task: row.id,
+                        };
+                        let status_kind = Status::task(row.status);
+                        let title_color = if row.quiet {
+                            cx.theme().muted_foreground
+                        } else {
+                            cx.theme().foreground
+                        };
+                        let row_el = button(SharedString::from(format!("space-task-{}", row.id)))
+                            .ghost()
+                            .w_full()
+                            .min_h(CONTROL_HEIGHT)
+                            .rounded(ROW_RADIUS)
+                            .px(SM)
+                            .accessibility_label(format!(
+                                "{} {}, {}, {}",
+                                row.id, row.title, row.project, row.status
+                            ))
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)),
-                            ),
-                        )
-                        .child(meta(summary.project.clone(), cx))
-                        .child(status_badge(status, Status::task(status), cx)),
-                );
+                            )
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap(SM)
+                                    .items_center()
+                                    .children((!row.quiet).then(|| status_dot(status_kind, cx)))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(TYPE_META)
+                                            .font_family(mono.clone())
+                                            .font_features(TABULAR.clone())
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(row.id.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(TYPE_BODY)
+                                            .text_color(title_color)
+                                            .child(row.title),
+                                    )
+                                    .child(meta(row.project, cx).flex_none())
+                                    .child(meta(row.agent, cx).flex_none())
+                                    .child(
+                                        meta(row.time, cx)
+                                            .flex_none()
+                                            .font_features(TABULAR.clone())
+                                            .text_right(),
+                                    )
+                                    .children(
+                                        (!row.quiet)
+                                            .then(|| status_badge(row.status, status_kind, cx)),
+                                    ),
+                            );
+                        block = block.child(row_el);
+                    }
+                    list = list.child(block);
+                }
             }
         }
         list.into_any_element()

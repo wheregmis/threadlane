@@ -5,6 +5,7 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{COMMENT, CREATE_ISSUE, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::link::DIFF_PREVIEW;
 use threadlane_core::model::{DecisionOption, Lane};
 use threadlane_core::store::{OrgStore, TaskStore};
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
@@ -235,9 +236,9 @@ pub(crate) async fn proposal(
         });
     }
     let allowed: &[&str] = if tool == PUBLISH_BRANCH {
-        &["repository"]
+        &["repository", DIFF_PREVIEW]
     } else {
-        &["repository", "title", "body"]
+        &["repository", "title", "body", DIFF_PREVIEW]
     };
     let object = fields(arguments, allowed)?;
     if !task.repositories.contains(&repository.id) {

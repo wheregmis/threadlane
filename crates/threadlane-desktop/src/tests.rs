@@ -6564,3 +6564,188 @@ async fn image_only_drafts_are_scoped_and_survive_undo_failure_and_history_reloa
     );
     assert!(state.conversation("work", "api", &when()).is_empty());
 }
+
+#[tokio::test]
+async fn space_tasks_view_groups_sorts_newest_first_collapses_done_and_filters() {
+    let make = |id: i64, title: &str, project: &str, agent: &str, status: TaskStatus, at: i64| {
+        let mut summary = task(id, status, None);
+        summary.task.title = title.into();
+        summary.task.created_at = Timestamp::from_millis(at);
+        summary.project = project.into();
+        summary.agent = agent.into();
+        summary.machine = Some("hub".into());
+        summary.running_since = (status == TaskStatus::Running).then(|| Timestamp::from_millis(at));
+        summary.completed_at =
+            (status == TaskStatus::Done).then(|| Timestamp::from_millis(at + 60_000));
+        summary
+    };
+    let tasks = vec![
+        make(1, "Old done", "api", "Engineer", TaskStatus::Done, 100_000),
+        make(2, "New done", "web", "Reviewer", TaskStatus::Done, 300_000),
+        make(
+            3,
+            "Broken build",
+            "api",
+            "Engineer",
+            TaskStatus::Failed,
+            200_000,
+        ),
+        make(
+            4,
+            "Waiting on approval",
+            "web",
+            "Lead",
+            TaskStatus::WaitingOnYou,
+            150_000,
+        ),
+        make(
+            5,
+            "Active work",
+            "api",
+            "Engineer",
+            TaskStatus::Running,
+            250_000,
+        ),
+        make(
+            6,
+            "Queued work",
+            "web",
+            "Engineer",
+            TaskStatus::Queued,
+            180_000,
+        ),
+    ];
+    let hub = FakeHub::new("Work", Vec::new());
+    *hub.tasks.lock().expect("lock") = tasks;
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+
+    let view = state.space_tasks_view("work", &when());
+    assert_eq!(view.total, 6);
+    assert_eq!(view.projects, vec!["api", "web"]);
+    assert_eq!(view.agents, vec!["Engineer", "Lead", "Reviewer"]);
+    let groups: Vec<TaskGroup> = view.sections.iter().map(|s| s.group).collect();
+    assert_eq!(
+        groups,
+        vec![
+            TaskGroup::NeedsYou,
+            TaskGroup::Failed,
+            TaskGroup::Running,
+            TaskGroup::Queued,
+            TaskGroup::Done,
+        ]
+    );
+    // Done starts collapsed when active/failed work exists.
+    let done = view.sections.last().unwrap();
+    assert!(done.collapsed);
+    assert_eq!(done.total, 2);
+    assert!(done.rows.is_empty());
+
+    // Expanding Done shows newest first and marks Done rows as quiet.
+    state.toggle_done_tasks_expanded("work");
+    let expanded = state.space_tasks_view("work", &when());
+    let done_rows = &expanded.sections.last().unwrap().rows;
+    assert_eq!(done_rows.len(), 2);
+    assert_eq!(done_rows[0].id, TaskId(2));
+    assert_eq!(done_rows[1].id, TaskId(1));
+    assert!(done_rows[0].quiet);
+    assert!(!expanded.sections[1].rows[0].quiet);
+
+    // Filtering by project + status narrows sections cleanly.
+    state.set_space_task_project_filter("work", Some("api".into()));
+    state.set_space_task_status_filter("work", Some(TaskGroup::Failed));
+    let filtered = state.space_tasks_view("work", &when());
+    assert_eq!(filtered.matched, 1);
+    assert_eq!(filtered.sections.len(), 1);
+    assert_eq!(filtered.sections[0].rows[0].id, TaskId(3));
+
+    state.clear_space_task_filter("work");
+    assert!(!state.space_task_filter("work").is_active());
+}
+
+#[test]
+fn decision_card_and_changes_extract_diff_preview_without_leaking_into_details() {
+    let preview = threadlane_core::workspace::DiffPreview {
+        repository: "threadlane".into(),
+        base_branch: "main".into(),
+        files: vec![threadlane_core::workspace::DiffFileStat {
+            path: "crates/threadlane-desktop/src/tasks.rs".into(),
+            insertions: 42,
+            deletions: 7,
+            binary: false,
+        }],
+        insertions: 42,
+        deletions: 7,
+        patch: "@@ -1,2 +1,3 @@\n+hello".into(),
+        truncated: false,
+    };
+    let mut decision = decision(1, 100_000);
+    decision.question = "Push branch threadlane/T-0001 of threadlane?".into();
+    decision.tool = "publish_branch".into();
+    decision.arguments = serde_json::json!({
+        "repository": "threadlane",
+        threadlane_core::link::DIFF_PREVIEW: preview,
+    });
+    let card = AppState::decision_card(&Queued {
+        space: "work".into(),
+        decision,
+    });
+    assert_eq!(card.diff.as_ref(), Some(&preview));
+    assert!(
+        card.details
+            .iter()
+            .all(|line| !line.contains("diff_preview"))
+    );
+
+    let mut summary = task(1, TaskStatus::Done, None);
+    summary.task.title = "Ship diff preview".into();
+    summary.task.result = Some(serde_json::json!({
+        threadlane_core::link::MERGE_CHECKS: [threadlane_core::workspace::MergeCheck {
+            repository: "threadlane".into(),
+            branch: "main".into(),
+            base: "abcdef1234567890".into(),
+            revision: Some("1234567890abcdef".into()),
+            conflicts: Vec::new(),
+            diff: Some(preview.clone()),
+        }]
+    }));
+    let detail = TaskDetail {
+        summary,
+        branch: "threadlane/T-0001".into(),
+        proposed_by: None,
+        repositories: Vec::new(),
+        stopped: false,
+        runs: Vec::new(),
+        reviews: Vec::new(),
+        decisions: Vec::new(),
+        messages: Vec::new(),
+        related: Vec::new(),
+    };
+    assert_eq!(changes(&detail).diffs, vec![preview]);
+}
+
+#[test]
+fn prose_humanizes_iso_timestamps_and_long_shas_outside_code_and_urls() {
+    // 2026-11-18 18:00 UTC, offset -5h -> 13:00 local.
+    let now = parse_iso_utc("2026-11-18T18:00:00Z").unwrap();
+    let local = When {
+        now,
+        offset_minutes: -300,
+    };
+    let input = "Merged 9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b at 2026-11-18T17:19:47Z \
+                 (keep `9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b` and \
+                 https://github.com/org/repo/commit/9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b).";
+    let rendered = markdown_source_with_time(input, Some(&local));
+    assert!(rendered.contains("Merged `9667947` at 12:19"), "{rendered}");
+    assert!(
+        rendered.contains("`9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b`"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "https://github.com/org/repo/commit/9667947bf370cfe005fb9f0553cbbdd6a1ce2c4b"
+        ),
+        "{rendered}"
+    );
+}

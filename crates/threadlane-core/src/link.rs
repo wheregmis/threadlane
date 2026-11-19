@@ -37,6 +37,11 @@ pub const FINISH_TASK: &str = "finish_task";
 /// agent's own value is replaced or removed.
 pub const MERGE_CHECKS: &str = "merge";
 
+/// The field of a `publish_branch` or `open_pull_request` call the runner sets
+/// to a [`crate::workspace::DiffPreview`] so the desktop can show what will be
+/// pushed inside the approval card. An agent's own value is replaced or removed.
+pub const DIFF_PREVIEW: &str = "diff_preview";
+
 /// Everything a runner needs to execute one run. Built by the hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunAssignment {
