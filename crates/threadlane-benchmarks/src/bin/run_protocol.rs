@@ -48,6 +48,7 @@ fn main() {
         native_session: NativeSession::Resume {
             id: "session-1".into(),
         },
+        skills: Vec::new(),
         appended_instructions: "Project instructions and conventions.\n".repeat(128),
         prompt: "Recent updates to the task.\n".repeat(256),
         tools: (1..=16)

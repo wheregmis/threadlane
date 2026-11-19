@@ -153,6 +153,17 @@ impl Desktop {
                                 )
                                 .child(div().text_size(TYPE_BODY).child(agent.role.clone()))
                                 .child(div().text_size(TYPE_BODY).text_color(muted).child(backends))
+                                .children((!agent.skills.is_empty()).then(|| {
+                                    let skills: Vec<_> = agent
+                                        .skills
+                                        .iter()
+                                        .map(|s| format!("{}/{}", s.backend, s.name))
+                                        .collect();
+                                    div()
+                                        .text_size(TYPE_BODY)
+                                        .text_color(muted)
+                                        .child(format!("Skills: {}", skills.join(", ")))
+                                }))
                                 .children(self.state.agent_runs_on(&space.name, agent).map(
                                     |line| div().text_size(TYPE_BODY).text_color(muted).child(line),
                                 )),
@@ -378,6 +389,7 @@ impl Desktop {
             .child(field(&self.agent_role))
             .child(field(&self.agent_instructions))
             .child(backends)
+            .child(self.skill_picker(false, cx))
             .child(
                 div()
                     .text_size(TYPE_META)

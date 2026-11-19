@@ -173,6 +173,7 @@ pub struct ReceivedRun {
     pub working_dir: PathBuf,
     pub prompt: String,
     pub appended_instructions: String,
+    pub skills: Vec<String>,
     pub model: Option<String>,
     pub deny_rules: Vec<String>,
     pub remove_builtin_tools: bool,
@@ -204,6 +205,8 @@ struct State {
     received: Vec<ReceivedRun>,
     /// Native session ids this backend knows, in the order they were created.
     sessions: Vec<String>,
+    /// What [`AgentBackend::installed_skills`] answers.
+    skills: Result<Vec<String>, BackendError>,
 }
 
 impl State {
@@ -258,6 +261,7 @@ impl ScriptedBackend {
                 questions: Vec::new(),
                 received: Vec::new(),
                 sessions: Vec::new(),
+                skills: Ok(Vec::new()),
             })),
         }
     }
@@ -304,6 +308,11 @@ impl ScriptedBackend {
     /// Queues the answer for the next one-shot question.
     pub fn push_answer(&self, answer: Result<Json, BackendError>) {
         self.state().answers.push_back(answer);
+    }
+
+    /// Replaces what [`AgentBackend::installed_skills`] answers.
+    pub fn set_skills(&self, skills: Result<Vec<String>, BackendError>) {
+        self.state().skills = skills;
     }
 
     /// Replaces what [`AgentBackend::probe`] reports.
@@ -357,6 +366,13 @@ impl AgentBackend for ScriptedBackend {
         self.kind
     }
 
+    async fn installed_skills(
+        &self,
+        _cwd: Option<&std::path::Path>,
+    ) -> Result<Vec<String>, BackendError> {
+        self.state().skills.clone()
+    }
+
     async fn probe(&self) -> Result<Probe, BackendError> {
         Ok(self.state().probe.clone())
     }
@@ -399,6 +415,7 @@ impl AgentBackend for ScriptedBackend {
                 working_dir: request.working_dir.clone(),
                 prompt: request.prompt.clone(),
                 appended_instructions: request.appended_instructions.clone(),
+                skills: request.skills.clone(),
                 model: request.model.clone(),
                 deny_rules: request.deny_rules.clone(),
                 remove_builtin_tools: request.remove_builtin_tools,
@@ -647,6 +664,7 @@ mod tests {
             working_dir: PathBuf::from("/lanes/lane-1"),
             prompt: "hello".into(),
             images: Vec::new(),
+            skills: Vec::new(),
             appended_instructions: "lead rules".into(),
             model: Some("haiku".into()),
             session,
@@ -875,6 +893,7 @@ mod tests {
                 session_outcome: SessionOutcome::Created,
                 working_dir: PathBuf::from("/lanes/lane-1"),
                 prompt: "hello".into(),
+                skills: Vec::new(),
                 appended_instructions: "lead rules".into(),
                 model: Some("haiku".into()),
                 deny_rules: vec!["Bash(rm:*)".into()],

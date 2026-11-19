@@ -511,6 +511,27 @@ impl HubApi for ClientApi {
                     repositories: db.repositories(project.id).await.map_err(api_error)?,
                 })
             }
+            OrgRequest::InstalledSkills => {
+                let (mut skills, mut unavailable) = (Vec::new(), Vec::new());
+                for backend in &self.core.inner.backends {
+                    match backend.installed_skills(None).await {
+                        Ok(names) => skills.extend(names.into_iter().map(|name| {
+                            threadlane_core::model::SkillBinding {
+                                backend: backend.kind(),
+                                name,
+                            }
+                        })),
+                        Err(error) => {
+                            tracing::warn!(backend = %backend.kind(), %error, "could not list skills");
+                            unavailable.push(backend.kind());
+                        }
+                    }
+                }
+                Ok(OrgReply::InstalledSkills {
+                    skills,
+                    unavailable,
+                })
+            }
             OrgRequest::Agents => Ok(OrgReply::Agents {
                 agents: db.agents().await.map_err(api_error)?,
             }),
@@ -536,6 +557,25 @@ impl HubApi for ClientApi {
                 backends,
                 models,
             } => {
+                self.org(OrgRequest::CreateAgentWithSkills {
+                    name,
+                    role,
+                    instructions,
+                    backends,
+                    models,
+                    skills: Vec::new(),
+                })
+                .await
+            }
+            OrgRequest::CreateAgentWithSkills {
+                name,
+                role,
+                instructions,
+                backends,
+                models,
+                skills,
+            } => {
+                validate_skills(&skills)?;
                 let name = required("agent name", &name)?;
                 let role = required("agent role", &role)?;
                 let mut preferred = Vec::with_capacity(backends.len());
@@ -554,6 +594,7 @@ impl HubApi for ClientApi {
                 let agent = db
                     .create_agent(&NewAgent {
                         models: overrides.into(),
+                        skills,
                         instructions,
                         backends: preferred,
                         ..NewAgent::named(name, role)
@@ -563,6 +604,7 @@ impl HubApi for ClientApi {
                 Ok(OrgReply::Agent { agent })
             }
             OrgRequest::UpdateAgent {
+                skills,
                 agent,
                 name,
                 role,
@@ -608,6 +650,9 @@ impl HubApi for ClientApi {
                             .collect::<Result<Vec<_>, ApiError>>()
                     })
                     .transpose()?;
+                if let Some(skills) = &skills {
+                    validate_skills(skills)?;
+                }
                 let agent_name = agent.trim();
                 let target_name = name.unwrap_or(agent_name);
                 let agent = db
@@ -622,6 +667,9 @@ impl HubApi for ClientApi {
                         }
                         if let Some(role) = role {
                             role.clone_into(&mut current.role);
+                        }
+                        if let Some(skills) = skills {
+                            current.skills = skills;
                         }
                         if let Some(instructions) = instructions {
                             current.instructions = instructions;
@@ -1054,6 +1102,25 @@ fn binding_summary(agent: Agent, binding: &Binding) -> BindingSummary {
 }
 
 /// `value` trimmed, or an error naming `what` if that leaves nothing.
+fn validate_skills(skills: &[threadlane_core::model::SkillBinding]) -> Result<(), ApiError> {
+    for (i, skill) in skills.iter().enumerate() {
+        if skill.backend == BackendKind::Antigravity {
+            return Err(ApiError::Invalid(
+                "Antigravity does not support explicit skill bindings".into(),
+            ));
+        }
+        if !threadlane_core::model::SkillBinding::valid_name(&skill.name)
+            || skills[..i].contains(skill)
+        {
+            return Err(ApiError::Invalid(format!(
+                "invalid or duplicate {} skill {:?}",
+                skill.backend, skill.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn known_backend(name: &str) -> Result<BackendKind, ApiError> {
     name.trim().parse().map_err(|_| {
         let known: Vec<&str> = BackendKind::ALL.iter().map(|b| b.as_str()).collect();

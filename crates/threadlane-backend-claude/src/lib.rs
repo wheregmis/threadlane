@@ -104,6 +104,52 @@ impl AgentBackend for ClaudeBackend {
         BackendKind::Claude
     }
 
+    async fn installed_skills(&self, _cwd: Option<&Path>) -> Result<Vec<String>, BackendError> {
+        let config = self
+            .config
+            .config_dir
+            .clone()
+            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
+            .or_else(|| std::env::home_dir().map(|dir| dir.join(".claude")));
+        let mut names = Vec::new();
+        if let Some(root) = config.map(|dir| dir.join("skills")) {
+            let entries = match std::fs::read_dir(root) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(e) => {
+                    return Err(BackendError::Failed(format!(
+                        "cannot list personal skills: {e}"
+                    )));
+                }
+            };
+            for entry in entries {
+                let entry = entry.map_err(|e| BackendError::Failed(e.to_string()))?;
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if !threadlane_core::model::SkillBinding::valid_name(&name) {
+                    continue;
+                }
+                match std::fs::metadata(entry.path().join("SKILL.md")) {
+                    Ok(meta) if meta.is_file() => names.push(name),
+                    Ok(_) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) => {}
+                    Err(e) => {
+                        return Err(BackendError::Failed(format!(
+                            "cannot read personal skill {name}: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
     async fn probe(&self) -> Result<Probe, BackendError> {
         let failed = |what: &str, error: ProbeError| match error {
             ProbeError::NotInstalled => BackendError::NotInstalled,
@@ -156,7 +202,8 @@ impl AgentBackend for ClaudeBackend {
         })
     }
 
-    async fn run(&self, request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
+    async fn run(&self, mut request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
+        self.apply_skills(&mut request).await?;
         if !request.working_dir.is_dir() {
             return Err(BackendError::Failed(format!(
                 "working directory {} does not exist",

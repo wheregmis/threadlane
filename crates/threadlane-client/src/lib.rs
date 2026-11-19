@@ -812,6 +812,27 @@ impl ClientCore {
         }
     }
 
+    /// Lists personal skill names on the selected hub, with the backends
+    /// that could not list theirs.
+    ///
+    /// # Errors
+    /// Returns pairing, discovery or hub errors.
+    pub async fn installed_skills(
+        &self,
+        space: Option<&str>,
+    ) -> Result<(Vec<threadlane_core::model::SkillBinding>, Vec<BackendKind>), ClientError> {
+        match self.org(space, OrgRequest::InstalledSkills).await? {
+            (
+                _,
+                OrgReply::InstalledSkills {
+                    skills,
+                    unavailable,
+                },
+            ) => Ok((skills, unavailable)),
+            (space, _) => Err(wrong_reply(&space, "installed skills")),
+        }
+    }
+
     /// Creates an agent in one space, with the backends it may use in order
     /// of preference (empty for either). `None` means the only paired hub.
     ///
@@ -844,11 +865,50 @@ impl ClientCore {
         backends: &[BackendKind],
         models: BTreeMap<String, String>,
     ) -> Result<Agent, ClientError> {
+        self.create_agent_profile(
+            space,
+            name,
+            role,
+            instructions,
+            backends,
+            models,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Creates a profile with per-provider models and personal skill references.
+    ///
+    /// # Errors
+    /// Returns pairing or hub validation errors.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors the existing profile creation API"
+    )]
+    pub async fn create_agent_profile(
+        &self,
+        space: Option<&str>,
+        name: &str,
+        role: &str,
+        instructions: &str,
+        backends: &[BackendKind],
+        models: BTreeMap<String, String>,
+        skills: Vec<threadlane_core::model::SkillBinding>,
+    ) -> Result<Agent, ClientError> {
         let name = name.to_owned();
         let role = role.to_owned();
         let instructions = instructions.to_owned();
         let backends = backends.to_vec();
-        let request = if models.is_empty() {
+        let request = if !skills.is_empty() {
+            OrgRequest::CreateAgentWithSkills {
+                name,
+                role,
+                instructions,
+                backends,
+                models,
+                skills,
+            }
+        } else if models.is_empty() {
             OrgRequest::CreateAgent {
                 name,
                 role,

@@ -34,6 +34,9 @@ pub(crate) const RECORDED_SHOWN: u32 = 20;
 /// How many characters of a recorded event's first line are shown.
 const RECORDED_CHARS: usize = 160;
 
+/// The hub's installed skills and the backends that could not list theirs.
+pub type InstalledSkills = (Vec<threadlane_core::model::SkillBinding>, Vec<BackendKind>);
+
 /// The picks of the "+ New agent" form; its text fields live in the view.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentForm {
@@ -41,6 +44,9 @@ pub struct AgentForm {
     pub space: Option<String>,
     /// The index in [`BACKENDS`] picked.
     pub backends: usize,
+    pub skills: Vec<threadlane_core::model::SkillBinding>,
+    /// The hub's skills and the backends that could not list theirs.
+    pub installed_skills: Option<Result<InstalledSkills, String>>,
     /// What "Start from a template" offers: `None` while the hub has not
     /// answered, else its templates or why it could not list them.
     pub templates: Option<Result<Vec<AgentTemplate>, String>>,
@@ -241,7 +247,7 @@ pub async fn add_repository(
 ///
 /// The hub's refusal, for example a name it already has.
 pub async fn copy_agent(core: &ClientCore, agent: &Agent, to: &str) -> Result<Agent, ClientError> {
-    core.create_agent_with_models(
+    core.create_agent_profile(
         Some(to),
         &agent.name,
         &agent.role,
@@ -254,6 +260,7 @@ pub async fn copy_agent(core: &ClientCore, agent: &Agent, to: &str) -> Result<Ag
                 Some((kind.as_str().to_owned(), model.to_owned()))
             })
             .collect(),
+        agent.skills.clone(),
     )
     .await
 }

@@ -406,6 +406,11 @@ enum RepoCommand {
 
 #[derive(Debug, Subcommand)]
 enum AgentCommand {
+    /// List bindable personal skills on the hub.
+    Skills {
+        #[arg(short, long)]
+        space: Option<String>,
+    },
     /// Create an agent, from scratch or from a template.
     Add {
         /// The space (paired hub name); may be left out if only one is paired.
@@ -434,6 +439,9 @@ enum AgentCommand {
         /// A model for one backend. May be repeated.
         #[arg(long = "model", value_name = "BACKEND=MODEL", value_parser = backend_model)]
         models: Vec<(String, String)>,
+        /// Replace the profile's skill list. Repeat for multiple skills.
+        #[arg(long = "skill", value_name = "BACKEND=NAME", value_parser = backend_skill)]
+        skills: Vec<threadlane_core::model::SkillBinding>,
     },
     /// Change an agent; options left out keep their value. It applies from
     /// the agent's next run.
@@ -463,6 +471,12 @@ enum AgentCommand {
         /// back to the backend's default. May be repeated.
         #[arg(long = "model", value_name = "BACKEND=MODEL", value_parser = backend_model)]
         models: Vec<(String, String)>,
+        /// Replace the profile's skill list. Repeat for multiple skills.
+        #[arg(long = "skill", value_name = "BACKEND=NAME", value_parser = backend_skill)]
+        skills: Vec<threadlane_core::model::SkillBinding>,
+        /// Remove every explicit skill binding.
+        #[arg(long, conflicts_with = "skills")]
+        clear_skills: bool,
     },
     /// Delete an agent with its bindings and standing rules, after you type
     /// its name. Finished tasks keep its name.
@@ -742,9 +756,23 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 );
             }
         }
+        Command::Agent {
+            command: AgentCommand::Skills { space },
+        } => {
+            let (skills, unavailable) = core.installed_skills(space.as_deref()).await?;
+            for skill in skills {
+                println!("{}={}", skill.backend, skill.name);
+            }
+            for backend in unavailable {
+                eprintln!("{backend}: could not list skills");
+            }
+        }
         Command::Agents { space } => {
             for agent in core.agents(space.as_deref()).await? {
                 println!("{} ({})", agent.name, agent.role);
+                for skill in agent.skills {
+                    println!("  {}={}", skill.backend, skill.name);
+                }
             }
         }
         Command::Agent {
@@ -757,6 +785,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     role,
                     instructions,
                     mut backends,
+                    skills,
                     models,
                 },
         } => {
@@ -776,13 +805,14 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 }
             }
             let agent = core
-                .create_agent_with_models(
+                .create_agent_profile(
                     space.as_deref(),
                     &name.unwrap_or_default(),
                     &role.unwrap_or_default(),
                     &instructions.unwrap_or_default(),
                     &backends,
                     models.into_iter().collect(),
+                    skills,
                 )
                 .await?;
             println!("created agent {} ({})", agent.name, agent.role);
@@ -796,6 +826,8 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     role,
                     instructions,
                     instructions_file,
+                    skills,
+                    clear_skills,
                     backends,
                     models,
                 },
@@ -808,6 +840,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 None => instructions,
             };
             let request = OrgRequest::UpdateAgent {
+                skills: (clear_skills || !skills.is_empty()).then_some(skills),
                 agent,
                 name,
                 role,
@@ -1671,6 +1704,18 @@ mod archive_cli_tests {
 }
 
 /// `BACKEND=MODEL` from `--model`.
+fn backend_skill(value: &str) -> Result<threadlane_core::model::SkillBinding, String> {
+    let (backend, name) = value.split_once('=').ok_or("expected BACKEND=NAME")?;
+    let backend = backend.parse::<BackendKind>().map_err(|e| e.to_string())?;
+    if !threadlane_core::model::SkillBinding::valid_name(name) {
+        return Err("invalid skill name".into());
+    }
+    Ok(threadlane_core::model::SkillBinding {
+        backend,
+        name: name.into(),
+    })
+}
+
 fn backend_model(value: &str) -> Result<(String, String), String> {
     value
         .split_once('=')

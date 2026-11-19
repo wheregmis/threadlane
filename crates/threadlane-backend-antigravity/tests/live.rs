@@ -66,6 +66,7 @@ async fn resumed_lead_calls_the_new_endpoint_with_remembered_text() {
                 tools: Some(endpoint.clone()),
                 model: None,
                 images: Vec::new(),
+                skills: Vec::new(),
                 session: session.clone(),
                 deny_rules: Vec::new(),
                 max_turns: None,

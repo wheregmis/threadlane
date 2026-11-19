@@ -131,6 +131,7 @@ async fn the_request_matches_the_assignment_field_for_field() {
         request.appended_instructions,
         expected.appended_instructions
     );
+    assert_eq!(request.skills, expected.skills);
     assert_eq!(request.model, expected.model);
     assert_eq!(request.deny_rules, expected.deny_rules);
     assert_eq!(request.remove_builtin_tools, expected.remove_builtin_tools);

@@ -71,6 +71,7 @@ impl Desktop {
     /// Opens the "+ New agent" form in `space` and lists its templates.
     pub(crate) fn open_agent_form(&mut self, space: String, cx: &mut Context<Self>) {
         self.state.open_agent_form(&space);
+        self.load_agent_skills(space.clone(), None, cx);
         let core = Arc::clone(&self.core);
         self.run(
             async move {
@@ -81,6 +82,40 @@ impl Desktop {
             cx,
         );
         cx.notify();
+    }
+
+    pub(crate) fn load_agent_skills(
+        &mut self,
+        space: String,
+        agent: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                let result = core
+                    .read()
+                    .await
+                    .installed_skills(Some(&space))
+                    .await
+                    .map_err(|e| describe(&e));
+                (space, agent, result)
+            },
+            |this, (space, agent, result), _| {
+                if let Some(name) = agent {
+                    if let Some(edit) = this
+                        .state
+                        .agent_edit_mut()
+                        .filter(|e| e.space == space && e.agent == name)
+                    {
+                        edit.installed_skills = Some(result);
+                    }
+                } else if this.state.agent_form().space.as_deref() == Some(&space) {
+                    this.state.agent_form_mut().installed_skills = Some(result);
+                }
+            },
+            cx,
+        );
     }
 
     /// Creates the agent the "+ New agent" form describes in `space`.
@@ -96,6 +131,7 @@ impl Desktop {
             return;
         }
         let backends = self.state.agent_form().backends();
+        let skills = self.state.agent_form().skills.clone();
         let models = threadlane_core::model::BackendKind::ALL
             .iter()
             .zip(&self.agent_models)
@@ -114,13 +150,14 @@ impl Desktop {
                 let created = core
                     .read()
                     .await
-                    .create_agent_with_models(
+                    .create_agent_profile(
                         Some(&space),
                         &name,
                         &role,
                         &instructions,
                         &backends,
                         models,
+                        skills,
                     )
                     .await;
                 (space, created)

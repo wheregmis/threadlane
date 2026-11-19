@@ -129,8 +129,29 @@ async fn reopening_a_file_keeps_data_and_does_not_rebootstrap() {
         },
         ..Bootstrap::default()
     };
+    let skills = vec![SkillBinding {
+        backend: BackendKind::Claude,
+        name: "review".into(),
+    }];
+    let agent_id;
     {
         let hub = HubDb::open(&path, &bootstrap, clock.clone()).await.unwrap();
+        let agent = hub
+            .create_agent(&NewAgent {
+                skills: skills.clone(),
+                ..NewAgent::named("Reviewer", "review")
+            })
+            .await
+            .unwrap();
+        agent_id = agent.id;
+        let mut legacy = serde_json::to_value(&agent).unwrap();
+        legacy.as_object_mut().unwrap().remove("skills");
+        assert!(
+            serde_json::from_value::<Agent>(legacy)
+                .unwrap()
+                .skills
+                .is_empty()
+        );
         hub.create_project(&NewProject {
             name: "Payments API".into(),
             max_parallel_tasks: 3,
@@ -142,6 +163,7 @@ async fn reopening_a_file_keeps_data_and_does_not_rebootstrap() {
     let hub = HubDb::open(&path, &Bootstrap::default(), clock)
         .await
         .unwrap();
+    assert_eq!(hub.agent(agent_id).await.unwrap().unwrap().skills, skills);
     assert_eq!(hub.space().await.unwrap().name, "Work");
     let names: Vec<_> = hub
         .projects()

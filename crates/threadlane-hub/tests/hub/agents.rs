@@ -1,6 +1,7 @@
 //! Editing and deleting agents through the Organization capability.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use threadlane_core::client::{ApiError, OrgReply, OrgRequest, OverviewReply, OverviewRequest};
 use threadlane_core::memory::INSTRUCTIONS_BUDGET;
@@ -37,6 +38,7 @@ struct Changes {
     instructions: Option<String>,
     backends: Option<Vec<String>>,
     models: Option<BTreeMap<String, String>>,
+    skills: Option<Vec<threadlane_core::model::SkillBinding>>,
 }
 
 fn update(agent: &str) -> OrgRequest {
@@ -45,6 +47,7 @@ fn update(agent: &str) -> OrgRequest {
 
 fn edit(agent: &str, changes: Changes) -> OrgRequest {
     OrgRequest::UpdateAgent {
+        skills: changes.skills,
         agent: agent.into(),
         name: changes.name,
         role: changes.role,
@@ -229,6 +232,20 @@ async fn an_update_refuses_bad_fields() {
         .await,
         "lead's role",
     );
+    refused(
+        api.org(edit(
+            "Reviewer",
+            Changes {
+                skills: Some(vec![threadlane_core::model::SkillBinding {
+                    backend: BackendKind::Antigravity,
+                    name: "review".into(),
+                }]),
+                ..Changes::default()
+            },
+        ))
+        .await,
+        "does not support explicit skill bindings",
+    );
     let missing = api.org(update("Nobody")).await;
     assert!(matches!(missing, Err(ApiError::NotFound(_))), "{missing:?}");
     let OrgReply::Agent { agent } = api
@@ -329,4 +346,158 @@ async fn delete_refuses_the_lead_a_wrong_name_and_open_tasks() {
     );
     // The name is free for a new agent.
     create(&hub, "Reviewer").await;
+}
+
+#[tokio::test]
+async fn a_lead_s_saved_skills_stay_out_of_its_runs() {
+    use threadlane_core::model::SkillBinding;
+    let hub = TestHub::start().await;
+    hub.hello().await; // Only Claude is usable on the runner.
+    let bindings = vec![
+        SkillBinding {
+            backend: BackendKind::Codex,
+            name: "codex-only".into(),
+        },
+        SkillBinding {
+            backend: BackendKind::Claude,
+            name: "claude-only".into(),
+        },
+    ];
+    let change = edit(
+        LEAD_NAME,
+        Changes {
+            backends: Some(vec!["codex".into(), "claude".into()]),
+            skills: Some(bindings.clone()),
+            ..Changes::default()
+        },
+    );
+
+    let OrgReply::Agent { agent } = hub.api.org(change).await.unwrap() else {
+        panic!("agent")
+    };
+    assert_eq!(
+        hub.db.agent(agent.id).await.unwrap().unwrap().skills,
+        bindings
+    );
+    hub.send("bound", "hello").await;
+    let (_, assignment) = crate::common::begin(&*hub.link).await;
+    assert_eq!(assignment.backend, BackendKind::Claude);
+    // The lead runs without native tools, so its skills stay out of the run.
+    assert!(assignment.skills.is_empty());
+    let clear = edit(
+        LEAD_NAME,
+        Changes {
+            skills: Some(Vec::new()),
+            ..Changes::default()
+        },
+    );
+    hub.api.org(clear).await.unwrap();
+    assert!(
+        hub.db
+            .agent(agent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .skills
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn one_backend_failing_to_list_skills_leaves_the_others_listed() {
+    use threadlane_core::backend::BackendError;
+    use threadlane_core::model::SkillBinding;
+    use threadlane_testkit::ScriptedBackend;
+    let hub = TestHub::start().await;
+    let clock = Arc::new(hub.clock.clone());
+    let claude = ScriptedBackend::new(BackendKind::Claude, clock.clone());
+    claude.set_skills(Ok(vec!["review".into()]));
+    let codex = ScriptedBackend::new(BackendKind::Codex, clock);
+    codex.set_skills(Err(BackendError::Failed("no home".into())));
+    let hub = TestHub::around(
+        hub.core
+            .with_backends(vec![Arc::new(claude), Arc::new(codex)]),
+        hub.clock,
+    )
+    .await;
+
+    let reply = hub.api.org(OrgRequest::InstalledSkills).await.unwrap();
+    let OrgReply::InstalledSkills {
+        skills,
+        unavailable,
+    } = reply
+    else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(
+        skills,
+        [SkillBinding {
+            backend: BackendKind::Claude,
+            name: "review".into(),
+        }]
+    );
+    assert_eq!(unavailable, [BackendKind::Codex]);
+}
+
+#[tokio::test]
+async fn a_task_run_falling_back_from_codex_keeps_only_claude_s_skills() {
+    use threadlane_core::model::{LaneKind, SkillBinding};
+    let hub = TestHub::start().await;
+    let agent = create(&hub, "Reviewer").await;
+    let bindings = vec![
+        SkillBinding {
+            backend: BackendKind::Codex,
+            name: "codex-only".into(),
+        },
+        SkillBinding {
+            backend: BackendKind::Claude,
+            name: "claude-only".into(),
+        },
+    ];
+    let change = edit(
+        "Reviewer",
+        Changes {
+            backends: Some(vec!["codex".into(), "claude".into()]),
+            skills: Some(bindings),
+            ..Changes::default()
+        },
+    );
+    hub.api.org(change).await.unwrap();
+    let general = hub.db.general_project().await.unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: general.id,
+            agent_id: agent.id,
+            mode: Mode::OnRequest,
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    hub.db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: general.id,
+                agent_id: agent.id,
+                title: "review".into(),
+                goal: "x".into(),
+                repositories: Vec::new(),
+                parent_task_id: None,
+                depends_on: Vec::new(),
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    hub.hello().await; // Only Claude is usable on the runner.
+
+    let (_, assignment) = crate::common::begin(&*hub.link).await;
+    assert_eq!(assignment.lane_kind, LaneKind::Task);
+    assert_eq!(assignment.backend, BackendKind::Claude);
+    assert_eq!(assignment.skills, ["claude-only"]);
 }

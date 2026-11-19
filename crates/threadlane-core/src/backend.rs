@@ -137,6 +137,7 @@ pub struct RunRequest {
     pub images: Vec<crate::attachment::ImageAttachment>,
     /// Stable across runs until memory changes (Plan.md §8.5 items 1 to 3).
     pub appended_instructions: String,
+    pub skills: Vec<String>,
     pub model: Option<String>,
     /// Start the backend's session or resume it.
     pub session: NativeSession,
@@ -283,6 +284,57 @@ pub trait BackendRun: Send + fmt::Debug {
 #[async_trait]
 pub trait AgentBackend: Send + Sync + fmt::Debug {
     fn kind(&self) -> BackendKind;
+    /// Personal skill names available on this machine. No paths or file contents cross the link.
+    async fn installed_skills(
+        &self,
+        _cwd: Option<&std::path::Path>,
+    ) -> Result<Vec<String>, BackendError> {
+        Ok(Vec::new())
+    }
+
+    /// Resolve identifiers on the runner and ask the provider to use its own installed skills.
+    async fn apply_skills(&self, request: &mut RunRequest) -> Result<(), BackendError> {
+        if request.skills.is_empty() {
+            return Ok(());
+        }
+        let prefix = match self.kind() {
+            BackendKind::Claude => "/",
+            BackendKind::Codex => "$",
+            BackendKind::Antigravity => {
+                return Err(BackendError::Failed(
+                    "Antigravity does not support profile skills".into(),
+                ));
+            }
+        };
+        let installed = self.installed_skills(Some(&request.working_dir)).await?;
+        let mut mentions = Vec::new();
+        for name in &request.skills {
+            if !crate::model::SkillBinding::valid_name(name) || !installed.contains(name) {
+                return Err(BackendError::Failed(format!(
+                    "{} skill {name:?} is missing on this runner. Install it or edit the agent profile.",
+                    self.kind()
+                )));
+            }
+            mentions.push(format!("{prefix}{name}"));
+        }
+        if request.remove_builtin_tools {
+            return Err(BackendError::Failed(format!(
+                "{} profile skills require native tools, which are disabled for this run",
+                self.kind()
+            )));
+        }
+        request.prompt = match (self.kind(), mentions.as_slice()) {
+            // Claude print mode expands one leading slash command, treating the rest as arguments.
+            (BackendKind::Claude, [command]) => format!("{command} {}", request.prompt),
+            _ => format!(
+                "Use these installed skills for this run: {}\n\n{}",
+                mentions.join(" "),
+                request.prompt
+            ),
+        };
+        Ok(())
+    }
+
     async fn probe(&self) -> Result<Probe, BackendError>;
     /// Starts a new session or resumes `request.resume`.
     async fn run(&self, request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError>;

@@ -20,9 +20,12 @@ pub struct AgentEdit {
     pub agent: String,
     /// The selected preset, or `BACKENDS.len()` for the saved order.
     pub backends: usize,
+    pub skills: Vec<threadlane_core::model::SkillBinding>,
+    pub installed_skills: Option<Result<crate::control::InstalledSkills, String>>,
     /// The index it opened with: Save sends backends only when it moved.
     opened_with: usize,
     saved_backends: Vec<BackendKind>,
+    original_skills: Vec<threadlane_core::model::SkillBinding>,
     opened_fields: Arc<AgentFields>,
     /// Whether the instructions show rendered as Markdown.
     pub preview: bool,
@@ -125,6 +128,9 @@ impl AppState {
             backends: picked,
             opened_with: picked,
             saved_backends: known.backends.clone(),
+            skills: known.skills.clone(),
+            original_skills: known.skills.clone(),
+            installed_skills: None,
             opened_fields: Arc::new(fields.clone()),
             preview: false,
         });
@@ -173,6 +179,8 @@ impl AppState {
             .map(|(backend, value)| (backend.as_str().to_owned(), value.trim().to_owned()))
             .collect();
         let request = OrgRequest::UpdateAgent {
+            skills: (!same_skills(&edit.skills, &edit.original_skills))
+                .then(|| edit.skills.clone()),
             agent: edit.agent.clone(),
             name: changed(name, &opened.name),
             role: changed(role, &opened.role),
@@ -181,6 +189,7 @@ impl AppState {
             models: (!models.is_empty()).then_some(models),
         };
         let OrgRequest::UpdateAgent {
+            skills: None,
             name: None,
             role: None,
             instructions: None,
@@ -278,5 +287,34 @@ impl AppState {
         self.report(crate::Activity::Done(format!(
             "Deleted {agent} from {space}."
         )));
+    }
+}
+
+/// Skill bindings are a set: reordering them is not an edit.
+fn same_skills(
+    a: &[threadlane_core::model::SkillBinding],
+    b: &[threadlane_core::model::SkillBinding],
+) -> bool {
+    a.len() == b.len() && a.iter().all(|s| b.contains(s)) && b.iter().all(|s| a.contains(s))
+}
+
+#[cfg(test)]
+mod skill_order_tests {
+    use threadlane_core::model::{BackendKind, SkillBinding};
+
+    #[test]
+    fn reordered_skills_are_the_same_set() {
+        let skill = |name: &str| SkillBinding {
+            backend: BackendKind::Codex,
+            name: name.into(),
+        };
+        assert!(super::same_skills(
+            &[skill("a"), skill("b")],
+            &[skill("b"), skill("a")]
+        ));
+        assert!(!super::same_skills(
+            &[skill("a"), skill("a")],
+            &[skill("a"), skill("b")]
+        ));
     }
 }
