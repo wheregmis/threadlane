@@ -479,6 +479,7 @@ async fn each_deny_rule_reaches_claude_as_a_disallowed_bash_prefix() {
         ("gh pr merge", "Bash(gh pr merge:*)"),
         ("gh release", "Bash(gh release:*)"),
         ("gh repo delete", "Bash(gh repo delete:*)"),
+        ("threadlane repo add", "Bash(threadlane repo add:*)"),
     ];
     assert_eq!(
         DENY_RULES.to_vec(),

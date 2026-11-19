@@ -364,6 +364,18 @@ async fn repositories_are_registered_per_project_and_a_remote_only_once_in_the_s
                 .into()
         ))
     );
+    // Another spelling of the same remote, or a branch of it, is the same repository.
+    for spelling in [
+        "https://example.com/me/api",
+        "ssh://git@Example.com/me/api.git/",
+    ] {
+        let again = org(&hub, add_repository(None, "api-main", spelling)).await;
+        assert!(
+            matches!(&again, Err(ApiError::Invalid(message))
+                if message.contains("as repository \"api\" of project \"Payments\"")),
+            "{spelling}: {again:?}"
+        );
+    }
     let same_name = org(
         &hub,
         add_repository(Some("Payments"), "api", "git@example.com:me/other.git"),
@@ -511,4 +523,43 @@ async fn templates_lists_the_starter_agents_compiled_into_the_hub() {
     assert_eq!(chief.name, "Chief of Staff");
     assert_eq!(chief.backends, [BackendKind::Claude, BackendKind::Codex]);
     assert!(chief.instructions.contains("ask_user"));
+}
+
+#[tokio::test]
+async fn a_local_folder_is_the_repository_its_origin_or_its_path_names() {
+    let hub = TestHub::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path().join("checkout");
+    std::fs::create_dir(&checkout).unwrap();
+    threadlane_testkit::git::git(&checkout, &["init", "--quiet"]);
+    threadlane_testkit::git::git(
+        &checkout,
+        &["remote", "add", "origin", "https://example.com/me/api.git"],
+    );
+    let plain = dir.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+
+    org(&hub, add_repository(None, "api", "git@example.com:me/api"))
+        .await
+        .unwrap();
+    let checkout = checkout.to_str().unwrap();
+    let local = org(&hub, add_repository(None, "api-local", checkout)).await;
+    assert!(
+        matches!(&local, Err(ApiError::Invalid(message)) if message.contains("as repository \"api\"")),
+        "a checkout of a registered remote: {local:?}"
+    );
+
+    let plain = plain.to_str().unwrap();
+    org(&hub, add_repository(None, "plain", plain))
+        .await
+        .unwrap();
+    let again = org(
+        &hub,
+        add_repository(None, "plain-again", &format!("{plain}/./")),
+    )
+    .await;
+    assert!(
+        matches!(&again, Err(ApiError::Invalid(message)) if message.contains("as repository \"plain\"")),
+        "the same folder by another path: {again:?}"
+    );
 }
