@@ -482,6 +482,9 @@ pub enum DecisionRequest {
     StandingRules { project: Option<String> },
     /// Revokes a standing rule; the next matching call asks again.
     RevokeRule { rule: StandingRuleId },
+    /// Claims the one reminder for a decision still waiting. Answered with
+    /// [`DecisionReply::Reminder`], `first` only for the first claim.
+    Remind { decision: DecisionId },
 }
 
 /// A standing rule as a client lists it.
@@ -514,6 +517,10 @@ pub enum DecisionReply {
     /// The rule as it now stands.
     StandingRule {
         rule: StandingRuleSummary,
+    },
+    /// Whether this was the first claim of the decision's reminder.
+    Reminder {
+        first: bool,
     },
 }
 

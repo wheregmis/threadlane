@@ -4,7 +4,9 @@
 //! on it; the runner performs the stored call once you approve (§9.4).
 
 use serde_json::{Value as Json, json};
-use threadlane_core::forge::{COMMENT, CREATE_ISSUE, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{
+    COMMENT, CREATE_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+};
 use threadlane_core::model::{DecisionOption, Lane};
 use threadlane_core::store::{OrgStore, TaskStore};
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
@@ -108,6 +110,14 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 "required":["repository","number"],"additionalProperties":false
             }),
         ),
+        define(
+            MARK_READY,
+            "Mark a draft pull request in a registered project repository ready for review.",
+            json!({
+                "type":"object","properties":{"repository":repository,"number":{"type":"integer","minimum":1}},
+                "required":["repository","number"],"additionalProperties":false
+            }),
+        ),
     ]
 }
 
@@ -157,6 +167,10 @@ pub(crate) fn repository_action(
             fields(a, &["repository", "number"])?;
             Ok(RepositoryAction::Merge { number: number()? })
         }
+        MARK_READY => {
+            fields(a, &["repository", "number"])?;
+            Ok(RepositoryAction::MarkReady { number: number()? })
+        }
         _ => Err(invalid("unknown repository action")),
     }
 }
@@ -187,7 +201,7 @@ pub(crate) async fn proposal(
     }
     if !matches!(
         tool,
-        PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE
+        PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE | MARK_READY
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -213,7 +227,7 @@ pub(crate) async fn proposal(
         .ok_or_else(|| {
             ToolError::InvalidArguments(format!("no repository {name:?} in this project"))
         })?;
-    if matches!(tool, COMMENT | CREATE_ISSUE | MERGE) {
+    if matches!(tool, COMMENT | CREATE_ISSUE | MERGE | MARK_READY) {
         repository_action(tool, arguments)?;
         let question = match tool {
             COMMENT => format!(
@@ -222,6 +236,10 @@ pub(crate) async fn proposal(
                 arguments["number"]
             ),
             MERGE => format!("Merge pull request #{} in {name}?", arguments["number"]),
+            MARK_READY => format!(
+                "Mark draft pull request #{} in {name} ready for review?",
+                arguments["number"]
+            ),
             _ => format!("Create issue {} in {name}?", arguments["title"]),
         };
         return Ok(Proposal {

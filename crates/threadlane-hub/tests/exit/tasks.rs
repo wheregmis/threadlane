@@ -167,6 +167,7 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
                     threadlane_hub::COMMENT,
                     threadlane_hub::CREATE_ISSUE,
                     threadlane_hub::MERGE,
+                    threadlane_hub::MARK_READY,
                     MEMORY_VIEW,
                     MEMORY_CREATE,
                     MEMORY_EDIT,

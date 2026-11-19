@@ -238,6 +238,7 @@ impl Forge for GitForge {
             RepositoryAction::Merge { number } => {
                 args(&["pr", "merge", &number.to_string(), "--merge"])
             }
+            RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
         };
         argv.push(format!("--repo={repo}").into());
         self.gh(Path::new("."), argv).await
