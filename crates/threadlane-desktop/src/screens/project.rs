@@ -3064,7 +3064,7 @@ fn handoff_preview(text: &str) -> String {
 
 #[cfg(test)]
 mod chat_details_tests {
-    use super::*;
+    use super::{chat_details_in_sheet, px};
 
     #[test]
     fn narrow_chat_uses_drawer_without_changing_global_sidebar() {
