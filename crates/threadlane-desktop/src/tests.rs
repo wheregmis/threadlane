@@ -7045,16 +7045,16 @@ async fn inbox_timeline_loads_repositories_and_links_github_references_per_proje
                 "Opened [#572](https://github.com/acme/site/pull/572)".to_owned(),
             ),
             (
-                "said-work-3".to_owned(),
+                "timeline-said-work-3".to_owned(),
                 "The lead of api replied: [#572](https://github.com/wheregmis/threadlane/pull/572) is ready".to_owned(),
             ),
-            ("said-work-2".to_owned(), "Any news on #572?".to_owned()),
+            ("timeline-said-work-2".to_owned(), "Any news on #572?".to_owned()),
             (
                 "result-work-1".to_owned(),
                 "Merged [#572](https://github.com/wheregmis/threadlane/pull/572)".to_owned(),
             ),
             (
-                "said-work-1".to_owned(),
+                "timeline-said-work-1".to_owned(),
                 "Check [#572](https://github.com/wheregmis/threadlane/pull/572)".to_owned(),
             ),
             ("result-work-9".to_owned(), "Notice #572".to_owned()),
@@ -7229,6 +7229,24 @@ async fn space_tasks_view_groups_sorts_newest_first_collapses_done_and_filters()
 
     state.clear_space_task_filter("work");
     assert!(!state.space_task_filter("work").is_active());
+}
+
+#[test]
+fn approval_details_keep_markdown_verbatim() {
+    let mut decision = decision(1, 100_000);
+    decision.kind = DecisionKind::Approval;
+    decision.arguments = serde_json::json!({ "note": "**x** [a](b) #5" });
+    let card = AppState::decision_card(&Queued {
+        space: "work".into(),
+        decision,
+    });
+    assert!(
+        card.details
+            .iter()
+            .any(|line| line.ends_with("**x** [a](b) #5")),
+        "{:?}",
+        card.details
+    );
 }
 
 #[test]

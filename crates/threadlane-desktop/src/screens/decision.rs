@@ -133,21 +133,8 @@ impl Desktop {
             .children(contents.context.map(|line| {
                 self.decision_context(format!("context-{prefix}"), &key.space, &project, line, cx)
             }))
-            .children(
-                contents
-                    .details
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, line)| {
-                        self.prose(
-                            format!("detail-{prefix}-{index}"),
-                            &key.space,
-                            Some(&project),
-                            line,
-                            cx,
-                        )
-                    }),
-            )
+            // Approval details are raw tool arguments: shown verbatim, never as Markdown.
+            .children(contents.details.into_iter().map(|line| div().child(line)))
             .children(
                 contents
                     .diff
