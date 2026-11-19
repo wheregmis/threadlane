@@ -320,7 +320,7 @@ pub(crate) async fn perform_schedule(
     .await
 }
 
-/// Creates an agent's routine in `lane_id`, keyed on `key`. Its events are
+/// Creates an agent's routine in `lane_id`, keyed on `key`. Its scheduled events are
 /// never requested work (Plan.md §7.3).
 #[allow(clippy::too_many_arguments, reason = "the routine and where it goes")]
 async fn routine(
@@ -569,6 +569,20 @@ pub(crate) async fn handle(core: &HubCore, request: TimerRequest) -> Result<Time
                 })
                 .await
                 .map_err(api_error)?;
+            Ok(TimerReply::Timer { timer })
+        }
+        TimerRequest::RunOnce {
+            timer: id,
+            client_request_id,
+        } => {
+            if client_request_id.trim().is_empty() || client_request_id.len() > 128 {
+                return Err(ApiError::Invalid("Invalid run request ID".into()));
+            }
+            let timer = db
+                .run_routine_once(id, &client_request_id, inner.clock.now())
+                .await
+                .map_err(ended)?;
+            inner.wake.wake(WakeTarget::Lane(timer.lane_id));
             Ok(TimerReply::Timer { timer })
         }
         TimerRequest::Pause { timer: id } => {

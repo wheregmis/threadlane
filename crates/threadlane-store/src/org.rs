@@ -415,30 +415,7 @@ impl OrgStore for HubDb {
 
     async fn create_agent(&self, agent: &NewAgent) -> StoreResult<Agent> {
         let tx = self.db.begin().await?;
-        let id: AgentId = query_one(
-            tx.conn(),
-            "INSERT INTO agents (name, role, instructions, backends, models, tools, requirements, skills)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
-            params![
-                agent.name.as_str(),
-                agent.role.as_str(),
-                agent.instructions.as_str(),
-                json_text(&agent.backends)?,
-                json_text(&agent.models)?,
-                json_text(&agent.tools)?,
-                json_text(&agent.requirements)?,
-                json_text(&agent.skills)?,
-            ],
-            |row| Cols(row).id(0),
-        )
-        .await?;
-        let created = query_one(
-            tx.conn(),
-            &format!("SELECT {AGENT_COLUMNS} WHERE id = ?1"),
-            params![id.get()],
-            decode_agent,
-        )
-        .await?;
+        let created = insert_agent_in(tx.conn(), agent).await?;
         tx.commit().await?;
         Ok(created)
     }
@@ -565,31 +542,7 @@ impl OrgStore for HubDb {
 
     async fn bind(&self, binding: &NewBinding) -> StoreResult<Binding> {
         let tx = self.db.begin().await?;
-        let id: i64 = query_one(
-            tx.conn(),
-            concat!(
-                "INSERT INTO bindings (id, project_id, agent_id, mode, is_lead, max_parallel)
-             VALUES (",
-                crate::db::next_id_sql!("bindings"),
-                ", ?1, ?2, ?3, ?4, ?5) RETURNING id"
-            ),
-            params![
-                binding.project_id.get(),
-                binding.agent_id.get(),
-                binding.mode.as_str(),
-                binding.is_lead,
-                i64::from(binding.max_parallel),
-            ],
-            |row| Cols(row).i64(0),
-        )
-        .await?;
-        let created = query_one(
-            tx.conn(),
-            &format!("SELECT {BINDING_COLUMNS} WHERE id = ?1"),
-            params![id],
-            decode_binding,
-        )
-        .await?;
+        let created = insert_binding_in(tx.conn(), binding).await?;
         tx.commit().await?;
         Ok(created)
     }
@@ -693,4 +646,64 @@ impl OrgStore for HubDb {
         tx.commit().await?;
         Ok(updated)
     }
+}
+
+pub(crate) async fn insert_agent_in(conn: &Connection, agent: &NewAgent) -> StoreResult<Agent> {
+    let id: AgentId = query_one(
+            conn,
+            "INSERT INTO agents (name, role, instructions, backends, models, tools, requirements, skills)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
+            params![
+                agent.name.as_str(),
+                agent.role.as_str(),
+                agent.instructions.as_str(),
+                json_text(&agent.backends)?,
+                json_text(&agent.models)?,
+                json_text(&agent.tools)?,
+                json_text(&agent.requirements)?,
+                json_text(&agent.skills)?,
+            ],
+            |row| Cols(row).id(0),
+        )
+        .await?;
+    let created = query_one(
+        conn,
+        &format!("SELECT {AGENT_COLUMNS} WHERE id = ?1"),
+        params![id.get()],
+        decode_agent,
+    )
+    .await?;
+    Ok(created)
+}
+
+pub(crate) async fn insert_binding_in(
+    conn: &Connection,
+    binding: &NewBinding,
+) -> StoreResult<Binding> {
+    let id: i64 = query_one(
+        conn,
+        concat!(
+            "INSERT INTO bindings (id, project_id, agent_id, mode, is_lead, max_parallel)
+             VALUES (",
+            crate::db::next_id_sql!("bindings"),
+            ", ?1, ?2, ?3, ?4, ?5) RETURNING id"
+        ),
+        params![
+            binding.project_id.get(),
+            binding.agent_id.get(),
+            binding.mode.as_str(),
+            binding.is_lead,
+            i64::from(binding.max_parallel),
+        ],
+        |row| Cols(row).i64(0),
+    )
+    .await?;
+    let created = query_one(
+        conn,
+        &format!("SELECT {BINDING_COLUMNS} WHERE id = ?1"),
+        params![id],
+        decode_binding,
+    )
+    .await?;
+    Ok(created)
 }

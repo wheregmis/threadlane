@@ -49,6 +49,15 @@ impl Cols<'_> {
             .transpose()
     }
 
+    pub(crate) fn real(&self, idx: usize) -> StoreResult<f64> {
+        match self.value(idx)? {
+            Value::Real(value) => Ok(value),
+            other => Err(StoreError::Corrupt(format!(
+                "column {idx}: expected a real number, found {other:?}"
+            ))),
+        }
+    }
+
     pub(crate) fn bool(&self, idx: usize) -> StoreResult<bool> {
         Ok(self.i64(idx)? != 0)
     }

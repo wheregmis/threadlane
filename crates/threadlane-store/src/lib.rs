@@ -27,6 +27,8 @@ mod smoke_tests;
 mod task;
 mod task_review;
 mod timer;
+mod work;
+pub use work::ReviewRoles;
 
 use std::path::Path;
 use std::sync::Arc;

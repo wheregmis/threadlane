@@ -238,6 +238,21 @@ threadlane routine cancel 3                              # for good
 local to `--zone`, this computer's time zone by default. `pause` and `cancel`
 work on follow-ups too.
 
+In the desktop app, open a project's **Routines** to run an active or paused
+routine once. **Run history** shows when each occurrence started, its outcome,
+and any reply or delegated tasks. A manual run keeps the original cadence.
+In the space sidebar, **Routines → Agenda** shows recent and upcoming runs,
+including tomorrow in your local time zone. **Usage** groups runs by project, agent and
+backend and shows how often providers reported cost and tokens.
+
+From a project's **Tasks**, open **Outputs** to search published pull
+requests, saved reports and attached images. Open **Review workflow** to edit
+the space's implementation and review instructions, choose two specialists
+and start linked tasks for a registered repository. The owner can accept the
+review or request changes. **Preview PR review team** shows which agents will
+be created or reused and the proposed weekday routine. It starts paused
+so you can run it once before enabling the schedule.
+
 Repositories a project's tasks work in:
 
 ```sh

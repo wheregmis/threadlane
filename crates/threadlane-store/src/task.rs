@@ -333,6 +333,26 @@ pub(crate) async fn end_task(
     Ok(())
 }
 
+/// Both ordinary completion and a configured space review pass through the workflow's owner gate.
+pub(crate) async fn complete_result(
+    conn: &Connection,
+    task: &Task,
+    run: RunId,
+    now: Timestamp,
+) -> StoreResult<()> {
+    if let Some(result) = &task.result
+        && task
+            .created_by_call
+            .as_deref()
+            .is_some_and(|key| key.starts_with("workflow-review:"))
+        && crate::work::needs_owner_decision(conn, task, result, run, now).await?
+    {
+        wait_on_decision(conn, task).await?;
+        return Ok(());
+    }
+    end_task(conn, task, TaskStatus::Done, None, now).await
+}
+
 /// How many times the user retried task `id`.
 async fn retries(conn: &Connection, id: TaskId) -> StoreResult<i64> {
     query_one(
@@ -491,7 +511,7 @@ pub(crate) async fn on_run_committed(
         )
         .await?;
         let task = Task { result, ..task };
-        return end_task(conn, &task, TaskStatus::Done, None, now).await;
+        return complete_result(conn, &task, run_id, now).await;
     }
     if pending_events(conn, lane_id).await? > 0 {
         return transition(conn, &task, TaskStatus::Queued).await;
@@ -802,49 +822,59 @@ impl HubDb {
         task: &NewTask,
         ask: Option<EventId>,
     ) -> StoreResult<Task> {
-        if !matches!(task.status, TaskStatus::Proposed | TaskStatus::Queued) {
-            return Err(StoreError::Invalid(format!(
-                "a task starts proposed or queued, not {}",
-                task.status
-            )));
-        }
         let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        check_run_lease(conn, lease, task.project_id).await?;
-        if let Some(call) = &task.created_by_call
-            && let Some(existing) =
-                task_in(conn, "created_by_call = ?1", call.as_str().into()).await?
-        {
-            return Ok(existing);
-        }
-        crate::org::require_active_project(conn, task.project_id).await?;
-        for other in task.depends_on.iter().chain(&task.parent_task_id) {
-            let project = query_opt(
-                conn,
-                "SELECT project_id FROM tasks WHERE id = ?1",
-                params![other.get()],
-                |row| Cols(row).id::<ProjectId>(0),
-            )
-            .await?;
-            if project != Some(task.project_id) {
-                return Err(StoreError::Invalid(format!(
-                    "{other} is not a task of project {}",
-                    task.project_id
-                )));
-            }
-        }
-        let lane_id: LaneId = query_one(
+        let created = insert_task_in(tx.conn(), lease, task, ask).await?;
+        tx.commit().await?;
+        Ok(created)
+    }
+}
+
+pub(crate) async fn insert_task_in(
+    conn: &Connection,
+    lease: Option<&Lease>,
+    task: &NewTask,
+    ask: Option<EventId>,
+) -> StoreResult<Task> {
+    if !matches!(task.status, TaskStatus::Proposed | TaskStatus::Queued) {
+        return Err(StoreError::Invalid(format!(
+            "a task starts proposed or queued, not {}",
+            task.status
+        )));
+    }
+    check_run_lease(conn, lease, task.project_id).await?;
+    if let Some(call) = &task.created_by_call
+        && let Some(existing) = task_in(conn, "created_by_call = ?1", call.as_str().into()).await?
+    {
+        return Ok(existing);
+    }
+    crate::org::require_active_project(conn, task.project_id).await?;
+    for other in task.depends_on.iter().chain(&task.parent_task_id) {
+        let project = query_opt(
             conn,
-            concat!(
-                "INSERT INTO lanes (id, project_id, kind) VALUES (",
-                crate::db::next_id_sql!("lanes"),
-                ", ?1, ?2) RETURNING id"
-            ),
-            params![task.project_id.get(), LaneKind::Task.as_str()],
-            |row| Cols(row).id(0),
+            "SELECT project_id FROM tasks WHERE id = ?1",
+            params![other.get()],
+            |row| Cols(row).id::<ProjectId>(0),
         )
         .await?;
-        let id: TaskId = query_one(
+        if project != Some(task.project_id) {
+            return Err(StoreError::Invalid(format!(
+                "{other} is not a task of project {}",
+                task.project_id
+            )));
+        }
+    }
+    let lane_id: LaneId = query_one(
+        conn,
+        concat!(
+            "INSERT INTO lanes (id, project_id, kind) VALUES (",
+            crate::db::next_id_sql!("lanes"),
+            ", ?1, ?2) RETURNING id"
+        ),
+        params![task.project_id.get(), LaneKind::Task.as_str()],
+        |row| Cols(row).id(0),
+    )
+    .await?;
+    let id: TaskId = query_one(
             conn,
             concat!(
                 "INSERT INTO tasks (id, project_id, lane_id, agent_id, title, goal, repositories,
@@ -871,50 +901,47 @@ impl HubDb {
             |row| Cols(row).id(0),
         )
         .await?;
+    exec(
+        conn,
+        "UPDATE lanes SET task_id = ?1 WHERE id = ?2",
+        params![id.get(), lane_id.get()],
+    )
+    .await?;
+    for dependency in &task.depends_on {
         exec(
             conn,
-            "UPDATE lanes SET task_id = ?1 WHERE id = ?2",
-            params![id.get(), lane_id.get()],
+            "INSERT INTO task_dependencies (task_id, depends_on) VALUES (?1, ?2)",
+            params![id.get(), dependency.get()],
         )
         .await?;
-        for dependency in &task.depends_on {
-            exec(
-                conn,
-                "INSERT INTO task_dependencies (task_id, depends_on) VALUES (?1, ?2)",
-                params![id.get(), dependency.get()],
-            )
-            .await?;
-        }
-        let created = existing_task(conn, id).await?;
-        let ended_badly = query_opt(
-            conn,
-            "SELECT t.id, t.status FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on
-             WHERE d.task_id = ?1 AND t.status IN ('failed', 'cancelled') ORDER BY t.id LIMIT 1",
-            params![id.get()],
-            |row| {
-                let c = Cols(row);
-                Ok((c.id::<TaskId>(0)?, c.parse::<TaskStatus>(1)?))
-            },
-        )
-        .await?;
-        if let Some((dependency, status)) = ended_badly {
-            // It could never start: cancel it as if it had been waiting.
-            let reason = dependency_ended(dependency, status);
-            end_task(
-                conn,
-                &created,
-                TaskStatus::Cancelled,
-                Some(&reason),
-                task.created_at,
-            )
-            .await?;
-        } else if created.status == TaskStatus::Queued {
-            insert_start_event(conn, &created).await?;
-        }
-        let created = existing_task(conn, id).await?;
-        tx.commit().await?;
-        Ok(created)
     }
+    let created = existing_task(conn, id).await?;
+    let ended_badly = query_opt(
+        conn,
+        "SELECT t.id, t.status FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on
+             WHERE d.task_id = ?1 AND t.status IN ('failed', 'cancelled') ORDER BY t.id LIMIT 1",
+        params![id.get()],
+        |row| {
+            let c = Cols(row);
+            Ok((c.id::<TaskId>(0)?, c.parse::<TaskStatus>(1)?))
+        },
+    )
+    .await?;
+    if let Some((dependency, status)) = ended_badly {
+        // It could never start: cancel it as if it had been waiting.
+        let reason = dependency_ended(dependency, status);
+        end_task(
+            conn,
+            &created,
+            TaskStatus::Cancelled,
+            Some(&reason),
+            task.created_at,
+        )
+        .await?;
+    } else if created.status == TaskStatus::Queued {
+        insert_start_event(conn, &created).await?;
+    }
+    existing_task(conn, id).await
 }
 
 impl HubDb {

@@ -18,7 +18,7 @@ use crate::inbox::{check_lease, insert_event_in};
 use crate::memory::live_in;
 use crate::row::{Cols, json_text, params};
 use crate::session::active_run;
-use crate::task::{end_task, task_of_lane, transition, with_published};
+use crate::task::{complete_result, task_of_lane, transition, with_published};
 
 pub const TASK_REVIEW_SOURCE: &str = "task-review";
 
@@ -347,7 +347,7 @@ pub(crate) async fn finish_review(
             params![task.id.get(), json_text(&reviewed.result)?],
         )
         .await?;
-        return end_task(conn, &reviewed, TaskStatus::Done, None, now).await;
+        return complete_result(conn, &reviewed, run, now).await;
     }
     transition(conn, task, TaskStatus::Queued).await?;
     exec(

@@ -744,15 +744,41 @@ pub enum ConversationEntry {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OverviewRequest {
+    RoutineHistory {
+        timer: TimerId,
+        before: Option<EventId>,
+    },
+    Agenda {
+        tomorrow_in: Option<String>,
+    },
+    SpaceUsage {
+        days: u32,
+    },
+    Outputs {
+        project: String,
+        search: String,
+    },
+    OutputImage {
+        project: String,
+        event: EventId,
+        index: u32,
+    },
+    ReviewRecipe,
     /// Every task of a project, oldest first. `None` means the General
     /// project.
-    Tasks { project: Option<String> },
+    Tasks {
+        project: Option<String>,
+    },
     /// Every running task in the space, oldest first.
     Running,
     /// One task in full.
-    Task { task: TaskId },
+    Task {
+        task: TaskId,
+    },
     /// The task details used on the desktop before Activity is opened.
-    TaskOverview { task: TaskId },
+    TaskOverview {
+        task: TaskId,
+    },
     /// One page of a task's journal steps, newest first.
     TaskActivity {
         task: TaskId,
@@ -772,20 +798,29 @@ pub enum OverviewRequest {
     },
     /// The newest `limit` delivered items in the space, of any project or
     /// none, oldest first.
-    Recent { limit: u32 },
+    Recent {
+        limit: u32,
+    },
     /// The machines that joined the space, and its model accounts.
     Machines,
     /// Whether a project's lead is working: when the run in progress on its
     /// lead lane started. `None` as the project means the General project.
-    Lead { project: Option<String> },
+    Lead {
+        project: Option<String>,
+    },
     /// The newest `limit` events of a project that were recorded and acted
     /// on by nobody, because the work was unrequested (Plan.md §2.3)
     /// or the project was archived, newest first. `None` means the General project.
-    Recorded { project: Option<String>, limit: u32 },
+    Recorded {
+        project: Option<String>,
+        limit: u32,
+    },
     /// How many such events the whole space has.
     RecordedCount,
     /// Runs on a project's lead lane, oldest first. `None` means General.
-    LeadRuns { project: Option<String> },
+    LeadRuns {
+        project: Option<String>,
+    },
     /// Results held by delivery pacing in this space.
     HeldResults,
 }
@@ -836,6 +871,25 @@ pub struct TaskActivityEntry {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OverviewReply {
+    RoutineHistory {
+        rows: Vec<crate::work::Occurrence>,
+    },
+    Agenda {
+        recent: Vec<crate::work::Occurrence>,
+        upcoming: Vec<crate::work::Scheduled>,
+    },
+    SpaceUsage {
+        groups: Vec<crate::work::UsageGroup>,
+    },
+    Outputs {
+        rows: Vec<crate::work::ProjectOutput>,
+    },
+    OutputImage {
+        image: ImageAttachment,
+    },
+    ReviewRecipe {
+        recipe: crate::work::ReviewRecipe,
+    },
     Work {
         overview: WorkOverview,
     },
@@ -1175,6 +1229,10 @@ pub async fn dispatch(api: &dyn HubApi, request: ClientRequest) -> ClientRespons
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TimerRequest {
+    RunOnce {
+        timer: TimerId,
+        client_request_id: String,
+    },
     /// The timers of a project that have not ended, active or paused, oldest
     /// first. `None` means the General project.
     List { project: Option<String> },
@@ -1216,6 +1274,24 @@ pub enum TimerReply {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskRequest {
+    SaveReviewRecipe {
+        recipe: crate::work::ReviewRecipe,
+    },
+    StartReviewWorkflow {
+        project: String,
+        goal: String,
+        engineer: String,
+        reviewer: String,
+        repository: String,
+        version: i64,
+        client_request_id: String,
+    },
+    InstallReviewTeam {
+        project: String,
+        engineer: String,
+        reviewer: String,
+        recurrence: Recurrence,
+    },
     /// Creates a queued task of yours in a project, skipping the lead: work
     /// you requested. `agent` must be bound in the project and not Off;
     /// `repositories` are names registered in it and `depends_on` its tasks
@@ -1235,11 +1311,15 @@ pub enum TaskRequest {
     /// Cancels a task that has not ended, and the tasks that wait on it;
     /// the lead hears of it once. Cancelling a cancelled task changes
     /// nothing.
-    Cancel { task: TaskId },
+    Cancel {
+        task: TaskId,
+    },
     /// Queues a failed task again, with a message in its lane quoting the
     /// last error and asking the agent to continue from the work already
     /// on the task branch. Only a failed task can be retried.
-    Retry { task: TaskId },
+    Retry {
+        task: TaskId,
+    },
 }
 
 /// The answer to a [`TaskRequest`].
@@ -1247,8 +1327,16 @@ pub enum TaskRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskReply {
+    ReviewRecipe {
+        recipe: crate::work::ReviewRecipe,
+    },
+    ReviewTeam {
+        timer: Timer,
+    },
     /// The task as it now stands.
-    Task { task: Task },
+    Task {
+        task: Task,
+    },
 }
 
 /// Read the hub's operational history or perform an owner repair.

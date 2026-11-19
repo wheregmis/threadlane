@@ -1521,7 +1521,7 @@ impl ClientCore {
         }
     }
 
-    async fn overview(
+    pub async fn overview(
         &self,
         space: Option<&str>,
         request: OverviewRequest,

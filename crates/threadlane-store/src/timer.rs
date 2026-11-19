@@ -151,6 +151,49 @@ pub(crate) async fn insert_timer_in(
 }
 
 impl HubDb {
+    /// Queues an owner-triggered occurrence without moving the scheduler cursor.
+    pub async fn run_routine_once(
+        &self,
+        id: TimerId,
+        request: &str,
+        now: Timestamp,
+    ) -> StoreResult<Timer> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let routine = timer_in(conn, id)
+            .await?
+            .ok_or_else(|| StoreError::not_found("timer", id))?;
+        crate::org::require_active_project(conn, routine.project_id).await?;
+        if routine.category != TimerCategory::Schedule
+            || !matches!(routine.status, TimerStatus::Paused | TimerStatus::Active)
+        {
+            return Err(StoreError::Invalid(
+                "Only an active or paused routine can run once.".into(),
+            ));
+        }
+        let inserted = insert_event_in(conn, &NewEvent {
+            project_id: routine.project_id, lane_id: routine.lane_id,
+            source: TIMER_SOURCE.into(), source_event_id: format!("{id}:manual:{request}"),
+            kind: EventKind::TimerFired, trust: Trust::System, requested: true,
+            payload: json!({"timer_id":id,"category":routine.category,"instruction":routine.instruction,
+                "occurrence":now,"task_ref":routine.task_ref,"created_by":routine.created_by,"manual":true}),
+            session_ref: None, decision_ref: None, reply_to_ref: None, received_at: now,
+        }).await?;
+        if matches!(inserted, Inserted::New(_)) {
+            exec(
+                conn,
+                "UPDATE timers SET last_fired_at=?1, fire_count=fire_count+1 WHERE id=?2",
+                params![now.as_millis(), id.get()],
+            )
+            .await?;
+        }
+        let result = timer_in(conn, id)
+            .await?
+            .ok_or_else(|| StoreError::not_found("timer", id))?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
     /// Saves a follow-up and the space Lead's ask that it continues.
     pub async fn create_timer_for_ask(
         &self,

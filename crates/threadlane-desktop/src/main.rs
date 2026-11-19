@@ -41,6 +41,8 @@ mod repository;
 mod screens;
 mod tokens;
 mod updates;
+mod work;
+use work::{WorkPage, WorkView};
 
 use icons::DesktopAssets;
 use keyboard::DecisionScroll;
@@ -264,6 +266,10 @@ enum Screen {
     },
     /// Routines in the selected space, or all spaces from the debug route.
     Routines(Option<String>),
+    Work {
+        space: String,
+        page: WorkPage,
+    },
     /// One space's settings, or preferences for this app.
     Settings(Option<String>),
     /// Pair another space with this app.
@@ -274,7 +280,8 @@ impl Screen {
     /// The space this screen belongs to, if it belongs to one.
     fn space(&self) -> Option<&str> {
         match self {
-            Self::Project { space, .. }
+            Self::Work { space, .. }
+            | Self::Project { space, .. }
             | Self::Task { space, .. }
             | Self::SpaceTasks { space }
             | Self::NewProject { space }
@@ -407,6 +414,7 @@ struct Desktop {
     core: Arc<RwLock<ClientCore>>,
     tokio: tokio::runtime::Handle,
     screen: Screen,
+    work: WorkView,
     task_activity: TaskActivity,
     task_activity_request: Option<Task<()>>,
     project_load: Option<Task<()>>,
@@ -674,6 +682,7 @@ impl Desktop {
         })
         .detach();
         Self {
+            work: WorkView::new(window, cx),
             state,
             core,
             tokio,
@@ -830,6 +839,7 @@ impl Desktop {
     fn load_screen_with_parts(&mut self, parts: (bool, bool), cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
         match self.screen.clone() {
+            Screen::Work { space, page } => self.load_work(space, page, cx),
             Screen::Routines(scope) => {
                 let projects = self
                     .state
@@ -1146,6 +1156,7 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.work.leave();
             self.project_load = None;
             self.project_load_pending = None;
             self.task_activity_request = None;
@@ -1724,6 +1735,7 @@ impl Desktop {
                     let gone = match &this.screen {
                         Screen::Project { space, .. }
                         | Screen::Task { space, .. }
+                        | Screen::Work { space, .. }
                         | Screen::SpaceTasks { space }
                         | Screen::Agents(Some(space))
                         | Screen::Routines(Some(space))
@@ -1776,6 +1788,7 @@ impl Render for Desktop {
         self.prepare_decision_inputs(window, cx);
         let when = self.when();
         let body = match self.screen.clone() {
+            Screen::Work { space, page } => self.work_screen(&space, &page, &when, window, cx),
             Screen::Home => self.home(&when, cx),
             Screen::Project {
                 space,

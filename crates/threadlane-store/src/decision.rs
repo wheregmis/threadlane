@@ -122,6 +122,14 @@ async fn close_in(
     at: Timestamp,
 ) -> StoreResult<Inserted> {
     let id = decision.id;
+    if decision.tool == "workflow_review" && answer["option"].as_u64() != Some(0) {
+        exec(
+            conn,
+            "UPDATE tasks SET result=NULL WHERE id=?1",
+            params![opt_raw(decision.task_id, |v| v.get())],
+        )
+        .await?;
+    }
     exec(
         conn,
         "UPDATE decisions SET status = ?1, answer = ?2, answered_at = ?3 WHERE id = ?4",
@@ -394,7 +402,7 @@ fn decode_rule(row: &Row) -> StoreResult<StandingRule> {
 /// Inserts a decision inside the caller's transaction, under `lease` if a
 /// run asks. A repeated `(run_id, tool_call_id)` returns the original and
 /// `false`.
-async fn insert_decision_in(
+pub(crate) async fn insert_decision_in(
     conn: &Connection,
     lease: Option<&Lease>,
     decision: &NewDecision,
@@ -490,7 +498,7 @@ async fn insert_decision_in(
     Ok((created, true))
 }
 
-async fn enqueue_card(conn: &Connection, created: &Decision) -> StoreResult<()> {
+pub(crate) async fn enqueue_card(conn: &Connection, created: &Decision) -> StoreResult<()> {
     // Decisions bypass pacing (Plan.md §10.2); the key makes the card
     // one per decision.
     enqueue_in(

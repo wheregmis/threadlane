@@ -576,6 +576,27 @@ impl Desktop {
                     .label("Space chat")
                     .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
             }));
+        if matches!(tab, Tab::Tasks | Tab::Setup) {
+            actions = actions.child(self.work_link(
+                "project-outputs",
+                "Outputs",
+                space,
+                crate::WorkPage::Outputs {
+                    project: project.into(),
+                    search: String::new(),
+                },
+                cx,
+            ));
+            if !archived {
+                actions = actions.child(self.work_link(
+                    "project-review-workflow",
+                    "Review workflow",
+                    space,
+                    crate::WorkPage::Workflow(project.into()),
+                    cx,
+                ));
+            }
+        }
         if archived {
             actions = actions.child(
                 button("unarchive-project")

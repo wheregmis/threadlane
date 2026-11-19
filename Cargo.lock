@@ -9010,6 +9010,7 @@ dependencies = [
  "async-trait",
  "gpui-kit",
  "image",
+ "jiff",
  "serde_json",
  "tempfile",
  "threadlane-client",

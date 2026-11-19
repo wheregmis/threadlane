@@ -33,6 +33,7 @@ const TABLES: &[&str] = &[
     "project_machines",
     "projects",
     "repositories",
+    "review_recipe",
     "run_events",
     "runs",
     "sessions",
