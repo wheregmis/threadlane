@@ -11,9 +11,9 @@ use threadlane_core::adapters::{
     ChannelAdapter, CheckpointBundle, Delivered, DeliveryError, PreparedWorkspace, SourceAdapter,
     SourceBatch, SourceError, SourceEvent, Workspace, WorkspaceError, WorkspaceSpec,
 };
-use threadlane_core::forge::{ApprovedBranch, Forge, ForgeError};
+use threadlane_core::forge::{ApprovedBranch, Forge, ForgeError, PullRequestUpdate};
 use threadlane_core::github::{Feed, GithubError, GithubItem, GithubSource, PullTarget};
-use threadlane_core::model::OutboxMessage;
+use threadlane_core::model::{OutboxMessage, Repository};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::tools::{ToolContext, ToolDefinition, ToolEndpoint, ToolError, ToolRegistry};
 
@@ -330,6 +330,12 @@ pub enum ForgeCall {
         worktree: PathBuf,
         branch: String,
     },
+    FastForward {
+        repository: String,
+        number: u64,
+        expected_head: String,
+        revision: String,
+    },
     Open {
         worktree: PathBuf,
         branch: String,
@@ -410,6 +416,21 @@ impl Forge for FakeForge {
             branch: branch.name.to_owned(),
         });
         Ok(())
+    }
+
+    async fn fast_forward_pull_request(
+        &self,
+        _worktree: &Path,
+        repository: &Repository,
+        update: PullRequestUpdate<'_>,
+    ) -> Result<String, ForgeError> {
+        lock(&self.calls).push(ForgeCall::FastForward {
+            repository: repository.name.clone(),
+            number: update.number.get(),
+            expected_head: update.expected_head.to_owned(),
+            revision: update.revision.to_owned(),
+        });
+        Ok("feature/pr-head".into())
     }
 
     async fn open_draft_pull_request(

@@ -164,6 +164,7 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
                     FINISH_TASK,
                     PUBLISH_BRANCH,
                     OPEN_PULL_REQUEST,
+                    threadlane_hub::FAST_FORWARD_PULL_REQUEST,
                     threadlane_hub::COMMENT,
                     threadlane_hub::CREATE_ISSUE,
                     threadlane_hub::MERGE,

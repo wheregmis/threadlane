@@ -25,7 +25,8 @@ use threadlane_core::store::{
 use threadlane_core::time::Clock;
 use threadlane_core::tools::ToolError;
 use threadlane_hub::{
-    CREATE_TASK, HubSettings, OPEN_PULL_REQUEST, PUBLISH_BRANCH, derived_call_key,
+    CREATE_TASK, FAST_FORWARD_PULL_REQUEST, HubSettings, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    derived_call_key,
 };
 
 use crate::common::{TestHub, begin};
@@ -571,6 +572,12 @@ async fn the_gate_refuses_a_call_it_cannot_ask_about_and_opens_nothing() {
             json!({ "repository": "app", "branch": "main" }),
         ),
         (PUBLISH_BRANCH, json!({ "repository": "app" })),
+        (FAST_FORWARD_PULL_REQUEST, json!({
+            "repository": "app", "expected_head": "b".repeat(40), PUBLISH_REVISION: "a".repeat(40)
+        })),
+        (FAST_FORWARD_PULL_REQUEST, json!({
+            "repository": "app", "number": 7, PUBLISH_REVISION: "a".repeat(40)
+        })),
         (
             PUBLISH_BRANCH,
             json!({ "repository": "app", PUBLISH_REVISION: "HEAD" }),

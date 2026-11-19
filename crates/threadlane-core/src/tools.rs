@@ -78,6 +78,9 @@ pub enum ToolError {
     /// A decision was opened; the agent must end its turn (Plan.md §9.4).
     #[error("waiting on you, end your turn")]
     WaitingOnYou,
+    /// The call was authorized and will be performed when the lane resumes.
+    #[error("already authorized and queued. End your turn to receive the outcome")]
+    AuthorizedAndQueued,
     /// Started before and not safe to repeat (Plan.md §4.6).
     #[error("outcome unknown, verify before retrying")]
     OutcomeUnknown,

@@ -1473,7 +1473,15 @@ async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
         .unwrap();
 
     let updated = hub
-        .update_task(&lead, created.id, Some("drop it"), None, Some(3))
+        .update_task(
+            &lead,
+            created.id,
+            TaskUpdate {
+                title: Some("drop it"),
+                priority: Some(3),
+                ..TaskUpdate::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(updated.title, "drop it");
@@ -1492,7 +1500,14 @@ async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
     assert_eq!(results[0].payload["status"], "cancelled");
 
     let changed = hub
-        .update_task(&lead, created.id, Some("again"), None, None)
+        .update_task(
+            &lead,
+            created.id,
+            TaskUpdate {
+                title: Some("again"),
+                ..TaskUpdate::default()
+            },
+        )
         .await;
     assert!(
         matches!(changed, Err(StoreError::Conflict(_))),
@@ -1525,7 +1540,14 @@ async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
         "{stale:?}"
     );
     let stale = hub
-        .update_task(&lead, fresh.id, Some("x"), None, None)
+        .update_task(
+            &lead,
+            fresh.id,
+            TaskUpdate {
+                title: Some("x"),
+                ..TaskUpdate::default()
+            },
+        )
         .await;
     assert!(
         matches!(stale, Err(StoreError::StaleLease { .. })),

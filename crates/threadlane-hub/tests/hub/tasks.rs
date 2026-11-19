@@ -764,6 +764,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             FINISH_TASK,
             PUBLISH_BRANCH,
             OPEN_PULL_REQUEST,
+            threadlane_hub::FAST_FORWARD_PULL_REQUEST,
             threadlane_hub::COMMENT,
             threadlane_hub::CREATE_ISSUE,
             threadlane_hub::MERGE,
@@ -1499,6 +1500,265 @@ async fn a_task_names_repositories_registered_in_its_project_and_runs_with_the_d
         task(&hub, "T-0002").await.repositories,
         task(&hub, "T-0001").await.repositories
     );
+}
+
+#[tokio::test]
+async fn the_lead_can_attach_repositories_and_wake_a_sleeping_task() {
+    let (hub, lease, lead_run) = lead_run(2).await;
+    let general = hub.general().await;
+    let app = hub
+        .db
+        .create_repository(&threadlane_core::model::NewRepository {
+            project_id: general.id,
+            name: "app".into(),
+            remote_url: "https://github.com/acme/app.git".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        })
+        .await
+        .unwrap();
+    call(
+        &hub,
+        &lease,
+        &lead_run,
+        "create",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &lead_run).await;
+
+    let (lease, run) = begin(&*hub.link).await;
+    assert!(run.repositories.is_empty());
+    finish_run(&hub, &lease, &run).await;
+    assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Sleeping);
+
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.lane_kind, LaneKind::Lead);
+    let arguments = json!({
+        "task_id": "T-0001",
+        "repositories": ["app", "app"],
+        "wake": "Verify the existing PR head and resume the fix."
+    });
+    for _ in 0..2 {
+        let updated = call(
+            &hub,
+            &lease,
+            &run,
+            "recover",
+            UPDATE_TASK,
+            arguments.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated["status"], "queued");
+    }
+    let recovered = task(&hub, "T-0001").await;
+    assert_eq!(recovered.repositories, [app.id]);
+    assert_eq!(recovered.waiting_reason, None);
+    assert_eq!(
+        hub.db
+            .pending_events(recovered.lane_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    finish_run(&hub, &lease, &run).await;
+
+    let (_, resumed) = begin(&*hub.link).await;
+    assert_eq!(resumed.repositories, [app]);
+    assert!(
+        resumed
+            .prompt
+            .contains("Verify the existing PR head and resume the fix.")
+    );
+}
+
+#[tokio::test]
+async fn a_lead_wake_survives_the_active_implementation_finishing() {
+    let (hub, lead, run) = lead_run(2).await;
+    call(
+        &hub,
+        &lead,
+        &run,
+        "create",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lead, &run).await;
+
+    let (lease, implementation) = begin(&*hub.link).await;
+    write_progress(&hub, &lease, &implementation, "T-0001").await;
+    hub.send("m-2", "Add a correction to T-0001").await;
+    let (lead, run) = begin(&*hub.link).await;
+    assert_eq!(run.lane_kind, LaneKind::Lead);
+    let instruction = "Include the corrected total.";
+    call(
+        &hub,
+        &lead,
+        &run,
+        "correct",
+        UPDATE_TASK,
+        json!({"task_id": "T-0001", "wake": instruction}),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lead, &run).await;
+
+    call(
+        &hub,
+        &lease,
+        &implementation,
+        "first-result",
+        FINISH_TASK,
+        json!({"summary": "Original total"}),
+    )
+    .await
+    .unwrap();
+    hub.link
+        .complete(&lease, implementation.run_id, None)
+        .await
+        .unwrap();
+
+    let queued = task(&hub, "T-0001").await;
+    assert_eq!(queued.status, TaskStatus::Queued);
+    assert!(queued.result.is_none());
+    assert!(task_results(&hub).await.is_empty());
+    let Begin::Run(resumed) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("the pending wake should start a new implementation run");
+    };
+    assert!(resumed.prompt.contains(instruction));
+    call(
+        &hub,
+        &lease,
+        &resumed,
+        "final-result",
+        FINISH_TASK,
+        json!({"summary": "Corrected total"}),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &resumed).await;
+    let done = task(&hub, "T-0001").await;
+    assert_eq!(done.status, TaskStatus::Done);
+    assert_eq!(done.result.unwrap()["summary"], "Corrected total");
+}
+
+#[tokio::test]
+async fn an_attachment_during_review_applies_to_the_next_implementation_run() {
+    let (hub, lead, run) = lead_run(2).await;
+    let general = hub.general().await;
+    let reviewer = hub
+        .db
+        .create_agent(&NewAgent::named("Reviewer", "reviewer"))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: general.id,
+            agent_id: reviewer.id,
+            is_lead: false,
+            mode: Mode::OnRequest,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    let app = hub
+        .db
+        .create_repository(&threadlane_core::model::NewRepository {
+            project_id: general.id,
+            name: "app".into(),
+            remote_url: "https://github.com/acme/app.git".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        })
+        .await
+        .unwrap();
+    call(
+        &hub,
+        &lead,
+        &run,
+        "create",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lead, &run).await;
+
+    let (lease, implementation) = begin(&*hub.link).await;
+    write_progress(&hub, &lease, &implementation, "T-0001").await;
+    let submitted = call(
+        &hub,
+        &lease,
+        &implementation,
+        "submit",
+        FINISH_TASK,
+        json!({
+            "summary": "Local fix"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(submitted["submitted_for_review"], true);
+    hub.link
+        .complete(&lease, implementation.run_id, None)
+        .await
+        .unwrap();
+
+    hub.send("m-2", "Attach app and continue T-0001").await;
+    let (lead, run) = begin(&*hub.link).await;
+    assert_eq!(run.lane_kind, LaneKind::Lead);
+    call(
+        &hub,
+        &lead,
+        &run,
+        "attach",
+        UPDATE_TASK,
+        json!({
+            "task_id": "T-0001", "repositories": ["app"], "wake": "Port the fix into app."
+        }),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lead, &run).await;
+
+    let Begin::Run(review) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("submitted work should still be reviewable");
+    };
+    assert!(review.review.is_some());
+    assert!(
+        review.repositories.is_empty(),
+        "the submission had no attached repos"
+    );
+    call(
+        &hub,
+        &lease,
+        &review,
+        "verdict",
+        "finish_review",
+        json!({
+            "verdict": "approved", "feedback": "The local fix is correct."
+        }),
+    )
+    .await
+    .unwrap();
+    hub.link
+        .complete(&lease, review.run_id, None)
+        .await
+        .unwrap();
+    assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Queued);
+
+    let Begin::Run(resumed) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("the lead's pending instruction should resume implementation");
+    };
+    assert!(resumed.review.is_none());
+    assert_eq!(resumed.repositories, [app]);
+    assert!(resumed.prompt.contains("Port the fix into app."));
 }
 
 /// Plan.md §5.4 item 5: a task lane that works in repositories is not

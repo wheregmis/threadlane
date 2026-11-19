@@ -143,7 +143,7 @@ async fn a_rule_removes_the_next_identical_ask_but_not_another_target_and_a_revo
     .await;
     assert_eq!(
         second,
-        Err(ToolError::WaitingOnYou),
+        Err(ToolError::AuthorizedAndQueued),
         "the run ends to perform it"
     );
     let by_rule = decision(&hub, 2).await;

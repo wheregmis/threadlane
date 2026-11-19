@@ -233,7 +233,7 @@ impl ClientApi {
             project_id: decision.project_id,
             agent_id,
             tool: decision.tool.clone(),
-            pattern: gate::rule_pattern(&decision.arguments),
+            pattern: gate::rule_pattern(&decision.tool, &decision.arguments),
             tier,
             created_at: now,
         })

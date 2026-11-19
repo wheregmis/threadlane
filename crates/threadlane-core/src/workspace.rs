@@ -192,11 +192,13 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
     /// Removes local worktrees and clones, reporting paths it could not remove.
     async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String>;
 
-    /// Resolves the task branch and computes its diff against the default branch.
+    /// Resolves the task branch and computes its diff against the expected PR
+    /// head, or against the default branch when publishing without a PR target.
     async fn preview_publish(
         &self,
         task: TaskId,
         repository: &Repository,
+        expected_head: Option<&str>,
     ) -> Result<PublishPreview, WorkspaceError>;
 }
 

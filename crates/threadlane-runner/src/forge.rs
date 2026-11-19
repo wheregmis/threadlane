@@ -15,13 +15,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use threadlane_core::forge::{ApprovedBranch, CommentTarget, Forge, ForgeError, RepositoryAction};
-use threadlane_core::github::REVIEW_MARKER_PREFIX;
+use serde_json::Value as Json;
+use threadlane_core::forge::{
+    ApprovedBranch, CommentTarget, Forge, ForgeError, PullRequestUpdate, RepositoryAction,
+};
+use threadlane_core::github::{REVIEW_MARKER_PREFIX, normalize_remote};
+use threadlane_core::model::Repository;
 use threadlane_core::workspace::{valid_branch_name, valid_commit_id};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
-use crate::workspace::{git, run};
+use crate::workspace::{check_fast_forward, git, run};
 
 /// The longest one `gh` command may take.
 const GH_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -160,6 +164,73 @@ fn args(items: &[&str]) -> Vec<OsString> {
     items.iter().map(OsString::from).collect()
 }
 
+fn pull_request_head<'a>(
+    pull: &'a Json,
+    repository: &Repository,
+    name: &str,
+) -> Result<&'a str, ForgeError> {
+    if pull["state"] != "open" {
+        return Err(ForgeError("the pull request must be open".into()));
+    }
+    for side in ["base", "head"] {
+        if !pull[side]["repo"]["full_name"]
+            .as_str()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(name))
+        {
+            return Err(ForgeError(
+                "the pull request must have both branches in the registered repository".into(),
+            ));
+        }
+    }
+    let head = pull["head"]["ref"]
+        .as_str()
+        .filter(|head| valid_branch_name(head))
+        .ok_or_else(|| ForgeError("the pull request has no valid head branch".into()))?;
+    if head == repository.default_branch
+        || pull["head"]["repo"]["default_branch"] == head
+        || pull["base"]["ref"] == head
+        || repository
+            .protected_branches
+            .iter()
+            .any(|branch| branch == head)
+    {
+        return Err(ForgeError(
+            "the pull request head is a default, base, or protected branch".into(),
+        ));
+    }
+    Ok(head)
+}
+
+async fn push_fast_forward(
+    worktree: &Path,
+    remote: &str,
+    branch: &str,
+    update: PullRequestUpdate<'_>,
+) -> Result<(), ForgeError> {
+    check_fast_forward(worktree, update.expected_head, update.revision)
+        .await
+        .map_err(|error| ForgeError(error.0))?;
+    let target = format!("refs/heads/{branch}");
+    let lease = format!("--force-with-lease={target}:{}", update.expected_head);
+    let refspec = format!("{}:{target}", update.revision);
+    // Ancestry is already checked. The lease guards against a concurrent ref change.
+    git(
+        Some(worktree),
+        [
+            "push",
+            "--quiet",
+            "--no-follow-tags",
+            &lease,
+            "--",
+            remote,
+            &refspec,
+        ],
+    )
+    .await
+    .map_err(|error| ForgeError(error.0))?;
+    Ok(())
+}
+
 #[async_trait]
 impl Forge for GitForge {
     async fn push(&self, worktree: &Path, branch: ApprovedBranch<'_>) -> Result<(), ForgeError> {
@@ -176,6 +247,41 @@ impl Forge for GitForge {
         .await
         .map_err(|error| ForgeError(error.0))?;
         Ok(())
+    }
+
+    async fn fast_forward_pull_request(
+        &self,
+        worktree: &Path,
+        repository: &Repository,
+        update: PullRequestUpdate<'_>,
+    ) -> Result<String, ForgeError> {
+        let remote = normalize_remote(&repository.remote_url)
+            .ok_or_else(|| ForgeError("the registered remote is not a GitHub repository".into()))?;
+        let (host, name) = remote
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let hostname = format!("--hostname={host}");
+        let endpoint = format!("repos/{name}/pulls/{}", update.number);
+        let output = self
+            .gh(
+                worktree,
+                args(&["api", &hostname, "--method=GET", &endpoint]),
+            )
+            .await?;
+        let pull: Json = serde_json::from_str(&output)
+            .map_err(|error| ForgeError(format!("invalid pull request response: {error}")))?;
+        let head = pull_request_head(&pull, repository, name)?;
+        let current = pull["head"]["sha"].as_str().unwrap_or_default();
+        if current != update.revision {
+            if current != update.expected_head {
+                return Err(ForgeError(format!(
+                    "PR #{} no longer has expected head {}. Inspect its current head before retrying.",
+                    update.number, update.expected_head
+                )));
+            }
+            push_fast_forward(worktree, &repository.remote_url, head, update).await?;
+        }
+        Ok(head.to_owned())
     }
 
     async fn open_draft_pull_request(
@@ -225,7 +331,7 @@ impl Forge for GitForge {
     }
 
     async fn apply(&self, remote: &str, action: &RepositoryAction) -> Result<String, ForgeError> {
-        let repo = threadlane_core::github::normalize_remote(remote)
+        let repo = normalize_remote(remote)
             .ok_or_else(|| ForgeError("the registered remote is not a forge repository".into()))?;
         let mut argv = match action {
             RepositoryAction::Comment {
@@ -302,6 +408,112 @@ mod tests {
 
     use super::*;
     use crate::workspace::git_command;
+    use threadlane_testkit::git::{bare_repository, git as local_git};
+
+    #[test]
+    fn a_pr_head_must_be_an_open_branch_in_the_registered_repository() {
+        use serde_json::json;
+        use threadlane_core::ids::{ProjectId, RepositoryId};
+
+        let repository = Repository {
+            id: RepositoryId(1),
+            project_id: ProjectId(1),
+            name: "app".into(),
+            remote_url: "https://github.com/acme/app.git".into(),
+            default_branch: "main".into(),
+            protected_branches: vec!["reserved".into()],
+        };
+        let pull = json!({
+            "state": "open",
+            "base": {"ref": "main", "repo": {"full_name": "acme/app"}},
+            "head": {"ref": "feature/pr", "repo": {"full_name": "Acme/App", "default_branch": "main"}}
+        });
+        assert_eq!(
+            pull_request_head(&pull, &repository, "acme/app").unwrap(),
+            "feature/pr"
+        );
+        for field in ["main", "reserved", "refs:other"] {
+            let mut candidate = pull.clone();
+            candidate["head"]["ref"] = json!(field);
+            assert!(pull_request_head(&candidate, &repository, "acme/app").is_err());
+        }
+        let mut fork = pull.clone();
+        fork["head"]["repo"]["full_name"] = json!("fork/app");
+        assert!(pull_request_head(&fork, &repository, "acme/app").is_err());
+        let mut closed = pull;
+        closed["state"] = json!("closed");
+        assert!(pull_request_head(&closed, &repository, "acme/app").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_fast_forward_requires_ancestry_and_the_exact_remote_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = bare_repository(dir.path(), "app");
+        let seed = dir.path().join("app-seed");
+        let remote_url = remote.to_str().unwrap();
+        let initial = local_git(&seed, &["rev-parse", "HEAD"]);
+        let initial = initial.trim();
+        local_git(&remote, &["update-ref", "refs/heads/pr", initial]);
+        local_git(
+            &seed,
+            &["commit", "--allow-empty", "-m", "Concurrent commit"],
+        );
+        let concurrent = local_git(&seed, &["rev-parse", "HEAD"]);
+        let concurrent = concurrent.trim();
+        local_git(
+            &seed,
+            &["commit", "--allow-empty", "-m", "Reviewed changes"],
+        );
+        let revision = local_git(&seed, &["rev-parse", "HEAD"]);
+        let revision = revision.trim();
+        let update = PullRequestUpdate {
+            number: 1.try_into().unwrap(),
+            expected_head: initial,
+            revision,
+        };
+
+        push_fast_forward(&seed, remote_url, "pr", update)
+            .await
+            .unwrap();
+        assert_eq!(local_git(&remote, &["rev-parse", "pr"]).trim(), revision);
+
+        let backwards = PullRequestUpdate {
+            expected_head: revision,
+            revision: initial,
+            ..update
+        };
+        assert!(
+            push_fast_forward(&seed, remote_url, "pr", backwards)
+                .await
+                .is_err()
+        );
+        assert_eq!(local_git(&remote, &["rev-parse", "pr"]).trim(), revision);
+
+        local_git(
+            &seed,
+            &[
+                "push",
+                remote_url,
+                &format!("{concurrent}:refs/heads/advanced"),
+            ],
+        );
+        assert!(
+            push_fast_forward(&seed, remote_url, "advanced", update)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            local_git(&remote, &["rev-parse", "advanced"]).trim(),
+            concurrent
+        );
+
+        assert!(
+            push_fast_forward(&seed, remote_url, "deleted", update)
+                .await
+                .is_err()
+        );
+        assert!(!local_git(&remote, &["branch", "--list"]).contains("deleted"));
+    }
 
     /// The environment a command sets on top of what it inherits.
     fn set_env(command: &Command) -> Vec<(String, String)> {

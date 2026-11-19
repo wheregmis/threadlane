@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use threadlane_core::link::LinkError;
 use threadlane_core::model::Lease;
 use threadlane_core::runtime::Killed;
+use threadlane_core::tools::ToolError;
 use tokio::sync::watch;
 
 /// Why a lane must stop before its cycle ends.
@@ -82,7 +83,7 @@ pub(crate) struct LaneState {
     stop: watch::Sender<Option<Stop>>,
     /// The current run opened a decision: it must end its turn now
     /// (Plan.md §9.4).
-    deferred: AtomicBool,
+    deferred: Mutex<Option<ToolError>>,
     /// The current run wrote its task's progress file, as the hub said in a
     /// tool result (docs/milestone-5.md §1 decision 7).
     progress_written: AtomicBool,
@@ -95,20 +96,22 @@ impl LaneState {
         Self {
             lease: Mutex::new(lease),
             stop,
-            deferred: AtomicBool::new(false),
+            deferred: Mutex::default(),
             progress_written: AtomicBool::new(false),
             submitted: Mutex::default(),
         }
     }
 
-    /// Marks the current run as waiting on a decision, or, with `false`,
-    /// starts a run with none.
-    pub(crate) fn set_deferred(&self, deferred: bool) {
-        self.deferred.store(deferred, Ordering::SeqCst);
+    /// Records what the run is paused for, or clears it at the start of a run.
+    pub(crate) fn set_deferred(&self, deferred: Option<ToolError>) {
+        *self.deferred.lock().expect("deferral lock poisoned") = deferred;
     }
 
-    pub(crate) fn deferred(&self) -> bool {
-        self.deferred.load(Ordering::SeqCst)
+    pub(crate) fn deferred(&self) -> Option<ToolError> {
+        self.deferred
+            .lock()
+            .expect("deferral lock poisoned")
+            .clone()
     }
 
     /// Marks the current run as having written its progress file, or, with
