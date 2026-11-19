@@ -1618,6 +1618,32 @@ async fn inbox_lists_the_newest_recent_failures_of_the_spaces_it_shows() {
     assert_eq!(listed(&state), [("home".to_owned(), 9)]);
 }
 
+#[tokio::test]
+async fn running_inbox_entries_open_the_right_task_when_spaces_share_an_id() {
+    let personal = FakeHub::new("Personal", Vec::new());
+    let work = FakeHub::new("Work", Vec::new());
+    let mut reported = task(26, TaskStatus::Running, None);
+    reported.task.title = "Bind Codex and Claude skills to agent profiles".into();
+    reported.project = "threadlane".into();
+    *personal.tasks.lock().unwrap() = vec![reported.clone(), task(27, TaskStatus::Queued, None)];
+    *work.tasks.lock().unwrap() = vec![task(26, TaskStatus::Running, None)];
+    let (_dir, core) = core(&[("personal", &personal), ("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    assert_eq!(state.running().len(), 2);
+    state.set_filter(Some("personal"));
+    let entries = state.running();
+    assert_eq!(entries, [("personal", &reported)]);
+    let (space, entry) = entries[0];
+    let detail = load_task(&core, space, entry.task.id).await;
+    state.apply_task(detail);
+    assert_eq!(
+        state.task("personal", TaskId(26)).unwrap().summary,
+        reported
+    );
+}
+
 const BLOCKED_FOR_TEST: &str = "blocked: every model account it can use is at its usage limit";
 
 #[tokio::test]
