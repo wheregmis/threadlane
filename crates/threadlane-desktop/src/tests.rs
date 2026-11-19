@@ -6880,6 +6880,126 @@ async fn the_space_lead_s_asks_and_the_replies_are_labeled_and_linked() {
 }
 
 #[tokio::test]
+async fn inbox_timeline_loads_repositories_and_links_github_references_per_project() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    *work.repositories.lock().unwrap() = vec![Repository {
+        id: RepositoryId(1),
+        project_id: ProjectId(1),
+        name: "threadlane".into(),
+        remote_url: "https://github.com/wheregmis/threadlane.git".into(),
+        default_branch: "main".into(),
+        protected_branches: Vec::new(),
+    }];
+    *home.repositories.lock().unwrap() = vec![
+        Repository {
+            id: RepositoryId(1),
+            project_id: ProjectId(1),
+            name: "site".into(),
+            remote_url: "git@github.com:acme/site.git".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        },
+        Repository {
+            id: RepositoryId(2),
+            project_id: ProjectId(2),
+            name: "notes".into(),
+            remote_url: "/srv/git/notes".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        },
+    ];
+    work.histories.lock().unwrap().extend([
+        (
+            "api".to_owned(),
+            vec![
+                said_by_you(1, "Check #572", 1_000),
+                said_by_lead(1, "api", "Merged #572", 2_000),
+            ],
+        ),
+        (
+            "General".to_owned(),
+            vec![
+                said_by_you(2, "Any news on #572?", 3_000),
+                ConversationEntry::ProjectReply {
+                    event_id: EventId(3),
+                    project: "api".to_owned(),
+                    ask_event_id: None,
+                    text: "The lead of api replied: #572 is ready".to_owned(),
+                    at: Timestamp::from_millis(4_000),
+                },
+            ],
+        ),
+    ]);
+    home.histories.lock().unwrap().extend([
+        (
+            "api".to_owned(),
+            vec![said_by_lead(1, "api", "Opened #572", 5_000)],
+        ),
+        (
+            "General".to_owned(),
+            vec![said_by_lead(2, "General", "Note #572", 6_000)],
+        ),
+    ]);
+    *work.recent.lock().unwrap() = vec![account_notice(9, "quota", "Notice #572")];
+
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    // Cold launch Inbox: only load_timeline runs (no load_project).
+    state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
+
+    assert_eq!(
+        state.github_repository("work", "api").as_deref(),
+        Some("wheregmis/threadlane")
+    );
+    assert_eq!(state.github_repository("work", "General"), None);
+    assert_eq!(
+        state.github_repository("home", "api").as_deref(),
+        Some("acme/site")
+    );
+    assert_eq!(state.github_repository("home", "General"), None);
+
+    let rendered: Vec<(String, String)> = state
+        .timeline()
+        .iter()
+        .map(|entry| {
+            let repo = entry
+                .repository_project()
+                .and_then(|project| state.github_repository(entry.space, project));
+            (
+                entry.prose_id(),
+                markdown_source_for(&entry.text(), None, repo.as_deref()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rendered,
+        [
+            ("result-home-2".to_owned(), "Note #572".to_owned()),
+            (
+                "result-home-1".to_owned(),
+                "Opened [#572](https://github.com/acme/site/pull/572)".to_owned(),
+            ),
+            (
+                "said-work-3".to_owned(),
+                "The lead of api replied: [#572](https://github.com/wheregmis/threadlane/pull/572) is ready".to_owned(),
+            ),
+            ("said-work-2".to_owned(), "Any news on #572?".to_owned()),
+            (
+                "result-work-1".to_owned(),
+                "Merged [#572](https://github.com/wheregmis/threadlane/pull/572)".to_owned(),
+            ),
+            (
+                "said-work-1".to_owned(),
+                "Check [#572](https://github.com/wheregmis/threadlane/pull/572)".to_owned(),
+            ),
+            ("result-work-9".to_owned(), "Notice #572".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn image_only_drafts_are_scoped_and_survive_undo_failure_and_history_reload() {
     let work = FakeHub::new("Work", Vec::new());
     let (_dir, core) = core(&[("work", &work)]);

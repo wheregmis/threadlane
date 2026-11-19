@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::client::TaskSummary;
 use threadlane_core::model::OutboxKind;
-use threadlane_desktop::{Author, Part, Spoken, When, count_form, is_quiet_update};
+use threadlane_desktop::{Author, Part, ProseLimit, Spoken, When, count_form, is_quiet_update};
 
 use super::{gap_line, menu_item};
 use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
@@ -397,14 +397,18 @@ impl Desktop {
                     if let Author::ProjectLead(project) = by {
                         from = Some(project.clone());
                     }
-                    (
-                        by.label(),
-                        div()
-                            .text_size(TYPE_BODY)
-                            .whitespace_normal()
-                            .child(text.to_owned())
-                            .into_any_element(),
-                    )
+                    let body = (!text.is_empty()).then(|| {
+                        self.prose(
+                            entry.prose_id(),
+                            &space,
+                            entry.repository_project(),
+                            text.to_owned(),
+                            cx,
+                        )
+                        .limit(ProseLimit::Result)
+                        .into_any_element()
+                    });
+                    (by.label(), body)
                 }
                 Spoken::Delivered(item) => {
                     let who = if item.kind() == OutboxKind::SystemNotice {
@@ -418,9 +422,9 @@ impl Desktop {
                         None => {
                             let seq = item.item.seq;
                             self.prose(
-                                format!("result-{space}-{seq}"),
+                                entry.prose_id(),
                                 &space,
-                                entry.project,
+                                entry.repository_project(),
                                 item.text(),
                                 cx,
                             )
@@ -428,7 +432,7 @@ impl Desktop {
                             .into_any_element()
                         }
                     };
-                    (who, body)
+                    (who, Some(body))
                 }
             };
             let place = match (multi_space, entry.project) {
@@ -495,7 +499,7 @@ impl Desktop {
                     .gap(XS)
                     .items_start()
                     .child(header)
-                    .child(div().w_full().child(body))
+                    .children(body.map(|body| div().w_full().child(body)))
                     .children(crate::components::chat_images::previews(entry.images, cx))
                     .children(from)
                     .context_menu(move |menu, _, _| {

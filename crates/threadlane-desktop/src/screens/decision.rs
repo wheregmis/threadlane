@@ -110,7 +110,16 @@ impl Desktop {
                         },
                     )),
             )
-            .child(decision_title(question))
+            .child(decision_title(
+                self.prose(
+                    format!("title-{prefix}"),
+                    &key.space,
+                    Some(&project),
+                    question,
+                    cx,
+                )
+                .text_size(crate::tokens::TYPE_EMPHASIS),
+            ))
             .children(body.map(|body| {
                 self.prose(
                     format!("question-{prefix}"),
@@ -124,7 +133,21 @@ impl Desktop {
             .children(contents.context.map(|line| {
                 self.decision_context(format!("context-{prefix}"), &key.space, &project, line, cx)
             }))
-            .children(contents.details.into_iter().map(|line| div().child(line)))
+            .children(
+                contents
+                    .details
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, line)| {
+                        self.prose(
+                            format!("detail-{prefix}-{index}"),
+                            &key.space,
+                            Some(&project),
+                            line,
+                            cx,
+                        )
+                    }),
+            )
             .children(
                 contents
                     .diff
