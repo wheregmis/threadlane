@@ -298,13 +298,19 @@ async fn call_tool(shared: &Shared, params: &Json) -> Result<Json, (i64, String)
         .and_then(|meta| meta.get(TOOL_USE_ID_META))
         .and_then(Json::as_str);
     let (text, is_error) = match shared.endpoint.call(call_id, name, arguments).await {
-        Ok(result) => (result.to_string(), false),
+        // Indented, so a long result reads as lines rather than one line (#563).
+        Ok(result) => (text_of(&result), false),
         Err(error) => (error.to_string(), true),
     };
     Ok(json!({
         "content": [{"type": "text", "text": text}],
         "isError": is_error,
     }))
+}
+
+/// A tool result as indented JSON text.
+fn text_of(result: &Json) -> String {
+    serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
 }
 
 fn rpc_response(body: Json) -> Response {
@@ -563,7 +569,7 @@ mod tests {
         assert_eq!(
             reply.json()["result"],
             json!({
-                "content": [{"type": "text", "text": r#"{"echo":{"text":"hi"}}"#}],
+                "content": [{"type": "text", "text": "{\n  \"echo\": {\n    \"text\": \"hi\"\n  }\n}"}],
                 "isError": false,
             })
         );

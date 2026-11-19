@@ -410,25 +410,70 @@ impl HubTools {
     }
 
     async fn list_tasks(&self, context: &ToolContext, arguments: &Json) -> Result<Json, ToolError> {
-        fields(arguments, &[])?;
+        let object = fields(arguments, &["task_id", "all", "offset", "limit"])?;
         let agents = self.db.all_agents().await.map_err(tool_error)?;
+        let agent = |task: &Task| {
+            agents
+                .iter()
+                .find(|agent| agent.id == task.agent_id)
+                .map_or(Json::Null, |agent| json!(agent.name))
+        };
+        if let Some(reference) = object.get("task_id") {
+            let task = self.project_task(context, reference).await?;
+            let mut entry = task_json(&task);
+            entry["agent"] = agent(&task);
+            return Ok(entry);
+        }
+        let all = match object.get("all") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| invalid("all must be true or false"))?,
+        };
+        let (offset, limit) = crate::page::offset_limit(object, TASK_PAGE, MAX_TASK_PAGE)?;
         let tasks = self
             .db
             .tasks(context.project_id)
             .await
             .map_err(tool_error)?;
+        let finished = tasks
+            .iter()
+            .filter(|task| task.status.is_terminal())
+            .count();
+        let hidden = if all {
+            0
+        } else {
+            finished.saturating_sub(RECENT_FINISHED)
+        };
+        // The oldest finished tasks are the ones hidden by default.
+        let mut skipped = 0;
         let listed: Vec<Json> = tasks
             .iter()
+            .filter(|task| {
+                let hide = task.status.is_terminal() && skipped < hidden;
+                skipped += usize::from(hide);
+                !hide
+            })
             .map(|task| {
-                let mut entry = task_json(task);
-                entry["agent"] = agents
-                    .iter()
-                    .find(|agent| agent.id == task.agent_id)
-                    .map_or(Json::Null, |agent| json!(agent.name));
+                let mut entry = task_line(task);
+                entry["agent"] = agent(task);
                 entry
             })
             .collect();
-        Ok(json!({ "tasks": listed }))
+        let (page, next) = crate::page::take(&listed, offset, limit);
+        let mut result = json!({
+            "tasks": page,
+            "detail": "Results are cut to one line. Call list_tasks with task_id for a task's \
+                       full goal and result.",
+        });
+        crate::page::mark(&mut result, LIST_TASKS, listed.len(), next);
+        if hidden > 0 {
+            result["hidden_finished"] = json!(format!(
+                "{hidden} older finished tasks are not listed. Call list_tasks with all: true \
+                 to list them."
+            ));
+        }
+        Ok(result)
     }
 
     /// A memory call, written as the run and keyed on the call.
@@ -743,6 +788,36 @@ pub(crate) fn task_json(task: &Task) -> Json {
     })
 }
 
+/// The tasks `list_tasks` lists by default besides the unfinished ones.
+const RECENT_FINISHED: usize = 10;
+/// The tasks one page of `list_tasks` holds by default, and at most.
+const TASK_PAGE: usize = 50;
+const MAX_TASK_PAGE: usize = 200;
+/// The longest one-line text in a listed task.
+const LINE_CHARS: usize = 200;
+
+/// A task in one line: its goal left out and its result cut to a line.
+fn task_line(task: &Task) -> Json {
+    let line = |text: &str| crate::page::one_line(text, LINE_CHARS);
+    let result = task
+        .result
+        .as_ref()
+        .map(|result| match result["summary"].as_str() {
+            Some(summary) => line(summary),
+            None => line(&result.to_string()),
+        });
+    json!({
+        "task_id": task.id.to_string(),
+        "title": line(&task.title),
+        "status": task.status,
+        "priority": task.priority,
+        "depends_on": task.depends_on.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "parent_task_id": task.parent_task_id.map(|id| id.to_string()),
+        "waiting_reason": task.waiting_reason.as_deref().map(line),
+        "result": result,
+    })
+}
+
 pub(crate) fn invalid(message: &str) -> ToolError {
     ToolError::InvalidArguments(message.to_owned())
 }
@@ -959,9 +1034,30 @@ fn task_definitions() -> Vec<ToolDefinition> {
         define(
             LIST_TASKS,
             "List this project's tasks with their status, why a queued one waits, and the \
-             result of a finished one.",
+             result of a finished one in one line. By default it lists the unfinished tasks \
+             and the 10 most recent finished ones, in pages. Pass task_id for one task's full \
+             goal and result.",
             Tier::Read,
-            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Show this one task in full instead of listing."
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "description": "Also list the older finished tasks."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Where the page starts; a cut page gives the next one."
+                    },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_TASK_PAGE }
+                },
+                "additionalProperties": false
+            }),
         ),
         define(
             FINISH_TASK,
@@ -1172,6 +1268,39 @@ mod tests {
         let key = derived_call_key("send_message", &a);
         assert!(key.starts_with("send_message:"));
         assert_eq!(key.len(), "send_message:".len() + 64);
+    }
+
+    #[test]
+    fn a_listed_task_has_its_result_in_one_short_line_and_no_goal() {
+        let summary = format!("Merged.\n\n{}", "detail ".repeat(500));
+        let task = Task {
+            id: TaskId(7),
+            project_id: ProjectId(1),
+            lane_id: threadlane_core::ids::LaneId(1),
+            agent_id: AgentId(1),
+            title: "page".into(),
+            goal: "g".repeat(5_000),
+            repositories: vec![],
+            parent_task_id: None,
+            depends_on: vec![TaskId(3)],
+            origin: TaskOrigin::User,
+            status: TaskStatus::Done,
+            priority: 0,
+            created_by_call: None,
+            last_machine_id: None,
+            waiting_reason: None,
+            result: Some(json!({ "summary": summary, "review": { "feedback": "x" } })),
+            created_at: threadlane_core::time::Timestamp::from_millis(0),
+        };
+        let line = task_line(&task);
+        let result = line["result"].as_str().unwrap();
+        assert!(result.starts_with("Merged. detail detail"), "{result}");
+        assert!(!result.contains('\n'));
+        assert!(result.chars().count() < LINE_CHARS + 30, "{result}");
+        assert_eq!(line.get("goal"), None);
+        assert_eq!(line["task_id"], "T-0007");
+        assert_eq!(line["depends_on"], json!(["T-0003"]));
+        assert!(line.to_string().len() < 600);
     }
 
     #[test]

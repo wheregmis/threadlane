@@ -1403,3 +1403,187 @@ async fn a_task_with_repositories_waits_for_a_machine_logged_in_to_gh() {
     assert_eq!(task_run.task_id, Some(TaskId(1)));
     assert_eq!(task(&hub, "T-0001").await.waiting_reason, None);
 }
+
+#[tokio::test]
+async fn list_tasks_lists_unfinished_and_recent_tasks_in_pages_and_one_in_full() {
+    let (hub, lease, run) = lead_run(2).await;
+    for n in 1..=14 {
+        call(
+            &hub,
+            &lease,
+            &run,
+            &format!("create-{n}"),
+            CREATE_TASK,
+            task_args(&format!("t{n}"), &[]),
+        )
+        .await
+        .unwrap();
+    }
+    for n in 1..=13 {
+        call(
+            &hub,
+            &lease,
+            &run,
+            &format!("cancel-{n}"),
+            CANCEL_TASK,
+            json!({ "task_id": n }),
+        )
+        .await
+        .unwrap();
+    }
+    let list =
+        |id: &'static str, arguments: Json| call(&hub, &lease, &run, id, LIST_TASKS, arguments);
+    let ids = |listed: &Json| -> Vec<String> {
+        listed["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|task| task["task_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // The default: the 10 most recent finished tasks and the unfinished one.
+    let listed = list("l-1", json!({})).await.unwrap();
+    let expected: Vec<String> = (4..=14).map(|n| format!("T-{n:04}")).collect();
+    assert_eq!(ids(&listed), expected);
+    assert_eq!(listed["total"], 11);
+    assert_eq!(listed.get("next_offset"), None);
+    assert!(
+        listed["hidden_finished"]
+            .as_str()
+            .unwrap()
+            .contains("all: true")
+    );
+    assert_eq!(listed["tasks"][0].get("goal"), None);
+    assert_eq!(listed["tasks"][0]["agent"], ENGINEER);
+
+    // Pages of the full list, to the end.
+    let first = list("l-2", json!({ "all": true, "limit": 5 }))
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(&first),
+        ["T-0001", "T-0002", "T-0003", "T-0004", "T-0005"]
+    );
+    assert_eq!(
+        (first["total"].clone(), first["next_offset"].clone()),
+        (json!(14), json!(5))
+    );
+    assert!(first["more"].as_str().unwrap().contains("offset 5"));
+    let last = list("l-3", json!({ "all": true, "offset": 10, "limit": 5 }))
+        .await
+        .unwrap();
+    assert_eq!(ids(&last), ["T-0011", "T-0012", "T-0013", "T-0014"]);
+    assert_eq!((last.get("next_offset"), last.get("more")), (None, None));
+    let past = list("l-4", json!({ "all": true, "offset": 14 }))
+        .await
+        .unwrap();
+    assert!(ids(&past).is_empty());
+    assert_eq!(past.get("hidden_finished"), None);
+
+    let full = list("l-5", json!({ "task_id": "T-0001" })).await.unwrap();
+    assert_eq!(full["goal"], "t1 is done");
+    assert_eq!(full["agent"], ENGINEER);
+    for bad in [
+        json!({ "all": "yes" }),
+        json!({ "limit": 0 }),
+        json!({ "limit": 201 }),
+        json!({ "offset": -1 }),
+        json!({ "task_id": "T-0099" }),
+    ] {
+        assert!(
+            matches!(
+                list("l-bad", bad.clone()).await,
+                Err(ToolError::InvalidArguments(_))
+            ),
+            "{bad}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_long_memory_file_is_viewed_in_pages_and_its_writer_is_warned() {
+    let (hub, lease, run) = lead_run(1).await;
+    let line = format!("{}\n", "word ".repeat(19));
+    let long = format!("# Long\nA long note.\n{}", line.repeat(500));
+    assert!(long.len() > 45_000);
+    let written = call(
+        &hub,
+        &lease,
+        &run,
+        "w-1",
+        MEMORY_CREATE,
+        json!({ "path": "project/notes/long.md", "content": long }),
+    )
+    .await
+    .unwrap();
+    assert!(written["warning"].as_str().unwrap().contains("pages"));
+    let small = call(
+        &hub,
+        &lease,
+        &run,
+        "w-2",
+        MEMORY_CREATE,
+        json!({ "path": "project/notes/small.md", "content": "# Small\nA small note." }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(small.get("warning"), None);
+
+    let mut read = String::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = call(
+            &hub,
+            &lease,
+            &run,
+            &format!("v-{offset}"),
+            MEMORY_VIEW,
+            json!({ "path": "project/notes/long.md", "offset": offset }),
+        )
+        .await
+        .unwrap();
+        let content = page["content"].as_str().unwrap();
+        assert!(content.chars().count() <= 20_000);
+        assert!(page.to_string().len() < 25_000);
+        assert_eq!(page["total"], long.chars().count());
+        read.push_str(content);
+        pages += 1;
+        match page.get("next_offset") {
+            Some(next) => {
+                assert!(content.ends_with('\n'), "a page ends at a line break");
+                assert!(page["more"].as_str().unwrap().contains("memory_view"));
+                offset = usize::try_from(next.as_u64().unwrap()).unwrap();
+            }
+            None => break,
+        }
+    }
+    assert_eq!(read, long);
+    assert_eq!(pages, 3);
+
+    let whole = call(
+        &hub,
+        &lease,
+        &run,
+        "v-small",
+        MEMORY_VIEW,
+        json!({ "path": "project/notes/small.md" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(whole["content"], "# Small\nA small note.");
+    assert_eq!((whole.get("total"), whole.get("next_offset")), (None, None));
+    let listed = call(
+        &hub,
+        &lease,
+        &run,
+        "v-dir",
+        MEMORY_VIEW,
+        json!({ "path": "project/notes", "limit": 1 }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["files"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["next_offset"], 1);
+}
