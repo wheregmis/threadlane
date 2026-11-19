@@ -38,6 +38,7 @@ mod decision_keys;
 mod decision_record;
 mod dreaming;
 mod edges;
+mod graph;
 mod machines;
 mod memory;
 mod permissions;
@@ -67,6 +68,11 @@ pub use dreaming::{DreamingAction, DreamingCard, DreamingLoad, change_dreaming, 
 pub use edges::{
     Confirmation, Connection, ConnectionStatus, Consequence, EmptyRegion, StateSentence,
 };
+pub use graph::{
+    DAG_NODE_H, DAG_NODE_W, DagNode, EdgeState, GraphEdge, ProjectTasksViewMode,
+    SpaceTasksViewMode, TOPO_NODE_H, TOPO_NODE_W, TaskDag, TeamViewMode, TopologyGraph,
+    TopologyNode, TopologyNodeKind, build_task_dag,
+};
 pub use machines::{
     MachineDetail, MachineHistory, MachineRow, MachineRun, load_machine_history, machine_row,
 };
@@ -94,7 +100,9 @@ pub use tasks::{
     chips, merge_state, running_elapsed, status_label, task_header, timeline, usage, work_elapsed,
     work_started,
 };
-pub use timeline::{Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, load_timeline};
+pub use timeline::{
+    Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, is_quiet_update, load_timeline,
+};
 
 /// How many of the newest delivered items Home asks each hub for.
 const RECENT: u32 = 50;
@@ -1176,6 +1184,20 @@ pub struct AppState {
     done_tasks_expanded: HashSet<String>,
     /// Diff preview blocks expanded by the user (keyed by UI element id).
     expanded_diffs: HashSet<String>,
+    /// Active view mode on a project's `Tasks` tab (Board | List | Graph).
+    project_tasks_view: ProjectTasksViewMode,
+    /// Active view mode on the space-wide `Tasks` screen (List | Graph).
+    space_tasks_view_mode: SpaceTasksViewMode,
+    /// Active view mode on the `Team` screen (Overview | Topology).
+    team_view_mode: TeamViewMode,
+    /// Optional project scope on the Team Topology canvas, keyed by space name.
+    topology_project: HashMap<String, String>,
+    /// Currently selected `(space, agent)` on the Team Topology canvas for inline mode dialing.
+    topology_selected_agent: Option<(String, String)>,
+    /// Inbox disclosure toggles to keep Inbox calm and scannable.
+    inbox_show_all_failures: bool,
+    inbox_show_all_recent: bool,
+    inbox_show_quiet_updates: bool,
     /// Where the Home composer sends: space and project.
     target_space: Option<String>,
     last_targets: BTreeMap<String, String>,
@@ -1363,6 +1385,102 @@ impl AppState {
         if !self.expanded_diffs.remove(&id) {
             self.expanded_diffs.insert(id);
         }
+    }
+
+    /// Current view mode for a project's `Tasks` tab.
+    #[must_use]
+    pub fn project_tasks_view(&self) -> ProjectTasksViewMode {
+        self.project_tasks_view
+    }
+
+    /// Sets the view mode for a project's `Tasks` tab.
+    pub fn set_project_tasks_view(&mut self, mode: ProjectTasksViewMode) {
+        self.project_tasks_view = mode;
+    }
+
+    /// Current view mode for the space-wide `Tasks` screen.
+    #[must_use]
+    pub fn space_tasks_view_mode(&self) -> SpaceTasksViewMode {
+        self.space_tasks_view_mode
+    }
+
+    /// Sets the view mode for the space-wide `Tasks` screen.
+    pub fn set_space_tasks_view_mode(&mut self, mode: SpaceTasksViewMode) {
+        self.space_tasks_view_mode = mode;
+    }
+
+    /// Current view mode for the `Team` screen.
+    #[must_use]
+    pub fn team_view_mode(&self) -> TeamViewMode {
+        self.team_view_mode
+    }
+
+    /// Sets the view mode for the `Team` screen.
+    pub fn set_team_view_mode(&mut self, mode: TeamViewMode) {
+        self.team_view_mode = mode;
+    }
+
+    /// Selected project filter for `space`'s Team Topology canvas.
+    #[must_use]
+    pub fn topology_project(&self, space: &str) -> Option<&str> {
+        self.topology_project.get(space).map(String::as_str)
+    }
+
+    /// Sets or clears the project filter for `space`'s Team Topology canvas.
+    pub fn set_topology_project(&mut self, space: &str, project: Option<String>) {
+        match project {
+            Some(project) => {
+                self.topology_project.insert(space.to_owned(), project);
+            }
+            None => {
+                self.topology_project.remove(space);
+            }
+        }
+    }
+
+    /// Currently selected `(space, agent)` on the Team Topology canvas.
+    #[must_use]
+    pub fn topology_selected_agent(&self) -> Option<(&str, &str)> {
+        self.topology_selected_agent
+            .as_ref()
+            .map(|(space, agent)| (space.as_str(), agent.as_str()))
+    }
+
+    /// Selects or toggles an agent on the Team Topology canvas.
+    pub fn toggle_topology_agent(&mut self, space: &str, agent: &str) {
+        let key = (space.to_owned(), agent.to_owned());
+        if self.topology_selected_agent.as_ref() == Some(&key) {
+            self.topology_selected_agent = None;
+        } else {
+            self.topology_selected_agent = Some(key);
+        }
+    }
+
+    #[must_use]
+    pub fn inbox_show_all_failures(&self) -> bool {
+        self.inbox_show_all_failures
+    }
+
+    pub fn toggle_inbox_all_failures(&mut self) {
+        self.inbox_show_all_failures = !self.inbox_show_all_failures;
+    }
+
+    #[must_use]
+    pub fn inbox_show_all_recent(&self) -> bool {
+        self.inbox_show_all_recent
+    }
+
+    pub fn toggle_inbox_all_recent(&mut self) {
+        self.inbox_show_all_recent = !self.inbox_show_all_recent;
+    }
+
+    #[must_use]
+    pub fn inbox_show_quiet_updates(&self) -> bool {
+        self.inbox_show_quiet_updates
+    }
+
+    pub fn toggle_inbox_quiet_updates(&mut self) {
+        self.inbox_show_quiet_updates = !self.inbox_show_quiet_updates;
     }
 
     fn shown(&self, space: &str) -> bool {
@@ -1928,6 +2046,14 @@ impl AppState {
         self.recorded_open.retain(|(space, _)| space != name);
         self.always.retain(|(space, _)| space != name);
         self.expanded_quiet.retain(|(space, _)| space != name);
+        self.topology_project.remove(name);
+        if self
+            .topology_selected_agent
+            .as_ref()
+            .is_some_and(|(space, _)| space == name)
+        {
+            self.topology_selected_agent = None;
+        }
         if self
             .open_agent
             .as_ref()

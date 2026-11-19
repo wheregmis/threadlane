@@ -15,6 +15,7 @@ use gpui_kit::{
 pub(crate) mod chat_images;
 pub(crate) mod composer;
 mod diff;
+mod graph_canvas;
 mod prose;
 
 use crate::icons::AppIcon;

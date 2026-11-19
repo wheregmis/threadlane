@@ -17,6 +17,24 @@ pub const TIMELINE_PAGE: usize = 20;
 /// How many of each conversation's newest entries a Home load asks for.
 const NEWEST: u32 = crate::PAGE;
 
+/// Whether a delivered lead message is an internal no-op reflection that
+/// shouldn't crowd the Inbox by default (still reachable via "Show quiet updates"
+/// and in the project's Chat tab).
+#[must_use]
+pub fn is_quiet_update(text: &str) -> bool {
+    let lower: String = text
+        .trim_start()
+        .chars()
+        .take(48)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    lower.starts_with("i didn't send a message")
+        || lower.starts_with("i didn’t send a message")
+        || lower.starts_with("i didn't message the user")
+        || lower.starts_with("i didn’t message the user")
+        || lower.starts_with("no message sent")
+}
+
 /// What an entry of the timeline says.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Spoken<'a> {
