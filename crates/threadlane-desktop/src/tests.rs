@@ -323,8 +323,20 @@ impl HubApi for FakeHub {
                         .map(|backend| backend.parse().expect("a backend"))
                         .collect();
                 }
-                for (backend, model) in models.unwrap_or_default() {
-                    agent.models[backend] = json!(model);
+                if let Some(models) = models {
+                    if !agent.models.is_object() {
+                        agent.models = json!({});
+                    }
+                    if let Some(map) = agent.models.as_object_mut() {
+                        for (backend, model) in models {
+                            let model = model.trim();
+                            if model.is_empty() {
+                                map.remove(&backend);
+                            } else {
+                                map.insert(backend, json!(model));
+                            }
+                        }
+                    }
                 }
                 for binding in bindings.iter_mut().filter(|b| b.agent == from) {
                     binding.agent.clone_from(&agent.name);
@@ -1621,6 +1633,32 @@ async fn inbox_lists_the_newest_recent_failures_of_the_spaces_it_shows() {
     );
     state.set_filter(Some("home"));
     assert_eq!(listed(&state), [("home".to_owned(), 9)]);
+}
+
+#[tokio::test]
+async fn running_inbox_entries_open_the_right_task_when_spaces_share_an_id() {
+    let personal = FakeHub::new("Personal", Vec::new());
+    let work = FakeHub::new("Work", Vec::new());
+    let mut reported = task(26, TaskStatus::Running, None);
+    reported.task.title = "Bind Codex and Claude skills to agent profiles".into();
+    reported.project = "threadlane".into();
+    *personal.tasks.lock().unwrap() = vec![reported.clone(), task(27, TaskStatus::Queued, None)];
+    *work.tasks.lock().unwrap() = vec![task(26, TaskStatus::Running, None)];
+    let (_dir, core) = core(&[("personal", &personal), ("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    assert_eq!(state.running().len(), 2);
+    state.set_filter(Some("personal"));
+    let entries = state.running();
+    assert_eq!(entries, [("personal", &reported)]);
+    let (space, entry) = entries[0];
+    let detail = load_task(&core, space, entry.task.id).await;
+    state.apply_task(detail);
+    assert_eq!(
+        state.task("personal", TaskId(26)).unwrap().summary,
+        reported
+    );
 }
 
 const BLOCKED_FOR_TEST: &str = "blocked: every model account it can use is at its usage limit";
@@ -6147,6 +6185,68 @@ async fn a_saved_mixed_backend_order_can_be_kept_or_cleared() {
 
     state.agent_edit_mut().unwrap().backends = saved;
     assert_eq!(state.agent_update(&fields), Ok(None));
+}
+
+#[tokio::test]
+async fn agent_models_follow_the_provider_after_reordering_and_reopening() {
+    use BackendKind::{Claude, Codex};
+
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    work.org(OrgRequest::CreateAgent {
+        name: "Picker".into(),
+        role: "reviewer".into(),
+        instructions: String::new(),
+        backends: vec![Claude, Codex],
+    })
+    .await
+    .unwrap();
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    let mut fields = state.open_agent_edit("work", "Picker").unwrap();
+    let codex_first = BACKENDS
+        .iter()
+        .position(|(_, kinds)| *kinds == [Codex, Claude])
+        .unwrap();
+    state.agent_edit_mut().unwrap().backends = codex_first;
+    for (kind, value) in &mut fields.models {
+        match kind {
+            Claude => *value = "opus".into(),
+            Codex => *value = "private-model-id".into(),
+            _ => {}
+        }
+    }
+    for clear_fallback in [false, true] {
+        if clear_fallback {
+            fields
+                .models
+                .iter_mut()
+                .find(|(kind, _)| *kind == Claude)
+                .unwrap()
+                .1
+                .clear();
+        }
+        let request = state.agent_update(&fields).unwrap().unwrap();
+        core.update_agent(Some("work"), request).await.unwrap();
+        state.close_agent_edit();
+        state.apply(refresh(&core).await);
+        let reopened = state.open_agent_edit("work", "Picker").unwrap();
+        assert_eq!(
+            state.agent_edit().unwrap().model_backends(),
+            [Codex, Claude]
+        );
+        assert_eq!(reopened.models, fields.models);
+        assert_eq!(state.agent_update(&reopened), Ok(None));
+        if clear_fallback {
+            assert!(
+                state.space("work").unwrap().agents[0]
+                    .models
+                    .get("claude")
+                    .is_none()
+            );
+        }
+        fields = reopened;
+    }
 }
 
 #[tokio::test]

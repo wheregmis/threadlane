@@ -102,6 +102,16 @@ impl ClientDirs {
         Err(ClientError::NoClientDir)
     }
 
+    /// Suggested directory for a new local space, beneath this client's spaces root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the name cannot be used as a single directory name.
+    pub fn space_dir(&self, name: &str) -> Result<PathBuf, ClientError> {
+        validate_name(name)?;
+        Ok(self.root.join("spaces").join(name))
+    }
+
     /// The path of [`HUBS_FILE`].
     #[must_use]
     pub fn hubs_file(&self) -> PathBuf {
@@ -314,6 +324,9 @@ pub enum ClientError {
     /// A hub is already paired under this name.
     #[error("a hub named {0:?} is already paired")]
     AlreadyPaired(String),
+    /// A suggested directory is already in use.
+    #[error("{} already exists. Choose it explicitly to pair it, or use another directory.", .0.display())]
+    DirectoryTaken(PathBuf),
     /// The name cannot be used for a hub.
     #[error("invalid hub name {0:?}: use 1 to 64 letters, digits, '-', '_' or '.'")]
     InvalidName(String),
@@ -514,6 +527,84 @@ impl ClientCore {
         self
     }
 
+    fn check_new_name(&self, name: &str) -> Result<(), ClientError> {
+        validate_name(name)?;
+        if self.hubs.iter().any(|hub| hub.name == name) {
+            return Err(ClientError::AlreadyPaired(name.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Pairs a local data directory, creating it before registering its socket.
+    /// Only an explicitly selected directory may already exist. An explicit path
+    /// pointing to a `hub.sock` file (not an existing directory) pairs its parent
+    /// directory instead of creating a directory named `hub.sock`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a name, directory creation, or persistence error.
+    pub fn pair_directory(
+        &mut self,
+        name: &str,
+        custom: Option<PathBuf>,
+    ) -> Result<(), ClientError> {
+        self.check_new_name(name)?;
+        let explicit = custom.is_some();
+        let dir = match custom {
+            Some(dir) => dir,
+            None => self.dirs.space_dir(name)?,
+        };
+        let dir =
+            std::path::absolute(&dir).map_err(|source| ClientError::Read { path: dir, source })?;
+        let dir = if explicit
+            && dir.file_name() == Some(std::ffi::OsStr::new(SOCKET_FILE))
+            && !dir.is_dir()
+        {
+            dir.parent().map(Path::to_path_buf).unwrap_or(dir)
+        } else {
+            dir
+        };
+        let socket = dir.join(SOCKET_FILE);
+        std::os::unix::net::SocketAddr::from_pathname(&socket).map_err(|source| {
+            ClientError::Write {
+                path: socket.clone(),
+                source,
+            }
+        })?;
+        let mut builder = DirBuilder::new();
+        builder.mode(0o700);
+        if let Some(parent) = dir.parent() {
+            builder
+                .recursive(true)
+                .create(parent)
+                .map_err(|source| ClientError::Write {
+                    path: parent.to_owned(),
+                    source,
+                })?;
+        }
+        let created = match builder.recursive(false).create(&dir) {
+            Ok(()) => true,
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists && explicit && dir.is_dir() =>
+            {
+                false
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && !explicit => {
+                return Err(ClientError::DirectoryTaken(dir));
+            }
+            Err(source) => return Err(ClientError::Write { path: dir, source }),
+        };
+        let paired = self.add_hub(PairedHub {
+            name: name.to_owned(),
+            reach: Reach::Socket { socket },
+        });
+        if created && paired.is_err() {
+            // Never remove files another process may have put in the directory.
+            let _ignored = fs::remove_dir(&dir);
+        }
+        paired
+    }
+
     /// Pairs the hub listening on `socket` under `name` and saves the list.
     /// A directory means the hub's data directory: its `hub.sock` is used.
     /// A relative path is made absolute. The hub need not be running.
@@ -523,10 +614,7 @@ impl ClientCore {
     /// [`ClientError::InvalidName`], [`ClientError::AlreadyPaired`], or an
     /// error writing the list.
     pub fn pair(&mut self, name: &str, socket: PathBuf) -> Result<(), ClientError> {
-        validate_name(name)?;
-        if self.hubs.iter().any(|hub| hub.name == name) {
-            return Err(ClientError::AlreadyPaired(name.to_owned()));
-        }
+        self.check_new_name(name)?;
         let socket = std::path::absolute(&socket).map_err(|source| ClientError::Read {
             path: socket.clone(),
             source,
@@ -552,10 +640,7 @@ impl ClientCore {
     /// [`ClientError::InvalidJoinCode`], the hub unreachable or refusing the
     /// code, or an error writing the key or the list.
     pub async fn join(&mut self, name: &str, code: &str) -> Result<(), ClientError> {
-        validate_name(name)?;
-        if self.hubs.iter().any(|hub| hub.name == name) {
-            return Err(ClientError::AlreadyPaired(name.to_owned()));
-        }
+        self.check_new_name(name)?;
         let code: JoinCode = code.parse().map_err(ClientError::InvalidJoinCode)?;
         let key_file = self.dirs.key_file(name);
         let failed = |source| ClientError::Write {
@@ -600,15 +685,14 @@ impl ClientCore {
         let name = name.as_str();
         let mut hubs = self.hubs.clone();
         hubs.push(hub);
-        self.save_hubs(&hubs)?;
-        self.hubs = hubs;
-
-        // A new pairing starts at the beginning of that hub's feed.
-        self.position.remove(name);
-        self.unsaved.remove(name);
+        // Clear an orphaned cursor before committing the new pairing.
         if self.saved.contains_key(name) {
             self.write_cursors(BTreeMap::from([(name.to_owned(), None)]))?;
         }
+        self.save_hubs(&hubs)?;
+        self.hubs = hubs;
+        self.position.remove(name);
+        self.unsaved.remove(name);
         Ok(())
     }
 
@@ -1960,7 +2044,8 @@ impl ClientCore {
 }
 
 fn validate_name(name: &str) -> Result<(), ClientError> {
-    let valid = (1..=64).contains(&name.len())
+    let valid = !matches!(name, "." | "..")
+        && (1..=64).contains(&name.len())
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));

@@ -2681,8 +2681,7 @@ impl Desktop {
             )
     }
 
-    /// "+ Add repository", or the form it opens: name, remote, default
-    /// branch.
+    /// Select a checkout or enter its clone details manually.
     fn repository_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let (in_space, named) = (space.to_owned(), project.to_owned());
         if !self.state.repository_form_open(space, project) {
@@ -2694,17 +2693,55 @@ impl Desktop {
                 .icon(AppIcon::GitFork)
                 .label("Add repository")
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    this.reset_repository_form();
                     this.state.open_repository_form(&in_space, &named, true);
                     cx.notify();
                 }))
                 .into_any_element();
         }
         let (close_space, close_project) = (space.to_owned(), project.to_owned());
+        let (pick_space, pick_project) = (space.to_owned(), project.to_owned());
         v_flex()
             .gap(SM)
-            .child(field(&self.repository_name))
-            .child(field(&self.repository_remote))
-            .child(field(&self.repository_branch))
+            .child(
+                button("repository-folder")
+                    .small()
+                    .self_start()
+                    .icon(AppIcon::FolderOpen)
+                    .tab_stop(true)
+                    .label("Choose repository folder…")
+                    .disabled(self.repository_picking.is_some())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.choose_repository_folder(
+                            pick_space.clone(),
+                            pick_project.clone(),
+                            window,
+                            cx,
+                        );
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(TYPE_META)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.repository_hint.clone().unwrap_or_else(|| {
+                        "Choose a Git checkout or enter its details below.".into()
+                    })),
+            )
+            .children(
+                [
+                    ("Name in project", &self.repository_name),
+                    ("Clone URL or path on hub", &self.repository_remote),
+                    ("Default branch", &self.repository_branch),
+                ]
+                .into_iter()
+                .map(|(title, input)| {
+                    v_flex()
+                        .gap(XS)
+                        .child(meta(title, cx))
+                        .child(field(input).disabled(self.repository_picking.is_some()))
+                }),
+            )
             .child(
                 div()
                     .text_size(TYPE_META)
@@ -2722,6 +2759,7 @@ impl Desktop {
                             .primary()
                             .icon(AppIcon::GitFork)
                             .label("Add")
+                            .disabled(self.repository_picking.is_some())
                             .accessibility_label("Add repository")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_repository(in_space.clone(), named.clone(), cx);
@@ -2733,6 +2771,7 @@ impl Desktop {
                             .icon(AppIcon::X)
                             .label("Cancel")
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                this.reset_repository_form();
                                 this.state.open_repository_form(
                                     &close_space,
                                     &close_project,

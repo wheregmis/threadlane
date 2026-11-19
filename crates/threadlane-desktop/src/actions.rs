@@ -219,6 +219,13 @@ impl Desktop {
         let name = self.repository_name.read(cx).value().to_string();
         let remote = self.repository_remote.read(cx).value().to_string();
         let branch = self.repository_branch.read(cx).value().to_string();
+        if self.repository_hint.is_some() && branch.trim().is_empty() {
+            self.state.report(Activity::Failed(
+                "Enter the branch the hub should use.".into(),
+            ));
+            cx.notify();
+            return;
+        }
         let core = Arc::clone(&self.core);
         self.state.report(Activity::Working(format!(
             "Checking every space, then adding {} to {space} / {project}…",
@@ -244,11 +251,7 @@ impl Desktop {
                         repository.name
                     )));
                     this.state.repository_added(&space, &project, repository);
-                    this.clear_fields.extend([
-                        this.repository_name.clone(),
-                        this.repository_remote.clone(),
-                        this.repository_branch.clone(),
-                    ]);
+                    this.reset_repository_form();
                 }
                 Err(why) => this.state.report(Activity::Failed(why)),
             },

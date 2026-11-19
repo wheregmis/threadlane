@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::input::{InputState, TextareaState, Undo};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState, Undo};
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
@@ -37,6 +37,7 @@ mod components;
 mod icons;
 mod keyboard;
 mod menus;
+mod repository;
 mod screens;
 mod tokens;
 
@@ -53,6 +54,8 @@ const RETRY_EVERY: Duration = Duration::from_secs(5);
 
 /// Repaint visible elapsed times without waiting for a hub refresh.
 const CLOCK_EVERY: Duration = Duration::from_secs(1);
+
+const HUB_DIR_HINT: &str = "Enter a space name or choose a folder";
 
 fn main() -> ExitCode {
     let runtime = match Runtime::new() {
@@ -465,6 +468,8 @@ struct Desktop {
     agent_models: Vec<Entity<InputState>>,
     agent_edit_models: Vec<Entity<InputState>>,
     /// The "+ Add repository" form's name, remote and default branch.
+    repository_hint: Option<String>,
+    repository_picking: Option<Rc<()>>,
     repository_name: Entity<InputState>,
     repository_remote: Entity<InputState>,
     repository_branch: Entity<InputState>,
@@ -525,9 +530,7 @@ impl Desktop {
                 .placeholder("Time zone, for example Europe/Berlin")
                 .default_value(zone)
         });
-        let hub_dir = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("The hub's data directory, ~/threadlane/work")
-        });
+        let hub_dir = cx.new(|cx| InputState::new(window, cx).placeholder(HUB_DIR_HINT));
         let mut field = |placeholder: &'static str, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
         };
@@ -547,11 +550,32 @@ impl Desktop {
         let agent_models = model_fields();
         let agent_edit_models = model_fields();
         let repository_name = field("Name in the project", cx);
-        let repository_remote = field("Remote, git@github.com:you/repo.git", cx);
+        let repository_remote = field("Clone URL or path on the hub", cx);
         let repository_branch = field("Default branch (main)", cx);
         let task_title = field("Title", cx);
         let task_goal = field("Goal: what done looks like", cx);
         let subscriptions = vec![
+            cx.subscribe_in(&space_name, window, |this, input, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let suggested = this
+                        .state
+                        .client_dir()
+                        .and_then(|root| {
+                            ClientDirs::new(root)
+                                .space_dir(input.read(cx).value().trim())
+                                .ok()
+                        })
+                        .map_or_else(|| HUB_DIR_HINT.to_owned(), |dir| dir.display().to_string());
+                    this.hub_dir
+                        .update(cx, |field, cx| field.set_placeholder(suggested, window, cx));
+                    cx.notify();
+                }
+            }),
+            cx.subscribe_in(&hub_dir, window, |_this, _input, event, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
             cx.observe(&project_name, |this, name, cx| {
                 if this.project_name_missing && !name.read(cx).value().trim().is_empty() {
                     this.project_name_missing = false;
@@ -697,6 +721,8 @@ impl Desktop {
             agent_edit_instructions,
             agent_models,
             agent_edit_models,
+            repository_hint: None,
+            repository_picking: None,
             repository_name,
             repository_remote,
             repository_branch,
@@ -1463,7 +1489,7 @@ impl Desktop {
                 (name, joined)
             },
             |this, (name, joined), cx| match joined {
-                Ok(()) => this.space_paired(&name, cx),
+                Ok(()) => this.space_paired(&name, format!("Paired {name}."), cx),
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
@@ -1476,19 +1502,14 @@ impl Desktop {
     /// follows.
     fn pair_directory(&mut self, cx: &mut Context<Self>) {
         let name = self.space_name.read(cx).value().trim().to_owned();
-        let dir = self.hub_dir.read(cx).value().trim().to_owned();
-        if name.is_empty() || dir.is_empty() {
-            self.state.report(Activity::Failed(
-                "Give the space a name and the hub's data directory.".to_owned(),
-            ));
+        let dir = self.hub_dir.read(cx).value().to_string();
+        if name.is_empty() {
+            self.state
+                .report(Activity::Failed("Give the space a name.".to_owned()));
             cx.notify();
             return;
         }
-        // `~` is the shell's; expand it here as the shell would have.
-        let dir = match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
-            (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
-            _ => std::path::PathBuf::from(dir),
-        };
+        let dir = screens::machines::parse_hub_dir(&dir, std::env::var_os("HOME").as_deref());
         let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
         self.state
             .report(Activity::Working(format!("Pairing {name}…")));
@@ -1496,17 +1517,49 @@ impl Desktop {
             async move {
                 let paired = {
                     let mut client = core.write().await;
-                    client
-                        .pair(&name, dir)
-                        .and_then(|()| client.follow(Some(&name)))
+                    client.pair_directory(&name, dir).and_then(|()| {
+                        let socket = client
+                            .hubs()
+                            .iter()
+                            .find_map(|hub| {
+                                (hub.name == name).then(|| match &hub.reach {
+                                    threadlane_client::Reach::Socket { socket } => {
+                                        Some(socket.clone())
+                                    }
+                                    threadlane_client::Reach::Iroh { .. } => None,
+                                })
+                            })
+                            .flatten();
+                        client.follow(Some(&name)).map(|stream| (stream, socket))
+                    })
                 };
-                let paired = paired.map(|stream| {
-                    tokio::spawn(pump(Arc::clone(&core), stream, shown));
-                });
+                let paired = match paired {
+                    Ok((stream, socket)) => {
+                        tokio::spawn(pump(Arc::clone(&core), stream, shown));
+                        let (data_dir, running) = match socket {
+                            Some(socket) => {
+                                let running =
+                                    tokio::time::timeout(Duration::from_millis(500), async {
+                                        tokio::net::UnixStream::connect(&socket).await.is_ok()
+                                    })
+                                    .await
+                                    .unwrap_or(false);
+                                (socket.parent().map(std::path::Path::to_path_buf), running)
+                            }
+                            None => (None, true),
+                        };
+                        Ok(screens::machines::paired_directory_message(
+                            &name,
+                            data_dir.as_deref(),
+                            running,
+                        ))
+                    }
+                    Err(error) => Err(error),
+                };
                 (name, paired)
             },
             |this, (name, paired), cx| match paired {
-                Ok(()) => this.space_paired(&name, cx),
+                Ok(message) => this.space_paired(&name, message, cx),
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
@@ -1514,10 +1567,10 @@ impl Desktop {
         cx.notify();
     }
 
-    fn space_paired(&mut self, name: &str, cx: &mut Context<Self>) {
+    fn space_paired(&mut self, name: &str, message: String, cx: &mut Context<Self>) {
         self.state.open_paired_space(name);
         self.state.select_space(name);
-        self.state.report(Activity::Done(format!("Paired {name}.")));
+        self.state.report(Activity::Done(message));
         self.clear_join = true;
         self.go(Screen::Home, cx);
         self.refresh(cx);
@@ -1674,6 +1727,9 @@ impl Render for Desktop {
                 .update(cx, |editor, cx| editor.set_value(text, window, cx));
         }
         if std::mem::take(&mut self.clear_join) {
+            self.hub_dir.update(cx, |field, cx| {
+                field.set_placeholder(HUB_DIR_HINT, window, cx)
+            });
             for field in [&self.space_name, &self.join_code, &self.hub_dir] {
                 field.update(cx, |field, cx| field.set_value("", window, cx));
             }

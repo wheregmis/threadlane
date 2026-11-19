@@ -1,5 +1,5 @@
 //! The Inbox (wireframe 1, `Screen::Home`): everything that needs you across
-//! every space, then recent failures, then every conversation as one
+//! every space, then running tasks and recent failures, then every conversation as one
 //! timeline, above a composer to any space's Lead.
 
 use gpui_kit::component::alert::Alert;
@@ -9,6 +9,7 @@ use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use threadlane_core::client::TaskSummary;
 use threadlane_core::model::OutboxKind;
 use threadlane_desktop::{Author, Part, Spoken, When, count_form, is_quiet_update};
 
@@ -106,26 +107,114 @@ impl Desktop {
         }
 
         let multi_space = state.spaces().len() > 1;
-        let failures = state.recent_failures(when);
-        let show_all_failures = state.inbox_show_all_failures();
-        let visible_failures = if show_all_failures {
-            failures.len()
-        } else {
-            failures.len().min(INBOX_FAILURES_SHOWN)
+        let running = self.inbox_tasks(
+            "Running tasks",
+            &state.running(),
+            Part::Running,
+            Status::Running,
+            None,
+            cx,
+        );
+        let failed = self.inbox_tasks(
+            "Failed",
+            &state.recent_failures(when),
+            Part::Tasks,
+            Status::Failed,
+            Some((INBOX_FAILURES_SHOWN, state.inbox_show_all_failures())),
+            cx,
+        );
+
+        let show_running = running.is_some();
+        let show_failed = failed.is_some();
+        let recent_empty = state.timeline().is_empty()
+            && state.gaps(Part::Recent).is_empty()
+            && !state.timeline_has_earlier();
+        let quiet =
+            !show_needs && !show_running && !show_failed && recent_empty && banners.is_empty();
+
+        let content = v_flex()
+            .gap(LG)
+            .child(heading("Inbox"))
+            .when(multi_space, |view| {
+                view.child(chips.w_full().min_h(CONTROL_HEIGHT).flex_none())
+            })
+            .children(
+                state
+                    .held_lines(when)
+                    .into_iter()
+                    .map(|line| div().text_size(TYPE_BODY).text_color(muted).child(line)),
+            )
+            .children(banners)
+            .when(show_needs, |view| view.child(needs))
+            .when(show_needs && show_running, |view| {
+                view.child(Separator::horizontal())
+            })
+            .children(running)
+            .when((show_needs || show_running) && show_failed, |view| {
+                view.child(Separator::horizontal())
+            })
+            .children(failed)
+            .when(
+                (show_needs || show_running || show_failed) && !recent_empty,
+                |view| view.child(Separator::horizontal()),
+            )
+            .when(!recent_empty, |view| view.child(self.timeline(when, cx)))
+            .when(quiet, |view| {
+                view.child(meta(
+                    "Nothing needs you. Tell your team what you need below.",
+                    cx,
+                ))
+            });
+        let _ = XL;
+        // The page scrolls above a composer pinned at the bottom, as in a project's Chat tab.
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .self_center()
+            .gap(SM)
+            .child(decision_scroller("home", content, &self.decision_scroll))
+            .when(!state.spaces().is_empty(), |view| {
+                view.child(self.home_composer(cx).flex_none())
+            })
+            .into_any_element()
+    }
+
+    fn inbox_tasks(
+        &self,
+        title: &'static str,
+        tasks: &[(&str, &TaskSummary)],
+        part: Part,
+        status: Status,
+        fold: Option<(usize, bool)>,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let multi_space = self.state.spaces().len() > 1;
+        let gaps = self.state.gaps(part);
+        if tasks.is_empty() && gaps.is_empty() {
+            return None;
+        }
+        let visible = match fold {
+            Some((limit, false)) => tasks.len().min(limit),
+            _ => tasks.len(),
         };
-        let mut failed_header = h_flex()
+        let mut header = h_flex()
             .gap(SM)
             .items_center()
-            .children(count(failures.len(), cx));
-        if failures.len() > INBOX_FAILURES_SHOWN {
-            failed_header = failed_header.child(
+            .children(count(tasks.len(), cx));
+        if let Some((limit, show_all)) = fold
+            && tasks.len() > limit
+        {
+            header = header.child(
                 button("inbox-toggle-failures")
                     .small()
                     .ghost()
-                    .label(if show_all_failures {
+                    .tab_stop(true)
+                    .label(if show_all {
                         "Show fewer".to_owned()
                     } else {
-                        format!("Show all {}", failures.len())
+                        format!("Show all {}", tasks.len())
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.state.toggle_inbox_all_failures();
@@ -133,17 +222,22 @@ impl Desktop {
                     })),
             );
         }
-        let mut failed = v_flex()
-            .gap(XS)
-            .child(section("Failed").child(failed_header));
-        // A space whose task list failed to load could be hiding failures.
-        let task_gaps = state.gaps(Part::Tasks);
-        let show_failed = !failures.is_empty() || !task_gaps.is_empty();
-        for (space, gap) in &task_gaps {
-            failed = failed.child(gap_line(gap, "tasks", space, cx));
+        let mut section = v_flex().gap(XS).child(section(title).child(header));
+        for (space, gap) in &gaps {
+            section = section.child(gap_line(
+                gap,
+                if part == Part::Running {
+                    "running tasks"
+                } else {
+                    "tasks"
+                },
+                space,
+                cx,
+            ));
         }
+        let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
-        for &(space, summary) in &failures[..visible_failures] {
+        for &(space, summary) in &tasks[..visible] {
             let task = &summary.task;
             let screen = Screen::Task {
                 space: space.to_owned(),
@@ -154,13 +248,21 @@ impl Desktop {
             } else {
                 format!("{} · {}", summary.project, summary.agent)
             };
-            failed = failed.child(
-                button(SharedString::from(format!("failed-{space}-{}", task.id)))
+            section = section.child(
+                button(SharedString::from(format!("{part:?}-{space}-{}", task.id)))
                     .ghost()
                     .w_full()
                     .rounded(ROW_RADIUS)
                     .px(SM)
-                    .accessibility_label(format!("Open {} {}", task.id, task.title))
+                    .tab_stop(true)
+                    .tooltip(format!(
+                        "{} {} · {space} / {}",
+                        task.id, task.title, summary.project
+                    ))
+                    .accessibility_label(format!(
+                        "Open {} {} in {space} / {}",
+                        task.id, task.title, summary.project
+                    ))
                     .child(
                         h_flex()
                             .w_full()
@@ -173,7 +275,7 @@ impl Desktop {
                                     .flex_none()
                                     .items_center()
                                     .justify_center()
-                                    .child(status_dot(Status::Failed, cx)),
+                                    .child(status_dot(status, cx)),
                             )
                             .child(
                                 div()
@@ -197,53 +299,7 @@ impl Desktop {
             );
         }
 
-        let recent_empty = state.timeline().is_empty()
-            && state.gaps(Part::Recent).is_empty()
-            && !state.timeline_has_earlier();
-        let quiet = !show_needs && !show_failed && recent_empty && banners.is_empty();
-
-        let content = v_flex()
-            .gap(LG)
-            .child(heading("Inbox"))
-            .when(multi_space, |view| {
-                view.child(chips.w_full().min_h(CONTROL_HEIGHT).flex_none())
-            })
-            .children(
-                state
-                    .held_lines(when)
-                    .into_iter()
-                    .map(|line| div().text_size(TYPE_BODY).text_color(muted).child(line)),
-            )
-            .children(banners)
-            .when(show_needs, |view| view.child(needs))
-            .when(show_needs && show_failed, |view| {
-                view.child(Separator::horizontal())
-            })
-            .when(show_failed, |view| view.child(failed))
-            .when((show_needs || show_failed) && !recent_empty, |view| {
-                view.child(Separator::horizontal())
-            })
-            .when(!recent_empty, |view| view.child(self.timeline(when, cx)))
-            .when(quiet, |view| {
-                view.child(meta(
-                    "Nothing needs you. Tell your team what you need below.",
-                    cx,
-                ))
-            });
-        let _ = XL;
-        // The page scrolls above a composer pinned at the bottom, as in a project's Chat tab.
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .max_w(READING_WIDTH)
-            .self_center()
-            .gap(SM)
-            .child(decision_scroller("home", content, &self.decision_scroll))
-            .when(!state.spaces().is_empty(), |view| {
-                view.child(self.home_composer(cx).flex_none())
-            })
-            .into_any_element()
+        Some(section)
     }
 
     /// The Inbox timeline (docs/one-place-to-talk.md): every conversation in
