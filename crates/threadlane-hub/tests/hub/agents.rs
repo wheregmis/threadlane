@@ -505,3 +505,39 @@ async fn a_task_run_falling_back_from_codex_keeps_only_claude_s_skills() {
     assert_eq!(assignment.backend, BackendKind::Claude);
     assert_eq!(assignment.skills, ["claude-only"]);
 }
+
+#[tokio::test]
+async fn binding_a_claude_skill_claude_may_not_invoke_is_rejected() {
+    use threadlane_backend_claude::{ClaudeBackend, ClaudeConfig};
+    use threadlane_core::model::SkillBinding;
+    let account = tempfile::tempdir().unwrap();
+    let folder = account.path().join("skills/deploy");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("SKILL.md"),
+        "---\ndisable-model-invocation: true\n---\nbody",
+    )
+    .unwrap();
+    let hub = TestHub::start().await;
+    let claude = ClaudeBackend::new(ClaudeConfig {
+        config_dir: Some(account.path().into()),
+        ..ClaudeConfig::default()
+    });
+    let hub = TestHub::around(hub.core.with_backends(vec![Arc::new(claude)]), hub.clock).await;
+    create(&hub, "Reviewer").await;
+    let change = edit(
+        "Reviewer",
+        Changes {
+            skills: Some(vec![SkillBinding {
+                backend: BackendKind::Claude,
+                name: "deploy".into(),
+            }]),
+            ..Changes::default()
+        },
+    );
+    let error = hub.api.org(change).await.unwrap_err();
+    assert_eq!(
+        error,
+        ApiError::Invalid("claude skill \"deploy\" sets disable-model-invocation and can only be started by slash command; remove that line from its SKILL.md or unbind it".into())
+    );
+}

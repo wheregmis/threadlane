@@ -294,6 +294,12 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
         Ok(Vec::new())
     }
 
+    /// Why an installed skill `name` cannot be used by a run, if it cannot. It reads as
+    /// "<backend> skill \"name\" <reason>". The skill is then left out of [`Self::installed_skills`].
+    async fn unusable_skill(&self, _name: &str) -> Option<String> {
+        None
+    }
+
     /// Resolve identifiers on the runner and ask the provider to use its own installed skills.
     /// A skill the runner cannot resolve is skipped; the returned warnings say which and why.
     async fn apply_skills(&self, request: &mut RunRequest) -> Result<Vec<String>, BackendError> {
@@ -329,6 +335,13 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
         for name in &request.skills {
             if crate::model::SkillBinding::valid_name(name) && installed.contains(name) {
                 mentions.push(format!("{prefix}{name}"));
+                continue;
+            }
+            if let Some(reason) = self.unusable_skill(name).await {
+                warnings.push(format!(
+                    "{} skill {name:?} was skipped for this run: it {reason}.",
+                    self.kind()
+                ));
                 continue;
             }
             // Listed outside any repository, a personal skill the run directory drops is shadowed.
