@@ -19,13 +19,14 @@ use gpui_kit::component::input::{InputState, TextareaState, Undo};
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
+use threadlane_core::client::{ActivityCursor, TaskActivityEntry};
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::model::Mode;
 use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
     Activity, AppState, Appearance, DecisionKey, RoutineText, Tab, When, change_memory,
-    decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project, load_routines,
-    load_task, load_timeline, pump, refresh,
+    decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project_tab,
+    load_routines, load_task_overview, load_timeline, pump, refresh,
 };
 use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
 use tokio::runtime::Runtime;
@@ -327,12 +328,84 @@ struct Feed {
     received: mpsc::UnboundedReceiver<SpaceFeedItem>,
 }
 
+#[derive(Default)]
+struct TaskActivity {
+    entries: Vec<TaskActivityEntry>,
+    next: Option<ActivityCursor>,
+    loading: bool,
+    error: Option<(Option<ActivityCursor>, String)>,
+    loaded: bool,
+    newest: Option<(Vec<TaskActivityEntry>, Option<ActivityCursor>)>,
+}
+
+impl TaskActivity {
+    fn apply_page(
+        &mut self,
+        before: Option<ActivityCursor>,
+        entries: Vec<TaskActivityEntry>,
+        next: Option<ActivityCursor>,
+    ) {
+        if before.is_some() {
+            self.entries.extend(entries);
+            self.next = next;
+        } else if let Some(overlap) = entries.last().and_then(|last| {
+            self.entries
+                .iter()
+                .position(|entry| last.position == entry.position)
+        }) {
+            self.entries.splice(..=overlap, entries);
+            self.newest = None;
+        } else if self.entries.is_empty() && (!entries.is_empty() || !self.loaded) {
+            self.entries = entries;
+            self.next = next;
+            self.newest = None;
+        } else if !entries.is_empty() {
+            self.newest = Some((entries, next));
+        }
+        self.loaded = true;
+    }
+
+    fn show_newest(&mut self) {
+        if let Some((entries, next)) = self.newest.take() {
+            self.entries = entries;
+            self.next = next;
+            self.error = None;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.loaded
+            && self.entries.is_empty()
+            && self.next.is_none()
+            && self.error.is_none()
+            && self.newest.is_none()
+    }
+}
+
+#[derive(Default)]
+struct PendingProjectLoad {
+    refreshed: (bool, bool),
+    latest: (bool, bool),
+}
+
+impl PendingProjectLoad {
+    fn queue(&mut self, parts: (bool, bool)) {
+        self.refreshed.0 |= parts.0;
+        self.refreshed.1 |= parts.1;
+        self.latest = parts;
+    }
+}
+
 /// The window's one view: the shell and its screens over [`AppState`].
 struct Desktop {
     state: AppState,
     core: Arc<RwLock<ClientCore>>,
     tokio: tokio::runtime::Handle,
     screen: Screen,
+    task_activity: TaskActivity,
+    task_activity_request: Option<Task<()>>,
+    project_load: Option<Task<()>>,
+    project_load_pending: Option<PendingProjectLoad>,
     keyboard_focus: FocusHandle,
     sidebar_collapsed: bool,
     decision_scroll: ScrollHandle,
@@ -517,11 +590,25 @@ impl Desktop {
             }
         });
         let clock = cx.spawn(async move |this, cx| {
+            let mut last_minute = None;
             loop {
                 cx.background_executor().timer(CLOCK_EVERY).await;
                 if this
                     .update(cx, |this, cx| {
-                        if this.state.has_ticking_work()
+                        let minute = SystemClock.now().as_millis().div_euclid(60_000);
+                        let minute_changed = last_minute.replace(minute) != Some(minute);
+                        // Chat history uses calendar labels. Its elapsed labels tick independently.
+                        if matches!(
+                            this.screen,
+                            Screen::Project {
+                                tab: Tab::Conversation,
+                                ..
+                            }
+                        ) {
+                            if minute_changed {
+                                cx.notify();
+                            }
+                        } else if this.state.has_ticking_work()
                             || this.state.visible_decisions().next().is_some()
                         {
                             cx.notify();
@@ -558,6 +645,10 @@ impl Desktop {
             core,
             tokio,
             screen,
+            task_activity: TaskActivity::default(),
+            task_activity_request: None,
+            project_load: None,
+            project_load_pending: None,
             keyboard_focus,
             sidebar_collapsed: false,
             decision_scroll: ScrollHandle::default(),
@@ -661,6 +752,12 @@ impl Desktop {
                         .map(|detail| (space.clone(), detail.summary.project.clone())),
                     _ => None,
                 };
+                let parts = match &this.screen {
+                    Screen::Project { space, project, .. } => {
+                        refreshed.project_parts(space, project)
+                    }
+                    _ => (false, false),
+                };
                 this.state.apply(refreshed);
                 // Refreshes run every REFRESH_EVERY, so this re-checks well within a minute.
                 for alert in this.state.reminders(SystemClock.now()) {
@@ -676,7 +773,7 @@ impl Desktop {
                     )));
                     this.go(Screen::Home, cx);
                 } else {
-                    this.load_screen(cx);
+                    this.load_screen_with_parts(parts, cx);
                 }
             },
             cx,
@@ -685,6 +782,10 @@ impl Desktop {
 
     /// Loads what the open screen shows beyond what a refresh brings.
     fn load_screen(&mut self, cx: &mut Context<Self>) {
+        self.load_screen_with_parts((false, false), cx);
+    }
+
+    fn load_screen_with_parts(&mut self, parts: (bool, bool), cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
         match self.screen.clone() {
             Screen::Routines(scope) => {
@@ -702,6 +803,13 @@ impl Desktop {
                 project,
                 tab,
             } => {
+                if self.project_load.is_some() {
+                    self.project_load_pending
+                        .get_or_insert_with(PendingProjectLoad::default)
+                        .queue(parts);
+                    return;
+                }
+                let (fresh_tasks, fresh_lead) = parts;
                 if tab == Tab::Setup {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }
@@ -718,31 +826,64 @@ impl Desktop {
                         cx,
                     );
                 }
-                // The Conversation tab's card and the Memory tab need the memory.
-                let selected = self
-                    .state
-                    .memory_selected(&space, &project)
-                    .map(str::to_owned);
-                let (in_space, named) = (space.clone(), project.clone());
-                let for_memory = Arc::clone(&core);
+                if matches!(tab, Tab::Conversation | Tab::Memory) {
+                    let selected = (tab == Tab::Memory)
+                        .then(|| {
+                            self.state
+                                .memory_selected(&space, &project)
+                                .map(str::to_owned)
+                        })
+                        .flatten();
+                    let (in_space, named) = (space.clone(), project.clone());
+                    let for_memory = Arc::clone(&core);
+                    self.run(
+                        async move {
+                            load_memory(&*for_memory.read().await, &in_space, &named, selected)
+                                .await
+                        },
+                        |this, loaded, _| this.state.apply_memory(loaded),
+                        cx,
+                    );
+                }
+                let job = self.tokio.spawn(async move {
+                    load_project_tab(
+                        &*core.read().await,
+                        &space,
+                        &project,
+                        Some(tab),
+                        fresh_tasks,
+                        fresh_lead,
+                    )
+                    .await
+                });
+                self.project_load = Some(cx.spawn(async move |this, cx| {
+                    let loaded = job.await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.project_load = None;
+                        let pending = this.project_load_pending.take();
+                        if let Ok(mut loaded) = loaded {
+                            if let Some(pending) = &pending {
+                                loaded.keep_refreshed_parts(pending.refreshed);
+                            }
+                            this.state.apply_project(loaded);
+                            cx.notify();
+                        }
+                        if let Some(pending) = pending {
+                            this.load_screen_with_parts(pending.latest, cx);
+                        }
+                    });
+                }));
+            }
+            Screen::Task { space, task } => {
+                if self.state.activity_open(&space, task) {
+                    self.load_task_activity(space.clone(), task, None, cx);
+                }
                 self.run(
-                    async move { load_project(&*core.read().await, &space, &project).await },
-                    |this, loaded, _| this.state.apply_project(loaded),
-                    cx,
-                );
-                self.run(
-                    async move {
-                        load_memory(&*for_memory.read().await, &in_space, &named, selected).await
-                    },
-                    |this, loaded, _| this.state.apply_memory(loaded),
+                    async move { load_task_overview(&*core.read().await, &space, task).await },
+                    |this, loaded, _| this.state.apply_task(loaded),
                     cx,
                 );
             }
-            Screen::Task { space, task } => self.run(
-                async move { load_task(&*core.read().await, &space, task).await },
-                |this, loaded, _| this.state.apply_task(loaded),
-                cx,
-            ),
             Screen::Agents(scope) => {
                 let projects = self
                     .state
@@ -820,6 +961,36 @@ impl Desktop {
             |this, loaded, _| this.state.apply_routines(loaded),
             cx,
         );
+    }
+
+    fn load_task_activity(
+        &mut self,
+        space: String,
+        task: TaskId,
+        before: Option<ActivityCursor>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.task_activity.loading {
+            return;
+        }
+        self.task_activity.loading = true;
+        self.task_activity.error = None;
+        let core = Arc::clone(&self.core);
+        let job = self
+            .tokio
+            .spawn(async move { core.read().await.task_activity(&space, task, before).await });
+        self.task_activity_request = Some(cx.spawn(async move |this, cx| {
+            let Ok(result) = job.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                let activity = &mut this.task_activity;
+                activity.loading = false;
+                match result {
+                    Ok((entries, next)) => activity.apply_page(before, entries, next),
+                    Err(error) => activity.error = Some((before, describe(&error))),
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn receive(&mut self, item: SpaceFeedItem, cx: &mut Context<Self>) {
@@ -933,6 +1104,10 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.project_load = None;
+            self.project_load_pending = None;
+            self.task_activity_request = None;
+            self.task_activity = TaskActivity::default();
             self.state.reset_chat_target();
             self.project_name_missing = false;
             self.reveal_linked_decision = None;
@@ -1575,5 +1750,86 @@ impl Render for Desktop {
                     .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
                     .children(self.activity(cx)),
             )
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::TaskActivity;
+    use threadlane_core::{
+        client::{ActivityCursor, RunStep, TaskActivityEntry},
+        ids::RunId,
+        time::Timestamp,
+    };
+
+    fn position(seq: i64) -> ActivityCursor {
+        ActivityCursor { run: RunId(1), seq }
+    }
+
+    fn steps(from: i64, to: i64) -> Vec<TaskActivityEntry> {
+        (from..=to)
+            .rev()
+            .map(|seq| TaskActivityEntry {
+                position: position(seq),
+                step: RunStep {
+                    kind: "text".into(),
+                    description: seq.to_string(),
+                    at: Timestamp::from_millis(0),
+                },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn non_overlapping_refresh_keeps_history_and_its_cursor_until_requested() {
+        let mut activity = TaskActivity::default();
+        activity.apply_page(None, steps(21, 40), Some(position(21)));
+        activity.apply_page(Some(position(21)), steps(1, 20), None);
+        activity.apply_page(None, steps(42, 61), Some(position(42)));
+
+        assert_eq!(activity.entries, steps(1, 40));
+        assert_eq!(activity.next, None);
+        assert!(activity.newest.is_some());
+
+        activity.show_newest();
+        assert_eq!(activity.entries, steps(42, 61));
+        assert_eq!(activity.next, Some(position(42)));
+    }
+
+    #[test]
+    fn overlapping_refresh_extends_history_and_empty_pages_can_continue() {
+        let mut activity = TaskActivity::default();
+        activity.apply_page(None, Vec::new(), Some(position(5)));
+        assert!(!activity.is_empty());
+        activity.apply_page(Some(position(5)), steps(1, 4), None);
+        activity.apply_page(None, steps(3, 6), Some(position(3)));
+        assert_eq!(activity.entries, steps(1, 6));
+        assert_eq!(activity.next, None);
+        assert!(activity.newest.is_none());
+
+        let mut empty = TaskActivity::default();
+        empty.apply_page(None, Vec::new(), None);
+        assert!(empty.is_empty());
+        empty.error = Some((None, "request failed".into()));
+        assert!(!empty.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod project_load_tests {
+    use super::PendingProjectLoad;
+
+    #[test]
+    fn queued_load_preserves_each_refreshed_part_and_uses_latest_follow_up() {
+        let mut pending = PendingProjectLoad::default();
+        pending.queue((true, false));
+        pending.queue((false, true));
+        assert_eq!(pending.refreshed, (true, true));
+        assert_eq!(pending.latest, (false, true));
+
+        // A feed event requests both parts without invalidating the refresh.
+        pending.queue((false, false));
+        assert_eq!(pending.refreshed, (true, true));
+        assert_eq!(pending.latest, (false, false));
     }
 }

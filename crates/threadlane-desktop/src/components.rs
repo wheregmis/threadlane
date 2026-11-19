@@ -1,5 +1,6 @@
 //! Common desktop surfaces and controls, built on GPUI Kit.
 
+use gpui_kit as gpui;
 use gpui_kit::component::badge::Badge;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBox;
@@ -7,7 +8,8 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    App, Div, ElementId, Entity, FontWeight, ParentElement as _, SharedString, Styled as _, div,
+    App, AppContext as _, Context, Div, ElementId, Entity, FontWeight, IntoElement,
+    ParentElement as _, Render, RenderOnce, SharedString, Styled as _, Task, Window, div,
 };
 
 pub(crate) mod chat_images;
@@ -234,6 +236,76 @@ pub(super) fn card(cx: &App) -> GroupBox {
         .bg(cx.theme().group_box)
         .p(MD)
         .content_style(v_flex().gap(SM).style().clone())
+}
+
+#[derive(IntoElement)]
+pub(crate) struct Elapsed {
+    id: SharedString,
+    since: threadlane_core::time::Timestamp,
+    asked: bool,
+}
+
+impl Elapsed {
+    pub(crate) fn new(id: String, since: threadlane_core::time::Timestamp) -> Self {
+        Self {
+            id: id.into(),
+            since,
+            asked: false,
+        }
+    }
+    pub(crate) fn asked(mut self) -> Self {
+        self.asked = true;
+        self
+    }
+}
+
+impl RenderOnce for Elapsed {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Keyed state observes its entity and invalidates the parent. Keep
+        // the ticking view inside it so a tick only invalidates the label.
+        let state = window.use_keyed_state(self.id, cx, |_, cx| {
+            cx.new(|_| ElapsedLabel {
+                since: self.since,
+                asked: self.asked,
+                _tick: None,
+            })
+        });
+        let label = state.read(cx).clone();
+        label.update(cx, |label, cx| {
+            if label.since != self.since || label.asked != self.asked {
+                label.since = self.since;
+                label.asked = self.asked;
+                cx.notify();
+            }
+        });
+        label
+    }
+}
+
+struct ElapsedLabel {
+    since: threadlane_core::time::Timestamp,
+    asked: bool,
+    _tick: Option<Task<()>>,
+}
+
+impl Render for ElapsedLabel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use threadlane_core::time::{Clock as _, SystemClock};
+        let elapsed = SystemClock.now().saturating_since(self.since);
+        let remaining = 60_000 - elapsed.as_millis() as u64 % 60_000;
+        self._tick = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(remaining))
+                .await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
+        let duration = threadlane_desktop::duration(elapsed);
+        if self.asked {
+            meta(format!("Asked {duration} ago"), cx)
+        } else {
+            meta(duration, cx).text_right()
+        }
+    }
 }
 
 /// Muted secondary copy.
