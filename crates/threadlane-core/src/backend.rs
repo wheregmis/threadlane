@@ -284,7 +284,7 @@ pub trait BackendRun: Send + fmt::Debug {
 #[async_trait]
 pub trait AgentBackend: Send + Sync + fmt::Debug {
     fn kind(&self) -> BackendKind;
-    /// Personal skill names available on this machine. No paths or file contents cross the link.
+    /// Installed skill names available on this machine. No paths or file contents cross the link.
     async fn installed_skills(
         &self,
         _cwd: Option<&std::path::Path>,
@@ -300,11 +300,8 @@ pub trait AgentBackend: Send + Sync + fmt::Debug {
         let prefix = match self.kind() {
             BackendKind::Claude => "/",
             BackendKind::Codex => "$",
-            BackendKind::Antigravity => {
-                return Err(BackendError::Failed(
-                    "Antigravity does not support profile skills".into(),
-                ));
-            }
+            // Headless Antigravity runs use name-based activation with slash commands disabled.
+            BackendKind::Antigravity => "",
         };
         let installed = self.installed_skills(Some(&request.working_dir)).await?;
         let mut mentions = Vec::new();
