@@ -36,6 +36,7 @@ mod actions;
 mod components;
 mod icons;
 mod keyboard;
+mod local_hub;
 mod menus;
 mod repository;
 mod screens;
@@ -83,6 +84,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    local_hub::start_missing(&client_dir, core.hubs());
     // The paired hubs are known without asking them: the first frame lists them.
     let mut state = AppState::paired(core.hubs().iter().map(|hub| hub.name.as_str()));
     state.set_client_dir(client_dir);
@@ -1535,6 +1537,7 @@ impl Desktop {
         }
         let dir = screens::machines::parse_hub_dir(&dir, std::env::var_os("HOME").as_deref());
         let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
+        let client_dir = self.state.client_dir().map(std::path::Path::to_path_buf);
         self.state
             .report(Activity::Working(format!("Pairing {name}…")));
         self.run(
@@ -1568,7 +1571,18 @@ impl Desktop {
                                     })
                                     .await
                                     .unwrap_or(false);
-                                (socket.parent().map(std::path::Path::to_path_buf), running)
+                                let data_dir = socket.parent().map(std::path::Path::to_path_buf);
+                                // A space made here gets its hub started here.
+                                let running = match (&client_dir, &data_dir) {
+                                    (Some(root), Some(dir))
+                                        if !running && local_hub::owned(root, dir) =>
+                                    {
+                                        local_hub::start(root, dir, &name).is_ok()
+                                            && listening(&socket).await
+                                    }
+                                    _ => running,
+                                };
+                                (data_dir, running)
                             }
                             None => (None, true),
                         };
@@ -1929,4 +1943,15 @@ mod project_load_tests {
         assert_eq!(pending.refreshed, (true, true));
         assert_eq!(pending.latest, (false, false));
     }
+}
+
+/// Whether a hub that was just started answers on `socket` within ten seconds.
+async fn listening(socket: &std::path::Path) -> bool {
+    for _ in 0..50 {
+        if tokio::net::UnixStream::connect(socket).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
 }

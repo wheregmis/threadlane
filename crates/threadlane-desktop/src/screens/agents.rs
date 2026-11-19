@@ -188,7 +188,14 @@ impl Desktop {
                     .join(" → ")
             };
             let projects = assignments_loaded.then(|| {
-                let count = self.state.agent_bindings(&space.name, &agent.name).len();
+                // General is the space lead's own project and is not listed.
+                let general = space.active_projects().find(|project| project.is_general);
+                let count = self
+                    .state
+                    .agent_bindings(&space.name, &agent.name)
+                    .iter()
+                    .filter(|bound| general.is_none_or(|general| general.name != bound.project))
+                    .count();
                 meta(
                     format!("{count} {}", count_form(count, "project", "projects")),
                     cx,
@@ -268,7 +275,10 @@ impl Desktop {
             return projects.child(gap_line(&gap, "projects", &space.name, cx));
         }
         let mut rows = v_flex();
-        for project in space.active_projects() {
+        for project in space
+            .active_projects()
+            .filter(|project| !project.is_general)
+        {
             let open = Screen::Project {
                 space: space.name.clone(),
                 project: project.name.clone(),
@@ -324,7 +334,7 @@ impl Desktop {
                     ),
             );
         }
-        if space.active_projects().next().is_none() {
+        if !space.active_projects().any(|project| !project.is_general) {
             return projects.child(empty(EmptyRegion::Projects, cx));
         }
         projects.child(rows)
