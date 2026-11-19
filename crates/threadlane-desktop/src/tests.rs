@@ -6791,7 +6791,8 @@ async fn home_s_timeline_pages_and_stops_where_a_conversation_is_not_loaded() {
         "nothing more loaded yet"
     );
     for (space, project, before) in earlier {
-        state.apply_earlier(load_earlier(&core, &space, &project, before).await);
+        assert!(state.begin_earlier(&space, &project, before));
+        assert!(state.apply_earlier(load_earlier(&core, &space, &project, before).await));
     }
     let shown = timeline_of(&state);
     assert_eq!(shown.len(), 31);
@@ -6803,6 +6804,53 @@ async fn home_s_timeline_pages_and_stops_where_a_conversation_is_not_loaded() {
     // A refresh of the newest page keeps how far back is loaded.
     state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
     assert_eq!(timeline_of(&state).len(), 31);
+}
+
+#[test]
+fn earlier_chat_pages_retry_the_same_cursor_without_dropping_visible_history() {
+    let mut state = AppState::paired(["work"]);
+    let page = (1..=i64::from(PAGE))
+        .map(|offset| said_by_lead(offset + 10, "General", "visible", (offset + 10) * 1_000))
+        .collect();
+    state.take_history("work", "General", page, true, PAGE);
+    let before = state.earlier("work", "General").expect("full initial page");
+    let shown = state.conversation("work", "General", &when());
+
+    assert!(state.begin_earlier("work", "General", before));
+    assert!(!state.begin_earlier("work", "General", before));
+    assert_eq!(
+        state.earlier_status("work", "General"),
+        Some(&EarlierStatus::Loading)
+    );
+    assert_eq!(state.earlier_status("work", "Other project"), None);
+    assert!(!state.apply_earlier(EarlierLoad {
+        space: "work".into(),
+        project: "General".into(),
+        before,
+        history: Err(ClientError::Unreachable {
+            space: "work".into(),
+            reason: "disconnected".into(),
+        }),
+        decision_records: Vec::new(),
+    }));
+    assert!(matches!(
+        state.earlier_status("work", "General"),
+        Some(EarlierStatus::Failed(why)) if why.contains("disconnected")
+    ));
+    assert_eq!(state.conversation("work", "General", &when()), shown);
+    assert_eq!(state.earlier("work", "General"), Some(before));
+
+    assert!(state.begin_earlier("work", "General", before));
+    assert!(state.apply_earlier(EarlierLoad {
+        space: "work".into(),
+        project: "General".into(),
+        before,
+        history: Ok(vec![said_by_lead(1, "General", "earlier", 1_000)]),
+        decision_records: Vec::new(),
+    }));
+    assert!(state.conversation("work", "General", &when()).len() > shown.len());
+    assert_eq!(state.earlier("work", "General"), None);
+    assert_eq!(state.earlier_status("work", "General"), None);
 }
 
 #[tokio::test]

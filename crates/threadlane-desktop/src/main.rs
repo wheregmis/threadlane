@@ -7,7 +7,7 @@
 //! (Plan.md §18.4 item 3): every hub call is spawned there and its result
 //! handed back to the view. The screens live in `screens/`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::Future;
 use std::process::{Command, ExitCode};
@@ -46,7 +46,7 @@ mod work;
 use work::{WorkPage, WorkView};
 
 use icons::DesktopAssets;
-use keyboard::DecisionScroll;
+use keyboard::{DecisionScroll, HistoryScroll};
 use tokens::{LG, MD, TABULAR, TYPE_BODY};
 
 /// How often the app asks every hub again, so reachability, what runs, and
@@ -431,6 +431,7 @@ struct Desktop {
     reveal_linked_decision: Option<DecisionKey>,
     conversation_at_bottom: bool,
     conversation_follow: Rc<Cell<bool>>,
+    history_scroll: Rc<RefCell<HistoryScroll>>,
     scroll_to_decision: Rc<Cell<DecisionScroll>>,
     decision_inputs: HashMap<DecisionKey, (Entity<InputState>, Subscription)>,
     composer: Entity<TextareaState>,
@@ -707,6 +708,7 @@ impl Desktop {
             reveal_linked_decision: None,
             conversation_at_bottom: true,
             conversation_follow: Rc::new(Cell::new(conversation)),
+            history_scroll: Rc::default(),
             scroll_to_decision: Rc::new(Cell::new(if conversation {
                 DecisionScroll::None
             } else {
@@ -1206,6 +1208,7 @@ impl Desktop {
             self.reveal_linked_decision = None;
             self.conversation_at_bottom = true;
             self.conversation_follow = Rc::new(Cell::new(false));
+            self.history_scroll = Rc::default();
             if let Screen::Project {
                 space,
                 project,
@@ -1382,12 +1385,31 @@ impl Desktop {
         before: Timestamp,
         cx: &mut Context<Self>,
     ) {
+        if !self.state.begin_earlier(&space, &project, before) {
+            return;
+        }
         let core = Arc::clone(&self.core);
         self.run(
-            async move { load_earlier(&*core.read().await, &space, &project, before).await },
-            |this, loaded, _| this.state.apply_earlier(loaded),
+            async move {
+                let loaded = load_earlier(&*core.read().await, &space, &project, before).await;
+                (space, project, loaded)
+            },
+            |this, (space, project, loaded), _| {
+                if this.state.apply_earlier(loaded)
+                    && !this.conversation_follow.get()
+                    && this.reveal_linked_decision.is_none()
+                    && matches!(
+                        &this.screen,
+                        Screen::Project { space: shown_space, project: shown_project, tab: Tab::Conversation }
+                            if shown_space == &space && shown_project == &project
+                    )
+                {
+                    this.history_scroll.borrow_mut().preserve();
+                }
+            },
             cx,
         );
+        cx.notify();
     }
 
     fn issue_code(&mut self, space: String, cx: &mut Context<Self>) {
