@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::input::{InputState, TextareaState, Undo};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState, Undo};
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
@@ -53,6 +53,8 @@ const RETRY_EVERY: Duration = Duration::from_secs(5);
 
 /// Repaint visible elapsed times without waiting for a hub refresh.
 const CLOCK_EVERY: Duration = Duration::from_secs(1);
+
+const HUB_DIR_HINT: &str = "Enter a space name or choose a folder";
 
 fn main() -> ExitCode {
     let runtime = match Runtime::new() {
@@ -523,9 +525,7 @@ impl Desktop {
                 .placeholder("Time zone, for example Europe/Berlin")
                 .default_value(zone)
         });
-        let hub_dir = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("The hub's data directory, ~/threadlane/work")
-        });
+        let hub_dir = cx.new(|cx| InputState::new(window, cx).placeholder(HUB_DIR_HINT));
         let mut field = |placeholder: &'static str, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
         };
@@ -550,6 +550,21 @@ impl Desktop {
         let task_title = field("Title", cx);
         let task_goal = field("Goal: what done looks like", cx);
         let subscriptions = vec![
+            cx.subscribe_in(&space_name, window, |this, input, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let suggested = this
+                        .state
+                        .client_dir()
+                        .and_then(|root| {
+                            ClientDirs::new(root)
+                                .space_dir(input.read(cx).value().trim())
+                                .ok()
+                        })
+                        .map_or_else(|| HUB_DIR_HINT.to_owned(), |dir| dir.display().to_string());
+                    this.hub_dir
+                        .update(cx, |field, cx| field.set_placeholder(suggested, window, cx));
+                }
+            }),
             cx.observe(&project_name, |this, name, cx| {
                 if this.project_name_missing && !name.read(cx).value().trim().is_empty() {
                     this.project_name_missing = false;
@@ -1470,18 +1485,20 @@ impl Desktop {
     /// follows.
     fn pair_directory(&mut self, cx: &mut Context<Self>) {
         let name = self.space_name.read(cx).value().trim().to_owned();
-        let dir = self.hub_dir.read(cx).value().trim().to_owned();
-        if name.is_empty() || dir.is_empty() {
-            self.state.report(Activity::Failed(
-                "Give the space a name and the hub's data directory.".to_owned(),
-            ));
+        let dir = self.hub_dir.read(cx).value().to_string();
+        if name.is_empty() {
+            self.state
+                .report(Activity::Failed("Give the space a name.".to_owned()));
             cx.notify();
             return;
         }
         // `~` is the shell's; expand it here as the shell would have.
-        let dir = match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
-            (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
-            _ => std::path::PathBuf::from(dir),
+        let dir = match (dir.as_str(), std::env::var_os("HOME")) {
+            ("", _) => None,
+            (path, Some(home)) if path.starts_with("~/") => {
+                Some(std::path::PathBuf::from(home).join(&path[2..]))
+            }
+            (path, _) => Some(std::path::PathBuf::from(path)),
         };
         let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
         self.state
@@ -1491,7 +1508,7 @@ impl Desktop {
                 let paired = {
                     let mut client = core.write().await;
                     client
-                        .pair(&name, dir)
+                        .pair_directory(&name, dir)
                         .and_then(|()| client.follow(Some(&name)))
                 };
                 let paired = paired.map(|stream| {
@@ -1668,6 +1685,9 @@ impl Render for Desktop {
                 .update(cx, |editor, cx| editor.set_value(text, window, cx));
         }
         if std::mem::take(&mut self.clear_join) {
+            self.hub_dir.update(cx, |field, cx| {
+                field.set_placeholder(HUB_DIR_HINT, window, cx)
+            });
             for field in [&self.space_name, &self.join_code, &self.hub_dir] {
                 field.update(cx, |field, cx| field.set_value("", window, cx));
             }

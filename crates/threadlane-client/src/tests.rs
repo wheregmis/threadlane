@@ -208,6 +208,79 @@ fn client_dir() -> (TempDir, ClientDirs) {
     (dir, dirs)
 }
 
+#[test]
+fn directory_pairing_persists_the_default_and_an_explicit_folder() {
+    let (temp, dirs) = client_dir();
+    let mut core = ClientCore::load(dirs.clone()).unwrap();
+    let default = dirs.space_dir("Work_1").unwrap();
+    let custom = temp.path().join("My custom directory");
+    fs::create_dir(&custom).unwrap();
+    fs::write(custom.join("existing"), "keep").unwrap();
+    core.pair_directory("Work_1", None).unwrap();
+    core.pair_directory("Personal", Some(custom.clone()))
+        .unwrap();
+    assert!(default.is_dir());
+    assert_eq!(default, dirs.root.join("spaces/Work_1"));
+    assert_eq!(fs::read(custom.join("existing")).unwrap(), b"keep");
+    let saved = ClientCore::load(dirs.clone()).unwrap();
+    for (hub, directory) in saved.hubs().iter().zip([default, custom]) {
+        assert_eq!(
+            hub.reach,
+            Reach::Socket {
+                socket: directory.join(SOCKET_FILE)
+            }
+        );
+    }
+    assert_eq!(saved.hubs().len(), 2);
+    assert!(!dirs.space_dir("Personal").unwrap().exists());
+}
+
+#[test]
+fn directory_pairing_validates_before_creating_and_preserves_collisions() {
+    let (_temp, dirs) = client_dir();
+    let mut core = ClientCore::load(dirs.clone()).unwrap();
+    for name in ["", ".", "..", "/outside", "../outside", "a/b"] {
+        assert!(matches!(
+            core.pair_directory(name, None),
+            Err(ClientError::InvalidName(_))
+        ));
+    }
+    assert!(matches!(
+        core.pair_directory("..", Some(dirs.root.join("custom"))),
+        Err(ClientError::InvalidName(_))
+    ));
+    assert!(!dirs.root.exists());
+    let taken = dirs.space_dir("taken").unwrap();
+    fs::create_dir_all(&taken).unwrap();
+    assert!(matches!(
+        core.pair_directory("taken", None),
+        Err(ClientError::DirectoryTaken(_))
+    ));
+    assert!(taken.is_dir());
+    core.pair_directory("taken", Some(taken)).unwrap();
+    let unused = dirs.root.join("unused");
+    assert!(matches!(
+        core.pair_directory("taken", Some(unused.clone())),
+        Err(ClientError::AlreadyPaired(_))
+    ));
+    assert!(!unused.exists());
+}
+
+#[test]
+fn a_failed_directory_pairing_removes_only_its_new_folder() {
+    let (temp, dirs) = client_dir();
+    let mut core = ClientCore::load(dirs.clone()).unwrap();
+    fs::create_dir_all(dirs.hubs_file()).unwrap(); // Force the final rename to fail.
+    let existing = temp.path().join("existing");
+    fs::create_dir(&existing).unwrap();
+    for path in [None, Some(existing.clone())] {
+        assert!(core.pair_directory("work", path).is_err());
+        assert!(core.hubs().is_empty());
+        assert!(!dirs.space_dir("work").unwrap().exists());
+        assert!(existing.is_dir());
+    }
+}
+
 /// A core with `work` paired (to a socket nobody serves) and answered by `hub`.
 fn paired(dirs: &ClientDirs, hub: &Arc<FakeHub>) -> ClientCore {
     let mut core = ClientCore::load(dirs.clone()).expect("load");

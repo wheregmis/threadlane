@@ -372,6 +372,34 @@ impl Desktop {
             .into_any_element()
     }
 
+    fn choose_hub_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose folder".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = selection.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.first() {
+                        this.hub_dir.update(cx, |field, cx| {
+                            field.set_value(path.display().to_string(), window, cx)
+                        });
+                    }
+                }
+                Ok(Err(error)) => {
+                    this.state
+                        .report(threadlane_desktop::Activity::Failed(error.to_string()));
+                    cx.notify();
+                }
+                _ => {}
+            });
+        })
+        .detach();
+    }
+
     /// Names a space and pairs it by join code or by local data directory.
     fn join_form(&self, cx: &mut Context<Self>) -> Div {
         let remote = self.remote_pairing;
@@ -406,11 +434,21 @@ impl Desktop {
                 },
                 cx,
             ))
-            .child(field(if remote {
-                &self.join_code
+            .child(if remote {
+                field(&self.join_code).into_any_element()
             } else {
-                &self.hub_dir
-            }))
+                h_flex()
+                    .gap(SM)
+                    .child(div().min_w_0().flex_1().child(field(&self.hub_dir)))
+                    .child(
+                        button("choose-hub-directory")
+                            .label("Choose folder…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_hub_directory(window, cx)
+                            })),
+                    )
+                    .into_any_element()
+            })
             .child(
                 button("connect-space")
                     .primary()
