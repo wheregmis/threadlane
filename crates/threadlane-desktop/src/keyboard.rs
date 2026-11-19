@@ -186,9 +186,31 @@ impl Desktop {
                 &self.task_composer
             }
             Screen::Project {
-                tab: Tab::Tasks | Tab::Conversation,
-                ..
-            } => &self.composer,
+                space,
+                project,
+                tab: Tab::Tasks,
+            } if !self.state.is_archived(space, project) => {
+                let target = Screen::Project {
+                    space: space.clone(),
+                    project: project.clone(),
+                    tab: Tab::Conversation,
+                };
+                self.go(target.clone(), cx);
+                let desktop = cx.entity().downgrade();
+                window.on_next_frame(move |window, cx| {
+                    let _gone = desktop.update(cx, |this, cx| {
+                        if this.screen == target {
+                            this.focus_composer(window, cx);
+                        }
+                    });
+                });
+                return;
+            }
+            Screen::Project {
+                space,
+                project,
+                tab: Tab::Conversation,
+            } if !self.state.is_archived(space, project) => &self.composer,
             _ => return,
         };
         self.scroll_to_decision.set(DecisionScroll::None);
