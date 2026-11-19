@@ -113,6 +113,7 @@ fn step(entry: &JournalEntry) -> Option<RunStep> {
         "turn_boundary" => "Finished a turn".to_owned(),
         "finished" => "Finished the run".to_owned(),
         "failed" => "Run failed".to_owned(),
+        "warning" => one_line(entry.entry["message"].as_str().unwrap_or("Warning")),
         _ => "Run activity".to_owned(),
     };
     Some(RunStep {

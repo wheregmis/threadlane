@@ -15,7 +15,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{
-    AgentBackend, AskRequest, BackendError, BackendRun, Probe, RunRequest,
+    AgentBackend, AskRequest, BackendError, BackendRun, Probe, RunRequest, with_warnings,
 };
 use threadlane_core::model::BackendKind;
 use threadlane_mcp::{McpServer, SERVER_NAME};
@@ -203,7 +203,7 @@ impl AgentBackend for ClaudeBackend {
     }
 
     async fn run(&self, mut request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
-        self.apply_skills(&mut request).await?;
+        let warnings = self.apply_skills(&mut request).await?;
         if !request.working_dir.is_dir() {
             return Err(BackendError::Failed(format!(
                 "working directory {} does not exist",
@@ -245,7 +245,7 @@ impl AgentBackend for ClaudeBackend {
             max_turns: request.max_turns,
         };
         match ClaudeRun::start(launch, request.session, server, config_dir) {
-            Ok(run) => Ok(Box::new(run)),
+            Ok(run) => Ok(with_warnings(warnings, Box::new(run))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Err(BackendError::NotInstalled)
             }

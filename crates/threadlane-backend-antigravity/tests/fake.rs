@@ -91,15 +91,17 @@ echo '{"event":"result","result":{"status":"SUCCESS"}}'
     assert!(
         matches!(backend.run(request.clone()).await, Err(error) if error.to_string().contains("require native tools"))
     );
+    assert!(!dir.path().join("args").exists());
     request.remove_builtin_tools = false;
     request.skills.push("hidden".into());
-    assert!(
-        matches!(backend.run(request.clone()).await, Err(error) if error.to_string().contains("is missing on this runner"))
-    );
-    assert!(!dir.path().join("args").exists());
-    request.skills.pop();
 
     let mut run = backend.run(request).await.unwrap();
+    assert_eq!(
+        run.next_event().await,
+        Some(BackendEvent::Warning {
+            message: "antigravity skill \"hidden\" was skipped for this run: it is not installed on this runner.".into()
+        })
+    );
     assert!(matches!(
         run.next_event().await,
         Some(BackendEvent::SessionStarted { .. })
