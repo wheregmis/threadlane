@@ -330,7 +330,7 @@ impl ProseLimit {
     ) -> (Option<usize>, Option<&'static str>) {
         let (lines, show, hide) = match self {
             Self::Full => return (None, None),
-            Self::Result => (3, "Show", "Hide"),
+            Self::Result => (3, "Show more", "Show less"),
             Self::Message => (40, "Show more", "Show less"),
             Self::Question => (6, "Show more", "Show less"),
         };

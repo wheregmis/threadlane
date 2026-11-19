@@ -1053,6 +1053,7 @@ fn task(id: i64, status: TaskStatus, waiting_reason: Option<&str>) -> TaskSummar
         project: "api".to_owned(),
         agent: "Engineer".to_owned(),
         machine: (status == TaskStatus::Running).then(|| "macbook".to_owned()),
+        active_machine_id: None,
         running_since: (status == TaskStatus::Running).then(|| Timestamp::from_millis(0)),
         completed_at: None,
     }
@@ -2026,11 +2027,11 @@ fn a_home_result_uses_the_rendered_three_line_limit_and_remembers_its_toggle() {
     let mut state = AppState::default();
     let limit = ProseLimit::Result;
     assert_eq!(limit.disclosure(false, false), (Some(3), None));
-    assert_eq!(limit.disclosure(false, true), (Some(3), Some("Show")));
+    assert_eq!(limit.disclosure(false, true), (Some(3), Some("Show more")));
     state.toggle_result("work", 1);
     assert_eq!(
         limit.disclosure(state.result_expanded("work", 1), true),
-        (None, Some("Hide"))
+        (None, Some("Show less"))
     );
     assert!(!state.result_expanded("home", 1));
     assert!(!state.result_expanded("work", 2));
@@ -5757,6 +5758,63 @@ async fn irreversible_commands_confirm_and_only_a_ceiling_that_caps_work_asks() 
         state.confirmation(&Consequence::SetCeiling(named(), None, Mode::Autonomous)),
         None
     );
+}
+
+#[tokio::test]
+async fn machine_totals_count_active_tasks_across_local_spaces() {
+    let work = FakeHub::new("Work", Vec::new());
+    let other = FakeHub::new("Other", Vec::new());
+    let mut local = machine(1, MachineStatus::Online);
+    local.load = 3;
+    local.max_parallel = 4;
+    local.capabilities = json!({"max_parallel": 4});
+    let mut remote = machine(2, MachineStatus::Online);
+    remote.name.clone_from(&local.name);
+    *work.machines.lock().unwrap() = vec![local.clone(), remote.clone()];
+    let mut on_local = task(1, TaskStatus::Running, None);
+    on_local.machine = Some(local.name.clone());
+    on_local.active_machine_id = Some(local.id);
+    let mut on_remote = task(2, TaskStatus::Running, None);
+    on_remote.machine = Some(remote.name.clone());
+    on_remote.active_machine_id = Some(remote.id);
+    let mut between_runs = task(3, TaskStatus::Running, None);
+    between_runs.running_since = None;
+    between_runs.machine = Some(local.name.clone());
+    *work.tasks.lock().unwrap() = vec![on_local.clone(), on_remote, between_runs];
+
+    // An older hub only supplies the active machine's name.
+    *other.machines.lock().unwrap() = vec![local.clone()];
+    on_local.active_machine_id = None;
+    *other.tasks.lock().unwrap() = vec![on_local, task(4, TaskStatus::Queued, None)];
+    let (_dir, core) = core(&[("work", &work), ("other", &other)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.set_filter(Some("other"));
+    let space = state.space("work").unwrap();
+    assert_eq!(space.machine_running_tasks(&local), Some(1));
+    assert_eq!(space.machine_running_tasks(&remote), Some(1));
+    assert_eq!(state.local_running_tasks(), Some(2));
+
+    let mut aliases = refresh(&core).await;
+    for status in &mut aliases.statuses {
+        status.reach = threadlane_client::Reach::Socket {
+            socket: PathBuf::from("/tmp/shared-hub.sock"),
+        };
+    }
+    state.apply(aliases);
+    assert_eq!(state.local_running_tasks(), Some(1));
+
+    state.machine_slots_changed("work", local.id, 2);
+    let detail = state.machine_detail("work", local.id, &when()).unwrap();
+    assert_eq!((detail.slots, detail.runner_slots), (2, 4));
+    assert_eq!(detail.running_tasks, Some(1));
+
+    work.down.store(true, Ordering::SeqCst);
+    state.apply(refresh(&core).await);
+    assert_eq!(state.local_running_tasks(), None);
+    let detail = state.machine_detail("work", local.id, &when()).unwrap();
+    assert_eq!(detail.running_tasks, None);
+    assert!(!detail.limit_writable);
 }
 
 #[tokio::test]

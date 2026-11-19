@@ -49,14 +49,14 @@ pub(super) fn field(state: &Entity<InputState>) -> Input {
 
 /// Shared composer surface.
 fn composer_surface(cx: &App) -> Div {
-    h_flex()
-        .gap(SM)
-        .p(SM)
-        .min_h(CONTROL_HEIGHT)
-        .flex_wrap()
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .p_2()
         .border_1()
         .border_color(cx.theme().border)
-        .bg(cx.theme().background)
+        .bg(cx.theme().muted)
         .rounded(COMPOSER_RADIUS)
 }
 

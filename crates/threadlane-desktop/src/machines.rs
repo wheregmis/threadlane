@@ -1,5 +1,7 @@
 //! Machines as the machines screen shows them (Plan.md §5.3, §11.1).
 
+use std::collections::HashSet;
+
 use crate::{Destination, Gap, describe};
 use threadlane_client::{ClientCore, ClientError};
 use threadlane_core::ids::{MachineId, RunId};
@@ -8,7 +10,47 @@ use threadlane_core::model::{Run, RunStatus};
 use threadlane_core::backend::{Probe, account_label, usable_backends};
 use threadlane_core::model::{Agent, BackendKind, Machine, MachineStatus};
 
-use crate::{AppState, Part, When};
+use crate::{AppState, Part, Reach, Space, When};
+
+impl Space {
+    /// Whether this membership is the runner of a hub reached over a local socket.
+    #[must_use]
+    pub fn is_local_machine(&self, machine: &Machine) -> bool {
+        self.local_socket.is_some() && machine.is_hub
+    }
+
+    /// Active tasks on this machine, including tasks in review with an active task run.
+    #[must_use]
+    pub fn machine_running_tasks(&self, machine: &Machine) -> Option<usize> {
+        if self.reach != Reach::Reachable
+            || self.gap(Part::Machines).is_some()
+            || self.gap(Part::Running).is_some()
+        {
+            return None;
+        }
+        let shared_name = self
+            .machines
+            .iter()
+            .any(|other| other.id != machine.id && other.name == machine.name);
+        let mut count = 0;
+        for task in self
+            .running
+            .iter()
+            .filter(|task| task.running_since.is_some())
+        {
+            if let Some(id) = task.active_machine_id {
+                count += usize::from(id == machine.id);
+            } else if task.machine.as_deref() == Some(machine.name.as_str()) {
+                // Older hubs returned only the name of the active machine.
+                if shared_name {
+                    return None;
+                }
+                count += 1;
+            }
+        }
+        Some(count)
+    }
+}
 
 /// One machine of one space.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +119,40 @@ pub fn machine_row(machine: &Machine, when: &When) -> MachineRow {
 }
 
 impl AppState {
+    /// Active tasks on local hub runners across paired spaces, regardless of the Inbox filter.
+    #[must_use]
+    pub fn local_running_tasks(&self) -> Option<usize> {
+        let mut total = None;
+        let mut sockets = HashSet::new();
+        for space in &self.spaces {
+            let Some(socket) = &space.local_socket else {
+                continue;
+            };
+            if !socket.as_os_str().is_empty() && !sockets.insert(socket) {
+                continue;
+            }
+            if space.reach != Reach::Reachable || space.gap(Part::Machines).is_some() {
+                return None;
+            }
+            for machine in space.machines.iter().filter(|machine| machine.is_hub) {
+                total = Some(total.unwrap_or(0) + space.machine_running_tasks(machine)?);
+            }
+        }
+        total
+    }
+
+    /// Applies a limit confirmed by the hub while the rest of the snapshot refreshes.
+    pub fn machine_slots_changed(&mut self, space: &str, id: MachineId, slots: u32) {
+        if let Some(machine) = self
+            .spaces
+            .iter_mut()
+            .find(|known| known.name == space)
+            .and_then(|space| space.machines.iter_mut().find(|machine| machine.id == id))
+        {
+            machine.max_parallel = slots;
+        }
+    }
+
     /// Which online machines in this space report a usable backend for the agent.
     #[must_use]
     pub fn agent_runs_on(&self, space: &str, agent: &Agent) -> Option<String> {
@@ -130,6 +206,9 @@ impl MachineRun {
 pub struct MachineDetail {
     pub slots: u32,
     pub runner_slots: u32,
+    pub running_tasks: Option<usize>,
+    pub local: bool,
+    pub limit_writable: bool,
     /// The current report.
     pub report: MachineRow,
     /// The reported membership state.
@@ -162,7 +241,7 @@ pub async fn load_machine_history(core: &ClientCore, space: &str, when: &When) -
     ) -> Result<Vec<MachineRun>, ClientError> {
         let in_space = Some(space);
         let mut runs = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         let display = |run: Run, destination: Destination, title: &str| {
             let at = run.ended_at.unwrap_or(run.started_at);
             MachineRun {
@@ -176,7 +255,7 @@ pub async fn load_machine_history(core: &ClientCore, space: &str, when: &When) -
         };
         // shortcut: overview can only list runs by lane; fetch once per task
         // until overview can return a machine-scoped history.
-        let mut listed_tasks = std::collections::HashSet::new();
+        let mut listed_tasks = HashSet::new();
         for project in core.project_list(in_space, true).await?.projects {
             let named = Some(project.name.as_str());
             for row in core.lead_runs(in_space, named).await? {
@@ -270,14 +349,28 @@ impl AppState {
                 .as_u64()
                 .and_then(|n| u32::try_from(n).ok())
                 .unwrap_or(machine.max_parallel),
+            running_tasks: space.machine_running_tasks(machine),
+            local: space.is_local_machine(machine),
+            limit_writable: space.reach == Reach::Reachable
+                && space.gap(Part::Machines).is_none()
+                && machine.status != MachineStatus::Revoked
+                && machine.max_parallel > 0,
             report: machine_row(machine, when),
             status: machine.status,
             platform: (!platform.is_empty()).then(|| platform.join(" · ")),
             tools_reported: machine.last_seen.is_some(),
             last_seen: machine.last_seen.map(|seen| when.moment(seen)),
-            occupancy: (machine.last_seen.is_some() && machine.max_parallel != 0).then(|| {
-                100. * machine.load.min(machine.max_parallel) as f32 / machine.max_parallel as f32
-            }),
+            occupancy: (space.reach == Reach::Reachable
+                && matches!(
+                    machine.status,
+                    MachineStatus::Online | MachineStatus::Draining
+                )
+                && machine.last_seen.is_some()
+                && machine.max_parallel != 0)
+                .then(|| {
+                    100. * machine.load.min(machine.max_parallel) as f32
+                        / machine.max_parallel as f32
+                }),
             accounts: space
                 .accounts
                 .iter()
