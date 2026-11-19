@@ -125,6 +125,11 @@ impl AppState {
         self.checking_connections = true;
     }
 
+    /// Ends a connection check that did not provide a fresh snapshot.
+    pub fn finish_checking_connections(&mut self) {
+        self.checking_connections = false;
+    }
+
     /// The space's current connection indicator, formatted in local time.
     #[must_use]
     pub fn connection(&self, space: &str, when: &When) -> Option<Connection> {
