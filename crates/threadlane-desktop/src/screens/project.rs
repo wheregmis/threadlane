@@ -28,8 +28,8 @@ use crate::components::{
 use crate::icons::AppIcon;
 use crate::tokens::{
     BOARD_COLUMN_MIN, CONTROL_HEIGHT, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, READING_WIDTH,
-    ROW_RADIUS, RULES_WIDTH, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status, TABULAR,
-    TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XL, XS,
+    ROW_RADIUS, RULES_WIDTH, SCROLLBAR_GUTTER, SHORT_LABEL_WIDTH, SIDEBAR_WIDTH, SM, Status,
+    TABULAR, TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -1748,6 +1748,8 @@ impl Desktop {
                             cx,
                         )
                         .flex_none()
+                        .w_auto()
+                        .mr(SCROLLBAR_GUTTER)
                     })),
             )
             .children(side)
@@ -1766,6 +1768,7 @@ impl Desktop {
             .h_full()
             .flex_none()
             .gap(SM)
+            .pr(SCROLLBAR_GUTTER)
             .overflow_y_scrollbar()
             .id("conversation-sidebar");
         side = side.child(section("From this conversation"));

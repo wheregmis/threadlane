@@ -16,8 +16,8 @@ use threadlane_desktop::{Author, Part, Spoken, When, count_form, is_quiet_update
 use super::{gap_line, menu_item};
 use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
 use crate::tokens::{
-    CONTROL_HEIGHT, LG, MD, READING_WIDTH, ROW_HEIGHT, ROW_RADIUS, SM, Status, TABULAR, TYPE_BODY,
-    TYPE_META, XS,
+    CONTROL_HEIGHT, LG, MD, READING_WIDTH, ROW_HEIGHT, ROW_RADIUS, SCROLLBAR_GUTTER, SM, Status,
+    TABULAR, TYPE_BODY, TYPE_META, XS,
 };
 use crate::{Desktop, Screen};
 
@@ -175,7 +175,12 @@ impl Desktop {
             .gap(SM)
             .child(decision_scroller("home", content, &self.decision_scroll))
             .when(!state.spaces().is_empty(), |view| {
-                view.child(self.home_composer(cx).flex_none())
+                view.child(
+                    self.home_composer(cx)
+                        .flex_none()
+                        .w_auto()
+                        .mr(SCROLLBAR_GUTTER),
+                )
             })
             .into_any_element()
     }

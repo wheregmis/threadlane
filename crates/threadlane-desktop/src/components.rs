@@ -21,8 +21,9 @@ mod prose;
 use crate::icons::AppIcon;
 use crate::tokens::{
     BADGE_RADIUS, BAR_HEIGHT, BUTTON_RADIUS, COMPOSER_RADIUS, CONTROL_HEIGHT, DOT_SIZE,
-    FIELD_RADIUS, ICON_BUTTON_RADIUS, MD, ROW_HEIGHT, ROW_RADIUS, SM, SMALL_CONTROL_HEIGHT, Status,
-    TABULAR, TYPE_BODY, TYPE_META, TYPE_SECTION, TYPE_TITLE, XS, XXL, XXS,
+    FIELD_RADIUS, ICON_BUTTON_RADIUS, MD, ROW_HEIGHT, ROW_RADIUS, SCROLLBAR_GUTTER, SM,
+    SMALL_CONTROL_HEIGHT, Status, TABULAR, TYPE_BODY, TYPE_META, TYPE_SECTION, TYPE_TITLE, XS, XXL,
+    XXS,
 };
 
 /// Standard push button. The kit's medium and small heights match our scale.
@@ -429,7 +430,7 @@ pub(super) fn decision_option(
         )
 }
 
-/// A decision screen's vertical scrolling region and its matching scrollbar.
+/// A vertical scrolling region with room for its overlay scrollbar.
 pub(super) fn decision_scroller(
     id: &'static str,
     content: Div,
@@ -451,7 +452,7 @@ pub(super) fn decision_scroller(
                 .overflow_y_scroll()
                 .lock_scroll_axis()
                 .track_scroll(handle)
-                .child(content.w_full().min_h_full()),
+                .child(content.w_full().min_h_full().pr(SCROLLBAR_GUTTER)),
         )
         .vertical_scrollbar(handle)
 }
