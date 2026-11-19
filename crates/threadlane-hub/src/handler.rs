@@ -1119,14 +1119,8 @@ fn binding_summary(agent: Agent, binding: &Binding) -> BindingSummary {
     }
 }
 
-/// `value` trimmed, or an error naming `what` if that leaves nothing.
 fn validate_skills(skills: &[threadlane_core::model::SkillBinding]) -> Result<(), ApiError> {
     for (i, skill) in skills.iter().enumerate() {
-        if skill.backend == BackendKind::Antigravity {
-            return Err(ApiError::Invalid(
-                "Antigravity does not support explicit skill bindings".into(),
-            ));
-        }
         if !threadlane_core::model::SkillBinding::valid_name(&skill.name)
             || skills[..i].contains(skill)
         {

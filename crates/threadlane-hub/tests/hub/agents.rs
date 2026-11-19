@@ -238,13 +238,13 @@ async fn an_update_refuses_bad_fields() {
             Changes {
                 skills: Some(vec![threadlane_core::model::SkillBinding {
                     backend: BackendKind::Antigravity,
-                    name: "review".into(),
+                    name: "/review".into(),
                 }]),
                 ..Changes::default()
             },
         ))
         .await,
-        "does not support explicit skill bindings",
+        "invalid or duplicate",
     );
     let missing = api.org(update("Nobody")).await;
     assert!(matches!(missing, Err(ApiError::NotFound(_))), "{missing:?}");
@@ -452,6 +452,10 @@ async fn a_task_run_falling_back_from_codex_keeps_only_claude_s_skills() {
         SkillBinding {
             backend: BackendKind::Claude,
             name: "claude-only".into(),
+        },
+        SkillBinding {
+            backend: BackendKind::Antigravity,
+            name: "antigravity-only".into(),
         },
     ];
     let change = edit(

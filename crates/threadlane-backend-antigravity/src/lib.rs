@@ -4,6 +4,7 @@ mod run;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -11,10 +12,12 @@ use std::{
 use tempfile::TempDir;
 use threadlane_core::{
     backend::{AgentBackend, AskRequest, BackendError, BackendRun, Probe, RunRequest},
-    model::BackendKind,
+    model::{BackendKind, SkillBinding},
 };
 use threadlane_mcp::{McpServer, SERVER_NAME};
 use tokio::process::Command;
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct AntigravityBackend {
@@ -145,6 +148,50 @@ impl AgentBackend for AntigravityBackend {
         BackendKind::Antigravity
     }
 
+    async fn installed_skills(&self, cwd: Option<&Path>) -> Result<Vec<String>, BackendError> {
+        let scratch;
+        let cwd = match cwd {
+            Some(cwd) => cwd,
+            None => {
+                scratch = tempfile::tempdir().map_err(failed)?;
+                scratch.path()
+            }
+        };
+        let mut cmd = self.command();
+        cmd.current_dir(cwd).args(["plugin", "list", "--json"]);
+        let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| BackendError::Timeout)?
+            .map_err(spawn_error)?;
+        if !output.status.success() {
+            return Err(failed(format!(
+                "agy plugin list failed with {}",
+                output.status
+            )));
+        }
+        let plugins: Vec<Value> = serde_json::from_slice(&output.stdout).map_err(failed)?;
+        let mut names = BTreeMap::new();
+        for plugin in plugins.iter().filter(|plugin| plugin["enabled"] == true) {
+            let Some(skills) = plugin["skills"].as_array() else {
+                continue;
+            };
+            for name in skills.iter().filter_map(Value::as_str) {
+                if SkillBinding::valid_name(name) {
+                    // A binding stores only the invocation name, so duplicates are ambiguous.
+                    names
+                        .entry(name)
+                        .and_modify(|unique| *unique = false)
+                        .or_insert(true);
+                }
+            }
+        }
+        Ok(names
+            .into_iter()
+            .filter(|(_, unique)| *unique)
+            .map(|(name, _)| name.to_owned())
+            .collect())
+    }
+
     async fn probe(&self) -> Result<Probe, BackendError> {
         let probe = async {
             let mut report = Probe {
@@ -179,7 +226,7 @@ impl AgentBackend for AntigravityBackend {
             report.logged_in = usage.status.success() && !usage.stdout.is_empty();
             Ok(report)
         };
-        tokio::time::timeout(Duration::from_secs(30), probe)
+        tokio::time::timeout(PROBE_TIMEOUT, probe)
             .await
             .map_err(|_| BackendError::Timeout)?
     }
