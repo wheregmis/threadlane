@@ -102,9 +102,8 @@ impl Desktop {
                         let (space, project, view) =
                             (in_space.clone(), project.clone(), view.clone());
                         menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
-                            move |_, _, cx| {
+                            move |_, window, cx| {
                                 let _ = view.update(cx, |this, cx| {
-                                    this.state.open_task_form(&space, &project, true);
                                     this.go(
                                         Screen::Project {
                                             space: space.clone(),
@@ -113,6 +112,7 @@ impl Desktop {
                                         },
                                         cx,
                                     );
+                                    this.show_new_task_form(&space, &project, window, cx);
                                 });
                             },
                         ));
@@ -648,10 +648,12 @@ impl Desktop {
                         .icon(AppIcon::ListPlus)
                         .label("New task")
                         .accessibility_label("Create a task directly")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state
-                                .open_task_form(&task_space, &task_project, !form_open);
-                            cx.notify();
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if form_open {
+                                this.hide_new_task_form(&task_space, &task_project, window, cx);
+                            } else {
+                                this.show_new_task_form(&task_space, &task_project, window, cx);
+                            }
                         })),
                 );
         }
@@ -2659,6 +2661,53 @@ pub(super) fn mode_name(mode: Mode) -> &'static str {
 impl Desktop {
     /// The "New task" form (wireframe 2, note 3): title, goal, the agent
     /// that does it, its repositories, and the tasks it waits for.
+    fn show_new_task_form(
+        &mut self,
+        space: &str,
+        project: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.open_task_form(space, project, true);
+        self.task_form_return_focus = window.focused(cx);
+        let target = self.screen.clone();
+        let view = cx.entity().downgrade();
+        let (space, project) = (space.to_owned(), project.to_owned());
+        window.on_next_frame(move |window, cx| {
+            let _gone = view.update(cx, |this, cx| {
+                if this.screen == target
+                    && this.state.task_form(&space, &project).is_some()
+                    && !this.state.is_archived(&space, &project)
+                {
+                    this.task_title.focus_handle(cx).focus(window, cx);
+                }
+            });
+        });
+        cx.notify();
+    }
+
+    fn hide_new_task_form(
+        &mut self,
+        space: &str,
+        project: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_new_task_focus(window, cx);
+        self.state.open_task_form(space, project, false);
+        cx.notify();
+    }
+
+    pub(crate) fn restore_new_task_focus(&mut self, window: &mut Window, cx: &App) {
+        let return_to = self.task_form_return_focus.take();
+        if self.task_form_focus.contains_focused(window, cx) {
+            return_to
+                .filter(|focus| self.keyboard_focus.contains(focus, window))
+                .unwrap_or_else(|| self.keyboard_focus.clone())
+                .focus(window, cx);
+        }
+    }
+
     fn task_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
         let Some(form) = self.state.task_form(space, project) else {
@@ -2745,14 +2794,26 @@ impl Desktop {
         let (in_space, named) = (space.to_owned(), project.to_owned());
         let (close_space, close_project) = (space.to_owned(), project.to_owned());
         v_flex()
+            .id("new-task-form")
+            .track_focus(&self.task_form_focus)
             .gap(SM)
             .p(MD)
             .border_1()
             .border_color(cx.theme().border)
             .rounded(ROW_RADIUS)
             .child(section("New task"))
-            .child(field(&self.task_title))
-            .child(field(&self.task_goal))
+            .child(
+                v_flex()
+                    .gap(XS)
+                    .child(meta("Title", cx))
+                    .child(field(&self.task_title).aria_label("Title")),
+            )
+            .child(
+                v_flex()
+                    .gap(XS)
+                    .child(meta("Goal", cx))
+                    .child(field(&self.task_goal).aria_label("Goal")),
+            )
             .child(
                 h_flex()
                     .gap(SM)
@@ -2793,18 +2854,16 @@ impl Desktop {
                             .primary()
                             .icon(AppIcon::ListPlus)
                             .label("Create task")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.create_task(in_space.clone(), named.clone(), cx);
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.create_task(in_space.clone(), named.clone(), window, cx);
                             })),
                     )
                     .child(
                         button("task-close")
                             .icon(AppIcon::X)
                             .label("Cancel")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state
-                                    .open_task_form(&close_space, &close_project, false);
-                                cx.notify();
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.hide_new_task_form(&close_space, &close_project, window, cx);
                             })),
                     ),
             )

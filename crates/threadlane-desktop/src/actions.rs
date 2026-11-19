@@ -261,7 +261,13 @@ impl Desktop {
     }
 
     /// Creates the task the "+ New task" form describes, as yours.
-    pub(crate) fn create_task(&mut self, space: String, project: String, cx: &mut Context<Self>) {
+    pub(crate) fn create_task(
+        &mut self,
+        space: String,
+        project: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let title = self.task_title.read(cx).value().to_string();
         let goal = self.task_goal.read(cx).value().to_string();
         let spec = match self.state.task_spec(&space, &project, &title, &goal) {
@@ -276,17 +282,24 @@ impl Desktop {
         self.state.report(Activity::Working(format!(
             "Creating a task in {space} / {project}…"
         )));
+        let window = window.window_handle();
+        let source = self.screen.clone();
         self.run(
             async move {
                 let created = core.read().await.create_task(Some(&space), spec).await;
                 (space, project, created)
             },
-            |this, (space, project, created), cx| match created {
+            move |this, (space, project, created), cx| match created {
                 Ok(task) => {
                     this.state.report(Activity::Done(format!(
                         "Created {} in {space} / {project}.",
                         task.id
                     )));
+                    if this.screen == source && this.state.task_form(&space, &project).is_some() {
+                        let _gone = window.update(cx, |_, window, cx| {
+                            this.restore_new_task_focus(window, cx);
+                        });
+                    }
                     this.state.task_created(&space, &project);
                     this.clear_fields
                         .extend([this.task_title.clone(), this.task_goal.clone()]);
