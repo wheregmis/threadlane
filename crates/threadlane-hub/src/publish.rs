@@ -5,7 +5,7 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    COMMENT, CREATE_ISSUE, MARK_READY, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -64,10 +64,18 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
     vec![
         define(
             PUBLISH_BRANCH,
-            "Push your task's branch of one repository to its remote. End your turn if the call waits for approval.",
+            "Push your task's branch of one repository to its remote. To change a pull request \
+             an earlier task opened, set onto_task to that task: your commit is pushed onto its \
+             branch and the pull request updates in place. End your turn if the call waits for approval.",
             json!({
                 "type": "object",
-                "properties": { "repository": repository.clone() },
+                "properties": {
+                    "repository": repository.clone(),
+                    "onto_task": {
+                        "type": "string",
+                        "description": "An ended task of this project, as T-0142. Your branch must contain its branch's commits."
+                    }
+                },
                 "required": ["repository"],
                 "additionalProperties": false
             }),
@@ -254,7 +262,7 @@ pub(crate) async fn proposal(
         });
     }
     let allowed: &[&str] = if tool == PUBLISH_BRANCH {
-        &["repository", DIFF_PREVIEW, PUBLISH_REVISION]
+        &["repository", ONTO_TASK, DIFF_PREVIEW, PUBLISH_REVISION]
     } else {
         &[
             "repository",
@@ -278,9 +286,32 @@ pub(crate) async fn proposal(
     let branch = task_branch(task.id);
     let about = format!("Task {}: {}. Commit: {revision}.", task.id, task.title);
     if tool == PUBLISH_BRANCH {
+        let Some(onto) = object.get(ONTO_TASK).filter(|onto| !onto.is_null()) else {
+            return Ok(Proposal {
+                question: format!("Push branch {branch} of {name}?"),
+                context: format!("{about} Remote: {}.", repository.remote_url),
+            });
+        };
+        // Only a branch this system made, whose own task can no longer move it.
+        let onto = crate::tools::task_ref(onto)?;
+        let target = db
+            .task(onto)
+            .await
+            .map_err(tool_error)?
+            .filter(|target| target.project_id == lane.project_id && target.id != task.id)
+            .ok_or_else(|| invalid("onto_task must be another task of this project"))?;
+        if !target.status.is_terminal() || !target.repositories.contains(&repository.id) {
+            return Err(invalid(
+                "onto_task must be an ended task that worked in this repository",
+            ));
+        }
+        let onto = task_branch(onto);
         return Ok(Proposal {
-            question: format!("Push branch {branch} of {name}?"),
-            context: format!("{about} Remote: {}.", repository.remote_url),
+            question: format!("Push branch {branch} of {name} onto {onto}?"),
+            context: format!(
+                "{about} Updates {onto} and any pull request open from it. Remote: {}.",
+                repository.remote_url
+            ),
         });
     }
     let title = match object.get("title") {

@@ -13,7 +13,7 @@ use threadlane_core::backend::{
     AgentBackend, BackendError, BackendEvent, BackendRun, NativeSession, Probe, RunRequest,
     encode_backends,
 };
-use threadlane_core::forge::{ApprovedBranch, Forge, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{ApprovedBranch, Forge, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::ids::{DecisionId, RunId};
 use threadlane_core::link::{
     Begin, HubLink, HubMessage, LinkError, PUBLISH_REVISION, Perform, RunAssignment, RunFailure,
@@ -26,7 +26,7 @@ use threadlane_core::runtime::steps::runner::{
 };
 use threadlane_core::runtime::{Killed, Step, StepHook};
 use threadlane_core::time::{Clock, Timestamp};
-use threadlane_core::workspace::{MergeCheck, Workspaces, task_branch, valid_commit_id};
+use threadlane_core::workspace::{MergeCheck, Workspaces, task_branch, task_ref, valid_commit_id};
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -945,11 +945,14 @@ impl Inner {
                 "branch {branch} moved from approved commit {revision} to {current}; request approval again"
             ));
         }
+        // The hub checked the task before asking; the push itself is not
+        // forced, so a branch that does not contain the target's commits fails.
+        let target = publish_target(task, tool, arguments)?;
         let approved = ApprovedBranch {
-            name: &branch,
+            name: &target,
             revision,
         };
-        let mut outcome = json!({ "performed": true, "repository": name, "branch": branch });
+        let mut outcome = json!({ "performed": true, "repository": name, "branch": target });
         match tool {
             PUBLISH_BRANCH => self
                 .forge
@@ -1400,4 +1403,43 @@ fn conflict_note(check: &MergeCheck) -> String {
         base = check.base,
         files = check.conflicts.join(", "),
     )
+}
+
+/// The branch a stored publish call pushes to: the task's own, or for
+/// `publish_branch` with `onto_task` that earlier task's.
+fn publish_target(
+    task: threadlane_core::ids::TaskId,
+    tool: &str,
+    arguments: &Json,
+) -> Result<String, String> {
+    match arguments.get(ONTO_TASK).filter(|onto| !onto.is_null()) {
+        Some(onto) if tool == PUBLISH_BRANCH => task_ref(onto)
+            .map(task_branch)
+            .ok_or_else(|| "onto_task is not a task id".to_owned()),
+        _ => Ok(task_branch(task)),
+    }
+}
+
+#[cfg(test)]
+mod publish_target_tests {
+    use super::*;
+
+    #[test]
+    fn only_publish_branch_with_onto_task_leaves_the_tasks_own_branch() {
+        let own = threadlane_core::ids::TaskId(92);
+        let onto = json!({ "repository": "app", "onto_task": "T-0087" });
+        assert_eq!(
+            publish_target(own, PUBLISH_BRANCH, &onto).unwrap(),
+            "threadlane/T-0087"
+        );
+        assert_eq!(
+            publish_target(own, OPEN_PULL_REQUEST, &onto).unwrap(),
+            "threadlane/T-0092"
+        );
+        assert_eq!(
+            publish_target(own, PUBLISH_BRANCH, &json!({ "repository": "app" })).unwrap(),
+            "threadlane/T-0092"
+        );
+        assert!(publish_target(own, PUBLISH_BRANCH, &json!({ "onto_task": "main" })).is_err());
+    }
 }

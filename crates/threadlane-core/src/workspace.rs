@@ -206,6 +206,24 @@ pub fn task_branch(task: TaskId) -> String {
     format!("threadlane/{task}")
 }
 
+/// A task id given as `T-0142`, `142`, or the number 142.
+#[must_use]
+pub fn task_ref(value: &serde_json::Value) -> Option<TaskId> {
+    let parsed = match value {
+        serde_json::Value::Number(number) => number.as_i64(),
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            let digits = text
+                .strip_prefix("T-")
+                .or_else(|| text.strip_prefix("t-"))
+                .unwrap_or(text);
+            digits.parse().ok()
+        }
+        _ => None,
+    };
+    parsed.filter(|id| *id > 0).map(TaskId)
+}
+
 /// Whether `name` may name a repository: it becomes a directory name and a
 /// command argument, so letters, digits, `.`, `_` and `-` only, starting
 /// with a letter or digit.

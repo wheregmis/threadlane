@@ -7,6 +7,9 @@ use async_trait::async_trait;
 
 /// The tool that pushes the task's branch (tier 2, task lanes only).
 pub const PUBLISH_BRANCH: &str = "publish_branch";
+/// `publish_branch` argument naming an ended task whose branch is pushed to
+/// instead of the caller's own, which updates that task's pull request.
+pub const ONTO_TASK: &str = "onto_task";
 /// The tool that opens a draft pull request from the task's branch,
 /// publishing the branch in the same call (tier 2, task lanes only).
 pub const OPEN_PULL_REQUEST: &str = "open_pull_request";

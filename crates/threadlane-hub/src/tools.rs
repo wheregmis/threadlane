@@ -875,22 +875,8 @@ fn priority_field(object: &Map<String, Json>) -> Result<Option<i64>, ToolError> 
 }
 
 /// A task id as `T-0142`, `142`, or the number 142.
-fn task_ref(value: &Json) -> Result<TaskId, ToolError> {
-    let parsed = match value {
-        Json::Number(number) => number.as_i64(),
-        Json::String(text) => {
-            let text = text.trim();
-            let digits = text
-                .strip_prefix("T-")
-                .or_else(|| text.strip_prefix("t-"))
-                .unwrap_or(text);
-            digits.parse().ok()
-        }
-        _ => None,
-    };
-    parsed
-        .filter(|id| *id > 0)
-        .map(TaskId)
+pub(crate) fn task_ref(value: &Json) -> Result<TaskId, ToolError> {
+    threadlane_core::workspace::task_ref(value)
         .ok_or_else(|| ToolError::InvalidArguments(format!("{value} is not a task id")))
 }
 

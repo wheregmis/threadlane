@@ -575,6 +575,23 @@ async fn the_gate_refuses_a_call_it_cannot_ask_about_and_opens_nothing() {
             PUBLISH_BRANCH,
             json!({ "repository": "app", PUBLISH_REVISION: "HEAD" }),
         ),
+        // onto_task: not the task itself, an unknown task, or a branch name.
+        (
+            PUBLISH_BRANCH,
+            json!({ "repository": "app", "onto_task": "T-0001", PUBLISH_REVISION: "a".repeat(40) }),
+        ),
+        (
+            PUBLISH_BRANCH,
+            json!({ "repository": "app", "onto_task": "T-0099", PUBLISH_REVISION: "a".repeat(40) }),
+        ),
+        (
+            PUBLISH_BRANCH,
+            json!({ "repository": "app", "onto_task": "main", PUBLISH_REVISION: "a".repeat(40) }),
+        ),
+        (
+            OPEN_PULL_REQUEST,
+            json!({ "repository": "app", "title": "ok", "onto_task": "T-0002", PUBLISH_REVISION: "a".repeat(40) }),
+        ),
         (
             OPEN_PULL_REQUEST,
             json!({ "repository": "app", PUBLISH_REVISION: "a".repeat(40) }),
