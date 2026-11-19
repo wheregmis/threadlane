@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use threadlane_core::forge::{CommentTarget, Forge, ForgeError, RepositoryAction};
+use threadlane_core::forge::{ApprovedBranch, CommentTarget, Forge, ForgeError, RepositoryAction};
 use threadlane_core::github::REVIEW_MARKER_PREFIX;
-use threadlane_core::workspace::valid_branch_name;
+use threadlane_core::workspace::{valid_branch_name, valid_commit_id};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
@@ -162,9 +162,13 @@ fn args(items: &[&str]) -> Vec<OsString> {
 
 #[async_trait]
 impl Forge for GitForge {
-    async fn push(&self, worktree: &Path, branch: &str) -> Result<(), ForgeError> {
-        check_branch(branch)?;
-        let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    async fn push(&self, worktree: &Path, branch: ApprovedBranch<'_>) -> Result<(), ForgeError> {
+        check_branch(branch.name)?;
+        if !valid_commit_id(branch.revision) {
+            return Err(ForgeError("publish requires a full commit SHA".into()));
+        }
+        // A branch can move between the runner's check and Git resolving the refspec.
+        let refspec = format!("{}^{{commit}}:refs/heads/{}", branch.revision, branch.name);
         git(
             Some(worktree),
             ["push", "--quiet", "origin", "--", refspec.as_str()],
@@ -177,7 +181,7 @@ impl Forge for GitForge {
     async fn open_draft_pull_request(
         &self,
         worktree: &Path,
-        branch: &str,
+        branch: ApprovedBranch<'_>,
         base: &str,
         title: &str,
         body: &str,
@@ -200,7 +204,15 @@ impl Forge for GitForge {
             .gh(
                 worktree,
                 args(&[
-                    "pr", "create", "--draft", "--head", branch, "--base", base, &title, &body,
+                    "pr",
+                    "create",
+                    "--draft",
+                    "--head",
+                    branch.name,
+                    "--base",
+                    base,
+                    &title,
+                    &body,
                 ]),
             )
             .await?;
@@ -334,7 +346,11 @@ mod tests {
         let forge = GitForge::with_gh("/nonexistent/gh");
         let worktree = Path::new("/nonexistent");
         for bad in ["--force", "-f", "a..b", "main:other"] {
-            assert!(forge.push(worktree, bad).await.is_err(), "{bad}");
+            let branch = ApprovedBranch {
+                name: bad,
+                revision: &"a".repeat(40),
+            };
+            assert!(forge.push(worktree, branch).await.is_err(), "{bad}");
             assert!(
                 forge.find_pull_request(worktree, bad).await.is_err(),
                 "{bad}"
@@ -343,7 +359,10 @@ mod tests {
         let opened = forge
             .open_draft_pull_request(
                 worktree,
-                "threadlane/T-0001",
+                ApprovedBranch {
+                    name: "threadlane/T-0001",
+                    revision: &"a".repeat(40),
+                },
                 "--force",
                 "t",
                 "b",

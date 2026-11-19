@@ -12,7 +12,7 @@ use threadlane_core::client::{
     UserMessage,
 };
 use threadlane_core::ids::{DecisionId, TaskId};
-use threadlane_core::link::{Begin, Perform, RunAssignment};
+use threadlane_core::link::{Begin, PUBLISH_REVISION, Perform, RunAssignment};
 use threadlane_core::model::{
     Decision, DecisionKind, DecisionOption, DecisionStatus, EventKind, LaneKind, Lease, Mode,
     NewAgent, NewBinding, NewDecision, NewRepository, OutboxKind, RunOutcome, Task, TaskStatus,
@@ -33,7 +33,12 @@ use crate::common::{TestHub, begin};
 const ENGINEER: &str = "Engineer";
 
 fn pull_request_args() -> Json {
-    json!({ "repository": "app", "title": "Add the page", "body": "Adds the page." })
+    json!({
+        "repository": "app",
+        "title": "Add the page",
+        "body": "Adds the page.",
+        PUBLISH_REVISION: "a".repeat(40),
+    })
 }
 
 /// A hub with an engineer, the repositories `app` and `other` in General,
@@ -565,18 +570,26 @@ async fn the_gate_refuses_a_call_it_cannot_ask_about_and_opens_nothing() {
             PUBLISH_BRANCH,
             json!({ "repository": "app", "branch": "main" }),
         ),
-        (OPEN_PULL_REQUEST, json!({ "repository": "app" })),
+        (PUBLISH_BRANCH, json!({ "repository": "app" })),
         (
-            OPEN_PULL_REQUEST,
-            json!({ "repository": "app", "title": "--draft=false" }),
+            PUBLISH_BRANCH,
+            json!({ "repository": "app", PUBLISH_REVISION: "HEAD" }),
         ),
         (
             OPEN_PULL_REQUEST,
-            json!({ "repository": "app", "title": "two\nlines" }),
+            json!({ "repository": "app", PUBLISH_REVISION: "a".repeat(40) }),
         ),
         (
             OPEN_PULL_REQUEST,
-            json!({ "repository": "app", "title": "ok", "body": "bell\u{7}" }),
+            json!({ "repository": "app", "title": "--draft=false", PUBLISH_REVISION: "a".repeat(40) }),
+        ),
+        (
+            OPEN_PULL_REQUEST,
+            json!({ "repository": "app", "title": "two\nlines", PUBLISH_REVISION: "a".repeat(40) }),
+        ),
+        (
+            OPEN_PULL_REQUEST,
+            json!({ "repository": "app", "title": "ok", "body": "bell\u{7}", PUBLISH_REVISION: "a".repeat(40) }),
         ),
     ]
     .into_iter()

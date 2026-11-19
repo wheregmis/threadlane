@@ -11,7 +11,7 @@ use threadlane_core::adapters::{
     ChannelAdapter, CheckpointBundle, Delivered, DeliveryError, PreparedWorkspace, SourceAdapter,
     SourceBatch, SourceError, SourceEvent, Workspace, WorkspaceError, WorkspaceSpec,
 };
-use threadlane_core::forge::{Forge, ForgeError};
+use threadlane_core::forge::{ApprovedBranch, Forge, ForgeError};
 use threadlane_core::github::{Feed, GithubError, GithubItem, GithubSource, PullTarget};
 use threadlane_core::model::OutboxMessage;
 use threadlane_core::runtime::{WakeTarget, Waker};
@@ -404,10 +404,10 @@ impl Forge for FakeForge {
         Ok("done".into())
     }
 
-    async fn push(&self, worktree: &Path, branch: &str) -> Result<(), ForgeError> {
+    async fn push(&self, worktree: &Path, branch: ApprovedBranch<'_>) -> Result<(), ForgeError> {
         lock(&self.calls).push(ForgeCall::Push {
             worktree: worktree.to_owned(),
-            branch: branch.to_owned(),
+            branch: branch.name.to_owned(),
         });
         Ok(())
     }
@@ -415,7 +415,7 @@ impl Forge for FakeForge {
     async fn open_draft_pull_request(
         &self,
         worktree: &Path,
-        branch: &str,
+        branch: ApprovedBranch<'_>,
         base: &str,
         title: &str,
         body: &str,
@@ -424,7 +424,7 @@ impl Forge for FakeForge {
         self.push(worktree, branch).await?;
         lock(&self.calls).push(ForgeCall::Open {
             worktree: worktree.to_owned(),
-            branch: branch.to_owned(),
+            branch: branch.name.to_owned(),
             base: base.to_owned(),
             title: title.to_owned(),
             body: body.to_owned(),
@@ -432,7 +432,7 @@ impl Forge for FakeForge {
         });
         let mut opened = lock(&self.opened);
         let url = format!("https://forge.test/pull/{}", opened.len() + 1);
-        opened.push((branch.to_owned(), url.clone()));
+        opened.push((branch.name.to_owned(), url.clone()));
         Ok(url)
     }
 

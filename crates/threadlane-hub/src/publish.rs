@@ -7,11 +7,11 @@ use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
     COMMENT, CREATE_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
 };
-use threadlane_core::link::DIFF_PREVIEW;
+use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
 use threadlane_core::store::{OrgStore, TaskStore};
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
-use threadlane_core::workspace::{task_branch, valid_repository_name};
+use threadlane_core::workspace::{task_branch, valid_commit_id, valid_repository_name};
 use threadlane_store::HubDb;
 
 use crate::error::tool_error;
@@ -254,9 +254,15 @@ pub(crate) async fn proposal(
         });
     }
     let allowed: &[&str] = if tool == PUBLISH_BRANCH {
-        &["repository", DIFF_PREVIEW]
+        &["repository", DIFF_PREVIEW, PUBLISH_REVISION]
     } else {
-        &["repository", "title", "body", DIFF_PREVIEW]
+        &[
+            "repository",
+            "title",
+            "body",
+            DIFF_PREVIEW,
+            PUBLISH_REVISION,
+        ]
     };
     let object = fields(arguments, allowed)?;
     if !task.repositories.contains(&repository.id) {
@@ -264,8 +270,13 @@ pub(crate) async fn proposal(
             "repository {name:?} is not one this task works in"
         )));
     }
+    let revision = object
+        .get(PUBLISH_REVISION)
+        .and_then(Json::as_str)
+        .filter(|revision| valid_commit_id(revision))
+        .ok_or_else(|| invalid("publish requires a full commit SHA from the runner"))?;
     let branch = task_branch(task.id);
-    let about = format!("Task {}: {}.", task.id, task.title);
+    let about = format!("Task {}: {}. Commit: {revision}.", task.id, task.title);
     if tool == PUBLISH_BRANCH {
         return Ok(Proposal {
             question: format!("Push branch {branch} of {name}?"),

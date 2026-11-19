@@ -13,10 +13,10 @@ use threadlane_core::backend::{
     AgentBackend, BackendError, BackendEvent, BackendRun, NativeSession, Probe, RunRequest,
     encode_backends,
 };
-use threadlane_core::forge::{Forge, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{ApprovedBranch, Forge, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::ids::{DecisionId, RunId};
 use threadlane_core::link::{
-    Begin, HubLink, HubMessage, LinkError, Perform, RunAssignment, RunFailure,
+    Begin, HubLink, HubMessage, LinkError, PUBLISH_REVISION, Perform, RunAssignment, RunFailure,
 };
 use threadlane_core::model::{BackendKind, EventKind, LaneKind, Lease, MachineReport};
 use threadlane_core::runtime::steps::perform;
@@ -26,7 +26,7 @@ use threadlane_core::runtime::steps::runner::{
 };
 use threadlane_core::runtime::{Killed, Step, StepHook};
 use threadlane_core::time::{Clock, Timestamp};
-use threadlane_core::workspace::{MergeCheck, Workspaces, task_branch};
+use threadlane_core::workspace::{MergeCheck, Workspaces, task_branch, valid_commit_id};
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -36,6 +36,7 @@ use crate::error::RunnerError;
 use crate::lane::{LaneExit, LaneState, Stop};
 use crate::mirror::{Flush, Mirror};
 use crate::tools::LaneTools;
+use crate::workspace::branch_revision;
 
 /// Claims lanes from a hub and executes their runs on a backend
 /// (docs/milestone-1.md §8).
@@ -922,6 +923,11 @@ impl Inner {
             .iter()
             .position(|repository| repository.name == name)
             .ok_or_else(|| format!("{name:?} is not one of the task's repositories"))?;
+        let revision = arguments
+            .get(PUBLISH_REVISION)
+            .and_then(Json::as_str)
+            .filter(|revision| valid_commit_id(revision))
+            .ok_or("the publish approval has no commit SHA. Request approval again.")?;
         let worktrees = self
             .workspaces
             .prepare(task, &assignment.repositories)
@@ -929,11 +935,23 @@ impl Inner {
             .map_err(|error| error.to_string())?;
         let worktree = worktrees.get(index).ok_or("no worktree was set up")?;
         let branch = task_branch(task);
+        let current = branch_revision(worktree, &branch)
+            .await
+            .map_err(|error| error.to_string())?;
+        if current != revision {
+            return Err(format!(
+                "branch {branch} moved from approved commit {revision} to {current}; request approval again"
+            ));
+        }
+        let approved = ApprovedBranch {
+            name: &branch,
+            revision,
+        };
         let mut outcome = json!({ "performed": true, "repository": name, "branch": branch });
         match tool {
             PUBLISH_BRANCH => self
                 .forge
-                .push(worktree, &branch)
+                .push(worktree, approved)
                 .await
                 .map_err(|error| error.to_string())?,
             OPEN_PULL_REQUEST => {
@@ -957,7 +975,7 @@ impl Inner {
                         .forge
                         .open_draft_pull_request(
                             worktree,
-                            &branch,
+                            approved,
                             &assignment.repositories[index].default_branch,
                             text("title").trim(),
                             text("body"),
