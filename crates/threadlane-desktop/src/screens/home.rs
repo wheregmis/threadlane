@@ -112,7 +112,6 @@ impl Desktop {
             &state.running(),
             Part::Running,
             Status::Running,
-            multi_space,
             None,
             cx,
         );
@@ -121,7 +120,6 @@ impl Desktop {
             &state.recent_failures(when),
             Part::Tasks,
             Status::Failed,
-            multi_space,
             Some((INBOX_FAILURES_SHOWN, state.inbox_show_all_failures())),
             cx,
         );
@@ -131,11 +129,8 @@ impl Desktop {
         let recent_empty = state.timeline().is_empty()
             && state.gaps(Part::Recent).is_empty()
             && !state.timeline_has_earlier();
-        let quiet = !show_needs
-            && !show_running
-            && !show_failed
-            && recent_empty
-            && banners.is_empty();
+        let quiet =
+            !show_needs && !show_running && !show_failed && recent_empty && banners.is_empty();
 
         let content = v_flex()
             .gap(LG)
@@ -186,17 +181,16 @@ impl Desktop {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn inbox_tasks(
         &self,
         title: &'static str,
         tasks: &[(&str, &TaskSummary)],
         part: Part,
         status: Status,
-        multi_space: bool,
         fold: Option<(usize, bool)>,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
+        let multi_space = self.state.spaces().len() > 1;
         let gaps = self.state.gaps(part);
         if tasks.is_empty() && gaps.is_empty() {
             return None;

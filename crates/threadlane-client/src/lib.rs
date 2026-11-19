@@ -536,7 +536,9 @@ impl ClientCore {
     }
 
     /// Pairs a local data directory, creating it before registering its socket.
-    /// Only an explicitly selected directory may already exist.
+    /// Only an explicitly selected directory may already exist. An explicit path
+    /// pointing to a `hub.sock` file pairs its parent directory instead of
+    /// creating a directory named `hub.sock`.
     ///
     /// # Errors
     ///
@@ -554,6 +556,11 @@ impl ClientCore {
         };
         let dir =
             std::path::absolute(&dir).map_err(|source| ClientError::Read { path: dir, source })?;
+        let dir = if explicit && dir.file_name() == Some(std::ffi::OsStr::new(SOCKET_FILE)) {
+            dir.parent().map(Path::to_path_buf).unwrap_or(dir)
+        } else {
+            dir
+        };
         let socket = dir.join(SOCKET_FILE);
         std::os::unix::net::SocketAddr::from_pathname(&socket).map_err(|source| {
             ClientError::Write {

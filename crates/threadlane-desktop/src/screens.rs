@@ -17,7 +17,7 @@ mod agents;
 mod decision;
 mod delete_project;
 mod home;
-mod machines;
+pub(crate) mod machines;
 mod new_project;
 mod project;
 mod routines;

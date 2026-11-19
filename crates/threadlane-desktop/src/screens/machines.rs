@@ -471,6 +471,11 @@ impl Desktop {
         let step = |title: &'static str, text: &'static str| {
             card(cx).child(section(title)).child(meta(text, cx))
         };
+        let command = first_run_hub_command(
+            self.state.client_dir(),
+            &self.space_name.read(cx).value(),
+            &self.hub_dir.read(cx).value(),
+        );
         v_flex()
             .flex_1()
             .min_h_0()
@@ -495,18 +500,185 @@ impl Desktop {
                     div()
                         .p(SM)
                         .text_size(TYPE_BODY)
+                        .font_family(cx.theme().mono_font_family.clone())
                         .bg(cx.theme().muted)
                         .rounded(ROW_RADIUS)
-                        .child("threadlane-hub --data-dir ~/threadlane/work run"),
+                        .child(command),
                 ),
             )
             .child(
                 step(
                     "2. Pair with it",
-                    "Use the local hub directory or a join code from the other computer.",
+                    "Leave the directory blank to create the suggested folder first (then start \
+                     the hub there), choose an existing hub folder, or use a join code from \
+                     another computer.",
                 )
                 .child(self.join_form(cx)),
             )
             .into_any_element()
+    }
+}
+
+const SOCKET_FILE: &str = "hub.sock";
+
+/// Trims the directory field from the pairing form and expands a leading `~/`.
+/// Whitespace-only input means "use the suggested space directory".
+pub(crate) fn parse_hub_dir(
+    raw: &str,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<std::path::PathBuf> {
+    let path = raw.trim();
+    if path.is_empty() {
+        return None;
+    }
+    // `~` is the shell's; expand it here as the shell would have.
+    match (path.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => Some(std::path::PathBuf::from(home).join(rest)),
+        _ => Some(std::path::PathBuf::from(path)),
+    }
+}
+
+fn shell_quote_path(path: &str) -> String {
+    let safe = !path.is_empty()
+        && path.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'/' | b'.' | b'_' | b'-' | b'~' | b':' | b'@' | b'+' | b'='
+                )
+        });
+    if safe {
+        return path.to_owned();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return format!("~/'{}'", rest.replace('\'', "'\\''"));
+    }
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+fn hub_run_command(dir: &str) -> String {
+    format!("threadlane-hub --data-dir {} run", shell_quote_path(dir))
+}
+
+/// The command shown in Step 1 of the first-run screen so it matches the folder
+/// Step 2 will pair: the explicit directory if entered, otherwise the suggested
+/// `<client-root>/spaces/<name>` directory.
+pub(crate) fn first_run_hub_command(
+    client_dir: Option<&std::path::Path>,
+    space_name: &str,
+    hub_dir: &str,
+) -> String {
+    let entered = hub_dir.trim();
+    if !entered.is_empty() {
+        let path = std::path::Path::new(entered);
+        let dir = if path.file_name() == Some(std::ffi::OsStr::new(SOCKET_FILE)) {
+            match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent.display().to_string(),
+                _ => ".".to_owned(),
+            }
+        } else {
+            entered.to_owned()
+        };
+        return hub_run_command(&dir);
+    }
+    if let Some(root) = client_dir {
+        let dirs = threadlane_client::ClientDirs::new(root);
+        let dir = dirs
+            .space_dir(space_name.trim())
+            .or_else(|_| dirs.space_dir("work"));
+        if let Ok(dir) = dir {
+            return hub_run_command(&dir.display().to_string());
+        }
+    }
+    hub_run_command("~/threadlane/work")
+}
+
+/// Status message after pairing a local directory: if no hub is running there
+/// yet, prints the command to start one.
+pub(crate) fn paired_directory_message(
+    name: &str,
+    data_dir: Option<&std::path::Path>,
+    hub_running: bool,
+) -> String {
+    if !hub_running && let Some(dir) = data_dir {
+        return format!(
+            "Paired {name}. Start a hub with: {}",
+            hub_run_command(&dir.display().to_string())
+        );
+    }
+    format!("Paired {name}.")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+
+    use super::{first_run_hub_command, paired_directory_message, parse_hub_dir};
+
+    #[test]
+    fn first_run_command_matches_the_suggested_or_entered_directory() {
+        let client = Path::new("/Users/alice/.config/threadlane");
+        assert_eq!(
+            first_run_hub_command(Some(client), "", ""),
+            "threadlane-hub --data-dir /Users/alice/.config/threadlane/spaces/work run"
+        );
+        assert_eq!(
+            first_run_hub_command(Some(client), "personal", "   "),
+            "threadlane-hub --data-dir /Users/alice/.config/threadlane/spaces/personal run"
+        );
+        assert_eq!(
+            first_run_hub_command(Some(client), "..", ""),
+            "threadlane-hub --data-dir /Users/alice/.config/threadlane/spaces/work run"
+        );
+        assert_eq!(
+            first_run_hub_command(Some(client), "work", "  ~/threadlane/custom  "),
+            "threadlane-hub --data-dir ~/threadlane/custom run"
+        );
+        assert_eq!(
+            first_run_hub_command(Some(client), "work", "/srv/work/hub.sock"),
+            "threadlane-hub --data-dir /srv/work run"
+        );
+        let spaced = Path::new("/Users/alice/Application Support/threadlane");
+        assert_eq!(
+            first_run_hub_command(Some(spaced), "work", ""),
+            "threadlane-hub --data-dir '/Users/alice/Application Support/threadlane/spaces/work' run"
+        );
+        assert_eq!(
+            first_run_hub_command(None, "work", ""),
+            "threadlane-hub --data-dir ~/threadlane/work run"
+        );
+    }
+
+    #[test]
+    fn paired_directory_message_prompts_to_start_a_hub_when_none_is_running() {
+        let dir = Path::new("/Users/alice/.config/threadlane/spaces/work");
+        assert_eq!(
+            paired_directory_message("work", Some(dir), false),
+            "Paired work. Start a hub with: threadlane-hub --data-dir /Users/alice/.config/threadlane/spaces/work run"
+        );
+        assert_eq!(
+            paired_directory_message("work", Some(dir), true),
+            "Paired work."
+        );
+        assert_eq!(
+            paired_directory_message("work", None, false),
+            "Paired work."
+        );
+    }
+
+    #[test]
+    fn parse_hub_dir_trims_whitespace_and_expands_home() {
+        let home = Some(OsStr::new("/Users/alice"));
+        assert_eq!(parse_hub_dir("", home), None);
+        assert_eq!(parse_hub_dir("   \t\n ", home), None);
+        assert_eq!(
+            parse_hub_dir("  ~/threadlane/work  ", home),
+            Some(PathBuf::from("/Users/alice/threadlane/work"))
+        );
+        assert_eq!(
+            parse_hub_dir("  /srv/my space/hub  ", home),
+            Some(PathBuf::from("/srv/my space/hub"))
+        );
     }
 }

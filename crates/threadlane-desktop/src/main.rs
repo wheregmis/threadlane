@@ -568,6 +568,12 @@ impl Desktop {
                         .map_or_else(|| HUB_DIR_HINT.to_owned(), |dir| dir.display().to_string());
                     this.hub_dir
                         .update(cx, |field, cx| field.set_placeholder(suggested, window, cx));
+                    cx.notify();
+                }
+            }),
+            cx.subscribe_in(&hub_dir, window, |_this, _input, event, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
                 }
             }),
             cx.observe(&project_name, |this, name, cx| {
@@ -1483,7 +1489,7 @@ impl Desktop {
                 (name, joined)
             },
             |this, (name, joined), cx| match joined {
-                Ok(()) => this.space_paired(&name, cx),
+                Ok(()) => this.space_paired(&name, format!("Paired {name}."), cx),
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
@@ -1503,14 +1509,7 @@ impl Desktop {
             cx.notify();
             return;
         }
-        // `~` is the shell's; expand it here as the shell would have.
-        let dir = match (dir.as_str(), std::env::var_os("HOME")) {
-            ("", _) => None,
-            (path, Some(home)) if path.starts_with("~/") => {
-                Some(std::path::PathBuf::from(home).join(&path[2..]))
-            }
-            (path, _) => Some(std::path::PathBuf::from(path)),
-        };
+        let dir = screens::machines::parse_hub_dir(&dir, std::env::var_os("HOME").as_deref());
         let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
         self.state
             .report(Activity::Working(format!("Pairing {name}…")));
@@ -1518,17 +1517,49 @@ impl Desktop {
             async move {
                 let paired = {
                     let mut client = core.write().await;
-                    client
-                        .pair_directory(&name, dir)
-                        .and_then(|()| client.follow(Some(&name)))
+                    client.pair_directory(&name, dir).and_then(|()| {
+                        let socket = client
+                            .hubs()
+                            .iter()
+                            .find_map(|hub| {
+                                (hub.name == name).then(|| match &hub.reach {
+                                    threadlane_client::Reach::Socket { socket } => {
+                                        Some(socket.clone())
+                                    }
+                                    threadlane_client::Reach::Iroh { .. } => None,
+                                })
+                            })
+                            .flatten();
+                        client.follow(Some(&name)).map(|stream| (stream, socket))
+                    })
                 };
-                let paired = paired.map(|stream| {
-                    tokio::spawn(pump(Arc::clone(&core), stream, shown));
-                });
+                let paired = match paired {
+                    Ok((stream, socket)) => {
+                        tokio::spawn(pump(Arc::clone(&core), stream, shown));
+                        let (data_dir, running) = match socket {
+                            Some(socket) => {
+                                let running =
+                                    tokio::time::timeout(Duration::from_millis(500), async {
+                                        tokio::net::UnixStream::connect(&socket).await.is_ok()
+                                    })
+                                    .await
+                                    .unwrap_or(false);
+                                (socket.parent().map(std::path::Path::to_path_buf), running)
+                            }
+                            None => (None, true),
+                        };
+                        Ok(screens::machines::paired_directory_message(
+                            &name,
+                            data_dir.as_deref(),
+                            running,
+                        ))
+                    }
+                    Err(error) => Err(error),
+                };
                 (name, paired)
             },
             |this, (name, paired), cx| match paired {
-                Ok(()) => this.space_paired(&name, cx),
+                Ok(message) => this.space_paired(&name, message, cx),
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
             cx,
@@ -1536,10 +1567,10 @@ impl Desktop {
         cx.notify();
     }
 
-    fn space_paired(&mut self, name: &str, cx: &mut Context<Self>) {
+    fn space_paired(&mut self, name: &str, message: String, cx: &mut Context<Self>) {
         self.state.open_paired_space(name);
         self.state.select_space(name);
-        self.state.report(Activity::Done(format!("Paired {name}.")));
+        self.state.report(Activity::Done(message));
         self.clear_join = true;
         self.go(Screen::Home, cx);
         self.refresh(cx);

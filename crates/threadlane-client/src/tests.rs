@@ -281,6 +281,56 @@ fn a_failed_directory_pairing_removes_only_its_new_folder() {
     }
 }
 
+#[test]
+fn directory_pairing_accepts_a_socket_file_path_without_creating_a_socket_directory() {
+    let (temp, dirs) = client_dir();
+    let mut core = ClientCore::load(dirs.clone()).unwrap();
+
+    // Existing socket file: pair its parent directory and leave the socket untouched.
+    let running_dir = temp.path().join("running");
+    fs::create_dir(&running_dir).unwrap();
+    let running_socket = running_dir.join(SOCKET_FILE);
+    let _listener = std::os::unix::net::UnixListener::bind(&running_socket).unwrap();
+    core.pair_directory("running", Some(running_socket.clone()))
+        .unwrap();
+    assert!(!running_socket.is_dir());
+
+    // Socket path before the hub starts (parent exists): never create a directory named hub.sock.
+    let existing_dir = temp.path().join("existing");
+    fs::create_dir(&existing_dir).unwrap();
+    let existing_socket = existing_dir.join(SOCKET_FILE);
+    core.pair_directory("existing", Some(existing_socket.clone()))
+        .unwrap();
+    assert!(!existing_socket.exists());
+
+    // Socket path before the hub starts (parent does not exist yet): create only the parent.
+    let pending_dir = temp.path().join("pending");
+    let pending_socket = pending_dir.join(SOCKET_FILE);
+    core.pair_directory("pending", Some(pending_socket.clone()))
+        .unwrap();
+    assert!(pending_dir.is_dir());
+    assert!(!pending_socket.exists());
+
+    // A regular file not named hub.sock is still rejected.
+    let stray = temp.path().join("notes.txt");
+    fs::write(&stray, "keep").unwrap();
+    assert!(matches!(
+        core.pair_directory("stray", Some(stray)),
+        Err(ClientError::Write { .. })
+    ));
+
+    let saved = ClientCore::load(dirs).unwrap();
+    assert_eq!(saved.hubs().len(), 3);
+    for (hub, expected) in
+        saved
+            .hubs()
+            .iter()
+            .zip([running_socket, existing_socket, pending_socket])
+    {
+        assert_eq!(hub.reach, Reach::Socket { socket: expected });
+    }
+}
+
 /// A core with `work` paired (to a socket nobody serves) and answered by `hub`.
 fn paired(dirs: &ClientDirs, hub: &Arc<FakeHub>) -> ClientCore {
     let mut core = ClientCore::load(dirs.clone()).expect("load");

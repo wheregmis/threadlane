@@ -84,7 +84,19 @@ fn inspect(folder: &Path, local_hub: bool) -> Result<Checkout, String> {
         }
     } else if remotes.is_empty() && local_hub {
         source.clone_from(&root);
-        branch = git(&["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
+        for candidate in ["main", "master"] {
+            if git(&[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{candidate}"),
+            ])
+            .is_ok()
+            {
+                branch = candidate.to_owned();
+                break;
+            }
+        }
         hint.push_str(" No remote is configured. The hub can clone this checkout.");
     } else if remotes.is_empty() {
         hint.push_str(" No remote is configured. Enter a clone source accessible to the hub.");
@@ -274,11 +286,23 @@ mod tests {
         git(dir.path(), &["init", "-b", "trunk"]);
         assert!(inspect(dir.path(), true).is_err());
         git(dir.path(), &["commit", "--allow-empty", "-m", "initial"]);
+
+        // Neither main nor master exists: leave the default branch blank with a prompt.
         let local = inspect(dir.path(), true).unwrap();
         assert_eq!(Path::new(&local.source), dir.path().canonicalize().unwrap());
-        assert_eq!(local.branch, "trunk");
-        git(dir.path(), &["checkout", "--detach"]);
-        assert!(inspect(dir.path(), true).unwrap().branch.is_empty());
+        assert!(local.branch.is_empty());
+        assert!(local.hint.contains("Default branch unknown"));
+
+        // Prefer master if present, even while checked out on a feature branch.
+        git(dir.path(), &["branch", "master"]);
+        git(dir.path(), &["checkout", "-b", "feature/demo"]);
+        assert_eq!(inspect(dir.path(), true).unwrap().branch, "master");
+
+        // Prefer main over master, never the current feature branch.
+        git(dir.path(), &["branch", "main"]);
+        assert_eq!(inspect(dir.path(), true).unwrap().branch, "main");
+
+        // Remote hub still leaves both source and branch empty.
         let network = inspect(dir.path(), false).unwrap();
         assert!(network.source.is_empty() && network.branch.is_empty());
     }
