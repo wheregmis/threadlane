@@ -75,14 +75,22 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         tier: Tier::Read,
         safe_to_repeat: true,
     });
-    tools.push(ToolDefinition {
+    tools.push(report_definition());
+    tools
+}
+
+pub(crate) fn report_definition() -> ToolDefinition {
+    ToolDefinition {
         name: REPORT_LIMITATION.into(),
-        description: "Report a limitation to wheregmis/threadlane on GitHub under this project's publication permissions.".into(),
-        input_schema: json!({"type":"object","properties":{"title":{"type":"string"},"situation":{"type":"string"},"suggestion":{"type":"string"}},"required":["title","situation","suggestion"],"additionalProperties":false}),
+        description:
+            "Report a public-safe Threadlane limitation to wheregmis/threadlane on GitHub. \
+                      Set require_approval if you are unsure Threadlane caused the blocker. \
+                      If the call answers 'waiting on you', end your turn."
+                .into(),
+        input_schema: json!({"type":"object","properties":{"title":{"type":"string"},"situation":{"type":"string"},"suggestion":{"type":"string"},"require_approval":{"type":"boolean"}},"required":["title","situation","suggestion"],"additionalProperties":false}),
         tier: Tier::SharedReversible,
         safe_to_repeat: false,
-    });
-    tools
+    }
 }
 
 async fn decision_evidence(db: &HubDb, project: ProjectId) -> StoreResult<Vec<Json>> {
@@ -112,7 +120,16 @@ pub(crate) async fn lead_preferences(db: &HubDb, project: ProjectId) -> StoreRes
 }
 
 pub(crate) fn report_issue(args: &Json) -> Result<(String, String), ToolError> {
-    fields(args, &["title", "situation", "suggestion"])?;
+    fields(
+        args,
+        &["title", "situation", "suggestion", "require_approval"],
+    )?;
+    if args
+        .get("require_approval")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(invalid("require_approval must be a boolean"));
+    }
     let section = |key: &str| {
         args[key]
             .as_str()

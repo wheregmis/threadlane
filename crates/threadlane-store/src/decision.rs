@@ -147,6 +147,10 @@ async fn close_in(
         params![expiry_call(id).as_str()],
     )
     .await?;
+    let from_dream = match decision.run_id {
+        Some(run) => crate::dreaming::dream_run_in(conn, run).await?,
+        None => false,
+    };
     let inserted = Box::pin(insert_event_in(
         conn,
         &NewEvent {
@@ -165,7 +169,7 @@ async fn close_in(
             trust,
             // It continues the run that asked.
             requested: true,
-            session_ref: if decision.tool == threadlane_core::forge::REPORT_LIMITATION {
+            session_ref: if from_dream {
                 None
             } else {
                 decision.session_id
@@ -176,10 +180,7 @@ async fn close_in(
         },
     ))
     .await?;
-    if decision.tool != threadlane_core::forge::REPORT_LIMITATION
-        && let Some(run) = decision.run_id
-        && crate::dreaming::dream_run_in(conn, run).await?
-    {
+    if from_dream && decision.tool != threadlane_core::forge::REPORT_LIMITATION {
         exec(
             conn,
             "UPDATE events SET status = 'skipped', status_reason = 'dream proposal closed'

@@ -4,6 +4,7 @@
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::NativeSession;
 use threadlane_core::client::{ApiError, TaskReply, TaskRequest};
+use threadlane_core::forge::REPORT_LIMITATION;
 use threadlane_core::ids::{AgentId, TaskId};
 use threadlane_core::link::{Begin, RunAssignment, RunFailure};
 use threadlane_core::model::{
@@ -725,6 +726,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             CANCEL_TIMER,
             ASK_USER,
             ASK_PROJECT_LEAD,
+            REPORT_LIMITATION,
         ]
     );
     assert!(
