@@ -6,6 +6,7 @@
 use threadlane_client::{ClientCore, ClientError, SpaceFeedItem};
 use threadlane_core::attachment::ImageAttachment;
 use threadlane_core::client::ConversationEntry;
+use threadlane_core::ids::EventId;
 use threadlane_core::model::OutboxKind;
 use threadlane_core::time::Timestamp;
 
@@ -40,7 +41,7 @@ pub fn is_quiet_update(text: &str) -> bool {
 pub enum Spoken<'a> {
     /// A message on the asking side: yours, the space lead's ask, or in
     /// General a project lead's reply to it.
-    Said(&'a str, &'a Author),
+    Said(EventId, &'a str, &'a Author),
     /// A message or notice the hub delivered.
     Delivered(&'a SpaceFeedItem),
 }
@@ -62,11 +63,20 @@ pub struct TimelineEntry<'a> {
 }
 
 impl TimelineEntry<'_> {
+    /// Stable identity for this entry across renders, prose caching, and disclosure.
+    #[must_use]
+    pub fn prose_id(&self) -> String {
+        match self.spoken {
+            Spoken::Said(id, _, _) => format!("timeline-said-{}-{id}", self.space),
+            Spoken::Delivered(item) => format!("result-{}-{}", self.space, item.item.seq),
+        }
+    }
+
     /// The text, for a delivered item its readable body.
     #[must_use]
     pub fn text(&self) -> String {
         match self.spoken {
-            Spoken::Said(text, _) => text.to_owned(),
+            Spoken::Said(_, text, _) => text.to_owned(),
             Spoken::Delivered(item) => item.text(),
         }
     }
@@ -132,11 +142,11 @@ impl AppState {
     /// left to "Needs you".
     fn timeline_all(&self) -> Vec<TimelineEntry<'_>> {
         let cut = self.timeline_cut();
-        let said = self.said.iter().map(|((space, _), said)| TimelineEntry {
+        let said = self.said.iter().map(|((space, id), said)| TimelineEntry {
             space,
             project: Some(&said.project),
             at: said.at,
-            spoken: Spoken::Said(&said.text, &said.by),
+            spoken: Spoken::Said(*id, &said.text, &said.by),
             images: &said.images,
         });
         let delivered = self

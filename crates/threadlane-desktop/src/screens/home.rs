@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::client::TaskSummary;
 use threadlane_core::model::OutboxKind;
-use threadlane_desktop::{Author, Part, Spoken, When, count_form, is_quiet_update};
+use threadlane_desktop::{Author, Part, ProseLimit, Spoken, When, count_form, is_quiet_update};
 
 use super::{gap_line, menu_item};
 use crate::components::{button, count, decision_scroller, heading, meta, section, status_dot};
@@ -388,23 +388,22 @@ impl Desktop {
                 cx,
             ));
         }
-        for (index, entry) in filtered[..visible_len].iter().enumerate() {
+        for entry in &filtered[..visible_len] {
             let space = entry.space.to_owned();
+            let entry_id = entry.prose_id();
             // A reply in General links to the conversation it came from.
             let mut from = None;
             let (who, body) = match entry.spoken {
-                Spoken::Said(text, by) => {
+                Spoken::Said(_, text, by) => {
                     if let Author::ProjectLead(project) = by {
                         from = Some(project.clone());
                     }
-                    (
-                        by.label(),
-                        div()
-                            .text_size(TYPE_BODY)
-                            .whitespace_normal()
-                            .child(text.to_owned())
-                            .into_any_element(),
-                    )
+                    let body = (!text.trim().is_empty()).then(|| {
+                        self.prose(entry_id.clone(), &space, text.to_owned(), cx)
+                            .limit(ProseLimit::Result)
+                            .into_any_element()
+                    });
+                    (by.label(), body)
                 }
                 Spoken::Delivered(item) => {
                     let who = if item.kind() == OutboxKind::SystemNotice {
@@ -417,12 +416,12 @@ impl Desktop {
                         Some(digest) => self.digest_entry(&space, digest, cx).into_any_element(),
                         None => {
                             let seq = item.item.seq;
-                            self.prose(format!("result-{space}-{seq}"), &space, item.text(), cx)
+                            self.prose(entry_id.clone(), &space, item.text(), cx)
                                 .result(seq, state.result_expanded(&space, seq))
                                 .into_any_element()
                         }
                     };
-                    (who, body)
+                    (who, Some(body))
                 }
             };
             let place = match (multi_space, entry.project) {
@@ -443,7 +442,7 @@ impl Desktop {
             let header_left = match &screen {
                 Some(screen) => {
                     let screen = screen.clone();
-                    button(SharedString::from(format!("timeline-{index}")))
+                    button(SharedString::from(format!("timeline-{entry_id}")))
                         .text()
                         .accessibility_label(format!("Open chat history for {place}"))
                         .child(title)
@@ -469,7 +468,7 @@ impl Desktop {
                     project: project.clone(),
                     tab: crate::Tab::Conversation,
                 };
-                button(SharedString::from(format!("timeline-from-{index}")))
+                button(SharedString::from(format!("timeline-from-{entry_id}")))
                     .small()
                     .ghost()
                     .tab_stop(true)
@@ -484,12 +483,12 @@ impl Desktop {
             });
             list = list.child(
                 v_flex()
-                    .id(SharedString::from(format!("timeline-menu-{index}")))
+                    .id(SharedString::from(format!("timeline-menu-{entry_id}")))
                     .w_full()
                     .gap(XS)
                     .items_start()
                     .child(header)
-                    .child(div().w_full().child(body))
+                    .children(body.map(|body| div().w_full().child(body)))
                     .children(crate::components::chat_images::previews(entry.images, cx))
                     .children(from)
                     .context_menu(move |menu, _, _| {
