@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, LazyLock};
 
-use gpui_kit::component::Theme;
+use gpui_kit::component::{Theme, scroll::Scrollbar};
 use gpui_kit::{FontFeatures, Hsla, Pixels, px};
 use threadlane_core::model::MachineStatus;
 
@@ -25,6 +25,8 @@ pub(super) const DOT_SIZE: Pixels = px(6.);
 
 /// Distance from the bottom that still counts as the latest position.
 pub(super) const SCROLL_END_TOLERANCE: Pixels = px(4.);
+/// Space for the overlay scrollbar's full track, including when hovered.
+pub(super) const SCROLLBAR_GUTTER: Pixels = Scrollbar::width();
 /// Visible rows before the composer starts scrolling internally.
 pub(super) const COMPOSER_MAX_ROWS: usize = 8;
 /// Composer radius in logical pixels.
