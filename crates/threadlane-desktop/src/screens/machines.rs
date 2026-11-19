@@ -7,20 +7,21 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
 use threadlane_core::{ids::MachineId, model::MachineStatus};
 use threadlane_desktop::{
-    Consequence, Destination, EmptyRegion, MachineRun, Part, Reach, When, count_form, machine_row,
+    Consequence, Destination, EmptyRegion, MachineRun, Part, Reach, When, count_form,
 };
 
 use super::{empty, gap_line, link};
-use crate::components::{button, card, field, heading, icon_button, meta, section, status_badge};
+use crate::components::{
+    button, card, field, heading, icon_button, meta, page_header, section, status_badge,
+};
 use crate::icons::AppIcon;
 use crate::tokens::{
-    KEY_RADIUS, READING_WIDTH, ROW_RADIUS, SM, SPACE_NAME_WIDTH, Status, TABULAR, TYPE_BODY,
-    TYPE_META, XL, XS,
+    READING_WIDTH, ROW_RADIUS, SM, SPACE_NAME_WIDTH, Status, TABULAR, TYPE_BODY, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -264,47 +265,63 @@ impl Desktop {
     }
 
     pub(crate) fn machines(&self, when: &When, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let summary = self.state.local_running_tasks().map(|running| {
+            meta(
+                format!("{} on this computer", running_tasks_label(Some(running))),
+                cx,
+            )
+        });
         let mut screen = v_flex()
-            .flex_1()
-            .min_h_0()
             .w_full()
             .max_w(READING_WIDTH)
-            .self_center()
-            .overflow_y_scrollbar()
-            .id("machines")
-            .gap(XL)
-            .child(heading("Machines"))
-            .children(self.state.local_running_tasks().map(|running| {
-                meta(
-                    format!("{} on this computer", running_tasks_label(Some(running))),
-                    cx,
-                )
-            }));
+            .gap_6()
+            .pr_2()
+            .pb_2()
+            .child(page_header("Machines", summary, None));
         if self.state.spaces().is_empty() {
             screen = screen.child(empty(EmptyRegion::Pairing, cx));
         }
         for space in self.state.spaces() {
-            let mut part = card(cx).child(section(space.name.clone()));
-            part = match space.gap(Part::Machines) {
-                Some(gap) => part.child(gap_line(&gap, "machines", &space.name, cx)),
-                None if space.machines.is_empty() => part.child(empty(EmptyRegion::Machines, cx)),
-                None if space.reach != Reach::Reachable => {
-                    part.child(meta("Space unavailable · showing last known machines", cx))
-                }
-                None => part.child(meta(
+            let machine_gap = space.gap(Part::Machines);
+            let availability = if machine_gap.is_none() && !space.machines.is_empty() {
+                Some(if space.reach == Reach::Reachable {
                     format!(
                         "{} of {} {} online",
                         space.online(),
                         space.machines.len(),
                         count_form(space.machines.len(), "machine", "machines")
-                    ),
-                    cx,
-                )),
+                    )
+                } else {
+                    "Space unavailable. Showing last known machines.".to_owned()
+                })
+            } else {
+                None
             };
 
+            let mut part = v_flex()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(border)
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .justify_between()
+                        .gap_x_4()
+                        .gap_y_1()
+                        .px_4()
+                        .py_3()
+                        .bg(cx.theme().group_box)
+                        .rounded_t(cx.theme().radius)
+                        .child(section(space.name.clone()))
+                        .children(availability.map(|label| meta(label, cx))),
+                );
+            if let Some(gap) = machine_gap {
+                part = part.child(gap_line(&gap, "machines", &space.name, cx).px_4().py_3());
+            } else if space.machines.is_empty() {
+                part = part.child(meta(EmptyRegion::Machines.sentence(), cx).px_4().py_3());
+            }
             for machine in &space.machines {
-                let row = machine_row(machine, when);
                 let open = Screen::Machine {
                     space: space.name.clone(),
                     machine: machine.id,
@@ -314,38 +331,65 @@ impl Desktop {
                 } else {
                     "Task limit".to_owned()
                 };
+                let last_seen = machine
+                    .last_seen
+                    .filter(|_| machine.status == MachineStatus::Offline)
+                    .map(|seen| format!("Last seen {}", when.moment(seen)));
+                let role = machine.is_hub.then(|| {
+                    if space.is_local_machine(machine) {
+                        "Hub on this computer"
+                    } else {
+                        "Hub"
+                    }
+                });
                 part = part.child(
-                    v_flex()
-                        .gap(XS)
-                        .pt(SM)
+                    h_flex()
+                        .flex_wrap()
+                        .gap_x_4()
+                        .gap_y_2()
+                        .px_4()
+                        .py_3()
                         .border_t_1()
-                        .border_color(cx.theme().border)
+                        .border_color(border)
                         .child(
                             h_flex()
-                                .gap(SM)
-                                .flex_wrap()
+                                .flex_1()
+                                .flex_basis(rems(10.))
+                                .min_w_0()
+                                .gap_3()
                                 .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            div().font_weight(FontWeight::SEMIBOLD).child(row.name),
-                                        )
-                                        .children(
-                                            space
-                                                .is_local_machine(machine)
-                                                .then(|| meta("This computer", cx)),
-                                        ),
+                                    Icon::new(AppIcon::Monitor)
+                                        .text_color(cx.theme().muted_foreground)
+                                        .flex_none(),
                                 )
                                 .child(
-                                    status_badge(row.state, machine.status.into(), cx).flex_none(),
+                                    v_flex()
+                                        .min_w_0()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .whitespace_normal()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(machine.name.clone()),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .flex_wrap()
+                                                .gap_x_2()
+                                                .children(role.map(|label| meta(label, cx)))
+                                                .children(last_seen.map(|seen| meta(seen, cx))),
+                                        ),
                                 ),
                         )
                         .child(
                             h_flex()
-                                .gap(SM)
                                 .flex_wrap()
-                                .justify_between()
+                                .gap_2()
+                                .child(status_badge(
+                                    machine.status.to_string(),
+                                    machine.status.into(),
+                                    cx,
+                                ))
                                 .child(meta(
                                     running_tasks_label(space.machine_running_tasks(machine)),
                                     cx,
@@ -355,9 +399,11 @@ impl Desktop {
                                         .small()
                                         .outline()
                                         .label(task_limit.clone())
+                                        .child(Icon::new(AppIcon::ChevronRight).size_4())
+                                        .tooltip("View machine details")
                                         .accessibility_label(format!(
-                                            "{} · {task_limit} · View machine details",
-                                            machine.name,
+                                            "View details for {} in {}. {task_limit}.",
+                                            machine.name, space.name,
                                         ))
                                         .tab_stop(true)
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -369,28 +415,87 @@ impl Desktop {
             }
 
             if !space.accounts.is_empty() {
-                part = part.child(section("Model accounts"));
-            }
-            for account in &space.accounts {
-                let limit = account
-                    .cooldown_until
-                    .filter(|until| *until > when.now)
-                    .map_or_else(
-                        || "available".to_owned(),
-                        |until| format!("limit reached until {}", when.moment(until)),
-                    );
                 part = part.child(
-                    div()
-                        .text_size(TYPE_BODY)
-                        .child(format!("{} · {} · {limit}", account.label, account.backend)),
+                    v_flex()
+                        .gap_2()
+                        .border_t_1()
+                        .border_color(border)
+                        .p_4()
+                        .child(section("Model accounts"))
+                        .children(space.accounts.iter().map(|account| {
+                            let limit = account
+                                .cooldown_until
+                                .filter(|until| *until > when.now)
+                                .map_or_else(
+                                    || "Available".to_owned(),
+                                    |until| format!("Limit reached until {}", when.moment(until)),
+                                );
+                            h_flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(account.label.clone())
+                                .child(meta(account.backend.to_string(), cx))
+                                .child(meta(limit, cx))
+                        })),
                 );
             }
 
-            part = part.child(section("Paired apps"));
-            if let Some(gap) = space.gap(Part::Clients) {
-                part = part.child(gap_line(&gap, "paired apps", &space.name, cx));
-            } else if space.clients.is_empty() {
-                part = part.child(empty(EmptyRegion::Clients, cx));
+            let client_gap = space.gap(Part::Clients);
+            let name = space.name.clone();
+            let unpair = button(format!("unpair-{name}"))
+                .ghost()
+                .icon(AppIcon::Unlink)
+                .label("Unpair this app…")
+                .accessibility_label(format!("Unpair this app from {name}"))
+                .tab_stop(true)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.confirm_action(Consequence::Unpair(name.clone()), window, cx);
+                }));
+            let name = space.name.clone();
+            let mut paired = v_flex()
+                .gap_2()
+                .border_t_1()
+                .border_color(border)
+                .p_4()
+                .child(
+                h_flex()
+                    .flex_wrap()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .flex_1()
+                            .flex_basis(rems(12.))
+                            .min_w_0()
+                            .child(section("Paired apps"))
+                            .children(
+                                (client_gap.is_none() && space.clients.is_empty())
+                                    .then(|| meta("No apps paired over the network.", cx)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                button(format!("code-{name}"))
+                                    .icon(AppIcon::KeyRound)
+                                    .label("New join code")
+                                    .accessibility_label(format!("New join code for {name}"))
+                                    .tooltip(
+                                        "Pair another app with this space using a single-use code",
+                                    )
+                                    .tab_stop(true)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.issue_code(name.clone(), cx);
+                                    })),
+                            )
+                            .child(unpair),
+                    ),
+            );
+            if let Some(gap) = client_gap {
+                paired = paired.child(gap_line(&gap, "paired apps", &space.name, cx).py_1());
             }
             for client in &space.clients {
                 let state = if client.is_active() {
@@ -398,7 +503,7 @@ impl Desktop {
                 } else {
                     "revoked"
                 };
-                part = part.child(
+                paired = paired.child(
                     h_flex()
                         .gap(SM)
                         .flex_wrap()
@@ -421,52 +526,37 @@ impl Desktop {
                 );
             }
 
-            let name = space.name.clone();
-            part = part.child(
-                h_flex()
-                    .gap(SM)
-                    .child(
-                        button(SharedString::from(format!("code-{name}")))
-                            .icon(AppIcon::KeyRound)
-                            .label("New join code")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.issue_code(name.clone(), cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_size(TYPE_BODY)
-                            .text_color(muted)
-                            .child("Pairs another app with this space. It works once."),
-                    ),
-            );
             if let Some(code) = self.state.code(&space.name) {
-                part = part.child(
+                paired = paired.child(
                     v_flex()
-                        .gap(XS)
-                        .child(div().self_start().px(SM).py(XS).rounded(KEY_RADIUS)
-                            .bg(cx.theme().muted).text_size(TYPE_BODY).child(code.code.clone()))
-                        .child(div().text_size(TYPE_META).text_color(muted).child(format!(
-                            "Run `threadlane hub join <name> <code>` on the other computer before {}.",
-                            when.time(code.expires_at)
-                        ))),
+                        .gap_2()
+                        .p_3()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().muted)
+                        .child(
+                            div()
+                                .whitespace_normal()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(code.code.clone()),
+                        )
+                        .child(meta(
+                            format!(
+                                "Run `threadlane hub join <name> <code>` on the other computer before {}. The code works once.",
+                                when.time(code.expires_at)
+                            ),
+                            cx,
+                        )),
                 );
             }
-            let name = space.name.clone();
-            part = part.child(
-                button(SharedString::from(format!("unpair-{name}")))
-                    .small()
-                    .ghost()
-                    .self_start()
-                    .icon(AppIcon::Unlink)
-                    .label("Unpair this app…")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.confirm_action(Consequence::Unpair(name.clone()), window, cx);
-                    })),
-            );
-            screen = screen.child(part);
+            screen = screen.child(part.child(paired));
         }
-        screen.into_any_element()
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .id("machines")
+            .overflow_y_scrollbar()
+            .child(screen.mx_auto())
+            .into_any_element()
     }
 
     /// The pairing screen the space switcher opens.

@@ -2,27 +2,31 @@
 use crate::{
     Desktop, Screen, Tab,
     components::{button, field, meta, page_header, section},
-    describe, local_zone,
-    tokens::{LG, MD, READING_WIDTH, SM},
+    describe,
+    icons::AppIcon,
+    local_zone,
+    tokens::{LG, MD, READING_WIDTH, SIDEBAR_WIDTH, SM},
 };
 use gpui_kit::component::{
-    Disableable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{InputState, Textarea, TextareaState},
     scroll::ScrollableElement as _,
     v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashSet;
 use std::sync::Arc;
 use threadlane_client::ClientCore;
 use threadlane_core::{
     client::{OverviewReply, OverviewRequest, TaskReply, TaskRequest},
     ids::{EventId, TaskId, TimerId},
     model::{Recurrence, Rule, Weekday},
-    work::{Occurrence, OutputSource, ReviewRecipe},
+    work::{Occurrence, OutputSource, ReviewRecipe, UsageGroup},
 };
-use threadlane_desktop::{Activity, When};
+use threadlane_desktop::{Activity, When, count_form, format_count};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorkPage {
@@ -92,6 +96,7 @@ pub(super) struct WorkView {
     saving: bool,
     loaded_recipe: Option<i64>,
     loaded_search: bool,
+    expanded_usage: HashSet<(String, String, String)>,
     retry_workflow: Option<(TaskRequest, String)>,
     implementation: Entity<TextareaState>,
     review: Entity<TextareaState>,
@@ -116,6 +121,7 @@ impl WorkView {
             manual: Default::default(),
             loaded_recipe: None,
             loaded_search: false,
+            expanded_usage: HashSet::new(),
             retry_workflow: None,
             engineer: input("Engineer"),
             reviewer: input("Reviewer"),
@@ -133,6 +139,7 @@ impl WorkView {
         self.loading = false;
         self.loaded_recipe = None;
         self.loaded_search = false;
+        self.expanded_usage.clear();
         self.retry_workflow = None;
         self.saving = false;
     }
@@ -145,6 +152,73 @@ impl WorkView {
                 |time| time.strftime("%a %b %d %H:%M %Z").to_string(),
             )
     }
+}
+
+fn reported_cost(cost: f64, reports: u128) -> String {
+    if reports == 0 {
+        "—".to_owned()
+    } else {
+        format!("USD {cost:.4}")
+    }
+}
+
+fn usage_metrics(group: Option<&UsageGroup>, compact: bool, cx: &App) -> Div {
+    let count = |n| format_count(u128::from(n));
+    let cells = [
+        ("Runs", 4., group.map(|g| (count(g.runs), None))),
+        (
+            "Run time",
+            5.,
+            group.map(|g| (format!("{} min", count(g.duration_ms / 60_000)), None)),
+        ),
+        (
+            "Reported tokens",
+            8.,
+            group.map(|g| {
+                (
+                    count(g.tokens),
+                    Some(format!(
+                        "{} complete {}",
+                        count(g.token_reports),
+                        count_form(g.token_reports, "report", "reports")
+                    )),
+                )
+            }),
+        ),
+        (
+            "Reported cost",
+            8.,
+            group.map(|g| {
+                (
+                    reported_cost(g.cost, u128::from(g.cost_reports)),
+                    Some(format!(
+                        "{} cost {}",
+                        count(g.cost_reports),
+                        count_form(g.cost_reports, "report", "reports")
+                    )),
+                )
+            }),
+        ),
+    ];
+    h_flex()
+        .items_start()
+        .flex_wrap()
+        .gap_x_3()
+        .gap_y_2()
+        .children(cells.map(|(label, width, value)| {
+            v_flex()
+                .w(rems(width))
+                .max_w_full()
+                .gap_1()
+                .when(!compact, |cell| cell.text_right())
+                .children((compact || group.is_none()).then(|| meta(label, cx)))
+                .children(value.map(|(value, detail)| {
+                    v_flex()
+                        .gap_1()
+                        .child(div().child(value))
+                        .children(detail.map(|detail| meta(detail, cx)))
+                }))
+        }))
 }
 
 impl Desktop {
@@ -258,6 +332,256 @@ impl Desktop {
             .label(id.to_string())
             .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx)))
     }
+
+    fn usage_screen(
+        &self,
+        space: &str,
+        days: u32,
+        refresh: Button,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let range = h_flex()
+            .gap_1()
+            .flex_wrap()
+            .children([1, 7, 30, 90].map(|d| {
+                let choice = self
+                    .work_link(
+                        format!("range-{d}"),
+                        format!("{d} {}", count_form(d, "day", "days")),
+                        space,
+                        WorkPage::Usage(d),
+                        cx,
+                    )
+                    .tab_stop(true)
+                    .selected(d == days);
+                if d == days {
+                    choice.secondary().outline()
+                } else {
+                    choice
+                }
+            }));
+        let sidebar = if self.sidebar_collapsed {
+            Pixels::ZERO
+        } else {
+            SIDEBAR_WIDTH
+        };
+        let content_width =
+            (window.viewport_size().width - sidebar - LG * 2. - SM).min(READING_WIDTH);
+        // Leave room for the numeric columns and a readable agent column.
+        let compact = content_width < window.rem_size() * 40.;
+        let border = cx.theme().border;
+        let mut body = v_flex()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .mx_auto()
+            .pr_2()
+            .pb_2();
+        match &self.work.data {
+            Some(Ok(OverviewReply::SpaceUsage { groups })) => {
+                let runs = groups.iter().map(|g| u128::from(g.runs)).sum();
+                let reports = groups.iter().map(|g| u128::from(g.cost_reports)).sum();
+                let cost: f64 = groups.iter().map(|g| g.cost).sum();
+                let runs = format_count(runs);
+                let cost = reported_cost(cost, reports);
+                body = body.child(
+                    h_flex()
+                        .items_start()
+                        .flex_wrap()
+                        .gap_x_8()
+                        .gap_y_4()
+                        .p_4()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().muted)
+                        .child(
+                            v_flex()
+                                .min_w(rems(4.))
+                                .gap_1()
+                                .child(meta("Runs", cx))
+                                .child(section(runs.clone()).text_xl()),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .flex_basis(rems(14.))
+                                .min_w_0()
+                                .gap_1()
+                                .child(meta("Reported cost", cx))
+                                .child(section(cost).text_xl())
+                                .child(meta(
+                                    format!(
+                                        "{} of {runs} runs reported cost",
+                                        format_count(reports)
+                                    ),
+                                    cx,
+                                )),
+                        ),
+                );
+                if groups.is_empty() {
+                    body =
+                        body.child(meta("No runs in this period. Try a longer range.", cx).py_4());
+                } else {
+                    body = body.child(section("Usage breakdown").pt_6().pb_3());
+                    if !compact {
+                        body = body.child(
+                            h_flex()
+                                .justify_between()
+                                .px_3()
+                                .pb_2()
+                                .child(meta("Agent", cx))
+                                .child(usage_metrics(None, false, cx)),
+                        );
+                    }
+                    body = body.children(
+                        groups
+                            .iter()
+                            .map(|g| self.usage_group(space, g, compact, border, cx)),
+                    );
+                }
+            }
+            None => {
+                body = body
+                    .child(meta("Loading usage…", cx).py_3())
+                    .children((0..3).map(|_| {
+                        div()
+                            .h_8()
+                            .mb_2()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().skeleton)
+                    }));
+            }
+            Some(Err(error)) => {
+                body = body
+                    .gap_1()
+                    .py_3()
+                    .child(section("Couldn’t load usage"))
+                    .child(meta(error.clone(), cx))
+                    .child(meta("Refresh to try again, or choose another period.", cx));
+            }
+            _ => body = body.child("The hub returned an unexpected response."),
+        }
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap_4()
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(READING_WIDTH)
+                    .mx_auto()
+                    .pr_2()
+                    .gap_2()
+                    .child(page_header(
+                        "Space usage",
+                        Some(meta(space.to_owned(), cx)),
+                        Some(h_flex().child(refresh.tab_stop(true))),
+                    ))
+                    .child(range),
+            )
+            .child(
+                v_flex()
+                    .id("work-content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(body),
+            )
+            .into_any_element()
+    }
+
+    fn usage_group(
+        &self,
+        space: &str,
+        group: &UsageGroup,
+        compact: bool,
+        border: Hsla,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let key = (
+            group.project.clone(),
+            group.agent.clone(),
+            group.backend.clone(),
+        );
+        let expanded = self.work.expanded_usage.contains(&key);
+        let heading = format!("{} / {} / {}", group.project, group.agent, group.backend);
+        let disclosure = (!group.tasks.is_empty()).then(|| {
+            let n = group.tasks.len();
+            button(format!("usage-tasks-{heading}"))
+                .small()
+                .ghost()
+                .self_start()
+                .tab_stop(true)
+                .icon(if expanded {
+                    AppIcon::ChevronDown
+                } else {
+                    AppIcon::ChevronRight
+                })
+                .label(format!(
+                    "{} {}",
+                    format_count(n as u128),
+                    count_form(n, "task", "tasks")
+                ))
+                .accessibility_label(format!(
+                    "{} tasks for {heading}",
+                    if expanded { "Hide" } else { "Show" }
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.work.expanded_usage.remove(&key) {
+                        this.work.expanded_usage.insert(key.clone());
+                    }
+                    cx.notify();
+                }))
+        });
+        v_flex()
+            .gap_2()
+            .px_3()
+            .py_3()
+            .border_t_1()
+            .border_color(border)
+            .child(
+                h_flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_3()
+                    .when(compact, |row| row.flex_col().justify_start())
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .when(compact, |identity| identity.w_full())
+                            .when(!compact, |identity| identity.flex_1())
+                            .child(
+                                div()
+                                    .whitespace_normal()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(group.agent.clone()),
+                            )
+                            .child(
+                                h_flex()
+                                    .flex_wrap()
+                                    .gap_x_2()
+                                    .child(meta(group.project.clone(), cx).whitespace_normal())
+                                    .child(meta(group.backend.clone(), cx).whitespace_normal()),
+                            )
+                            .children(disclosure),
+                    )
+                    .child(
+                        usage_metrics(Some(group), compact, cx)
+                            .max_w_full()
+                            .flex_none(),
+                    ),
+            )
+            .children(expanded.then(|| {
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .children(group.tasks.iter().map(|id| {
+                        self.source_task(space, *id, format!("usage-{heading}-{id}"), cx)
+                            .tab_stop(true)
+                    }))
+            }))
+    }
+
     fn workflow_action(
         &mut self,
         space: String,
@@ -626,6 +950,9 @@ impl Desktop {
                 this.work.data = None;
                 this.load_screen(cx);
             }));
+        if let WorkPage::Usage(days) = page {
+            return self.usage_screen(space, *days, refresh, window, cx);
+        }
         match (&self.work.data, page) {
             (None, _) => body = body.child(meta("Loading…", cx)),
             (Some(Err(error)), _) => body = body.child(error.clone()),
@@ -740,53 +1067,6 @@ impl Desktop {
                         },
                         cx,
                     ));
-                }
-            }
-            (Some(Ok(OverviewReply::SpaceUsage { groups })), WorkPage::Usage(days)) => {
-                body = body.child(h_flex().gap(SM).children([1, 7, 30, 90].map(|d| {
-                    self.work_link(
-                        format!("range-{d}"),
-                        format!("{d} days"),
-                        space,
-                        WorkPage::Usage(d),
-                        cx,
-                    )
-                    .disabled(d == *days)
-                })));
-                if groups.is_empty() {
-                    body = body.child("No runs during this period.");
-                }
-                let runs: u64 = groups.iter().map(|g| g.runs).sum();
-                let cost: f64 = groups.iter().map(|g| g.cost).sum();
-                let reports: u64 = groups.iter().map(|g| g.cost_reports).sum();
-                body = body
-                    .child(section(format!("Past {days} days · {runs} runs")))
-                    .child(meta(
-                        format!("USD {cost:.4} reported · {reports} of {runs} runs supplied cost"),
-                        cx,
-                    ));
-                for g in groups {
-                    let heading = format!("{} / {} / {}", g.project, g.agent, g.backend);
-                    let totals = format!(
-                        "{} runs · {} min · {} tokens ({} complete reports) · USD {:.4} ({} cost reports)",
-                        g.runs,
-                        g.duration_ms / 60000,
-                        g.tokens,
-                        g.token_reports,
-                        g.cost,
-                        g.cost_reports
-                    );
-                    let info = meta(totals, cx);
-                    let tasks = g.tasks.iter().map(|id| {
-                        self.source_task(space, *id, format!("usage-{heading}-{id}"), cx)
-                    });
-                    body = body.child(
-                        v_flex()
-                            .gap(SM)
-                            .child(section(heading.clone()))
-                            .child(info)
-                            .child(h_flex().gap(SM).flex_wrap().children(tasks)),
-                    );
                 }
             }
             (Some(Ok(OverviewReply::Outputs { rows })), WorkPage::Outputs { project, search }) => {
@@ -936,5 +1216,17 @@ impl Desktop {
                     .child(body.max_w(READING_WIDTH)),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::reported_cost;
+
+    #[test]
+    fn missing_cost_differs_from_reported_zero() {
+        assert_eq!(reported_cost(0.0, 0), "—");
+        assert_eq!(reported_cost(0.0, 2), "USD 0.0000");
+        assert_eq!(reported_cost(1.2345, 1), "USD 1.2345");
     }
 }
