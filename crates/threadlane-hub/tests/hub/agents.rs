@@ -231,6 +231,20 @@ async fn an_update_refuses_bad_fields() {
         .await,
         "lead's role",
     );
+    refused(
+        api.org(edit(
+            "Reviewer",
+            Changes {
+                skills: Some(vec![threadlane_core::model::SkillBinding {
+                    backend: BackendKind::Antigravity,
+                    name: "review".into(),
+                }]),
+                ..Changes::default()
+            },
+        ))
+        .await,
+        "does not support explicit skill bindings",
+    );
     let missing = api.org(update("Nobody")).await;
     assert!(matches!(missing, Err(ApiError::NotFound(_))), "{missing:?}");
     let OrgReply::Agent { agent } = api
