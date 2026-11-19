@@ -70,8 +70,6 @@ pub(super) const SIDEBAR_WIDTH: Pixels = px(220.);
 pub(super) const PANEL_WIDTH: Pixels = px(250.);
 /// Board column min in logical pixels.
 pub(super) const BOARD_COLUMN_MIN: Pixels = px(152.);
-/// Grid cell width in logical pixels.
-pub(super) const GRID_CELL_WIDTH: Pixels = px(130.);
 /// Timestamp width in logical pixels.
 pub(super) const TIMESTAMP_WIDTH: Pixels = px(110.);
 /// Form width in logical pixels.
@@ -86,18 +84,12 @@ pub(super) const MEMORY_LIST_WIDTH: Pixels = px(300.);
 pub(super) const LABEL_WIDTH: Pixels = px(160.);
 /// Short label width in logical pixels.
 pub(super) const SHORT_LABEL_WIDTH: Pixels = px(100.);
-/// Inline label width in logical pixels.
-pub(super) const INLINE_LABEL_WIDTH: Pixels = px(60.);
 /// Short field width in logical pixels.
 pub(super) const SHORT_FIELD_WIDTH: Pixels = px(90.);
 /// Zone width in logical pixels.
 pub(super) const ZONE_WIDTH: Pixels = px(260.);
 /// Space name width in logical pixels.
 pub(super) const SPACE_NAME_WIDTH: Pixels = px(240.);
-/// Agent card width in logical pixels.
-pub(super) const AGENT_CARD_WIDTH: Pixels = px(220.);
-/// Mode width in logical pixels.
-pub(super) const MODE_WIDTH: Pixels = px(200.);
 
 /// Width at which the task timeline can sit beside its supporting panel.
 pub(super) const TASK_TIMELINE_BASIS: Pixels = px(300.);

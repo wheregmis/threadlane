@@ -165,7 +165,7 @@ impl Desktop {
             |this, (space, created), _| match created {
                 Ok(agent) => {
                     this.state.report(Activity::Done(format!(
-                        "Created {} in {space}. Bind it to a project in the grid below.",
+                        "Created {} in {space}. Add it from a project’s Team tab.",
                         agent.name
                     )));
                     this.state.agent_created(&space, agent);

@@ -1,4 +1,4 @@
-//! An agent's edit view, opened from its card on the Agents screen: name,
+//! An agent's edit view, opened from its row on the Team screen: name,
 //! role, backends, a model per backend, and the instructions with a
 //! Markdown preview; beside it, where the agent is bound. "Delete agent…"
 //! asks for the typed name, as project deletion does.
@@ -8,18 +8,19 @@ use std::sync::Arc;
 use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::{InputState, Textarea};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::*;
 use threadlane_core::model::BackendKind;
-use threadlane_desktop::{Activity, AgentFields, BACKENDS, Tab, describe};
+use threadlane_desktop::{Activity, AgentEdit, AgentFields, BACKENDS, Tab, describe};
 
-use super::link;
 use super::project::mode_name;
-use crate::components::{button, card, field, meta, section};
+use crate::components::{button, card, field, meta, page_header, section};
 use crate::icons::AppIcon;
-use crate::tokens::{FIELD_RADIUS, FORM_WIDTH, MD, ROW_RADIUS, SM, TYPE_BODY};
+use crate::tokens::{FIELD_RADIUS, FORM_WIDTH, LG, MD, ROW_RADIUS, SM, TYPE_BODY, XS};
 use crate::{Desktop, Screen};
 
 /// Backend order and per-backend models, shared by the create and edit forms.
@@ -221,7 +222,7 @@ impl Desktop {
             }
             _ => None,
         };
-        let mut rows = v_flex().gap(SM);
+        let mut choices_row = h_flex().gap(SM).flex_wrap();
         for kind in BackendKind::ALL {
             let view = cx.entity().downgrade();
             let choices: Vec<_> = choices
@@ -239,10 +240,11 @@ impl Desktop {
                 })
                 .collect();
             let count = picked.iter().filter(|s| s.backend == *kind).count();
-            rows = rows.child(
+            choices_row = choices_row.child(
                 button(SharedString::from(format!(
                     "profile-skills-{editing}-{kind}"
                 )))
+                .small()
                 .outline()
                 .label(format!("{kind} skills ({count})"))
                 .disabled(choices.is_empty())
@@ -276,11 +278,11 @@ impl Desktop {
                 }),
             );
         }
-        if let Some(note) = note {
-            rows = rows.child(meta(note, cx));
-        }
-        // Lead runs have no native tools, so the hub leaves skills out of them.
-        rows.child(meta("Skills apply to task runs only, not lead runs.", cx))
+        v_flex()
+            .gap(XS)
+            .child(meta("Task skills", cx))
+            .child(choices_row)
+            .children(note.map(|note| meta(note, cx)))
     }
 
     /// Opens `agent`'s edit view and fills its fields.
@@ -307,6 +309,7 @@ impl Desktop {
         self.agent_edit_instructions.update(cx, |input, cx| {
             input.set_value(fields.instructions, window, cx);
         });
+        self.agent_edit_name.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -463,8 +466,7 @@ impl Desktop {
     }
 
     /// The open edit view, with the agent's bindings beside it.
-    pub(super) fn agent_edit_view(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let edit = self.state.agent_edit()?.clone();
+    pub(super) fn agent_edit_view(&self, edit: &AgentEdit, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
         let label = |text: &'static str| div().text_size(TYPE_BODY).text_color(muted).child(text);
         let backends = backend_picker(
@@ -500,7 +502,7 @@ impl Desktop {
             let text = self.agent_edit_instructions.read(cx).value().to_string();
             div()
                 .p(SM)
-                .min_h(px(240.))
+                .min_h_24()
                 .text_size(TYPE_BODY)
                 .bg(cx.theme().muted)
                 .rounded(ROW_RADIUS)
@@ -515,13 +517,16 @@ impl Desktop {
         } else {
             Textarea::new(&self.agent_edit_instructions)
                 .rounded(FIELD_RADIUS)
+                .aria_label("Agent instructions")
                 .into_any_element()
         };
 
-        let mut actions = h_flex()
+        let actions = h_flex()
             .gap(SM)
+            .flex_wrap()
             .child(
                 button("agent-edit-save")
+                    .small()
                     .primary()
                     .icon(AppIcon::Check)
                     .label("Save")
@@ -529,6 +534,8 @@ impl Desktop {
             )
             .child(
                 button("agent-edit-cancel")
+                    .small()
+                    .ghost()
                     .icon(AppIcon::X)
                     .label("Cancel")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -536,71 +543,123 @@ impl Desktop {
                         cx.notify();
                     })),
             );
-        if self.state.offers_agent_delete(&edit.space, &edit.agent) {
-            let (space, agent) = (edit.space.clone(), edit.agent.clone());
-            actions = actions.child(div().flex_1()).child(
+        let delete = self
+            .state
+            .offers_agent_delete(&edit.space, &edit.agent)
+            .then(|| {
+                let (space, agent) = (edit.space.clone(), edit.agent.clone());
                 button("agent-edit-delete")
-                    .danger()
+                    .small()
+                    .ghost()
                     .icon(AppIcon::Trash)
                     .label("Delete agent…")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.confirm_agent_deletion(space.clone(), agent.clone(), window, cx);
-                    })),
-            );
-        }
+                    }))
+            });
         let editor = card(cx)
-            .flex_1()
+            .w_full()
+            .flex_none()
             .max_w(FORM_WIDTH)
-            .child(section(format!("Edit {} in {}", edit.agent, edit.space)))
-            .child(field(&self.agent_edit_name))
-            .child(field(&self.agent_edit_role))
+            .child(
+                h_flex()
+                    .gap(MD)
+                    .flex_wrap()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_32()
+                            .gap(XS)
+                            .child(label("Name"))
+                            .child(field(&self.agent_edit_name)),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_32()
+                            .gap(XS)
+                            .child(label("Role"))
+                            .child(field(&self.agent_edit_role)),
+                    ),
+            )
             .child(backends)
             .child(self.skill_picker(true, cx))
             .child(
                 h_flex()
                     .justify_between()
                     .items_center()
-                    .child(label("Instructions, in Markdown"))
+                    .child(label("Instructions (Markdown)"))
                     .child(mode),
             )
             .child(instructions)
-            .child(meta(
-                "Changes apply from its next run; a run already going keeps what it started with.",
-                cx,
-            ))
-            .child(actions);
+            .child(meta("Changes apply from the next run.", cx));
 
-        let mut bound = v_flex().gap(SM).child(section("Bound in"));
+        let mut bound = v_flex().gap(SM).child(section("Project assignments"));
         let bindings = self.state.agent_bindings(&edit.space, &edit.agent);
         if bindings.is_empty() {
-            bound = bound.child(meta("No project yet: pick its mode in the grid below.", cx));
+            bound = bound.child(meta("Add this agent from a project’s Team tab.", cx));
         }
         for row in bindings {
-            let lead = if row.binding.is_lead { ", lead" } else { "" };
-            let text = format!("{}: {}{lead}", row.project, mode_name(row.binding.mode));
-            let (space, project) = (edit.space.clone(), row.project.clone());
+            let lead = if row.binding.is_lead { " · lead" } else { "" };
+            let mode = format!("{}{lead}", mode_name(row.binding.mode));
+            let (space, project) = (edit.space.clone(), row.project);
             bound = bound.child(
-                link(format!("agent-edit-binding-{}", row.project), text).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.go(
-                            Screen::Project {
-                                space: space.clone(),
-                                project: project.clone(),
-                                tab: Tab::Setup,
-                            },
-                            cx,
-                        );
-                    },
-                )),
+                h_flex()
+                    .gap(XS)
+                    .justify_between()
+                    .flex_wrap()
+                    .child(
+                        button(SharedString::from(format!("agent-edit-binding-{project}")))
+                            .small()
+                            .ghost()
+                            .label(project.clone())
+                            .icon(AppIcon::ChevronRight)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.go(
+                                    Screen::Project {
+                                        space: space.clone(),
+                                        project: project.clone(),
+                                        tab: Tab::Team,
+                                    },
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(meta(mode, cx)),
             );
         }
-        Some(
-            h_flex()
-                .gap(MD)
-                .items_start()
-                .flex_wrap()
-                .child(editor)
-                .child(card(cx).w(px(240.)).child(bound)),
-        )
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .gap(LG)
+            .child(page_header(
+                format!("Edit {}", edit.agent),
+                Some(meta(format!("{} / Team", edit.space), cx)),
+                Some(actions),
+            ))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_y_scrollbar()
+                    .id("agent-editor")
+                    .child(
+                        h_flex()
+                            .gap(MD)
+                            .items_start()
+                            .flex_wrap()
+                            .child(editor)
+                            .child(
+                                v_flex()
+                                    .w_56()
+                                    .max_w_full()
+                                    .gap(LG)
+                                    .child(bound)
+                                    .children(delete.map(|button| h_flex().child(button))),
+                            ),
+                    ),
+            )
     }
 }
