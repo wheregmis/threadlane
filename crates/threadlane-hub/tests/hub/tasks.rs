@@ -1419,7 +1419,11 @@ async fn list_tasks_lists_unfinished_and_recent_tasks_in_pages_and_one_in_full()
         .await
         .unwrap();
     }
-    for n in 1..=13 {
+    // T-0001 finishes last, so it is among the recent ones though created first.
+    for n in (2..=13).chain([1]) {
+        if n == 1 {
+            hub.clock.advance(std::time::Duration::from_secs(60));
+        }
         call(
             &hub,
             &lease,
@@ -1442,9 +1446,13 @@ async fn list_tasks_lists_unfinished_and_recent_tasks_in_pages_and_one_in_full()
             .collect()
     };
 
-    // The default: the 10 most recent finished tasks and the unfinished one.
+    // The default: the 10 most recently finished tasks and the unfinished one.
     let listed = list("l-1", json!({})).await.unwrap();
-    let expected: Vec<String> = (4..=14).map(|n| format!("T-{n:04}")).collect();
+    let expected: Vec<String> = [1]
+        .into_iter()
+        .chain(5..=14)
+        .map(|n| format!("T-{n:04}"))
+        .collect();
     assert_eq!(ids(&listed), expected);
     assert_eq!(listed["total"], 11);
     assert_eq!(listed.get("next_offset"), None);

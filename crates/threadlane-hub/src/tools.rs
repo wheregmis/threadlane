@@ -436,24 +436,35 @@ impl HubTools {
             .tasks(context.project_id)
             .await
             .map_err(tool_error)?;
-        let finished = tasks
+        let finished: Vec<&Task> = tasks
             .iter()
             .filter(|task| task.status.is_terminal())
-            .count();
+            .collect();
         let hidden = if all {
             0
         } else {
-            finished.saturating_sub(RECENT_FINISHED)
+            finished.len().saturating_sub(RECENT_FINISHED)
         };
-        // The oldest finished tasks are the ones hidden by default.
-        let mut skipped = 0;
+        // The finished tasks that ended least recently are the ones hidden by
+        // default; one with no recorded end counts as ending when created.
+        let ids: Vec<TaskId> = finished.iter().map(|task| task.id).collect();
+        let ended = self
+            .db
+            .task_completion_times(&ids)
+            .await
+            .map_err(tool_error)?;
+        let mut by_end = finished;
+        by_end.sort_by_key(|task| {
+            (
+                ended.get(&task.id).copied().unwrap_or(task.created_at),
+                task.id,
+            )
+        });
+        let hide: std::collections::HashSet<TaskId> =
+            by_end.iter().take(hidden).map(|task| task.id).collect();
         let listed: Vec<Json> = tasks
             .iter()
-            .filter(|task| {
-                let hide = task.status.is_terminal() && skipped < hidden;
-                skipped += usize::from(hide);
-                !hide
-            })
+            .filter(|task| !hide.contains(&task.id))
             .map(|task| {
                 let mut entry = task_line(task);
                 entry["agent"] = agent(task);
