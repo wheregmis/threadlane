@@ -1241,6 +1241,7 @@ pub struct AppState {
     agent_form: AgentForm,
     /// The agent whose edit view is open.
     agent_edit: Option<AgentEdit>,
+    agent_saves: HashSet<InSpace<String>>,
     /// The picks of the "+ New task" form.
     task_form: TaskForm,
     /// The project whose "+ Add repository" form is open.
