@@ -399,7 +399,7 @@ impl Desktop {
                         from = Some(project.clone());
                     }
                     let body = (!text.trim().is_empty()).then(|| {
-                        self.prose(entry_id.clone(), &space, entry.project, text.to_owned(), cx)
+                        self.prose(entry_id.clone(), &space, entry.repository_project(), text.to_owned(), cx)
                             .limit(ProseLimit::Result)
                             .into_any_element()
                     });
@@ -416,7 +416,7 @@ impl Desktop {
                         Some(digest) => self.digest_entry(&space, digest, cx).into_any_element(),
                         None => {
                             let seq = item.item.seq;
-                            self.prose(entry_id.clone(), &space, entry.project, item.text(), cx)
+                            self.prose(entry_id.clone(), &space, entry.repository_project(), item.text(), cx)
                                 .result(seq, state.result_expanded(&space, seq))
                                 .into_any_element()
                         }

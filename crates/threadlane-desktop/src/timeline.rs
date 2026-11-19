@@ -7,7 +7,7 @@ use threadlane_client::{ClientCore, ClientError, SpaceFeedItem};
 use threadlane_core::attachment::ImageAttachment;
 use threadlane_core::client::ConversationEntry;
 use threadlane_core::ids::EventId;
-use threadlane_core::model::OutboxKind;
+use threadlane_core::model::{OutboxKind, Repository};
 use threadlane_core::time::Timestamp;
 
 use crate::{AppState, Author};
@@ -80,38 +80,74 @@ impl TimelineEntry<'_> {
             Spoken::Delivered(item) => item.text(),
         }
     }
+
+    /// The project whose repository `#N` references in this entry resolve against.
+    #[must_use]
+    pub fn repository_project(&self) -> Option<&str> {
+        match self.spoken {
+            Spoken::Said(_, _, Author::ProjectLead(project)) => Some(project.as_str()),
+            _ => self.project,
+        }
+    }
 }
 
-/// The newest page of each conversation Home merges. Made by
-/// [`load_timeline`], applied with [`AppState::apply_timeline`].
+#[derive(Debug)]
+struct TimelinePage {
+    space: String,
+    project: String,
+    entries: Result<Vec<ConversationEntry>, ClientError>,
+    repositories: Result<Vec<Repository>, ClientError>,
+}
+
+/// The newest page of each conversation Home merges, along with each
+/// project's repositories for `#N` prose links. Made by [`load_timeline`],
+/// applied with [`AppState::apply_timeline`].
 #[derive(Debug)]
 pub struct TimelineLoad {
-    pages: Vec<(String, String, Result<Vec<ConversationEntry>, ClientError>)>,
+    pages: Vec<TimelinePage>,
 }
 
-/// Asks for the newest entries of each `(space, project)` conversation.
+/// Asks for the newest entries and repositories of each `(space, project)`
+/// conversation.
 pub async fn load_timeline(core: &ClientCore, projects: Vec<(String, String)>) -> TimelineLoad {
     let mut pages = Vec::with_capacity(projects.len());
     for (space, project) in projects {
-        let page = core
-            .conversation(Some(&space), Some(&project), None, NEWEST)
-            .await;
-        pages.push((space, project, page));
+        let (entries, repositories) = tokio::join!(
+            core.conversation(Some(&space), Some(&project), None, NEWEST),
+            core.repositories(Some(&space), Some(&project)),
+        );
+        pages.push(TimelinePage {
+            space,
+            project,
+            entries,
+            repositories,
+        });
     }
     TimelineLoad { pages }
 }
 
 impl AppState {
     /// Takes the newest page of each conversation into the same history the
-    /// project screen shows, so an entry is never shown twice.
+    /// project screen shows, so an entry is never shown twice, and records
+    /// each project's repositories for `#N` links.
     // shortcut: a conversation that cannot be listed keeps what was shown,
     // with no line saying so; add a gap line if hubs refuse it in practice.
     pub fn apply_timeline(&mut self, load: TimelineLoad) {
-        for (space, project, page) in load.pages {
-            if let Ok(entries) = page
-                && !self.project_absent(&space, &project)
-            {
+        for TimelinePage {
+            space,
+            project,
+            entries,
+            repositories,
+        } in load.pages
+        {
+            if self.project_absent(&space, &project) {
+                continue;
+            }
+            if let Ok(entries) = entries {
                 self.take_history(&space, &project, entries, true, NEWEST);
+            }
+            if let Ok(repositories) = repositories {
+                self.apply_repositories(&space, &project, Ok(repositories));
             }
         }
     }
