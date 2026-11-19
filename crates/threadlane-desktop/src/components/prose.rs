@@ -238,6 +238,7 @@ impl RenderOnce for Prose {
                 button("toggle-prose")
                     .ghost()
                     .small()
+                    .self_start()
                     .tab_stop(true)
                     .label(label)
                     .on_click(move |_, _, cx| {

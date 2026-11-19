@@ -100,7 +100,9 @@ pub use tasks::{
     chips, merge_state, running_elapsed, status_label, task_header, timeline, usage, work_elapsed,
     work_started,
 };
-pub use timeline::{Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, load_timeline};
+pub use timeline::{
+    Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, is_quiet_update, load_timeline,
+};
 
 /// How many of the newest delivered items Home asks each hub for.
 const RECENT: u32 = 50;
@@ -1192,6 +1194,10 @@ pub struct AppState {
     topology_project: HashMap<String, String>,
     /// Currently selected `(space, agent)` on the Team Topology canvas for inline mode dialing.
     topology_selected_agent: Option<(String, String)>,
+    /// Inbox disclosure toggles to keep Inbox calm and scannable.
+    inbox_show_all_failures: bool,
+    inbox_show_all_recent: bool,
+    inbox_show_quiet_updates: bool,
     /// Where the Home composer sends: space and project.
     target_space: Option<String>,
     last_targets: BTreeMap<String, String>,
@@ -1448,6 +1454,33 @@ impl AppState {
         } else {
             self.topology_selected_agent = Some(key);
         }
+    }
+
+    #[must_use]
+    pub fn inbox_show_all_failures(&self) -> bool {
+        self.inbox_show_all_failures
+    }
+
+    pub fn toggle_inbox_all_failures(&mut self) {
+        self.inbox_show_all_failures = !self.inbox_show_all_failures;
+    }
+
+    #[must_use]
+    pub fn inbox_show_all_recent(&self) -> bool {
+        self.inbox_show_all_recent
+    }
+
+    pub fn toggle_inbox_all_recent(&mut self) {
+        self.inbox_show_all_recent = !self.inbox_show_all_recent;
+    }
+
+    #[must_use]
+    pub fn inbox_show_quiet_updates(&self) -> bool {
+        self.inbox_show_quiet_updates
+    }
+
+    pub fn toggle_inbox_quiet_updates(&mut self) {
+        self.inbox_show_quiet_updates = !self.inbox_show_quiet_updates;
     }
 
     fn shown(&self, space: &str) -> bool {

@@ -6981,3 +6981,17 @@ async fn agent_topology_builds_three_tier_org_and_lights_up_active_delegations()
     state.toggle_topology_agent("work", "Engineer");
     assert_eq!(state.topology_selected_agent(), None);
 }
+
+#[test]
+fn quiet_update_detector_flags_internal_no_op_messages_only() {
+    assert!(is_quiet_update(
+        "I didn't send a message. T-0066 found no issues."
+    ));
+    assert!(is_quiet_update(
+        "I didn’t message the user. Nothing new to tell them."
+    ));
+    assert!(is_quiet_update("No message sent. Waiting on CI."));
+    assert!(!is_quiet_update(
+        "I've queued T-0069 for the Backend Developer."
+    ));
+}
