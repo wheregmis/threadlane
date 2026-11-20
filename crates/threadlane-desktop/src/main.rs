@@ -1195,6 +1195,7 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.state.clear_memory_inspection();
             self.work.leave();
             self.inbox = screens::Inbox::default();
             self.project_load = None;
