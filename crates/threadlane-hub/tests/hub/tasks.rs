@@ -143,6 +143,57 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
             .await
             .is_err()
     );
+    // The reviewer reads the task's memory but cannot change it (#610).
+    assert!(review.tools.iter().any(|tool| tool.name == MEMORY_VIEW));
+    assert!(!review.tools.iter().any(|tool| tool.name == MEMORY_CREATE));
+    let progress = format!("project/tasks/{id}.md");
+    let viewed = call(
+        &hub,
+        &lease,
+        &review,
+        "view",
+        MEMORY_VIEW,
+        json!({"path": progress}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(viewed["content"], format!("# {id}\nDone."));
+    let listed = call(
+        &hub,
+        &lease,
+        &review,
+        "list",
+        MEMORY_VIEW,
+        json!({"path": "project/tasks"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        listed["files"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(progress))
+    );
+    for (tool, arguments) in [
+        (
+            MEMORY_CREATE,
+            json!({"path": "project/notes/x.md", "content": "x"}),
+        ),
+        (
+            MEMORY_EDIT,
+            json!({"path": progress, "old_text": "Done.", "new_text": "No."}),
+        ),
+        (MEMORY_DELETE, json!({"path": progress})),
+        (
+            MEMORY_RENAME,
+            json!({"from": progress, "to": "project/tasks/y.md"}),
+        ),
+    ] {
+        assert!(matches!(
+            call(&hub, &lease, &review, tool, tool, arguments).await,
+            Err(ToolError::Blocked(_))
+        ));
+    }
     call(
         &hub,
         &lease,
