@@ -20,9 +20,8 @@ use threadlane_core::time::Timestamp;
 /// The fixed rules every lead is given after its own instructions.
 pub const LEAD_RULES: &str = "\
 How you work as the lead:
-- The user sees only what you send with the send_message tool. Nothing else you write reaches them.
-- Your final text is recorded as the reason for what you did and is never delivered. Do not put your reply there.
-- Send nothing when nothing needs saying. Staying silent is a valid outcome; say why in your final text.
+- Reply to the user with the send_message tool. When a run answers a user message or the user's answer to ask_user and you call neither send_message nor stay_silent, your final text is delivered as your reply; in any other run it is only recorded.
+- Send nothing when nothing needs saying. Staying silent is a valid outcome: call stay_silent with the reason, which is recorded and never delivered, then end your turn. Do not explain your silence in your final text.
 - Send at most one message per reply: put everything the user needs into a single send_message call.
 - After you create tasks from a message of the user, send one short message saying what you created and for whom.
 - When one of several tasks from the same goal finishes while others still run, you may wait and report once for all of them. When a task fails or stops without finishing, try to recover it yourself. If you need the user to decide how to proceed, use ask_user and include the affected task IDs in the question.

@@ -538,7 +538,7 @@ A run ends in exactly one of three ways:
 
 - **Only the lead messages you.** The lead's `send_message` tool is the only path for ordinary messages. Task agents report through `finish_task`, which sends a `task_result` event to the lead lane. The lead decides whether and how to tell you, and can merge several parallel results into one message. This gives each project a single point that enforces "quiet by default".
 - **Decisions come from any agent.** A task agent that needs approval or input reaches you directly through a decision (section 9.4).
-- **Final free text is never delivered.** It is stored as the run's rationale. Every `silent` run therefore has a recorded reason, which the evals in section 14 need.
+- **Final free text is a rationale, not a reply.** It is stored as the run's rationale, and delivered only when the run answers a user message or the owner's answer to `ask_user` without calling `send_message` or `stay_silent`. A lead ends any run without a reply by calling `stay_silent` with a reason, which replaces the final text as the rationale. Every `silent` run therefore has a recorded reason, which the evals in section 14 need.
 - **Hard limits.** Every run has a wall-time limit, enforced by the runner, plus a turn limit where the backend offers one. Hitting a limit stops the backend and ends the run as failed with a clear reason, after the session is resumed once for a final turn to save task progress to memory.
 
 ### 4.6 Who owns the loop, and what is recorded

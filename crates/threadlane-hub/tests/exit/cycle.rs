@@ -19,7 +19,8 @@ use threadlane_hub::{
 };
 use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, HubSettings, LEAD_NAME, LEAD_ROLE, LIST_TASKS, MEMORY_CREATE,
-    MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW, OFF_REASON, SEND_MESSAGE, UPDATE_TASK,
+    MEMORY_DELETE, MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW, OFF_REASON, SEND_MESSAGE, STAY_SILENT,
+    UPDATE_TASK,
 };
 use threadlane_testkit::{CrashPlan, Script, SessionOutcome};
 
@@ -69,6 +70,7 @@ async fn a_message_produces_exactly_one_reply() {
         run.tools,
         [
             SEND_MESSAGE,
+            STAY_SILENT,
             CREATE_TASK,
             UPDATE_TASK,
             CANCEL_TASK,
