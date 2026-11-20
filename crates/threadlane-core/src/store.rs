@@ -349,10 +349,11 @@ pub struct TaskUpdate<'a> {
     pub wake: Option<TaskWake<'a>>,
 }
 
-/// An instruction from the project lead to queue in the task's lane.
+/// A message to queue in the task's lane, from the project lead or the user.
 #[derive(Debug)]
 pub struct TaskWake<'a> {
     pub call_key: String,
+    /// The whole text the task's agent reads.
     pub instruction: &'a str,
     pub requested: bool,
     pub at: Timestamp,
@@ -391,9 +392,10 @@ pub trait TaskStore: Send + Sync {
     async fn left_unwoken(&self, lane_id: LaneId) -> StoreResult<bool>;
     async fn tasks(&self, project_id: ProjectId) -> StoreResult<Vec<Task>>;
     /// Edits a task and queues its wake instruction in the same transaction.
+    /// `lease` is the editing run's, `None` when the user edits it.
     async fn update_task(
         &self,
-        lease: &Lease,
+        lease: Option<&Lease>,
         id: TaskId,
         update: TaskUpdate<'_>,
     ) -> StoreResult<Task>;

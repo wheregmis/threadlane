@@ -54,8 +54,8 @@ pub use agent_edit::{AgentBinding, AgentEdit, AgentFields};
 pub use clock::{When, duration, format_count, parse_iso_utc};
 pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
 pub use control::{
-    AgentDraft, AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository,
-    can_confirm_deletion, copy_agent, same_remote,
+    AgentDraft, AgentForm, BACKENDS, Publication, Recorded, RecordedRow, TaskControl, TaskForm,
+    add_repository, can_confirm_deletion, copy_agent, same_remote,
 };
 pub use conversation::{
     Digest, Line, belongs_in_conversation, follow_latest, message_limit, newest_message,

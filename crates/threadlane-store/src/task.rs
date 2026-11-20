@@ -1191,14 +1191,14 @@ impl TaskStore for HubDb {
 
     async fn update_task(
         &self,
-        lease: &Lease,
+        lease: Option<&Lease>,
         id: TaskId,
         update: TaskUpdate<'_>,
     ) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
         let mut task = existing_task(conn, id).await?;
-        check_run_lease(conn, Some(lease), task.project_id).await?;
+        check_run_lease(conn, lease, task.project_id).await?;
         if task.status.is_terminal() {
             return Err(StoreError::Conflict(format!(
                 "task {id} is {}; it can no longer change",
@@ -1244,7 +1244,7 @@ impl TaskStore for HubDb {
                     source: TASK_WAKE_SOURCE.to_owned(),
                     source_event_id: format!("{id}:{}", wake.call_key),
                     kind: EventKind::System,
-                    payload: json!({"text": format!("The project lead asks you to resume: {}", wake.instruction)}),
+                    payload: json!({"text": wake.instruction}),
                     trust: Trust::System,
                     requested: task.origin.is_requested() || wake.requested,
                     session_ref: None,

@@ -501,3 +501,36 @@ async fn a_published_task_can_push_again_after_the_base_moves() {
     s.checkpoint(T1).await;
     git(&path, &["push", "origin", "HEAD"]);
 }
+
+#[tokio::test]
+async fn a_task_given_a_repository_is_told_where_its_earlier_work_is() {
+    let h = Harness::new();
+    let earlier = h.config.lanes_dir.join(LANE.to_string());
+    std::fs::create_dir_all(&earlier).unwrap();
+    std::fs::write(earlier.join("work.txt"), "done before the attach").unwrap();
+    let mut assignment = assignment(11);
+    assignment.lane_kind = LaneKind::Task;
+    assignment.task_id = Some(T1);
+    let s = setup();
+    assignment.repositories = vec![s.repository.clone()];
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment)));
+    h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
+    h.backend.scripted.push(
+        Script::new()
+            .call("progress", "memory_create", json!({}))
+            .finish("Moved"),
+    );
+    h.runner.work_once().await.unwrap();
+    let runs = h.backend.scripted.received();
+    assert_ne!(runs[0].working_dir, earlier);
+    assert!(
+        runs[0].prompt.contains(&earlier.display().to_string()),
+        "{}",
+        runs[0].prompt
+    );
+    assert!(
+        earlier.join("work.txt").is_file(),
+        "the earlier work is kept"
+    );
+}

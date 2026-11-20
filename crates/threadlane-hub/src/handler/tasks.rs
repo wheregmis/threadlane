@@ -5,7 +5,7 @@
 use threadlane_core::client::{ApiError, TaskReply, TaskRequest};
 use threadlane_core::model::{Mode, NewTask, TaskOrigin, TaskStatus};
 use threadlane_core::runtime::{WakeTarget, Waker as _};
-use threadlane_core::store::{OrgStore, TaskStore};
+use threadlane_core::store::{OrgStore, TaskStore, TaskUpdate, TaskWake};
 
 use super::{ClientApi, active_project, project_error, required};
 use crate::error::api_error;
@@ -317,6 +317,78 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                 .map_err(api_error)?;
             inner.wake.wake(WakeTarget::Lane(retried.lane_id));
             Ok(TaskReply::Task { task: retried })
+        }
+        TaskRequest::AttachRepositories {
+            task: id,
+            repositories,
+        } => {
+            let task = db
+                .task(id)
+                .await
+                .map_err(api_error)?
+                .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+            if task.status.is_terminal() {
+                return Err(ApiError::Invalid(format!(
+                    "task {id} is {}; only a task that has not ended can take a repository",
+                    task.status
+                )));
+            }
+            let registered = db.repositories(task.project_id).await.map_err(api_error)?;
+            let mut added = Vec::new();
+            for name in &repositories {
+                let repository = registered
+                    .iter()
+                    .find(|repository| repository.name == name.trim())
+                    .ok_or_else(|| {
+                        ApiError::Invalid(format!("task {id}'s project has no repository {name:?}"))
+                    })?;
+                if !task.repositories.contains(&repository.id) && !added.contains(repository) {
+                    added.push(repository.clone());
+                }
+            }
+            if added.is_empty() {
+                return Err(ApiError::Invalid(format!(
+                    "task {id} already has every repository named"
+                )));
+            }
+            let names = added
+                .iter()
+                .map(|repository| repository.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let instruction = format!(
+                "The user attached {names} to this task so its work can be published. \
+                 Your progress file is kept, and so is your earlier working directory: \
+                 your next run starts in a worktree of the attached repository and is told \
+                 where the earlier work is. Bring your completed work into the worktree, \
+                 then publish as the task asks."
+            );
+            let ids: Vec<_> = added.iter().map(|repository| repository.id).collect();
+            let updated = db
+                .update_task(
+                    None,
+                    id,
+                    TaskUpdate {
+                        repositories: &ids,
+                        wake: Some(TaskWake {
+                            call_key: format!(
+                                "attach:{}",
+                                ids.iter()
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ),
+                            instruction: &instruction,
+                            requested: true,
+                            at: inner.clock.now(),
+                        }),
+                        ..TaskUpdate::default()
+                    },
+                )
+                .await
+                .map_err(api_error)?;
+            inner.wake.wake(WakeTarget::Lane(updated.lane_id));
+            Ok(TaskReply::Task { task: updated })
         }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }

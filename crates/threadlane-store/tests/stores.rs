@@ -1534,7 +1534,7 @@ async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
 
     let updated = hub
         .update_task(
-            &lead,
+            Some(&lead),
             created.id,
             TaskUpdate {
                 title: Some("drop it"),
@@ -1561,7 +1561,7 @@ async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
 
     let changed = hub
         .update_task(
-            &lead,
+            Some(&lead),
             created.id,
             TaskUpdate {
                 title: Some("again"),
@@ -1601,7 +1601,7 @@ async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
     );
     let stale = hub
         .update_task(
-            &lead,
+            Some(&lead),
             fresh.id,
             TaskUpdate {
                 title: Some("x"),

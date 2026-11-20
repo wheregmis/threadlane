@@ -130,6 +130,16 @@ fn toggle<T: PartialEq>(picked: &mut Vec<T>, value: T) {
     }
 }
 
+/// Whether a task's work can be published, and the registered repositories
+/// you can attach to it so it can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Publication {
+    /// `Can publish to app`, or why it cannot.
+    pub line: String,
+    /// Registered repositories it lacks, while it has not ended.
+    pub attachable: Vec<String>,
+}
+
 /// What the task screen offers to stop a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskControl {
@@ -488,6 +498,48 @@ impl AppState {
         if self.task_form(space, project).is_some() {
             self.task_form = TaskForm::default();
         }
+    }
+
+    /// Whether task `task` of `space` can publish its work, once loaded.
+    #[must_use]
+    pub fn task_publication(&self, space: &str, task: TaskId) -> Option<Publication> {
+        let detail = self.task(space, task)?;
+        let task = &detail.summary.task;
+        let project = &detail.summary.project;
+        let known = self
+            .project_gap(space, project, Part::Repositories)
+            .is_none();
+        let registered = self
+            .project(space, project)
+            .map(|view| view.repositories.as_slice())
+            .unwrap_or_default();
+        let (attached, missing): (Vec<_>, Vec<_>) = registered
+            .iter()
+            .partition(|repository| task.repositories.contains(&repository.id));
+        let ended = task.status.is_terminal();
+        let line = if !task.repositories.is_empty() {
+            let names: Vec<_> = attached.iter().map(|r| r.name.as_str()).collect();
+            if names.is_empty() {
+                "Can publish".to_owned()
+            } else {
+                format!("Can publish to {}", names.join(", "))
+            }
+        } else if ended {
+            "Cannot publish: no repository was attached before it ended".to_owned()
+        } else if known && registered.is_empty() {
+            "Cannot publish: no repository is attached, and its project has none registered"
+                .to_owned()
+        } else {
+            "Cannot publish: no repository is attached".to_owned()
+        };
+        Some(Publication {
+            line,
+            attachable: if ended {
+                Vec::new()
+            } else {
+                missing.into_iter().map(|r| r.name.clone()).collect()
+            },
+        })
     }
 
     /// What the task screen offers to stop task `task` of `space`.
