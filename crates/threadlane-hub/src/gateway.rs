@@ -312,6 +312,25 @@ impl LocalLink {
             }
             crate::publish::proposal(&inner.db, lane, tool, &args).await?
         };
+        // Read here, once the call is recorded, so a repeated call replays
+        // this outcome instead of reading GitHub again.
+        let mut asked = asked;
+        if tool == crate::ASSIGN_ISSUE && !matches!(asked, Asked::Dream) {
+            match crate::publish::issue_claim(&inner.db, inner.github.as_deref(), lane, arguments)
+                .await?
+            {
+                crate::publish::Claim::Free => {}
+                crate::publish::Claim::Yours(message) => return Ok(json!({ "result": message })),
+                // No standing rule allows taking an issue someone else holds.
+                crate::publish::Claim::Held(question) => {
+                    proposal.question = question;
+                    asked = Asked::You {
+                        offers_rule: false,
+                        proposal: false,
+                    };
+                }
+            }
+        }
         if matches!(asked, Asked::Dream) {
             let details = proposal
                 .context

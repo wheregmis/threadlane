@@ -265,6 +265,104 @@ fn gh_args(a: &Json) -> Result<Vec<String>, ToolError> {
     Ok(args)
 }
 
+/// `owner/name` of a remote on github.com, the host the GitHub source reads.
+fn github_repository(remote: &str) -> Option<String> {
+    threadlane_core::github::normalize_remote(remote)?
+        .strip_prefix("github.com/")
+        .map(str::to_owned)
+}
+
+/// Who holds the issue an `assign_issue` call names.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Claim {
+    /// Nobody else: the gate decides as for any call.
+    Free,
+    /// Already assigned to you alone; nothing to do.
+    Yours(String),
+    /// Someone else holds it, or GitHub could not say: you decide, always,
+    /// on this question.
+    Held(String),
+}
+
+/// Reads who holds the issue of a validated `assign_issue` call. A pull
+/// request or a closed issue is refused; a failed read is [`Claim::Held`],
+/// never free.
+pub(crate) async fn issue_claim(
+    db: &HubDb,
+    github: Option<&dyn threadlane_core::github::GithubSource>,
+    lane: &Lane,
+    arguments: &Json,
+) -> Result<Claim, ToolError> {
+    let name = arguments["repository"].as_str().unwrap_or_default();
+    let number = arguments["number"].as_u64().unwrap_or_default();
+    let full_name = db
+        .repositories(lane.project_id)
+        .await
+        .map_err(tool_error)?
+        .into_iter()
+        .find(|repository| repository.name == name)
+        .and_then(|repository| github_repository(&repository.remote_url))
+        .ok_or_else(|| invalid("the registered remote is not a GitHub repository"))?;
+    let read = match github {
+        Some(github) => github.issue_claim(&full_name, number).await,
+        None => Err(threadlane_core::github::GithubError(
+            "this hub does not read GitHub".to_owned(),
+        )),
+    };
+    let claim = match read {
+        Ok(claim) => claim,
+        Err(error) => {
+            return Ok(Claim::Held(format!(
+                "Could not check who holds issue #{number} in {name} ({error}). \
+                 Assign it to you anyway?"
+            )));
+        }
+    };
+    if claim.is_pull_request {
+        return Err(invalid(&format!(
+            "#{number} is a pull request; assign_issue assigns issues only"
+        )));
+    }
+    if !claim.open {
+        return Err(invalid(&format!("issue #{number} in {name} is closed")));
+    }
+    let other = |login: &String| !login.eq_ignore_ascii_case(&claim.viewer);
+    let assigned: Vec<&str> = claim
+        .assignees
+        .iter()
+        .filter(|login| other(login))
+        .map(String::as_str)
+        .collect();
+    let pulls: Vec<String> = claim
+        .open_pull_requests
+        .iter()
+        .filter(|(_, author)| other(author))
+        .map(|(pull, author)| format!("#{pull} by {author}"))
+        .collect();
+    let mut held = Vec::new();
+    if !assigned.is_empty() {
+        held.push(format!("is assigned to {}", assigned.join(", ")));
+    }
+    if !pulls.is_empty() {
+        let noun = if pulls.len() == 1 {
+            "pull request"
+        } else {
+            "pull requests"
+        };
+        held.push(format!("has open {noun} {}", pulls.join(", ")));
+    }
+    Ok(if !held.is_empty() {
+        Claim::Held(format!(
+            "Issue #{number} in {name} {}. Take it anyway?",
+            held.join(" and ")
+        ))
+    } else if claim.assignees.is_empty() {
+        Claim::Free
+    } else {
+        Claim::Yours(format!("issue #{number} is already assigned to you"))
+    })
+}
+
 /// Parses the arguments again before handing the stored call to the runner.
 pub(crate) fn repository_action(
     tool: &str,
@@ -496,6 +594,9 @@ pub(crate) async fn proposal(
             | ASSIGN_ISSUE
     ) {
         let action = repository_action(tool, arguments)?;
+        if tool == ASSIGN_ISSUE && github_repository(&repository.remote_url).is_none() {
+            return Err(invalid("the registered remote is not a GitHub repository"));
+        }
         // `owner/repo#N` links to the right repository in a multi-repository project.
         let slug = threadlane_core::github::normalize_remote(&repository.remote_url)
             .and_then(|remote| remote.strip_prefix("github.com/").map(str::to_owned))

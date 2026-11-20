@@ -112,6 +112,21 @@ pub struct PullTarget {
     pub number: Option<u64>,
 }
 
+/// Who holds an issue, as `assign_issue` checks it before asking.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueClaim {
+    /// The login `gh` reads as.
+    pub viewer: String,
+    /// The number names a pull request, not an issue.
+    pub is_pull_request: bool,
+    /// The issue is open.
+    pub open: bool,
+    /// The logins it is assigned to.
+    pub assignees: Vec<String>,
+    /// Open pull requests that reference it, as `(number, author login)`.
+    pub open_pull_requests: Vec<(u64, String)>,
+}
+
 /// Why a call to GitHub failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("github: {0}")]
@@ -144,6 +159,12 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
     ) -> Result<(), GithubError> {
         items.push(notification.clone());
         Ok(())
+    }
+
+    /// Who holds issue `number` of `repository` (`owner/name`).
+    async fn issue_claim(&self, repository: &str, number: u64) -> Result<IssueClaim, GithubError> {
+        let _ = (repository, number);
+        Err(GithubError("this source cannot read issues".to_owned()))
     }
 }
 

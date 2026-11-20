@@ -71,6 +71,10 @@ Before the decision on `assign_issue` is made, the hub reads the issue.
   - **GitHub cannot be read:** treated as held, with the reason in the
     question. Never assume free.
 - `TASK_RULES`: when `assign_issue` is declined, do no work on the issue.
+- As built: the read happens once the call is recorded, inside the gateway's
+  `ask`, so a repeated call replays its first outcome. Only github.com remotes
+  qualify; a number that is a pull request is refused like a closed issue.
+  The question names the pull request's author too (`#12 by bob`).
 
 ## PR 3: draft pull request early
 

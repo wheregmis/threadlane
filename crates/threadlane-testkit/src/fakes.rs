@@ -12,7 +12,9 @@ use threadlane_core::adapters::{
     SourceBatch, SourceError, SourceEvent, Workspace, WorkspaceError, WorkspaceSpec,
 };
 use threadlane_core::forge::{ApprovedBranch, Forge, ForgeError, PullRequestUpdate};
-use threadlane_core::github::{Feed, GithubError, GithubItem, GithubSource, PullTarget};
+use threadlane_core::github::{
+    Feed, GithubError, GithubItem, GithubSource, IssueClaim, PullTarget,
+};
 use threadlane_core::model::{OutboxMessage, Repository};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::tools::{ToolContext, ToolDefinition, ToolEndpoint, ToolError, ToolRegistry};
@@ -487,6 +489,10 @@ pub enum GithubCall {
         target: PullTarget,
         since: Option<String>,
     },
+    IssueClaim {
+        repository: String,
+        number: u64,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -500,6 +506,8 @@ struct GithubState {
     poll_interval: Option<std::time::Duration>,
     /// Notification id, details available, and whether the lookup succeeded.
     activity: Vec<(String, Vec<GithubItem>, bool)>,
+    /// What [`GithubSource::issue_claim`] answers, by `(repository, number)`.
+    claims: Vec<(String, u64, Result<IssueClaim, String>)>,
 }
 
 /// A [`GithubSource`] that touches no network. It records every call, keeps
@@ -539,6 +547,14 @@ impl FakeGithub {
         lock(&self.state)
             .activity
             .push((id.to_owned(), partial, false));
+    }
+
+    /// What [`GithubSource::issue_claim`] answers for issue `number` of
+    /// `repository`: the claim, or the error. Unscripted issues fail.
+    pub fn set_claim(&self, repository: &str, number: u64, claim: Result<IssueClaim, String>) {
+        lock(&self.state)
+            .claims
+            .push((repository.to_owned(), number, claim));
     }
 
     /// What the feed answers as the interval it asks for.
@@ -622,5 +638,22 @@ impl GithubSource for FakeGithub {
             items.push(notification.clone());
         }
         Ok(())
+    }
+
+    async fn issue_claim(&self, repository: &str, number: u64) -> Result<IssueClaim, GithubError> {
+        let mut state = lock(&self.state);
+        state.calls.push(GithubCall::IssueClaim {
+            repository: repository.to_owned(),
+            number,
+        });
+        state
+            .claims
+            .iter()
+            .rev()
+            .find(|(r, n, _)| r == repository && *n == number)
+            .map_or_else(
+                || Err(GithubError(format!("no claim for {repository}#{number}"))),
+                |(_, _, claim)| claim.clone().map_err(GithubError),
+            )
     }
 }
