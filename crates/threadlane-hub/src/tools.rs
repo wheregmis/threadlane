@@ -636,44 +636,21 @@ impl HubTools {
             }
             result[MERGE_CHECKS] = merge.clone();
         }
-        // A named Reviewer must exist. With none named, the project's own
-        // agent of role "reviewer" reviews, if it has one that is not off.
-        let agents = self.db.agents().await.map_err(tool_error)?;
-        let reviewer = match &self.reviewer {
-            Some(name) => Some(
-                agents
-                    .into_iter()
-                    .find(|agent| agent.name == *name)
-                    .ok_or_else(|| {
-                        ToolError::Blocked(format!("Space Reviewer {name:?} is unavailable"))
-                    })?,
-            ),
-            None => {
-                let bindings = self
-                    .db
-                    .bindings(context.project_id)
-                    .await
-                    .map_err(tool_error)?;
-                agents.into_iter().find(|agent| {
-                    agent.role.eq_ignore_ascii_case("reviewer")
-                        && bindings.iter().any(|binding| {
-                            binding.agent_id == agent.id && binding.mode != Mode::Off
-                        })
-                })
-            }
-        };
-        if let (Some(reviewer), Some(task_id)) = (reviewer, context.task_id) {
+        if result.get("pr_verdict").is_none()
+            && let Some(task_id) = context.task_id
+            && let Some(reviewer) = self.implementation_reviewer(context.project_id).await?
+        {
             let task = self
                 .project_task(context, &json!(task_id.to_string()))
                 .await?;
             // The Reviewer cannot review its own task: that finishes unreviewed.
-            if reviewer.id != task.agent_id {
+            if reviewer != task.agent_id {
                 let revisions = self.review_revisions(&task, &result).await?;
                 self.db
                     .submit_for_review(
                         &context.lease,
                         context.run_id,
-                        reviewer.id,
+                        reviewer,
                         &revisions,
                         &result,
                     )
@@ -698,6 +675,32 @@ impl HubTools {
             "finished": true,
             "next": "End your turn now. The task is done, and its result reaches the lead, when this run ends.",
         }))
+    }
+
+    async fn implementation_reviewer(
+        &self,
+        project: ProjectId,
+    ) -> Result<Option<AgentId>, ToolError> {
+        let agents = self.db.agents().await.map_err(tool_error)?;
+        if let Some(name) = &self.reviewer {
+            return agents
+                .iter()
+                .find(|agent| agent.name == *name)
+                .map(|agent| Some(agent.id))
+                .ok_or_else(|| {
+                    ToolError::Blocked(format!("Space Reviewer {name:?} is unavailable"))
+                });
+        }
+        let bindings = self.db.bindings(project).await.map_err(tool_error)?;
+        Ok(agents
+            .iter()
+            .find(|agent| {
+                agent.role.eq_ignore_ascii_case("reviewer")
+                    && bindings
+                        .iter()
+                        .any(|binding| binding.agent_id == agent.id && binding.mode != Mode::Off)
+            })
+            .map(|agent| agent.id))
     }
 
     async fn review_revisions(

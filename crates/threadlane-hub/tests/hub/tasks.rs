@@ -330,6 +330,10 @@ async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
         })
         .await
         .unwrap();
+    hub.send("scan", "Check PR readiness").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(lead.prompt.contains(r#"set agent to "Checker"."#));
+    finish_run(&hub, &lease, &lead).await;
     let report = hub
         .db
         .create_task(
@@ -711,11 +715,20 @@ async fn create_task_makes_one_queued_task_per_call_however_often_it_is_repeated
 
 #[tokio::test]
 async fn scans_share_one_pr_review_per_head_and_reuse_its_committed_verdict() {
-    let (hub, lease, lead) = lead_run(2).await;
+    let hub = TestHub::with(
+        threadlane_hub::HubSettings {
+            reviewer: Some("Checker".into()),
+            ..Default::default()
+        },
+        std::sync::Arc::new(NoHooks),
+    )
+    .await;
+    hub.hello().await;
+    engineer(&hub, 2).await;
     let project = hub.general().await;
     let reviewer = hub
         .db
-        .create_agent(&NewAgent::named("Reviewer", "reviewer"))
+        .create_agent(&NewAgent::named("Checker", "quality"))
         .await
         .unwrap();
     hub.db
@@ -738,9 +751,12 @@ async fn scans_share_one_pr_review_per_head_and_reuse_its_committed_verdict() {
         })
         .await
         .unwrap();
+    hub.send("scan", "Check PR readiness").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(lead.prompt.contains(r#"set agent to "Checker"."#));
     let head = "a".repeat(40);
     let target = json!({"repository":"widgets","number":42,"head":head});
-    let scan = json!({"title":"Review PR 42","goal":"Review the diff","agent":"Reviewer","pr_review":target});
+    let scan = json!({"title":"Review PR 42","goal":"Review the diff","agent":ENGINEER,"pr_review":target});
     assert_eq!(
         call(
             &hub,
@@ -770,7 +786,7 @@ async fn scans_share_one_pr_review_per_head_and_reuse_its_committed_verdict() {
     finish_run(&hub, &lease, &lead).await;
 
     let (lease, review) = begin(&*hub.link).await;
-    assert_eq!(review.agent_name, "Reviewer");
+    assert_eq!(review.agent_name, ENGINEER);
     assert!(review.prompt.contains(&head));
     let target = review.pr_review.as_ref().unwrap();
     assert_eq!(target.number, 42);
@@ -785,9 +801,10 @@ async fn scans_share_one_pr_review_per_head_and_reuse_its_committed_verdict() {
             .is_err()
     );
     result["reviewed_head"] = json!(head);
-    call(&hub, &lease, &review, "verdict", FINISH_TASK, result)
+    let finished = call(&hub, &lease, &review, "verdict", FINISH_TASK, result)
         .await
         .unwrap();
+    assert_eq!(finished["finished"], true);
     finish_run(&hub, &lease, &review).await;
 
     let (lease, lead) = begin(&*hub.link).await;
