@@ -1865,6 +1865,17 @@ async fn list_tasks_lists_unfinished_and_recent_tasks_in_pages_and_one_in_full()
     assert_eq!(listed["tasks"][0].get("goal"), None);
     assert_eq!(listed["tasks"][0]["agent"], ENGINEER);
 
+    let hidden = listed["hidden_finished"].as_str().unwrap();
+    assert!(hidden.starts_with("3 older finished tasks"));
+
+    // An offset past the end still returns the count of the filtered snapshot.
+    let past_default = list("l-far", json!({ "offset": usize::MAX }))
+        .await
+        .unwrap();
+    assert!(ids(&past_default).is_empty());
+    assert_eq!(past_default["total"], 11);
+    assert_eq!(past_default["hidden_finished"], listed["hidden_finished"]);
+
     // Pages of the full list, to the end.
     let first = list("l-2", json!({ "all": true, "limit": 5 }))
         .await
@@ -1907,6 +1918,46 @@ async fn list_tasks_lists_unfinished_and_recent_tasks_in_pages_and_one_in_full()
             "{bad}"
         );
     }
+}
+
+#[tokio::test]
+async fn list_tasks_continues_after_the_last_wire_entry_not_the_sql_limit() {
+    let (hub, lease, run) = lead_run(2).await;
+    let wide = "😀".repeat(196);
+    for n in 1..=35 {
+        call(
+            &hub,
+            &lease,
+            &run,
+            &format!("create-{n}"),
+            CREATE_TASK,
+            task_args(&format!("{n} {wide}"), &[]),
+        )
+        .await
+        .unwrap();
+    }
+    let args = json!({ "all": true, "limit": 35 });
+    let first = call(&hub, &lease, &run, "page-one", LIST_TASKS, args)
+        .await
+        .unwrap();
+    let len = first["tasks"].as_array().unwrap().len();
+    assert!((1..35).contains(&len));
+    assert_eq!(first["total"], 35);
+    assert_eq!(first["next_offset"], len);
+    let second = call(
+        &hub,
+        &lease,
+        &run,
+        "page-two",
+        LIST_TASKS,
+        json!({ "all": true, "limit": 35, "offset": len }),
+    )
+    .await
+    .unwrap();
+    let rows = second["tasks"].as_array().unwrap();
+    assert_eq!(rows[0]["task_id"], format!("T-{:04}", len + 1));
+    assert_eq!(len + rows.len(), 35);
+    assert_eq!(second.get("next_offset"), None);
 }
 
 #[tokio::test]

@@ -479,53 +479,37 @@ impl HubTools {
                 .ok_or_else(|| invalid("all must be true or false"))?,
         };
         let (offset, limit) = crate::page::offset_limit(object, TASK_PAGE, MAX_TASK_PAGE)?;
-        let tasks = self
+        let listed = self
             .db
-            .tasks(context.project_id)
-            .await
-            .map_err(tool_error)?;
-        let finished: Vec<&Task> = tasks
-            .iter()
-            .filter(|task| task.status.is_terminal())
-            .collect();
-        let hidden = if all {
-            0
-        } else {
-            finished.len().saturating_sub(RECENT_FINISHED)
-        };
-        // The finished tasks that ended least recently are the ones hidden by
-        // default; one with no recorded end counts as ending when created.
-        let ids: Vec<TaskId> = finished.iter().map(|task| task.id).collect();
-        let ended = self
-            .db
-            .task_completion_times(&ids)
-            .await
-            .map_err(tool_error)?;
-        let mut by_end = finished;
-        by_end.sort_by_key(|task| {
-            (
-                ended.get(&task.id).copied().unwrap_or(task.created_at),
-                task.id,
+            .task_list_page(
+                context.project_id,
+                (!all).then_some(RECENT_FINISHED),
+                offset,
+                limit,
             )
-        });
-        let hide: std::collections::HashSet<TaskId> =
-            by_end.iter().take(hidden).map(|task| task.id).collect();
-        let listed: Vec<Json> = tasks
+            .await
+            .map_err(tool_error)?;
+        let entries: Vec<Json> = listed
+            .tasks
             .iter()
-            .filter(|task| !hide.contains(&task.id))
             .map(|task| {
                 let mut entry = task_line(task);
                 entry["agent"] = agent(task);
                 entry
             })
             .collect();
-        let (page, next) = crate::page::take(&listed, offset, limit);
+        // A DB page is row-bounded; the wire page may be smaller due to its
+        // serialized size budget. Resume after the last entry actually sent.
+        let (page, _) = crate::page::take(&entries, 0, limit);
+        let next = offset.saturating_add(page.len());
+        let next = (next < listed.total).then_some(next);
         let mut result = json!({
             "tasks": page,
             "detail": "Results are cut to one line. Call list_tasks with task_id for a task's \
                        full goal and result.",
         });
-        crate::page::mark(&mut result, LIST_TASKS, listed.len(), next);
+        crate::page::mark(&mut result, LIST_TASKS, listed.total, next);
+        let hidden = listed.hidden_finished;
         if hidden > 0 {
             result["hidden_finished"] = json!(format!(
                 "{hidden} older finished tasks are not listed. Call list_tasks with all: true \

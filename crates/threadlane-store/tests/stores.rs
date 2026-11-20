@@ -1023,6 +1023,66 @@ async fn task_results(hub: &HubDb, project: &Project) -> Vec<Event> {
 }
 
 #[tokio::test]
+async fn task_list_page_uses_the_current_attempt_and_only_loads_the_project_page() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let retried = hub
+        .create_task(None, &new_task(&general, agent, "retried", vec![]))
+        .await
+        .unwrap();
+    let older = hub
+        .create_task(None, &new_task(&general, agent, "older", vec![]))
+        .await
+        .unwrap();
+    let pending = hub
+        .create_task(None, &new_task(&general, agent, "pending", vec![]))
+        .await
+        .unwrap();
+    // The retry's later completion, rather than its original result, must
+    // determine inclusion. The synthetic events mirror the production keys.
+    hub.cancel_task(None, retried.id, T0).await.unwrap();
+    hub.cancel_task(None, older.id, T0 + Duration::from_secs(1))
+        .await
+        .unwrap();
+    for (key, seconds) in [
+        (format!("retry:{}:1", retried.id.get()), 2),
+        (format!("result:{}:retry1", retried.id.get()), 3),
+    ] {
+        hub.insert_event(&NewEvent {
+            source: TASK_SOURCE.into(),
+            received_at: T0 + Duration::from_secs(seconds),
+            ..message(&general, &key)
+        })
+        .await
+        .unwrap();
+    }
+    let other = hub
+        .create_project(&NewProject {
+            name: "Other".into(),
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    let other_agent = engineer(&hub, &other, 2).await;
+    hub.create_task(None, &new_task(&other, other_agent, "private", vec![]))
+        .await
+        .unwrap();
+
+    let first = hub.task_list_page(general.id, Some(1), 0, 1).await.unwrap();
+    assert_eq!((first.total, first.hidden_finished), (2, 1));
+    assert_eq!(first.tasks[0].id, retried.id);
+    let second = hub.task_list_page(general.id, Some(1), 1, 1).await.unwrap();
+    assert_eq!(second.tasks[0].id, pending.id);
+    let all = hub.task_list_page(general.id, None, 0, 10).await.unwrap();
+    assert_eq!((all.total, all.hidden_finished), (3, 0));
+    assert_eq!(
+        all.tasks.iter().map(|t| t.id).collect::<Vec<_>>(),
+        [retried.id, older.id, pending.id]
+    );
+}
+
+#[tokio::test]
 async fn tasks_get_a_lane_and_a_start_event_once_per_creating_call() {
     let hub = hub().await;
     let general = hub.general_project().await.unwrap();
