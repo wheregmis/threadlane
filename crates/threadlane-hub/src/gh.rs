@@ -239,8 +239,6 @@ impl GithubSource for GhSource {
         Ok(items)
     }
 
-    // shortcut: inline review comments (`pulls/<n>/comments`) are not read;
-    // add them if leads need line comments.
     async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
         let (Some(number), repository) = (notification.pull_request, &notification.repository)
         else {
@@ -270,9 +268,9 @@ impl GithubSource for GhSource {
         let mut items = vec![GithubItem {
             kind: GithubKind::PullRequestUpdate,
             branch: Some(target.branch.clone()),
-            title: format!("head {sha}, {state}"),
+            title: format!("head {sha}"),
             body: format!(
-                "{}\nNotified as {}.",
+                "{} ({state})\nNotified as {}.",
                 notification.title,
                 notification.kind.describe()
             ),
@@ -281,28 +279,50 @@ impl GithubSource for GhSource {
         }];
         // Ids apart from `pull_request`'s, so a task given this pull request
         // later still gets the same review and comment in its own lane.
-        let latest = |mut found: Vec<GithubItem>| {
-            found.pop().map(|item| GithubItem {
-                id: format!("notified:{}", item.id),
-                ..item
-            })
-        };
-        items.extend(latest(
-            self.get_items(
+        if notification.kind == GithubKind::CheckResult {
+            let checks = self
+                .get_items(
+                    &format!(
+                        "repos/{repository}/commits/{}/check-runs?per_page=100",
+                        encode(&sha)
+                    ),
+                    &target,
+                    parse_check_runs,
+                )
+                .await?;
+            items.extend(checks.into_iter().map(notified_item));
+            return Ok(items);
+        }
+        let mut reviews = self
+            .get_items(
                 &format!("repos/{repository}/pulls/{number}/reviews?per_page=100"),
                 &target,
-                last_review,
+                submitted_reviews,
             )
-            .await?,
-        ));
-        items.extend(latest(
-            self.get_items(
-                &format!("repos/{repository}/issues/{number}/comments?per_page=100"),
-                &target,
-                parse_comments,
-            )
-            .await?,
-        ));
+            .await?;
+        items.extend(reviews.pop().filter(external_review).map(notified_item));
+        let comment = match notification
+            .url
+            .as_deref()
+            .and_then(|url| comment_path(url, repository))
+        {
+            Some(path) => {
+                let comment = self.get_json(&format!("repos/{repository}/{path}")).await?;
+                parse_comments(&Json::Array(vec![comment]), &target)
+                    .pop()
+                    .map(|mut item| {
+                        if path.starts_with("pulls/") {
+                            item.title = "inline review comment".into();
+                        }
+                        item
+                    })
+            }
+            None => {
+                let page = self.get_json(&format!("repos/{repository}/issues/{number}/comments?sort=updated&direction=desc&per_page=1")).await?;
+                parse_comments(&page, &target).into_iter().next()
+            }
+        };
+        items.extend(comment.map(notified_item));
         Ok(items)
     }
 }
@@ -335,18 +355,20 @@ fn encode(text: &str) -> String {
         .collect()
 }
 
-/// The last submitted review of a page, unless Threadlane posted it: an
-/// older review is not what happened now.
-fn last_review(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
-    let last = answer
-        .as_array()
-        .and_then(|reviews| {
-            reviews
-                .iter()
-                .rfind(|review| review["submitted_at"].is_string())
-        })
-        .cloned();
-    parse_reviews(&Json::Array(last.into_iter().collect()), target)
+fn notified_item(mut item: GithubItem) -> GithubItem {
+    item.id = format!("notified:{}:{}:{}", item.id, item.at, item.title);
+    item
+}
+
+/// Only use comment endpoints in the notified repository.
+fn comment_path<'a>(url: &'a str, repository: &str) -> Option<&'a str> {
+    let path = url
+        .strip_prefix("https://api.github.com/repos/")?
+        .strip_prefix(repository)?
+        .strip_prefix('/')?;
+    let (resource, id) = path.rsplit_once('/')?;
+    (matches!(resource, "pulls/comments" | "issues/comments") && id.parse::<u64>().is_ok())
+        .then_some(path)
 }
 
 /// The head branch and commit of a `pulls/<n>` answer.
@@ -495,16 +517,19 @@ fn notification(value: &Json) -> Option<GithubItem> {
     if kind == GithubKind::Notification && !reason.is_empty() {
         title = format!("{title} ({})", reason.replace('_', " "));
     }
+    let repository = text(value, "/repository/full_name")?;
+    let url = text(value, "/subject/latest_comment_url")
+        .filter(|url| pull_request.is_some() && comment_path(url, &repository).is_some());
     Some(GithubItem {
         id: format!("notification:{thread}:{at}"),
         kind,
-        repository: text(value, "/repository/full_name")?,
+        repository,
         pull_request,
         branch,
         author: None,
         title,
         body: String::new(),
-        url: None,
+        url,
         at,
     })
 }
@@ -543,23 +568,30 @@ pub(crate) fn parse_check_runs(answer: &Json, target: &PullTarget) -> Vec<Github
 
 /// Submitted reviews from GitHub, excluding verdicts already delivered inside Threadlane.
 pub(crate) fn parse_reviews(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
+    submitted_reviews(answer, target)
+        .into_iter()
+        .filter(external_review)
+        .collect()
+}
+
+fn external_review(review: &GithubItem) -> bool {
+    let key = review
+        .body
+        .trim_end()
+        .lines()
+        .next_back()
+        .and_then(|line| line.strip_prefix(REVIEW_MARKER_PREFIX))
+        .and_then(|rest| rest.strip_suffix(" -->"));
+    !key.is_some_and(|key| key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+fn submitted_reviews(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
     answer
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|review| {
             let body = text(review, "/body").unwrap_or_default();
-            let delivery_key = body
-                .trim_end()
-                .lines()
-                .next_back()
-                .and_then(|line| line.strip_prefix(REVIEW_MARKER_PREFIX))
-                .and_then(|rest| rest.strip_suffix(" -->"));
-            if delivery_key
-                .is_some_and(|key| key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit()))
-            {
-                return None;
-            }
             Some(GithubItem {
                 id: format!("review:{}", id(review)?),
                 kind: GithubKind::Review,
@@ -948,18 +980,18 @@ case "$last" in
             ids,
             [
                 notification.id.as_str(),
-                "notified:review:80",
-                "notified:comment:1700000001",
+                "notified:review:80:2026-11-17T08:45:00Z:changes requested",
+                "notified:comment:1700000001:2026-11-17T08:52:30Z:comment",
             ],
             "the notification, then ids apart from the task's work"
         );
         let head = &items[0];
         assert_eq!(head.kind, GithubKind::PullRequestUpdate);
-        assert_eq!(head.title, format!("head {sha}, open"));
+        assert_eq!(head.title, format!("head {sha}"));
         assert_eq!(head.pull_request, Some(42));
         assert_eq!(
             head.body,
-            "Add the settings page\nNotified as a review request."
+            "Add the settings page (open)\nNotified as a review request."
         );
         let review = &items[1];
         assert_eq!(review.kind, GithubKind::Review);
@@ -984,24 +1016,61 @@ case "$last" in
             "\"state\": \"open\",",
             "\"state\": \"closed\", \"merged\": true,",
         );
-        for (pull, head) in [
-            (
-                pushed,
-                "head 1111111111111111111111111111111111111111, open",
-            ),
-            (
-                merged,
-                "head 1111111111111111111111111111111111111111, merged",
-            ),
-        ] {
+        for (pull, state) in [(pushed, "open"), (merged, "merged")] {
             let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(&pull, &human)));
             let items = source.activity(&notification).await.unwrap();
-            assert_eq!(items[0].title, head);
+            assert_eq!(
+                items[0].title,
+                "head 1111111111111111111111111111111111111111"
+            );
+            assert!(items[0].body.contains(&format!("({state})")));
         }
 
         // Anything not about a pull request reports itself.
         let issue = parse_feed(FEED).unwrap().items.remove(1);
         assert_eq!(source.activity(&issue).await.unwrap(), [issue]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pull_request_activity_names_checks_and_follows_the_notified_line_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = r#"{"id":9,"user":{"login":"ada"},"body":"On this line","updated_at":"2026-11-17T09:00:00Z"}"#;
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                ("*/pulls/42", "pull.http", ok(PULL)),
+                ("*/check-runs*", "checks.http", ok(CHECK_RUNS)),
+                ("*/reviews*", "reviews.http", ok("[]")),
+                ("*/pulls/comments/9", "line.http", ok(line)),
+            ],
+        ));
+        let mut notification = parse_feed(FEED).unwrap().items.remove(0);
+        notification.kind = GithubKind::CheckResult;
+        let items = source.activity(&notification).await.unwrap();
+        let checks: Vec<_> = items
+            .iter()
+            .filter(|item| item.kind == GithubKind::CheckResult)
+            .map(|item| item.title.as_str())
+            .collect();
+        assert_eq!(checks, ["test: failure", "lint: success"]);
+
+        let feed = FEED
+            .replace("other/thing", "acme/widgets")
+            .replace("/pulls/7\"", "/pulls/42\"")
+            .replace("/issues/comments/9\"", "/pulls/comments/9\"");
+        let notification = parse_feed(&feed).unwrap().items.remove(3);
+        let items = source.activity(&notification).await.unwrap();
+        assert_eq!(items[1].kind, GithubKind::Comment);
+        assert_eq!(items[1].title, "inline review comment");
+        assert_eq!(items[1].author.as_deref(), Some("ada"));
+        assert!(
+            comment_path(
+                "https://api.github.com/repos/other/thing/pulls/comments/9",
+                "acme/widgets"
+            )
+            .is_none()
+        );
     }
 
     #[cfg(unix)]

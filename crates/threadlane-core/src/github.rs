@@ -39,6 +39,8 @@ pub enum GithubKind {
     Notification,
     /// A pull request's head commit or state as a notification found it.
     PullRequestUpdate,
+    /// The observed head commit of a pull request changed.
+    Push,
 }
 
 impl GithubKind {
@@ -53,6 +55,7 @@ impl GithubKind {
             Self::Mention => "a mention",
             Self::Notification => "a notification",
             Self::PullRequestUpdate => "a pull request update",
+            Self::Push => "a push",
         }
     }
 }
@@ -133,7 +136,8 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
 
     /// What a notification about a pull request reports, as that pull
     /// request is now: the notification, with its id, naming the head commit
-    /// and state, then the latest review and comment, with ids apart from
+    /// in the title and its state in the body, then the latest review and
+    /// comment or the completed checks, with ids apart from
     /// [`GithubSource::pull_request`]'s. By default, the notification itself.
     async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
         Ok(vec![notification.clone()])

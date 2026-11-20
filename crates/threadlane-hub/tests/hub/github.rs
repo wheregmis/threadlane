@@ -12,6 +12,7 @@ use threadlane_core::github::{
     Feed, GITHUB_SOURCE, GithubError, GithubItem, GithubKind, GithubSource, PullTarget,
 };
 use threadlane_core::ids::EventId;
+use threadlane_core::link::HubMessage;
 use threadlane_core::model::{
     DecisionAnswer, DecisionKind, DecisionOption, Event, EventKind, MachineReport, NewDecision,
     NewProject, NewRepository, NewTask, Project, Task, TaskOrigin, TaskStatus, Trust,
@@ -1003,7 +1004,8 @@ fn notified(at: &str) -> GithubItem {
 fn head(sha: &str, at: &str) -> GithubItem {
     GithubItem {
         kind: GithubKind::PullRequestUpdate,
-        title: format!("head {sha}, open"),
+        title: format!("head {sha}"),
+        body: "Add the settings page (open)".into(),
         ..notified(at)
     }
 }
@@ -1037,6 +1039,13 @@ fn payload(event: &Event) -> GithubItem {
     serde_json::from_value(event.payload.clone()).unwrap()
 }
 
+async fn expect_nudge(hub: &TestHub) {
+    let message = tokio::time::timeout(Duration::from_secs(1), hub.link.next_message())
+        .await
+        .expect("GitHub activity should wake the lead");
+    assert_eq!(message, Some(HubMessage::Nudge));
+}
+
 #[tokio::test]
 async fn a_pull_request_notification_says_what_happened_and_wakes_once_per_activity() {
     let github = FakeGithub::default();
@@ -1057,17 +1066,36 @@ async fn a_pull_request_notification_says_what_happened_and_wakes_once_per_activ
             .all(|event| (event.lane_id, event.requested) == (general.lead_lane_id, false)),
         "no task owns #42, so its lead hears of it"
     );
-    assert_eq!(payload(&events[0]).title, "head aaa, open", "the new head");
-    assert_eq!(payload(&events[1]).author.as_deref(), Some("octocat"));
-    assert_eq!(payload(&events[1]).title, "approved", "the review state");
+    assert_eq!(payload(&events[0]).author.as_deref(), Some("octocat"));
+    assert_eq!(payload(&events[0]).title, "approved", "the review state");
+    assert_eq!(payload(&events[1]).title, "head aaa", "the new head");
     let pending = hub.db.pending_events(general.lead_lane_id).await.unwrap();
     assert_eq!(pending.len(), 2, "the lead has them to wake for");
+    expect_nudge(&hub).await;
 
     // The same update delivered again is not read again and inserts nothing,
     // so it wakes nobody; what it would report now does not matter.
     github.set_activity(&notified(t1).id, vec![head("zzz", t1)]);
+    // Recreate a crash after the last event insert but before saving its cursor.
+    hub.db
+        .set_source_cursor("github:lead:notification:7:", "", hub.clock.now())
+        .await
+        .unwrap();
     touch_feed(&github, "2026-11-17T08:00:30Z");
     assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 0);
+
+    let repeat = "2026-11-17T08:01:00Z";
+    deliver(
+        &github,
+        vec![head("aaa", repeat), notified_review("approved", t1)],
+    );
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), hub.link.next_message())
+            .await
+            .is_err(),
+        "redelivering the same activity gives no wake"
+    );
 
     // Later distinct activity on the same pull request still arrives: a
     // comment, a second review request on the same head, and a check.
@@ -1087,9 +1115,15 @@ async fn a_pull_request_notification_says_what_happened_and_wakes_once_per_activ
         &github,
         vec![head("aaa", t2), notified_review("approved", t1), comment],
     );
-    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 2);
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    expect_nudge(&hub).await;
     let t3 = "2026-11-17T08:03:00Z";
-    deliver(&github, vec![head("aaa", t3)]);
+    let request = GithubItem {
+        kind: GithubKind::ReviewRequest,
+        ..notified(t3)
+    };
+    github.set_activity(&request.id, vec![head("aaa", t3)]);
+    github.notify(request);
     assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
     let t4 = "2026-11-17T08:04:00Z";
     let ci = GithubItem {
@@ -1108,20 +1142,41 @@ async fn a_pull_request_notification_says_what_happened_and_wakes_once_per_activ
     assert_eq!(
         ids(&events),
         [
-            format!("notification:7:{t1}").as_str(),
             "notified:review:5",
-            &format!("notification:7:{t2}"),
+            &format!("notification:7:{t1}"),
             "notified:comment:9",
             &format!("notification:7:{t3}"),
             &format!("notification:8:{t4}"),
         ]
     );
-    assert_eq!(payload(&events[3]).author.as_deref(), Some("stranger"));
+    assert_eq!(payload(&events[2]).author.as_deref(), Some("stranger"));
     assert_eq!(
-        payload(&events[5]).title,
+        payload(&events[4]).title,
         "CI: failed",
         "the check and its result"
     );
+    let pushed = "2026-11-17T08:05:00Z";
+    deliver(&github, vec![head("bbb", pushed)]);
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    let push = payload(github_events(&hub).await.last().unwrap());
+    assert_eq!(push.kind, GithubKind::Push);
+    assert_eq!(push.title, "head bbb");
+
+    for (at, state) in [
+        ("2026-11-17T08:06:00Z", "closed"),
+        ("2026-11-17T08:07:00Z", "open"),
+    ] {
+        let update = GithubItem {
+            body: format!("Add the settings page ({state})"),
+            ..head("bbb", at)
+        };
+        deliver(&github, vec![update]);
+        assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+        assert_eq!(
+            payload(github_events(&hub).await.last().unwrap()).kind,
+            GithubKind::PullRequestUpdate
+        );
+    }
 }
 
 #[tokio::test]

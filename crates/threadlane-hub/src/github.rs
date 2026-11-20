@@ -81,6 +81,13 @@ struct Routes {
     ended: Vec<Work>,
 }
 
+#[derive(Default)]
+struct LeadActivity {
+    items: Vec<GithubItem>,
+    /// Save the observed PR head only after delivering the activity.
+    cursor: Option<(String, String)>,
+}
+
 /// The normalized remote of a repository GitHub names `owner/name`.
 fn github_key(repository: &str) -> Option<String> {
     normalize_remote(&format!("https://{GITHUB_HOST}{repository}"))
@@ -309,7 +316,7 @@ impl HubCore {
                 self.apply_github_feed(
                     &routes,
                     feed,
-                    &activity,
+                    activity,
                     cursor.as_deref(),
                     &mut pass,
                     &mut lanes,
@@ -340,7 +347,7 @@ impl HubCore {
         &self,
         routes: &Routes,
         feed: Feed,
-        activity: &HashMap<String, Vec<GithubItem>>,
+        mut activity: HashMap<String, LeadActivity>,
         cursor: Option<&str>,
         pass: &mut GithubPass,
         lanes: &mut BTreeSet<LaneId>,
@@ -355,12 +362,18 @@ impl HubCore {
             }
             if let Some((project, lane, requested)) = routes.route(item) {
                 // A task's lane reads the details from its own work instead.
-                let items = activity
-                    .get(&item.id)
-                    .filter(|_| !requested)
-                    .map_or(std::slice::from_ref(item), Vec::as_slice);
+                let lead = activity.get_mut(&item.id).filter(|_| !requested);
+                let items = lead
+                    .as_ref()
+                    .map_or(std::slice::from_ref(item), |a| a.items.as_slice());
                 for item in items {
                     pass.inserted += self.insert(project, lane, requested, item, lanes).await?;
+                }
+                if let Some((key, value)) = lead.and_then(|a| a.cursor.take()) {
+                    inner
+                        .db
+                        .set_source_cursor(&key, &value, inner.clock.now())
+                        .await?;
                 }
             }
             inner.hook.reach(AFTER_INSERT)?;
@@ -443,23 +456,72 @@ impl HubCore {
         &self,
         source: &dyn GithubSource,
         feed: &Feed,
-    ) -> Result<HashMap<String, Vec<GithubItem>>, HubError> {
+    ) -> Result<HashMap<String, LeadActivity>, HubError> {
         let inner = &self.inner;
         let routes = Routes::read(&inner.db).await?;
         let mut activity = HashMap::new();
+        let mut observed = HashMap::new();
         for item in &feed.items {
             let for_lead = matches!(routes.route(item), Some((_, _, false)));
-            if !for_lead
-                || item.pull_request.is_none()
-                || inner.db.has_source_event(GITHUB_SOURCE, &item.id).await?
-            {
+            if !for_lead || item.pull_request.is_none() || activity.contains_key(&item.id) {
                 continue;
             }
-            let items = source.activity(item).await.unwrap_or_else(|error| {
-                tracing::warn!(%error, id = item.id, "could not read what a GitHub notification reports");
-                vec![item.clone()]
-            });
-            activity.insert(item.id.clone(), items);
+            // shortcut: one cursor per observed PR thread; prune alongside event history
+            // if the hub adds retention.
+            let thread = item.id.strip_suffix(&item.at).unwrap_or(&item.id);
+            let key = format!("github:lead:{thread}");
+            let previous = match observed.get(&key) {
+                Some(value) => Some(String::clone(value)),
+                None => inner.db.source_cursor(&key).await?,
+            };
+            let previous = previous.as_deref().and_then(|s| s.split_once('\n'));
+            let mut resolved = LeadActivity::default();
+            if previous.is_some_and(|(at, _)| at >= item.at.as_str()) {
+                activity.insert(item.id.clone(), resolved);
+                continue;
+            }
+            // A crash after inserting the head can leave just its cursor to save.
+            let delivered = inner
+                .db
+                .source_event_payload(GITHUB_SOURCE, &item.id)
+                .await?;
+            let already_delivered = delivered.is_some();
+            resolved.items = match delivered {
+                Some(payload) => {
+                    let item = serde_json::from_value(payload).map_err(|error| {
+                        StoreError::Invalid(format!("a stored GitHub item: {error}"))
+                    })?;
+                    vec![item]
+                }
+                None => source.activity(item).await.unwrap_or_else(|error| {
+                    tracing::warn!(%error, id = item.id, "could not read pull request activity");
+                    vec![item.clone()]
+                }),
+            };
+            if let Some(head) = resolved.items.first_mut()
+                && matches!(head.kind, GithubKind::PullRequestUpdate | GithubKind::Push)
+            {
+                let summary = format!("{}\n{}", head.title, head.body);
+                let value = format!("{}\n{summary}", item.at);
+                observed.insert(key.clone(), value.clone());
+                resolved.cursor = Some((key, value));
+                let explicit_request =
+                    matches!(item.kind, GithubKind::ReviewRequest | GithubKind::Mention);
+                if !explicit_request && previous.is_some_and(|(_, last)| last == summary) {
+                    resolved.items.remove(0);
+                } else {
+                    if previous.is_some_and(|(_, last)| last.lines().next() != Some(&head.title)) {
+                        head.kind = GithubKind::Push;
+                    }
+                    // The notification id marks the delivery complete. Insert it last
+                    // so a crash between detail inserts can replay the missing ones.
+                    resolved.items.rotate_left(1);
+                }
+            }
+            if already_delivered {
+                resolved.items.clear();
+            }
+            activity.insert(item.id.clone(), resolved);
         }
         Ok(activity)
     }
