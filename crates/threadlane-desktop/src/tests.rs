@@ -4683,6 +4683,7 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
     assert_eq!(rows["Project queues"], "api 3");
     assert_eq!(rows["Oldest pending event"], "53 ms");
     assert_eq!(rows["Outbox lag"], "2 min");
+    assert_eq!(rows["Delivery health"], "Unavailable on this hub");
     assert_eq!(
         rows["Run duration"],
         "12 ms avg · 12 ms max · 1 observation"
@@ -4693,6 +4694,25 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
             .metrics_rows("home", &when)
             .unwrap_err()
             .contains("metrics unavailable")
+    );
+    let mut current = work.metrics.lock().unwrap().clone().unwrap();
+    current.delivery_health = Some(threadlane_core::client::DeliveryHealth {
+        held: 0,
+        next_hold_check: None,
+        retrying: 1,
+        next_retry: Some(current.at),
+        failed_created_in_last_week: 2,
+    });
+    *work.metrics.lock().unwrap() = Some(current);
+    state.apply_metrics("work".to_owned(), load_metrics(&core, "work").await);
+    let rows: BTreeMap<_, _> = state
+        .metrics_rows("work", &when)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        rows["Delivery health"],
+        "0 held; 1 retrying · retry due; 2 permanently failed (created in the past 7 days)"
     );
 }
 

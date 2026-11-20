@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use threadlane_core::client::{
-    LaneInspection, Latency, OperationsMetrics, TraceInspection, TracedToolCall,
+    DeliveryHealth, LaneInspection, Latency, OperationsMetrics, TraceInspection, TracedToolCall,
 };
 use threadlane_core::ids::{EventId, LaneId, ProjectId};
 use threadlane_core::model::Event;
@@ -20,6 +20,7 @@ use crate::session::{RUN_FIELDS, SESSION_FIELDS, decode_run, decode_session};
 use crate::timer::{TIMER_FIELDS, decode_timer};
 
 const DAY: Duration = Duration::from_secs(86_400);
+const DELIVERY_WEEK: Duration = Duration::from_secs(7 * 86_400);
 
 async fn latency(
     conn: &Connection,
@@ -115,12 +116,39 @@ impl HubDb {
                 AND last_fired_at IS NOT NULL AND (?1 IS NULL OR project_id = ?1)",
         )
         .await?;
-        let outbox_lag_ms = query_one(
+        let (outbox_lag_ms, delivery_health) = query_one(
             &conn,
-            "SELECT MAX(MAX(0, ?2 - created_at)) FROM outbox
-             WHERE status IN ('pending', 'failed') AND (?1 IS NULL OR project_id = ?1)",
-            params![project_id.clone(), now],
-            |row| Cols(row).opt_i64(0),
+            "WITH scoped AS (
+                SELECT status, created_at, not_before,
+                       status = 'pending' AND pacing_hold IS NOT NULL AS held,
+                       status = 'pending' AND pacing_hold IS NULL AND attempts > 0 AS retrying
+                FROM outbox
+                WHERE (?1 IS NULL OR project_id = ?1)
+                  AND (status IN ('pending', 'failed')
+                    OR (status = 'dead' AND created_at > ?3 AND created_at <= ?2))
+             )
+             SELECT MAX(CASE WHEN status IN ('pending', 'failed')
+                             THEN MAX(0, ?2 - created_at) END),
+                    COUNT(CASE WHEN held THEN 1 END),
+                    MIN(CASE WHEN held THEN not_before END),
+                    COUNT(CASE WHEN retrying THEN 1 END),
+                    MIN(CASE WHEN retrying THEN COALESCE(not_before, ?2) END),
+                    COUNT(CASE WHEN status = 'dead' THEN 1 END)
+             FROM scoped",
+            params![project_id.clone(), now, (at - DELIVERY_WEEK).as_millis()],
+            |row| {
+                let c = Cols(row);
+                Ok((
+                    c.opt_i64(0)?,
+                    DeliveryHealth {
+                        held: c.i64(1)?,
+                        next_hold_check: c.opt_ts(2)?,
+                        retrying: c.i64(3)?,
+                        next_retry: c.opt_ts(4)?,
+                        failed_created_in_last_week: c.i64(5)?,
+                    },
+                ))
+            },
         )
         .await?;
         let messages_per_day = query_all(
@@ -179,6 +207,7 @@ impl HubDb {
             dead_events,
             timer_lateness,
             outbox_lag_ms,
+            delivery_health: Some(delivery_health),
             messages_per_day: messages_per_day.into_iter().collect(),
             silent_run_ratio,
             decisions_per_day,

@@ -1415,7 +1415,7 @@ The implementation must uphold these. Each maps to an automated test. They descr
 
 - **Trace id** from event to run to tool calls to outbox message, across hub and machines.
 - **Run record** for every run: lane, machine, agent, backend and version, account, trigger events, session, outcome, rationale, duration, error, and usage as the backend reports it.
-- **Metrics:** lane lag (oldest pending age), queue depth per project, run duration, account cooldowns and time spent waiting on them, lease expirations, dead events, machine availability and load, placement wait time, cross-machine resumes, timer lateness, outbox lag, messages per day, silent-run ratio, decision rate and answer latency, standing rules created.
+- **Metrics:** lane lag (oldest pending age), queue depth per project, run duration, account cooldowns and time spent waiting on them, lease expirations, dead events, machine availability and load, placement wait time, cross-machine resumes, timer lateness, outbox lag and delivery health (pacing holds, retries, and permanently failed rows created in the last seven days), messages per day, silent-run ratio, decision rate and answer latency, standing rules created.
 - **Operator tools:** inspect a lane, replay a dead event, pause a project, drain or revoke a machine, roll back a memory version.
 
 ### 14.2 Evals
