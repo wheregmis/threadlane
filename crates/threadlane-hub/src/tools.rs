@@ -575,6 +575,7 @@ impl HubTools {
     ) -> Result<Json, ToolError> {
         let run = self.run(context).await?;
         let by = MemoryAuthor {
+            expected_version: None,
             lease: context.lease,
             run_id: run.id,
             call_key: effect_key(context, &run, tool, arguments),

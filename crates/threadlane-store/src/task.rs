@@ -1005,7 +1005,7 @@ impl HubDb {
             .await
     }
 
-    async fn tasks_with_dependencies(
+    pub(crate) async fn tasks_with_dependencies(
         &self,
         filter: &str,
         values: impl turso::IntoParams + Send,

@@ -1876,6 +1876,7 @@ async fn machines_report_and_accounts_cool_down() {
 /// Writes `task`'s progress file in `run`, which `finish_task` requires.
 async fn write_progress(hub: &HubDb, lease: &Lease, run: &Run, task: &Task) {
     let by = MemoryAuthor {
+        expected_version: None,
         lease: *lease,
         run_id: run.id,
         call_key: "progress".into(),
@@ -1894,6 +1895,7 @@ async fn memory_author(hub: &HubDb) -> (MemoryAuthor, Run) {
     hub.insert_event(&message(&general, "m-1")).await.unwrap();
     let (lease, run) = run_pending(hub, general.lead_lane_id, a, T0).await;
     let by = MemoryAuthor {
+        expected_version: None,
         lease,
         run_id: run.id,
         call_key: "call-1".into(),
