@@ -2616,23 +2616,24 @@ impl AppState {
     /// repository, or `None` when it has none or several.
     #[must_use]
     pub fn github_repository(&self, space: &str, project: &str) -> Option<String> {
-        self.github_repository_among(space, project, &[])
+        self.github_repository_among(space, project, None)
     }
 
     /// Like [`Self::github_repository`], among only `repositories` of
-    /// `project` (such as a task's attached ones); empty means all of them.
+    /// `project` (such as a task's attached ones); `None` means all of them,
+    /// while `Some(&[])` (a task with no repositories) means none.
     #[must_use]
     pub fn github_repository_among(
         &self,
         space: &str,
         project: &str,
-        repositories: &[threadlane_core::ids::RepositoryId],
+        repositories: Option<&[threadlane_core::ids::RepositoryId]>,
     ) -> Option<String> {
         let mut slugs = self
             .project(space, project)?
             .repositories
             .iter()
-            .filter(|repository| repositories.is_empty() || repositories.contains(&repository.id))
+            .filter(|repository| repositories.is_none_or(|among| among.contains(&repository.id)))
             .filter_map(|repository| github_repository(&repository.remote_url));
         let first = slugs.next()?;
         // Several repositories make a bare `#N` ambiguous: don't guess.

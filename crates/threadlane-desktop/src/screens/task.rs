@@ -79,7 +79,7 @@ impl Desktop {
                     id,
                     space,
                     Some(&summary.project),
-                    &summary.task.repositories,
+                    Some(&summary.task.repositories),
                     moment.text,
                     cx,
                 )));

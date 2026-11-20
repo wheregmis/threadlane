@@ -5398,14 +5398,14 @@ async fn project_github_repository_links_bare_numbers_only_when_unambiguous() {
 
     // A task's attached repository is the context, skipping non-GitHub ones.
     let task_repo =
-        state.github_repository_among("work", "api", &[RepositoryId(1), RepositoryId(3)]);
+        state.github_repository_among("work", "api", Some(&[RepositoryId(1), RepositoryId(3)]));
     assert_eq!(task_repo.as_deref(), Some("acme/other"));
     assert_eq!(
         markdown_source_for("See #1.", None, task_repo.as_deref()),
         "See [#1](https://github.com/acme/other/pull/1)."
     );
     assert_eq!(
-        state.github_repository_among("work", "api", &[RepositoryId(2), RepositoryId(3)]),
+        state.github_repository_among("work", "api", Some(&[RepositoryId(2), RepositoryId(3)])),
         None
     );
 
@@ -5435,6 +5435,11 @@ async fn project_github_repository_links_bare_numbers_only_when_unambiguous() {
     assert_eq!(
         state.github_repository("work", "api").as_deref(),
         Some("acme/widgets")
+    );
+    // A task with no repositories has no context, not the project's only one.
+    assert_eq!(
+        state.github_repository_among("work", "api", Some(&[])),
+        None
     );
 }
 

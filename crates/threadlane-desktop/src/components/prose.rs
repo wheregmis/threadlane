@@ -66,17 +66,17 @@ impl Desktop {
         text: String,
         cx: &Context<Self>,
     ) -> Prose {
-        self.prose_among(id, space, project, &[], text, cx)
+        self.prose_among(id, space, project, None, text, cx)
     }
 
     /// Prose whose bare `#N` resolves among `repositories` of `project`, such
-    /// as a task's attached repositories; empty means all of the project's.
+    /// as a task's attached repositories; `None` means all of the project's.
     pub(crate) fn prose_among(
         &self,
         id: impl Into<SharedString>,
         space: &str,
         project: Option<&str>,
-        repositories: &[RepositoryId],
+        repositories: Option<&[RepositoryId]>,
         text: String,
         cx: &Context<Self>,
     ) -> Prose {

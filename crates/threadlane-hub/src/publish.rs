@@ -502,7 +502,10 @@ pub(crate) async fn proposal(
                 if !remove.is_empty() {
                     change.push(format!("remove {}", remove.join(", ")));
                 }
-                format!("Label issue {slug}#{number} in {name}: {}?", change.join("; "))
+                format!(
+                    "Label issue {slug}#{number} in {name}: {}?",
+                    change.join("; ")
+                )
             }
             _ => match tool {
                 COMMENT => format!(
@@ -510,7 +513,10 @@ pub(crate) async fn proposal(
                     arguments["target"].as_str().unwrap_or_default(),
                     arguments["number"]
                 ),
-                MERGE => format!("Merge pull request {slug}#{} in {name}?", arguments["number"]),
+                MERGE => format!(
+                    "Merge pull request {slug}#{} in {name}?",
+                    arguments["number"]
+                ),
                 MARK_READY => format!(
                     "Mark draft pull request {slug}#{} in {name} ready for review?",
                     arguments["number"]
