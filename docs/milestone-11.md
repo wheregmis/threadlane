@@ -25,8 +25,9 @@ with `-D warnings` and `cargo fmt --check` passing.
    report a Threadlane limitation to `wheregmis/threadlane` through the shared-effect
    permission gate. Each issue describes a public-safe situation and suggested improvement.
    Previous report titles and outcomes help prevent repeats. A change to an
-   instructions file is a proposal, never applied. Off by default per
-   project; a setting turns it on with a cadence.
+   instructions file is a proposal, never applied. On by default per
+   project, daily at 02:00 in the hub's zone; a setting changes the cadence
+   or turns it off, and an explicit off stays off.
 5. **"Measurably reduces stale and duplicate memory"** is measured by a
    deterministic checker over memory (exact and near-duplicate notes by
    normalized text, notes that point at tasks or files that no longer

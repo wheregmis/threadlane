@@ -89,6 +89,12 @@ impl LocalLink {
             .await?;
         let asked = match verdict {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
+            _ if tool == REPORT_LIMITATION && arguments["require_approval"] == true => {
+                Some(Asked::You {
+                    offers_rule: false,
+                    proposal: false,
+                })
+            }
             _ if dream.is_some() && memory::protected(tool, arguments) => Some(Asked::Dream),
             Verdict::Allow { rule: None } if dream.is_some() => None,
             _ if dream.is_some() && tool != REPORT_LIMITATION => {
@@ -354,7 +360,7 @@ impl LocalLink {
                 .then(|| now + inner.settings.decision_expiry),
             created_at: now,
         };
-        match asked {
+        let authorized = match asked {
             Asked::Review { .. } => {
                 let (id, reason) = self.classify(lease, run, &decision).await?;
                 if reason.is_some() {
@@ -365,21 +371,26 @@ impl LocalLink {
                     .db
                     .reviewed_decision(lease, &id, &decision, reason.as_deref())
                     .await
+                    .map(|()| false)
             }
             Asked::You { .. } | Asked::Dream => inner
                 .db
                 .open_decision(Some(lease), &decision)
                 .await
-                .map(|_| ()),
+                .map(|_| false),
             Asked::Rule(rule) => inner
                 .db
                 .allow_by_rule(lease, &decision, rule)
                 .await
-                .map(|_| ()),
+                .map(|decision| decision.approved()),
         }
         .map_err(tool_error)?;
         inner.wake.wake(WakeTarget::Dispatcher);
-        Err(ToolError::WaitingOnYou)
+        if authorized {
+            Err(ToolError::AuthorizedAndQueued)
+        } else {
+            Err(ToolError::WaitingOnYou)
+        }
     }
 
     /// [`threadlane_core::link::HubLink::begin_perform`]: the stored call of
@@ -697,6 +708,7 @@ fn error_record(error: &ToolError) -> Option<Json> {
         ToolError::Blocked(message) => ("blocked", message),
         ToolError::Failed(message) => ("failed", message),
         ToolError::WaitingOnYou => ("waiting_on_you", &String::new()),
+        ToolError::AuthorizedAndQueued => ("authorized_and_queued", &String::new()),
         _ => return None,
     };
     Some(json!({ ERROR_RECORD: { "kind": kind, "message": message } }))
@@ -717,6 +729,7 @@ fn replay(result: Json) -> Result<Json, ToolError> {
         Some("invalid_arguments") => ToolError::InvalidArguments(message),
         Some("blocked") => ToolError::Blocked(message),
         Some("waiting_on_you") => ToolError::WaitingOnYou,
+        Some("authorized_and_queued") => ToolError::AuthorizedAndQueued,
         _ => ToolError::Failed(message),
     })
 }
@@ -733,6 +746,7 @@ mod tests {
             ToolError::Blocked("no".into()),
             ToolError::Failed("boom".into()),
             ToolError::WaitingOnYou,
+            ToolError::AuthorizedAndQueued,
         ] {
             let record = error_record(&error).unwrap();
             assert_eq!(replay(record), Err(error));

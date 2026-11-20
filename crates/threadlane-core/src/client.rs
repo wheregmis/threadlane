@@ -1245,6 +1245,15 @@ pub enum TimerRequest {
         recurrence: Recurrence,
         client_request_id: String,
     },
+    /// Owner routine with a missed-run grace. A separate operation makes old hubs reject
+    /// the opt-in rather than silently falling back to catch-up.
+    CreateRoutineSkippingLate {
+        project: Option<String>,
+        instruction: String,
+        recurrence: Recurrence,
+        client_request_id: String,
+        grace_minutes: u16,
+    },
     /// Pauses a timer; it fires nothing until resumed.
     Pause { timer: TimerId },
     /// Resumes a paused timer: a routine at its next occurrence from now, a
@@ -1392,6 +1401,21 @@ pub struct Latency {
     pub max_ms: Option<i64>,
 }
 
+/// Delivery state counts for an operations snapshot, scoped like its outbox lag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryHealth {
+    /// Pending outbox rows marked as held by pacing (a digest counts as one row).
+    pub held: i64,
+    /// Earliest pacing boundary, if a held row has one; not a promise of delivery.
+    pub next_hold_check: Option<Timestamp>,
+    /// Pending rows with a failed attempt that are not currently marked held.
+    pub retrying: i64,
+    /// Earliest retry eligibility, including retries already due.
+    pub next_retry: Option<Timestamp>,
+    /// Permanently failed rows whose creation time falls in the rolling seven days.
+    pub failed_created_in_last_week: i64,
+}
+
 /// A requested snapshot of the hub's operational metrics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperationsMetrics {
@@ -1415,6 +1439,9 @@ pub struct OperationsMetrics {
     pub timer_lateness: Latency,
     /// Age of the oldest pending or retrying outbox row, absent if none.
     pub outbox_lag_ms: Option<i64>,
+    /// Aggregate delivery metadata; absent from older hubs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_health: Option<DeliveryHealth>,
     /// Ordinary outbox messages delivered per UTC date (YYYY-MM-DD).
     pub messages_per_day: BTreeMap<String, i64>,
     /// Silent committed runs divided by all committed runs, absent if none.

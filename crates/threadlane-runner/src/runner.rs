@@ -13,7 +13,10 @@ use threadlane_core::backend::{
     AgentBackend, BackendError, BackendEvent, BackendRun, NativeSession, Probe, RunRequest,
     encode_backends,
 };
-use threadlane_core::forge::{ApprovedBranch, Forge, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{
+    ApprovedBranch, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, Forge, ONTO_TASK, OPEN_PULL_REQUEST,
+    PUBLISH_BRANCH, PullRequestUpdate,
+};
 use threadlane_core::ids::{DecisionId, RunId};
 use threadlane_core::link::{
     Begin, HubLink, HubMessage, LinkError, PUBLISH_REVISION, Perform, RunAssignment, RunFailure,
@@ -369,7 +372,7 @@ impl Inner {
         assignment: &RunAssignment,
     ) -> Result<AfterRun, LaneExit> {
         let run_id = assignment.run_id;
-        lane.set_deferred(false);
+        lane.set_deferred(None);
         lane.set_progress_written(false);
         *lane.submitted.lock().expect("submission lock poisoned") = None;
         let Some(backend) = self.backend(assignment.backend) else {
@@ -476,7 +479,7 @@ impl Inner {
                 // A run waiting on you ends now; it is resumed with the answer.
                 if assignment.lane_kind == LaneKind::Task
                     && assignment.review.is_none()
-                    && !lane.deferred()
+                    && lane.deferred().is_none()
                 {
                     let progress = !lane.progress_written();
                     let quiet = self.left_unwoken(lane, assignment.run_id).await?;
@@ -492,7 +495,10 @@ impl Inner {
                             .await?;
                     }
                 }
-                return self.commit(lane, assignment, final_text.as_deref()).await;
+                let final_text = final_text.as_deref().filter(|_| {
+                    lane.deferred() != Some(threadlane_core::tools::ToolError::AuthorizedAndQueued)
+                });
+                return self.commit(lane, assignment, final_text).await;
             }
             // The runner ends the run if the agent does not (Plan.md §9.4).
             Ended::Deferred => {
@@ -500,7 +506,10 @@ impl Inner {
                 mirror
                     .flush(self.link.as_ref(), &lane.lease(), Flush::Required)
                     .await?;
-                return self.commit(lane, assignment, Some(STOPPED_WAITING)).await;
+                let rationale = (lane.deferred()
+                    == Some(threadlane_core::tools::ToolError::WaitingOnYou))
+                .then_some(STOPPED_WAITING);
+                return self.commit(lane, assignment, rationale).await;
             }
             Ended::Terminal(BackendEvent::Failed { error })
                 if threadlane_core::backend::rejects_model(&error) =>
@@ -692,12 +701,12 @@ impl Inner {
             if !assignment.dreaming
                 && assignment.review.is_none()
                 && assignment.space_lead_ask.is_none()
-                && !lane.deferred()
+                && lane.deferred().is_none()
                 && event == BackendEvent::TurnBoundary
             {
                 self.fold_in(lane, assignment, run).await?;
             }
-            if lane.deferred() && matches!(event, BackendEvent::ToolUse { .. }) {
+            if lane.deferred().is_some() && matches!(event, BackendEvent::ToolUse { .. }) {
                 return Ok(Ended::Deferred);
             }
         }
@@ -973,6 +982,36 @@ impl Inner {
             return Err(format!(
                 "branch {branch} moved from approved commit {revision} to {current}; request approval again"
             ));
+        }
+        if tool == FAST_FORWARD_PULL_REQUEST {
+            let repository = &assignment.repositories[index];
+            let remote = threadlane_core::github::normalize_remote(&repository.remote_url)
+                .ok_or("the registered remote is not a GitHub repository")?;
+            let number = arguments["number"]
+                .as_u64()
+                .and_then(std::num::NonZeroU64::new)
+                .ok_or("the approved call has no valid PR number")?;
+            let expected_head = arguments[EXPECTED_HEAD]
+                .as_str()
+                .filter(|head| valid_commit_id(head))
+                .ok_or("the approved call has no expected PR head SHA")?;
+            let update = PullRequestUpdate {
+                number,
+                expected_head,
+                revision,
+            };
+            let head = self
+                .forge
+                .fast_forward_pull_request(worktree, repository, update)
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(json!({
+                "performed": true,
+                "repository": name,
+                "branch": head,
+                "pull_request": format!("https://{remote}/pull/{number}"),
+                "revision": revision,
+            }));
         }
         // The hub checked the task before asking; the push itself is not
         // forced, so a branch that does not contain the target's commits fails.

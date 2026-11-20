@@ -23,7 +23,10 @@ use threadlane_core::runtime::Step;
 use threadlane_core::store::{DecisionStore, OrgStore, SessionStore};
 use threadlane_core::time::Clock;
 use threadlane_core::workspace::Workspaces;
-use threadlane_hub::{FINISH_TASK, HubError, OPEN_PULL_REQUEST, PUBLISH_BRANCH, derived_call_key};
+use threadlane_hub::{
+    FAST_FORWARD_PULL_REQUEST, FINISH_TASK, HubError, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    derived_call_key,
+};
 use threadlane_runner::{GitWorkspaces, RunnerError};
 use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::git::git;
@@ -149,7 +152,9 @@ pub async fn assert_published(sim: &Sim, scenario: &str) {
     assert_eq!(opened.len(), 1, "{scenario}: exactly one pull request");
     for call in forge.calls() {
         match call {
-            ForgeCall::Apply { .. } => panic!("unexpected repository action"),
+            ForgeCall::Apply { .. } | ForgeCall::FastForward { .. } => {
+                panic!("unexpected repository action")
+            }
             ForgeCall::Open {
                 branch,
                 base,
@@ -280,6 +285,78 @@ async fn a_finished_task_asks_before_publishing_and_after_the_answer_opens_one_d
     ] {
         assert!(resumed.contains(told), "{told:?} in {resumed}");
     }
+}
+
+#[tokio::test]
+async fn an_existing_pull_request_update_pins_both_revisions() {
+    let world = World::new().await;
+    add_engineer(&world.db, 1).await;
+    let repository = world
+        .add_github_repository("app", "https://github.com/acme/app.git")
+        .await;
+    let workspaces = GitWorkspaces::new(world.workspaces());
+    let repositories = [repository];
+    let task = TaskId(1);
+    let paths = workspaces.prepare(task, &repositories).await.unwrap();
+    let worktree = &paths[0];
+    let head = git(worktree, &["rev-parse", "HEAD"]).trim().to_owned();
+    std::fs::write(worktree.join("page.html"), "<h1>Reviewed</h1>\n").unwrap();
+    workspaces
+        .checkpoint(task, &repositories, "Reviewed")
+        .await
+        .unwrap();
+    let revision = git(worktree, &["rev-parse", "HEAD"]).trim().to_owned();
+    world
+        .backend
+        .set_default(plan_tasks_in(&["app"], &[("page", &[])]));
+    world
+        .backend
+        .route("decision_answer", finish_after(Duration::ZERO));
+    world.backend.route("task_result", reply_script());
+    world.backend.route(
+        "task_start",
+        Script::new()
+            .call(
+                "toolu_ff",
+                FAST_FORWARD_PULL_REQUEST,
+                json!({
+                    "repository": "app", "number": 506, "expected_head": head,
+                }),
+            )
+            .finish("Waiting on the decision."),
+    );
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Update the existing pull request").await;
+    live(&sim).await.unwrap();
+    let decisions = sim.decisions().await;
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].arguments["expected_head"], head);
+    assert_eq!(decisions[0].arguments[PUBLISH_REVISION], revision);
+    assert!(
+        decisions[0].arguments["diff_preview"]["patch"]
+            .as_str()
+            .unwrap()
+            .contains("+<h1>Reviewed</h1>")
+    );
+    assert!(sim.world.forge.calls().is_empty());
+
+    assert_eq!(answer_all(&sim, "approve", None).await, 1);
+    live(&sim).await.unwrap();
+    assert_eq!(
+        sim.world.forge.calls(),
+        [ForgeCall::FastForward {
+            repository: "app".into(),
+            number: 506,
+            expected_head: head,
+            revision,
+        }]
+    );
+    let task = sim.task("T-0001").await;
+    assert_eq!(task.status, TaskStatus::Done);
+    assert_eq!(
+        task.result.unwrap()["pull_request"],
+        "https://github.com/acme/app/pull/506"
+    );
 }
 
 #[tokio::test]

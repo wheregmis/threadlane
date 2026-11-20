@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use threadlane_core::ids::{EventId, ProjectId, TimerId};
 use threadlane_core::model::{
-    EventKind, Inserted, NewEvent, NewTimer, Timer, TimerCategory, TimerCreator, TimerStatus, Trust,
+    EventKind, Inserted, MAX_MISSED_GRACE_MINUTES, NewEvent, NewTimer, Timer, TimerCategory,
+    TimerCreator, TimerStatus, Trust,
 };
 use threadlane_core::store::{StoreError, StoreResult, TimerStore};
 use threadlane_core::time::Timestamp;
@@ -13,7 +14,7 @@ use turso::{Connection, Row};
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
 use crate::decision::{expire_in, expiring_decision};
-use crate::inbox::insert_event_in;
+use crate::inbox::{insert_event_in, insert_event_with_skip_in};
 use crate::row::{Cols, json_text, opt_raw, params};
 
 /// Source name of `timer_fired` events.
@@ -22,7 +23,7 @@ pub const TIMER_SOURCE: &str = "timer";
 pub(crate) const TIMER_FIELDS: &str =
     "id, project_id, lane_id, agent_id, task_ref, category, due_at,
     recurrence, instruction, status, created_by, created_by_call, last_fired_at, fire_count,
-    requested";
+    requested, missed_grace_minutes";
 
 pub(crate) fn decode_timer(row: &Row) -> StoreResult<Timer> {
     let c = Cols(row);
@@ -42,6 +43,11 @@ pub(crate) fn decode_timer(row: &Row) -> StoreResult<Timer> {
         last_fired_at: c.opt_ts(12)?,
         fire_count: c.u32(13)?,
         requested: c.bool(14)?,
+        missed_grace_minutes: c
+            .opt_i64(15)?
+            .map(u16::try_from)
+            .transpose()
+            .map_err(|_| StoreError::Corrupt("invalid stored missed-run grace".into()))?,
     })
 }
 
@@ -107,6 +113,15 @@ pub(crate) async fn insert_timer_in(
     timer: &NewTimer,
     ask: Option<EventId>,
 ) -> StoreResult<Timer> {
+    insert_timer_with_grace_in(conn, timer, ask, None).await
+}
+
+async fn insert_timer_with_grace_in(
+    conn: &Connection,
+    timer: &NewTimer,
+    ask: Option<EventId>,
+    grace_minutes: Option<u16>,
+) -> StoreResult<Timer> {
     if timer.category != TimerCategory::FollowUp && timer.recurrence.is_none() {
         return Err(StoreError::Invalid("a schedule needs a recurrence".into()));
     }
@@ -126,8 +141,9 @@ pub(crate) async fn insert_timer_in(
         conn,
         &format!(
             "INSERT INTO timers (id, project_id, lane_id, agent_id, task_ref, category, due_at,
-                 recurrence, instruction, status, created_by, created_by_call, requested, space_lead_event)
-             VALUES ({}, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12)
+                 recurrence, instruction, status, created_by, created_by_call, requested, space_lead_event,
+                 missed_grace_minutes)
+             VALUES ({}, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12, ?13)
              RETURNING {TIMER_FIELDS}",
             crate::db::next_id_sql!("timers")
         ),
@@ -144,6 +160,7 @@ pub(crate) async fn insert_timer_in(
             timer.created_by_call.as_deref(),
             timer.requested,
             opt_raw(ask, |id| id.get()),
+            grace_minutes.map(i64::from),
         ],
         decode_timer,
     )
@@ -151,6 +168,99 @@ pub(crate) async fn insert_timer_in(
 }
 
 impl HubDb {
+    /// Creates an owner routine that skips automatic occurrences outside the grace.
+    pub async fn create_routine_skipping_late(
+        &self,
+        timer: &NewTimer,
+        grace_minutes: u16,
+    ) -> StoreResult<Timer> {
+        if timer.category != TimerCategory::Schedule || timer.created_by != TimerCreator::User {
+            return Err(StoreError::Invalid(
+                "Only owner-created routines can skip missed runs.".into(),
+            ));
+        }
+        if !(1..=MAX_MISSED_GRACE_MINUTES).contains(&grace_minutes) {
+            return Err(StoreError::Invalid(format!(
+                "Missed-run grace must be from 1 to {MAX_MISSED_GRACE_MINUTES} minutes."
+            )));
+        }
+        let tx = self.db.begin().await?;
+        let saved = insert_timer_with_grace_in(tx.conn(), timer, None, Some(grace_minutes)).await?;
+        tx.commit().await?;
+        Ok(saved)
+    }
+
+    /// Atomically advance past downtime and record one skipped receipt. It never becomes
+    /// a pending event, never increments the fired count, and never wakes a lane.
+    pub async fn skip_late_routine(
+        &self,
+        id: TimerId,
+        occurrence: Timestamp,
+        next: Timestamp,
+        now: Timestamp,
+    ) -> StoreResult<()> {
+        if next <= now || next <= occurrence {
+            return Err(StoreError::Invalid(
+                "the next routine occurrence must be in the future".into(),
+            ));
+        }
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let timer = timer_in(conn, id)
+            .await?
+            .ok_or_else(|| StoreError::not_found("timer", id))?;
+        if timer.due_at != occurrence
+            || timer.status != TimerStatus::Active
+            || !timer.skips_late_at(now)
+        {
+            return Err(StoreError::Conflict(format!(
+                "routine {id} changed before it could be skipped"
+            )));
+        }
+        let changed = exec(
+            conn,
+            "UPDATE timers SET due_at = ?1 WHERE id = ?2 AND status = 'active' AND due_at = ?3
+             AND EXISTS (SELECT 1 FROM projects p WHERE p.id = timers.project_id AND p.archived_at IS NULL)",
+            params![next.as_millis(), id.get(), occurrence.as_millis()],
+        ).await?;
+        if changed != 1 {
+            return Err(StoreError::Conflict(format!(
+                "routine {id} cannot be skipped at {occurrence}"
+            )));
+        }
+        let grace = timer.missed_grace_minutes.expect("skip has a grace");
+        let reason = format!("Skipped because it was more than {grace} minutes late.");
+        let receipt = insert_event_with_skip_in(
+            conn,
+            &NewEvent {
+                project_id: timer.project_id,
+                lane_id: timer.lane_id,
+                source: TIMER_SOURCE.into(),
+                source_event_id: occurrence_id(id, occurrence),
+                kind: EventKind::TimerFired,
+                trust: Trust::System,
+                requested: false,
+                session_ref: None,
+                decision_ref: None,
+                reply_to_ref: None,
+                received_at: now,
+                payload: json!({
+                    "timer_id": id, "category": timer.category, "instruction": timer.instruction,
+                    "occurrence": occurrence, "created_by": timer.created_by, "next_due_at": next,
+                    "grace_minutes": grace,
+                }),
+            },
+            Some(&reason),
+        )
+        .await?;
+        if !matches!(receipt, Inserted::New(_)) {
+            return Err(StoreError::Conflict(format!(
+                "routine {id} already recorded {occurrence}"
+            )));
+        }
+        tx.commit().await
+    }
+
     /// Queues an owner-triggered occurrence without moving the scheduler cursor.
     pub async fn run_routine_once(
         &self,

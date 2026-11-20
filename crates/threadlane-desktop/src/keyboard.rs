@@ -7,8 +7,9 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use threadlane_core::ids::{EventId, RunId};
 use threadlane_desktop::{
-    DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope,
+    DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope, Line,
 };
 
 use crate::components::{key_hint, meta, section};
@@ -23,6 +24,65 @@ pub(super) enum DecisionScroll {
     None,
     Card,
     Note,
+}
+
+/// Stable message keys for holding the visible row still when prepending history.
+#[derive(Clone, PartialEq, Eq)]
+enum HistoryRow {
+    Event(EventId),
+    Feed(i64),
+    Run(RunId),
+    Decision(String),
+}
+
+impl HistoryRow {
+    fn of(line: &Line) -> Option<Self> {
+        match line {
+            Line::You { id, .. }
+            | Line::SpaceLead { id, .. }
+            | Line::ProjectReply { id, .. }
+            | Line::DeliveryFailure { id, .. } => Some(Self::Event(*id)),
+            Line::Lead { seq, .. } | Line::Notice { seq, .. } => Some(Self::Feed(*seq)),
+            Line::Digest { digest, .. } => Some(Self::Feed(digest.seq)),
+            Line::Quiet { id, .. } => Some(Self::Run(*id)),
+            Line::Decision { card, .. } => Some(Self::Decision(card.id.clone())),
+            Line::Day(_) | Line::New | Line::Sending { .. } | Line::Stopped { .. } => None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct HistoryScroll {
+    visible: Option<(HistoryRow, Pixels)>,
+    restore: Option<(HistoryRow, Pixels)>,
+}
+
+impl HistoryScroll {
+    pub(super) fn preserve(&mut self) {
+        self.restore = self.visible.clone();
+    }
+
+    fn measure(
+        &mut self,
+        rows: &[Option<HistoryRow>],
+        bounds: &[Bounds<Pixels>],
+        viewport: Bounds<Pixels>,
+    ) -> Option<Pixels> {
+        let rows = || {
+            rows.iter()
+                .zip(bounds)
+                .filter_map(|(row, bound)| Some((row.as_ref()?, bound)))
+        };
+        let delta = self.restore.take().and_then(|(anchor, prior_top)| {
+            rows()
+                .find(|(row, _)| **row == anchor)
+                .map(|(_, bound)| prior_top - (bound.top() - viewport.top()))
+        });
+        self.visible = rows()
+            .find(|(_, bound)| bound.bottom() > viewport.top() && bound.top() < viewport.bottom())
+            .map(|(row, bound)| (row.clone(), bound.top() - viewport.top()));
+        delta
+    }
 }
 
 impl Screen {
@@ -186,9 +246,31 @@ impl Desktop {
                 &self.task_composer
             }
             Screen::Project {
-                tab: Tab::Tasks | Tab::Conversation,
-                ..
-            } => &self.composer,
+                space,
+                project,
+                tab: Tab::Tasks,
+            } if !self.state.is_archived(space, project) => {
+                let target = Screen::Project {
+                    space: space.clone(),
+                    project: project.clone(),
+                    tab: Tab::Conversation,
+                };
+                self.go(target.clone(), cx);
+                let desktop = cx.entity().downgrade();
+                window.on_next_frame(move |window, cx| {
+                    let _gone = desktop.update(cx, |this, cx| {
+                        if this.screen == target {
+                            this.focus_composer(window, cx);
+                        }
+                    });
+                });
+                return;
+            }
+            Screen::Project {
+                space,
+                project,
+                tab: Tab::Conversation,
+            } if !self.state.is_archived(space, project) => &self.composer,
             _ => return,
         };
         self.scroll_to_decision.set(DecisionScroll::None);
@@ -216,8 +298,12 @@ impl Desktop {
         space: &str,
         project: &str,
         lines: Div,
+        conversation: &[Line],
+        has_header: bool,
         cx: &mut Context<Self>,
     ) -> Div {
+        let rows: Vec<_> = conversation.iter().map(HistoryRow::of).collect();
+        let history = self.history_scroll.clone();
         let scroll = self.decision_scroll.clone();
         let previous_max = scroll.max_offset().y;
         let was_at_bottom = self.conversation_at_bottom;
@@ -228,7 +314,33 @@ impl Desktop {
         let current_visit = follow.clone();
         let desktop = cx.entity().downgrade();
         let (in_space, named) = (space.to_owned(), project.to_owned());
-        let lines = lines.on_children_prepainted(move |_, window, _| {
+        let lines = lines.on_children_prepainted(move |bounds, window, _| {
+            // When present, the first child is the history control/status.
+            let viewport = scroll.bounds();
+            if let Some(delta) = history.borrow_mut().measure(
+                &rows,
+                bounds.get(usize::from(has_header)..).unwrap_or_default(),
+                viewport,
+            ) {
+                follow.set(false);
+                let scroll = scroll.clone();
+                let desktop = desktop.clone();
+                let visit = current_visit.clone();
+                let measured = scroll.offset();
+                window.on_next_frame(move |window, cx| {
+                    let _ = desktop.update(cx, |this, _| {
+                        if std::rc::Rc::ptr_eq(&this.conversation_follow, &visit)
+                            && scroll.offset() == measured
+                        {
+                            let y =
+                                (measured.y + delta).clamp(-scroll.max_offset().y, Pixels::ZERO);
+                            scroll.set_offset(point(measured.x, y));
+                            window.refresh();
+                        }
+                    });
+                });
+                return;
+            }
             let max = scroll.max_offset().y;
             let at_bottom = max + scroll.offset().y <= crate::tokens::SCROLL_END_TOLERANCE;
             let jump = threadlane_desktop::follow_latest(
@@ -351,4 +463,44 @@ pub(super) fn send_hint(cx: &App) -> String {
         },
     )
     .map_or_else(|| "Send".to_owned(), |key| format!("Send  {key}"))
+}
+
+#[cfg(test)]
+mod history_scroll_tests {
+    use gpui_kit::{Bounds, point, px, size};
+
+    use super::{HistoryRow, HistoryScroll};
+
+    #[test]
+    fn reopening_earlier_history_keeps_the_same_visible_row_and_pixel_position() {
+        let rect = |top, height| Bounds::new(point(px(0.), px(top)), size(px(300.), px(height)));
+        let mut scroll = HistoryScroll::default();
+        let viewport = rect(100., 200.);
+        let shown = [None, Some(HistoryRow::Feed(2)), Some(HistoryRow::Feed(3))];
+        let bounds = [rect(74., 10.), rect(90., 96.), rect(210., 96.)];
+        assert_eq!(scroll.measure(&shown, &bounds, viewport), None);
+        scroll.preserve();
+
+        let prepended = [
+            Some(HistoryRow::Feed(1)),
+            None,
+            shown[1].clone(),
+            shown[2].clone(),
+        ];
+        let bounds = [
+            rect(68., 70.),
+            rect(145., 10.),
+            rect(161., 96.),
+            rect(281., 96.),
+        ];
+        assert_eq!(
+            scroll.measure(&prepended, &bounds, viewport),
+            Some(px(-71.))
+        );
+        assert_eq!(
+            scroll.measure(&prepended, &bounds, viewport),
+            None,
+            "restore is one-shot"
+        );
+    }
 }

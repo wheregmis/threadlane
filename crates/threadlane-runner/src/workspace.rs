@@ -615,18 +615,29 @@ impl Workspaces for GitWorkspaces {
         &self,
         task: TaskId,
         repository: &Repository,
+        expected_head: Option<&str>,
     ) -> Result<PublishPreview, WorkspaceError> {
         check(repository)?;
         let _repo = self.lock_repository(repository.id).await;
         if !self.is_ready(task, repository) {
             return Err(WorkspaceError("no worktree was set up".into()));
         }
-        let commit = self.fetch_base(repository).await?;
         let worktree = self.worktree(task, repository);
         let revision = branch_revision(&worktree, &task_branch(task)).await?;
-        let diff = self
-            .compute_diff_preview(repository, &worktree, &commit, &revision)
-            .await?;
+        let diff = if let Some(head) = expected_head {
+            check_fast_forward(&worktree, head, &revision).await?;
+            let mut diff = self
+                .compute_diff_preview(repository, &worktree, head, &revision)
+                .await?;
+            if let Some(diff) = &mut diff {
+                diff.base_branch = format!("PR head {}", &head[..12]);
+            }
+            diff
+        } else {
+            let base = self.fetch_base(repository).await?;
+            self.compute_diff_preview(repository, &worktree, &base, &revision)
+                .await?
+        };
         Ok(PublishPreview { revision, diff })
     }
 
@@ -864,6 +875,36 @@ where
     run(git_command(dir, &args), "git", &args, GIT_TIMEOUT)
         .await
         .map_err(WorkspaceError)
+}
+
+/// Checks ancestry without Git replacement objects changing the commit graph.
+pub(crate) async fn check_fast_forward(
+    worktree: &Path,
+    head: &str,
+    revision: &str,
+) -> Result<(), WorkspaceError> {
+    if !valid_commit_id(head) || !valid_commit_id(revision) {
+        return Err(WorkspaceError(
+            "a fast-forward requires two full commit SHAs".into(),
+        ));
+    }
+    git(
+        Some(worktree),
+        [
+            "--no-replace-objects",
+            "merge-base",
+            "--is-ancestor",
+            head,
+            revision,
+        ],
+    )
+    .await
+    .map_err(|error| {
+        WorkspaceError(format!(
+            "the task commit must contain the expected PR head: {error}"
+        ))
+    })?;
+    Ok(())
 }
 
 /// `git [-C dir] <args>`, kept from prompting. It sets no credentials and

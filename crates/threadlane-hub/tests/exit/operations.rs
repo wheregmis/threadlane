@@ -347,11 +347,13 @@ async fn lane_and_metrics_dispatch_use_scope_and_show_live_lease_and_history() {
     assert_eq!(inspected.sessions.len(), 1);
     assert_eq!(inspected.runs.len(), 1);
     assert_eq!(inspected.open_decisions.len(), 1);
-    assert_eq!(inspected.timers.len(), 2);
-    assert_eq!(inspected.timers[1], timer);
+    // General's default dreaming, the decision's expiry, then the follow-up.
+    assert_eq!(inspected.timers.len(), 3);
+    assert_eq!(inspected.timers[2], timer);
     assert_eq!(inspected.timers[0].created_by, TimerCreator::System);
+    assert_eq!(inspected.timers[1].created_by, TimerCreator::System);
     assert_eq!(
-        Some(inspected.timers[0].due_at),
+        Some(inspected.timers[1].due_at),
         inspected.open_decisions[0].expires_at
     );
 
