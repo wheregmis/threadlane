@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST, LABEL_ISSUE, MARK_READY, MERGE,
-    OPEN_PULL_REQUEST, PUBLISH_BRANCH, REPORT_LIMITATION,
+    CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST, LABEL_ISSUE, MARK_READY,
+    MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH, REPORT_LIMITATION,
 };
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
@@ -86,7 +86,8 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | CREATE_ISSUE
         | MERGE
         | MARK_READY
-        | LABEL_ISSUE => kind == LaneKind::Task,
+        | LABEL_ISSUE
+        | CLOSE_PULL_REQUEST => kind == LaneKind::Task,
         _ => true,
     }
 }
@@ -1393,6 +1394,7 @@ impl ToolRegistry for HubTools {
             | MERGE
             | MARK_READY
             | LABEL_ISSUE
+            | CLOSE_PULL_REQUEST
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
             ))),
@@ -1599,7 +1601,8 @@ mod tests {
                     CREATE_ISSUE,
                     MERGE,
                     MARK_READY,
-                    LABEL_ISSUE
+                    LABEL_ISSUE,
+                    CLOSE_PULL_REQUEST
                 ][..],
                 &memory
             ]

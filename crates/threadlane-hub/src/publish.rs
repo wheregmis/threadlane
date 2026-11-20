@@ -5,8 +5,9 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, LABEL_ISSUE, MARK_READY,
-    MAX_LABELS, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH, valid_label_name,
+    CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST,
+    LABEL_ISSUE, MARK_READY, MAX_LABELS, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    valid_label_name,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -55,7 +56,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: schema,
-        tier: if name == MERGE {
+        tier: if matches!(name, MERGE | CLOSE_PULL_REQUEST) {
             Tier::SharedHardToUndo
         } else {
             Tier::SharedReversible
@@ -157,6 +158,22 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 "required":["repository","number"],"additionalProperties":false
             }),
         ),
+        define(
+            CLOSE_PULL_REQUEST,
+            "Close an open pull request in a registered project repository, such as a superseded \
+             duplicate, and optionally delete its head branch. Give the PR number and its current \
+             full head SHA: the close is refused if the head has moved.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "expected_head":{"type":"string","description":"The current full commit SHA of the PR head."},
+                    "delete_branch":{"type":"boolean","description":"Also delete the PR's head branch. Default false."}
+                },
+                "required":["repository","number","expected_head"],"additionalProperties":false
+            }),
+        ),
     ]
 }
 
@@ -231,6 +248,24 @@ pub(crate) fn repository_action(
                 remove,
             })
         }
+        CLOSE_PULL_REQUEST => {
+            fields(a, &["repository", "number", EXPECTED_HEAD, "delete_branch"])?;
+            let expected_head = a[EXPECTED_HEAD]
+                .as_str()
+                .filter(|head| valid_commit_id(head))
+                .ok_or_else(|| invalid("expected_head must be a full commit SHA"))?
+                .to_owned();
+            let delete_branch = match a.get("delete_branch") {
+                None | Some(Json::Null) => false,
+                Some(Json::Bool(delete)) => *delete,
+                Some(_) => return Err(invalid("delete_branch must be true or false")),
+            };
+            Ok(RepositoryAction::ClosePullRequest {
+                number: number()?,
+                expected_head,
+                delete_branch,
+            })
+        }
         _ => Err(invalid("unknown repository action")),
     }
 }
@@ -292,6 +327,7 @@ pub(crate) async fn proposal(
             | MERGE
             | MARK_READY
             | LABEL_ISSUE
+            | CLOSE_PULL_REQUEST
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -337,26 +373,27 @@ pub(crate) async fn proposal(
         })?;
     if matches!(
         tool,
-        COMMENT | CREATE_ISSUE | MERGE | MARK_READY | LABEL_ISSUE
+        COMMENT | CREATE_ISSUE | MERGE | MARK_READY | LABEL_ISSUE | CLOSE_PULL_REQUEST
     ) {
         let action = repository_action(tool, arguments)?;
-        let question = match tool {
-            COMMENT => format!(
-                "Comment on {} #{} in {name}?",
-                arguments["target"].as_str().unwrap_or_default(),
-                arguments["number"]
+        let question = match &action {
+            threadlane_core::forge::RepositoryAction::ClosePullRequest {
+                number,
+                expected_head,
+                delete_branch,
+            } => format!(
+                "Close pull request #{number} in {name}{} if its head is still {expected_head}?",
+                if *delete_branch {
+                    " and delete its head branch"
+                } else {
+                    ""
+                }
             ),
-            MERGE => format!("Merge pull request #{} in {name}?", arguments["number"]),
-            MARK_READY => format!(
-                "Mark draft pull request #{} in {name} ready for review?",
-                arguments["number"]
-            ),
-            LABEL_ISSUE => {
-                let threadlane_core::forge::RepositoryAction::LabelIssue { add, remove, .. } =
-                    &action
-                else {
-                    unreachable!("label_issue parses to LabelIssue")
-                };
+            threadlane_core::forge::RepositoryAction::LabelIssue {
+                number,
+                add,
+                remove,
+            } => {
                 let mut change = Vec::new();
                 if !add.is_empty() {
                     change.push(format!("add {}", add.join(", ")));
@@ -364,13 +401,21 @@ pub(crate) async fn proposal(
                 if !remove.is_empty() {
                     change.push(format!("remove {}", remove.join(", ")));
                 }
-                format!(
-                    "Label issue #{} in {name}: {}?",
-                    arguments["number"],
-                    change.join("; ")
-                )
+                format!("Label issue #{number} in {name}: {}?", change.join("; "))
             }
-            _ => format!("Create issue {} in {name}?", arguments["title"]),
+            _ => match tool {
+                COMMENT => format!(
+                    "Comment on {} #{} in {name}?",
+                    arguments["target"].as_str().unwrap_or_default(),
+                    arguments["number"]
+                ),
+                MERGE => format!("Merge pull request #{} in {name}?", arguments["number"]),
+                MARK_READY => format!(
+                    "Mark draft pull request #{} in {name} ready for review?",
+                    arguments["number"]
+                ),
+                _ => format!("Create issue {} in {name}?", arguments["title"]),
+            },
         };
         return Ok(Proposal {
             question,

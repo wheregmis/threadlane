@@ -42,6 +42,8 @@ pub fn valid_label_name(name: &str) -> bool {
         && name.trim() == name
         && !name.chars().any(char::is_control)
 }
+/// Close a registered repository's pull request, optionally deleting its head branch.
+pub const CLOSE_PULL_REQUEST: &str = "close_pull_request";
 
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -64,6 +66,13 @@ pub enum RepositoryAction {
         number: std::num::NonZeroU64,
         add: Vec<String>,
         remove: Vec<String>,
+    },
+    /// Close the numbered pull request if its head is still `expected_head`,
+    /// then delete its head branch if asked.
+    ClosePullRequest {
+        number: std::num::NonZeroU64,
+        expected_head: String,
+        delete_branch: bool,
     },
 }
 
