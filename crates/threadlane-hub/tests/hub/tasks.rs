@@ -1342,6 +1342,15 @@ async fn a_dependency_and_the_parallel_limits_hold_tasks_back_with_their_reason(
     .await
     .unwrap();
     finish_run(&hub, &first, &first_run).await;
+    // The lead's short run on the result goes before the waiting tasks.
+    let (lead, lead_run) = begin(&*hub.link).await;
+    assert_eq!(lead.lane_id, hub.general().await.lead_lane_id);
+    assert_eq!(
+        hub.link.request_work().await.unwrap(),
+        None,
+        "the tasks wait for a machine slot"
+    );
+    finish_run(&hub, &lead, &lead_run).await;
     let (_, third_run) = begin(&*hub.link).await;
     assert!(
         third_run.prompt.contains("T-0003"),
@@ -1351,7 +1360,7 @@ async fn a_dependency_and_the_parallel_limits_hold_tasks_back_with_their_reason(
     assert_eq!(
         hub.link.request_work().await.unwrap(),
         None,
-        "the lead also waits for a machine slot"
+        "no machine slot is left"
     );
     assert_eq!(
         task(&hub, "T-0004").await.waiting_reason.as_deref(),
