@@ -884,7 +884,8 @@ impl DecisionStore for HubDb {
                  starts; its outcome follows.",
                 created.id, created.tool
             ),
-            Trust::User,
+            // Not the user's answer: it must not make the next run count as requested.
+            Trust::System,
             created.created_at,
         )
         .await?;

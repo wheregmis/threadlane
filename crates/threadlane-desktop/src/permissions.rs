@@ -408,8 +408,8 @@ impl AppState {
             if tier == Tier::SharedReversible && set.is_none() && mode != Mode::Off {
                 statements.push(Statement {
                     what: "Its own branch and draft pull request",
-                    examples: "push the task branch, open a draft pull request; asks instead \
-                               in a run triggered by outside content",
+                    examples: "push the task branch, open a draft pull request; decided as \
+                               other shared effects are in a run triggered by outside content",
                     tier: None,
                     cell: "Yes".to_owned(),
                     choices: Vec::new(),
@@ -552,12 +552,14 @@ impl AppState {
         let permits = match mode {
             Mode::Off => "No agent will run in any project of this space.",
             Mode::OnRequest => {
-                "Agents start work only when you ask, and ask before any shared effect. \
+                "Agents start work only when you ask, and ask before any shared effect \
+                 except pushing their task branch and opening a draft pull request. \
                  Bindings above it act at On request."
             }
             Mode::Assisted => {
-                "Agents may also propose work, and push branches and open draft pull \
-                 requests after an automatic review. They still ask for anything hard to undo."
+                "Agents may also propose work, and perform shared effects other than pushing \
+                 their task branch and opening a draft pull request after an automatic \
+                 review. They still ask for anything hard to undo."
             }
             Mode::Autonomous => {
                 "Agents may also start work on their own from events, routines and their own \

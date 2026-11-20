@@ -223,6 +223,7 @@ pub async fn assert_published(sim: &Sim, scenario: &str) {
     {
         assert_eq!(feed.len(), 1, "{scenario}: only the reply");
     } else {
+        assert_eq!(feed.len(), 2, "{scenario}: the card and the reply");
         let card = feed.remove(0);
         assert_eq!(
             card.message.kind,
@@ -255,8 +256,9 @@ async fn a_draft_pull_request_is_opened_by_default_without_a_card() {
                 && event.payload["text"]
                     .as_str()
                     .is_some_and(|text| text.contains("is allowed by default"))
+                && event.trust == threadlane_core::model::Trust::System
         }),
-        "the answer event says so"
+        "the answer event says so, and is not the user's"
     );
 }
 

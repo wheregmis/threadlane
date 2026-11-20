@@ -95,8 +95,11 @@ approval, and every later push would ask again.
 - The gate allows `open_pull_request` and `publish_branch` without
   `onto_task` by default, where the matrix would ask or review, in every mode
   above Off.
-- Not in a tainted run: a run that consumed outside content decides as
-  before, so outside content cannot push or publish text unseen.
+- Not in a tainted run: a run that consumed an external event decides as
+  before (ask, review or a standing rule). Taint tracks external events only:
+  text an agent reads itself through read-only `gh` views, repository files or
+  web fetches does not taint a run, so such a run can still publish without
+  asking.
 - A tier 2 override on the binding turns it off; Off, ceilings and Block
   still win.
 - The call is recorded as a decision already answered, marked `by_default`
