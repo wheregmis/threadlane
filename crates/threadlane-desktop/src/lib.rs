@@ -504,6 +504,20 @@ impl Tab {
         }
     }
 
+    /// What it shows, as the tooltip on its icon-only tab.
+    #[must_use]
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            Self::Tasks => "Tasks: the board",
+            Self::Conversation => "Chat with the lead",
+            Self::Memory => "Memory: notes and progress files",
+            Self::Team => "Team: agents and permissions",
+            Self::Workflow => "Workflow: how work gets reviewed",
+            Self::Routines => "Routines and follow-ups",
+            Self::Setup => "Setup: repositories and machines",
+        }
+    }
+
     /// Its place on the tab bar, which selects it there: always found
     /// from [`Tab::ALL`], so a tab added anywhere keeps the two in step.
     #[must_use]

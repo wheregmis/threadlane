@@ -2744,6 +2744,8 @@ fn every_tab_is_selected_where_it_is_shown() {
         assert_eq!(Tab::at(tab.index()), Some(tab), "{tab:?}");
         assert_eq!(labels[tab.index()], tab.label(), "{tab:?}");
         assert_eq!(Tab::named(&tab.label().to_lowercase()), Some(tab));
+        // The bar shows only icons, so the tooltip must name the tab.
+        assert!(tab.tooltip().starts_with(tab.label()), "{tab:?}");
     }
     assert_eq!(
         labels,

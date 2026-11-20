@@ -9,6 +9,7 @@ use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     h_flex, v_flex,
@@ -551,6 +552,7 @@ impl Desktop {
                     .label(label)
                     .aria_label(label)
                     .icon(Icon::new(icon).size(TYPE_BODY))
+                    .tooltip(move |window, cx| Tooltip::new(tab.tooltip()).build(window, cx))
             }));
         let archived = self.state.is_archived(space, project);
         let paused = self.state.is_paused(space, project);
