@@ -5,8 +5,8 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, MARK_READY,
-    MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST,
+    MARK_READY, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -330,17 +330,17 @@ pub(crate) async fn proposal(
                 }
             ),
             _ => match tool {
-            COMMENT => format!(
-                "Comment on {} #{} in {name}?",
-                arguments["target"].as_str().unwrap_or_default(),
-                arguments["number"]
-            ),
-            MERGE => format!("Merge pull request #{} in {name}?", arguments["number"]),
-            MARK_READY => format!(
-                "Mark draft pull request #{} in {name} ready for review?",
-                arguments["number"]
-            ),
-            _ => format!("Create issue {} in {name}?", arguments["title"]),
+                COMMENT => format!(
+                    "Comment on {} #{} in {name}?",
+                    arguments["target"].as_str().unwrap_or_default(),
+                    arguments["number"]
+                ),
+                MERGE => format!("Merge pull request #{} in {name}?", arguments["number"]),
+                MARK_READY => format!(
+                    "Mark draft pull request #{} in {name} ready for review?",
+                    arguments["number"]
+                ),
+                _ => format!("Create issue {} in {name}?", arguments["title"]),
             },
         };
         return Ok(Proposal {

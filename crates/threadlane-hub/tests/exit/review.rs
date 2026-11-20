@@ -12,7 +12,7 @@ use threadlane_core::model::{
 use threadlane_core::runtime::steps::perform;
 use threadlane_core::store::{InboxStore, OrgStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{COMMENT, CREATE_ISSUE, MARK_READY, MERGE};
+use threadlane_hub::{CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, MARK_READY, MERGE};
 use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::{CrashPlan, Script};
 
@@ -22,7 +22,7 @@ use crate::operations::follow_up;
 use crate::permissions::engineer_in;
 use crate::publish::{drive, publish_world};
 
-pub(super) fn actions() -> [(&'static str, Json); 4] {
+pub(super) fn actions() -> [(&'static str, Json); 5] {
     [
         (
             COMMENT,
@@ -34,8 +34,15 @@ pub(super) fn actions() -> [(&'static str, Json); 4] {
         ),
         (MERGE, json!({"repository":"app","number":12})),
         (MARK_READY, json!({"repository":"app","number":12})),
+        (
+            CLOSE_PULL_REQUEST,
+            json!({"repository":"app","number":12,"expected_head":HEAD,"delete_branch":true}),
+        ),
     ]
 }
+
+/// The PR head a close is pinned to.
+const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn script(tool: &str, args: Json) -> Script {
     Script::new().call("forge-call", tool, args).finish("Done.")
@@ -167,7 +174,7 @@ async fn each_tool_uses_its_matrix_cell_and_reviews_record_the_reason() {
             let sim = w.boot(CrashPlan::new()).await;
             sim.send("m", "Finish the page").await;
             work(&sim).await;
-            let reviewed = mode != Mode::OnRequest && tool != MERGE;
+            let reviewed = mode != Mode::OnRequest && ![MERGE, CLOSE_PULL_REQUEST].contains(&tool);
             let decisions = sim.decisions().await;
             assert_eq!(decisions.len(), 1, "{mode} {tool}");
             assert_eq!(decisions[0].arguments, args);
@@ -506,4 +513,68 @@ async fn redteam_live_claude() {
 #[ignore = "uses the real Codex backend and its quota"]
 async fn redteam_live_codex() {
     redteam(Arc::new(threadlane_backend_codex::CodexBackend::default())).await;
+}
+
+#[tokio::test]
+async fn closing_a_pull_request_waits_for_approval_of_the_head_it_shows() {
+    let args = actions()[4].1.clone();
+    for mode in [Mode::OnRequest, Mode::Autonomous] {
+        for option in ["decline", "approve"] {
+            let w = world(CLOSE_PULL_REQUEST, args.clone(), mode).await;
+            w.backend.push_answer(answer("allow"));
+            let sim = w.boot(CrashPlan::new()).await;
+            sim.send("m", "Close the duplicate").await;
+            work(&sim).await;
+            // Hard to undo: even an allowed review leaves the decision to the owner.
+            let decisions = sim.decisions().await;
+            assert_eq!(decisions.len(), 1, "{mode}");
+            let decision = &decisions[0];
+            assert!(!decision.approved(), "{mode}");
+            assert!(w.forge.calls().is_empty(), "{mode}");
+            for shown in ["#12", "app", HEAD, "delete its head branch"] {
+                assert!(decision.question.contains(shown), "{shown}");
+            }
+            drive(&sim, option, None).await.unwrap();
+            let calls = w.forge.calls();
+            if option == "decline" {
+                assert!(calls.is_empty(), "{mode}");
+                continue;
+            }
+            let [ForgeCall::Apply { remote, action }] = calls.as_slice() else {
+                panic!("expected one close, got {calls:?}");
+            };
+            assert!(remote.contains("app"), "{remote}");
+            assert_eq!(
+                action,
+                &RepositoryAction::ClosePullRequest {
+                    number: 12.try_into().unwrap(),
+                    expected_head: HEAD.into(),
+                    delete_branch: true,
+                }
+            );
+            assert_invariants(&sim, CLOSE_PULL_REQUEST).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_close_without_the_full_head_sha_it_was_shown_is_refused() {
+    for (head, delete) in [
+        (json!(null), json!(false)),
+        (json!("0123456"), json!(false)),
+        (json!(HEAD.to_uppercase()), json!(false)),
+        (json!(HEAD), json!("yes")),
+    ] {
+        let mut args = json!({"repository":"app","number":12,"delete_branch":delete});
+        if !head.is_null() {
+            args["expected_head"] = head.clone();
+        }
+        let w = world(CLOSE_PULL_REQUEST, args, Mode::Assisted).await;
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Close the duplicate").await;
+        work(&sim).await;
+        assert!(w.backend.questions().is_empty(), "{head}");
+        assert!(sim.decisions().await.is_empty(), "{head}");
+        assert!(w.forge.calls().is_empty(), "{head}");
+    }
 }

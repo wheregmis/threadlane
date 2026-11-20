@@ -165,8 +165,8 @@ impl Routes {
                     let names_pull_request = matches!(
                         decision.tool.as_str(),
                         MERGE | MARK_READY | CLOSE_PULL_REQUEST
-                    )
-                        || (decision.tool == COMMENT && arguments["target"] == "pull_request");
+                    ) || (decision.tool == COMMENT
+                        && arguments["target"] == "pull_request");
                     let (name, branch, number) =
                         match (outcome["repository"].as_str(), outcome["branch"].as_str()) {
                             (Some(name), Some(branch)) => (

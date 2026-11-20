@@ -623,6 +623,14 @@ mod tests {
             ),
             json!({"repository":"app","number":42})
         );
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            rule_pattern(
+                crate::CLOSE_PULL_REQUEST,
+                &json!({"repository":"app","number":42,"expected_head":head,"delete_branch":true})
+            ),
+            json!({"repository":"app","number":42,"expected_head":head})
+        );
     }
 
     #[test]
