@@ -1581,6 +1581,21 @@ impl AppState {
         self.queue.iter().filter(|queued| self.shown(&queued.space))
     }
 
+    /// Whether the Inbox's Needs you tab has nothing to show: no decisions,
+    /// blockers or running tasks in the spaces shown, and no gaps in either.
+    #[must_use]
+    pub fn caught_up(&self) -> bool {
+        self.needs_you().next().is_none()
+            && self.running().is_empty()
+            && self.gaps(Part::Decisions).is_empty()
+            && self.gaps(Part::Running).is_empty()
+            && self
+                .spaces
+                .iter()
+                .filter(|space| self.shown(&space.name))
+                .all(|space| self.blocked(&space.name).is_none())
+    }
+
     /// The contents and treatment of an open decision card, by decision kind.
     #[must_use]
     pub fn decision_card(queued: &Queued) -> DecisionCard {

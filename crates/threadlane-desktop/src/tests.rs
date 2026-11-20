@@ -1673,6 +1673,30 @@ async fn running_inbox_entries_open_the_right_task_when_spaces_share_an_id() {
     );
 }
 
+#[tokio::test]
+async fn inbox_is_caught_up_only_when_nothing_needs_you_and_nothing_runs_in_the_spaces_shown() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().expect("lock") = vec![task(1, TaskStatus::Running, None)];
+    let home = FakeHub::new("Home", Vec::new());
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    assert_eq!(state.needs_you().count(), 0);
+    assert!(
+        !state.caught_up(),
+        "a running task keeps the Inbox from saying caught up"
+    );
+    state.set_filter(Some("home"));
+    assert!(state.caught_up(), "nothing runs in the space shown");
+    state.set_filter(Some("work"));
+    assert!(!state.caught_up());
+
+    *work.tasks.lock().expect("lock") = vec![task(1, TaskStatus::Done, None)];
+    state.apply(refresh(&core).await);
+    assert!(state.caught_up(), "no decisions and nothing running");
+}
+
 const BLOCKED_FOR_TEST: &str = "blocked: every model account it can use is at its usage limit";
 
 #[tokio::test]

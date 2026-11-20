@@ -210,12 +210,15 @@ impl Desktop {
 
         let mut needs = v_flex().gap(SM).pb(SM);
         let gaps = state.gaps(Part::Decisions);
-        if banners.is_empty() && gaps.is_empty() && state.needs_you().next().is_none() {
+        if state.caught_up() {
             return needs
                 .pt(LG)
                 .items_start()
                 .child(section("You’re caught up"))
-                .child(meta("No decisions or blockers in the spaces shown.", cx))
+                .child(meta(
+                    "No decisions, blockers or running tasks in the spaces shown.",
+                    cx,
+                ))
                 .child(
                     button("inbox-view-activity")
                         .outline()
@@ -274,7 +277,14 @@ impl Desktop {
                     .children(open.then(|| self.decision(queued, when, cx))),
             );
         }
-        needs
+        needs.children(self.inbox_tasks(
+            "Running tasks",
+            &state.running(),
+            Part::Running,
+            None,
+            when,
+            cx,
+        ))
     }
 
     fn inbox_activity(&self, when: &When, cx: &mut Context<Self>) -> Div {
