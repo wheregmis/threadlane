@@ -43,7 +43,7 @@ fn cubic_point(
 
 /// Paints the viewport-clipped architectural dot grid, cubic Bézier edges,
 /// port dots, and directional arrowheads (static; does not repaint on pulse frames).
-fn static_edge_layer(
+pub(crate) fn static_edge_layer(
     id: impl Into<ElementId>,
     edges: Vec<GraphEdge>,
     width: f32,
@@ -91,7 +91,7 @@ fn static_edge_layer(
                     EdgeState::Active => (run_ink, 2.2),
                     EdgeState::Blocked => (fail_ink.opacity(0.9), 2.0),
                     EdgeState::Satisfied => (done_ink.opacity(0.55), 1.5),
-                    EdgeState::Pending => (theme.border.opacity(0.95), 1.4),
+                    EdgeState::Pending => (theme.muted_foreground.opacity(0.7), 1.4),
                 };
 
                 let p0 = (edge.x1, edge.y1);
