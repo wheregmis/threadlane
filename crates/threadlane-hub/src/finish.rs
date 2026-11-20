@@ -66,6 +66,16 @@ impl LocalLink {
             event.kind == EventKind::UserMessage
                 || (event.kind == EventKind::DecisionAnswer && event.trust == Trust::User)
         });
+        // A run that waited on you ended for your answer: its final text, or
+        // the runner's stop notice, is a note for the run detail (#612).
+        let replying = replying
+            && lane.kind == LaneKind::Lead
+            && !db
+                .lane_decisions(lane.id)
+                .await
+                .map_err(link_error)?
+                .iter()
+                .any(|decision| decision.run_id == Some(run_id));
         let mut rationale = final_text;
         let outcome = if db.count_for_run(run_id).await.map_err(link_error)? > 0 {
             RunOutcome::Sent
@@ -83,9 +93,7 @@ impl LocalLink {
         } else if let Some(text) = final_text
             .map(str::trim)
             // A dream reviews memory; it has nothing to tell you.
-            .filter(|text| {
-                lane.kind == LaneKind::Lead && replying && !dreaming && deliverable(text)
-            })
+            .filter(|text| replying && !dreaming && deliverable(text))
         {
             // A lead that just answers is heard, as if it had sent the text.
             let run = self.active_run(lease, run_id).await?;
