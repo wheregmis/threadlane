@@ -5273,9 +5273,9 @@ fn bare_github_references_link_only_outside_words_code_and_urls() {
     assert_eq!(
         references,
         [
-            ("#565", Reference::Github(565)),
-            ("#572", Reference::Github(572)),
-            ("#1", Reference::Github(1)),
+            ("#565", Reference::Github(None, 565)),
+            ("#572", Reference::Github(None, 572)),
+            ("#1", Reference::Github(None, 1)),
             (
                 "https://example.test/page#565",
                 Reference::Web("https://example.test/page#565")
@@ -5317,14 +5317,14 @@ fn bare_github_references_link_only_outside_words_code_and_urls() {
 
     assert_eq!(
         Reference::from_link("threadlane:#565"),
-        Some(Reference::Github(565))
+        Some(Reference::Github(None, 565))
     );
     assert_eq!(Reference::from_link("threadlane:#"), None);
     assert_eq!(Reference::from_link("threadlane:#0"), None);
 }
 
 #[tokio::test]
-async fn project_github_repository_uses_first_github_remote() {
+async fn project_github_repository_links_bare_numbers_only_when_unambiguous() {
     let hub = FakeHub::new("Work", Vec::new());
     let (_dir, core) = core(&[("work", &hub)]);
     let mut state = AppState::default();
@@ -5358,7 +5358,7 @@ async fn project_github_repository_uses_first_github_remote() {
     );
     assert_eq!(state.github_repository("work", "api"), None);
 
-    // First GitHub remote wins, skipping non-GitHub remotes before it.
+    // Two GitHub repositories: a bare `#N` is ambiguous without context.
     state.apply_repositories(
         "work",
         "api",
@@ -5389,9 +5389,99 @@ async fn project_github_repository_uses_first_github_remote() {
             },
         ]),
     );
+    assert_eq!(state.github_repository("work", "api"), None);
+    assert_eq!(
+        markdown_source_for("See #1.", None, None),
+        "See #1.",
+        "multi-repo without context stays plain text"
+    );
+
+    // A task's attached repository is the context, skipping non-GitHub ones.
+    let task_repo =
+        state.github_repository_among("work", "api", Some(&[RepositoryId(1), RepositoryId(3)]));
+    assert_eq!(task_repo.as_deref(), Some("acme/other"));
+    assert_eq!(
+        markdown_source_for("See #1.", None, task_repo.as_deref()),
+        "See [#1](https://github.com/acme/other/pull/1)."
+    );
+    assert_eq!(
+        state.github_repository_among("work", "api", Some(&[RepositoryId(2), RepositoryId(3)])),
+        None
+    );
+
+    // A single GitHub repository, among non-GitHub ones, is unambiguous.
+    state.apply_repositories(
+        "work",
+        "api",
+        Ok(vec![
+            Repository {
+                id: RepositoryId(1),
+                project_id: ProjectId(1),
+                name: "local".into(),
+                remote_url: "/srv/git/local".into(),
+                default_branch: "main".into(),
+                protected_branches: Vec::new(),
+            },
+            Repository {
+                id: RepositoryId(2),
+                project_id: ProjectId(1),
+                name: "ssh".into(),
+                remote_url: "git@github.com:Acme/Widgets.git".into(),
+                default_branch: "main".into(),
+                protected_branches: Vec::new(),
+            },
+        ]),
+    );
     assert_eq!(
         state.github_repository("work", "api").as_deref(),
         Some("acme/widgets")
+    );
+    // A task with no repositories has no context, not the project's only one.
+    assert_eq!(
+        state.github_repository_among("work", "api", Some(&[])),
+        None
+    );
+}
+
+#[test]
+fn qualified_github_references_link_to_their_own_repository() {
+    let text = "See acme/other#7, wheregmis/threadlane#565. Skip a/b/c#1, x.acme/b#2, \
+                acme/b#05, acme/b#7x, `acme/b#9`, and https://github.com/acme/web/issues/3.";
+    let references = segments(text)
+        .into_iter()
+        .filter_map(|segment| match segment {
+            Segment::Link(label, target) => Some((label, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        references,
+        [
+            ("acme/other#7", Reference::Github(Some("acme/other"), 7)),
+            (
+                "wheregmis/threadlane#565",
+                Reference::Github(Some("wheregmis/threadlane"), 565)
+            ),
+            (
+                "https://github.com/acme/web/issues/3",
+                Reference::Web("https://github.com/acme/web/issues/3")
+            ),
+        ]
+    );
+    // Qualified and URL references ignore the context's repository; bare ones use it.
+    for context in [None, Some("acme/widgets")] {
+        assert_eq!(
+            markdown_source_for(
+                "acme/other#7 and https://github.com/acme/web/pull/3",
+                None,
+                context
+            ),
+            "[acme/other#7](https://github.com/acme/other/pull/7) and https://github.com/acme/web/pull/3"
+        );
+    }
+    assert_eq!(
+        markdown_source_for("#7 and acme/other#7", None, Some("acme/widgets")),
+        "[#7](https://github.com/acme/widgets/pull/7) and [acme/other#7](https://github.com/acme/other/pull/7)"
     );
 }
 

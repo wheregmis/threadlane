@@ -10,7 +10,7 @@ use gpui_kit::component::text::{
 };
 use gpui_kit::component::{Sizable as _, v_flex};
 use gpui_kit::*;
-use threadlane_core::ids::DecisionId;
+use threadlane_core::ids::{DecisionId, RepositoryId};
 use threadlane_desktop::{
     Activity, ProseLimit, Reference, describe, github_pull_url, load_decision_link,
     markdown_source_for,
@@ -66,9 +66,26 @@ impl Desktop {
         text: String,
         cx: &Context<Self>,
     ) -> Prose {
+        self.prose_among(id, space, project, None, text, cx)
+    }
+
+    /// Prose whose bare `#N` resolves among `repositories` of `project`, such
+    /// as a task's attached repositories; `None` means all of the project's.
+    pub(crate) fn prose_among(
+        &self,
+        id: impl Into<SharedString>,
+        space: &str,
+        project: Option<&str>,
+        repositories: Option<&[RepositoryId]>,
+        text: String,
+        cx: &Context<Self>,
+    ) -> Prose {
         let id = id.into();
         let when = self.when();
-        let github_repo = project.and_then(|project| self.state.github_repository(space, project));
+        let github_repo = project.and_then(|project| {
+            self.state
+                .github_repository_among(space, project, repositories)
+        });
         Prose {
             id: id.clone(),
             source: markdown_source_for(&text, Some(&when), github_repo.as_deref()),
@@ -96,8 +113,8 @@ impl Desktop {
                 cx,
             ),
             Reference::Decision(id) => self.open_linked_decision(space, id, cx),
-            Reference::Github(number) => {
-                if let Some(repo) = github_repo {
+            Reference::Github(repo, number) => {
+                if let Some(repo) = repo.or(github_repo) {
                     cx.open_url(&github_pull_url(repo, number));
                 }
             }

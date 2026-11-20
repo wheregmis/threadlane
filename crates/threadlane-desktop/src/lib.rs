@@ -2612,13 +2612,34 @@ impl AppState {
         view.repositories = take(&mut view.answers, Part::Repositories, repositories);
     }
 
-    /// The `owner/repo` of `project`'s first repository with a GitHub remote.
+    /// The `owner/repo` a bare `#N` in `project` refers to: its only GitHub
+    /// repository, or `None` when it has none or several.
     #[must_use]
     pub fn github_repository(&self, space: &str, project: &str) -> Option<String> {
-        self.project(space, project)?
+        self.github_repository_among(space, project, None)
+    }
+
+    /// Like [`Self::github_repository`], among only `repositories` of
+    /// `project` (such as a task's attached ones); `None` means all of them,
+    /// while `Some(&[])` (a task with no repositories) means none.
+    #[must_use]
+    pub fn github_repository_among(
+        &self,
+        space: &str,
+        project: &str,
+        repositories: Option<&[threadlane_core::ids::RepositoryId]>,
+    ) -> Option<String> {
+        let mut slugs = self
+            .project(space, project)?
             .repositories
             .iter()
-            .find_map(|repository| github_repository(&repository.remote_url))
+            .filter(|repository| repositories.is_none_or(|among| among.contains(&repository.id)))
+            .filter_map(|repository| github_repository(&repository.remote_url));
+        let first = slugs.next()?;
+        // Several repositories make a bare `#N` ambiguous: don't guess.
+        slugs
+            .all(|slug| slug.eq_ignore_ascii_case(&first))
+            .then_some(first)
     }
 
     /// Takes the bindings of each project, for the modes grid.
