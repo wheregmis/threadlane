@@ -58,7 +58,8 @@ async fn task_run_with(hook: Arc<dyn StepHook>) -> (TestHub, Lease, RunAssignmen
         .create_agent(&NewAgent::named(ENGINEER, "engineer"))
         .await
         .unwrap();
-    hub.db
+    let binding = hub
+        .db
         .bind(&NewBinding {
             project_id: general.id,
             agent_id: agent.id,
@@ -66,6 +67,12 @@ async fn task_run_with(hook: Arc<dyn StepHook>) -> (TestHub, Lease, RunAssignmen
             is_lead: false,
             max_parallel: 1,
         })
+        .await
+        .unwrap();
+    // These tests are about asking: an override turns off the default that
+    // opens draft pull requests and pushes the task branch without asking.
+    hub.db
+        .set_binding_overrides(binding.id, &json!({"shared_reversible": "ask"}))
         .await
         .unwrap();
     for name in ["app", "other"] {

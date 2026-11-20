@@ -179,6 +179,7 @@ The full matrix:
 
 - **Project ceiling.** Each project has a maximum mode, inherited from its space. No binding can exceed it. A work project capped at Assisted cannot have an autonomous agent by accident.
 - **Standing rules.** When you answer a decision you can also say "always allow this here". That creates a rule scoped to one agent, one project, one tool, and one argument pattern. Tier 2 rules work in any mode. Tier 3 rules take effect only in Autonomous. Rules are listed in the project's settings and can be revoked. **From Noop:** it starts cautious and takes over more as it proves it decides like you.
+- **Default for a task's own work.** Opening a draft pull request and pushing the task's own branch are allowed without asking in every mode above Off, unless the run is tainted by outside content or the binding has an override for tier 2; such a call is recorded as a decision allowed by default.
 - **Overrides.** Any cell of the matrix can be made stricter per binding. It can be made looser only up to what the ceiling's column allows.
 - **Untrusted input steps the mode down.** A run triggered by external content operates one mode lower than its binding, to a minimum of On request (section 9.1).
 - **Two agents, stricter wins.** When the lead creates a task for another agent from work you did not request, both the lead's and the assignee's modes must permit it.
@@ -1149,8 +1150,9 @@ Each tool declares its tier (section 2.3). The gate evaluates in order, and the 
 1. **Forbidden list.** Built-in, then space, then project. Result: block.
 2. **Effective mode.** The lower of the binding's mode and the project ceiling. If the run is tainted by external content, one step lower again, to a minimum of On request.
 3. **Binding overrides and standing rules**, within what the effective mode permits.
-4. **The mode matrix** (section 2.3): allow, classifier review, or ask.
-5. **Classifier**, where the matrix calls for it. It reviews the action in context and either allows or blocks. A block returns to the agent as a tool error so it can find a safer approach. The classifier is a one-shot question to a backend on the hub's computer, with a fixed answer format and no tools (section 5.7).
+4. **The default for a task's own work** (section 2.3): a draft pull request or a push of the task's own branch, in an untainted run with no tier 2 override, is allowed where the matrix would ask or review.
+5. **The mode matrix** (section 2.3): allow, classifier review, or ask.
+6. **Classifier**, where the matrix calls for it. It reviews the action in context and either allows or blocks. A block returns to the agent as a tool error so it can find a safer approach. The classifier is a one-shot question to a backend on the hub's computer, with a fixed answer format and no tools (section 5.7).
 
 **Decisions:**
 

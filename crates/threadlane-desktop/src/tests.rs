@@ -3716,6 +3716,7 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
             ("Read", "Yes", 4),
             ("Work locally", "Yes", 4),
             ("Shared, reversible", "Asks you", 2),
+            ("Its own branch and draft pull request", "Yes", 0),
             ("Hard to undo", "Asks you", 2),
             ("Forbidden", "Blocked", 0),
         ]

@@ -37,9 +37,10 @@ use crate::harness::{
     reply_script,
 };
 use crate::invariants::{assert_invariants, assert_quiet};
+use crate::permissions::asks_before_sharing;
 
 /// The pull request the task agent asks for.
-fn pull_request() -> Json {
+pub(super) fn pull_request() -> Json {
     json!({ "repository": "app", "title": "Add the page", "body": "Adds the page." })
 }
 
@@ -213,24 +214,56 @@ pub async fn assert_published(sim: &Sim, scenario: &str) {
         })),
         "{scenario}"
     );
-    let feed = sim.feed().await;
-    let kinds: Vec<OutboxKind> = feed.iter().map(|item| item.message.kind).collect();
-    assert_eq!(
-        kinds,
-        [OutboxKind::Decision, OutboxKind::Message],
-        "{scenario}: the card, then the reply"
+    let mut feed = sim.feed().await;
+    // Allowed by default, the call was never asked: no card.
+    if decision
+        .answer
+        .as_ref()
+        .is_some_and(|a| a["by_default"] == true)
+    {
+        assert_eq!(feed.len(), 1, "{scenario}: only the reply");
+    } else {
+        let card = feed.remove(0);
+        assert_eq!(
+            card.message.kind,
+            OutboxKind::Decision,
+            "{scenario}: the card"
+        );
+        assert_eq!(card.message.body["decision"], json!("D-0001"), "{scenario}");
+    }
+    assert_eq!(feed[0].message.kind, OutboxKind::Message, "{scenario}");
+    assert_eq!(feed[0].message.body, json!({ "text": REPLY }), "{scenario}");
+}
+
+/// A draft pull request in an untainted run is opened by default: one
+/// decision, already approved and marked so, no card, one draft.
+#[tokio::test]
+async fn a_draft_pull_request_is_opened_by_default_without_a_card() {
+    let world = publish_world(World::new().await, ask_script()).await;
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Put the page up and open a pull request")
+        .await;
+    drive(&sim, "approve", None).await.unwrap();
+    assert_published(&sim, "by default").await;
+    let decision = sim.decisions().await.remove(0);
+    assert_eq!(decision.answer.as_ref().unwrap()["by_default"], true);
+    assert!(!decision.offers_standing_rule);
+    assert_eq!(decision.expires_at, None);
+    assert!(
+        sim.events().await.iter().any(|event| {
+            event.decision_ref == Some(decision.id)
+                && event.payload["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("is allowed by default"))
+        }),
+        "the answer event says so"
     );
-    assert_eq!(
-        feed[0].message.body["decision"],
-        json!("D-0001"),
-        "{scenario}"
-    );
-    assert_eq!(feed[1].message.body, json!({ "text": REPLY }), "{scenario}");
 }
 
 #[tokio::test]
 async fn a_finished_task_asks_before_publishing_and_after_the_answer_opens_one_draft() {
     let world = publish_world(World::new().await, ask_script()).await;
+    asks_before_sharing(&world).await;
     let sim = world.boot(CrashPlan::new()).await;
     sim.send("m-1", "Put the page up and open a pull request")
         .await;
@@ -369,6 +402,7 @@ async fn a_branch_changed_after_approval_requires_a_new_publish_request() {
             .call("toolu_publish", tool, arguments)
             .finish("Waiting on the user.");
         let world = publish_world(World::new().await, script).await;
+        asks_before_sharing(&world).await;
         let project = world.db.general_project().await.unwrap();
         let repositories = world.db.repositories(project.id).await.unwrap();
         let workspaces = GitWorkspaces::new(world.workspaces());
@@ -423,6 +457,7 @@ async fn a_branch_changed_after_approval_requires_a_new_publish_request() {
 #[tokio::test]
 async fn a_declined_call_is_not_performed_and_the_session_resumes_with_your_note() {
     let world = publish_world(World::new().await, ask_script()).await;
+    asks_before_sharing(&world).await;
     let sim = world.boot(CrashPlan::new()).await;
     sim.send("m-1", "Put the page up").await;
     drive(&sim, "decline", Some("Not yet: add tests first."))
@@ -544,6 +579,7 @@ async fn the_runner_stops_a_backend_that_keeps_working_after_it_asked() {
         .call("toolu_f", FINISH_TASK, json!({ "summary": "Sneaked out." }))
         .finish("Done anyway.");
     let world = publish_world(World::new().await, keeps_going).await;
+    asks_before_sharing(&world).await;
     let sim = world.boot(CrashPlan::new()).await;
     sim.send("m-1", "Put the page up").await;
     live(&sim).await.unwrap();

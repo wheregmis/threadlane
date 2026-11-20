@@ -40,7 +40,7 @@ const TIERS: [(Tier, &str, &str); 5] = [
     (
         Tier::SharedReversible,
         "Shared, reversible",
-        "push the task branch, open a draft pull request",
+        "comment, label and assign issues, update another pull request",
     ),
     (
         Tier::SharedHardToUndo,
@@ -152,7 +152,8 @@ pub struct Statement {
     pub what: &'static str,
     /// What it covers, for example `merge, release, deploy`.
     pub examples: &'static str,
-    /// The tier an override sets; `None` for the initiative row.
+    /// The tier an override sets; `None` for the initiative row and the
+    /// built-in default.
     pub tier: Option<Tier>,
     /// What applies now: `Yes`, `Asks you`, `Proposes first`, ...
     pub cell: String,
@@ -403,6 +404,17 @@ impl AppState {
                 cell: cell_label(cell).to_owned(),
                 choices,
             });
+            // The gate's built-in default, which a tier 2 override turns off.
+            if tier == Tier::SharedReversible && set.is_none() && mode != Mode::Off {
+                statements.push(Statement {
+                    what: "Its own branch and draft pull request",
+                    examples: "push the task branch, open a draft pull request; asks instead \
+                               in a run triggered by outside content",
+                    tier: None,
+                    cell: "Yes".to_owned(),
+                    choices: Vec::new(),
+                });
+            }
         }
         let rules = match self.project_gap(space, project, Part::Rules) {
             Some(gap) => Err(gap),

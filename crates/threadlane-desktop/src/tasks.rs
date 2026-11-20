@@ -1188,6 +1188,19 @@ fn task_moments(
         }
     }
     for decision in &detail.decisions {
+        if decision
+            .answer
+            .as_ref()
+            .is_some_and(|answer| answer["by_default"] == true)
+        {
+            moments.push((
+                decision.created_at,
+                format!("asked-{}", decision.id),
+                format!("Allowed {} by default: {}", decision.id, decision.question),
+                None,
+            ));
+            continue;
+        }
         moments.push((
             decision.created_at,
             format!("asked-{}", decision.id),

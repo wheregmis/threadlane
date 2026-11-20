@@ -105,6 +105,7 @@ impl LocalLink {
                 )));
             }
             Verdict::Allow { rule } => rule.map(Asked::Rule),
+            Verdict::AllowByDefault => Some(Asked::Default),
             Verdict::Review { offers_rule } => Some(Asked::Review {
                 offers_rule,
                 proposal: new_work,
@@ -383,7 +384,7 @@ impl LocalLink {
                     ..
                 }
             ),
-            expires_at: (!matches!(asked, Asked::Rule(_)))
+            expires_at: (!matches!(asked, Asked::Rule(_) | Asked::Default))
                 .then(|| now + inner.settings.decision_expiry),
             created_at: now,
         };
@@ -408,6 +409,11 @@ impl LocalLink {
             Asked::Rule(rule) => inner
                 .db
                 .allow_by_rule(lease, &decision, rule)
+                .await
+                .map(|decision| decision.approved()),
+            Asked::Default => inner
+                .db
+                .allow_by_default(lease, &decision)
                 .await
                 .map(|decision| decision.approved()),
         }
@@ -731,9 +737,17 @@ impl LocalLink {
 #[derive(Clone, Copy)]
 enum Asked {
     Dream,
-    Review { offers_rule: bool, proposal: bool },
-    You { offers_rule: bool, proposal: bool },
+    Review {
+        offers_rule: bool,
+        proposal: bool,
+    },
+    You {
+        offers_rule: bool,
+        proposal: bool,
+    },
     Rule(StandingRuleId),
+    /// The gate's built-in default allowed it.
+    Default,
 }
 
 /// The record of a call that failed in a way that is safe to answer the same

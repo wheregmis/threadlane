@@ -857,6 +857,44 @@ impl DecisionStore for HubDb {
         Ok(answered)
     }
 
+    async fn allow_by_default(
+        &self,
+        lease: &Lease,
+        decision: &NewDecision,
+    ) -> StoreResult<Decision> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let (created, new) = insert_decision_in(conn, Some(lease), decision).await?;
+        if !new {
+            return Ok(created);
+        }
+        close_in(
+            conn,
+            &created,
+            DecisionStatus::Answered,
+            &json!({
+                "option": 0,
+                "note": null,
+                "standing_rule": false,
+                "by_default": true,
+                "answered_at": created.created_at,
+            }),
+            format!(
+                "{} ({}) is allowed by default. The system performs the call before this run \
+                 starts; its outcome follows.",
+                created.id, created.tool
+            ),
+            Trust::User,
+            created.created_at,
+        )
+        .await?;
+        let answered = decision_in(conn, created.id)
+            .await?
+            .ok_or_else(|| StoreError::not_found("decision", created.id))?;
+        tx.commit().await?;
+        Ok(answered)
+    }
+
     async fn standing_rules(
         &self,
         project_id: Option<ProjectId>,

@@ -87,6 +87,21 @@ No new tool. The draft pull request becomes the public progress record.
   of any other hub sees it.
 - The pull request stays a draft. Marking ready stays your call.
 
+## PR 4: draft pull request and task branch without asking
+
+Opening a draft pull request early would otherwise pause the task for an
+approval, and every later push would ask again.
+
+- The gate allows `open_pull_request` and `publish_branch` without
+  `onto_task` by default, where the matrix would ask or review, in every mode
+  above Off.
+- Not in a tainted run: a run that consumed outside content decides as
+  before, so outside content cannot push or publish text unseen.
+- A tier 2 override on the binding turns it off; Off, ceilings and Block
+  still win.
+- The call is recorded as a decision already answered, marked `by_default`
+  in its answer, with no card, and performed the way a rule-allowed call is.
+
 ## Not in this stage
 
 - A progress comment on the issue. The draft pull request says most of it.

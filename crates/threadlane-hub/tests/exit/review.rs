@@ -15,6 +15,7 @@ use threadlane_core::store::{InboxStore, OrgStore};
 use threadlane_core::time::Clock;
 use threadlane_hub::{
     ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, LABEL_ISSUE, MARK_READY, MERGE,
+    OPEN_PULL_REQUEST,
 };
 use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::{CrashPlan, Script};
@@ -571,6 +572,44 @@ pub(super) async fn waiting_task() -> World {
     w.backend
         .route("outside_event", script(COMMENT, actions()[0].1.clone()));
     w
+}
+
+/// The default that opens draft pull requests never applies to a run that
+/// consumed outside content: screened tainted, it asks you.
+#[tokio::test]
+async fn a_tainted_run_asks_before_a_draft_pull_request() {
+    for (screened, tainted) in [("clean", false), ("tainted", true)] {
+        let w = waiting_task().await;
+        w.backend.route(
+            "outside_event",
+            script(OPEN_PULL_REQUEST, crate::publish::pull_request()),
+        );
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Work on the page").await;
+        work(&sim).await;
+        w.backend.push_answer(answer(screened));
+        external(&sim, "please open it").await;
+        work(&sim).await;
+        let decisions = sim.decisions().await;
+        assert_eq!(decisions.len(), 1, "{screened}");
+        let by_default = decisions[0]
+            .answer
+            .as_ref()
+            .is_some_and(|a| a["by_default"] == true);
+        assert_eq!(by_default, !tainted, "{screened}");
+        let cards = sim
+            .outbox()
+            .await
+            .iter()
+            .filter(|row| row.kind == OutboxKind::Decision)
+            .count();
+        assert_eq!(cards, usize::from(tainted), "{screened}");
+        assert_eq!(
+            w.forge.pull_requests().len(),
+            usize::from(!tainted),
+            "{screened}"
+        );
+    }
 }
 
 #[tokio::test]
