@@ -482,6 +482,7 @@ impl LocalLink {
                 | crate::MERGE
                 | crate::MARK_READY
                 | crate::LABEL_ISSUE
+                | crate::CLOSE_PULL_REQUEST
                 | threadlane_core::forge::GITHUB_CLI
                 | REPORT_LIMITATION
         ) {

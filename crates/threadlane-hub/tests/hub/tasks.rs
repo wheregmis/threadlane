@@ -966,6 +966,8 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             threadlane_hub::MERGE,
             threadlane_hub::MARK_READY,
             threadlane_hub::LABEL_ISSUE,
+            threadlane_hub::CLOSE_PULL_REQUEST,
+            threadlane_core::forge::GITHUB_CLI,
             MEMORY_VIEW,
             MEMORY_CREATE,
             MEMORY_EDIT,
@@ -976,6 +978,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             LIST_TIMERS,
             CANCEL_TIMER,
             ASK_USER,
+            REPORT_LIMITATION,
         ]
     );
     assert!(
@@ -1677,7 +1680,7 @@ async fn a_task_names_repositories_registered_in_its_project_and_runs_with_the_d
     assert!(
         task_run
             .appended_instructions
-            .contains("Do not run git push or gh to do them yourself"),
+            .contains("Do not run git push or a gh command that changes GitHub yourself"),
         "layer 3"
     );
 

@@ -20,7 +20,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
-use threadlane_core::forge::{COMMENT, MARK_READY, MERGE};
+use threadlane_core::forge::{CLOSE_PULL_REQUEST, COMMENT, MARK_READY, MERGE};
 use threadlane_core::github::{
     DEFAULT_POLL_INTERVAL, Feed, GITHUB_SOURCE, GithubItem, GithubKind, GithubSource, PullTarget,
     normalize_remote, pull_request_number,
@@ -170,8 +170,11 @@ impl Routes {
                         continue;
                     }
                     let arguments = &decision.arguments;
-                    let names_pull_request = matches!(decision.tool.as_str(), MERGE | MARK_READY)
-                        || (decision.tool == COMMENT && arguments["target"] == "pull_request");
+                    let names_pull_request = matches!(
+                        decision.tool.as_str(),
+                        MERGE | MARK_READY | CLOSE_PULL_REQUEST
+                    ) || (decision.tool == COMMENT
+                        && arguments["target"] == "pull_request");
                     let (name, branch, number) =
                         match (outcome["repository"].as_str(), outcome["branch"].as_str()) {
                             (Some(name), Some(branch)) => (

@@ -42,6 +42,8 @@ pub fn valid_label_name(name: &str) -> bool {
         && name.trim() == name
         && !name.chars().any(char::is_control)
 }
+/// Close a registered repository's pull request, optionally deleting its head branch.
+pub const CLOSE_PULL_REQUEST: &str = "close_pull_request";
 /// Run one `gh` command against a registered repository, for a GitHub action
 /// no dedicated tool covers yet. The user always decides it.
 pub const GITHUB_CLI: &str = "github_cli";
@@ -67,6 +69,13 @@ pub enum RepositoryAction {
         number: std::num::NonZeroU64,
         add: Vec<String>,
         remove: Vec<String>,
+    },
+    /// Close the numbered pull request if its head is still `expected_head`,
+    /// then delete its head branch if asked.
+    ClosePullRequest {
+        number: std::num::NonZeroU64,
+        expected_head: String,
+        delete_branch: bool,
     },
     /// Run `gh` with these arguments, scoped to the repository with `--repo`.
     GhCli { args: Vec<String> },
