@@ -402,6 +402,8 @@ pub struct TopologyNode {
     pub id: String,
     pub title: String,
     pub subtitle: String,
+    /// Full text behind a cut subtitle, such as an agent's long model names.
+    pub tooltip: Option<String>,
     pub badge: Option<String>,
     pub active_label: Option<String>,
     pub running: bool,
@@ -502,6 +504,7 @@ impl AppState {
             id: space_lead_id.clone(),
             title: "Space Lead".to_owned(),
             subtitle: format!("{space_name} · General"),
+            tooltip: None,
             badge: Some("Orchestrator".to_owned()),
             active_label: general_running.then(|| "Working now".to_owned()),
             running: general_running,
@@ -555,6 +558,7 @@ impl AppState {
                 id,
                 title: project.clone(),
                 subtitle: "Project lead".to_owned(),
+                tooltip: None,
                 badge,
                 active_label,
                 running,
@@ -627,21 +631,13 @@ impl AppState {
                     |el| format!("{} · {el}", t.task.id),
                 )
             });
-            let backends = if agent.backends.is_empty() {
-                "any backend".to_owned()
-            } else {
-                agent
-                    .backends
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" / ")
-            };
+            let (backends, full_backends) = crate::backend_summary(agent);
             node_coords.insert(id.clone(), (col2_x, y));
             nodes.push(TopologyNode {
                 id,
                 title: agent.name.clone(),
                 subtitle: format!("{} · {backends}", agent.role),
+                tooltip: Some(format!("{} · {full_backends}", agent.role)),
                 badge,
                 active_label,
                 running: active_task.is_some(),

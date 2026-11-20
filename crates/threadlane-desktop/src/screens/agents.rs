@@ -4,13 +4,16 @@ use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::BackendKind;
-use threadlane_desktop::{EmptyRegion, Part, Space, TeamViewMode, When, count_form};
+use threadlane_desktop::{
+    EmptyRegion, Part, Space, TeamViewMode, When, backend_summary, count_form,
+};
 
 use super::agent_edit::backend_picker;
 use super::{empty, gap_line};
@@ -207,16 +210,7 @@ impl Desktop {
             });
         let mut agents = v_flex();
         for agent in &space.agents {
-            let backends = if agent.backends.is_empty() {
-                "Any backend".to_owned()
-            } else {
-                agent
-                    .backends
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" → ")
-            };
+            let (backends, full_backends) = backend_summary(agent);
             let projects = assignments_loaded.then(|| {
                 // General is the space lead's own project and is not listed.
                 let general = space.active_projects().find(|project| project.is_general);
@@ -269,7 +263,20 @@ impl Desktop {
                                                 .whitespace_normal()
                                         },
                                     ))
-                                    .child(meta(backends, cx).max_w_full().whitespace_normal())
+                                    .child(
+                                        meta(backends, cx)
+                                            .max_w_full()
+                                            .whitespace_normal()
+                                            .id(SharedString::from(format!(
+                                                "models-{}-{}",
+                                                space.name, agent.name
+                                            )))
+                                            .aria_label(full_backends.clone())
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(full_backends.clone())
+                                                    .build(window, cx)
+                                            }),
+                                    )
                                     .children(projects)
                                     .children((skills > 0).then(|| {
                                         meta(

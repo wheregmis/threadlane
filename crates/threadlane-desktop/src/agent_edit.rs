@@ -58,6 +58,47 @@ fn model(models: &Json, backend: BackendKind) -> String {
         .to_owned()
 }
 
+/// Model names longer than this are cut on team cards.
+const CARD_MODEL_CHARS: usize = 20;
+
+/// An agent's backends in preference order with each one's model, for the
+/// team cards: `(short, full)`, e.g. `claude · opus → codex · gpt-5`, where
+/// the backends after the first are fallbacks. `short` cuts long model names;
+/// `full` is for the tooltip. A backend without a model runs its default.
+#[must_use]
+pub fn backend_summary(agent: &Agent) -> (String, String) {
+    let line = |cut: bool| {
+        let chosen = |backend: &BackendKind| {
+            let model = model(&agent.models, *backend);
+            let model = match model.char_indices().nth(CARD_MODEL_CHARS) {
+                Some((at, _)) if cut => format!("{}…", &model[..at]),
+                _ => model,
+            };
+            if model.is_empty() {
+                backend.to_string()
+            } else {
+                format!("{backend} · {model}")
+            }
+        };
+        if agent.backends.is_empty() {
+            // Either backend may run it; still show any model it has set.
+            BackendKind::ALL
+                .iter()
+                .filter(|backend| !model(&agent.models, **backend).is_empty())
+                .map(chosen)
+                .fold("Any backend".to_owned(), |line, part| line + ", " + &part)
+        } else {
+            agent
+                .backends
+                .iter()
+                .map(chosen)
+                .collect::<Vec<_>>()
+                .join(" → ")
+        }
+    };
+    (line(true), line(false))
+}
+
 impl AgentEdit {
     /// The extra picker option for a saved order outside the presets.
     #[must_use]
