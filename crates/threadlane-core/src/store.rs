@@ -593,6 +593,15 @@ pub trait DecisionStore: Send + Sync {
         decision: &NewDecision,
         rule: StandingRuleId,
     ) -> StoreResult<Decision>;
+    /// Records a call the gate's built-in default allowed as a decision
+    /// answered with its first option, its answer marked `by_default`, and
+    /// inserts the answer event, in one transaction and with no card. A
+    /// repeated `(run_id, tool_call_id)` returns the original.
+    async fn allow_by_default(
+        &self,
+        lease: &Lease,
+        decision: &NewDecision,
+    ) -> StoreResult<Decision>;
     /// The standing rules of a project, or of every project when `None`,
     /// revoked ones included, oldest first.
     async fn standing_rules(&self, project_id: Option<ProjectId>)

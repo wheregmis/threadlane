@@ -23,6 +23,7 @@ use crate::harness::{
     progress_content, progress_turn, reply_script, write_progress,
 };
 use crate::invariants::{assert_invariants, assert_quiet};
+use crate::permissions::asks_before_sharing;
 use crate::publish::{self, ask_script, assert_published, drive, publish_world};
 
 /// Every boundary one message passes through on its way to the feed.
@@ -393,43 +394,51 @@ async fn killing_the_process_at_any_step_of_a_task_still_yields_one_task_one_res
 /// included: whatever is interrupted, exactly one draft pull request.
 #[tokio::test]
 async fn killing_the_process_at_any_step_still_opens_exactly_one_pull_request() {
-    let world = publish_world(World::new().await, ask_script()).await;
-    let plan = CrashPlan::new();
-    let sim = world.boot(plan.clone()).await;
-    sim.send("m-1", "Put the page up and open a pull request")
-        .await;
-    drive(&sim, "approve", None).await.unwrap();
-    assert_published(&sim, "reference").await;
-    let reached = plan.reached();
-    for step in [runner::TASK, tool_call::ALL, perform::ALL].concat() {
-        assert!(reached.contains(&step), "the scenario reaches {step}");
-    }
-
-    for (index, &step) in reached.iter().enumerate() {
-        let nth = reached[..=index]
-            .iter()
-            .filter(|seen| **seen == step)
-            .count();
-        let scenario = format!("publish, {step} #{nth}");
-        let world = publish_world(World::new().await, ask_script()).await;
-        let plan = CrashPlan::kill_at_nth(step, u32::try_from(nth).unwrap());
-        let sim = world.boot(plan.clone()).await;
+    // Asked and approved, and allowed by default: performed the same way.
+    for asks in [true, false] {
+        let world = || async {
+            let world = publish_world(World::new().await, ask_script()).await;
+            if asks {
+                asks_before_sharing(&world).await;
+            }
+            world
+        };
+        let plan = CrashPlan::new();
+        let sim = world().await.boot(plan.clone()).await;
         sim.send("m-1", "Put the page up and open a pull request")
             .await;
-        let died = drive(&sim, "approve", None).await;
-        assert_eq!(
-            died.as_ref().err().and_then(publish::Death::killed_at),
-            Some(step),
-            "{scenario}: killed at the step, got {died:?}"
-        );
-        sim.clock().advance(PAST_LEASE);
-        let sim = sim.restart(CrashPlan::new()).await;
-        drive(&sim, "approve", None)
-            .await
-            .unwrap_or_else(|death| panic!("{scenario}: recovery failed: {death:?}"));
-        assert_published(&sim, &scenario).await;
+        drive(&sim, "approve", None).await.unwrap();
+        assert_published(&sim, "reference").await;
+        let reached = plan.reached();
+        for step in [runner::TASK, tool_call::ALL, perform::ALL].concat() {
+            assert!(reached.contains(&step), "the scenario reaches {step}");
+        }
+
+        for (index, &step) in reached.iter().enumerate() {
+            let nth = reached[..=index]
+                .iter()
+                .filter(|seen| **seen == step)
+                .count();
+            let scenario = format!("publish (asks {asks}), {step} #{nth}");
+            let plan = CrashPlan::kill_at_nth(step, u32::try_from(nth).unwrap());
+            let sim = world().await.boot(plan.clone()).await;
+            sim.send("m-1", "Put the page up and open a pull request")
+                .await;
+            let died = drive(&sim, "approve", None).await;
+            assert_eq!(
+                died.as_ref().err().and_then(publish::Death::killed_at),
+                Some(step),
+                "{scenario}: killed at the step, got {died:?}"
+            );
+            sim.clock().advance(PAST_LEASE);
+            let sim = sim.restart(CrashPlan::new()).await;
+            drive(&sim, "approve", None)
+                .await
+                .unwrap_or_else(|death| panic!("{scenario}: recovery failed: {death:?}"));
+            assert_published(&sim, &scenario).await;
+        }
+        println!("{} kill points in a publish (asks {asks})", reached.len());
     }
-    println!("{} kill points in a publish", reached.len());
 }
 
 /// A task world whose task agent, as in the real run, writes its progress

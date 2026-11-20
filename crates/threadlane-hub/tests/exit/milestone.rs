@@ -38,6 +38,8 @@ async fn world() -> World {
     world.runner_config.debounce = Duration::ZERO;
     add_engineer(&world.db, 2).await;
     world.add_repository("app").await;
+    // The exit scenario has the page wait on you.
+    crate::permissions::asks_before_sharing(&world).await;
     let backend = &world.backend;
     backend.route(
         PUBLISHED,

@@ -968,6 +968,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             threadlane_hub::LABEL_ISSUE,
             threadlane_hub::CLOSE_PULL_REQUEST,
             threadlane_core::forge::GITHUB_CLI,
+            threadlane_hub::ASSIGN_ISSUE,
             MEMORY_VIEW,
             MEMORY_CREATE,
             MEMORY_EDIT,

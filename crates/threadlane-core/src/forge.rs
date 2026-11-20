@@ -48,6 +48,9 @@ pub const CLOSE_PULL_REQUEST: &str = "close_pull_request";
 /// no dedicated tool covers yet. The user always decides it.
 pub const GITHUB_CLI: &str = "github_cli";
 
+/// Assign a registered repository's issue to the logged-in user.
+pub const ASSIGN_ISSUE: &str = "assign_issue";
+
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RepositoryAction {
@@ -79,6 +82,8 @@ pub enum RepositoryAction {
     },
     /// Run `gh` with these arguments, scoped to the repository with `--repo`.
     GhCli { args: Vec<String> },
+    /// Assign the numbered issue to the logged-in user.
+    AssignIssue { number: std::num::NonZeroU64 },
 }
 
 /// Kind of numbered GitHub item to comment on.

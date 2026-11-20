@@ -22,7 +22,10 @@
 //!   on the head commit when it was looked up (a fork's branch, or one
 //!   deleted after the merge, is not in the base repository), else the branch;
 //! - a pull request's reviews: `repos/<owner>/<name>/pulls/<n>/reviews?per_page=100`;
-//! - its comments: `repos/<owner>/<name>/issues/<n>/comments?per_page=100[&since=<time>]`.
+//! - its comments: `repos/<owner>/<name>/issues/<n>/comments?per_page=100[&since=<time>]`;
+//! - who holds an issue, before `assign_issue` asks: `repos/<owner>/<name>/issues/<n>`,
+//!   its `timeline?per_page=100` for open pull requests that cross-reference it,
+//!   and `user` for the login `gh` reads as.
 //!
 //! With `--include` each answer starts with the status line and headers. A
 //! `Link` header's `rel="next"` is followed, as another such GET of the path
@@ -36,8 +39,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::github::{
-    Feed, GithubError, GithubItem, GithubKind, GithubSource, PullTarget, REVIEW_MARKER_PREFIX,
-    pull_request_number,
+    Feed, GithubError, GithubItem, GithubKind, GithubSource, IssueClaim, PullTarget,
+    REVIEW_MARKER_PREFIX, pull_request_number,
 };
 use tokio::process::Command;
 
@@ -358,6 +361,52 @@ impl GithubSource for GhSource {
         }
         Ok(())
     }
+
+    async fn issue_claim(&self, repository: &str, number: u64) -> Result<IssueClaim, GithubError> {
+        if !valid_full_name(repository) {
+            return Err(GithubError(format!(
+                "{repository:?} is not a repository name"
+            )));
+        }
+        let issue = self
+            .get_json(&format!("repos/{repository}/issues/{number}"))
+            .await?;
+        let path = format!("repos/{repository}/issues/{number}/timeline?per_page=100");
+        let mut open_pull_requests = Vec::new();
+        for page in self.get_pages(&[], &path).await? {
+            open_pull_requests.extend(open_references(&page.json(&path)?));
+        }
+        let viewer = text(&self.get_json("user").await?, "/login")
+            .ok_or_else(|| GithubError("gh api user names no login".to_owned()))?;
+        Ok(IssueClaim {
+            viewer,
+            is_pull_request: !issue["pull_request"].is_null(),
+            open: issue["state"] == "open",
+            assignees: issue["assignees"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|user| text(user, "/login"))
+                .collect(),
+            open_pull_requests,
+        })
+    }
+}
+
+/// The open pull requests a timeline page says reference the issue, as
+/// `(number, author login)`.
+fn open_references(timeline: &Json) -> Vec<(u64, String)> {
+    timeline
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|event| event["event"] == "cross-referenced")
+        .filter_map(|event| {
+            let source = &event["source"]["issue"];
+            (!source["pull_request"].is_null() && source["state"] == "open")
+                .then(|| Some((source["number"].as_u64()?, text(source, "/user/login")?)))?
+        })
+        .collect()
 }
 
 /// `owner/name` with the characters GitHub allows in them.
@@ -1207,6 +1256,77 @@ case "$last" in
             )
             .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_issue_claim_reads_the_issue_its_open_referencing_pulls_and_the_viewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = |number: u64, state: &str, pull: bool, author: &str| {
+            let pull = if pull { r#","pull_request":{}"# } else { "" };
+            format!(
+                r#"{{"event":"cross-referenced","source":{{"issue":{{"number":{number},"state":"{state}","user":{{"login":"{author}"}}{pull}}}}}}}"#
+            )
+        };
+        let first = format!(
+            "HTTP/2.0 200 OK\nLink: <https://api.github.com/repositories/1/issues/7/timeline?per_page=100&page=2>; rel=\"next\"\n\n[{},{},{}]",
+            reference(12, "open", true, "bob"),
+            reference(13, "closed", true, "carol"),
+            reference(14, "open", false, "dave"),
+        );
+        let second = ok(&format!(
+            r#"[{},{{"event":"labeled"}}]"#,
+            reference(15, "open", true, "me")
+        ));
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                (
+                    "repos/acme/widgets/issues/7",
+                    "issue.http",
+                    ok(r#"{"state":"open","assignees":[{"login":"alice"}]}"#),
+                ),
+                ("*page=2", "timeline2.http", second),
+                ("*/timeline*", "timeline1.http", first),
+                ("user", "user.http", ok(r#"{"login":"me"}"#)),
+            ],
+        ));
+        let claim = source.issue_claim("acme/widgets", 7).await.unwrap();
+        assert_eq!(
+            claim,
+            IssueClaim {
+                viewer: "me".into(),
+                is_pull_request: false,
+                open: true,
+                assignees: vec!["alice".into()],
+                open_pull_requests: vec![(12, "bob".into()), (15, "me".into())],
+            }
+        );
+        let made = calls(dir.path());
+        assert_eq!(made.len(), 4);
+        for call in &made {
+            assert!(
+                call.starts_with("api --method GET --include -H Accept: "),
+                "{call}"
+            );
+            for write in [
+                " -f",
+                " -F",
+                "--field",
+                "--raw-field",
+                "--input",
+                "-X",
+                "POST",
+                "PATCH",
+            ] {
+                assert!(!call.contains(write), "{call} contains {write}");
+            }
+        }
+        assert!(
+            source.issue_claim("acme/../x", 7).await.is_err(),
+            "a bad name never reaches gh"
+        );
+        assert_eq!(calls(dir.path()).len(), 4);
     }
 
     #[cfg(unix)]
