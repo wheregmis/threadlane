@@ -763,10 +763,6 @@ pub enum OverviewRequest {
         event: EventId,
         index: u32,
     },
-    ProjectWorkflow {
-        project: String,
-    },
-    ReviewRecipe,
     /// Every task of a project, oldest first. `None` means the General
     /// project.
     Tasks {
@@ -889,13 +885,6 @@ pub enum OverviewReply {
     },
     OutputImage {
         image: ImageAttachment,
-    },
-    ProjectWorkflow {
-        graph: Option<crate::work::WorkflowGraph>,
-        recipe: crate::work::ReviewRecipe,
-    },
-    ReviewRecipe {
-        recipe: crate::work::ReviewRecipe,
     },
     Work {
         overview: WorkOverview,
@@ -1290,35 +1279,6 @@ pub enum TimerReply {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskRequest {
-    SaveProjectWorkflow {
-        project: String,
-        graph: crate::work::WorkflowGraph,
-    },
-    StartProjectWorkflow {
-        project: String,
-        goal: String,
-        repository: String,
-        version: i64,
-        client_request_id: String,
-    },
-    SaveReviewRecipe {
-        recipe: crate::work::ReviewRecipe,
-    },
-    StartReviewWorkflow {
-        project: String,
-        goal: String,
-        engineer: String,
-        reviewer: String,
-        repository: String,
-        version: i64,
-        client_request_id: String,
-    },
-    InstallReviewTeam {
-        project: String,
-        engineer: String,
-        reviewer: String,
-        recurrence: Recurrence,
-    },
     /// Creates a queued task of yours in a project, skipping the lead: work
     /// you requested. `agent` must be bound in the project and not Off;
     /// `repositories` are names registered in it and `depends_on` its tasks
@@ -1338,15 +1298,11 @@ pub enum TaskRequest {
     /// Cancels a task that has not ended, and the tasks that wait on it;
     /// the lead hears of it once. Cancelling a cancelled task changes
     /// nothing.
-    Cancel {
-        task: TaskId,
-    },
+    Cancel { task: TaskId },
     /// Queues a failed task again, with a message in its lane quoting the
     /// last error and asking the agent to continue from the work already
     /// on the task branch. Only a failed task can be retried.
-    Retry {
-        task: TaskId,
-    },
+    Retry { task: TaskId },
     /// Attaches registered repositories, by name, to a task that has not
     /// ended, so it can publish. Its earlier work and session are kept; a
     /// message in its lane tells its agent, and the next run gets worktrees.
@@ -1361,19 +1317,8 @@ pub enum TaskRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskReply {
-    ProjectWorkflow {
-        graph: crate::work::WorkflowGraph,
-    },
-    ReviewRecipe {
-        recipe: crate::work::ReviewRecipe,
-    },
-    ReviewTeam {
-        timer: Timer,
-    },
     /// The task as it now stands.
-    Task {
-        task: Task,
-    },
+    Task { task: Task },
 }
 
 /// Read the hub's operational history or perform an owner repair.
