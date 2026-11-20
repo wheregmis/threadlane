@@ -89,10 +89,18 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
                 .then(|| ((*field).to_owned(), value.clone()))
         })
         .collect();
-    if tool == crate::FAST_FORWARD_PULL_REQUEST
-        && let Some(number) = arguments["number"].as_u64()
+    if matches!(
+        tool,
+        crate::FAST_FORWARD_PULL_REQUEST | crate::CLOSE_PULL_REQUEST
+    ) && let Some(number) = arguments["number"].as_u64()
     {
         targets.insert("number".into(), number.into());
+    }
+    // A standing rule to close one PR covers only the head it was shown.
+    if tool == crate::CLOSE_PULL_REQUEST
+        && let Some(head) = arguments.get(threadlane_core::forge::EXPECTED_HEAD)
+    {
+        targets.insert(threadlane_core::forge::EXPECTED_HEAD.into(), head.clone());
     }
     Json::Object(targets)
 }
@@ -614,6 +622,14 @@ mod tests {
                 &json!({"repository":"app","number":42})
             ),
             json!({"repository":"app","number":42})
+        );
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            rule_pattern(
+                crate::CLOSE_PULL_REQUEST,
+                &json!({"repository":"app","number":42,"expected_head":head,"delete_branch":true})
+            ),
+            json!({"repository":"app","number":42,"expected_head":head})
         );
     }
 

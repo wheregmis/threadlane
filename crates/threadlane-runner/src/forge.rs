@@ -134,6 +134,97 @@ impl GitForge {
             .clone()
     }
 
+    /// Closes PR `number` of `repo` (`host/owner/name`) only while its head
+    /// is `expected_head`, then deletes its head branch if asked. A PR that is
+    /// already closed at that head is not closed again, so a retry finishes.
+    async fn close_pull_request(
+        &self,
+        repo: &str,
+        number: std::num::NonZeroU64,
+        expected_head: &str,
+        delete_branch: bool,
+    ) -> Result<String, ForgeError> {
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let hostname = format!("--hostname={host}");
+        let endpoint = format!("repos/{name}/pulls/{number}");
+        let here = Path::new(".");
+        let output = self
+            .gh(here, args(&["api", &hostname, "--method=GET", &endpoint]))
+            .await?;
+        let pull: Json = serde_json::from_str(&output)
+            .map_err(|error| ForgeError(format!("invalid pull request response: {error}")))?;
+        if pull["head"]["sha"].as_str() != Some(expected_head) {
+            return Err(ForgeError(format!(
+                "PR #{number} no longer has expected head {expected_head}. Inspect its current head before retrying."
+            )));
+        }
+        let branch = match delete_branch {
+            // GitHub nulls the head repository once the head branch is gone.
+            true if pull["head"]["repo"].is_null() => None,
+            true => Some(closable_head(&pull, name)?),
+            false => None,
+        };
+        let closed = if pull["merged"] == true {
+            format!("Pull request #{number} was already merged")
+        } else {
+            format!("Closed pull request #{number}")
+        };
+        // shortcut: GitHub cannot pin a close or a ref deletion to a head SHA, so a push in the
+        // moment between these checks and the calls below is not caught.
+        if pull["state"] == "open" {
+            self.gh(
+                here,
+                args(&[
+                    "api",
+                    &hostname,
+                    "--method=PATCH",
+                    &endpoint,
+                    "-f",
+                    "state=closed",
+                ]),
+            )
+            .await?;
+        }
+        let Some(branch) = branch else {
+            return Ok(format!("{closed}."));
+        };
+        // A closed PR's head SHA is frozen, so check the live branch: it may have been reused.
+        let live_ref = format!("repos/{name}/git/ref/heads/{branch}");
+        match self
+            .gh(here, args(&["api", &hostname, "--method=GET", &live_ref]))
+            .await
+        {
+            Err(error) if error.0.contains("(HTTP 404)") => {
+                return Ok(format!(
+                    "{closed}; its branch {branch} was already deleted."
+                ));
+            }
+            Err(error) => return Err(error),
+            Ok(output) => {
+                let live: Json = serde_json::from_str(&output)
+                    .map_err(|error| ForgeError(format!("invalid branch response: {error}")))?;
+                if live["object"]["sha"].as_str() != Some(expected_head) {
+                    return Err(ForgeError(format!(
+                        "{closed}, but kept branch {branch}: it no longer points at {expected_head}."
+                    )));
+                }
+            }
+        }
+        let refs = format!("repos/{name}/git/refs/heads/{branch}");
+        if let Err(error) = self
+            .gh(here, args(&["api", &hostname, "--method=DELETE", &refs]))
+            .await
+        {
+            // Already deleted by an earlier attempt.
+            if !error.0.contains("Reference does not exist") {
+                return Err(error);
+            }
+        }
+        Ok(format!("{closed} and deleted its branch {branch}."))
+    }
+
     /// `gh <args>` in `worktree`, kept from prompting.
     fn gh_command(&self, worktree: &Path, args: &[OsString]) -> Command {
         let mut command = Command::new(&self.gh);
@@ -199,6 +290,30 @@ fn pull_request_head<'a>(
         ));
     }
     Ok(head)
+}
+
+/// The head branch of `pull` if it may be deleted: in the registered
+/// repository and not its base or default branch.
+fn closable_head<'a>(pull: &'a Json, name: &str) -> Result<&'a str, ForgeError> {
+    let head = &pull["head"];
+    if !head["repo"]["full_name"]
+        .as_str()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(name))
+    {
+        return Err(ForgeError(
+            "the pull request's head branch is not in the registered repository".into(),
+        ));
+    }
+    let branch = head["ref"]
+        .as_str()
+        .filter(|branch| valid_branch_name(branch))
+        .ok_or_else(|| ForgeError("the pull request has no valid head branch".into()))?;
+    if pull["base"]["ref"] == branch || head["repo"]["default_branch"] == branch {
+        return Err(ForgeError(
+            "the pull request head is the base or default branch".into(),
+        ));
+    }
+    Ok(branch)
 }
 
 async fn push_fast_forward(
@@ -333,6 +448,16 @@ impl Forge for GitForge {
     async fn apply(&self, remote: &str, action: &RepositoryAction) -> Result<String, ForgeError> {
         let repo = normalize_remote(remote)
             .ok_or_else(|| ForgeError("the registered remote is not a forge repository".into()))?;
+        if let RepositoryAction::ClosePullRequest {
+            number,
+            expected_head,
+            delete_branch,
+        } = action
+        {
+            return self
+                .close_pull_request(&repo, *number, expected_head, *delete_branch)
+                .await;
+        }
         let mut argv = match action {
             RepositoryAction::Comment {
                 target,
@@ -357,6 +482,7 @@ impl Forge for GitForge {
                 args(&["pr", "merge", &number.to_string(), "--merge"])
             }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
+            RepositoryAction::ClosePullRequest { .. } => unreachable!("handled above"),
         };
         argv.push(format!("--repo={repo}").into());
         self.gh(Path::new("."), argv).await
