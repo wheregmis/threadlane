@@ -160,13 +160,19 @@ impl GitForge {
                 "PR #{number} no longer has expected head {expected_head}. Inspect its current head before retrying."
             )));
         }
-        let branch = if delete_branch {
-            Some(closable_head(&pull, name)?)
+        let branch = match delete_branch {
+            // GitHub nulls the head repository once the head branch is gone.
+            true if pull["head"]["repo"].is_null() => None,
+            true => Some(closable_head(&pull, name)?),
+            false => None,
+        };
+        let closed = if pull["merged"] == true {
+            format!("Pull request #{number} was already merged")
         } else {
-            None
+            format!("Closed pull request #{number}")
         };
         // shortcut: GitHub cannot pin a close or a ref deletion to a head SHA, so a push in the
-        // moment between this check and the calls below is not caught.
+        // moment between these checks and the calls below is not caught.
         if pull["state"] == "open" {
             self.gh(
                 here,
@@ -182,8 +188,30 @@ impl GitForge {
             .await?;
         }
         let Some(branch) = branch else {
-            return Ok(format!("Closed pull request #{number}."));
+            return Ok(format!("{closed}."));
         };
+        // A closed PR's head SHA is frozen, so check the live branch: it may have been reused.
+        let live_ref = format!("repos/{name}/git/ref/heads/{branch}");
+        match self
+            .gh(here, args(&["api", &hostname, "--method=GET", &live_ref]))
+            .await
+        {
+            Err(error) if error.0.contains("(HTTP 404)") => {
+                return Ok(format!(
+                    "{closed}; its branch {branch} was already deleted."
+                ));
+            }
+            Err(error) => return Err(error),
+            Ok(output) => {
+                let live: Json = serde_json::from_str(&output)
+                    .map_err(|error| ForgeError(format!("invalid branch response: {error}")))?;
+                if live["object"]["sha"].as_str() != Some(expected_head) {
+                    return Err(ForgeError(format!(
+                        "{closed}, but kept branch {branch}: it no longer points at {expected_head}."
+                    )));
+                }
+            }
+        }
         let refs = format!("repos/{name}/git/refs/heads/{branch}");
         if let Err(error) = self
             .gh(here, args(&["api", &hostname, "--method=DELETE", &refs]))
@@ -194,9 +222,7 @@ impl GitForge {
                 return Err(error);
             }
         }
-        Ok(format!(
-            "Closed pull request #{number} and deleted its branch {branch}."
-        ))
+        Ok(format!("{closed} and deleted its branch {branch}."))
     }
 
     /// `gh <args>` in `worktree`, kept from prompting.

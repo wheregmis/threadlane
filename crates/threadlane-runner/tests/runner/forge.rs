@@ -127,6 +127,8 @@ impl FakeGh {
                echo 'https://github.test/me/app/pull/7'\n\
              elif [ \"$3\" = \"--paginate\" ] && [ -f {record}/reviews ]; then\n\
                cat {record}/reviews\n\
+             elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/ref/; then\n\
+               cat {record}/ref.json 2>/dev/null || {{ echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }}\n\
              elif [ \"$3\" = \"--method=GET\" ]; then\n\
                cat {record}/pull.json\n\
              elif [ \"$1 $2\" = \"api user\" ]; then\n\
@@ -437,6 +439,12 @@ async fn a_close_is_refused_once_the_head_moved_and_deletes_only_a_same_reposito
         "-f",
         "state=closed",
     ];
+    let get_ref = vec![
+        "api",
+        "--hostname=github.test",
+        "--method=GET",
+        "repos/acme/app/git/ref/heads/dup/pr",
+    ];
     let delete = vec![
         "api",
         "--hostname=github.test",
@@ -464,9 +472,57 @@ async fn a_close_is_refused_once_the_head_moved_and_deletes_only_a_same_reposito
         pull(head, "open", "Acme", "dup/pr"),
     )
     .unwrap();
+    let ref_json = |sha: &str| serde_json::json!({"object": {"sha": sha}}).to_string();
+    std::fs::write(gh.dir.path().join("ref.json"), ref_json(head)).unwrap();
     let forge = GitForge::with_gh(gh.program());
     forge.apply(remote, &close(true)).await.unwrap();
-    assert_eq!(gh.invocations(), [get.clone(), patch, delete]);
+    assert_eq!(
+        gh.invocations(),
+        [get.clone(), patch.clone(), get_ref.clone(), delete]
+    );
+
+    // A reused branch whose ref moved past the closed PR's frozen head is kept.
+    let gh = FakeGh::new();
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        pull(head, "closed", "acme", "dup/pr"),
+    )
+    .unwrap();
+    std::fs::write(gh.dir.path().join("ref.json"), ref_json(moved)).unwrap();
+    let forge = GitForge::with_gh(gh.program());
+    let error = forge.apply(remote, &close(true)).await.unwrap_err();
+    assert!(error.0.contains("kept branch dup/pr"), "{error}");
+    assert_eq!(gh.invocations(), [get.clone(), get_ref.clone()]);
+
+    // A branch already gone (404) counts as deleted.
+    let gh = FakeGh::new();
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        pull(head, "open", "acme", "dup/pr"),
+    )
+    .unwrap();
+    let forge = GitForge::with_gh(gh.program());
+    let done = forge.apply(remote, &close(true)).await.unwrap();
+    assert!(done.contains("already deleted"), "{done}");
+    assert_eq!(gh.invocations(), [get.clone(), patch, get_ref]);
+
+    // A merged PR is reported as merged; a null head repository means its branch is gone.
+    let gh = FakeGh::new();
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        serde_json::json!({
+            "state": "closed",
+            "merged": true,
+            "base": {"ref": "main"},
+            "head": {"sha": head, "ref": "dup/pr", "repo": null}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let forge = GitForge::with_gh(gh.program());
+    let done = forge.apply(remote, &close(true)).await.unwrap();
+    assert!(done.contains("already merged"), "{done}");
+    assert_eq!(gh.invocations(), std::slice::from_ref(&get));
 
     // Already closed, as on a retry, and the branch kept.
     let gh = FakeGh::new();
