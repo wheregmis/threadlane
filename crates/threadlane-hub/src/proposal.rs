@@ -61,6 +61,20 @@ pub(crate) async fn task(db: &HubDb, lane: &Lane, arguments: &Json) -> Result<Pr
         let names: Vec<&str> = names.iter().filter_map(Json::as_str).collect();
         context.push_str(&format!(" Repositories: {}.", names.join(", ")));
     }
+    if let Some(args) = call.object.get("pr_review") {
+        let target = crate::tools::review_head(db, lane.project_id, args).await?;
+        if let Some(found) = db
+            .pr_review_status(lane.project_id, &target)
+            .await
+            .map_err(crate::error::tool_error)?
+        {
+            return Err(ToolError::Blocked(format!(
+                "Review of {} at {} is {} on {}.",
+                target.url, target.head, found.state, found.task
+            )));
+        }
+        context.push_str(&format!(" Review {} at {}.", target.url, target.head));
+    }
     Ok(Proposal {
         question: format!("Start a task for {agent}: {}?", call.title),
         context,

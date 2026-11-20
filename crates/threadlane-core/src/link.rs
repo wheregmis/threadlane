@@ -73,6 +73,9 @@ pub struct RunAssignment {
     /// A review checks these immutable commits in its own worktrees.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<RunReview>,
+    /// A standalone PR review works in a separate checkout and finishes as a normal task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_review: Option<PullRequestReview>,
     /// The events this run consumes.
     pub events: Vec<EventId>,
     /// Decisions answered with approval among those events: the runner
@@ -105,6 +108,13 @@ pub struct RunAssignment {
     /// The run's durable trace ID, for correlation with hub records.
     #[serde(default)]
     pub trace_id: String,
+}
+
+/// The head a standalone review task inspects, including PRs from forks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestReview {
+    pub number: u64,
+    pub revision: crate::workspace::ReviewRevision,
 }
 
 /// Which implementation submission a Reviewer run examines.

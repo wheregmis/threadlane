@@ -48,6 +48,7 @@ async fn a_message_produces_one_sent_reply_in_the_feed() {
             UPDATE_TASK,
             CANCEL_TASK,
             LIST_TASKS,
+            threadlane_hub::PR_REVIEW_STATUS,
             MEMORY_VIEW,
             MEMORY_CREATE,
             MEMORY_EDIT,

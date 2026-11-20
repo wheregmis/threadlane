@@ -161,6 +161,7 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
                 run.tools,
                 [
                     CREATE_TASK,
+                    threadlane_hub::PR_REVIEW_STATUS,
                     FINISH_TASK,
                     PUBLISH_BRANCH,
                     OPEN_PULL_REQUEST,

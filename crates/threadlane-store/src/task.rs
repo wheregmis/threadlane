@@ -126,7 +126,7 @@ async fn dependencies(conn: &Connection, id: TaskId) -> StoreResult<Vec<TaskId>>
 }
 
 /// Checks that a run's lease is current and works in `project_id`.
-async fn check_run_lease(
+pub(crate) async fn check_run_lease(
     conn: &Connection,
     lease: Option<&Lease>,
     project_id: ProjectId,
