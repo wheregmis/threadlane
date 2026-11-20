@@ -481,6 +481,7 @@ impl LocalLink {
                 | crate::CREATE_ISSUE
                 | crate::MERGE
                 | crate::MARK_READY
+                | crate::LABEL_ISSUE
                 | REPORT_LIMITATION
         ) {
             let (remote, action) = if decision.tool == REPORT_LIMITATION {

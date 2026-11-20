@@ -150,6 +150,106 @@ impl GitForge {
             .await
             .map_err(ForgeError)
     }
+
+    /// Labels an issue through `gh api`. Refuses a pull request, adds only
+    /// labels the repository already has (the API would create the others),
+    /// and treats removing a label the issue lacks as done.
+    async fn label_issue(
+        &self,
+        repo: &str,
+        number: std::num::NonZeroU64,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<String, ForgeError> {
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let api = |method: &str, endpoint: String, extra: Vec<String>| {
+            let mut argv = args(&[
+                "api",
+                &format!("--hostname={host}"),
+                &format!("--method={method}"),
+            ]);
+            argv.extend(extra.into_iter().map(OsString::from));
+            argv.push(endpoint.into());
+            self.gh(Path::new("."), argv)
+        };
+        let issue = api("GET", format!("repos/{name}/issues/{number}"), Vec::new()).await?;
+        let issue: Json = serde_json::from_str(&issue)
+            .map_err(|error| ForgeError(format!("invalid issue response: {error}")))?;
+        if !issue["pull_request"].is_null() {
+            return Err(ForgeError(format!(
+                "#{number} is a pull request; label_issue labels issues only"
+            )));
+        }
+        let mut report = Vec::new();
+        if !add.is_empty() {
+            let known = api(
+                "GET",
+                format!("repos/{name}/labels"),
+                vec!["--paginate".into(), "--jq=.[].name".into()],
+            )
+            .await?;
+            let known: Vec<&str> = known.lines().map(str::trim).collect();
+            let (found, missing): (Vec<&String>, Vec<&String>) = add
+                .iter()
+                .partition(|label| known.iter().any(|k| k.eq_ignore_ascii_case(label)));
+            if !found.is_empty() {
+                let fields = found
+                    .iter()
+                    .map(|label| format!("--raw-field=labels[]={label}"));
+                api(
+                    "POST",
+                    format!("repos/{name}/issues/{number}/labels"),
+                    fields.collect(),
+                )
+                .await?;
+                report.push(format!("Added {}.", join(&found)));
+            }
+            if !missing.is_empty() {
+                report.push(format!(
+                    "Not added, because {repo} has no such label: {}.",
+                    join(&missing)
+                ));
+            }
+        }
+        for label in remove {
+            let endpoint = format!(
+                "repos/{name}/issues/{number}/labels/{}",
+                path_segment(label)
+            );
+            match api("DELETE", endpoint, Vec::new()).await {
+                Ok(_) => {}
+                // The issue does not have the label (or it does not exist): nothing to remove.
+                Err(ForgeError(error)) if error.contains("HTTP 404") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if !remove.is_empty() {
+            report.push(format!("Removed {}.", remove.join(", ")));
+        }
+        Ok(format!("Issue #{number} in {repo}: {}", report.join(" ")))
+    }
+}
+
+fn join(labels: &[&String]) -> String {
+    labels
+        .iter()
+        .map(|l| l.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Percent-encodes `text` for one URL path segment.
+fn path_segment(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(b).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn check_branch(branch: &str) -> Result<(), ForgeError> {
@@ -357,6 +457,11 @@ impl Forge for GitForge {
                 args(&["pr", "merge", &number.to_string(), "--merge"])
             }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
+            RepositoryAction::LabelIssue {
+                number,
+                add,
+                remove,
+            } => return self.label_issue(&repo, *number, add, remove).await,
         };
         argv.push(format!("--repo={repo}").into());
         self.gh(Path::new("."), argv).await

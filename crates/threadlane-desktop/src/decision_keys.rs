@@ -307,6 +307,7 @@ fn confirms_number(decision: &Decision) -> bool {
             | threadlane_core::forge::REPORT_LIMITATION
             | CREATE_ISSUE
             | MARK_READY
+            | threadlane_core::forge::LABEL_ISSUE
             | OPEN_PULL_REQUEST
             | PUBLISH_BRANCH
             | "memory_view"

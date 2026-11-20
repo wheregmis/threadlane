@@ -129,6 +129,14 @@ impl FakeGh {
                cat {record}/reviews\n\
              elif [ \"$1 $2\" = \"api user\" ]; then\n\
                {api_user}\n\
+             elif [ \"$1\" = api ]; then\n\
+               for last; do :; done\n\
+               case \"$3 $last\" in\n\
+                 '--method=GET repos/acme/app/issues/12') echo '{{\"number\":12}}' ;;\n\
+                 '--method=GET repos/acme/app/issues/13') echo '{{\"pull_request\":{{}}}}' ;;\n\
+                 '--method=GET repos/acme/app/labels') printf 'bug\\nNeeds Review\\n' ;;\n\
+                 '--method=DELETE repos/acme/app/issues/12/labels/gone') echo 'Not Found (HTTP 404)' >&2; exit 1 ;;\n\
+               esac\n\
              fi\n"
         );
         let program = dir.path().join("gh");
@@ -400,5 +408,70 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
             vec!["pr", "merge", "12", "--merge", repo],
             vec!["pr", "ready", "12", repo],
         ]
+    );
+}
+
+#[tokio::test]
+async fn issue_labels_use_gh_api_and_report_labels_the_repository_lacks() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let remote = "git@github.test:ACME/APP.git";
+    let label = |number: u64| RepositoryAction::LabelIssue {
+        number: std::num::NonZeroU64::new(number).unwrap(),
+        add: vec!["needs review".into(), "bug".into(), "nope".into()],
+        remove: vec!["gone".into(), "area: hub".into()],
+    };
+    let report = forge.apply(remote, &label(12)).await.unwrap();
+    assert_eq!(
+        report,
+        "Issue #12 in github.test/acme/app: Added needs review, bug. Not added, because \
+         github.test/acme/app has no such label: nope. Removed gone, area: hub."
+    );
+    let host = "--hostname=github.test";
+    assert_eq!(
+        gh.invocations(),
+        [
+            vec!["api", host, "--method=GET", "repos/acme/app/issues/12"],
+            vec![
+                "api",
+                host,
+                "--method=GET",
+                "--paginate",
+                "--jq=.[].name",
+                "repos/acme/app/labels"
+            ],
+            vec![
+                "api",
+                host,
+                "--method=POST",
+                "--raw-field=labels[]=needs review",
+                "--raw-field=labels[]=bug",
+                "repos/acme/app/issues/12/labels"
+            ],
+            vec![
+                "api",
+                host,
+                "--method=DELETE",
+                "repos/acme/app/issues/12/labels/gone"
+            ],
+            vec![
+                "api",
+                host,
+                "--method=DELETE",
+                "repos/acme/app/issues/12/labels/area%3A%20hub"
+            ],
+        ],
+        "labels the repository lacks are never sent, so none is created"
+    );
+
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let error = forge.apply(remote, &label(13)).await.unwrap_err();
+    assert!(error.0.contains("is a pull request"), "{error}");
+    assert_eq!(
+        gh.invocations().len(),
+        1,
+        "nothing is changed on a pull request"
     );
 }

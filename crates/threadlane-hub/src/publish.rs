@@ -5,8 +5,8 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, MARK_READY, MERGE, ONTO_TASK,
-    OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, LABEL_ISSUE, MARK_READY,
+    MAX_LABELS, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH, valid_label_name,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -143,6 +143,20 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 "required":["repository","number"],"additionalProperties":false
             }),
         ),
+        define(
+            LABEL_ISSUE,
+            "Add or remove labels on an issue (not a pull request) in a registered project \
+             repository. Labels the repository does not have are reported back, not created.",
+            json!({
+                "type":"object","properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "add":{"type":"array","items":{"type":"string"},"description":"Existing label names to add."},
+                    "remove":{"type":"array","items":{"type":"string"},"description":"Label names to remove."}
+                },
+                "required":["repository","number"],"additionalProperties":false
+            }),
+        ),
     ]
 }
 
@@ -196,7 +210,51 @@ pub(crate) fn repository_action(
             fields(a, &["repository", "number"])?;
             Ok(RepositoryAction::MarkReady { number: number()? })
         }
+        LABEL_ISSUE => {
+            fields(a, &["repository", "number", "add", "remove"])?;
+            let (add, remove) = (labels(a, "add")?, labels(a, "remove")?);
+            if add.is_empty() && remove.is_empty() {
+                return Err(invalid("name at least one label to add or remove"));
+            }
+            if add.len() + remove.len() > MAX_LABELS {
+                return Err(invalid("at most 20 labels in one call"));
+            }
+            if add
+                .iter()
+                .any(|label| remove.iter().any(|r| r.eq_ignore_ascii_case(label)))
+            {
+                return Err(invalid("a label cannot be both added and removed"));
+            }
+            Ok(RepositoryAction::LabelIssue {
+                number: number()?,
+                add,
+                remove,
+            })
+        }
         _ => Err(invalid("unknown repository action")),
+    }
+}
+
+/// The label names under `key`, which may be absent.
+fn labels(a: &Json, key: &str) -> Result<Vec<String>, ToolError> {
+    let bad = || {
+        invalid(&format!(
+            "{key} must be a list of label names, each at most 50 characters without control \
+             characters or surrounding spaces"
+        ))
+    };
+    match a.get(key) {
+        None | Some(Json::Null) => Ok(Vec::new()),
+        Some(Json::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .filter(|name| valid_label_name(name))
+                    .map(str::to_owned)
+                    .ok_or_else(bad)
+            })
+            .collect(),
+        Some(_) => Err(bad()),
     }
 }
 
@@ -233,6 +291,7 @@ pub(crate) async fn proposal(
             | CREATE_ISSUE
             | MERGE
             | MARK_READY
+            | LABEL_ISSUE
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -276,8 +335,11 @@ pub(crate) async fn proposal(
                 names(false)
             ))
         })?;
-    if matches!(tool, COMMENT | CREATE_ISSUE | MERGE | MARK_READY) {
-        repository_action(tool, arguments)?;
+    if matches!(
+        tool,
+        COMMENT | CREATE_ISSUE | MERGE | MARK_READY | LABEL_ISSUE
+    ) {
+        let action = repository_action(tool, arguments)?;
         let question = match tool {
             COMMENT => format!(
                 "Comment on {} #{} in {name}?",
@@ -289,6 +351,25 @@ pub(crate) async fn proposal(
                 "Mark draft pull request #{} in {name} ready for review?",
                 arguments["number"]
             ),
+            LABEL_ISSUE => {
+                let threadlane_core::forge::RepositoryAction::LabelIssue { add, remove, .. } =
+                    &action
+                else {
+                    unreachable!("label_issue parses to LabelIssue")
+                };
+                let mut change = Vec::new();
+                if !add.is_empty() {
+                    change.push(format!("add {}", add.join(", ")));
+                }
+                if !remove.is_empty() {
+                    change.push(format!("remove {}", remove.join(", ")));
+                }
+                format!(
+                    "Label issue #{} in {name}: {}?",
+                    arguments["number"],
+                    change.join("; ")
+                )
+            }
             _ => format!("Create issue {} in {name}?", arguments["title"]),
         };
         return Ok(Proposal {
@@ -442,6 +523,32 @@ pub(crate) fn plain_text(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn label_issue_needs_valid_distinct_labels() {
+        let parse = |a: Json| repository_action(LABEL_ISSUE, &a);
+        assert_eq!(
+            parse(json!({"repository":"app","number":7,"add":["bug"],"remove":["triage"]})),
+            Ok(threadlane_core::forge::RepositoryAction::LabelIssue {
+                number: std::num::NonZeroU64::new(7).unwrap(),
+                add: vec!["bug".into()],
+                remove: vec!["triage".into()],
+            })
+        );
+        for bad in [
+            json!({"repository":"app","number":7}),
+            json!({"repository":"app","number":7,"add":[]}),
+            json!({"repository":"app","number":0,"add":["bug"]}),
+            json!({"repository":"app","number":7,"add":"bug"}),
+            json!({"repository":"app","number":7,"add":[" bug"]}),
+            json!({"repository":"app","number":7,"add":["a\nb"]}),
+            json!({"repository":"app","number":7,"add":["Bug"],"remove":["bug"]}),
+            json!({"repository":"app","number":7,"add":["bug"],"labels":["x"]}),
+            json!({"repository":"app","number":7,"add":vec!["x"; 21]}),
+        ] {
+            assert!(parse(bad.clone()).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn titles_and_bodies_are_plain_text() {

@@ -89,7 +89,8 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
                 .then(|| ((*field).to_owned(), value.clone()))
         })
         .collect();
-    if tool == crate::FAST_FORWARD_PULL_REQUEST
+    // A standing rule for these covers one pull request or issue, not the whole repository.
+    if matches!(tool, crate::FAST_FORWARD_PULL_REQUEST | crate::LABEL_ISSUE)
         && let Some(number) = arguments["number"].as_u64()
     {
         targets.insert("number".into(), number.into());
@@ -332,7 +333,12 @@ mod tests {
             case("tier 2 assisted", T2, AS, Review),
             case("tier 2 autonomous", T2, AU, Review),
             case("tier 3 on request", T3, ON, Ask),
-            case("tier 3 assisted offers no rule it would not apply", T3, AS, Ask),
+            case(
+                "tier 3 assisted offers no rule it would not apply",
+                T3,
+                AS,
+                Ask,
+            ),
             case("tier 3 autonomous", T3, AU, AskOffer),
             case("forbidden on request", TF, ON, Block),
             case("forbidden assisted", TF, AS, Block),
@@ -614,6 +620,13 @@ mod tests {
                 &json!({"repository":"app","number":42})
             ),
             json!({"repository":"app","number":42})
+        );
+        assert_eq!(
+            rule_pattern(
+                crate::LABEL_ISSUE,
+                &json!({"repository":"app","number":7,"add":["bug"]})
+            ),
+            json!({"repository":"app","number":7})
         );
     }
 
