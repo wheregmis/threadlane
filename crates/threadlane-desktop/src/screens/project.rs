@@ -10,7 +10,8 @@ use gpui_kit::component::separator::Separator;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -41,6 +42,17 @@ pub(super) const MODES: [(Mode, &str); 4] = [
     (Mode::Assisted, "Assisted"),
     (Mode::Autonomous, "Autonomous"),
 ];
+
+/// Keep at least 24 rem for the chat when both rails fit.
+fn chat_details_in_sheet(viewport_width: Pixels, rem: Pixels, sidebar_collapsed: bool) -> bool {
+    let left = if sidebar_collapsed {
+        Pixels::ZERO
+    } else {
+        SIDEBAR_WIDTH
+    };
+    let available = (viewport_width - left - LG * 2.).min(READING_WIDTH);
+    available - SIDEBAR_WIDTH - LG < rem * 24.
+}
 
 impl Desktop {
     pub(crate) fn space_tasks(
@@ -503,7 +515,7 @@ impl Desktop {
                 .self_center()
                 .gap(MD)
                 .child(page_header("Chat", Some(context), actions))
-                .child(self.conversation_tab(space, project, when, cx))
+                .child(self.conversation_tab(space, project, when, false, cx))
                 .into_any_element();
         }
         let (in_space, named) = (space.to_owned(), project.to_owned());
@@ -557,7 +569,17 @@ impl Desktop {
         let lead_mode = self.state.lead_mode(space, project);
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
-            Tab::Conversation => self.conversation_tab(space, project, when, cx),
+            Tab::Conversation => self.conversation_tab(
+                space,
+                project,
+                when,
+                chat_details_in_sheet(
+                    window.viewport_size().width,
+                    window.rem_size(),
+                    self.sidebar_collapsed,
+                ),
+                cx,
+            ),
             Tab::Memory => self.memory_tab(space, project, when, cx),
             Tab::Team => self.agents_tab(space, project, cx),
             Tab::Workflow => self.workflow_tab(space, project, archived, window, cx),
@@ -1228,6 +1250,7 @@ impl Desktop {
         space: &str,
         project: &str,
         when: &When,
+        details_in_sheet: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -1736,7 +1759,49 @@ impl Desktop {
             lines = lines.child(self.recorded_section(space, project, recorded, cx));
         }
 
-        let side = (!main_chat).then(|| self.conversation_sidebar(space, project, when, cx));
+        let details = (!main_chat && details_in_sheet).then(|| {
+            let (space, project) = (space.to_owned(), project.to_owned());
+            button("conversation-details")
+                .small()
+                .outline()
+                .self_start()
+                .icon(AppIcon::Columns3)
+                .label("Conversation details")
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    let view = cx.entity().downgrade();
+                    let (space, project) = (space.clone(), project.clone());
+                    window.open_sheet(cx, move |sheet, window, cx| {
+                        let width = RULES_WIDTH.min(window.viewport_size().width);
+                        let content = view.update(cx, |this, cx| {
+                            this.conversation_details(&space, &project, &this.when(), true, cx)
+                        });
+                        let view = view.clone();
+                        sheet
+                            .title("Conversation details")
+                            .size(width)
+                            .resizable(false)
+                            .children(content.ok())
+                            .on_close(move |_, window, cx| {
+                                // Resizing during the sheet can remove its opener.
+                                let _gone = view.update(cx, |this, cx| {
+                                    if !this.keyboard_focus.contains_focused(window, cx) {
+                                        this.keyboard_focus.focus(window, cx);
+                                    }
+                                });
+                            })
+                    });
+                }))
+        });
+        let side = (!main_chat && !details_in_sheet).then(|| {
+            v_flex()
+                .id("conversation-sidebar")
+                .w(SIDEBAR_WIDTH)
+                .h_full()
+                .flex_none()
+                .pr(SCROLLBAR_GUTTER)
+                .overflow_y_scrollbar()
+                .child(self.conversation_details(space, project, when, false, cx))
+        });
         h_flex()
             .flex_1()
             .min_h_0()
@@ -1748,6 +1813,7 @@ impl Desktop {
                     .h_full()
                     .min_w_0()
                     .gap(SM)
+                    .children(details)
                     .child(self.conversation_scroller(
                         space,
                         project,
@@ -1780,21 +1846,29 @@ impl Desktop {
             .into_any_element()
     }
 
-    fn conversation_sidebar(
+    fn open_conversation_detail(
+        &mut self,
+        screen: Screen,
+        in_sheet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if in_sheet {
+            window.close_sheet(cx);
+            self.keyboard_focus.focus(window, cx);
+        }
+        self.go(screen, cx);
+    }
+
+    fn conversation_details(
         &self,
         space: &str,
         project: &str,
         when: &When,
+        in_sheet: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut side = v_flex()
-            .w(SIDEBAR_WIDTH)
-            .h_full()
-            .flex_none()
-            .gap(SM)
-            .pr(SCROLLBAR_GUTTER)
-            .overflow_y_scrollbar()
-            .id("conversation-sidebar");
+        let mut side = v_flex().gap(SM);
         side = side.child(section("From this conversation"));
         // The hub does not record which message made a task, so the tasks
         // are listed here rather than under the message.
@@ -1852,7 +1926,9 @@ impl Desktop {
                         format!("from-{}", summary.task.id),
                         format!("{} {}", summary.task.id, summary.task.title),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_conversation_detail(screen.clone(), in_sheet, window, cx);
+                    })),
                 )
                 .child(
                     h_flex()
@@ -1887,7 +1963,9 @@ impl Desktop {
                     .ghost()
                     .self_start()
                     .label(format!("View all {total_tasks} tasks"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(all_screen.clone(), cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_conversation_detail(all_screen.clone(), in_sheet, window, cx);
+                    })),
             );
         }
         side = side.child(section("Open decisions"));
@@ -1951,7 +2029,9 @@ impl Desktop {
                 .small()
                 .icon(AppIcon::BookOpen)
                 .label("Open memory")
-                .on_click(cx.listener(move |this, _, _, cx| this.go(memory.clone(), cx))),
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_conversation_detail(memory.clone(), in_sheet, window, cx);
+                })),
         )
         .into_any_element()
     }
@@ -3103,4 +3183,18 @@ fn handoff_preview(text: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or(trimmed);
     first_line.to_owned()
+}
+
+#[cfg(test)]
+mod chat_details_tests {
+    use super::{chat_details_in_sheet, px};
+
+    #[test]
+    fn narrow_chat_uses_drawer_without_changing_global_sidebar() {
+        assert!(chat_details_in_sheet(px(640.), px(16.), false));
+        assert!(chat_details_in_sheet(px(760.), px(16.), false));
+        assert!(!chat_details_in_sheet(px(760.), px(16.), true));
+        assert!(!chat_details_in_sheet(px(1024.), px(16.), false));
+        assert!(chat_details_in_sheet(px(1024.), px(24.), false));
+    }
 }
