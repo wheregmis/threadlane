@@ -12,7 +12,9 @@ use threadlane_core::model::{
 use threadlane_core::runtime::steps::perform;
 use threadlane_core::store::{InboxStore, OrgStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, LABEL_ISSUE, MARK_READY, MERGE};
+use threadlane_hub::{
+    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, LABEL_ISSUE, MARK_READY, MERGE,
+};
 use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::{CrashPlan, Script};
 
@@ -22,7 +24,7 @@ use crate::operations::follow_up;
 use crate::permissions::engineer_in;
 use crate::publish::{drive, publish_world};
 
-pub(super) fn actions() -> [(&'static str, Json); 6] {
+pub(super) fn actions() -> [(&'static str, Json); 7] {
     [
         (
             COMMENT,
@@ -42,6 +44,7 @@ pub(super) fn actions() -> [(&'static str, Json); 6] {
             CLOSE_PULL_REQUEST,
             json!({"repository":"app","number":12,"expected_head":HEAD,"delete_branch":true}),
         ),
+        (ASSIGN_ISSUE, json!({"repository":"app","number":12})),
     ]
 }
 
@@ -231,6 +234,41 @@ async fn autonomous_merge_with_a_standing_rule_still_needs_review() {
     assert_eq!(w.backend.questions().len(), 1);
     assert_eq!(w.forge.calls().len(), 1);
     assert_eq!(sim.decisions().await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_approved_assign_issue_reaches_the_forge_and_a_bad_number_does_not() {
+    let w = world(ASSIGN_ISSUE, actions()[6].1.clone(), Mode::OnRequest).await;
+    let sim = w.boot(CrashPlan::new()).await;
+    sim.send("m", "Finish the page").await;
+    drive(&sim, "approve", None).await.unwrap();
+    assert_eq!(
+        sim.decisions().await[0].question,
+        "Assign issue #12 in app to you?"
+    );
+    let calls = w.forge.calls();
+    let [
+        ForgeCall::Apply {
+            action: RepositoryAction::AssignIssue { number },
+            ..
+        },
+    ] = calls.as_slice()
+    else {
+        panic!("expected one assignment, got {calls:?}");
+    };
+    assert_eq!(number.get(), 12);
+
+    let w = world(
+        ASSIGN_ISSUE,
+        json!({"repository":"app","number":0}),
+        Mode::OnRequest,
+    )
+    .await;
+    let sim = w.boot(CrashPlan::new()).await;
+    sim.send("m", "Finish the page").await;
+    work(&sim).await;
+    assert!(sim.decisions().await.is_empty());
+    assert!(w.forge.calls().is_empty());
 }
 
 #[tokio::test]

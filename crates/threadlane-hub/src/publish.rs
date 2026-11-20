@@ -5,9 +5,9 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST,
-    GITHUB_CLI, LABEL_ISSUE, MARK_READY, MAX_LABELS, MERGE, ONTO_TASK, OPEN_PULL_REQUEST,
-    PUBLISH_BRANCH, valid_label_name,
+    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EXPECTED_HEAD,
+    FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, LABEL_ISSUE, MARK_READY, MAX_LABELS, MERGE, ONTO_TASK,
+    OPEN_PULL_REQUEST, PUBLISH_BRANCH, valid_label_name,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -190,6 +190,14 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 "required":["repository","args","missing_tool"],"additionalProperties":false
             }),
         ),
+        define(
+            ASSIGN_ISSUE,
+            "Assign an issue in a registered project repository to you, so others can see it is taken.",
+            json!({
+                "type":"object","properties":{"repository":repository,"number":{"type":"integer","minimum":1}},
+                "required":["repository","number"],"additionalProperties":false
+            }),
+        ),
     ]
 }
 
@@ -233,6 +241,10 @@ fn gh_args(a: &Json) -> Result<Vec<String>, ToolError> {
                 .any(|arg| arg.starts_with("--add-label") || arg.starts_with("--remove-label")) =>
         {
             Some(LABEL_ISSUE)
+        }
+        // assign_issue checks who holds the issue first.
+        ("issue", "edit") if args.iter().any(|arg| arg.starts_with("--add-assignee")) => {
+            Some(ASSIGN_ISSUE)
         }
         _ => None,
     };
@@ -347,6 +359,10 @@ pub(crate) fn repository_action(
             missing_tool(a)?;
             Ok(RepositoryAction::GhCli { args: gh_args(a)? })
         }
+        ASSIGN_ISSUE => {
+            fields(a, &["repository", "number"])?;
+            Ok(RepositoryAction::AssignIssue { number: number()? })
+        }
         _ => Err(invalid("unknown repository action")),
     }
 }
@@ -410,6 +426,7 @@ pub(crate) async fn proposal(
             | LABEL_ISSUE
             | CLOSE_PULL_REQUEST
             | GITHUB_CLI
+            | ASSIGN_ISSUE
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -470,7 +487,13 @@ pub(crate) async fn proposal(
     }
     if matches!(
         tool,
-        COMMENT | CREATE_ISSUE | MERGE | MARK_READY | LABEL_ISSUE | CLOSE_PULL_REQUEST
+        COMMENT
+            | CREATE_ISSUE
+            | MERGE
+            | MARK_READY
+            | LABEL_ISSUE
+            | CLOSE_PULL_REQUEST
+            | ASSIGN_ISSUE
     ) {
         let action = repository_action(tool, arguments)?;
         // `owner/repo#N` links to the right repository in a multi-repository project.
@@ -521,6 +544,9 @@ pub(crate) async fn proposal(
                     "Mark draft pull request {slug}#{} in {name} ready for review?",
                     arguments["number"]
                 ),
+                ASSIGN_ISSUE => {
+                    format!("Assign issue #{} in {name} to you?", arguments["number"])
+                }
                 _ => format!("Create issue {} in {name}?", arguments["title"]),
             },
         };
@@ -759,6 +785,7 @@ mod tests {
             json!(["pr", "close", "1"]),
             json!(["issue", "comment", "1"]),
             json!(["issue", "edit", "1", "--add-label=bug"]),
+            json!(["issue", "edit", "1", "--add-assignee=@me"]),
             json!(["issue"]),
             json!(["issue", "edit", 1]),
         ] {

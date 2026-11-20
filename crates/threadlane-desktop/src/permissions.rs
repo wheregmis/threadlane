@@ -194,6 +194,7 @@ pub fn allows(tool: &str, pattern: &Json) -> String {
     let action = match tool {
         "open_pull_request" => "open draft pull requests".to_owned(),
         "publish_branch" => "push its task branch".to_owned(),
+        "assign_issue" => "assign issues to you".to_owned(),
         "memory_edit" | "memory_create" => "change".to_owned(),
         "memory_delete" => "delete".to_owned(),
         "memory_rename" => "rename".to_owned(),
