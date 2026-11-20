@@ -16,8 +16,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::Mode;
 use threadlane_desktop::{
-    Consequence, EmptyRegion, Line, ModeChoice, Part, ProjectTasksViewMode, SpaceTasksViewMode,
-    TaskGroup, When, build_task_dag, message_limit, newest_message, status_label, work_elapsed,
+    Consequence, EarlierStatus, EmptyRegion, Line, ModeChoice, Part, ProjectTasksViewMode,
+    SpaceTasksViewMode, TaskGroup, When, build_task_dag, message_limit, newest_message,
+    status_label, work_elapsed,
 };
 
 use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
@@ -1236,18 +1237,40 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let mut lines = v_flex().gap(MD);
+        // Always keep this control and the history status in a single child before the rows.
+        let mut history = v_flex().gap(XS).items_start();
+        let mut has_header = false;
         if let Some(before) = self.state.earlier(space, project) {
+            has_header = true;
+            let status = self.state.earlier_status(space, project);
+            let label = match status {
+                Some(EarlierStatus::Loading) => "Loading earlier messages…",
+                Some(EarlierStatus::Failed(error)) => {
+                    history = history.child(meta(
+                        format!("Could not load earlier messages: {error}"),
+                        cx,
+                    ));
+                    "Retry"
+                }
+                None => "Show earlier",
+            };
             let (space, project) = (space.to_owned(), project.to_owned());
-            lines = lines.child(button("earlier").small().label("Show earlier").on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.earlier(space.clone(), project.clone(), before, cx);
-                }),
-            ));
+            history = history.child(
+                button("earlier")
+                    .small()
+                    .tab_stop(true)
+                    .label(label)
+                    .disabled(status == Some(&EarlierStatus::Loading))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.earlier(space.clone(), project.clone(), before, cx);
+                    })),
+            );
         }
         if let Some(gap) = self.state.project_gap(space, project, Part::Conversation) {
-            lines = lines.child(gap_line(&gap, "conversation", space, cx));
+            has_header = true;
+            history = history.child(gap_line(&gap, "conversation", space, cx));
         }
+        let mut lines = v_flex().gap(MD).children(has_header.then_some(history));
         let main_chat = self.is_main_chat(space, project);
         let conversation = self.state.conversation(space, project, when);
         if conversation.is_empty()
@@ -1731,7 +1754,14 @@ impl Desktop {
                     .h_full()
                     .min_w_0()
                     .gap(SM)
-                    .child(self.conversation_scroller(space, project, lines, cx))
+                    .child(self.conversation_scroller(
+                        space,
+                        project,
+                        lines,
+                        &conversation,
+                        has_header,
+                        cx,
+                    ))
                     .children((!self.state.is_archived(space, project)).then(|| {
                         let page = (space.to_owned(), project.to_owned());
                         let picker = self.to_picker(
