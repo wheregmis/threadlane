@@ -1117,6 +1117,44 @@ async fn dream_pages_carry_unread_runs_and_support_a_correction_only_default() {
 }
 
 #[tokio::test]
+async fn dream_keeps_defaults_suspended_until_the_hidden_correction_is_reviewed() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    set(&hub, None).await;
+    let project = hub.general().await.id;
+    hub.send("reversal", "Stop using the previous report format.")
+        .await;
+    let (lease, reversal) = begin(&*hub.link).await;
+    complete(&hub, &lease, &reversal).await;
+    for n in 0..20 {
+        hub.send(&format!("later-{n}"), "Thanks.").await;
+    }
+    let (lease, later) = begin(&*hub.link).await;
+    complete(&hub, &lease, &later).await;
+
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, first) = begin(&*hub.link).await;
+    call(&*hub.link, &lease, &first, SESSIONS, json!({"offset":1}))
+        .await
+        .unwrap();
+    complete(&hub, &lease, &first).await;
+    assert!(hub.db.preferences_need_review(project).await.unwrap());
+
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, second) = begin(&*hub.link).await;
+    let page = call(&*hub.link, &lease, &second, SESSIONS, json!({"limit":1}))
+        .await
+        .unwrap();
+    assert_eq!(page["runs"][0]["run_id"], reversal.run_id.get());
+    assert!(hub.db.preferences_need_review(project).await.unwrap());
+    complete(&hub, &lease, &second).await;
+    assert!(!hub.db.preferences_need_review(project).await.unwrap());
+}
+
+#[tokio::test]
 async fn dream_freezes_membership_and_pages_more_than_twenty_decisions() {
     let hub = TestHub::start().await;
     hub.hello().await;
@@ -1152,6 +1190,29 @@ async fn dream_freezes_membership_and_pages_more_than_twenty_decisions() {
     set(&hub, Some(interval())).await;
     hub.clock.advance(HOUR);
     hub.core.schedule_once().await.unwrap();
+    let (lease, first) = begin(&*hub.link).await;
+    let mut offset = 0;
+    // The oldest three questions and their answer runs lie outside the Lead's recent window.
+    while offset < 6 {
+        let page = call(
+            &*hub.link,
+            &lease,
+            &first,
+            SESSIONS,
+            json!({"offset":offset,"limit":6-offset}),
+        )
+        .await
+        .unwrap();
+        offset = page["next_offset"].as_u64().unwrap();
+    }
+    complete(&hub, &lease, &first).await;
+    let project = hub.general().await;
+    assert!(
+        hub.db.preferences_need_review(project.id).await.unwrap(),
+        "older choices were unread"
+    );
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
     let (lease, dream) = begin(&*hub.link).await;
     let mut ids = std::collections::BTreeSet::new();
     let mut offset = 0;
@@ -1182,7 +1243,6 @@ async fn dream_freezes_membership_and_pages_more_than_twenty_decisions() {
         .await
         .unwrap();
     let total = page["total"].as_u64().unwrap();
-    let project = hub.general().await;
     let agent = hub.db.bindings(project.id).await.unwrap()[0].agent_id;
     hub.db
         .create_task(
@@ -1216,6 +1276,7 @@ async fn dream_freezes_membership_and_pages_more_than_twenty_decisions() {
     assert_eq!(past["total"], total);
     assert!(past["tasks"].as_array().unwrap().is_empty());
     complete(&hub, &lease, &dream).await;
+    assert!(!hub.db.preferences_need_review(project.id).await.unwrap());
     hub.clock.advance(HOUR);
     hub.core.schedule_once().await.unwrap();
     let (lease, next) = begin(&*hub.link).await;

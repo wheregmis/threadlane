@@ -23,6 +23,13 @@ const CHOICES: &str =
     WHERE d.project_id=?1 AND e.project_id=d.project_id AND d.kind='input' AND d.tool='ask_user'
     AND d.status='answered' AND d.run_id IS NOT NULL AND e.trust='user'";
 
+const RECENT_MESSAGES: &str = "SELECT id FROM events WHERE project_id=?1 AND source='client'
+    AND kind='user_message' AND trust='user' ORDER BY id DESC LIMIT 20";
+
+fn recent_choices() -> String {
+    format!("SELECT d.id {CHOICES} ORDER BY d.answered_at DESC, d.id DESC LIMIT 20")
+}
+
 async fn active_timer(
     conn: &Connection,
     project: ProjectId,
@@ -206,26 +213,38 @@ impl HubDb {
         tx.commit().await
     }
 
-    /// A long gap since the last committed dream can hide a reversal outside the
-    /// Lead's bounded recent evidence. Defer defaults until the next review.
+    /// Defer defaults when a reversal could be outside the Lead's recent evidence,
+    /// including pages left unread by a committed dream.
     pub async fn preferences_need_review(&self, project: ProjectId) -> StoreResult<bool> {
-        query_one(&self.db.reader()?, "SELECT EXISTS(
+        let sql = format!("WITH unread AS (
+            SELECT i.kind, i.item_id FROM dream_items i
+            WHERE i.project_id=?1 AND i.kind IN ('run','choice') AND i.last_review=0
+            AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id=i.seen_run AND r.status='committed')
+        )
+        SELECT EXISTS(
             SELECT 1 FROM events e WHERE e.project_id=?1 AND e.trust='user' AND e.kind IN ('user_message','decision_answer')
             AND e.id > (SELECT MAX(re.event_id) FROM run_events re JOIN events d ON d.id=re.event_id
                 JOIN runs r ON r.id=re.run_id WHERE r.status='committed' AND d.kind='dream' AND d.source='timer'
-                AND d.trust='system' AND d.project_id=?1) LIMIT 1 OFFSET 20)",
-            params![project.get()], |r|Cols(r).bool(0)).await
+                AND d.trust='system' AND d.project_id=?1) LIMIT 1 OFFSET 20)
+            OR EXISTS (SELECT 1 FROM unread WHERE kind='choice' AND item_id NOT IN ({}))
+            OR EXISTS (SELECT 1 FROM unread i JOIN run_events re ON re.run_id=i.item_id
+                JOIN events e ON e.id=re.event_id WHERE i.kind='run' AND e.project_id=?1
+                AND e.source='client' AND e.kind='user_message' AND e.trust='user'
+                AND json_type(e.payload,'$.text')='text' AND e.id NOT IN ({RECENT_MESSAGES})
+                AND re.run_id=(SELECT MIN(first.run_id) FROM run_events first WHERE first.event_id=e.id))",
+            recent_choices());
+        query_one(&self.db.reader()?, &sql, params![project.get()], |r| {
+            Cols(r).bool(0)
+        })
+        .await
     }
 
     /// Owner-answered input cards for the Lead, including older cited cards.
     pub async fn user_choices(&self, project: ProjectId, cited: &[i64]) -> StoreResult<Vec<Json>> {
         let conn = self.db.reader()?;
-        let mut ids = query_all(
-            &conn,
-            &format!("SELECT d.id {CHOICES} ORDER BY d.answered_at DESC, d.id DESC LIMIT 20"),
-            params![project.get()],
-            |row| Cols(row).i64(0),
-        )
+        let mut ids = query_all(&conn, &recent_choices(), params![project.get()], |row| {
+            Cols(row).i64(0)
+        })
         .await?;
         ids.extend_from_slice(cited);
         self.choice_records(project, &ids).await
@@ -516,8 +535,12 @@ impl HubDb {
         project: ProjectId,
         cited: &[i64],
     ) -> StoreResult<Vec<Json>> {
-        self.owner_messages(project,cited,"e.id IN (SELECT value FROM json_each(?2)) OR e.id IN
-            (SELECT id FROM events WHERE project_id=?1 AND source='client' AND kind='user_message' AND trust='user' ORDER BY id DESC LIMIT 20)").await
+        self.owner_messages(
+            project,
+            cited,
+            &format!("e.id IN (SELECT value FROM json_each(?2)) OR e.id IN ({RECENT_MESSAGES})"),
+        )
+        .await
     }
 
     /// Finished run summaries and delivered messages for the selected page.
