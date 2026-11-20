@@ -1,10 +1,11 @@
 use crate::{Profile, failed, spawn_error};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::{collections::VecDeque, fmt, process::Stdio};
+use std::{collections::VecDeque, fmt, process::Stdio, time::Duration};
 use threadlane_core::backend::{
     BackendError, BackendEvent as Event, BackendRun, NativeSession, RunRequest,
 };
+use threadlane_core::time::{Clock, SystemClock};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdout, Command},
@@ -12,6 +13,7 @@ use tokio::{
 
 pub(super) fn result_error(result: &Value) -> BackendError {
     let error = result["error"].as_str().unwrap_or("Antigravity run failed");
+    let lower = error.to_lowercase();
     if ["RESOURCE_EXHAUSTED", "QUOTA_EXCEEDED"]
         .contains(&result["finished_reason"].as_str().unwrap_or(""))
         || [
@@ -21,12 +23,36 @@ pub(super) fn result_error(result: &Value) -> BackendError {
             "usage limit",
         ]
         .iter()
-        .any(|s| error.to_lowercase().contains(s))
+        .any(|s| lower.contains(s))
     {
-        BackendError::UsageLimit { resets_at: None }
+        BackendError::UsageLimit {
+            resets_at: resets_in(&lower).map(|wait| SystemClock.now() + wait),
+        }
     } else {
         failed(error)
     }
+}
+
+/// The wait in agy's "resets in 37m3s", if the text gives one.
+fn resets_in(error: &str) -> Option<Duration> {
+    const PREFIX: &str = "resets in ";
+    let rest = &error[error.find(PREFIX)? + PREFIX.len()..];
+    let (mut secs, mut n, mut any) = (0u64, 0u64, false);
+    for c in rest.chars() {
+        let unit = match c {
+            '0'..='9' => {
+                n = n.checked_mul(10)?.checked_add(u64::from(c.to_digit(10)?))?;
+                continue;
+            }
+            'h' => 3600,
+            'm' => 60,
+            's' => 1,
+            _ => break,
+        };
+        secs = secs.checked_add(n.checked_mul(unit)?)?;
+        (n, any) = (0, true);
+    }
+    (any && n == 0).then(|| Duration::from_secs(secs))
 }
 
 pub(super) struct Run {
@@ -222,11 +248,25 @@ mod quota_tests {
         let result = json!({ "error": "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 37m3s." });
         assert!(matches!(
             result_error(&result),
+            BackendError::UsageLimit { resets_at: Some(_) }
+        ));
+        assert!(matches!(
+            result_error(&json!({ "error": "Individual quota reached." })),
             BackendError::UsageLimit { resets_at: None }
         ));
         assert!(matches!(
             result_error(&json!({ "error": "boom" })),
             BackendError::Failed(_)
         ));
+    }
+
+    #[test]
+    fn the_reset_wait_is_read_from_the_quota_message() {
+        let wait = |text: &str| resets_in(text).map(|wait| wait.as_secs());
+        assert_eq!(wait("individual quota reached. resets in 37m3s."), Some(2223));
+        assert_eq!(wait("resets in 1h2m"), Some(3720));
+        assert_eq!(wait("resets in 45s"), Some(45));
+        assert_eq!(wait("resets in 37 minutes"), None);
+        assert_eq!(wait("quota reached"), None);
     }
 }
