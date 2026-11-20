@@ -26,7 +26,7 @@ use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
     Activity, AppState, Appearance, DecisionKey, RoutineText, Tab, When, change_memory,
     decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project_tab,
-    load_routines, load_task_overview, load_timeline, mode_label, pump, refresh,
+    load_routines, load_task_overview, load_timeline, mode_label, pump, refresh_each,
 };
 use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
 use tokio::runtime::Runtime;
@@ -295,6 +295,11 @@ impl Screen {
             | Self::Settings(Some(space)) => Some(space),
             _ => None,
         }
+    }
+
+    /// Unscoped views load auxiliary data once the full roster is refreshed.
+    fn loads_after_refresh_pass(&self) -> bool {
+        matches!(self, Self::Home | Self::Agents(None) | Self::Routines(None))
     }
 
     /// The screen `THREADLANE_DESKTOP_OPEN` names: `home` or `inbox`, `agents`,
@@ -815,19 +820,41 @@ impl Desktop {
         self.state.checking_connections();
         cx.notify();
         let core = Arc::clone(&self.core);
-        let job = self
-            .tokio
-            .spawn(async move { refresh(&*core.read().await).await });
+        let (send, mut receive) = mpsc::unbounded_channel();
+        let job = self.tokio.spawn(async move {
+            let core = core.read().await;
+            refresh_each(&core, |_, part| send.send(part).is_ok()).await;
+            core.hubs()
+                .iter()
+                .map(|hub| hub.name.clone())
+                .collect::<Vec<_>>()
+        });
         cx.spawn(async move |this, cx| {
-            let result = job.await;
+            while let Some(part) = receive.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.refresh_gate.is_current(pairing_revision) {
+                            this.apply_refresh(part, cx);
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    job.abort();
+                    return;
+                }
+            }
+            let roster = job.await;
             let _ = this.update(cx, |this, cx| {
                 let (current, again) = this.refresh_gate.finish(pairing_revision);
-                if let Ok(refreshed) = result
-                    && current
-                {
-                    this.apply_refresh(refreshed, cx);
-                } else {
-                    this.state.finish_checking_connections();
+                this.state.finish_checking_connections();
+                if current && let Ok(roster) = roster {
+                    this.state.retain_paired_spaces(&roster);
+                    // These unscoped screens fetch auxiliary data across all hubs.
+                    // Load once, rather than re-querying every hub on each result.
+                    if this.screen.loads_after_refresh_pass() {
+                        this.load_screen(cx);
+                    }
                 }
                 if again {
                     this.start_refresh(true, cx);
@@ -839,7 +866,9 @@ impl Desktop {
     }
 
     fn apply_refresh(&mut self, refreshed: threadlane_desktop::Refresh, cx: &mut Context<Self>) {
-        // The open screen loads after refresh: the Agents screen needs the projects it lists.
+        let selected_hub = refreshed
+            .refreshed_space()
+            .is_some_and(|space| self.screen.space() == Some(space));
         let open_project = match &self.screen {
             Screen::Project { space, project, .. } => Some((space.clone(), project.clone())),
             Screen::Task { space, task } => self
@@ -852,12 +881,15 @@ impl Desktop {
             Screen::Project { space, project, .. } => refreshed.project_parts(space, project),
             _ => (false, false),
         };
-        self.state.apply(refreshed);
+        self.state.apply_partial(refreshed);
         // Refreshes run every REFRESH_EVERY, so this re-checks well within a minute.
         for alert in self.state.reminders(SystemClock.now()) {
             if self.state.notifies(&alert) {
                 self.remind(alert, cx);
             }
+        }
+        if !selected_hub {
+            return;
         }
         if let Some((space, project)) = open_project
             && self.state.project_absent(&space, &project)
@@ -2032,6 +2064,21 @@ mod activity_tests {
         assert!(empty.is_empty());
         empty.error = Some((None, "request failed".into()));
         assert!(!empty.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod refresh_screen_tests {
+    use super::Screen;
+
+    #[test]
+    fn refresh_end_loads_unscoped_auxiliary_screens_including_home() {
+        assert!(Screen::Home.loads_after_refresh_pass());
+        assert!(Screen::Agents(None).loads_after_refresh_pass());
+        assert!(Screen::Routines(None).loads_after_refresh_pass());
+        assert!(!Screen::Agents(Some("Work".into())).loads_after_refresh_pass());
+        assert!(!Screen::Routines(Some("Work".into())).loads_after_refresh_pass());
+        assert!(!Screen::Machines.loads_after_refresh_pass());
     }
 }
 

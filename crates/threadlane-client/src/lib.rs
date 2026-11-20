@@ -185,6 +185,18 @@ impl HubStatus {
     }
 }
 
+async fn check_hub_info(api: Result<Arc<dyn HubApi>, ClientError>) -> Result<HubInfo, ApiError> {
+    let api = api.map_err(|error| ApiError::Unreachable(error.to_string()))?;
+    tokio::time::timeout(STATUS_TIMEOUT, api.info())
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(ApiError::Unreachable(format!(
+                "no answer within {} s",
+                STATUS_TIMEOUT.as_secs()
+            )))
+        })
+}
+
 /// A message the hub accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sent {
@@ -745,17 +757,7 @@ impl ClientCore {
             .iter()
             .map(|hub| {
                 let api = self.api_for(hub);
-                let check = tokio::spawn(async move {
-                    let api = api.map_err(|error| ApiError::Unreachable(error.to_string()))?;
-                    tokio::time::timeout(STATUS_TIMEOUT, api.info())
-                        .await
-                        .unwrap_or_else(|_elapsed| {
-                            Err(ApiError::Unreachable(format!(
-                                "no answer within {} s",
-                                STATUS_TIMEOUT.as_secs()
-                            )))
-                        })
-                });
+                let check = tokio::spawn(async move { check_hub_info(api).await });
                 (hub.clone(), check)
             })
             .collect();
@@ -771,6 +773,15 @@ impl ClientCore {
             });
         }
         statuses
+    }
+
+    /// Checks a single paired hub without waiting for any other hub.
+    pub async fn status_for(&self, hub: &PairedHub) -> HubStatus {
+        HubStatus {
+            name: hub.name.clone(),
+            reach: hub.reach.clone(),
+            info: check_hub_info(self.api_for(hub)).await,
+        }
     }
 
     /// The projects of one space. `None` means the only paired hub.

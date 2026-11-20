@@ -23,8 +23,11 @@ use threadlane_core::model::{
     Weekday,
 };
 use threadlane_core::time::Timestamp;
+use tokio::sync::oneshot;
 
 use super::*;
+
+type BlockedInfo = (oneshot::Sender<()>, oneshot::Receiver<()>);
 
 /// A hub with the projects `api` and General, and what it was given.
 /// While `down`, it answers nothing; while `old`, it answers like a hub
@@ -33,6 +36,7 @@ use super::*;
 struct FakeHub {
     space: String,
     down: AtomicBool,
+    blocked_info: Mutex<Option<BlockedInfo>>,
     old: AtomicBool,
     batched_work: AtomicBool,
     project_task_requests: AtomicI64,
@@ -106,6 +110,11 @@ impl FakeHub {
 #[async_trait]
 impl HubApi for FakeHub {
     async fn info(&self) -> Result<HubInfo, ApiError> {
+        let blocked = self.blocked_info.lock().unwrap().take();
+        if let Some((started, release)) = blocked {
+            let _ = started.send(());
+            let _ = release.await;
+        }
         self.up()?;
         Ok(HubInfo {
             space: self.space.clone(),
@@ -7496,6 +7505,95 @@ async fn batched_refresh_supplies_the_project_board_and_the_tasks_tab_skips_chat
         TaskId(7)
     );
     assert_eq!(work.project_task_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn concurrent_refresh_yields_a_healthy_hub_without_waiting_for_slow_peers() {
+    let names = ["one", "two", "three", "four", "five"];
+    let hubs: Vec<_> = names
+        .iter()
+        .map(|name| FakeHub::new(name, Vec::new()))
+        .collect();
+    let pairs: Vec<_> = names.into_iter().zip(&hubs).collect();
+    let (_dir, core) = core(&pairs);
+    let mut state = AppState::paired(names.into_iter().chain(["old-pairing"]));
+    let mut gates: Vec<_> = hubs
+        .iter()
+        .map(|hub| {
+            let (started, watch) = oneshot::channel();
+            let (release, blocked) = oneshot::channel();
+            *hub.blocked_info.lock().unwrap() = Some((started, blocked));
+            (watch, Some(release))
+        })
+        .collect();
+    hubs[1].decisions.lock().unwrap().push(decision(2, 42));
+
+    let (send, mut receive) = mpsc::unbounded_channel();
+    let refresh = tokio::spawn(async move {
+        refresh_each(&core, |_, part| send.send(part).is_ok()).await;
+    });
+
+    // The first four peers are all in flight, and the fifth waits for a slot.
+    for (started, _) in &mut gates[..4] {
+        tokio::time::timeout(Duration::from_secs(2), started)
+            .await
+            .expect("a slot should start")
+            .unwrap();
+    }
+    assert!(matches!(
+        gates[4].0.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+
+    // Free only the second slot. Its result appears while slot one is blocked.
+    gates[1].1.take().unwrap().send(()).unwrap();
+    let part = tokio::time::timeout(Duration::from_secs(2), receive.recv())
+        .await
+        .expect("the healthy peer should not be blocked")
+        .unwrap();
+    assert_eq!(part.refreshed_space(), Some("two"));
+    state.checking_connections();
+    state.apply_partial(part);
+    assert!(state.checking_connections);
+    assert_eq!(
+        state.connection("two", &when()).unwrap().status,
+        ConnectionStatus::Live
+    );
+    assert_eq!(
+        state.connection("one", &when()).unwrap().status,
+        ConnectionStatus::Reconnecting
+    );
+    assert_eq!(state.queue.len(), 1);
+
+    tokio::time::timeout(Duration::from_secs(2), &mut gates[4].0)
+        .await
+        .expect("the first free slot should start another peer")
+        .unwrap();
+    for (_, release) in gates {
+        if let Some(release) = release {
+            release.send(()).unwrap();
+        }
+    }
+    while let Some(part) = receive.recv().await {
+        state.apply_partial(part);
+    }
+    refresh.await.unwrap();
+
+    // Keep old pairings while only partial data is available; remove
+    // them from the display when the complete roster has been confirmed.
+    assert!(state.space("old-pairing").is_some());
+    state.retain_paired_spaces(&names.map(str::to_owned));
+    assert!(state.space("old-pairing").is_none());
+    assert_eq!(
+        state
+            .spaces
+            .iter()
+            .map(|space| space.name.as_str())
+            .collect::<Vec<_>>(),
+        names
+    );
+    assert_eq!(state.queue.len(), 1);
+    assert_eq!(state.queue[0].space, "two");
 }
 
 #[tokio::test]
