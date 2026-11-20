@@ -6,17 +6,57 @@ use crate::{
     row::{Cols, opt_raw, params},
 };
 use serde_json::json;
+use std::collections::HashMap;
 use threadlane_core::attachment::ImageAttachment;
+use threadlane_core::client::RunUsage;
 use threadlane_core::ids::RunId;
-use threadlane_core::ids::{EventId, ProjectId, TaskId, TimerId};
+use threadlane_core::ids::{EventId, LaneId, ProjectId, TaskId, TimerId};
 use threadlane_core::model::{DecisionKind, DecisionOption, NewDecision, Task};
-use threadlane_core::store::StoreResult;
+use threadlane_core::store::{StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
 use threadlane_core::work::{Occurrence, OutputSource, ProjectOutput, UsageGroup};
 use turso::Connection;
 
 #[cfg(test)]
 mod tests;
+
+/// CTEs ending in `run_usage(run_id,input,output,cost)`: each run's usage from its latest
+/// `finished` entry, for the runs of the sessions a preceding `scope(session_id)` CTE names.
+/// Claude reports its cost, and Codex its tokens, as running totals for the session, so those
+/// count the rise since the session's latest earlier report, or the whole value when the total
+/// restarted lower. Input includes cached input for both, as Codex already reports it.
+const RUN_USAGE: &str = "
+  reports AS (
+    SELECT r.id run_id, r.session_id, r.backend,
+      json_extract(j.entry,'$.usage.usage.input_tokens') input,
+      json_extract(j.entry,'$.usage.usage.cache_read_input_tokens') cache_read,
+      json_extract(j.entry,'$.usage.usage.cache_creation_input_tokens') cache_write,
+      json_extract(j.entry,'$.usage.usage.output_tokens') output,
+      json_extract(j.entry,'$.usage.total_cost_usd') cost
+    FROM runs r JOIN journal j ON j.run_id=r.id AND j.seq=(
+      SELECT MAX(seq) FROM journal WHERE run_id=r.id AND json_extract(entry,'$.type')='finished')
+    WHERE r.session_id IN (SELECT session_id FROM scope)),
+  counts AS (
+    SELECT run_id, session_id, backend,
+      CASE WHEN typeof(input)='integer' AND input>=0 THEN input
+        + CASE WHEN typeof(cache_read)='integer' AND cache_read>=0 THEN cache_read ELSE 0 END
+        + CASE WHEN typeof(cache_write)='integer' AND cache_write>=0 THEN cache_write ELSE 0 END
+      END input,
+      CASE WHEN typeof(output)='integer' AND output>=0 THEN output END output,
+      CASE WHEN typeof(cost) IN ('real','integer') AND cost>=0 THEN CAST(cost AS REAL) END cost
+    FROM reports),
+  previous AS (
+    SELECT *,
+      LAG(input) OVER (PARTITION BY session_id, input IS NULL ORDER BY run_id) input_before,
+      LAG(output) OVER (PARTITION BY session_id, output IS NULL ORDER BY run_id) output_before,
+      LAG(cost) OVER (PARTITION BY session_id, cost IS NULL ORDER BY run_id) cost_before
+    FROM counts),
+  run_usage AS (
+    SELECT run_id,
+      CASE WHEN backend='codex' AND input_before<=input THEN input-input_before ELSE input END input,
+      CASE WHEN backend='codex' AND output_before<=output THEN output-output_before ELSE output END output,
+      CASE WHEN backend='claude' AND cost_before<=cost THEN cost-cost_before ELSE cost END cost
+    FROM previous)";
 
 pub(crate) async fn needs_owner_decision(
     conn: &Connection,
@@ -123,35 +163,53 @@ impl HubDb {
         .await
     }
 
-    /// Aggregate the latest finished journal entry per run, matching Task Details.
+    /// Each finished run's usage in `lane`, counted as `RUN_USAGE` describes for both Task Details
+    /// and [`Self::space_usage`].
+    pub async fn lane_run_usage(&self, lane: LaneId) -> StoreResult<HashMap<RunId, RunUsage>> {
+        let sql = format!(
+            "WITH scope AS (SELECT id session_id FROM sessions WHERE lane_id=?1), {RUN_USAGE}
+             SELECT run_id,input,output,cost FROM run_usage
+             WHERE input IS NOT NULL OR output IS NOT NULL OR cost IS NOT NULL"
+        );
+        let rows = query_all(&self.db.reader()?, &sql, params![lane.get()], |row| {
+            let c = Cols(row);
+            let count = |idx| Ok::<_, StoreError>(c.opt_i64(idx)?.map(|n| n as u64));
+            Ok((
+                c.id(0)?,
+                RunUsage {
+                    input_tokens: count(1)?,
+                    output_tokens: count(2)?,
+                    cost_usd: c.opt_real(3)?,
+                },
+            ))
+        })
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Aggregate each run's usage as `RUN_USAGE` counts it, matching Task Details.
     pub async fn space_usage(
         &self,
         since: Timestamp,
         now: Timestamp,
     ) -> StoreResult<Vec<UsageGroup>> {
-        let sql = "
-        WITH samples AS (
+        // Earlier runs of a session outside the window still give the baseline for its totals.
+        let sql = format!(
+            "WITH scope AS (SELECT session_id FROM runs WHERE started_at BETWEEN ?1 AND ?2), {RUN_USAGE},
+        samples AS (
           SELECT p.name project, COALESCE(a.name,'Lead') agent, COALESCE(r.backend,'Unknown') backend,
-            l.task_id, MAX(0,COALESCE(r.ended_at,?2)-r.started_at) duration,
-            json_extract(j.entry,'$.usage.usage.input_tokens') input,
-            json_extract(j.entry,'$.usage.usage.output_tokens') output,
-            json_extract(j.entry,'$.usage.total_cost_usd') cost
+            l.task_id, MAX(0,COALESCE(r.ended_at,?2)-r.started_at) duration, u.input, u.output, u.cost
           FROM runs r JOIN lanes l ON l.id=r.lane_id JOIN projects p ON p.id=l.project_id
-          LEFT JOIN agents a ON a.id=r.agent_id
-          LEFT JOIN journal j ON j.run_id=r.id AND j.seq=(
-            SELECT MAX(seq) FROM journal WHERE run_id=r.id AND json_extract(entry,'$.type')='finished')
+          LEFT JOIN agents a ON a.id=r.agent_id LEFT JOIN run_usage u ON u.run_id=r.id
           WHERE r.started_at BETWEEN ?1 AND ?2)
         SELECT project,agent,backend,COUNT(*),SUM(duration),SUM(COALESCE(input,0)+COALESCE(output,0)),
           COUNT(input+output),CAST(COALESCE(SUM(cost),0) AS REAL),COUNT(cost),
           json_group_array(DISTINCT task_id)
-        FROM (SELECT project,agent,backend,task_id,duration,
-          CASE WHEN typeof(input)='integer' AND input>=0 THEN input END input,
-          CASE WHEN typeof(output)='integer' AND output>=0 THEN output END output,
-          CASE WHEN typeof(cost) IN ('real','integer') AND cost>=0 THEN cost END cost
-          FROM samples) GROUP BY project,agent,backend ORDER BY project,agent,backend";
+        FROM samples GROUP BY project,agent,backend ORDER BY project,agent,backend"
+        );
         query_all(
             &self.db.reader()?,
-            sql,
+            &sql,
             params![since.as_millis(), now.as_millis()],
             |row| {
                 let c = Cols(row);

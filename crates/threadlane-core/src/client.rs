@@ -618,10 +618,11 @@ pub struct RunStep {
     pub at: Timestamp,
 }
 
-/// Usage reported by the backend for a finished run.
+/// Usage reported by the backend for a finished run, counting this run only even when the
+/// backend reports running totals for a resumed session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunUsage {
-    /// Input tokens as counted by the backend.
+    /// Input tokens as counted by the backend, including cache reads and writes.
     pub input_tokens: Option<u64>,
     /// Output tokens as counted by the backend.
     pub output_tokens: Option<u64>,
