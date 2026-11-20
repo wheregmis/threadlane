@@ -496,6 +496,8 @@ struct Desktop {
     /// The "+ New task" form's title and goal.
     task_title: Entity<InputState>,
     task_goal: Entity<InputState>,
+    task_form_focus: FocusHandle,
+    task_form_return_focus: Option<FocusHandle>,
     /// Empty these fields at the next render, which has the window it needs.
     clear_fields: Vec<Entity<InputState>>,
     /// Whether the window was full screen at the last render, which the
@@ -763,6 +765,8 @@ impl Desktop {
             repository_branch,
             task_title,
             task_goal,
+            task_form_focus: cx.focus_handle(),
+            task_form_return_focus: None,
             clear_fields: Vec::new(),
             full_screen: false,
             offset_minutes: local_offset_minutes(),
@@ -1227,6 +1231,7 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.task_form_return_focus = None;
             self.state.clear_memory_inspection();
             self.work.leave();
             self.inbox = screens::Inbox::default();
