@@ -6,7 +6,7 @@ use threadlane_core::ids::RunId;
 use threadlane_core::link::{LinkError, RunFailure};
 use threadlane_core::model::{
     EventKind, LaneKind, Lease, NewOutboxMessage, OutboxKind, RetryPolicy, Run, RunOutcome,
-    RunStatus, Urgency,
+    RunStatus, Trust, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{DecisionStore, LeadReply, OutboxStore, SessionStore};
@@ -54,15 +54,18 @@ impl LocalLink {
         }
         let dreaming = events.iter().any(crate::dreaming::is_dream);
         let silenced = db
-            .finished_call(run_id, STAY_SILENT)
+            .finished_calls(run_id, STAY_SILENT)
             .await
             .map_err(link_error)?;
-        let silent_reason = silenced.as_ref().and_then(silent_reason);
-        // Only a reply to the user is delivered from final text; routine,
-        // GitHub and task wakes speak through send_message alone (#604).
-        let replying = events
-            .iter()
-            .any(|event| event.kind == EventKind::UserMessage);
+        // The last accepted call wins; a refused one (empty reason) does not count.
+        let silent_reason = silenced.iter().rev().find_map(silent_reason);
+        // Only a reply to the owner (a message or their answer to ask_user) is
+        // delivered from final text; routine, GitHub and task wakes speak
+        // through send_message alone (#604).
+        let replying = events.iter().any(|event| {
+            event.kind == EventKind::UserMessage
+                || (event.kind == EventKind::DecisionAnswer && event.trust == Trust::User)
+        });
         let mut rationale = final_text;
         let outcome = if db.count_for_run(run_id).await.map_err(link_error)? > 0 {
             RunOutcome::Sent

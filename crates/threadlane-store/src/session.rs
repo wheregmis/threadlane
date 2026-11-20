@@ -663,14 +663,15 @@ impl SessionStore for HubDb {
 }
 
 impl HubDb {
-    /// The arguments of the run's last finished call to `tool`, if any.
-    pub async fn finished_call(&self, run: RunId, tool: &str) -> StoreResult<Option<Json>> {
+    /// The arguments of the run's finished calls to `tool`, oldest first.
+    /// Refused calls finish too, so callers pick the ones they accept.
+    pub async fn finished_calls(&self, run: RunId, tool: &str) -> StoreResult<Vec<Json>> {
         let conn = self.db.reader()?;
-        query_opt(
+        query_all(
             &conn,
             "SELECT arguments FROM tool_calls
              WHERE run_id = ?1 AND tool = ?2 AND status = 'finished'
-             ORDER BY id DESC LIMIT 1",
+             ORDER BY id",
             params![run.get(), tool],
             |row| Cols(row).json(0),
         )

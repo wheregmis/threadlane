@@ -213,20 +213,6 @@ async fn a_lead_that_calls_stay_silent_sends_nothing_and_keeps_its_reason() {
     hub.hello().await;
     hub.send("m-1", "fyi, the build is green").await;
     let (lease, run) = begin(&*hub.link).await;
-    let empty = hub
-        .link
-        .call_tool(
-            &lease,
-            run.run_id,
-            Some("toolu_0"),
-            STAY_SILENT,
-            &json!({ "reason": " " }),
-        )
-        .await;
-    assert!(
-        matches!(empty, Err(ToolError::InvalidArguments(_))),
-        "{empty:?}"
-    );
     hub.link
         .call_tool(
             &lease,
@@ -237,6 +223,20 @@ async fn a_lead_that_calls_stay_silent_sends_nothing_and_keeps_its_reason() {
         )
         .await
         .unwrap();
+    let empty = hub
+        .link
+        .call_tool(
+            &lease,
+            run.run_id,
+            Some("toolu_2"),
+            STAY_SILENT,
+            &json!({ "reason": " " }),
+        )
+        .await;
+    assert!(
+        matches!(empty, Err(ToolError::InvalidArguments(_))),
+        "{empty:?}"
+    );
     let outcome = hub
         .link
         .complete(&lease, run.run_id, Some("I sent nothing: it was an FYI."))
@@ -267,5 +267,48 @@ async fn a_routine_or_github_wake_ending_in_text_is_silent_and_keeps_the_text() 
         assert_eq!(record.rationale.as_deref(), Some(text), "{kind}");
         assert_eq!(hub.core.dispatch_once().await.unwrap(), 0, "{kind}");
         assert!(hub.feed().await.is_empty(), "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn a_lead_reply_to_the_owners_answer_is_delivered_once() {
+    // The owner answering ask_user is a reply; a decision that expires is not.
+    for (trust, delivered) in [(Trust::User, 1), (Trust::System, 0)] {
+        let hub = TestHub::start().await;
+        hub.hello().await;
+        hub.insert(|event| {
+            event.kind = EventKind::DecisionAnswer;
+            event.trust = trust;
+            event.payload = json!({ "text": "Use the backend repo." });
+        })
+        .await;
+        let (lease, run) = begin(&*hub.link).await;
+        let text = "Got it, created T-12 for Backend.";
+        let outcome = hub
+            .link
+            .complete(&lease, run.run_id, Some(text))
+            .await
+            .unwrap();
+        let expected = if delivered == 1 {
+            RunOutcome::Sent
+        } else {
+            RunOutcome::Silent
+        };
+        assert_eq!(outcome, expected, "{trust:?}");
+        assert_eq!(
+            hub.core.dispatch_once().await.unwrap(),
+            delivered,
+            "{trust:?}"
+        );
+        assert_eq!(
+            hub.core.dispatch_once().await.unwrap(),
+            0,
+            "once, {trust:?}"
+        );
+        let feed = hub.feed().await;
+        assert_eq!(feed.len(), delivered as usize, "{trust:?}");
+        if delivered == 1 {
+            assert_eq!(feed[0].message.body, json!({ "text": text }));
+        }
     }
 }
