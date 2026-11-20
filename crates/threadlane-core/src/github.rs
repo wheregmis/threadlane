@@ -134,13 +134,16 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
         since: Option<&str>,
     ) -> Result<Vec<GithubItem>, GithubError>;
 
-    /// What a notification about a pull request reports, as that pull
-    /// request is now: the notification, with its id, naming the head commit
-    /// in the title and its state in the body, then the latest review and
-    /// comment or the completed checks, with ids apart from
-    /// [`GithubSource::pull_request`]'s. By default, the notification itself.
-    async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
-        Ok(vec![notification.clone()])
+    /// Append the PR head under the notification's id, then any known details
+    /// under their GitHub activity ids. Keep the items already read on error
+    /// so the hub can deliver them and retry the missing details.
+    async fn activity(
+        &self,
+        notification: &GithubItem,
+        items: &mut Vec<GithubItem>,
+    ) -> Result<(), GithubError> {
+        items.push(notification.clone());
+        Ok(())
     }
 }
 

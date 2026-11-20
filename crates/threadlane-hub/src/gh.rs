@@ -26,7 +26,8 @@
 //!
 //! With `--include` each answer starts with the status line and headers. A
 //! `Link` header's `rel="next"` is followed, as another such GET of the path
-//! it names, for at most [`MAX_PAGES`] pages per call.
+//! it names. Feed and work polls read at most [`MAX_PAGES`] pages per call.
+//! Latest-activity lookups compare timestamps across all pages.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -105,28 +106,50 @@ impl GhSource {
         let mut next = Some(path.to_owned());
         while let Some(path) = next.take() {
             let extra = if pages.is_empty() { extra } else { &[] };
-            let (ok, output) = self.get(extra, &path).await?;
-            let page = match parse_answer(&output) {
-                Ok(page) if ok || page.status == 304 => page,
-                Ok(_) => return Err(GithubError(format!("gh api {path} failed"))),
-                Err(error) if ok => return Err(error),
-                Err(_) => return Err(GithubError(format!("gh api {path} failed"))),
-            };
+            let page = self.get_page(extra, &path).await?;
             next = page.next.clone().filter(|_| pages.len() + 1 < MAX_PAGES);
             pages.push(page);
         }
         Ok(pages)
     }
 
+    async fn get_page(&self, extra: &[String], path: &str) -> Result<Answer, GithubError> {
+        let (ok, output) = self.get(extra, path).await?;
+        match parse_answer(&output) {
+            Ok(page) if ok || page.status == 304 => Ok(page),
+            Err(error) if ok => Err(error),
+            _ => Err(GithubError(format!("gh api {path} failed"))),
+        }
+    }
+
     /// The JSON of a one-page GET that must succeed.
     async fn get_json(&self, path: &str) -> Result<Json, GithubError> {
-        let (ok, output) = self.get(&[], path).await?;
-        let answer = parse_answer(&output)?;
-        if !ok || !(200..=299).contains(&answer.status) {
-            return Err(GithubError(format!("gh api {path} failed")));
+        self.get_page(&[], path).await?.json(path)
+    }
+
+    /// Issue comments are ordered by id, so a later page or an edit to an
+    /// older comment can supply the most recently updated item.
+    async fn latest_item(
+        &self,
+        path: String,
+        target: &PullTarget,
+        parse: fn(&Json, &PullTarget) -> Vec<GithubItem>,
+    ) -> Result<Option<GithubItem>, GithubError> {
+        let mut next = Some(path);
+        let mut visited = std::collections::HashSet::new();
+        let mut latest: Option<GithubItem> = None;
+        while let Some(path) = next {
+            if !visited.insert(path.clone()) {
+                return Err(GithubError(format!("repeated GitHub page: {path}")));
+            }
+            let page = self.get_page(&[], &path).await?;
+            latest = latest
+                .into_iter()
+                .chain(parse(&page.json(&path)?, target))
+                .max_by(|a, b| a.at.cmp(&b.at));
+            next = page.next;
         }
-        serde_json::from_str(&answer.body)
-            .map_err(|error| GithubError(format!("gh api {path} answered: {error}")))
+        Ok(latest)
     }
 
     /// The head branch and commit of pull request `number`, read from
@@ -147,15 +170,7 @@ impl GhSource {
     ) -> Result<Vec<GithubItem>, GithubError> {
         let mut items = Vec::new();
         for page in self.get_pages(&[], path).await? {
-            if !(200..=299).contains(&page.status) {
-                return Err(GithubError(format!(
-                    "gh api {path} answered {}",
-                    page.status
-                )));
-            }
-            let body: Json = serde_json::from_str(&page.body)
-                .map_err(|error| GithubError(format!("gh api {path} answered: {error}")))?;
-            items.extend(parse(&body, target));
+            items.extend(parse(&page.json(path)?, target));
         }
         Ok(items)
     }
@@ -239,10 +254,15 @@ impl GithubSource for GhSource {
         Ok(items)
     }
 
-    async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
+    async fn activity(
+        &self,
+        notification: &GithubItem,
+        items: &mut Vec<GithubItem>,
+    ) -> Result<(), GithubError> {
         let (Some(number), repository) = (notification.pull_request, &notification.repository)
         else {
-            return Ok(vec![notification.clone()]);
+            items.push(notification.clone());
+            return Ok(());
         };
         if !valid_full_name(repository) {
             return Err(GithubError(format!(
@@ -265,7 +285,7 @@ impl GithubSource for GhSource {
         };
         // The notification's own id: each update of the thread is one item,
         // and the same update delivered again is the same item.
-        let mut items = vec![GithubItem {
+        items.push(GithubItem {
             kind: GithubKind::PullRequestUpdate,
             branch: Some(target.branch.clone()),
             title: format!("head {sha}"),
@@ -276,9 +296,7 @@ impl GithubSource for GhSource {
             ),
             url: text(&pull, "/html_url"),
             ..notification.clone()
-        }];
-        // Ids apart from `pull_request`'s, so a task given this pull request
-        // later still gets the same review and comment in its own lane.
+        });
         if notification.kind == GithubKind::CheckResult {
             let checks = self
                 .get_items(
@@ -290,17 +308,17 @@ impl GithubSource for GhSource {
                     parse_check_runs,
                 )
                 .await?;
-            items.extend(checks.into_iter().map(notified_item));
-            return Ok(items);
+            items.extend(checks);
+            return Ok(());
         }
-        let mut reviews = self
-            .get_items(
-                &format!("repos/{repository}/pulls/{number}/reviews?per_page=100"),
+        let review = self
+            .latest_item(
+                format!("repos/{repository}/pulls/{number}/reviews?per_page=100"),
                 &target,
                 submitted_reviews,
             )
             .await?;
-        items.extend(reviews.pop().filter(external_review).map(notified_item));
+        items.extend(review.filter(external_review));
         let comment = match notification
             .url
             .as_deref()
@@ -312,18 +330,33 @@ impl GithubSource for GhSource {
                     .pop()
                     .map(|mut item| {
                         if path.starts_with("pulls/") {
+                            item.id = format!("inline:{}", item.id);
                             item.title = "inline review comment".into();
                         }
                         item
                     })
             }
             None => {
-                let page = self.get_json(&format!("repos/{repository}/issues/{number}/comments?sort=updated&direction=desc&per_page=1")).await?;
-                parse_comments(&page, &target).into_iter().next()
+                self.latest_item(
+                    format!("repos/{repository}/issues/{number}/comments?per_page=100"),
+                    &target,
+                    parse_comments,
+                )
+                .await?
             }
         };
-        items.extend(comment.map(notified_item));
-        Ok(items)
+        items.extend(comment);
+        if notification.kind == GithubKind::ReviewRequest {
+            let request = self
+                .latest_item(
+                    format!("repos/{repository}/issues/{number}/events?per_page=100"),
+                    &target,
+                    parse_review_requests,
+                )
+                .await?;
+            items.extend(request);
+        }
+        Ok(())
     }
 }
 
@@ -355,9 +388,32 @@ fn encode(text: &str) -> String {
         .collect()
 }
 
-fn notified_item(mut item: GithubItem) -> GithubItem {
-    item.id = format!("notified:{}:{}:{}", item.id, item.at, item.title);
-    item
+fn parse_review_requests(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
+    answer
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|event| event["event"] == "review_requested")
+        .filter_map(|event| {
+            Some(GithubItem {
+                id: format!("review_request:{}", id(event)?),
+                kind: GithubKind::ReviewRequest,
+                repository: target.repository.clone(),
+                pull_request: target.number,
+                branch: Some(target.branch.clone()),
+                author: text(event, "/actor/login"),
+                title: text(event, "/requested_reviewer/login")
+                    .or_else(|| text(event, "/requested_team/slug"))
+                    .map_or_else(
+                        || "Review requested".into(),
+                        |who| format!("Requested review from {who}"),
+                    ),
+                body: String::new(),
+                url: text(event, "/url"),
+                at: text(event, "/created_at")?,
+            })
+        })
+        .collect()
 }
 
 /// Only use comment endpoints in the notified repository.
@@ -403,6 +459,19 @@ struct Answer {
     /// The path of the `rel="next"` page.
     next: Option<String>,
     body: String,
+}
+
+impl Answer {
+    fn json(&self, path: &str) -> Result<Json, GithubError> {
+        if !(200..=299).contains(&self.status) {
+            return Err(GithubError(format!(
+                "gh api {path} answered {}",
+                self.status
+            )));
+        }
+        serde_json::from_str(&self.body)
+            .map_err(|error| GithubError(format!("gh api {path} answered: {error}")))
+    }
 }
 
 fn parse_answer(output: &str) -> Result<Answer, GithubError> {
@@ -947,6 +1016,13 @@ case "$last" in
         );
     }
 
+    #[cfg(unix)]
+    async fn activity(source: &GhSource, notification: &GithubItem) -> Vec<GithubItem> {
+        let mut items = Vec::new();
+        source.activity(notification, &mut items).await.unwrap();
+        items
+    }
+
     #[test]
     fn a_workflow_run_notification_names_its_check_and_result() {
         let feed = parse_feed(FEED).unwrap();
@@ -967,23 +1043,31 @@ case "$last" in
         let routes = |pull: &str, reviews: &str| {
             [
                 ("*/pulls/42", "pull.http", ok(pull)),
+                (
+                    "*/events?per_page=100",
+                    "events.http",
+                    ok(
+                        r#"[{"id":53,"event":"review_requested","actor":{"login":"ada"},"requested_reviewer":{"login":"pat"},"created_at":"2026-11-17T08:59:00Z"}]"#,
+                    ),
+                ),
                 ("*/reviews*", "reviews.http", ok(reviews)),
                 ("*/comments*", "comments.http", ok(COMMENTS)),
             ]
         };
         let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(PULL, &human)));
         let notification = parse_feed(FEED).unwrap().items.remove(0);
-        let items = source.activity(&notification).await.unwrap();
+        let items = activity(&source, &notification).await;
         let sha = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
         let ids: Vec<_> = items.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(
             ids,
             [
                 notification.id.as_str(),
-                "notified:review:80:2026-11-17T08:45:00Z:changes requested",
-                "notified:comment:1700000001:2026-11-17T08:52:30Z:comment",
+                "review:80",
+                "comment:1700000001",
+                "review_request:53",
             ],
-            "the notification, then ids apart from the task's work"
+            "the notification, then the underlying GitHub activity ids"
         );
         let head = &items[0];
         assert_eq!(head.kind, GithubKind::PullRequestUpdate);
@@ -1007,7 +1091,7 @@ case "$last" in
 
         // When Threadlane's own review is the latest, an older one is no news.
         let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(PULL, REVIEWS)));
-        let items = source.activity(&notification).await.unwrap();
+        let items = activity(&source, &notification).await;
         assert!(items.iter().all(|item| item.kind != GithubKind::Review));
 
         // The head as it is now: pushed, then merged.
@@ -1018,7 +1102,7 @@ case "$last" in
         );
         for (pull, state) in [(pushed, "open"), (merged, "merged")] {
             let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(&pull, &human)));
-            let items = source.activity(&notification).await.unwrap();
+            let items = activity(&source, &notification).await;
             assert_eq!(
                 items[0].title,
                 "head 1111111111111111111111111111111111111111"
@@ -1028,7 +1112,59 @@ case "$last" in
 
         // Anything not about a pull request reports itself.
         let issue = parse_feed(FEED).unwrap().items.remove(1);
-        assert_eq!(source.activity(&issue).await.unwrap(), [issue]);
+        assert_eq!(activity(&source, &issue).await, [issue]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn comment_lookup_keeps_partial_results_and_uses_the_latest_edit_across_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = r#"[{"id":1,"user":{"login":"ada"},"updated_at":"2026-11-17T08:00:00Z"}]"#;
+        let second = r#"[{"id":2,"user":{"login":"pat"},"updated_at":"2026-11-17T08:30:00Z"}]"#;
+        let page_one = |body: &str| {
+            format!(
+                "HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/acme/widgets/issues/42/comments?page=2>; rel=\"next\"\n\n{body}"
+            )
+        };
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                ("*/pulls/42", "pull.http", ok(PULL)),
+                (
+                    "*/reviews*",
+                    "reviews.http",
+                    ok(r#"[{"id":8,"state":"APPROVED","submitted_at":"2026-11-17T07:00:00Z"}]"#),
+                ),
+                ("*/comments?per_page=100", "first.http", page_one(first)),
+                (
+                    "*/comments?page=2",
+                    "second.http",
+                    "HTTP/2.0 503 Unavailable\n\n".into(),
+                ),
+            ],
+        ));
+        let mut notification = parse_feed(FEED).unwrap().items.remove(0);
+        notification.kind = GithubKind::Mention;
+        assert!(notification.url.is_none());
+        let mut partial = Vec::new();
+        source
+            .activity(&notification, &mut partial)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            partial.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            [GithubKind::PullRequestUpdate, GithubKind::Review]
+        );
+        std::fs::write(dir.path().join("second.http"), ok(second)).unwrap();
+        let items = activity(&source, &notification).await;
+        assert_eq!(items[2].author.as_deref(), Some("pat"));
+        std::fs::write(
+            dir.path().join("first.http"),
+            page_one(&first.replace("08:00", "09:00")),
+        )
+        .unwrap();
+        let items = activity(&source, &notification).await;
+        assert_eq!(items[2].author.as_deref(), Some("ada"));
     }
 
     #[cfg(unix)]
@@ -1047,7 +1183,7 @@ case "$last" in
         ));
         let mut notification = parse_feed(FEED).unwrap().items.remove(0);
         notification.kind = GithubKind::CheckResult;
-        let items = source.activity(&notification).await.unwrap();
+        let items = activity(&source, &notification).await;
         let checks: Vec<_> = items
             .iter()
             .filter(|item| item.kind == GithubKind::CheckResult)
@@ -1060,7 +1196,7 @@ case "$last" in
             .replace("/pulls/7\"", "/pulls/42\"")
             .replace("/issues/comments/9\"", "/pulls/comments/9\"");
         let notification = parse_feed(&feed).unwrap().items.remove(3);
-        let items = source.activity(&notification).await.unwrap();
+        let items = activity(&source, &notification).await;
         assert_eq!(items[1].kind, GithubKind::Comment);
         assert_eq!(items[1].title, "inline review comment");
         assert_eq!(items[1].author.as_deref(), Some("ada"));

@@ -552,26 +552,37 @@ async fn activity_on_a_finished_tasks_pull_request_reaches_the_lead_with_its_det
     hub.core.poll_github_once().await.unwrap();
     assert!(github_events(&hub).await.is_empty());
 
-    github.notify(item(
-        "n:ci-42",
-        GithubKind::CheckResult,
-        WIDGETS_NAME,
-        Some(42),
-        "2026-01-01T00:00:02Z",
-    ));
+    let at = "2026-01-01T00:00:02Z";
+    let ci = GithubItem {
+        kind: GithubKind::CheckResult,
+        ..notified(at)
+    };
+    github.set_activity(
+        &ci.id,
+        vec![
+            head("aaa", at),
+            GithubItem {
+                title: "test: failure".into(),
+                ..check("check_run:9", at)
+            },
+            GithubItem {
+                title: "lint: success".into(),
+                ..check("check_run:8", at)
+            },
+        ],
+    );
+    github.notify(ci);
+    let review = item("review:12", GithubKind::Review, WIDGETS_NAME, Some(42), at);
+    github.add_to("acme/widgets", BRANCH, review.clone());
+    let later = "2026-01-01T00:00:03Z";
+    deliver(&github, vec![head("aaa", later), review]);
     hub.core.poll_github_once().await.unwrap();
     let events = github_events(&hub).await;
-    let failed = events
-        .iter()
-        .find(|event| event.source_event_id == "check_run:9")
-        .expect("the failed check reached a lane");
-    assert_eq!(
-        (failed.lane_id, failed.requested),
-        (general.lead_lane_id, true)
-    );
+    assert_eq!(ids(&events), ["check_run:9", "review:12"]);
     assert!(
-        !ids(&events).contains(&"check_run:8"),
-        "a check that passed needs nobody"
+        events
+            .iter()
+            .all(|event| event.lane_id == general.lead_lane_id && event.requested)
     );
 }
 
@@ -870,11 +881,15 @@ impl GithubSource for PausedGithub {
         self.source.pull_request(target, since).await
     }
 
-    async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
+    async fn activity(
+        &self,
+        notification: &GithubItem,
+        items: &mut Vec<GithubItem>,
+    ) -> Result<(), GithubError> {
         if self.pause_activity && notification.repository == "acme/gadgets" {
             self.pause().await;
         }
-        self.source.activity(notification).await
+        self.source.activity(notification, items).await
     }
 }
 
@@ -1013,13 +1028,7 @@ fn head(sha: &str, at: &str) -> GithubItem {
 fn notified_review(state: &str, at: &str) -> GithubItem {
     GithubItem {
         title: state.into(),
-        ..item(
-            "notified:review:5",
-            GithubKind::Review,
-            WIDGETS_NAME,
-            Some(42),
-            at,
-        )
+        ..item("review:5", GithubKind::Review, WIDGETS_NAME, Some(42), at)
     }
 }
 
@@ -1103,13 +1112,7 @@ async fn a_pull_request_notification_says_what_happened_and_wakes_once_per_activ
     let comment = GithubItem {
         author: Some("stranger".into()),
         title: "comment".into(),
-        ..item(
-            "notified:comment:9",
-            GithubKind::Comment,
-            WIDGETS_NAME,
-            Some(42),
-            t2,
-        )
+        ..item("comment:9", GithubKind::Comment, WIDGETS_NAME, Some(42), t2)
     };
     deliver(
         &github,
@@ -1122,8 +1125,17 @@ async fn a_pull_request_notification_says_what_happened_and_wakes_once_per_activ
         kind: GithubKind::ReviewRequest,
         ..notified(t3)
     };
-    github.set_activity(&request.id, vec![head("aaa", t3)]);
-    github.notify(request);
+    github.set_activity(
+        &request.id,
+        vec![
+            head("aaa", t3),
+            GithubItem {
+                id: "review_request:3".into(),
+                ..request.clone()
+            },
+        ],
+    );
+    github.notify(request.clone());
     assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
     let t4 = "2026-11-17T08:04:00Z";
     let ci = GithubItem {
@@ -1142,10 +1154,10 @@ async fn a_pull_request_notification_says_what_happened_and_wakes_once_per_activ
     assert_eq!(
         ids(&events),
         [
-            "notified:review:5",
+            "notified:review:5:2026-11-17T08:00:00Z:approved",
             &format!("notification:7:{t1}"),
-            "notified:comment:9",
-            &format!("notification:7:{t3}"),
+            "notified:comment:9:2026-11-17T08:02:00Z:comment",
+            &format!("notified:review_request:3:{t3}:{}", request.title),
             &format!("notification:8:{t4}"),
         ]
     );
@@ -1180,6 +1192,71 @@ async fn a_pull_request_notification_says_what_happened_and_wakes_once_per_activ
 }
 
 #[tokio::test]
+async fn mentions_and_review_requests_wake_only_for_distinct_activity_on_the_same_head() {
+    for (reason, kind) in [
+        (GithubKind::Mention, GithubKind::Comment),
+        (GithubKind::ReviewRequest, GithubKind::ReviewRequest),
+    ] {
+        let github = FakeGithub::default();
+        let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+        let first = "2026-11-17T08:00:00Z";
+        for (at, id, happened, count) in [
+            (first, "1", first, 2),
+            ("2026-11-17T08:01:00Z", "1", first, 0),
+            ("2026-11-17T08:02:00Z", "2", "2026-11-17T08:02:00Z", 1),
+        ] {
+            let notification = GithubItem {
+                kind: reason,
+                ..notified(at)
+            };
+            let detail = item(id, kind, WIDGETS_NAME, Some(42), happened);
+            github.set_activity(&notification.id, vec![head("aaa", at), detail]);
+            github.notify(notification);
+            assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, count);
+            if count == 0 {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), hub.link.next_message())
+                        .await
+                        .is_err()
+                );
+            } else {
+                expect_nudge(&hub).await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_partial_lookup_is_retried_and_only_the_missing_comment_wakes_again() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let at = "2026-11-17T08:00:00Z";
+    let notification = notified(at);
+    let mut items = vec![head("aaa", at), notified_review("approved", at)];
+    github.fail_activity(&notification.id, items.clone());
+    github.notify(notification.clone());
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 2);
+    expect_nudge(&hub).await;
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 0);
+    items.push(item(
+        "comment:6",
+        GithubKind::Comment,
+        WIDGETS_NAME,
+        Some(42),
+        at,
+    ));
+    github.set_activity(&notification.id, items);
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    expect_nudge(&hub).await;
+    assert_eq!(
+        payload(github_events(&hub).await.last().unwrap()).kind,
+        GithubKind::Comment
+    );
+    touch_feed(&github, "2026-11-17T08:05:00Z");
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 0);
+}
+
+#[tokio::test]
 async fn a_task_given_the_pull_request_later_still_gets_the_review_its_lead_heard_of() {
     let github = FakeGithub::default();
     let (hub, _) = start(&github, Arc::new(NoHooks)).await;
@@ -1210,11 +1287,16 @@ async fn a_notification_whose_activity_cannot_be_read_still_arrives() {
     let github = FakeGithub::default();
     let (hub, _) = start(&github, Arc::new(NoHooks)).await;
     let t1 = "2026-11-17T08:00:00Z";
-    github.fail_activity(&notified(t1).id);
+    github.fail_activity(&notified(t1).id, vec![]);
     github.notify(notified(t1));
     assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
     let events = github_events(&hub).await;
-    assert_eq!(payload(&events[0]), notified(t1));
+    let fallback = payload(&events[0]);
+    assert_eq!(fallback.title, notified(t1).title);
+    assert_eq!(fallback.kind, notified(t1).kind);
+    github.set_activity(&notified(t1).id, vec![head("aaa", t1)]);
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    assert_eq!(payload(&github_events(&hub).await[1]).title, "head aaa");
 }
 
 #[tokio::test]

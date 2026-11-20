@@ -498,9 +498,8 @@ struct GithubState {
     /// Items on a task's work, by `(repository, branch)`.
     work: Vec<(String, String, GithubItem)>,
     poll_interval: Option<std::time::Duration>,
-    /// What a notification reports, by its id, or `None` to fail; unlisted
-    /// ones report themselves.
-    activity: Vec<(String, Option<Vec<GithubItem>>)>,
+    /// Notification id, details available, and whether the lookup succeeded.
+    activity: Vec<(String, Vec<GithubItem>, bool)>,
 }
 
 /// A [`GithubSource`] that touches no network. It records every call, keeps
@@ -532,12 +531,14 @@ impl FakeGithub {
     pub fn set_activity(&self, id: &str, items: Vec<GithubItem>) {
         lock(&self.state)
             .activity
-            .push((id.to_owned(), Some(items)));
+            .push((id.to_owned(), items, true));
     }
 
     /// Makes [`GithubSource::activity`] fail for the notification `id`.
-    pub fn fail_activity(&self, id: &str) {
-        lock(&self.state).activity.push((id.to_owned(), None));
+    pub fn fail_activity(&self, id: &str, partial: Vec<GithubItem>) {
+        lock(&self.state)
+            .activity
+            .push((id.to_owned(), partial, false));
     }
 
     /// What the feed answers as the interval it asks for.
@@ -601,17 +602,25 @@ impl GithubSource for FakeGithub {
         Ok(items)
     }
 
-    async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
+    async fn activity(
+        &self,
+        notification: &GithubItem,
+        items: &mut Vec<GithubItem>,
+    ) -> Result<(), GithubError> {
         let state = lock(&self.state);
-        match state
+        if let Some((_, found, complete)) = state
             .activity
             .iter()
             .rev()
-            .find(|(id, _)| *id == notification.id)
+            .find(|(id, _, _)| *id == notification.id)
         {
-            None => Ok(vec![notification.clone()]),
-            Some((_, Some(items))) => Ok(items.clone()),
-            Some((_, None)) => Err(GithubError(format!("{} failed", notification.id))),
+            items.extend_from_slice(found);
+            if !complete {
+                return Err(GithubError(format!("{} failed", notification.id)));
+            }
+        } else {
+            items.push(notification.clone());
         }
+        Ok(())
     }
 }
