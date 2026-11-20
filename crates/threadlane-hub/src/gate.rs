@@ -332,7 +332,12 @@ mod tests {
             case("tier 2 assisted", T2, AS, Review),
             case("tier 2 autonomous", T2, AU, Review),
             case("tier 3 on request", T3, ON, Ask),
-            case("tier 3 assisted offers no rule it would not apply", T3, AS, Ask),
+            case(
+                "tier 3 assisted offers no rule it would not apply",
+                T3,
+                AS,
+                Ask,
+            ),
             case("tier 3 autonomous", T3, AU, AskOffer),
             case("forbidden on request", TF, ON, Block),
             case("forbidden assisted", TF, AS, Block),

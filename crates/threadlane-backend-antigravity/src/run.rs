@@ -263,7 +263,10 @@ mod quota_tests {
     #[test]
     fn the_reset_wait_is_read_from_the_quota_message() {
         let wait = |text: &str| resets_in(text).map(|wait| wait.as_secs());
-        assert_eq!(wait("individual quota reached. resets in 37m3s."), Some(2223));
+        assert_eq!(
+            wait("individual quota reached. resets in 37m3s."),
+            Some(2223)
+        );
         assert_eq!(wait("resets in 1h2m"), Some(3720));
         assert_eq!(wait("resets in 45s"), Some(45));
         assert_eq!(wait("resets in 37 minutes"), None);

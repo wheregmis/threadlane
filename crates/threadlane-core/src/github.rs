@@ -37,6 +37,10 @@ pub enum GithubKind {
     Mention,
     /// Any other notification: assigned, state changed, subscribed, ...
     Notification,
+    /// A pull request's head commit or state as a notification found it.
+    PullRequestUpdate,
+    /// The observed head commit of a pull request changed.
+    Push,
 }
 
 impl GithubKind {
@@ -50,6 +54,8 @@ impl GithubKind {
             Self::ReviewRequest => "a review request",
             Self::Mention => "a mention",
             Self::Notification => "a notification",
+            Self::PullRequestUpdate => "a pull request update",
+            Self::Push => "a push",
         }
     }
 }
@@ -127,6 +133,18 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
         target: &PullTarget,
         since: Option<&str>,
     ) -> Result<Vec<GithubItem>, GithubError>;
+
+    /// Append the PR head under the notification's id, then any known details
+    /// under their GitHub activity ids. Keep the items already read on error
+    /// so the hub can deliver them and retry the missing details.
+    async fn activity(
+        &self,
+        notification: &GithubItem,
+        items: &mut Vec<GithubItem>,
+    ) -> Result<(), GithubError> {
+        items.push(notification.clone());
+        Ok(())
+    }
 }
 
 /// A remote URL in the one form two spellings of the same repository share:

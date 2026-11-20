@@ -17,7 +17,7 @@
 //! the repository and the pull request's number, whose branch the source
 //! looks up.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use threadlane_core::forge::{COMMENT, MARK_READY, MERGE};
@@ -79,6 +79,14 @@ struct Routes {
     /// The work of tasks that have ended, routed to their project's lead
     /// lane. It is read only when the feed reports activity on it.
     ended: Vec<Work>,
+}
+
+#[derive(Default)]
+struct LeadActivity {
+    retry: bool,
+    items: Vec<GithubItem>,
+    /// Save the observed PR head only after delivering the activity.
+    cursor: Option<(String, String)>,
 }
 
 /// The normalized remote of a repository GitHub names `owner/name`.
@@ -296,13 +304,25 @@ impl HubCore {
             }
         };
 
+        let activity = match &feed {
+            Some(feed) => self.feed_activity(source.as_ref(), feed).await?,
+            None => HashMap::new(),
+        };
+
         let mut lanes = BTreeSet::new();
         let followed = {
             let _removal = inner.project_removal.lock().await;
             let routes = Routes::read(&inner.db).await?;
             let refresh = if let Some(feed) = feed {
-                self.apply_github_feed(&routes, feed, cursor.as_deref(), &mut pass, &mut lanes)
-                    .await?
+                self.apply_github_feed(
+                    &routes,
+                    feed,
+                    activity,
+                    cursor.as_deref(),
+                    &mut pass,
+                    &mut lanes,
+                )
+                .await?
             } else {
                 Vec::new()
             };
@@ -328,24 +348,62 @@ impl HubCore {
         &self,
         routes: &Routes,
         feed: Feed,
+        mut activity: HashMap<String, LeadActivity>,
         cursor: Option<&str>,
         pass: &mut GithubPass,
         lanes: &mut BTreeSet<LaneId>,
     ) -> Result<Vec<Work>, HubError> {
         let inner = &self.inner;
         let mut refresh = Vec::new();
+        let mut retry = false;
         for item in &feed.items {
-            if let Some(work) = routes.ended_for(item)
+            let ended = routes.ended_for(item);
+            if let Some(work) = ended
                 && !refresh.contains(work)
             {
                 refresh.push(work.clone());
             }
             if let Some((project, lane, requested)) = routes.route(item) {
-                pass.inserted += self.insert(project, lane, requested, item, lanes).await?;
+                if let Some(resolved) = activity.get_mut(&item.id).filter(|_| !requested) {
+                    retry |= resolved.retry;
+                    for mut detail in resolved.items.drain(..) {
+                        let is_detail = detail.id != item.id;
+                        if ended.is_some()
+                            && (!needs_attention(&detail)
+                                || (item.kind == GithubKind::CheckResult
+                                    && detail.kind == GithubKind::PullRequestUpdate))
+                        {
+                            continue;
+                        }
+                        if resolved.retry && !is_detail && detail.kind == item.kind {
+                            detail.id = format!("unresolved:{}", item.id);
+                        } else if ended.is_none() && is_detail {
+                            // Keep an unclaimed PR's detail available to a task assigned it later.
+                            detail.id =
+                                format!("notified:{}:{}:{}", detail.id, detail.at, detail.title);
+                        }
+                        let (project, lane, requested) = ended
+                            .filter(|_| is_detail)
+                            .map_or((project, lane, false), |work| {
+                                (work.project, work.lane, true)
+                            });
+                        pass.inserted += self
+                            .insert(project, lane, requested, &detail, lanes)
+                            .await?;
+                    }
+                    if let Some((key, value)) = resolved.cursor.take() {
+                        inner
+                            .db
+                            .set_source_cursor(&key, &value, inner.clock.now())
+                            .await?;
+                    }
+                } else {
+                    pass.inserted += self.insert(project, lane, requested, item, lanes).await?;
+                }
             }
             inner.hook.reach(AFTER_INSERT)?;
         }
-        if let Some(next) = feed.cursor.filter(|next| cursor != Some(next.as_str())) {
+        if !retry && let Some(next) = feed.cursor.filter(|next| cursor != Some(next.as_str())) {
             inner
                 .db
                 .set_source_cursor(FEED_CURSOR, &next, inner.clock.now())
@@ -412,6 +470,83 @@ impl HubCore {
             }
         }
         Ok(inserted)
+    }
+
+    /// What each new notification about a pull request reports for the
+    /// lead (see [`GithubSource::activity`]), by notification id. Read
+    /// before the project-removal lock, as GitHub can be slow; the routes
+    /// are read again under it. A notification already inserted is not read
+    /// again once its thread cursor is saved.
+    async fn feed_activity(
+        &self,
+        source: &dyn GithubSource,
+        feed: &Feed,
+    ) -> Result<HashMap<String, LeadActivity>, HubError> {
+        let inner = &self.inner;
+        let routes = Routes::read(&inner.db).await?;
+        let mut activity = HashMap::new();
+        let mut observed = HashMap::new();
+        for item in &feed.items {
+            let for_lead = matches!(routes.route(item), Some((_, _, false)));
+            if !for_lead || item.pull_request.is_none() || activity.contains_key(&item.id) {
+                continue;
+            }
+            // shortcut: one cursor per observed PR thread; prune alongside event history
+            // if the hub adds retention.
+            let thread = item.id.strip_suffix(&item.at).unwrap_or(&item.id);
+            let key = format!("github:lead:{thread}");
+            let previous = match observed.get(&key) {
+                Some(value) => Some(String::clone(value)),
+                None => inner.db.source_cursor(&key).await?,
+            };
+            let previous = previous.as_deref().and_then(|s| s.split_once('\n'));
+            let mut resolved = LeadActivity::default();
+            if previous.is_some_and(|(at, _)| at >= item.at.as_str()) {
+                activity.insert(item.id.clone(), resolved);
+                continue;
+            }
+            if let Err(error) = source.activity(item, &mut resolved.items).await {
+                tracing::warn!(%error, id = item.id, "could not read all pull request activity");
+                resolved.retry = true;
+                if resolved.items.is_empty() && previous.is_none() {
+                    resolved.items.push(item.clone());
+                }
+            }
+            if let Some(head) = resolved.items.first_mut()
+                && matches!(head.kind, GithubKind::PullRequestUpdate | GithubKind::Push)
+            {
+                // Recover the original observation if events survived a crash or a partial read.
+                if let Some(payload) = inner
+                    .db
+                    .source_event_payload(GITHUB_SOURCE, &item.id)
+                    .await?
+                {
+                    *head = serde_json::from_value(payload).map_err(|error| {
+                        StoreError::Invalid(format!("a stored GitHub item: {error}"))
+                    })?;
+                }
+                let summary = format!("{}\n{}", head.title, head.body);
+                // An incomplete read observed the head but must still retry this timestamp.
+                let completed_at = if resolved.retry {
+                    previous.map_or("", |(at, _)| at)
+                } else {
+                    &item.at
+                };
+                let value = format!("{completed_at}\n{summary}");
+                observed.insert(key.clone(), value.clone());
+                resolved.cursor = Some((key, value));
+                if previous.is_some_and(|(_, last)| last == summary) {
+                    resolved.items.remove(0);
+                } else {
+                    if previous.is_some_and(|(_, last)| last.lines().next() != Some(&head.title)) {
+                        head.kind = GithubKind::Push;
+                    }
+                    resolved.items.rotate_left(1);
+                }
+            }
+            activity.insert(item.id.clone(), resolved);
+        }
+        Ok(activity)
     }
 
     /// Inserts one item as an `outside_event` of the GitHub source. Returns

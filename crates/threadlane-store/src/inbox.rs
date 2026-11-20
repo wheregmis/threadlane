@@ -390,6 +390,21 @@ impl InboxStore for HubDb {
         .await
     }
 
+    async fn source_event_payload(
+        &self,
+        source: &str,
+        source_event_id: &str,
+    ) -> StoreResult<Option<Json>> {
+        let conn = self.db.reader()?;
+        query_opt(
+            &conn,
+            "SELECT payload FROM events WHERE source = ?1 AND source_event_id = ?2",
+            params![source, source_event_id],
+            |row| Cols(row).json(0),
+        )
+        .await
+    }
+
     async fn pending_events(&self, lane_id: LaneId) -> StoreResult<Vec<Event>> {
         let conn = self.db.reader()?;
         query_all(
