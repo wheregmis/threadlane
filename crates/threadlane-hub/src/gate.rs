@@ -198,8 +198,8 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
             _ => {}
         }
     }
-    // A tier 3 rule can apply only where the project allows Autonomous.
-    let offers_rule = ruled && (input.tier < Tier::SharedHardToUndo || ceiling == Mode::Autonomous);
+    // A tier 3 rule applies only where the agent acts in Autonomous.
+    let offers_rule = ruled && (input.tier < Tier::SharedHardToUndo || mode == Mode::Autonomous);
     match verdict {
         Cell::Allow => Verdict::Allow { rule: None },
         Cell::Review => Verdict::Review { offers_rule },
@@ -331,8 +331,8 @@ mod tests {
             case("tier 2 on request", T2, ON, AskOffer),
             case("tier 2 assisted", T2, AS, Review),
             case("tier 2 autonomous", T2, AU, Review),
-            case("tier 3 on request", T3, ON, AskOffer),
-            case("tier 3 assisted", T3, AS, AskOffer),
+            case("tier 3 on request", T3, ON, Ask),
+            case("tier 3 assisted offers no rule it would not apply", T3, AS, Ask),
             case("tier 3 autonomous", T3, AU, AskOffer),
             case("forbidden on request", TF, ON, Block),
             case("forbidden assisted", TF, AS, Block),
@@ -348,9 +348,9 @@ mod tests {
             tainted(case("tainted tier 2 on request", T2, ON, AskOffer)),
             tainted(case("tainted tier 2 assisted asks", T2, AS, AskOffer)),
             tainted(case("tainted tier 2 autonomous", T2, AU, Review)),
-            tainted(case("tainted tier 3 on request", T3, ON, AskOffer)),
-            tainted(case("tainted tier 3 assisted", T3, AS, AskOffer)),
-            tainted(case("tainted tier 3 autonomous", T3, AU, AskOffer)),
+            tainted(case("tainted tier 3 on request", T3, ON, Ask)),
+            tainted(case("tainted tier 3 assisted", T3, AS, Ask)),
+            tainted(case("tainted tier 3 autonomous", T3, AU, Ask)),
             tainted(case("tainted forbidden", TF, AU, Block)),
             tainted(case("tainted off", T0, Mode::Off, Block)),
             // Ceilings: the binding acts at the lower of its mode and both.
@@ -427,10 +427,10 @@ mod tests {
             ruled(case("tier 2 rule assisted", T2, AS, Rule)),
             ruled(case("tier 2 rule autonomous", T2, AU, Rule)),
             tainted(ruled(case("tier 2 rule tainted", T2, ON, Rule))),
-            ruled(case("tier 3 rule on request", T3, ON, AskOffer)),
-            ruled(case("tier 3 rule assisted", T3, AS, AskOffer)),
+            ruled(case("tier 3 rule on request", T3, ON, Ask)),
+            ruled(case("tier 3 rule assisted", T3, AS, Ask)),
             ruled(case("tier 3 rule autonomous is reviewed", T3, AU, Review)),
-            tainted(ruled(case("tier 3 rule tainted", T3, AU, AskOffer))),
+            tainted(ruled(case("tier 3 rule tainted", T3, AU, Ask))),
             Case {
                 rule: Some("other"),
                 ..ruled(case("a rule for another target", T2, ON, AskOffer))
