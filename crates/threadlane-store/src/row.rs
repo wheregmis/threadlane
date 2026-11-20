@@ -58,6 +58,13 @@ impl Cols<'_> {
         }
     }
 
+    pub(crate) fn opt_real(&self, idx: usize) -> StoreResult<Option<f64>> {
+        match self.value(idx)? {
+            Value::Null => Ok(None),
+            _ => self.real(idx).map(Some),
+        }
+    }
+
     pub(crate) fn bool(&self, idx: usize) -> StoreResult<bool> {
         Ok(self.i64(idx)? != 0)
     }

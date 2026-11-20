@@ -30,6 +30,7 @@ const TABLES: &[&str] = &[
     "memory_versions",
     "outbox",
     "permission_questions",
+    "pr_review_tasks",
     "project_machines",
     "projects",
     "repositories",
@@ -47,6 +48,8 @@ const TABLES: &[&str] = &[
     "tool_calls",
     "deletion_floors",
     "project_cleanup",
+    "dream_batches",
+    "dream_items",
 ];
 
 async fn hub() -> HubDb {

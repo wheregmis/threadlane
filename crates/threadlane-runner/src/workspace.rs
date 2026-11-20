@@ -25,12 +25,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use threadlane_core::ids::{RepositoryId, RunId, TaskId};
+use threadlane_core::ids::{RepositoryId, TaskId};
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{
-    DiffFileStat, DiffPreview, MergeCheck, PublishPreview, ReviewRevision, WorkspaceCounts,
-    WorkspaceError, WorkspaceRemoval, Workspaces, task_branch, valid_branch_name, valid_commit_id,
-    valid_repository_name,
+    DiffFileStat, DiffPreview, MergeCheck, PublishPreview, ReviewCheckout, ReviewRevision,
+    WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces, task_branch, valid_branch_name,
+    valid_commit_id, valid_repository_name,
 };
 use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -454,7 +454,7 @@ impl Workspaces for GitWorkspaces {
     async fn prepare_review(
         &self,
         task: TaskId,
-        submission: RunId,
+        checkout: ReviewCheckout,
         repositories: &[Repository],
         revisions: &[ReviewRevision],
     ) -> Result<Vec<PathBuf>, WorkspaceError> {
@@ -472,7 +472,10 @@ impl Workspaces for GitWorkspaces {
             .map_err(|error| io_error("resolving", &self.root, &error))?;
         let task_dir = root.join("worktrees").join(task.to_string());
         let reviews = task_dir.join(".reviews");
-        let dir = reviews.join(submission.to_string());
+        let dir = reviews.join(match checkout {
+            ReviewCheckout::Submission(run) => run.to_string(),
+            ReviewCheckout::PullRequest(number) => format!("pr-{number}"),
+        });
         checked_dir(&root, &task_dir).await?;
         checked_dir(&root, &reviews).await?;
         checked_dir(&root, &dir).await?;
@@ -490,25 +493,62 @@ impl Workspaces for GitWorkspaces {
             let marker = dir.join(format!(".{}.ready", repository.name));
             checked_dir(&root, &path).await?;
             if marker.is_file() && path.join(".git").is_file() {
-                if git(Some(&path), ["rev-parse", "--abbrev-ref", "HEAD"])
-                    .await?
-                    .trim()
-                    != "HEAD"
-                    || git(Some(&path), ["rev-parse", "HEAD"]).await?.trim() != commit
-                    || !git(
-                        Some(&path),
-                        ["status", "--porcelain", "--untracked-files=no"],
-                    )
-                    .await?
-                    .is_empty()
+                if !git(
+                    Some(&path),
+                    ["status", "--porcelain", "--untracked-files=no"],
+                )
+                .await?
+                .is_empty()
                 {
                     return Err(WorkspaceError(format!(
                         "review worktree for {} has changed",
                         repository.name
                     )));
                 }
+                if git(Some(&path), ["rev-parse", "--abbrev-ref", "HEAD"])
+                    .await?
+                    .trim()
+                    != "HEAD"
+                    || git(Some(&path), ["rev-parse", "HEAD"]).await?.trim() != commit
+                {
+                    match checkout {
+                        ReviewCheckout::PullRequest(_) => {
+                            git(
+                                Some(&path),
+                                ["checkout", "--detach", "--no-overwrite-ignore", commit],
+                            )
+                            .await?;
+                        }
+                        ReviewCheckout::Submission(_) => {
+                            return Err(WorkspaceError(format!(
+                                "review worktree for {} has changed",
+                                repository.name
+                            )));
+                        }
+                    }
+                }
             } else {
                 let clone = self.clone(repository).await?;
+                if let ReviewCheckout::PullRequest(number) = checkout
+                    && git(
+                        Some(&clone),
+                        ["cat-file", "-e", &format!("{commit}^{{commit}}")],
+                    )
+                    .await
+                    .is_err()
+                {
+                    // Fork PRs may exist only under the base repository's pull refs.
+                    git(
+                        Some(&clone),
+                        [
+                            "fetch",
+                            "--quiet",
+                            "origin",
+                            &format!("refs/pull/{number}/head"),
+                        ],
+                    )
+                    .await?;
+                }
                 remove_file(&marker).await?;
                 remove_dir(&path).await?;
                 create_dir(&dir).await?;

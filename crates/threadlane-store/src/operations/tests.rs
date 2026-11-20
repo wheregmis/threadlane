@@ -48,6 +48,7 @@ async fn history() -> HubDb {
                (2, 2, 'test', '5', 'user_message', '{}', 'user', 1, 'pending', 172799995),
                (1, 1, 'test', '6', 'user_message', '{}', 'user', 1, 'dead', 0),
                (2, 2, 'test', '7', 'user_message', '{}', 'user', 1, 'dead', 0),
+               (1, 1, 'test', '8', 'user_message', '{}', 'user', 1, 'dead', -432000000),
                (1, 1, 'timer', '1:10', 'timer_fired', '{\"occurrence\":10}', 'system', 1, 'done', 20),
                (1, 1, 'timer', '1:30', 'timer_fired', '{\"occurrence\":30}', 'system', 1, 'done', 50);
              INSERT INTO timers (project_id, lane_id, category, due_at, instruction, status,
@@ -77,12 +78,14 @@ async fn history() -> HubDb {
                  (1, NULL, 'message', 'client', '{}', 'normal', 'dead', 0, NULL),
                  (2, NULL, 'message', 'client', '{}', 'normal', 'pending', 172799950, NULL);
              INSERT INTO decisions (project_id, lane_id, tool, arguments, arguments_hash, kind, question,
-                                    options, status, created_at, answered_at)
-               VALUES (1, 1, 'ask_user', '{}', '', 'input', '?', '[]', 'answered', 86400000, 86400012),
-                      (1, 1, 'ask_user', '{}', '', 'input', '?', '[]', 'answered', 172799970, 172799995),
-                      (1, 1, 'ask_user', '{}', '', 'input', '?', '[]', 'pending', 172800000, NULL),
-                      (1, 1, 'ask_user', '{}', '', 'input', '?', '[]', 'expired', 0, 130),
-                      (2, 2, 'ask_user', '{}', '', 'input', '?', '[]', 'pending', 172799999, NULL);
+                                    options, status, created_at, answered_at, answer)
+               VALUES (1, 1, 'ask_user', '{}', '', 'input', '?', '[]', 'answered', 86400000, 86400012, '{\"option\":0}'),
+                      (1, 1, 'ask_user', '{}', '', 'input', '?', '[]', 'answered', 172799970, 172799995, NULL),
+                      (1, 1, 'ask_user', '{}', '', 'input', '?', '[]', 'pending', 172800000, NULL, NULL),
+                      (1, 1, 'ask_user', '{}', '', 'input', '?', '[]', 'expired', 0, 130, NULL),
+                      (2, 2, 'ask_user', '{}', '', 'input', '?', '[]', 'pending', 172799999, NULL, NULL),
+                      (1, 1, 'ask_user', '{}', '', 'input', '?', '[]', 'answered', 172799980, 172799980,
+                       '{\"option\":0,\"classifier\":\"allow\"}');
              INSERT INTO agents (id, name, role) VALUES (99, 'Metrics fixture', 'lead');
              INSERT INTO standing_rules (project_id, agent_id, tool, pattern, tier, created_at, revoked_at)
                VALUES (1, 99, 'a', '{}', 2, 10, NULL), (1, 99, 'a', '{}', 2, 10, 20),
@@ -113,12 +116,12 @@ async fn lane_lag_uses_oldest_pending_event_per_lane() {
 }
 
 #[tokio::test]
-async fn queue_depth_groups_all_lanes_and_includes_empty_projects() {
+async fn queue_depth_counts_lanes_with_pending_work_and_includes_empty_projects() {
     let db = history().await;
     assert_eq!(
         db.operations_metrics(None).await.unwrap().queue_depth,
         [
-            ("General".to_owned(), 3),
+            ("General".to_owned(), 2),
             ("Other".to_owned(), 1),
             ("Empty".to_owned(), 0)
         ]
@@ -129,7 +132,7 @@ async fn queue_depth_groups_all_lanes_and_includes_empty_projects() {
             .await
             .unwrap()
             .queue_depth,
-        [("General".to_owned(), 3)].into()
+        [("General".to_owned(), 2)].into()
     );
 }
 
@@ -159,7 +162,7 @@ async fn cooldown_wait_includes_completed_and_current_blockage() {
 }
 
 #[tokio::test]
-async fn dead_events_count_current_dead_rows() {
+async fn dead_events_count_dead_rows_received_in_the_past_week() {
     assert_eq!(metrics().await.dead_events, 1);
 }
 
@@ -295,12 +298,14 @@ async fn silent_run_ratio_uses_committed_runs() {
 }
 
 #[tokio::test]
-async fn decision_rate_uses_creation_in_the_rolling_day() {
-    assert_eq!(metrics().await.decisions_per_day, 2);
+async fn decision_rate_uses_creation_in_the_rolling_day_and_splits_off_the_classifier() {
+    let metrics = metrics().await;
+    assert_eq!(metrics.decisions_per_day, 2);
+    assert_eq!(metrics.classifier_decisions_per_day, 1);
 }
 
 #[tokio::test]
-async fn answer_latency_omits_unanswered_and_expired_decisions() {
+async fn answer_latency_omits_unanswered_expired_and_classifier_decisions() {
     assert_eq!(
         metrics().await.answer_latency,
         Latency {

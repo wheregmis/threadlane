@@ -89,7 +89,9 @@ impl LocalLink {
             .await?;
         let asked = match verdict {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
-            _ if tool == REPORT_LIMITATION && arguments["require_approval"] == true => {
+            _ if tool == REPORT_LIMITATION
+                && (dream.is_some() || arguments["require_approval"] == true) =>
+            {
                 Some(Asked::You {
                     offers_rule: false,
                     proposal: false,
@@ -302,7 +304,13 @@ impl LocalLink {
                 context: body,
             }
         } else {
-            crate::publish::proposal(&inner.db, lane, tool, arguments).await?
+            let mut args = arguments.clone();
+            if matches!(asked, Asked::Dream)
+                && let Some(obj) = args.as_object_mut()
+            {
+                obj.remove("expected_version");
+            }
+            crate::publish::proposal(&inner.db, lane, tool, &args).await?
         };
         if matches!(asked, Asked::Dream) {
             let details = proposal
@@ -535,6 +543,7 @@ impl LocalLink {
         let inner = &self.core.inner;
         let lane = self.check_lease(lease).await?;
         let by = MemoryAuthor {
+            expected_version: None,
             lease: *lease,
             run_id,
             call_key: format!("perform:{}", decision.id),
@@ -633,6 +642,11 @@ impl LocalLink {
             call_id: None,
         };
         let outcome = match tools.create_accepted_task(&context, decision).await {
+            Ok(task) if task.get("review_status").is_some() => json!({
+                "performed": true,
+                "summary": format!("Reused the review on {}.", task["task_id"].as_str().unwrap_or_default()),
+                "result": task,
+            }),
             Ok(task) => json!({
                 "performed": true,
                 "summary": format!(

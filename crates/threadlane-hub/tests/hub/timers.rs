@@ -7,8 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value as Json, json};
-use threadlane_core::client::{ApiError, DecisionRequest, TimerReply, TimerRequest};
-use threadlane_core::ids::DecisionId;
+use threadlane_core::client::{
+    ApiError, DecisionRequest, OverviewReply, OverviewRequest, TimerReply, TimerRequest,
+};
+use threadlane_core::ids::{AgentId, DecisionId};
 use threadlane_core::link::{Begin, HubLink, Perform, RunAssignment};
 use threadlane_core::model::{
     BackendKind, EventKind, EventStatus, LaneKind, Lease, MAX_LIVE_TIMERS, Mode, NewAgent,
@@ -201,9 +203,7 @@ async fn a_follow_up_fires_once_into_the_lane_that_set_it_and_its_run_reads_it()
     .await;
 }
 
-#[tokio::test]
-async fn a_task_sets_its_follow_up_in_its_own_lane() {
-    let hub = hub().await;
+async fn bind_engineer(hub: &TestHub) -> AgentId {
     let agent = hub
         .db
         .create_agent(&NewAgent::named("Engineer", "engineer"))
@@ -219,6 +219,13 @@ async fn a_task_sets_its_follow_up_in_its_own_lane() {
         })
         .await
         .unwrap();
+    agent.id
+}
+
+#[tokio::test]
+async fn a_task_sets_its_follow_up_in_its_own_lane() {
+    let hub = hub().await;
+    let agent = bind_engineer(&hub).await;
     let lead = lead_run(&hub, "m-task").await;
     lead.call(
         "t1",
@@ -255,7 +262,7 @@ async fn a_task_sets_its_follow_up_in_its_own_lane() {
         timer.task_ref.map(|id| id.to_string()),
         set["task_id"].as_str().map(str::to_owned)
     );
-    assert_eq!(timer.agent_id, Some(agent.id));
+    assert_eq!(timer.agent_id, Some(agent));
     assert!(timer.requested, "the task came from you");
 }
 
@@ -873,4 +880,82 @@ async fn a_missed_routine_does_not_wake_or_replay_and_records_one_skip_after_res
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].status, "pending");
     assert!(history[0].manual);
+}
+
+#[tokio::test]
+async fn paused_routine_records_manual_work_and_resumes_on_its_original_cadence() {
+    let hub = hub().await;
+    bind_engineer(&hub).await;
+    let timer = your_routine(&hub, daily(9, 0, "America/Toronto")).await;
+    hub.api
+        .timers(TimerRequest::Pause { timer: timer.id })
+        .await
+        .unwrap();
+    let manual = TimerRequest::RunOnce {
+        timer: timer.id,
+        client_request_id: "preview".into(),
+    };
+    hub.api.timers(manual.clone()).await.unwrap();
+    hub.api.timers(manual).await.unwrap();
+    let after = hub.db.timer(timer.id).await.unwrap().unwrap();
+    assert_eq!(
+        (after.due_at, after.status, after.fire_count),
+        (timer.due_at, TimerStatus::Paused, 1)
+    );
+    let (lease, run) = begin(&*hub.link).await;
+    let child = hub
+        .link
+        .call_tool(
+            &lease,
+            run.run_id,
+            Some("delegate"),
+            CREATE_TASK,
+            &json!({"title":"Review","goal":"Review the change","agent":"Engineer"}),
+        )
+        .await
+        .unwrap();
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    let OverviewReply::RoutineHistory { rows } = hub
+        .api
+        .overview(OverviewRequest::RoutineHistory {
+            timer: timer.id,
+            before: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("history")
+    };
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].manual);
+    assert!(rows[0].started.is_some());
+    assert_eq!(
+        rows[0].tasks[0].to_string(),
+        child["task_id"].as_str().unwrap()
+    );
+    hub.api
+        .timers(TimerRequest::Resume { timer: timer.id })
+        .await
+        .unwrap();
+    let OverviewReply::Agenda { recent, upcoming } = hub
+        .api
+        .overview(OverviewRequest::Agenda { tomorrow_in: None })
+        .await
+        .unwrap()
+    else {
+        panic!("agenda")
+    };
+    assert_eq!(recent, rows);
+    assert_eq!(upcoming[0].due, timer.due_at);
+    assert!(upcoming.len() >= 7);
+    let OverviewReply::SpaceUsage { groups } = hub
+        .api
+        .overview(OverviewRequest::SpaceUsage { days: 7 })
+        .await
+        .unwrap()
+    else {
+        panic!("usage")
+    };
+    assert_eq!(groups.iter().map(|g| g.runs).sum::<u64>(), 1);
+    assert_eq!(groups[0].cost_reports, 0);
 }

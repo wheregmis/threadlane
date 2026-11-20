@@ -2766,9 +2766,7 @@ fn every_tab_is_selected_where_it_is_shown() {
     }
     assert_eq!(
         labels,
-        [
-            "Chat", "Tasks", "Team", "Workflow", "Routines", "Memory", "Setup"
-        ]
+        ["Chat", "Tasks", "Team", "Routines", "Memory", "Setup"]
     );
 }
 
@@ -4687,13 +4685,10 @@ async fn dreaming_card_applies_project_settings_versions_and_findings() {
     state.apply_dreaming(load_dreaming(&core, "work", "api", 0).await);
     let card = state.dreaming_card("work", "api", &when);
     assert!(!card.enabled && !card.disabled);
-    assert_eq!(
-        card.last,
-        [
-            "Last dream · 00:02",
-            "Deleted project/notes/obsolete.md · version 2"
-        ]
-    );
+    assert_eq!(card.last, ["Last dream · 00:02"]);
+    assert_eq!(card.changes[0].path, "project/notes/obsolete.md");
+    assert_eq!(card.changes[0].version, 2);
+    assert!(card.changes[0].deleted);
     assert!(card.findings[0].contains("T-0999"));
 
     let on = state
@@ -4762,7 +4757,7 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         "at": 0, "lane_lag_ms": {"1": 53, "2": 22}, "queue_depth": {"api": 3},
         "run_duration": {"count": 1, "mean_ms": 12.0, "max_ms": 12},
         "account_cooldowns": {}, "account_wait_ms": 83, "dead_events": 2,
-        "timer_lateness": {"count": 0, "mean_ms": null, "max_ms": null},
+        "timer_lateness": {"count": 2, "mean_ms": 24_520.0, "max_ms": 7_200_000},
         "outbox_lag_ms": 125_000, "messages_per_day": {"2026-01-01": 4},
         "silent_run_ratio": 0.25, "decisions_per_day": 5,
         "answer_latency": {"count": 0, "mean_ms": null, "max_ms": null}, "standing_rules_created": 1
@@ -4783,6 +4778,11 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         rows["Run duration"],
         "12 ms avg · 12 ms max · 1 observation"
     );
+    assert_eq!(
+        rows["Timer lateness"],
+        "24.5 s avg · 2 h 0 min max · 2 observations"
+    );
+    assert_eq!(rows["Decisions in 24 hours"], "5 by you · 0 automatic");
     assert_eq!(rows["Silent runs"], "25%");
     assert!(
         state

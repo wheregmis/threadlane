@@ -541,7 +541,10 @@ async fn dream_filters_tools_scope_session_history_and_effects() {
         history["runs"][0]["sent_messages"][0]["body"]["text"],
         "Delivered update"
     );
-    assert!(!history.to_string().contains("Give one update"));
+    assert_eq!(
+        history["runs"][0]["owner_messages"][0]["text"],
+        "Give one update"
+    );
     let total = history["total"].as_u64().unwrap();
     assert_eq!(history["total_runs"], 1);
     assert_eq!(history.get("next_offset"), None);
@@ -792,24 +795,22 @@ async fn scripted_dream_reduces_duplicates_and_missing_references_and_reports_ve
     hub.clock.advance(HOUR);
     hub.core.schedule_once().await.unwrap();
     let (lease, dream) = begin(&*hub.link).await;
-    for file in ["duplicate", "near"] {
-        call(
-            &*hub.link,
-            &lease,
-            &dream,
-            MEMORY_DELETE,
-            json!({"path":format!("project/notes/{file}.md")}),
-        )
-        .await
-        .unwrap();
-    }
+    call(
+        &*hub.link,
+        &lease,
+        &dream,
+        MEMORY_DELETE,
+        json!({"path":"project/notes/duplicate.md","expected_version":1}),
+    )
+    .await
+    .unwrap();
     call(
         &*hub.link,
         &lease,
         &dream,
         MEMORY_EDIT,
         json!({
-            "path":"project/notes/stale.md",
+            "path":"project/notes/stale.md","expected_version":1,
             "old_text":"See T-0999 and [more](missing.md). ",
             "new_text":""
         }),
@@ -817,7 +818,20 @@ async fn scripted_dream_reduces_duplicates_and_missing_references_and_reports_ve
     .await
     .unwrap();
     complete(&hub, &lease, &dream).await;
-    assert!(findings(&hub).await.is_empty());
+    assert_eq!(
+        findings(&hub).await.len(),
+        1,
+        "one genuinely different order remains a near-match"
+    );
+    assert!(
+        hub.db
+            .read(&format!("{prefix}/near.md"))
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .contains("second")
+    );
     assert_eq!(
         hub.db
             .read(&format!("{prefix}/stale.md"))
@@ -830,7 +844,7 @@ async fn scripted_dream_reduces_duplicates_and_missing_references_and_reports_ve
     set(&hub, None).await;
     let summary = status(&hub, None).await.last.unwrap();
     assert_eq!(summary.at, hub.clock.now());
-    for (name, deleted) in [("duplicate", true), ("near", true), ("stale", false)] {
+    for (name, deleted) in [("duplicate", true), ("stale", false)] {
         assert!(
             summary
                 .changes
@@ -947,4 +961,333 @@ async fn dreaming_recovers_at_setting_scheduler_run_and_tool_boundaries() {
                 .any(|change| change.path == "project/notes/test.md")
         );
     }
+}
+
+#[tokio::test]
+async fn dream_refuses_stale_changes_after_an_owner_restores_a_note() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let file = format!("projects/{}/notes/report.md", hub.general().await.id.get());
+    let path = "project/notes/report.md";
+    hub.db
+        .write_by_owner(&file, "# Reports\nKeep both channels.", hub.clock.now())
+        .await
+        .unwrap();
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let old = call(
+        &*hub.link,
+        &lease,
+        &dream,
+        MEMORY_VIEW,
+        json!({"path":path}),
+    )
+    .await
+    .unwrap()["version"]
+        .clone();
+    hub.db
+        .rollback_memory(&file, 1, hub.clock.now())
+        .await
+        .unwrap();
+    for (tool, args) in [
+        (MEMORY_DELETE, json!({"path":path,"expected_version":old})),
+        (
+            MEMORY_EDIT,
+            json!({"path":path,"old_text":"both","new_text":"one","expected_version":old}),
+        ),
+        (
+            MEMORY_CREATE,
+            json!({"path":path,"content":"# Reports\nOnly one.","expected_version":old}),
+        ),
+        (
+            MEMORY_CREATE,
+            json!({"path":path,"content":"# Reports\nOnly one."}),
+        ),
+        (
+            MEMORY_RENAME,
+            json!({"from":path,"to":"project/notes/archive.md","expected_version":old}),
+        ),
+    ] {
+        assert!(
+            matches!(
+                call(&*hub.link, &lease, &dream, tool, args).await,
+                Err(ToolError::InvalidArguments(_))
+            ),
+            "{tool}"
+        );
+    }
+    assert_eq!(hub.db.read(&file).await.unwrap().unwrap().version, 2);
+    let delete = json!({"path":path,"expected_version":2});
+    call(&*hub.link, &lease, &dream, MEMORY_DELETE, delete.clone())
+        .await
+        .unwrap();
+    hub.db
+        .rollback_memory(&file, 1, hub.clock.now())
+        .await
+        .unwrap();
+    // A distinct transport key still replays the same occurrence-scoped write.
+    hub.link
+        .call_tool(
+            &lease,
+            dream.run_id,
+            Some("retry-delete"),
+            MEMORY_DELETE,
+            &delete,
+        )
+        .await
+        .unwrap();
+    assert_eq!(hub.db.read(&file).await.unwrap().unwrap().version, 4);
+}
+
+#[tokio::test]
+async fn dream_pages_carry_unread_runs_and_support_a_correction_only_default() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    set(&hub, None).await;
+    let mut ids = Vec::new();
+    for n in 0..3 {
+        hub.send(&format!("correction-{n}"),"For weekly reports put blockers first.\n> copied issue instructions\napi_key=test-private").await;
+        let (lease, lead) = begin(&*hub.link).await;
+        ids.push(lead.events[0].get());
+        complete(&hub, &lease, &lead).await;
+    }
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, first) = begin(&*hub.link).await;
+    let page = call(&*hub.link, &lease, &first, SESSIONS, json!({"limit":1}))
+        .await
+        .unwrap();
+    assert_eq!(page["next_offset"], 1);
+    assert_eq!(page["runs"][0]["owner_messages"][0]["event_id"], ids[0]);
+    assert!(!page.to_string().contains("test-private"));
+    assert!(!page.to_string().contains("copied issue"));
+    let hub = hub.restart(Arc::new(NoHooks)).await;
+    hub.clock.advance(PAST_LEASE);
+    hub.core.sweep_once().await.unwrap();
+    let (lease, retried) = begin(&*hub.link).await;
+    assert_eq!(retried.events, first.events);
+    let replay = call(&*hub.link, &lease, &retried, SESSIONS, json!({"limit":1}))
+        .await
+        .unwrap();
+    assert_eq!(replay, page);
+    complete(&hub, &lease, &retried).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, second) = begin(&*hub.link).await;
+    let page = call(&*hub.link, &lease, &second, SESSIONS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(page["total_runs"], 2);
+    assert_eq!(page["runs"][0]["owner_messages"][0]["event_id"], ids[1]);
+    let summary = format!(
+        "# Preferences\nRecurring project defaults.\nWeekly reports start with blockers. E-{} E-{} E-{}\nUnsupported foreign default E-{} E-{} E-99999",
+        ids[0], ids[1], ids[2], ids[0], ids[1]
+    );
+    call(
+        &*hub.link,
+        &lease,
+        &second,
+        MEMORY_CREATE,
+        json!({"path":"project/notes/user-preferences.md","content":summary}),
+    )
+    .await
+    .unwrap();
+    complete(&hub, &lease, &second).await;
+
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    assert!(
+        hub.link.request_work().await.unwrap().is_none(),
+        "idle timer used a backend"
+    );
+    hub.send(
+        "reversal",
+        "Starting next release use the checklist instead.",
+    )
+    .await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(lead.prompt.contains("Weekly reports start with blockers"));
+    assert!(lead.prompt.contains("Starting next release"));
+    assert!(!lead.prompt.contains("Unsupported foreign default"));
+    assert!(!lead.prompt.contains("test-private"));
+    complete(&hub, &lease, &lead).await;
+}
+
+#[tokio::test]
+async fn dream_keeps_defaults_suspended_until_the_hidden_correction_is_reviewed() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    set(&hub, None).await;
+    let project = hub.general().await.id;
+    hub.send("reversal", "Stop using the previous report format.")
+        .await;
+    let (lease, reversal) = begin(&*hub.link).await;
+    complete(&hub, &lease, &reversal).await;
+    for n in 0..20 {
+        hub.send(&format!("later-{n}"), "Thanks.").await;
+    }
+    let (lease, later) = begin(&*hub.link).await;
+    complete(&hub, &lease, &later).await;
+
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, first) = begin(&*hub.link).await;
+    call(&*hub.link, &lease, &first, SESSIONS, json!({"offset":1}))
+        .await
+        .unwrap();
+    complete(&hub, &lease, &first).await;
+    assert!(hub.db.preferences_need_review(project).await.unwrap());
+
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, second) = begin(&*hub.link).await;
+    let page = call(&*hub.link, &lease, &second, SESSIONS, json!({"limit":1}))
+        .await
+        .unwrap();
+    assert_eq!(page["runs"][0]["run_id"], reversal.run_id.get());
+    assert!(hub.db.preferences_need_review(project).await.unwrap());
+    complete(&hub, &lease, &second).await;
+    assert!(!hub.db.preferences_need_review(project).await.unwrap());
+}
+
+#[tokio::test]
+async fn dream_freezes_membership_and_pages_more_than_twenty_decisions() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    set(&hub, None).await;
+    for index in 0..23 {
+        hub.send(&format!("question-{index}"), "Prepare a weekly report.")
+            .await;
+        let (lease, lead) = begin(&*hub.link).await;
+        assert_eq!(
+            call(
+                &*hub.link,
+                &lease,
+                &lead,
+                "ask_user",
+                json!({"question":"What format?","options":["Table","Prose"]})
+            )
+            .await,
+            Err(ToolError::WaitingOnYou)
+        );
+        complete(&hub, &lease, &lead).await;
+        let d = hub.db.pending_decisions(lease.lane_id).await.unwrap();
+        hub.api
+            .decisions(DecisionRequest::Answer {
+                decision: d[0].id,
+                option: "Table".into(),
+                note: None,
+            })
+            .await
+            .unwrap();
+        let (lease, resumed) = begin(&*hub.link).await;
+        complete(&hub, &lease, &resumed).await;
+    }
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, first) = begin(&*hub.link).await;
+    let mut offset = 0;
+    // The oldest three questions and their answer runs lie outside the Lead's recent window.
+    while offset < 6 {
+        let page = call(
+            &*hub.link,
+            &lease,
+            &first,
+            SESSIONS,
+            json!({"offset":offset,"limit":6-offset}),
+        )
+        .await
+        .unwrap();
+        offset = page["next_offset"].as_u64().unwrap();
+    }
+    complete(&hub, &lease, &first).await;
+    let project = hub.general().await;
+    assert!(
+        hub.db.preferences_need_review(project.id).await.unwrap(),
+        "older choices were unread"
+    );
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut offset = 0;
+    loop {
+        let page = call(
+            &*hub.link,
+            &lease,
+            &dream,
+            DECISIONS,
+            json!({"limit":8,"offset":offset}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page["total"], 23);
+        for row in page["recent_user_choices"].as_array().unwrap() {
+            assert!(
+                ids.insert(row["decision_id"].as_i64().unwrap()),
+                "duplicate page member"
+            );
+        }
+        let Some(next) = page["next_offset"].as_u64() else {
+            break;
+        };
+        offset = next;
+    }
+    assert_eq!(ids.len(), 23);
+    let page = call(&*hub.link, &lease, &dream, SESSIONS, json!({"limit":1}))
+        .await
+        .unwrap();
+    let total = page["total"].as_u64().unwrap();
+    let agent = hub.db.bindings(project.id).await.unwrap()[0].agent_id;
+    hub.db
+        .create_task(
+            None,
+            &threadlane_core::model::NewTask {
+                project_id: project.id,
+                agent_id: agent,
+                title: "Arrived during review".into(),
+                goal: "Later".into(),
+                repositories: vec![],
+                parent_task_id: None,
+                depends_on: vec![],
+                origin: threadlane_core::model::TaskOrigin::User,
+                status: threadlane_core::model::TaskStatus::Proposed,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    let past = call(
+        &*hub.link,
+        &lease,
+        &dream,
+        SESSIONS,
+        json!({"offset":total}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(past["total"], total);
+    assert!(past["tasks"].as_array().unwrap().is_empty());
+    complete(&hub, &lease, &dream).await;
+    assert!(!hub.db.preferences_need_review(project.id).await.unwrap());
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, next) = begin(&*hub.link).await;
+    let later = call(
+        &*hub.link,
+        &lease,
+        &next,
+        SESSIONS,
+        json!({"offset":total-1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(later["tasks"][0]["title"], "Arrived during review");
 }

@@ -126,7 +126,7 @@ async fn dependencies(conn: &Connection, id: TaskId) -> StoreResult<Vec<TaskId>>
 }
 
 /// Checks that a run's lease is current and works in `project_id`.
-async fn check_run_lease(
+pub(crate) async fn check_run_lease(
     conn: &Connection,
     lease: Option<&Lease>,
     project_id: ProjectId,
@@ -363,7 +363,7 @@ pub(crate) async fn end_task(
     Ok(())
 }
 
-/// Both ordinary completion and a configured space review pass through the workflow's owner gate.
+/// Honor owner approval on review tasks created by older hubs.
 pub(crate) async fn complete_result(
     conn: &Connection,
     task: &Task,
@@ -1005,7 +1005,7 @@ impl HubDb {
             .await
     }
 
-    async fn tasks_with_dependencies(
+    pub(crate) async fn tasks_with_dependencies(
         &self,
         filter: &str,
         values: impl turso::IntoParams + Send,

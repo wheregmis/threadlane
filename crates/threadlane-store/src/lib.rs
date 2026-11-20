@@ -19,6 +19,8 @@ mod machine;
 mod memory;
 mod migrate;
 mod org;
+mod pr_review;
+pub use pr_review::{PrReviewAssignment, PrReviewHead, PrReviewStatus};
 mod outbox;
 mod row;
 mod session;
@@ -28,7 +30,6 @@ mod task;
 mod task_review;
 mod timer;
 mod work;
-pub use work::ReviewRoles;
 
 use std::path::Path;
 use std::sync::Arc;

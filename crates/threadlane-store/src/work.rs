@@ -1,5 +1,4 @@
 //! Read models for owner-facing project work. Results are scoped in the query.
-use crate::db::exec;
 use crate::row::json_text;
 use crate::{
     HubDb,
@@ -7,23 +6,57 @@ use crate::{
     row::{Cols, opt_raw, params},
 };
 use serde_json::json;
+use std::collections::HashMap;
 use threadlane_core::attachment::ImageAttachment;
-use threadlane_core::client::AgentTemplate;
-use threadlane_core::ids::{AgentId, RepositoryId, RunId};
-use threadlane_core::ids::{EventId, ProjectId, TaskId, TimerId};
-use threadlane_core::model::{
-    DecisionKind, DecisionOption, Mode, NewAgent, NewBinding, NewDecision, NewTask, NewTimer,
-    Project, Task, TaskOrigin, TaskStatus, Timer,
-};
+use threadlane_core::client::RunUsage;
+use threadlane_core::ids::RunId;
+use threadlane_core::ids::{EventId, LaneId, ProjectId, TaskId, TimerId};
+use threadlane_core::model::{DecisionKind, DecisionOption, NewDecision, Task};
 use threadlane_core::store::{StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
-use threadlane_core::work::{
-    Occurrence, OutputSource, ProjectOutput, ReviewRecipe, UsageGroup, WorkflowGraph,
-};
+use threadlane_core::work::{Occurrence, OutputSource, ProjectOutput, UsageGroup};
 use turso::Connection;
 
 #[cfg(test)]
 mod tests;
+
+/// CTEs ending in `run_usage(run_id,input,output,cost)`: each run's usage from its latest
+/// `finished` entry, for the runs of the sessions a preceding `scope(session_id)` CTE names.
+/// Claude reports its cost, and Codex its tokens, as running totals for the session, so those
+/// count the rise since the session's latest earlier report, or the whole value when the total
+/// restarted lower. Input includes cached input for both, as Codex already reports it.
+const RUN_USAGE: &str = "
+  reports AS (
+    SELECT r.id run_id, r.session_id, r.backend,
+      json_extract(j.entry,'$.usage.usage.input_tokens') input,
+      json_extract(j.entry,'$.usage.usage.cache_read_input_tokens') cache_read,
+      json_extract(j.entry,'$.usage.usage.cache_creation_input_tokens') cache_write,
+      json_extract(j.entry,'$.usage.usage.output_tokens') output,
+      json_extract(j.entry,'$.usage.total_cost_usd') cost
+    FROM runs r JOIN journal j ON j.run_id=r.id AND j.seq=(
+      SELECT MAX(seq) FROM journal WHERE run_id=r.id AND json_extract(entry,'$.type')='finished')
+    WHERE r.session_id IN (SELECT session_id FROM scope)),
+  counts AS (
+    SELECT run_id, session_id, backend,
+      CASE WHEN typeof(input)='integer' AND input>=0 THEN input
+        + CASE WHEN typeof(cache_read)='integer' AND cache_read>=0 THEN cache_read ELSE 0 END
+        + CASE WHEN typeof(cache_write)='integer' AND cache_write>=0 THEN cache_write ELSE 0 END
+      END input,
+      CASE WHEN typeof(output)='integer' AND output>=0 THEN output END output,
+      CASE WHEN typeof(cost) IN ('real','integer') AND cost>=0 THEN CAST(cost AS REAL) END cost
+    FROM reports),
+  previous AS (
+    SELECT *,
+      LAG(input) OVER (PARTITION BY session_id, input IS NULL ORDER BY run_id) input_before,
+      LAG(output) OVER (PARTITION BY session_id, output IS NULL ORDER BY run_id) output_before,
+      LAG(cost) OVER (PARTITION BY session_id, cost IS NULL ORDER BY run_id) cost_before
+    FROM counts),
+  run_usage AS (
+    SELECT run_id,
+      CASE WHEN backend='codex' AND input_before<=input THEN input-input_before ELSE input END input,
+      CASE WHEN backend='codex' AND output_before<=output THEN output-output_before ELSE output END output,
+      CASE WHEN backend='claude' AND cost_before<=cost THEN cost-cost_before ELSE cost END cost
+    FROM previous)";
 
 pub(crate) async fn needs_owner_decision(
     conn: &Connection,
@@ -79,296 +112,7 @@ pub(crate) async fn needs_owner_decision(
     Ok(true)
 }
 
-/// Both roles are resolved inside the transaction that creates their tasks.
-#[derive(Debug, Clone, Copy)]
-pub struct ReviewRoles<'a> {
-    pub engineer: &'a str,
-    pub reviewer: &'a str,
-}
-
-async fn bound_specialist(
-    conn: &Connection,
-    project: ProjectId,
-    name: &str,
-) -> StoreResult<AgentId> {
-    query_opt(conn,"SELECT b.agent_id FROM bindings b JOIN agents a ON a.id=b.agent_id
-        WHERE b.project_id=?1 AND a.name=?2 AND a.deleted_at IS NULL AND b.is_lead=0 AND b.mode!='off'",
-        params![project.get(),name],|row|Cols(row).id(0)).await?.ok_or_else(||StoreError::Invalid(format!("Bind an enabled specialist named {name:?} to this project.")))
-}
-
-async fn project_graph(
-    conn: &Connection,
-    project: ProjectId,
-) -> StoreResult<Option<WorkflowGraph>> {
-    query_one(
-        conn,
-        "SELECT workflow FROM projects WHERE id=?1",
-        params![project.get()],
-        |row| Cols(row).opt_de(0),
-    )
-    .await
-}
-
 impl HubDb {
-    pub async fn project_workflow(&self, project: ProjectId) -> StoreResult<Option<WorkflowGraph>> {
-        project_graph(&self.db.reader()?, project).await
-    }
-
-    pub async fn save_project_workflow(
-        &self,
-        project: ProjectId,
-        mut graph: WorkflowGraph,
-    ) -> StoreResult<WorkflowGraph> {
-        graph
-            .validate()
-            .map_err(|error| StoreError::Invalid(error.into()))?;
-        let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        crate::org::require_active_project(conn, project).await?;
-        let current = project_graph(conn, project)
-            .await?
-            .map_or(0, |saved| saved.version);
-        if graph.version != current {
-            return Err(StoreError::Invalid(
-                "The workflow changed on another client. Reopen it before saving.".into(),
-            ));
-        }
-        graph.version += 1;
-        exec(
-            conn,
-            "UPDATE projects SET workflow=?1 WHERE id=?2",
-            params![json_text(&graph)?, project.get()],
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(graph)
-    }
-
-    pub async fn start_project_workflow(
-        &self,
-        project: ProjectId,
-        repository: RepositoryId,
-        goal: &str,
-        version: i64,
-        request: &str,
-    ) -> StoreResult<Task> {
-        let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        crate::org::require_active_project(conn, project).await?;
-        // The first task is the receipt even if the graph has since been edited.
-        for prefix in ["canvas", "canvas-review"] {
-            if let Some(task) =
-                crate::task::task_by_call(conn, &format!("{prefix}:0:{project}:{request}")).await?
-            {
-                tx.commit().await?;
-                return Ok(task);
-            }
-        }
-        let graph = project_graph(conn, project)
-            .await?
-            .filter(|graph| graph.version == version)
-            .ok_or_else(|| {
-                StoreError::Invalid("Reload the saved workflow before starting it.".into())
-            })?;
-        let layers = graph
-            .layers()
-            .map_err(|error| StoreError::Invalid(error.into()))?;
-        let mut tasks = std::collections::HashMap::new();
-        let mut first = None;
-        for (index, step) in layers.into_iter().flatten().enumerate() {
-            let depends_on: Vec<TaskId> = step.after.iter().map(|id| tasks[id]).collect();
-            let mut prompt = format!("{goal}\n\n{}", step.instructions);
-            if !depends_on.is_empty() {
-                let sources = depends_on
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                prompt.push_str(&format!("\n\nUse the recorded results of {sources}."));
-            }
-            let prefix = if step.owner_review {
-                "canvas-review"
-            } else {
-                "canvas"
-            };
-            let task = crate::task::insert_task_in(
-                conn,
-                None,
-                &NewTask {
-                    project_id: project,
-                    agent_id: bound_specialist(conn, project, &step.agent).await?,
-                    title: format!(
-                        "{} · {}",
-                        step.name,
-                        goal.lines()
-                            .next()
-                            .unwrap_or(goal)
-                            .chars()
-                            .take(100)
-                            .collect::<String>()
-                    ),
-                    goal: prompt,
-                    repositories: vec![repository],
-                    parent_task_id: None,
-                    depends_on,
-                    origin: TaskOrigin::User,
-                    status: TaskStatus::Queued,
-                    priority: 0,
-                    created_by_call: Some(format!("{prefix}:{index}:{project}:{request}")),
-                    created_at: self.now(),
-                },
-                None,
-            )
-            .await?;
-            tasks.insert(step.id, task.id);
-            first.get_or_insert(task);
-        }
-        let first =
-            first.ok_or_else(|| StoreError::Invalid("Add a step before starting.".into()))?;
-        tx.commit().await?;
-        Ok(first)
-    }
-
-    pub async fn start_review_workflow(
-        &self,
-        project: ProjectId,
-        roles: ReviewRoles<'_>,
-        repository: RepositoryId,
-        goal: &str,
-        recipe: &ReviewRecipe,
-        request: &str,
-    ) -> StoreResult<Task> {
-        let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        crate::org::require_active_project(conn, project).await?;
-        let engineer = bound_specialist(conn, project, roles.engineer).await?;
-        let reviewer = bound_specialist(conn, project, roles.reviewer).await?;
-        let title: String = goal
-            .lines()
-            .next()
-            .unwrap_or(goal)
-            .chars()
-            .take(100)
-            .collect();
-        let mut spec = NewTask {
-            project_id: project,
-            agent_id: engineer,
-            title: title.clone(),
-            goal: format!("{goal}\n\n{}", recipe.implementation),
-            repositories: vec![repository],
-            parent_task_id: None,
-            depends_on: vec![],
-            origin: TaskOrigin::User,
-            status: TaskStatus::Queued,
-            priority: 0,
-            created_by_call: Some(format!("workflow-implement:{project}:{request}")),
-            created_at: self.now(),
-        };
-        let first = crate::task::insert_task_in(conn, None, &spec, None).await?;
-        spec.agent_id = reviewer;
-        spec.title = format!("Review {title}");
-        spec.goal = format!(
-            "{}\n\nReview {} and the branch and checks recorded in its result. The owner decides whether to accept your review.",
-            recipe.review, first.id
-        );
-        spec.depends_on = vec![first.id];
-        spec.created_by_call = Some(format!("workflow-review:{project}:{request}"));
-        crate::task::insert_task_in(conn, None, &spec, None).await?;
-        tx.commit().await?;
-        Ok(first)
-    }
-
-    /// Install both bindings and the initially paused routine atomically.
-    pub async fn install_review_team(
-        &self,
-        project: &Project,
-        roles: [(&str, &AgentTemplate); 2],
-        timer: &NewTimer,
-    ) -> StoreResult<Timer> {
-        let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        crate::org::require_active_project(conn, project.id).await?;
-        for (name, template) in roles {
-            let agent = match query_opt(
-                conn,
-                "SELECT id FROM agents WHERE name=?1 AND deleted_at IS NULL",
-                params![name],
-                |row| Cols(row).id::<AgentId>(0),
-            )
-            .await?
-            {
-                Some(id) => id,
-                None => {
-                    crate::org::insert_agent_in(
-                        conn,
-                        &NewAgent {
-                            instructions: template.instructions.clone(),
-                            backends: template.backends.clone(),
-                            ..NewAgent::named(name, template.role.clone())
-                        },
-                    )
-                    .await?
-                    .id
-                }
-            };
-            let binding = query_opt(
-                conn,
-                "SELECT is_lead,mode FROM bindings WHERE project_id=?1 AND agent_id=?2",
-                params![project.id.get(), agent.get()],
-                |row| Ok((Cols(row).bool(0)?, Cols(row).parse::<Mode>(1)?)),
-            )
-            .await?;
-            match binding {
-                Some((true, _)) | Some((_, Mode::Off)) => {
-                    return Err(StoreError::Invalid(format!(
-                        "Choose an enabled specialist for {name}."
-                    )));
-                }
-                Some(_) => {}
-                None => {
-                    crate::org::insert_binding_in(
-                        conn,
-                        &NewBinding {
-                            project_id: project.id,
-                            agent_id: agent,
-                            mode: Mode::OnRequest,
-                            is_lead: false,
-                            max_parallel: 1,
-                        },
-                    )
-                    .await?;
-                }
-            }
-        }
-        let key = timer.created_by_call.as_deref();
-        // A cancelled preset stays in history. A new installation gets its own timer.
-        exec(conn, "UPDATE timers SET created_by_call=NULL WHERE created_by_call=?1 AND status='cancelled'", params![key]).await?;
-        let existed = query_one(
-            conn,
-            "SELECT EXISTS(SELECT 1 FROM timers WHERE created_by_call=?1)",
-            params![key],
-            |row| Cols(row).bool(0),
-        )
-        .await?;
-        let mut saved = crate::timer::insert_timer_in(conn, timer, None).await?;
-        if saved.instruction != timer.instruction || saved.recurrence != timer.recurrence {
-            return Err(StoreError::Invalid(
-                "This project already has a different review team routine.".into(),
-            ));
-        }
-        if !existed {
-            exec(
-                conn,
-                "UPDATE timers SET status='paused' WHERE id=?1",
-                params![saved.id.get()],
-            )
-            .await?;
-            saved.status = threadlane_core::model::TimerStatus::Paused;
-        }
-        tx.commit().await?;
-        Ok(saved)
-    }
-
     /// Occurrences retain their own run even when the same routine fires again.
     pub async fn routine_history(
         &self,
@@ -419,35 +163,53 @@ impl HubDb {
         .await
     }
 
-    /// Aggregate the latest finished journal entry per run, matching Task Details.
+    /// Each finished run's usage in `lane`, counted as `RUN_USAGE` describes for both Task Details
+    /// and [`Self::space_usage`].
+    pub async fn lane_run_usage(&self, lane: LaneId) -> StoreResult<HashMap<RunId, RunUsage>> {
+        let sql = format!(
+            "WITH scope AS (SELECT id session_id FROM sessions WHERE lane_id=?1), {RUN_USAGE}
+             SELECT run_id,input,output,cost FROM run_usage
+             WHERE input IS NOT NULL OR output IS NOT NULL OR cost IS NOT NULL"
+        );
+        let rows = query_all(&self.db.reader()?, &sql, params![lane.get()], |row| {
+            let c = Cols(row);
+            let count = |idx| Ok::<_, StoreError>(c.opt_i64(idx)?.map(|n| n as u64));
+            Ok((
+                c.id(0)?,
+                RunUsage {
+                    input_tokens: count(1)?,
+                    output_tokens: count(2)?,
+                    cost_usd: c.opt_real(3)?,
+                },
+            ))
+        })
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Aggregate each run's usage as `RUN_USAGE` counts it, matching Task Details.
     pub async fn space_usage(
         &self,
         since: Timestamp,
         now: Timestamp,
     ) -> StoreResult<Vec<UsageGroup>> {
-        let sql = "
-        WITH samples AS (
+        // Earlier runs of a session outside the window still give the baseline for its totals.
+        let sql = format!(
+            "WITH scope AS (SELECT session_id FROM runs WHERE started_at BETWEEN ?1 AND ?2), {RUN_USAGE},
+        samples AS (
           SELECT p.name project, COALESCE(a.name,'Lead') agent, COALESCE(r.backend,'Unknown') backend,
-            l.task_id, MAX(0,COALESCE(r.ended_at,?2)-r.started_at) duration,
-            json_extract(j.entry,'$.usage.usage.input_tokens') input,
-            json_extract(j.entry,'$.usage.usage.output_tokens') output,
-            json_extract(j.entry,'$.usage.total_cost_usd') cost
+            l.task_id, MAX(0,COALESCE(r.ended_at,?2)-r.started_at) duration, u.input, u.output, u.cost
           FROM runs r JOIN lanes l ON l.id=r.lane_id JOIN projects p ON p.id=l.project_id
-          LEFT JOIN agents a ON a.id=r.agent_id
-          LEFT JOIN journal j ON j.run_id=r.id AND j.seq=(
-            SELECT MAX(seq) FROM journal WHERE run_id=r.id AND json_extract(entry,'$.type')='finished')
+          LEFT JOIN agents a ON a.id=r.agent_id LEFT JOIN run_usage u ON u.run_id=r.id
           WHERE r.started_at BETWEEN ?1 AND ?2)
         SELECT project,agent,backend,COUNT(*),SUM(duration),SUM(COALESCE(input,0)+COALESCE(output,0)),
           COUNT(input+output),CAST(COALESCE(SUM(cost),0) AS REAL),COUNT(cost),
           json_group_array(DISTINCT task_id)
-        FROM (SELECT project,agent,backend,task_id,duration,
-          CASE WHEN typeof(input)='integer' AND input>=0 THEN input END input,
-          CASE WHEN typeof(output)='integer' AND output>=0 THEN output END output,
-          CASE WHEN typeof(cost) IN ('real','integer') AND cost>=0 THEN cost END cost
-          FROM samples) GROUP BY project,agent,backend ORDER BY project,agent,backend";
+        FROM samples GROUP BY project,agent,backend ORDER BY project,agent,backend"
+        );
         query_all(
             &self.db.reader()?,
-            sql,
+            &sql,
             params![since.as_millis(), now.as_millis()],
             |row| {
                 let c = Cols(row);
@@ -537,47 +299,5 @@ impl HubDb {
             |row| Cols(row).de(0),
         )
         .await
-    }
-
-    pub async fn review_recipe(&self) -> StoreResult<ReviewRecipe> {
-        Ok(query_opt(
-            &self.db.reader()?,
-            "SELECT implementation,review,version FROM review_recipe WHERE id=1",
-            (),
-            |row| {
-                Ok(ReviewRecipe {
-                    implementation: Cols(row).text(0)?,
-                    review: Cols(row).text(1)?,
-                    version: Cols(row).i64(2)?,
-                })
-            },
-        )
-        .await?
-        .unwrap_or_default())
-    }
-
-    pub async fn save_review_recipe(&self, recipe: &ReviewRecipe) -> StoreResult<ReviewRecipe> {
-        let tx = self.db.begin().await?;
-        let current: i64 = query_one(
-            tx.conn(),
-            "SELECT COALESCE(MAX(version),0) FROM review_recipe",
-            (),
-            |row| Cols(row).i64(0),
-        )
-        .await?;
-        if current != recipe.version {
-            return Err(StoreError::Invalid(
-                "The review workflow changed. Reload it before saving.".into(),
-            ));
-        }
-        let version = current + 1;
-        exec(tx.conn(),"INSERT INTO review_recipe(id,version,implementation,review) VALUES(1,?1,?2,?3)
-        ON CONFLICT(id) DO UPDATE SET version=excluded.version,implementation=excluded.implementation,review=excluded.review",
-        params![version,recipe.implementation.as_str(),recipe.review.as_str()]).await?;
-        tx.commit().await?;
-        Ok(ReviewRecipe {
-            version,
-            ..recipe.clone()
-        })
     }
 }

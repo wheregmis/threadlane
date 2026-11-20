@@ -483,6 +483,12 @@ impl TimerStore for HubDb {
             },
         )
         .await?;
+        if dreaming
+            && timer.fire_count > 0
+            && crate::dreaming::quiet_since_dream(conn, timer.project_id, now).await?
+        {
+            exec(conn,"UPDATE events SET status='skipped',status_reason='no new project evidence' WHERE id=?1",params![inserted.id().get()]).await?;
+        }
         tx.commit().await?;
         Ok(inserted)
     }

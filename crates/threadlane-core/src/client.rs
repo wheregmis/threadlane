@@ -618,10 +618,11 @@ pub struct RunStep {
     pub at: Timestamp,
 }
 
-/// Usage reported by the backend for a finished run.
+/// Usage reported by the backend for a finished run, counting this run only even when the
+/// backend reports running totals for a resumed session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunUsage {
-    /// Input tokens as counted by the backend.
+    /// Input tokens as counted by the backend, including cache reads and writes.
     pub input_tokens: Option<u64>,
     /// Output tokens as counted by the backend.
     pub output_tokens: Option<u64>,
@@ -763,10 +764,6 @@ pub enum OverviewRequest {
         event: EventId,
         index: u32,
     },
-    ProjectWorkflow {
-        project: String,
-    },
-    ReviewRecipe,
     /// Every task of a project, oldest first. `None` means the General
     /// project.
     Tasks {
@@ -889,13 +886,6 @@ pub enum OverviewReply {
     },
     OutputImage {
         image: ImageAttachment,
-    },
-    ProjectWorkflow {
-        graph: Option<crate::work::WorkflowGraph>,
-        recipe: crate::work::ReviewRecipe,
-    },
-    ReviewRecipe {
-        recipe: crate::work::ReviewRecipe,
     },
     Work {
         overview: WorkOverview,
@@ -1290,35 +1280,6 @@ pub enum TimerReply {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskRequest {
-    SaveProjectWorkflow {
-        project: String,
-        graph: crate::work::WorkflowGraph,
-    },
-    StartProjectWorkflow {
-        project: String,
-        goal: String,
-        repository: String,
-        version: i64,
-        client_request_id: String,
-    },
-    SaveReviewRecipe {
-        recipe: crate::work::ReviewRecipe,
-    },
-    StartReviewWorkflow {
-        project: String,
-        goal: String,
-        engineer: String,
-        reviewer: String,
-        repository: String,
-        version: i64,
-        client_request_id: String,
-    },
-    InstallReviewTeam {
-        project: String,
-        engineer: String,
-        reviewer: String,
-        recurrence: Recurrence,
-    },
     /// Creates a queued task of yours in a project, skipping the lead: work
     /// you requested. `agent` must be bound in the project and not Off;
     /// `repositories` are names registered in it and `depends_on` its tasks
@@ -1338,15 +1299,11 @@ pub enum TaskRequest {
     /// Cancels a task that has not ended, and the tasks that wait on it;
     /// the lead hears of it once. Cancelling a cancelled task changes
     /// nothing.
-    Cancel {
-        task: TaskId,
-    },
+    Cancel { task: TaskId },
     /// Queues a failed task again, with a message in its lane quoting the
     /// last error and asking the agent to continue from the work already
     /// on the task branch. Only a failed task can be retried.
-    Retry {
-        task: TaskId,
-    },
+    Retry { task: TaskId },
     /// Attaches registered repositories, by name, to a task that has not
     /// ended, so it can publish. Its earlier work and session are kept; a
     /// message in its lane tells its agent, and the next run gets worktrees.
@@ -1361,19 +1318,8 @@ pub enum TaskRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskReply {
-    ProjectWorkflow {
-        graph: crate::work::WorkflowGraph,
-    },
-    ReviewRecipe {
-        recipe: crate::work::ReviewRecipe,
-    },
-    ReviewTeam {
-        timer: Timer,
-    },
     /// The task as it now stands.
-    Task {
-        task: Task,
-    },
+    Task { task: Task },
 }
 
 /// Read the hub's operational history or perform an owner repair.
@@ -1452,7 +1398,7 @@ pub struct OperationsMetrics {
     /// Age of the oldest pending event per lane with pending work.
     #[serde(deserialize_with = "deserialize_lane_lag")]
     pub lane_lag_ms: BTreeMap<LaneId, i64>,
-    /// Pending events across all lanes of each included project, including zeros.
+    /// Lanes with pending events in each included project, including zeros.
     pub queue_depth: BTreeMap<String, i64>,
     /// Time from start to end for every ended run.
     pub run_duration: Latency,
@@ -1461,7 +1407,7 @@ pub struct OperationsMetrics {
     /// Space-wide elapsed time from recorded account-blocked notices to
     /// their matching resumed notices, or to the snapshot for an open interval.
     pub account_wait_ms: i64,
-    /// Events currently dead.
+    /// Events currently dead that were received in the past 7 days.
     pub dead_events: i64,
     /// Time from due to fired for each recorded timer occurrence.
     pub timer_lateness: Latency,
@@ -1474,9 +1420,14 @@ pub struct OperationsMetrics {
     pub messages_per_day: BTreeMap<String, i64>,
     /// Silent committed runs divided by all committed runs, absent if none.
     pub silent_run_ratio: Option<f64>,
-    /// Decisions created in the rolling 24 hours up to the snapshot.
+    /// Decisions created in the rolling 24 hours up to the snapshot that the
+    /// classifier did not answer.
     pub decisions_per_day: i64,
-    /// Time from creation to answer for decisions with status answered.
+    /// Decisions created in the same 24 hours that the classifier answered;
+    /// zero from older hubs.
+    #[serde(default)]
+    pub classifier_decisions_per_day: i64,
+    /// Time from creation to answer for decisions you answered.
     pub answer_latency: Latency,
     /// Standing rules ever created, including revoked rules.
     pub standing_rules_created: i64,

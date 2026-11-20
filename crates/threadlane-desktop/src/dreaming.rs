@@ -2,7 +2,8 @@
 
 use threadlane_client::{ClientCore, parse_dreaming_cadence};
 use threadlane_core::client::{
-    DreamingStatus, MemoryFinding, MemoryReply, MemoryRequest, OperationsReply, OperationsRequest,
+    DreamChange, DreamingStatus, MemoryFinding, MemoryReply, MemoryRequest, OperationsReply,
+    OperationsRequest,
 };
 use threadlane_core::model::{Recurrence, Rule};
 
@@ -39,6 +40,8 @@ pub struct DreamingCard {
     pub cadence_gap: Option<crate::Gap>,
     /// The last completed dream and the versions it wrote.
     pub last: Vec<String>,
+    /// File versions written by the last completed occurrence.
+    pub changes: Vec<DreamChange>,
     /// Checker findings or a status message.
     pub findings: Vec<String>,
     /// The reason the memory checker is unavailable.
@@ -196,6 +199,7 @@ impl AppState {
             cadence: "Loading dreaming settings…".to_owned(),
             cadence_gap: Some(crate::Gap::Loading),
             last: Vec::new(),
+            changes: Vec::new(),
             findings: vec!["Checking memory…".to_owned()],
             findings_gap: Some(crate::Gap::Loading),
         };
@@ -219,10 +223,7 @@ impl AppState {
                     if let Some(dream) = &status.last {
                         card.last
                             .push(format!("Last dream · {}", when.moment(dream.at)));
-                        card.last.extend(dream.changes.iter().map(|change| {
-                            let action = if change.deleted { "Deleted" } else { "Wrote" };
-                            format!("{action} {} · version {}", change.path, change.version)
-                        }));
+                        card.changes.clone_from(&dream.changes);
                         if dream.changes.is_empty() {
                             card.last.push("No memory changes.".to_owned());
                         }

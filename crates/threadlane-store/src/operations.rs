@@ -67,7 +67,7 @@ impl HubDb {
         .await?;
         let queue_depth = query_all(
             &conn,
-            "SELECT p.name, COUNT(e.id) FROM projects p
+            "SELECT p.name, COUNT(DISTINCT e.lane_id) FROM projects p
              LEFT JOIN events e ON e.project_id = p.id AND e.status = 'pending'
              WHERE ?1 IS NULL OR p.id = ?1 GROUP BY p.id",
             params![project_id.clone()],
@@ -100,8 +100,9 @@ impl HubDb {
         .await?;
         let dead_events = query_one(
             &conn,
-            "SELECT COUNT(*) FROM events WHERE status = 'dead' AND (?1 IS NULL OR project_id = ?1)",
-            params![project_id.clone()],
+            "SELECT COUNT(*) FROM events
+             WHERE status = 'dead' AND received_at > ?2 AND (?1 IS NULL OR project_id = ?1)",
+            params![project_id.clone(), (at - DELIVERY_WEEK).as_millis()],
             |row| Cols(row).i64(0),
         )
         .await?;
@@ -175,18 +176,21 @@ impl HubDb {
             },
         )
         .await?;
-        let decisions_per_day = query_one(
+        let (decisions_per_day, classifier_decisions_per_day) = query_one(
             &conn,
-            "SELECT COUNT(*) FROM decisions WHERE (?1 IS NULL OR project_id = ?1)
+            "SELECT COUNT(CASE WHEN json_extract(answer, '$.classifier') IS NULL THEN 1 END),
+                    COUNT(CASE WHEN json_extract(answer, '$.classifier') IS NOT NULL THEN 1 END)
+             FROM decisions WHERE (?1 IS NULL OR project_id = ?1)
              AND created_at > ?2 AND created_at <= ?3",
             params![project_id.clone(), (at - DAY).as_millis(), now],
-            |row| Cols(row).i64(0),
+            |row| Ok((Cols(row).i64(0)?, Cols(row).i64(1)?)),
         )
         .await?;
         let answer_latency = latency(
             &conn, project,
             "SELECT MAX(0, answered_at - created_at) AS ms FROM decisions
-             WHERE status = 'answered' AND answered_at IS NOT NULL AND (?1 IS NULL OR project_id = ?1)",
+             WHERE status = 'answered' AND answered_at IS NOT NULL
+                AND json_extract(answer, '$.classifier') IS NULL AND (?1 IS NULL OR project_id = ?1)",
         )
         .await?;
         let standing_rules_created = query_one(
@@ -211,6 +215,7 @@ impl HubDb {
             messages_per_day: messages_per_day.into_iter().collect(),
             silent_run_ratio,
             decisions_per_day,
+            classifier_decisions_per_day,
             answer_latency,
             standing_rules_created,
         })

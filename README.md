@@ -250,20 +250,7 @@ including tomorrow in your local time zone. **Usage** groups runs by project, ag
 backend and shows how often providers reported cost and tokens.
 
 From a project's **Tasks**, open **Outputs** to search published pull
-requests, saved reports and attached images. In **Workflow → Workflow canvas**,
-add a step, give it instructions, and choose an enabled project specialist.
-Drag a step to move it. Drag the dot on its right edge onto another step to
-connect them, or select the source, choose **Connect from step**, and select
-the destination. Moving steps saves their positions in the project. If you
-also have pending workflow edits, **Save project workflow** saves them together.
-A step waits for every incoming dependency. Steps without dependencies can run
-in parallel. Select a destination to remove a connection under **Runs after**.
-Save the project workflow, enter a goal, and choose a repository to start a run.
-
-**Review preset** opens the space's shared implementation and review instructions.
-The owner can accept the review or request changes. **Preview PR review team** shows which agents will
-be created or reused and the proposed weekday routine. It starts paused
-so you can run it once before enabling the schedule.
+requests, saved reports and attached images.
 
 Repositories a project's tasks work in:
 

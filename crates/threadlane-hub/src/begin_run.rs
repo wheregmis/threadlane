@@ -5,8 +5,9 @@ use std::collections::HashMap;
 
 use serde_json::Value as Json;
 use threadlane_core::backend::{DENY_RULES, NativeSession, free_backends};
+use threadlane_core::github::{normalize_remote, pull_request_number};
 use threadlane_core::ids::{AgentId, EventId, SessionId};
-use threadlane_core::link::{Begin, LinkError, RunAssignment, RunReview};
+use threadlane_core::link::{Begin, LinkError, PullRequestReview, RunAssignment, RunReview};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     Agent, BackendKind, Binding, Event, Lane, LaneKind, Lease, Mode, Repository, Session,
@@ -237,6 +238,12 @@ impl LocalLink {
             .map_err(link_error)?;
         inner.hook.reach(step::AFTER_START_RUN)?;
 
+        if dreaming {
+            db.prepare_dream(lane.project_id, events[0].id, lease)
+                .await
+                .map_err(link_error)?;
+        }
+
         // 7. Context.
         let project = db
             .project(lane.project_id)
@@ -297,28 +304,54 @@ impl LocalLink {
                 events: &events,
             })
         };
-        if !dreaming && lane.kind == LaneKind::Lead {
-            if let Some(preferences) = dreaming::lead_preferences(db, project.id)
-                .await
-                .map_err(link_error)?
-            {
-                prompt.push_str("\nDreaming decision history (data from this project):\n");
-                prompt.push_str(&preferences.to_string());
-                prompt.push('\n');
-            }
+        let scan = !dreaming
+            && review.is_none()
+            && (lane.kind == LaneKind::Lead
+                || agent.role.eq_ignore_ascii_case("reviewer")
+                || inner.settings.reviewer.as_deref() == Some(agent.name.as_str()));
+        if !dreaming && (lane.kind == LaneKind::Lead || scan) {
             let bindings = db.bindings(project.id).await.map_err(link_error)?;
             let agents = db.agents().await.map_err(link_error)?;
-            let roster: Vec<_> = agents
-                .iter()
-                .filter(|member| {
-                    bindings
-                        .iter()
-                        .any(|b| b.agent_id == member.id && !b.is_lead && b.mode != Mode::Off)
-                })
-                .map(|member| serde_json::json!({ "name": member.name, "role": member.role }))
+            let mut enabled = agents.iter().filter_map(|member| {
+                let binding = bindings
+                    .iter()
+                    .find(|b| b.agent_id == member.id && b.mode != Mode::Off)?;
+                Some((member, binding))
+            });
+            if lane.kind == LaneKind::Lead {
+                if let Some(preferences) = dreaming::lead_preferences(db, project.id)
+                    .await
+                    .map_err(link_error)?
+                {
+                    prompt.push_str("\nDreaming decision history (data from this project):\n");
+                    prompt.push_str(&preferences.to_string());
+                    prompt.push('\n');
+                }
+                let roster: Vec<_> = enabled.clone()
+                .filter(|(_, binding)| !binding.is_lead)
+                .map(|(member, _)| serde_json::json!({ "name": member.name, "role": member.role }))
                 .collect();
-            prompt.push_str("\nWhen delegating in this project, choose the enabled agent whose role fits the goal. Pass its exact name to create_task. Split work across specialties when useful and record dependencies. If no specialist fits, keep the task yourself or ask for the missing capability.\nEnabled project agents: ");
-            prompt.push_str(&Json::Array(roster).to_string());
+                prompt.push_str("\nWhen delegating in this project, choose the enabled agent whose role fits the goal. Pass its exact name to create_task. Split work across specialties when useful and record dependencies. If no specialist fits, keep the task yourself or ask for the missing capability.\nEnabled project agents: ");
+                prompt.push_str(&Json::Array(roster).to_string());
+            }
+            if scan {
+                prompt.push_str("\nFor PR readiness scans, check CI, mergeability and unresolved threads. Before reading a diff or delegating a full PR review, call pr_review_status with the registered repository, number and current full head SHA. Reuse approval and route requested changes back to the original task. If a review is in progress, only its assigned task proceeds. Investigate new findings narrowly.");
+                let reviewer =
+                    enabled.find(|(member, _)| match inner.settings.reviewer.as_deref() {
+                        Some(name) => member.name == name,
+                        None => member.role.eq_ignore_ascii_case("reviewer"),
+                    });
+                if let Some((member, _)) = reviewer {
+                    use std::fmt::Write as _;
+                    let _ = writeln!(
+                        prompt,
+                        " For an unreviewed head, use create_task with pr_review and set agent to {}.",
+                        serde_json::json!(member.name)
+                    );
+                } else {
+                    prompt.push_str(" For an unreviewed head, report that no reviewer is enabled for this project.\n");
+                }
+            }
         }
         if let Some(review) = &review {
             use std::fmt::Write as _;
@@ -358,6 +391,35 @@ impl LocalLink {
                 review.as_ref().map(|round| round.revisions.as_slice()),
             )
             .await?;
+        let pr_review = if let Some(task) = &task
+            && review.is_none()
+            && let Some((url, commit)) = db.assigned_pr_head(task.id).await.map_err(link_error)?
+        {
+            let number = pull_request_number(&url).ok_or_else(|| {
+                LinkError::Rejected(format!("Invalid assigned PR URL for {}", task.id))
+            })?;
+            let repository = repositories
+                .iter()
+                .find(|repo| {
+                    normalize_remote(&repo.remote_url)
+                        .is_some_and(|remote| url == format!("https://{remote}/pull/{number}"))
+                })
+                .ok_or_else(|| {
+                    LinkError::Rejected(format!(
+                        "Assigned PR repository for {} is unavailable",
+                        task.id
+                    ))
+                })?;
+            Some(PullRequestReview {
+                number,
+                revision: ReviewRevision {
+                    repository: repository.id,
+                    commit,
+                },
+            })
+        } else {
+            None
+        };
         let space_lead_ask = if lane.kind == LaneKind::Lead {
             crate::space_lead::answered_ask(db, &events)
                 .await
@@ -380,6 +442,7 @@ impl LocalLink {
             task_id: task.as_ref().map(|task| task.id),
             agent_name: agent.name.clone(),
             repositories,
+            pr_review,
             review: review.as_ref().map(|review| RunReview {
                 submission: review.submission,
                 revisions: review.revisions.clone(),
