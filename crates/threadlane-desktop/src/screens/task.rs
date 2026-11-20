@@ -75,10 +75,11 @@ impl Desktop {
                         .flex_none()
                         .text_right(),
                 )
-                .child(div().flex_1().min_w_0().child(self.prose(
+                .child(div().flex_1().min_w_0().child(self.prose_among(
                     id,
                     space,
                     Some(&summary.project),
+                    Some(&summary.task.repositories),
                     moment.text,
                     cx,
                 )));
@@ -128,10 +129,32 @@ impl Desktop {
             .collect();
 
         let change = changes(detail);
+        let publication = self.state.task_publication(space, task);
         let mut published = card(cx)
             .p(SM)
             .child(self.copyable("copy-branch", change.branch, cx))
             .child(change.state)
+            .children(publication.as_ref().map(|p| meta(p.line.clone(), cx)))
+            .children(
+                publication
+                    .into_iter()
+                    .filter(|_| !archived)
+                    .flat_map(|p| p.attachable)
+                    .map(|name| {
+                        let in_space = space.to_owned();
+                        button(SharedString::from(format!("attach-{name}")))
+                            .small()
+                            .ghost()
+                            .icon(AppIcon::Plus)
+                            .label(format!("Attach {name}"))
+                            .accessibility_label(format!(
+                                "Attach repository {name} to {task} so its work can be published"
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.attach_repository(in_space.clone(), task, name.clone(), cx);
+                            }))
+                    }),
+            )
             .children(change.merge)
             .children(change.diffs.iter().enumerate().map(|(index, diff)| {
                 self.diff_preview(format!("task-{space}-{task}-{index}"), diff, cx)

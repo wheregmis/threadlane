@@ -87,7 +87,7 @@ fn memory(
             && record.notes.contains(pointer)
             && !record.notes.contains(source_text)
     };
-    let recalled = learned
+    let recalled = after
         .messages
         .last()
         .is_some_and(|text| text.contains(fact) && text.contains(pointer));
@@ -230,7 +230,9 @@ fn eval_scorers_match_scripted_transcripts_and_reject_wrong_outcomes() {
     let before = scripted(
         json!({"messages":["quirk repo:app/README.md"],"notes":"quirk repo:app/README.md","findings":5}),
     );
-    let after = scripted(json!({"notes":"quirk repo:app/README.md","findings":1}));
+    let after = scripted(
+        json!({"notes":"quirk repo:app/README.md","messages":["quirk repo:app/README.md"],"findings":1}),
+    );
     let wrong = scripted(json!({"notes":"quirk giant source text","findings":6}));
     assert_eq!(
         memory(
@@ -250,7 +252,7 @@ fn eval_scorers_match_scripted_transcripts_and_reject_wrong_outcomes() {
             "repo:app/README.md",
             "giant source text"
         ),
-        (false, true, 0)
+        (false, false, 0)
     );
 
     assert!(permission(&quiet, false));
@@ -310,7 +312,10 @@ async fn set_lead_mode(sim: &Sim, mode: Mode) {
 }
 
 async fn live_world(mode: Mode) -> (Sim, World) {
-    let mut world = World::new().await;
+    live_in(World::new().await, mode).await
+}
+
+async fn live_in(mut world: World, mode: Mode) -> (Sim, World) {
     world.runner_config.debounce = Duration::ZERO;
     let real = backend();
     assert!(
@@ -569,6 +574,55 @@ async fn eval_live_mode_adherence() {
     println!("mode adherence {passed} / 4");
 }
 
+/// A separate hub prevents chat history, decision cards and native sessions leaking the answers.
+async fn probe_project_notes(source: &Sim) -> (Transcript, Vec<String>) {
+    let (probe, world) = live_world(Mode::Assisted).await;
+    world.add_repository("app").await;
+    let prefix = format!(
+        "projects/{}/notes/",
+        source.db().general_project().await.unwrap().id.get()
+    );
+    let project = probe.db().general_project().await.unwrap();
+    for file in source.db().list(&prefix).await.unwrap() {
+        if file.path.ends_with("/INDEX.md") {
+            continue;
+        }
+        let suffix = file.path.strip_prefix(&prefix).unwrap();
+        probe
+            .db()
+            .write_by_owner(
+                &format!("projects/{}/notes/{suffix}", project.id.get()),
+                &file.content,
+                probe.clock().now(),
+            )
+            .await
+            .unwrap();
+    }
+    probe.send("probe","Consult this project's notes. Give the exact release override and the export procedure pointer in repo:<repository>/<path> format. When are release notes published relative to tagging for stable, preview and nightly? Give one line per channel as channel=before, channel=after or channel=unknown. Include the retention rule.").await;
+    drive(&probe).await;
+    let mut paths = BTreeSet::new();
+    for run in probe.runs().await {
+        for call in probe
+            .db()
+            .inspect_trace(&run.trace_id)
+            .await
+            .unwrap()
+            .tool_calls
+        {
+            if call.tool == "memory_view"
+                && call
+                    .result
+                    .as_ref()
+                    .is_some_and(|r| r["content"].is_string())
+                && let Some(path) = call.arguments["path"].as_str()
+            {
+                paths.insert(path.to_owned());
+            }
+        }
+    }
+    (observe(&probe).await, paths.into_iter().collect())
+}
+
 #[tokio::test]
 #[ignore = "uses a real model and spends quota"]
 async fn eval_live_memory() {
@@ -579,11 +633,16 @@ async fn eval_live_memory() {
     world.add_repository("app").await;
     sim.send("learn", &format!("Remember the undocumented release override {FACT}. The export procedure is maintained in {POINTER}; today's source excerpt is '{SOURCE}'. Save what will help the next session.")).await;
     drive(&sim).await;
-    sim.clock().advance(Duration::from_secs(3600));
-    sim.send("recall", "Using saved project memory, remind me of our release override and where to find the export procedure.").await;
-    drive(&sim).await;
     let project = sim.db().general_project().await.unwrap();
     for (name, content) in [
+        (
+            "stable",
+            "# Stable releases\nRelease publication order.\nFor stable releases, publish release notes before tagging the build.",
+        ),
+        (
+            "preview",
+            "# Preview releases\nRelease publication order.\nFor preview releases, publish release notes after tagging the build.",
+        ),
         (
             "backup-one",
             "# Backups\nThe release script requires the stable artifact.",
@@ -598,7 +657,7 @@ async fn eval_live_memory() {
         ),
         (
             "old",
-            "# Old procedure\n[Removed document](obsolete-note.md). Use the retention policy.",
+            "# Old procedure\n[Removed document](obsolete-note.md). Keep backups for 47 days.",
         ),
     ] {
         sim.db()
@@ -610,7 +669,7 @@ async fn eval_live_memory() {
             .await
             .unwrap();
     }
-    let before = observe(&sim).await;
+    let (before, before_reads) = probe_project_notes(&sim).await;
     sim.api
         .memory(MemoryRequest::SetDreaming {
             project: None,
@@ -624,11 +683,144 @@ async fn eval_live_memory() {
     sim.clock().advance(Duration::from_secs(3600));
     sim.core.schedule_once().await.unwrap();
     drive(&sim).await;
-    let after = observe(&sim).await;
+    let (after, after_reads) = probe_project_notes(&sim).await;
     let (kept, recalled, reduced) = memory(&before, &after, FACT, POINTER, SOURCE);
+    let score = |t: &Transcript| {
+        let answer = t
+            .messages
+            .last()
+            .cloned()
+            .unwrap_or_default()
+            .to_lowercase()
+            .replace(' ', "");
+        [
+            "stable=before",
+            "preview=after",
+            "nightly=unknown",
+            "47days",
+        ]
+        .map(|part| answer.contains(part))
+    };
     println!(
-        "memory retained {kept}, recalled {recalled}, checker findings {} → {} ({reduced} removed)",
-        before.findings, after.findings
+        "before {:?}, after {:?}, memory reads {:?} → {:?}, findings {} → {}, reduced {reduced}",
+        score(&before),
+        score(&after),
+        before_reads,
+        after_reads,
+        before.findings,
+        after.findings
+    );
+    assert!(
+        kept,
+        "storage failed: before {:?}, after {:?}",
+        before.notes, after.notes
+    );
+    assert!(
+        recalled,
+        "post-dream recall failed: {:?}",
+        after.messages.last()
+    );
+    assert_eq!(
+        score(&after),
+        [true; 4],
+        "post-dream order, abstention or retention regressed"
+    );
+    assert!(
+        after.findings < before.findings,
+        "cleanup left every finding"
+    );
+}
+
+async fn seed_learning_replay() -> World {
+    use crate::harness::{add_engineer, plan_tasks, write_progress};
+    use threadlane_hub::{FINISH_TASK, MEMORY_CREATE};
+
+    let world = World::new().await;
+    add_engineer(&world.db, 1).await;
+    world.backend.set_default(Script::new().finish("Recorded."));
+    world.backend.route(
+        "Investigate the export failure",
+        plan_tasks(&[("Verify an export retry", &[])]),
+    );
+    world.backend.route("task_start",Script::new().call_for("progress",MEMORY_CREATE,write_progress)
+        .call("finish",FINISH_TASK,json!({"summary":"First export failed with mismatch M17. Regenerated the manifest using procedure marigold-47, retried the same export, and verified all expected rows. The maintained instructions are in repo:app/README.md. This fix is specific to M17."})).finish("Verified."));
+    let seed = world.boot(CrashPlan::new()).await;
+    set_lead_mode(&seed, Mode::Autonomous).await;
+    world.add_repository("app").await;
+    seed.send("task", "Investigate the export failure").await;
+    drive(&seed).await;
+    assert!(seed.tasks().await.iter().any(|t| {
+        t.result
+            .as_ref()
+            .is_some_and(|r| r.to_string().contains("marigold-47"))
+    }));
+    for n in 0..3 {
+        seed.send(&format!("correction-{n}"),"Correction to the weekly report: use Cedar format through release 7. Starting with release 8, use Saffron.").await;
+        drive(&seed).await;
+    }
+    world
+}
+
+#[tokio::test]
+#[ignore = "uses a real model and spends quota"]
+async fn eval_live_dream_learning() {
+    const QUESTION: &str = "Predict the owner's routine format for a weekly report at release 7 and at release 8, and for an incident brief. The candidate formats are Cedar and Saffron. For each return a line weekly7=..., weekly8=..., incident=... . Use ask for unknowns. Also give the verified procedure identifier for an M17 export failure and give timeout=apply or timeout=investigate for an unrelated connection timeout. Answer from project evidence only.";
+    // All training answers precede both probes. Neither probe receives feedback.
+    let mut predictions = Vec::new();
+    for enabled in [false, true] {
+        let (sim, _) = live_in(seed_learning_replay().await, Mode::Assisted).await;
+        sim.api
+            .memory(MemoryRequest::SetDreaming {
+                project: None,
+                cadence: enabled.then(|| Recurrence {
+                    rule: Rule::Interval { minutes: 60 },
+                    zone: "UTC".into(),
+                }),
+            })
+            .await
+            .unwrap();
+        sim.clock().advance(Duration::from_secs(3600));
+        if enabled {
+            sim.core.schedule_once().await.unwrap();
+            drive(&sim).await;
+            let project = sim.db().general_project().await.unwrap();
+            assert!(sim.db().dream_summary(project.id).await.unwrap().is_some());
+        }
+        sim.clock().advance(Duration::from_secs(31 * 60));
+        sim.send(if enabled { "after" } else { "control" }, QUESTION)
+            .await;
+        drive(&sim).await;
+        let observed = observe(&sim).await;
+        assert_eq!(observed.forge_writes, 0);
+        let reply = observed
+            .messages
+            .last()
+            .cloned()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let reply = reply.replace(' ', "");
+        let mut attempts = 0;
+        let mut correct = 0;
+        for (key, want) in [("weekly7=", "cedar"), ("weekly8=", "saffron")] {
+            if ["cedar", "saffron"]
+                .iter()
+                .any(|v| reply.contains(&format!("{key}{v}")))
+            {
+                attempts += 1;
+                correct += usize::from(reply.contains(&format!("{key}{want}")));
+            }
+        }
+        let abstained = reply.contains("incident=ask");
+        let procedure = reply.contains("marigold-47") && reply.contains("timeout=investigate");
+        println!(
+            "dreaming={enabled}: {correct}/{attempts} correct predictions, {attempts}/2 coverage, incident abstention={abstained}, procedure recalled={procedure}"
+        );
+        predictions.push((correct, abstained, procedure));
+    }
+    assert_eq!(
+        predictions[1],
+        (2, true, true),
+        "enhanced probe failed: {predictions:?}"
     );
 }
 

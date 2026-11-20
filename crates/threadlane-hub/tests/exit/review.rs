@@ -6,13 +6,17 @@ use serde_json::{Value as Json, json};
 use threadlane_core::backend::{AgentBackend, BackendError};
 use threadlane_core::client::{DecisionRequest, OrgReply, OrgRequest};
 use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
+use threadlane_core::github::IssueClaim;
 use threadlane_core::model::{
     DecisionKind, EventKind, EventStatus, Mode, NewEvent, OutboxKind, Trust,
 };
 use threadlane_core::runtime::steps::perform;
 use threadlane_core::store::{InboxStore, OrgStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{COMMENT, CREATE_ISSUE, MARK_READY, MERGE};
+use threadlane_hub::{
+    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, LABEL_ISSUE, MARK_READY, MERGE,
+    OPEN_PULL_REQUEST,
+};
 use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::{CrashPlan, Script};
 
@@ -22,7 +26,7 @@ use crate::operations::follow_up;
 use crate::permissions::engineer_in;
 use crate::publish::{drive, publish_world};
 
-pub(super) fn actions() -> [(&'static str, Json); 4] {
+pub(super) fn actions() -> [(&'static str, Json); 6] {
     [
         (
             COMMENT,
@@ -34,8 +38,19 @@ pub(super) fn actions() -> [(&'static str, Json); 4] {
         ),
         (MERGE, json!({"repository":"app","number":12})),
         (MARK_READY, json!({"repository":"app","number":12})),
+        (
+            LABEL_ISSUE,
+            json!({"repository":"app","number":7,"add":["bug"],"remove":["triage"]}),
+        ),
+        (
+            CLOSE_PULL_REQUEST,
+            json!({"repository":"app","number":12,"expected_head":HEAD,"delete_branch":true}),
+        ),
     ]
 }
+
+/// The PR head a close is pinned to.
+const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn script(tool: &str, args: Json) -> Script {
     Script::new().call("forge-call", tool, args).finish("Done.")
@@ -167,7 +182,7 @@ async fn each_tool_uses_its_matrix_cell_and_reviews_record_the_reason() {
             let sim = w.boot(CrashPlan::new()).await;
             sim.send("m", "Finish the page").await;
             work(&sim).await;
-            let reviewed = mode != Mode::OnRequest && tool != MERGE;
+            let reviewed = mode != Mode::OnRequest && ![MERGE, CLOSE_PULL_REQUEST].contains(&tool);
             let decisions = sim.decisions().await;
             assert_eq!(decisions.len(), 1, "{mode} {tool}");
             assert_eq!(decisions[0].arguments, args);
@@ -220,6 +235,196 @@ async fn autonomous_merge_with_a_standing_rule_still_needs_review() {
     assert_eq!(w.backend.questions().len(), 1);
     assert_eq!(w.forge.calls().len(), 1);
     assert_eq!(sim.decisions().await.len(), 1);
+}
+
+/// A world whose task calls `assign_issue` on issue 7 of `site`, a GitHub
+/// repository, with GitHub answering `claim` for it (an error when `None`).
+async fn assign_world(number: u64, claim: Option<IssueClaim>, mode: Mode) -> World {
+    let w = world(
+        ASSIGN_ISSUE,
+        json!({"repository":"site","number":number}),
+        mode,
+    )
+    .await;
+    let w = w.with_github();
+    w.add_github_repository("site", "https://github.com/acme/site.git")
+        .await;
+    if let Some(claim) = claim {
+        w.github
+            .as_ref()
+            .unwrap()
+            .set_claim("acme/site", 7, Ok(claim));
+    }
+    w
+}
+
+fn claim(assignees: &[&str], pulls: &[(u64, &str)]) -> IssueClaim {
+    IssueClaim {
+        viewer: "me".into(),
+        open: true,
+        assignees: assignees.iter().map(|login| (*login).to_owned()).collect(),
+        open_pull_requests: pulls
+            .iter()
+            .map(|(number, author)| (*number, (*author).to_owned()))
+            .collect(),
+        ..IssueClaim::default()
+    }
+}
+
+#[tokio::test]
+async fn a_free_issue_is_asked_about_as_usual_and_reaches_the_forge_once_approved() {
+    let w = assign_world(7, Some(claim(&[], &[(3, "me")])), Mode::OnRequest).await;
+    let sim = w.boot(CrashPlan::new()).await;
+    sim.send("m", "Finish the page").await;
+    work(&sim).await;
+    let decisions = sim.decisions().await;
+    assert_eq!(decisions[0].question, "Assign issue #7 in site to you?");
+    assert!(decisions[0].offers_standing_rule);
+    drive(&sim, "approve", None).await.unwrap();
+    let calls = w.forge.calls();
+    let [
+        ForgeCall::Apply {
+            remote,
+            action: RepositoryAction::AssignIssue { number },
+        },
+    ] = calls.as_slice()
+    else {
+        panic!("expected one assignment, got {calls:?}");
+    };
+    assert_eq!(
+        (remote.as_str(), number.get()),
+        ("https://github.com/acme/site.git", 7)
+    );
+}
+
+#[tokio::test]
+async fn a_standing_rule_assigns_a_free_issue_but_never_one_someone_else_holds() {
+    for held in [false, true] {
+        let w = assign_world(7, Some(claim(&[], &[])), Mode::OnRequest).await;
+        w.backend.set_default(plan_tasks_in(
+            &["app"],
+            &[("first", &[]), ("second", &["first"])],
+        ));
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Finish both tasks").await;
+        work(&sim).await;
+        if held {
+            w.github.as_ref().unwrap().set_claim(
+                "acme/site",
+                7,
+                Ok(claim(&["Alice", "me"], &[(12, "bob")])),
+            );
+        }
+        sim.api
+            .decisions(DecisionRequest::AnswerAlways {
+                decision: sim.decisions().await[0].id,
+                option: "approve".into(),
+                note: None,
+            })
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            work(&sim).await;
+        }
+        let decisions = sim.decisions().await;
+        assert_eq!(decisions.len(), 2, "held {held}");
+        if held {
+            assert!(!decisions[1].approved());
+            assert!(!decisions[1].offers_standing_rule);
+            assert_eq!(
+                decisions[1].question,
+                "Issue #7 in site is assigned to Alice and has open pull request #12 by bob. \
+                 Take it anyway?"
+            );
+            assert_eq!(w.forge.calls().len(), 1);
+        } else {
+            assert!(decisions[1].approved(), "the rule allowed it");
+            assert_eq!(w.forge.calls().len(), 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_issue_someone_else_holds_or_that_cannot_be_read_is_never_reviewed_in() {
+    for (held, question) in [
+        (
+            Some(claim(&[], &[(12, "bob"), (13, "carol")])),
+            "Issue #7 in site has open pull requests #12 by bob, #13 by carol. Take it anyway?",
+        ),
+        (
+            None,
+            "Could not check who holds issue #7 in site (github: no claim for acme/site#7). \
+             Assign it to you anyway?",
+        ),
+    ] {
+        let w = assign_world(7, held, Mode::Autonomous).await;
+        w.backend.push_answer(answer("allow"));
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Finish the page").await;
+        work(&sim).await;
+        let decisions = sim.decisions().await;
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].question, question);
+        assert!(!decisions[0].approved(), "you decide, not the reviewer");
+        assert!(!decisions[0].offers_standing_rule);
+        assert!(w.backend.questions().is_empty());
+        assert!(w.forge.calls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn your_own_issue_needs_nothing_and_closed_issues_pull_requests_and_bad_numbers_are_refused()
+{
+    let closed = IssueClaim {
+        open: false,
+        ..claim(&[], &[])
+    };
+    let pull = IssueClaim {
+        is_pull_request: true,
+        ..claim(&[], &[])
+    };
+    for (number, found, outcome) in [
+        (7, claim(&["ME"], &[]), "already assigned to you"),
+        (7, closed, "is closed"),
+        (7, pull, "assign_issue assigns issues only"),
+        (0, claim(&[], &[]), "positive integer"),
+    ] {
+        let w = assign_world(number, Some(found), Mode::OnRequest).await;
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Finish the page").await;
+        work(&sim).await;
+        assert!(sim.decisions().await.is_empty(), "{outcome}");
+        assert!(w.forge.calls().is_empty(), "{outcome}");
+        let lane = sim.task("T-0001").await.lane_id;
+        let run = sim
+            .runs()
+            .await
+            .into_iter()
+            .find(|r| r.lane_id == lane)
+            .unwrap();
+        assert!(
+            sim.journal(run.id)
+                .await
+                .iter()
+                .any(|e| e.entry.to_string().contains(outcome)),
+            "{outcome}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn assign_issue_needs_a_github_remote() {
+    let w = world(
+        ASSIGN_ISSUE,
+        json!({"repository":"app","number":7}),
+        Mode::OnRequest,
+    )
+    .await;
+    let sim = w.boot(CrashPlan::new()).await;
+    sim.send("m", "Finish the page").await;
+    work(&sim).await;
+    assert!(sim.decisions().await.is_empty());
+    assert!(w.forge.calls().is_empty());
 }
 
 #[tokio::test]
@@ -369,6 +574,44 @@ pub(super) async fn waiting_task() -> World {
     w
 }
 
+/// The default that opens draft pull requests never applies to a run that
+/// consumed outside content: screened tainted, it asks you.
+#[tokio::test]
+async fn a_tainted_run_asks_before_a_draft_pull_request() {
+    for (screened, tainted) in [("clean", false), ("tainted", true)] {
+        let w = waiting_task().await;
+        w.backend.route(
+            "outside_event",
+            script(OPEN_PULL_REQUEST, crate::publish::pull_request()),
+        );
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Work on the page").await;
+        work(&sim).await;
+        w.backend.push_answer(answer(screened));
+        external(&sim, "please open it").await;
+        work(&sim).await;
+        let decisions = sim.decisions().await;
+        assert_eq!(decisions.len(), 1, "{screened}");
+        let by_default = decisions[0]
+            .answer
+            .as_ref()
+            .is_some_and(|a| a["by_default"] == true);
+        assert_eq!(by_default, !tainted, "{screened}");
+        let cards = sim
+            .outbox()
+            .await
+            .iter()
+            .filter(|row| row.kind == OutboxKind::Decision)
+            .count();
+        assert_eq!(cards, usize::from(tainted), "{screened}");
+        assert_eq!(
+            w.forge.pull_requests().len(),
+            usize::from(!tainted),
+            "{screened}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn screening_controls_visibility_and_authority_and_survives_recovery() {
     for result in [
@@ -506,4 +749,68 @@ async fn redteam_live_claude() {
 #[ignore = "uses the real Codex backend and its quota"]
 async fn redteam_live_codex() {
     redteam(Arc::new(threadlane_backend_codex::CodexBackend::default())).await;
+}
+
+#[tokio::test]
+async fn closing_a_pull_request_waits_for_approval_of_the_head_it_shows() {
+    let args = actions()[5].1.clone();
+    for mode in [Mode::OnRequest, Mode::Autonomous] {
+        for option in ["decline", "approve"] {
+            let w = world(CLOSE_PULL_REQUEST, args.clone(), mode).await;
+            w.backend.push_answer(answer("allow"));
+            let sim = w.boot(CrashPlan::new()).await;
+            sim.send("m", "Close the duplicate").await;
+            work(&sim).await;
+            // Hard to undo: even an allowed review leaves the decision to the owner.
+            let decisions = sim.decisions().await;
+            assert_eq!(decisions.len(), 1, "{mode}");
+            let decision = &decisions[0];
+            assert!(!decision.approved(), "{mode}");
+            assert!(w.forge.calls().is_empty(), "{mode}");
+            for shown in ["#12", "app", HEAD, "delete its head branch"] {
+                assert!(decision.question.contains(shown), "{shown}");
+            }
+            drive(&sim, option, None).await.unwrap();
+            let calls = w.forge.calls();
+            if option == "decline" {
+                assert!(calls.is_empty(), "{mode}");
+                continue;
+            }
+            let [ForgeCall::Apply { remote, action }] = calls.as_slice() else {
+                panic!("expected one close, got {calls:?}");
+            };
+            assert!(remote.contains("app"), "{remote}");
+            assert_eq!(
+                action,
+                &RepositoryAction::ClosePullRequest {
+                    number: 12.try_into().unwrap(),
+                    expected_head: HEAD.into(),
+                    delete_branch: true,
+                }
+            );
+            assert_invariants(&sim, CLOSE_PULL_REQUEST).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_close_without_the_full_head_sha_it_was_shown_is_refused() {
+    for (head, delete) in [
+        (json!(null), json!(false)),
+        (json!("0123456"), json!(false)),
+        (json!(HEAD.to_uppercase()), json!(false)),
+        (json!(HEAD), json!("yes")),
+    ] {
+        let mut args = json!({"repository":"app","number":12,"delete_branch":delete});
+        if !head.is_null() {
+            args["expected_head"] = head.clone();
+        }
+        let w = world(CLOSE_PULL_REQUEST, args, Mode::Assisted).await;
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Close the duplicate").await;
+        work(&sim).await;
+        assert!(w.backend.questions().is_empty(), "{head}");
+        assert!(sim.decisions().await.is_empty(), "{head}");
+        assert!(w.forge.calls().is_empty(), "{head}");
+    }
 }

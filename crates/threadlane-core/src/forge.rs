@@ -28,6 +28,28 @@ pub const REPORT_LIMITATION: &str = "report_threadlane_limitation";
 pub const MERGE: &str = "merge";
 /// Mark a registered repository's draft pull request ready for review.
 pub const MARK_READY: &str = "mark_ready";
+/// Add or remove labels on a registered repository's issue (not a pull request).
+pub const LABEL_ISSUE: &str = "label_issue";
+/// The most labels one `label_issue` call may name.
+pub const MAX_LABELS: usize = 20;
+
+/// Whether `name` can be a GitHub label: at most 50 characters, no control
+/// characters, and no surrounding whitespace.
+#[must_use]
+pub fn valid_label_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 50
+        && name.trim() == name
+        && !name.chars().any(char::is_control)
+}
+/// Close a registered repository's pull request, optionally deleting its head branch.
+pub const CLOSE_PULL_REQUEST: &str = "close_pull_request";
+/// Run one `gh` command against a registered repository, for a GitHub action
+/// no dedicated tool covers yet. The user always decides it.
+pub const GITHUB_CLI: &str = "github_cli";
+
+/// Assign a registered repository's issue to the logged-in user.
+pub const ASSIGN_ISSUE: &str = "assign_issue";
 
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -44,6 +66,24 @@ pub enum RepositoryAction {
     Merge { number: std::num::NonZeroU64 },
     /// Mark the numbered draft pull request ready for review.
     MarkReady { number: std::num::NonZeroU64 },
+    /// Add and remove labels on the numbered issue. Labels the repository
+    /// does not have are reported, never created.
+    LabelIssue {
+        number: std::num::NonZeroU64,
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
+    /// Close the numbered pull request if its head is still `expected_head`,
+    /// then delete its head branch if asked.
+    ClosePullRequest {
+        number: std::num::NonZeroU64,
+        expected_head: String,
+        delete_branch: bool,
+    },
+    /// Run `gh` with these arguments, scoped to the repository with `--repo`.
+    GhCli { args: Vec<String> },
+    /// Assign the numbered issue to the logged-in user.
+    AssignIssue { number: std::num::NonZeroU64 },
 }
 
 /// Kind of numbered GitHub item to comment on.
@@ -121,4 +161,20 @@ pub trait Forge: Send + Sync + fmt::Debug {
         worktree: &Path,
         branch: &str,
     ) -> Result<Option<String>, ForgeError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_label_name;
+
+    #[test]
+    fn label_names_are_short_plain_text() {
+        assert!(valid_label_name("bug"));
+        assert!(valid_label_name("good first issue"));
+        assert!(valid_label_name("area: hub/runner"));
+        assert!(!valid_label_name(""));
+        assert!(!valid_label_name(" bug"));
+        assert!(!valid_label_name("bug\n"));
+        assert!(!valid_label_name(&"x".repeat(51)));
+    }
 }

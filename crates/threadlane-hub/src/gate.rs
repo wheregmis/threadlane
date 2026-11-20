@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value as Json};
+use threadlane_core::forge::{ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::model::{Cell, Mode, StandingRule};
 use threadlane_core::tools::{Tier, Verdict};
 
@@ -89,10 +90,19 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
                 .then(|| ((*field).to_owned(), value.clone()))
         })
         .collect();
-    if tool == crate::FAST_FORWARD_PULL_REQUEST
-        && let Some(number) = arguments["number"].as_u64()
+    // A standing rule for these covers one pull request or issue, not the whole repository.
+    if matches!(
+        tool,
+        crate::FAST_FORWARD_PULL_REQUEST | crate::LABEL_ISSUE | crate::CLOSE_PULL_REQUEST
+    ) && let Some(number) = arguments["number"].as_u64()
     {
         targets.insert("number".into(), number.into());
+    }
+    // A standing rule to close one PR covers only the head it was shown.
+    if tool == crate::CLOSE_PULL_REQUEST
+        && let Some(head) = arguments.get(threadlane_core::forge::EXPECTED_HEAD)
+    {
+        targets.insert(threadlane_core::forge::EXPECTED_HEAD.into(), head.clone());
     }
     Json::Object(targets)
 }
@@ -126,6 +136,13 @@ pub fn loosest_override(tier: Tier, ceiling: Mode) -> Cell {
     cell(Row::Tier(tier), ceiling)
 }
 
+/// Whether the built-in default covers the call: opening a draft pull
+/// request, or pushing the task's own branch (no `onto_task`).
+fn allowed_by_default(tool: &str, arguments: &Json) -> bool {
+    tool == OPEN_PULL_REQUEST
+        || (tool == PUBLISH_BRANCH && arguments.get(ONTO_TASK).is_none_or(Json::is_null))
+}
+
 /// Decides one call, first rule that applies wins (Plan.md §9.1):
 ///
 /// 1. the forbidden tier blocks;
@@ -135,7 +152,11 @@ pub fn loosest_override(tier: Tier, ceiling: Mode) -> Cell {
 ///    up to the ceiling's column (stepped down too if tainted); a standing
 ///    rule matching the call then allows a tier 0 to 2 call in any mode, and
 ///    has a tier 3 call reviewed in Autonomous;
-/// 4. otherwise the matrix's cell for the row and the effective mode.
+/// 4. otherwise, a call the cell would ask about or review is allowed by
+///    default when it opens a draft pull request or pushes the task's own
+///    branch, the run is untainted, and the binding sets no override for the
+///    tier;
+/// 5. otherwise the matrix's cell for the row and the effective mode.
 #[must_use]
 pub fn gate(input: &GateInput<'_>) -> Verdict {
     // shortcut: the forbidden list is the built-in tier only; add space and
@@ -198,8 +219,16 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
             _ => {}
         }
     }
-    // A tier 3 rule can apply only where the project allows Autonomous.
-    let offers_rule = ruled && (input.tier < Tier::SharedHardToUndo || ceiling == Mode::Autonomous);
+    if matches!(verdict, Cell::Ask | Cell::Review)
+        && row == Row::Tier(input.tier)
+        && !input.tainted
+        && !input.overrides.contains_key(&input.tier)
+        && allowed_by_default(input.tool, input.arguments)
+    {
+        return Verdict::AllowByDefault;
+    }
+    // A tier 3 rule applies only where the agent acts in Autonomous.
+    let offers_rule = ruled && (input.tier < Tier::SharedHardToUndo || mode == Mode::Autonomous);
     match verdict {
         Cell::Allow => Verdict::Allow { rule: None },
         Cell::Review => Verdict::Review { offers_rule },
@@ -233,6 +262,7 @@ mod tests {
     enum V {
         Allow,
         Rule,
+        Default,
         Review,
         Ask,
         AskOffer,
@@ -243,6 +273,7 @@ mod tests {
         match verdict {
             Verdict::Allow { rule: None } => V::Allow,
             Verdict::Allow { rule: Some(_) } => V::Rule,
+            Verdict::AllowByDefault => V::Default,
             Verdict::Review { .. } => V::Review,
             Verdict::Ask { offers_rule: false } => V::Ask,
             Verdict::Ask { offers_rule: true } => V::AskOffer,
@@ -307,7 +338,7 @@ mod tests {
 
     #[test]
     fn the_gate_follows_the_matrix_with_ceilings_overrides_rules_and_taint() {
-        use V::{Allow, Ask, AskOffer, Block, Review, Rule};
+        use V::{Allow, Ask, AskOffer, Block, Default, Review, Rule};
         let tainted = |c: Case| Case { tainted: true, ..c };
         let proposal = |c: Case, assignee: Mode| Case {
             tool: CREATE_TASK,
@@ -316,8 +347,16 @@ mod tests {
             ..c
         };
         let ruled = |c: Case| Case {
-            tool: "open_pull_request",
+            tool: "comment",
             rule: Some("app"),
+            ..c
+        };
+        let drafted = |c: Case| Case {
+            tool: "open_pull_request",
+            ..c
+        };
+        let pushed = |c: Case| Case {
+            tool: "publish_branch",
             ..c
         };
         let table: Vec<Case> = vec![
@@ -331,8 +370,13 @@ mod tests {
             case("tier 2 on request", T2, ON, AskOffer),
             case("tier 2 assisted", T2, AS, Review),
             case("tier 2 autonomous", T2, AU, Review),
-            case("tier 3 on request", T3, ON, AskOffer),
-            case("tier 3 assisted", T3, AS, AskOffer),
+            case("tier 3 on request", T3, ON, Ask),
+            case(
+                "tier 3 assisted offers no rule it would not apply",
+                T3,
+                AS,
+                Ask,
+            ),
             case("tier 3 autonomous", T3, AU, AskOffer),
             case("forbidden on request", TF, ON, Block),
             case("forbidden assisted", TF, AS, Block),
@@ -348,9 +392,9 @@ mod tests {
             tainted(case("tainted tier 2 on request", T2, ON, AskOffer)),
             tainted(case("tainted tier 2 assisted asks", T2, AS, AskOffer)),
             tainted(case("tainted tier 2 autonomous", T2, AU, Review)),
-            tainted(case("tainted tier 3 on request", T3, ON, AskOffer)),
-            tainted(case("tainted tier 3 assisted", T3, AS, AskOffer)),
-            tainted(case("tainted tier 3 autonomous", T3, AU, AskOffer)),
+            tainted(case("tainted tier 3 on request", T3, ON, Ask)),
+            tainted(case("tainted tier 3 assisted", T3, AS, Ask)),
+            tainted(case("tainted tier 3 autonomous", T3, AU, Ask)),
             tainted(case("tainted forbidden", TF, AU, Block)),
             tainted(case("tainted off", T0, Mode::Off, Block)),
             // Ceilings: the binding acts at the lower of its mode and both.
@@ -427,18 +471,58 @@ mod tests {
             ruled(case("tier 2 rule assisted", T2, AS, Rule)),
             ruled(case("tier 2 rule autonomous", T2, AU, Rule)),
             tainted(ruled(case("tier 2 rule tainted", T2, ON, Rule))),
-            ruled(case("tier 3 rule on request", T3, ON, AskOffer)),
-            ruled(case("tier 3 rule assisted", T3, AS, AskOffer)),
+            ruled(case("tier 3 rule on request", T3, ON, Ask)),
+            ruled(case("tier 3 rule assisted", T3, AS, Ask)),
             ruled(case("tier 3 rule autonomous is reviewed", T3, AU, Review)),
-            tainted(ruled(case("tier 3 rule tainted", T3, AU, AskOffer))),
+            tainted(ruled(case("tier 3 rule tainted", T3, AU, Ask))),
             Case {
                 rule: Some("other"),
                 ..ruled(case("a rule for another target", T2, ON, AskOffer))
             },
             Case {
-                tool: "publish_branch",
+                tool: "create_issue",
                 rule: Some("app"),
                 ..case("a rule for another tool", T2, ON, AskOffer)
+            },
+            // The default: a draft pull request and the task's own branch,
+            // untainted and with no override for the tier.
+            drafted(case("a draft pull request on request", T2, ON, Default)),
+            drafted(case("a draft pull request assisted", T2, AS, Default)),
+            drafted(case("a draft pull request autonomous", T2, AU, Default)),
+            pushed(case("the task branch on request", T2, ON, Default)),
+            pushed(case("the task branch assisted", T2, AS, Default)),
+            pushed(case("the task branch autonomous", T2, AU, Default)),
+            tainted(drafted(case("a tainted draft asks", T2, ON, AskOffer))),
+            tainted(drafted(case("a tainted draft is reviewed", T2, AU, Review))),
+            tainted(pushed(case("a tainted push asks", T2, AS, AskOffer))),
+            drafted(Case {
+                overrides: &[(T2, Cell::Ask)],
+                ..case("an override decides a draft", T2, AU, AskOffer)
+            }),
+            pushed(Case {
+                overrides: &[(T2, Cell::Review)],
+                ..case("an override decides a push", T2, ON, Review)
+            }),
+            pushed(Case {
+                overrides: &[(T2, Cell::Block)],
+                ..case("an override blocks a push", T2, AU, Block)
+            }),
+            drafted(case("an off agent opens nothing", T2, Mode::Off, Block)),
+            drafted(Case {
+                project: Some(Mode::Off),
+                ..case("an off ceiling opens nothing", T2, AU, Block)
+            }),
+            Case {
+                tool: "comment",
+                ..case("a comment still asks", T2, ON, AskOffer)
+            },
+            Case {
+                tool: "assign_issue",
+                ..case("an assignment is still reviewed", T2, AS, Review)
+            },
+            Case {
+                tool: "merge",
+                ..case("a merge still asks", T3, ON, Ask)
             },
             Case {
                 rule: Some("revoked"),
@@ -540,16 +624,8 @@ mod tests {
                     json!({ "path": "space/instructions.md" }),
                     false,
                 )],
-                Some("revoked") => vec![rule(
-                    "open_pull_request",
-                    json!({ "repository": "app" }),
-                    true,
-                )],
-                Some(name) => vec![rule(
-                    "open_pull_request",
-                    json!({ "repository": name }),
-                    false,
-                )],
+                Some("revoked") => vec![rule("comment", json!({ "repository": "app" }), true)],
+                Some(name) => vec![rule("comment", json!({ "repository": name }), false)],
             };
             let overrides: Overrides = row.overrides.iter().copied().collect();
             let got = gate(&GateInput {
@@ -614,6 +690,69 @@ mod tests {
                 &json!({"repository":"app","number":42})
             ),
             json!({"repository":"app","number":42})
+        );
+        assert_eq!(
+            rule_pattern(
+                crate::LABEL_ISSUE,
+                &json!({"repository":"app","number":7,"add":["bug"]})
+            ),
+            json!({"repository":"app","number":7})
+        );
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            rule_pattern(
+                crate::CLOSE_PULL_REQUEST,
+                &json!({"repository":"app","number":42,"expected_head":head,"delete_branch":true})
+            ),
+            json!({"repository":"app","number":42,"expected_head":head})
+        );
+    }
+
+    #[test]
+    fn the_default_covers_only_drafts_and_the_task_branch() {
+        for (tool, arguments, covered) in [
+            ("open_pull_request", json!({"repository":"app"}), true),
+            ("publish_branch", json!({"repository":"app"}), true),
+            (
+                "publish_branch",
+                json!({"repository":"app","onto_task":null}),
+                true,
+            ),
+            (
+                "publish_branch",
+                json!({"repository":"app","onto_task":"T-0001"}),
+                false,
+            ),
+            (
+                "fast_forward_pull_request",
+                json!({"repository":"app","number":1}),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                allowed_by_default(tool, &arguments),
+                covered,
+                "{tool} {arguments}"
+            );
+        }
+        let onto = json!({"repository":"app","onto_task":"T-0001"});
+        let verdict = gate(&GateInput {
+            tool: "publish_branch",
+            tier: T2,
+            arguments: &onto,
+            mode: ON,
+            space_ceiling: AU,
+            project_ceiling: None,
+            overrides: &Overrides::new(),
+            rules: &[],
+            tainted: false,
+            requested: true,
+            new_work: None,
+        });
+        assert_eq!(
+            short(&verdict),
+            V::AskOffer,
+            "a push onto another task asks"
         );
     }
 

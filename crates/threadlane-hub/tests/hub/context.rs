@@ -76,8 +76,8 @@ async fn appended_instructions_are_byte_identical_between_runs() {
     assert!(first.starts_with(LEAD_INSTRUCTIONS));
     assert!(first.contains(LEAD_RULES));
     for rule in [
-        "sees only what you send with the send_message tool",
-        "never delivered",
+        "Reply to the user with the send_message tool",
+        "call stay_silent with the reason",
         "Send nothing when nothing needs saying",
         "at most one message per reply",
     ] {

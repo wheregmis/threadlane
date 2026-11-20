@@ -27,7 +27,8 @@ pub async fn assert_invariants(sim: &Sim, scenario: &str) {
 
 /// Every decision that was asked has exactly one card in the outbox
 /// (Plan.md §10.1), however often a crash interrupted asking. One a
-/// standing rule answered was never asked, and has none.
+/// standing rule, the classifier or the built-in default answered was never
+/// asked, and has none.
 pub async fn assert_one_card_per_decision(sim: &Sim, scenario: &str) {
     let outbox = sim.outbox().await;
     let events = sim.events().await;
@@ -49,7 +50,7 @@ pub async fn assert_one_card_per_decision(sim: &Sim, scenario: &str) {
                     && !decision
                         .answer
                         .as_ref()
-                        .is_some_and(|a| a["classifier"] == "allow")
+                        .is_some_and(|a| a["classifier"] == "allow" || a["by_default"] == true)
             ),
             "{scenario}: decision {} has {cards} cards",
             decision.id

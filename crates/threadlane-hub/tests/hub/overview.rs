@@ -691,6 +691,66 @@ async fn stage_b_conversations_share_the_digest_and_route_a_dead_delivery_to_its
 }
 
 #[tokio::test]
+async fn run_usage_counts_a_resumed_sessions_total_once_like_space_usage() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    // Claude reports the session's running cost; its tokens are this run's.
+    let mut sessions = Vec::new();
+    for (n, cost, cache_read) in [(1, 0.5, 100), (2, 0.8, 0)] {
+        hub.send(&format!("resume-{n}"), "Check the code").await;
+        let (lease, run) = begin(&*hub.link).await;
+        sessions.push(run.session_id);
+        let entry = json!({"type": "finished", "usage": {"total_cost_usd": cost, "usage": {
+            "input_tokens": 10, "output_tokens": 2,
+            "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": 5}}});
+        hub.link
+            .append(
+                &lease,
+                &[JournalEntry {
+                    run_id: run.run_id,
+                    seq: 1,
+                    at: hub.clock.now(),
+                    entry,
+                }],
+            )
+            .await
+            .unwrap();
+        hub.link.complete(&lease, run.run_id, None).await.unwrap();
+        hub.link.release(&lease).await.unwrap();
+        hub.clock.advance(Duration::from_secs(60));
+    }
+    assert_eq!(sessions[0], sessions[1]);
+    // Task Details reads the same per-run usage through `lane_run_usage`.
+    let OverviewReply::LeadRuns { runs } =
+        overview(&hub, OverviewRequest::LeadRuns { project: None }).await
+    else {
+        panic!("lead runs")
+    };
+    let mut usage: Vec<_> = runs.iter().map(|r| r.usage.clone().unwrap()).collect();
+    usage.sort_by(|a, b| a.cost_usd.partial_cmp(&b.cost_usd).unwrap());
+    assert_eq!(
+        usage
+            .iter()
+            .map(|u| (u.input_tokens, u.output_tokens))
+            .collect::<Vec<_>>(),
+        [(Some(15), Some(2)), (Some(115), Some(2))]
+    );
+    assert!((usage[0].cost_usd.unwrap() - 0.3).abs() < 1e-9);
+    assert_eq!(usage[1].cost_usd, Some(0.5));
+    let OverviewReply::SpaceUsage { groups } =
+        overview(&hub, OverviewRequest::SpaceUsage { days: 7 }).await
+    else {
+        panic!("usage")
+    };
+    let [group] = groups.as_slice() else {
+        panic!("{groups:?}")
+    };
+    assert_eq!(group.tokens, 134);
+    let listed: f64 = usage.iter().filter_map(|u| u.cost_usd).sum();
+    assert!((group.cost - listed).abs() < 1e-9 && (group.cost - 0.8).abs() < 1e-9);
+}
+
+#[tokio::test]
 async fn overview_lead_exposes_the_latest_step_then_backend_usage_after_completion() {
     let hub = TestHub::start().await;
     hub.hello().await;

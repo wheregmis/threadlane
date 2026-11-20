@@ -70,11 +70,11 @@ pub use crate::timers::{CANCEL_TIMER, CREATE_SCHEDULE, LIST_TIMERS, SET_FOLLOW_U
 pub use crate::tools::ASK_USER;
 pub use crate::tools::{
     CANCEL_TASK, CLIENT_CHANNEL, CREATE_TASK, CombinedTools, FINISH_TASK, HubTools, LIST_TASKS,
-    SEND_MESSAGE, UPDATE_TASK, derived_call_key, offered_in,
+    PR_REVIEW_STATUS, SEND_MESSAGE, STAY_SILENT, UPDATE_TASK, derived_call_key, offered_in,
 };
 pub use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST, MARK_READY, MERGE, OPEN_PULL_REQUEST,
-    PUBLISH_BRANCH,
+    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST,
+    LABEL_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
 };
 
 /// Installs the global `tracing` subscriber. `RUST_LOG` overrides the
@@ -99,7 +99,7 @@ pub fn init_logging(config: &LogConfig) -> anyhow::Result<()> {
 /// process cannot open the same database (Plan.md §18.1).
 #[derive(Debug)]
 pub struct DirLock {
-    _file: File,
+    file: File,
 }
 
 impl DirLock {
@@ -122,6 +122,43 @@ impl DirLock {
                 data_dir.root().display()
             )
         })?;
-        Ok(Self { _file: file })
+        Ok(Self { file })
+    }
+}
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        // A concurrent fork can briefly retain the open file description
+        // until exec closes its inherited descriptor. Unlock before closing
+        // so that reference cannot delay an immediate hub restart.
+        if let Err(error) = self.file.unlock() {
+            tracing::warn!(%error, "could not release the hub directory lock");
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod dir_lock_tests {
+    use super::*;
+
+    #[test]
+    fn dropping_the_dir_lock_releases_it_even_if_a_child_still_has_the_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(dir.path().to_path_buf());
+        let lock = DirLock::acquire(&data_dir).unwrap();
+
+        // A duplicate keeps the same open file description alive, as a child
+        // forked by another thread can do until it reaches exec.
+        let inherited = lock.file.try_clone().unwrap();
+        assert!(DirLock::acquire(&data_dir).is_err());
+        drop(lock);
+
+        let reopened = DirLock::acquire(&data_dir).expect("drop releases the OS lock");
+        drop(inherited);
+        assert!(
+            DirLock::acquire(&data_dir).is_err(),
+            "closing the old descriptor cannot release the new owner's lock"
+        );
+        drop(reopened);
     }
 }

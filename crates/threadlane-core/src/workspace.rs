@@ -105,6 +105,13 @@ pub struct MergeCheck {
     pub diff: Option<DiffPreview>,
 }
 
+/// Identifies a checkout reused when a review resumes on the same machine.
+#[derive(Debug, Clone, Copy)]
+pub enum ReviewCheckout {
+    Submission(RunId),
+    PullRequest(u64),
+}
+
 /// An implementation commit for a review, keyed by the project's repository ID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewRevision {
@@ -146,7 +153,7 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
     async fn prepare_review(
         &self,
         task: TaskId,
-        submission: RunId,
+        checkout: ReviewCheckout,
         repositories: &[Repository],
         revisions: &[ReviewRevision],
     ) -> Result<Vec<PathBuf>, WorkspaceError>;

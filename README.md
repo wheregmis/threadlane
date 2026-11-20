@@ -250,12 +250,7 @@ including tomorrow in your local time zone. **Usage** groups runs by project, ag
 backend and shows how often providers reported cost and tokens.
 
 From a project's **Tasks**, open **Outputs** to search published pull
-requests, saved reports and attached images. Open **Review workflow** to edit
-the space's implementation and review instructions, choose two specialists
-and start linked tasks for a registered repository. The owner can accept the
-review or request changes. **Preview PR review team** shows which agents will
-be created or reused and the proposed weekday routine. It starts paused
-so you can run it once before enabling the schedule.
+requests, saved reports and attached images.
 
 Repositories a project's tasks work in:
 

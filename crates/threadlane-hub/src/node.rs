@@ -183,6 +183,7 @@ impl Hub {
         shutdown: impl Future<Output = ()> + Send,
         updates: Option<Arc<HubUpdates>>,
     ) -> anyhow::Result<()> {
+        let _awake = self.config.power.keep_awake.then(keep_awake).flatten();
         let mut core = self.core().await?;
         let iroh = &self.config.iroh;
         let endpoint = if iroh.enabled {
@@ -299,6 +300,20 @@ async fn print_first_join_code(core: &HubCore) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Holds macOS's idle-sleep assertion while the returned child lives: it is
+/// killed when dropped, and `-w` ends it if the hub dies first.
+fn keep_awake() -> Option<tokio::process::Child> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    tokio::process::Command::new("caffeinate")
+        .args(["-i", "-w", &std::process::id().to_string()])
+        .kill_on_drop(true)
+        .spawn()
+        .inspect_err(|error| tracing::warn!(%error, "could not keep the machine awake"))
+        .ok()
 }
 
 async fn until_stopped(mut stopped: watch::Receiver<bool>) {

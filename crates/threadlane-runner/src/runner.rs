@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +29,9 @@ use threadlane_core::runtime::steps::runner::{
 };
 use threadlane_core::runtime::{Killed, Step, StepHook};
 use threadlane_core::time::{Clock, Timestamp};
-use threadlane_core::workspace::{MergeCheck, Workspaces, task_branch, task_ref, valid_commit_id};
+use threadlane_core::workspace::{
+    MergeCheck, ReviewCheckout, Workspaces, task_branch, task_ref, valid_commit_id,
+};
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -394,6 +396,7 @@ impl Inner {
         }
         let mut performed = self.perform(lane, assignment).await?;
         performed.push_str(&self.bring_in_base(assignment).await);
+        performed.push_str(&self.earlier_work(lane, assignment, &working_dir).await);
         lane.check()?;
         self.link.check_running(&lane.lease()).await?;
 
@@ -1173,6 +1176,29 @@ impl Inner {
         }
     }
 
+    /// Where a task that worked without a repository left its work, once a
+    /// repository is attached and its runs start in a worktree instead.
+    async fn earlier_work(
+        &self,
+        lane: &LaneState,
+        assignment: &RunAssignment,
+        working_dir: &Path,
+    ) -> String {
+        if assignment.task_id.is_none() || assignment.review.is_some() {
+            return String::new();
+        }
+        let earlier = self.config.lanes_dir.join(lane.lease().lane_id.to_string());
+        if earlier == working_dir || !has_work(&earlier).await {
+            return String::new();
+        }
+        format!(
+            "\nYour work from before a repository was attached is in {}. \
+             Your working directory is now {}: bring any completed work you still need into it.\n",
+            earlier.display(),
+            working_dir.display()
+        )
+    }
+
     /// The task's worktree of its first repository, set up if needed, for a
     /// task that names repositories; otherwise `<lanes_dir>/<lane id>`,
     /// created if missing.
@@ -1187,7 +1213,7 @@ impl Inner {
                     self.workspaces
                         .prepare_review(
                             task,
-                            review.submission,
+                            ReviewCheckout::Submission(review.submission),
                             &assignment.repositories,
                             &review.revisions,
                         )
@@ -1201,6 +1227,28 @@ impl Inner {
                 }
             }
             .map_err(|error| format!("could not set up the task's worktrees: {error}"))?;
+            // Task checkpoints and approved actions still use the managed task branches.
+            // Give the Reviewer its own checkout, even when the target is not the first repository.
+            if let Some(review) = &assignment.pr_review {
+                let repository = assignment
+                    .repositories
+                    .iter()
+                    .find(|repo| repo.id == review.revision.repository)
+                    .ok_or_else(|| "the assigned PR repository is missing".to_owned())?;
+                return self
+                    .workspaces
+                    .prepare_review(
+                        task,
+                        ReviewCheckout::PullRequest(review.number),
+                        std::slice::from_ref(repository),
+                        std::slice::from_ref(&review.revision),
+                    )
+                    .await
+                    .map_err(|error| format!("could not prepare the PR review checkout: {error}"))?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "no PR review checkout was set up".to_owned());
+            }
             if !assignment.repositories.is_empty() {
                 return paths
                     .into_iter()
@@ -1494,6 +1542,19 @@ fn publish_target(
             .ok_or_else(|| "onto_task is not a task id".to_owned()),
         _ => Ok(task_branch(task)),
     }
+}
+
+/// Whether `dir` holds anything besides review checkouts, which share it.
+async fn has_work(dir: &Path) -> bool {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return false;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_name() != "reviews" {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

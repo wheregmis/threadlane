@@ -146,6 +146,9 @@ pub enum Verdict {
     /// would have asked about: such a call is recorded as a decision the
     /// rule answered, and performed as an approved one is.
     Allow { rule: Option<StandingRuleId> },
+    /// Proceed by the built-in default: recorded and performed as a
+    /// rule-allowed call is, with the decision marked as allowed by default.
+    AllowByDefault,
     /// Classifier review. An unavailable or malformed answer opens a decision
     /// with the same `offers_rule` semantics as [`Verdict::Ask`].
     Review { offers_rule: bool },

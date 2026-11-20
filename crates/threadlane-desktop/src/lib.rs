@@ -50,12 +50,12 @@ mod settings;
 mod tasks;
 mod timeline;
 
-pub use agent_edit::{AgentBinding, AgentEdit, AgentFields};
+pub use agent_edit::{AgentBinding, AgentEdit, AgentFields, backend_summary};
 pub use clock::{When, duration, format_count, parse_iso_utc};
 pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
 pub use control::{
-    AgentDraft, AgentForm, BACKENDS, Recorded, RecordedRow, TaskControl, TaskForm, add_repository,
-    can_confirm_deletion, copy_agent, same_remote,
+    AgentDraft, AgentForm, BACKENDS, Publication, Recorded, RecordedRow, TaskControl, TaskForm,
+    add_repository, can_confirm_deletion, copy_agent, same_remote,
 };
 pub use conversation::{
     Digest, Line, belongs_in_conversation, follow_latest, message_limit, newest_message,
@@ -470,8 +470,6 @@ pub enum Tab {
     Memory,
     /// Its agents and their permissions.
     Team,
-    /// Its review workflow.
-    Workflow,
     /// Its routines and follow-ups.
     Routines,
     /// Its repositories and machines.
@@ -480,11 +478,10 @@ pub enum Tab {
 
 impl Tab {
     /// Every tab, in the order the tab bar shows them: Chat first.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Conversation,
         Self::Tasks,
         Self::Team,
-        Self::Workflow,
         Self::Routines,
         Self::Memory,
         Self::Setup,
@@ -498,9 +495,21 @@ impl Tab {
             Self::Conversation => "Chat",
             Self::Memory => "Memory",
             Self::Team => "Team",
-            Self::Workflow => "Workflow",
             Self::Routines => "Routines",
             Self::Setup => "Setup",
+        }
+    }
+
+    /// What it shows, as the tooltip on its icon-only tab.
+    #[must_use]
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            Self::Tasks => "Tasks: the board",
+            Self::Conversation => "Chat with the lead",
+            Self::Memory => "Memory: notes and progress files",
+            Self::Team => "Team: agents and permissions",
+            Self::Routines => "Routines and follow-ups",
+            Self::Setup => "Setup: repositories and machines",
         }
     }
 
@@ -1581,6 +1590,21 @@ impl AppState {
         self.queue.iter().filter(|queued| self.shown(&queued.space))
     }
 
+    /// Whether the Inbox's Needs you tab has nothing to show: no decisions,
+    /// blockers or running tasks in the spaces shown, and no gaps in either.
+    #[must_use]
+    pub fn caught_up(&self) -> bool {
+        self.needs_you().next().is_none()
+            && self.running().is_empty()
+            && self.gaps(Part::Decisions).is_empty()
+            && self.gaps(Part::Running).is_empty()
+            && self
+                .spaces
+                .iter()
+                .filter(|space| self.shown(&space.name))
+                .all(|space| self.blocked(&space.name).is_none())
+    }
+
     /// The contents and treatment of an open decision card, by decision kind.
     #[must_use]
     pub fn decision_card(queued: &Queued) -> DecisionCard {
@@ -2588,13 +2612,34 @@ impl AppState {
         view.repositories = take(&mut view.answers, Part::Repositories, repositories);
     }
 
-    /// The `owner/repo` of `project`'s first repository with a GitHub remote.
+    /// The `owner/repo` a bare `#N` in `project` refers to: its only GitHub
+    /// repository, or `None` when it has none or several.
     #[must_use]
     pub fn github_repository(&self, space: &str, project: &str) -> Option<String> {
-        self.project(space, project)?
+        self.github_repository_among(space, project, None)
+    }
+
+    /// Like [`Self::github_repository`], among only `repositories` of
+    /// `project` (such as a task's attached ones); `None` means all of them,
+    /// while `Some(&[])` (a task with no repositories) means none.
+    #[must_use]
+    pub fn github_repository_among(
+        &self,
+        space: &str,
+        project: &str,
+        repositories: Option<&[threadlane_core::ids::RepositoryId]>,
+    ) -> Option<String> {
+        let mut slugs = self
+            .project(space, project)?
             .repositories
             .iter()
-            .find_map(|repository| github_repository(&repository.remote_url))
+            .filter(|repository| repositories.is_none_or(|among| among.contains(&repository.id)))
+            .filter_map(|repository| github_repository(&repository.remote_url));
+        let first = slugs.next()?;
+        // Several repositories make a bare `#N` ambiguous: don't guess.
+        slugs
+            .all(|slug| slug.eq_ignore_ascii_case(&first))
+            .then_some(first)
     }
 
     /// Takes the bindings of each project, for the modes grid.

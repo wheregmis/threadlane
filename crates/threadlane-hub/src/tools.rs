@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST, MARK_READY, MERGE, OPEN_PULL_REQUEST,
-    PUBLISH_BRANCH, REPORT_LIMITATION,
+    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST, GITHUB_CLI,
+    LABEL_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH, REPORT_LIMITATION,
 };
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
@@ -23,7 +23,7 @@ use threadlane_core::store::{
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry};
 use threadlane_core::workspace::{MergeCheck, ReviewRevision};
-use threadlane_store::HubDb;
+use threadlane_store::{HubDb, PrReviewAssignment, PrReviewHead, PrReviewStatus};
 
 use crate::error::tool_error;
 
@@ -32,6 +32,8 @@ pub const CLIENT_CHANNEL: &str = "client";
 
 /// Name of the lead's messaging tool.
 pub const SEND_MESSAGE: &str = "send_message";
+/// Name of the lead's tool for ending a run without a reply.
+pub const STAY_SILENT: &str = "stay_silent";
 
 /// Creates a task; in a task lane, a subtask (Plan.md §5.1).
 pub const CREATE_TASK: &str = "create_task";
@@ -41,12 +43,15 @@ pub const UPDATE_TASK: &str = "update_task";
 pub const CANCEL_TASK: &str = "cancel_task";
 /// The lead lists the project's tasks.
 pub const LIST_TASKS: &str = "list_tasks";
+pub const PR_REVIEW_STATUS: &str = "pr_review_status";
 /// A task agent reports its task done, with a result.
 pub use threadlane_core::link::FINISH_TASK;
 pub(crate) const FINISH_REVIEW: &str = "finish_review";
 
+/// A review run may read the reviewed project's memory, to check progress
+/// files and notes, but changes nothing (#610).
 pub(crate) fn offered_for_review(tool: &str) -> bool {
-    tool == FINISH_REVIEW
+    tool == FINISH_REVIEW || tool == crate::memory::MEMORY_VIEW
 }
 /// Asks you a question with options; your answer resumes the session
 /// (Plan.md §9.4, kind `input`).
@@ -67,10 +72,10 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         }
         // ask_project_lead is offered to the General lead only (begin_run).
         SEND_MESSAGE
+        | STAY_SILENT
         | UPDATE_TASK
         | CANCEL_TASK
         | LIST_TASKS
-        | REPORT_LIMITATION
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
         FINISH_TASK
         | PUBLISH_BRANCH
@@ -79,7 +84,11 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | COMMENT
         | CREATE_ISSUE
         | MERGE
-        | MARK_READY => kind == LaneKind::Task,
+        | MARK_READY
+        | LABEL_ISSUE
+        | CLOSE_PULL_REQUEST
+        | GITHUB_CLI
+        | ASSIGN_ISSUE => kind == LaneKind::Task,
         _ => true,
     }
 }
@@ -187,6 +196,29 @@ impl HubTools {
             }),
             tier: Tier::Local,
             safe_to_repeat: false,
+        }
+    }
+
+    fn stay_silent_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: STAY_SILENT.to_owned(),
+            description: "End this run without messaging the user, and record why. The \
+                          reason is kept in the run record and never delivered. Use it when \
+                          nothing needs saying, then end your turn."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Why nothing needs saying, for the run record."
+                    }
+                },
+                "required": ["reason"],
+                "additionalProperties": false
+            }),
+            tier: Tier::Local,
+            safe_to_repeat: true,
         }
     }
 
@@ -345,28 +377,45 @@ impl HubTools {
             ),
             None => (origin, effect_key(context, &run, CREATE_TASK, arguments)),
         };
-        let task = self
-            .db
-            .create_task_for_ask(
-                Some(&context.lease),
-                &NewTask {
-                    project_id: context.project_id,
-                    agent_id,
-                    title: title.to_owned(),
-                    goal: goal.to_owned(),
-                    repositories,
-                    parent_task_id,
-                    depends_on,
-                    origin,
-                    status: TaskStatus::Queued,
-                    priority,
-                    created_by_call: Some(created_by_call),
-                    created_at: self.clock.now(),
-                },
-                space_lead_ask,
-            )
-            .await
-            .map_err(tool_error)?;
+        let mut spec = NewTask {
+            project_id: context.project_id,
+            agent_id,
+            title: title.to_owned(),
+            goal: goal.to_owned(),
+            repositories,
+            parent_task_id,
+            depends_on,
+            origin,
+            status: TaskStatus::Queued,
+            priority,
+            created_by_call: Some(created_by_call),
+            created_at: self.clock.now(),
+        };
+        let task = if let Some(args) = object.get("pr_review") {
+            let target = review_head(&self.db, context.project_id, args).await?;
+            if !spec.repositories.contains(&target.repository) {
+                spec.repositories.push(target.repository);
+            }
+            let _ = write!(
+                spec.goal,
+                "\nReview {} at exactly {}. Verify HEAD in the review checkout before reading its diff. Keep the managed task branch intact. Pass reviewed_head and pr_verdict to finish_task.",
+                target.url, target.head
+            );
+            match self
+                .db
+                .assign_pr_review(&context.lease, &spec, space_lead_ask, &target)
+                .await
+                .map_err(tool_error)?
+            {
+                PrReviewAssignment::Existing(found) => return Ok(review_json(Some(found))),
+                PrReviewAssignment::Created(task) => *task,
+            }
+        } else {
+            self.db
+                .create_task_for_ask(Some(&context.lease), &spec, space_lead_ask)
+                .await
+                .map_err(tool_error)?
+        };
         self.waker.wake(WakeTarget::Lane(task.lane_id));
         Ok(task_json(&task))
     }
@@ -396,8 +445,9 @@ impl HubTools {
         let repositories = named_repositories(&self.db, context.project_id, object)
             .await?
             .unwrap_or_default();
-        let instruction = text_field(object, "wake")?;
-        let wake = if let Some(instruction) = instruction {
+        let instruction = text_field(object, "wake")?
+            .map(|text| format!("The project lead asks you to resume: {text}"));
+        let wake = if let Some(instruction) = &instruction {
             let run = self.run(context).await?;
             Some(TaskWake {
                 call_key: effect_key(context, &run, UPDATE_TASK, arguments),
@@ -413,7 +463,7 @@ impl HubTools {
         let updated = self
             .db
             .update_task(
-                &context.lease,
+                Some(&context.lease),
                 task.id,
                 TaskUpdate {
                     title: text_field(object, "title")?,
@@ -528,6 +578,7 @@ impl HubTools {
     ) -> Result<Json, ToolError> {
         let run = self.run(context).await?;
         let by = MemoryAuthor {
+            expected_version: None,
             lease: context.lease,
             run_id: run.id,
             call_key: effect_key(context, &run, tool, arguments),
@@ -549,9 +600,32 @@ impl HubTools {
         context: &ToolContext,
         arguments: &Json,
     ) -> Result<Json, ToolError> {
-        let object = fields(arguments, &["summary", MERGE_CHECKS])?;
+        let object = fields(
+            arguments,
+            &["summary", MERGE_CHECKS, "pr_verdict", "reviewed_head"],
+        )?;
         let summary = text_field(object, "summary")?.ok_or_else(|| missing("summary"))?;
         let mut result = json!({ "summary": summary });
+        if let Some(task_id) = context.task_id {
+            let assigned = self
+                .db
+                .assigned_pr_head(task_id)
+                .await
+                .map_err(tool_error)?;
+            if let Some((_, head)) = assigned {
+                if arguments["reviewed_head"].as_str() != Some(&head) {
+                    return Err(invalid(
+                        "reviewed_head must match the assigned full PR head SHA",
+                    ));
+                }
+                let verdict: TaskReviewVerdict =
+                    serde_json::from_value(arguments["pr_verdict"].clone())
+                        .map_err(|_| invalid("pr_verdict must be approved or changes_requested"))?;
+                result["pr_verdict"] = json!(verdict);
+            } else if object.contains_key("pr_verdict") || object.contains_key("reviewed_head") {
+                return Err(invalid("this task has no assigned PR head"));
+            }
+        }
         if let Some(merge) = object.get(MERGE_CHECKS) {
             let checks: Vec<MergeCheck> = serde_json::from_value(merge.clone())
                 .map_err(|error| ToolError::InvalidArguments(format!("merge: {error}")))?;
@@ -566,44 +640,21 @@ impl HubTools {
             }
             result[MERGE_CHECKS] = merge.clone();
         }
-        // A named Reviewer must exist. With none named, the project's own
-        // agent of role "reviewer" reviews, if it has one that is not off.
-        let agents = self.db.agents().await.map_err(tool_error)?;
-        let reviewer = match &self.reviewer {
-            Some(name) => Some(
-                agents
-                    .into_iter()
-                    .find(|agent| agent.name == *name)
-                    .ok_or_else(|| {
-                        ToolError::Blocked(format!("Space Reviewer {name:?} is unavailable"))
-                    })?,
-            ),
-            None => {
-                let bindings = self
-                    .db
-                    .bindings(context.project_id)
-                    .await
-                    .map_err(tool_error)?;
-                agents.into_iter().find(|agent| {
-                    agent.role.eq_ignore_ascii_case("reviewer")
-                        && bindings.iter().any(|binding| {
-                            binding.agent_id == agent.id && binding.mode != Mode::Off
-                        })
-                })
-            }
-        };
-        if let (Some(reviewer), Some(task_id)) = (reviewer, context.task_id) {
+        if result.get("pr_verdict").is_none()
+            && let Some(task_id) = context.task_id
+            && let Some(reviewer) = self.implementation_reviewer(context.project_id).await?
+        {
             let task = self
                 .project_task(context, &json!(task_id.to_string()))
                 .await?;
             // The Reviewer cannot review its own task: that finishes unreviewed.
-            if reviewer.id != task.agent_id {
+            if reviewer != task.agent_id {
                 let revisions = self.review_revisions(&task, &result).await?;
                 self.db
                     .submit_for_review(
                         &context.lease,
                         context.run_id,
-                        reviewer.id,
+                        reviewer,
                         &revisions,
                         &result,
                     )
@@ -628,6 +679,32 @@ impl HubTools {
             "finished": true,
             "next": "End your turn now. The task is done, and its result reaches the lead, when this run ends.",
         }))
+    }
+
+    async fn implementation_reviewer(
+        &self,
+        project: ProjectId,
+    ) -> Result<Option<AgentId>, ToolError> {
+        let agents = self.db.agents().await.map_err(tool_error)?;
+        if let Some(name) = &self.reviewer {
+            return agents
+                .iter()
+                .find(|agent| agent.name == *name)
+                .map(|agent| Some(agent.id))
+                .ok_or_else(|| {
+                    ToolError::Blocked(format!("Space Reviewer {name:?} is unavailable"))
+                });
+        }
+        let bindings = self.db.bindings(project).await.map_err(tool_error)?;
+        Ok(agents
+            .iter()
+            .find(|agent| {
+                agent.role.eq_ignore_ascii_case("reviewer")
+                    && bindings
+                        .iter()
+                        .any(|binding| binding.agent_id == agent.id && binding.mode != Mode::Off)
+            })
+            .map(|agent| agent.id))
     }
 
     async fn review_revisions(
@@ -747,6 +824,7 @@ impl<'a> TaskCall<'a> {
                 "depends_on",
                 "priority",
                 "repositories",
+                "pr_review",
             ],
         )?;
         Ok(Self {
@@ -756,6 +834,36 @@ impl<'a> TaskCall<'a> {
             priority: priority_field(object)?.unwrap_or(0),
             object,
         })
+    }
+}
+
+pub(crate) async fn review_head(
+    db: &HubDb,
+    project: ProjectId,
+    args: &Json,
+) -> Result<PrReviewHead, ToolError> {
+    let object = fields(args, &["repository", "number", "head"])?;
+    let name = text_field(object, "repository")?.ok_or_else(|| missing("repository"))?;
+    let number = args["number"]
+        .as_u64()
+        .ok_or_else(|| invalid("number must be a positive PR number"))?;
+    let head = text_field(object, "head")?.ok_or_else(|| missing("head"))?;
+    let repository = db
+        .repositories(project)
+        .await
+        .map_err(tool_error)?
+        .into_iter()
+        .find(|r| r.name == name)
+        .ok_or_else(|| invalid("unknown review repository in this project"))?;
+    PrReviewHead::new(&repository, number, head).map_err(tool_error)
+}
+
+fn review_json(found: Option<PrReviewStatus>) -> Json {
+    match found {
+        Some(review) => {
+            json!({"review_status": review.state, "task_id": review.task.to_string(), "feedback": review.feedback})
+        }
+        None => json!({"review_status": "unreviewed"}),
     }
 }
 
@@ -1013,6 +1121,13 @@ fn task_definitions() -> Vec<ToolDefinition> {
         tier,
         safe_to_repeat: true,
     };
+    let review_target = json!({
+        "type":"object", "properties": {
+            "repository": {"type":"string","description":"Registered repository name."},
+            "number": {"type":"integer","minimum":1},
+            "head": {"type":"string","description":"Full current GitHub PR head SHA."}
+        }, "required":["repository","number","head"],"additionalProperties":false
+    });
     vec![
         define(
             CREATE_TASK,
@@ -1020,7 +1135,7 @@ fn task_definitions() -> Vec<ToolDefinition> {
              Independent tasks run in parallel; give a task the ids of the tasks it must \
              wait for in depends_on. From inside a task, this creates a subtask. For work the \
              user did not ask for, they may be asked first: if the call returns \"waiting on \
-             you\", end your turn.",
+             you\", end your turn. For a full PR code review, supply pr_review so an existing verdict or assignment can be reused.",
             Tier::Local,
             json!({
                 "type": "object",
@@ -1031,6 +1146,7 @@ fn task_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "The name of the agent to do it. Defaults to you."
                     },
+                    "pr_review": review_target.clone(),
                     "depends_on": {
                         "type": "array",
                         "items": task_id.clone(),
@@ -1114,6 +1230,12 @@ fn task_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         define(
+            PR_REVIEW_STATUS,
+            "Look up the existing code review for this exact PR head before assigning or starting review. Returns the task, review status and available feedback.",
+            Tier::Read,
+            review_target,
+        ),
+        define(
             FINISH_TASK,
             "Report your task done with a summary of the result, then end your turn. \
              The summary is what the lead sees. Write your progress file, \
@@ -1122,6 +1244,8 @@ fn task_definitions() -> Vec<ToolDefinition> {
             json!({
                 "type": "object",
                 "properties": {
+                    "pr_verdict": {"type":"string","enum":["approved","changes_requested"],"description":"Required for a standalone PR code review."},
+                    "reviewed_head": {"type":"string","description":"Full SHA actually reviewed for a standalone PR code review."},
                     "summary": {
                         "type": "string",
                         "description": "What was done, and anything the lead needs to know."
@@ -1141,6 +1265,14 @@ fn task_definitions() -> Vec<ToolDefinition> {
             }, "required": ["verdict", "feedback"], "additionalProperties": false }),
         ),
     ]
+}
+
+/// The reason of a `stay_silent` call, if its arguments give one.
+pub(crate) fn silent_reason(arguments: &Json) -> Option<&str> {
+    arguments["reason"]
+        .as_str()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
 }
 
 fn parse_send_message(arguments: &Json) -> Result<(String, Urgency), ToolError> {
@@ -1176,7 +1308,10 @@ fn parse_send_message(arguments: &Json) -> Result<(String, Urgency), ToolError> 
 #[async_trait]
 impl ToolRegistry for HubTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = vec![Self::send_message_definition()];
+        let mut definitions = vec![
+            Self::send_message_definition(),
+            Self::stay_silent_definition(),
+        ];
         definitions.extend(task_definitions());
         definitions.extend(crate::publish::definitions());
         definitions.extend(crate::memory::definitions());
@@ -1201,10 +1336,25 @@ impl ToolRegistry for HubTools {
     ) -> Result<Json, ToolError> {
         match name {
             SEND_MESSAGE => self.send_message(context, &arguments).await,
+            // The call's record is the outcome: commit reads the reason.
+            STAY_SILENT => silent_reason(&arguments)
+                .map(|_| json!({ "silent": true }))
+                .ok_or_else(|| {
+                    ToolError::InvalidArguments("reason must be a non-empty string".to_owned())
+                }),
             CREATE_TASK => self.create_task(context, &arguments).await,
             UPDATE_TASK => self.update_task(context, &arguments).await,
             CANCEL_TASK => self.cancel_task(context, &arguments).await,
             LIST_TASKS => self.list_tasks(context, &arguments).await,
+            PR_REVIEW_STATUS => {
+                let target = review_head(&self.db, context.project_id, &arguments).await?;
+                Ok(review_json(
+                    self.db
+                        .pr_review_status(context.project_id, &target)
+                        .await
+                        .map_err(tool_error)?,
+                ))
+            }
             FINISH_TASK => self.finish_task(context, &arguments).await,
             FINISH_REVIEW => self.finish_review(context, &arguments).await,
             crate::space_lead::ASK_PROJECT_LEAD => {
@@ -1244,6 +1394,10 @@ impl ToolRegistry for HubTools {
             | CREATE_ISSUE
             | MERGE
             | MARK_READY
+            | LABEL_ISSUE
+            | CLOSE_PULL_REQUEST
+            | GITHUB_CLI
+            | ASSIGN_ISSUE
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
             ))),
@@ -1428,7 +1582,8 @@ mod tests {
                     CREATE_TASK,
                     UPDATE_TASK,
                     CANCEL_TASK,
-                    LIST_TASKS
+                    LIST_TASKS,
+                    PR_REVIEW_STATUS
                 ][..],
                 &memory,
                 &[crate::space_lead::ASK_PROJECT_LEAD, REPORT_LIMITATION]
@@ -1440,6 +1595,7 @@ mod tests {
             [
                 &[
                     CREATE_TASK,
+                    PR_REVIEW_STATUS,
                     FINISH_TASK,
                     PUBLISH_BRANCH,
                     OPEN_PULL_REQUEST,
@@ -1447,9 +1603,14 @@ mod tests {
                     COMMENT,
                     CREATE_ISSUE,
                     MERGE,
-                    MARK_READY
+                    MARK_READY,
+                    LABEL_ISSUE,
+                    CLOSE_PULL_REQUEST,
+                    GITHUB_CLI,
+                    ASSIGN_ISSUE
                 ][..],
-                &memory
+                &memory,
+                &[REPORT_LIMITATION]
             ]
             .concat()
         );

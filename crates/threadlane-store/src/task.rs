@@ -100,6 +100,10 @@ async fn task_in(
     }
 }
 
+pub(crate) async fn task_by_call(conn: &Connection, call: &str) -> StoreResult<Option<Task>> {
+    task_in(conn, "created_by_call = ?1", call.into()).await
+}
+
 async fn existing_task(conn: &Connection, id: TaskId) -> StoreResult<Task> {
     task_in(conn, "id = ?1", id.get().into())
         .await?
@@ -122,7 +126,7 @@ async fn dependencies(conn: &Connection, id: TaskId) -> StoreResult<Vec<TaskId>>
 }
 
 /// Checks that a run's lease is current and works in `project_id`.
-async fn check_run_lease(
+pub(crate) async fn check_run_lease(
     conn: &Connection,
     lease: Option<&Lease>,
     project_id: ProjectId,
@@ -359,7 +363,7 @@ pub(crate) async fn end_task(
     Ok(())
 }
 
-/// Both ordinary completion and a configured space review pass through the workflow's owner gate.
+/// Honor owner approval on review tasks created by older hubs.
 pub(crate) async fn complete_result(
     conn: &Connection,
     task: &Task,
@@ -367,10 +371,9 @@ pub(crate) async fn complete_result(
     now: Timestamp,
 ) -> StoreResult<()> {
     if let Some(result) = &task.result
-        && task
-            .created_by_call
-            .as_deref()
-            .is_some_and(|key| key.starts_with("workflow-review:"))
+        && task.created_by_call.as_deref().is_some_and(|key| {
+            key.starts_with("workflow-review:") || key.starts_with("canvas-review:")
+        })
         && crate::work::needs_owner_decision(conn, task, result, run, now).await?
     {
         wait_on_decision(conn, task).await?;
@@ -879,7 +882,7 @@ pub(crate) async fn insert_task_in(
     }
     check_run_lease(conn, lease, task.project_id).await?;
     if let Some(call) = &task.created_by_call
-        && let Some(existing) = task_in(conn, "created_by_call = ?1", call.as_str().into()).await?
+        && let Some(existing) = task_by_call(conn, call).await?
     {
         return Ok(existing);
     }
@@ -1002,7 +1005,7 @@ impl HubDb {
             .await
     }
 
-    async fn tasks_with_dependencies(
+    pub(crate) async fn tasks_with_dependencies(
         &self,
         filter: &str,
         values: impl turso::IntoParams + Send,
@@ -1188,14 +1191,14 @@ impl TaskStore for HubDb {
 
     async fn update_task(
         &self,
-        lease: &Lease,
+        lease: Option<&Lease>,
         id: TaskId,
         update: TaskUpdate<'_>,
     ) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
         let mut task = existing_task(conn, id).await?;
-        check_run_lease(conn, Some(lease), task.project_id).await?;
+        check_run_lease(conn, lease, task.project_id).await?;
         if task.status.is_terminal() {
             return Err(StoreError::Conflict(format!(
                 "task {id} is {}; it can no longer change",
@@ -1241,7 +1244,7 @@ impl TaskStore for HubDb {
                     source: TASK_WAKE_SOURCE.to_owned(),
                     source_event_id: format!("{id}:{}", wake.call_key),
                     kind: EventKind::System,
-                    payload: json!({"text": format!("The project lead asks you to resume: {}", wake.instruction)}),
+                    payload: json!({"text": wake.instruction}),
                     trust: Trust::System,
                     requested: task.origin.is_requested() || wake.requested,
                     session_ref: None,

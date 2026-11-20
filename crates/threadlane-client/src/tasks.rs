@@ -24,14 +24,16 @@ pub struct NewTaskSpec {
     pub repositories: Vec<String>,
     /// Tasks of the project it waits for.
     pub depends_on: Vec<TaskId>,
-    /// Whether the task ends by opening a draft pull request.
+    /// Whether the task's work is kept in a draft pull request.
     pub draft_pr: bool,
 }
 
-/// Added to the goal of a task that ends with a draft pull request, so the
-/// work does not stop at an unpublished branch.
-pub const DRAFT_PR_GOAL: &str = "When the work is done and checked, open a draft pull \
-request for it with open_pull_request before you call finish_task.";
+/// Added to the goal of a task whose work is kept in a draft pull request,
+/// so others can follow it from the first change and it never stops at an
+/// unpublished branch.
+pub const DRAFT_PR_GOAL: &str = "As soon as the first working change exists, open a draft \
+pull request for it with open_pull_request. Push later changes to it with publish_branch and \
+leave it a draft. It must be open before you call finish_task.";
 
 impl ClientCore {
     /// Creates a task of yours in one space, skipping the lead, with a
@@ -72,16 +74,6 @@ impl ClientCore {
         self.one_task(space, request).await
     }
 
-    /// Submit an owner action for the saved review workflow.
-    pub async fn workflow(
-        &self,
-        space: &str,
-        request: TaskRequest,
-    ) -> Result<TaskReply, ClientError> {
-        let (space, api) = self.target(Some(space))?;
-        api.tasks(request).await.map_err(|e| api_error(&space, e))
-    }
-
     /// Fresh idempotency key for one user-initiated action.
     pub fn request_id() -> String {
         uuid::Uuid::new_v4().to_string()
@@ -109,6 +101,31 @@ impl ClientCore {
     pub async fn retry_task(&self, space: Option<&str>, task: &str) -> Result<Task, ClientError> {
         let id = self.task_id(space, task)?;
         self.one_task(space, TaskRequest::Retry { task: id }).await
+    }
+
+    /// Attaches registered `repositories` of its project to task `task`
+    /// (`T-0142`) so it can publish. `None` means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, an id that is not a
+    /// task's, or the hub's error, for example an ended task or an
+    /// unregistered repository.
+    pub async fn attach_repositories(
+        &self,
+        space: Option<&str>,
+        task: &str,
+        repositories: Vec<String>,
+    ) -> Result<Task, ClientError> {
+        let id = self.task_id(space, task)?;
+        self.one_task(
+            space,
+            TaskRequest::AttachRepositories {
+                task: id,
+                repositories,
+            },
+        )
+        .await
     }
 
     fn task_id(&self, space: Option<&str>, task: &str) -> Result<TaskId, ClientError> {

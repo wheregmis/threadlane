@@ -40,7 +40,7 @@ const TIERS: [(Tier, &str, &str); 5] = [
     (
         Tier::SharedReversible,
         "Shared, reversible",
-        "push the task branch, open a draft pull request",
+        "comment, label and assign issues, update another pull request",
     ),
     (
         Tier::SharedHardToUndo,
@@ -152,7 +152,8 @@ pub struct Statement {
     pub what: &'static str,
     /// What it covers, for example `merge, release, deploy`.
     pub examples: &'static str,
-    /// The tier an override sets; `None` for the initiative row.
+    /// The tier an override sets; `None` for the initiative row and the
+    /// built-in default.
     pub tier: Option<Tier>,
     /// What applies now: `Yes`, `Asks you`, `Proposes first`, ...
     pub cell: String,
@@ -194,6 +195,7 @@ pub fn allows(tool: &str, pattern: &Json) -> String {
     let action = match tool {
         "open_pull_request" => "open draft pull requests".to_owned(),
         "publish_branch" => "push its task branch".to_owned(),
+        "assign_issue" => "assign issues to you".to_owned(),
         "memory_edit" | "memory_create" => "change".to_owned(),
         "memory_delete" => "delete".to_owned(),
         "memory_rename" => "rename".to_owned(),
@@ -402,6 +404,17 @@ impl AppState {
                 cell: cell_label(cell).to_owned(),
                 choices,
             });
+            // The gate's built-in default, which a tier 2 override turns off.
+            if tier == Tier::SharedReversible && set.is_none() && mode != Mode::Off {
+                statements.push(Statement {
+                    what: "Its own branch and draft pull request",
+                    examples: "push the task branch, open a draft pull request; decided as \
+                               other shared effects are in a run triggered by outside content",
+                    tier: None,
+                    cell: "Yes".to_owned(),
+                    choices: Vec::new(),
+                });
+            }
         }
         let rules = match self.project_gap(space, project, Part::Rules) {
             Some(gap) => Err(gap),
@@ -539,12 +552,14 @@ impl AppState {
         let permits = match mode {
             Mode::Off => "No agent will run in any project of this space.",
             Mode::OnRequest => {
-                "Agents start work only when you ask, and ask before any shared effect. \
+                "Agents start work only when you ask, and ask before any shared effect \
+                 except pushing their task branch and opening a draft pull request. \
                  Bindings above it act at On request."
             }
             Mode::Assisted => {
-                "Agents may also propose work, and push branches and open draft pull \
-                 requests after an automatic review. They still ask for anything hard to undo."
+                "Agents may also propose work, and perform shared effects other than pushing \
+                 their task branch and opening a draft pull request after an automatic \
+                 review. They still ask for anything hard to undo."
             }
             Mode::Autonomous => {
                 "Agents may also start work on their own from events, routines and their own \

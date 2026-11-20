@@ -912,6 +912,23 @@ impl HubApi for FakeHub {
                     task: summary.task.clone(),
                 })
             }
+            // The fake numbers repositories by name: `app` is 1.
+            TaskRequest::AttachRepositories {
+                task: id,
+                repositories,
+            } => {
+                let summary = tasks
+                    .iter_mut()
+                    .find(|summary| summary.task.id == id)
+                    .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+                if repositories != ["app"] {
+                    return Err(ApiError::Invalid(format!("no {repositories:?}")));
+                }
+                summary.task.repositories.push(RepositoryId(1));
+                Ok(TaskReply::Task {
+                    task: summary.task.clone(),
+                })
+            }
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -1671,6 +1688,30 @@ async fn running_inbox_entries_open_the_right_task_when_spaces_share_an_id() {
         state.task("personal", TaskId(26)).unwrap().summary,
         reported
     );
+}
+
+#[tokio::test]
+async fn inbox_is_caught_up_only_when_nothing_needs_you_and_nothing_runs_in_the_spaces_shown() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().expect("lock") = vec![task(1, TaskStatus::Running, None)];
+    let home = FakeHub::new("Home", Vec::new());
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    assert_eq!(state.needs_you().count(), 0);
+    assert!(
+        !state.caught_up(),
+        "a running task keeps the Inbox from saying caught up"
+    );
+    state.set_filter(Some("home"));
+    assert!(state.caught_up(), "nothing runs in the space shown");
+    state.set_filter(Some("work"));
+    assert!(!state.caught_up());
+
+    *work.tasks.lock().expect("lock") = vec![task(1, TaskStatus::Done, None)];
+    state.apply(refresh(&core).await);
+    assert!(state.caught_up(), "no decisions and nothing running");
 }
 
 const BLOCKED_FOR_TEST: &str = "blocked: every model account it can use is at its usage limit";
@@ -2744,12 +2785,12 @@ fn every_tab_is_selected_where_it_is_shown() {
         assert_eq!(Tab::at(tab.index()), Some(tab), "{tab:?}");
         assert_eq!(labels[tab.index()], tab.label(), "{tab:?}");
         assert_eq!(Tab::named(&tab.label().to_lowercase()), Some(tab));
+        // The bar shows only icons, so the tooltip must name the tab.
+        assert!(tab.tooltip().starts_with(tab.label()), "{tab:?}");
     }
     assert_eq!(
         labels,
-        [
-            "Chat", "Tasks", "Team", "Workflow", "Routines", "Memory", "Setup"
-        ]
+        ["Chat", "Tasks", "Team", "Routines", "Memory", "Setup"]
     );
 }
 
@@ -3203,6 +3244,71 @@ async fn a_failed_task_offers_retry_and_is_queued_again() {
 }
 
 #[tokio::test]
+async fn a_task_without_a_repository_says_it_cannot_publish_until_one_is_attached() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.tasks.lock().expect("lock").extend([
+        task(1, TaskStatus::Sleeping, None),
+        task(2, TaskStatus::Done, None),
+    ]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    state.apply_task(load_task(&core, "work", TaskId(2)).await);
+    let line = |state: &AppState, id| state.task_publication("work", TaskId(id)).unwrap();
+    assert_eq!(
+        line(&state, 1).line,
+        "Cannot publish: no repository is attached",
+        "the project's repositories are not loaded yet"
+    );
+    state.apply_repositories("work", "api", Ok(Vec::new()));
+    assert!(line(&state, 1).line.contains("has none registered"));
+
+    let repository = |id, name: &str| Repository {
+        id: RepositoryId(id),
+        project_id: ProjectId(1),
+        name: name.into(),
+        remote_url: format!("/srv/git/{name}"),
+        default_branch: "main".into(),
+        protected_branches: Vec::new(),
+    };
+    state.apply_repositories(
+        "work",
+        "api",
+        Ok(vec![repository(1, "app"), repository(2, "docs")]),
+    );
+    assert_eq!(
+        line(&state, 1),
+        Publication {
+            line: "Cannot publish: no repository is attached".into(),
+            attachable: vec!["app".into(), "docs".into()],
+        }
+    );
+    assert_eq!(
+        line(&state, 2),
+        Publication {
+            line: "Cannot publish: no repository was attached before it ended".into(),
+            attachable: Vec::new(),
+        },
+        "an ended task cannot take one"
+    );
+
+    let attached = core
+        .attach_repositories(Some("work"), "T-0001", vec!["app".into()])
+        .await
+        .expect("attached");
+    assert_eq!(attached.repositories, [RepositoryId(1)]);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    assert_eq!(
+        line(&state, 1),
+        Publication {
+            line: "Can publish to app".into(),
+            attachable: vec!["docs".into()],
+        }
+    );
+}
+
+#[tokio::test]
 async fn pausing_a_project_shows_it_paused_until_resumed() {
     let work = FakeHub::new("Work", Vec::new());
     let (_dir, core) = core(&[("work", &work)]);
@@ -3610,6 +3716,7 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
             ("Read", "Yes", 4),
             ("Work locally", "Yes", 4),
             ("Shared, reversible", "Asks you", 2),
+            ("Its own branch and draft pull request", "Yes", 0),
             ("Hard to undo", "Asks you", 2),
             ("Forbidden", "Blocked", 0),
         ]
@@ -4603,13 +4710,10 @@ async fn dreaming_card_applies_project_settings_versions_and_findings() {
     state.apply_dreaming(load_dreaming(&core, "work", "api", 0).await);
     let card = state.dreaming_card("work", "api", &when);
     assert!(!card.enabled && !card.disabled);
-    assert_eq!(
-        card.last,
-        [
-            "Last dream · 00:02",
-            "Deleted project/notes/obsolete.md · version 2"
-        ]
-    );
+    assert_eq!(card.last, ["Last dream · 00:02"]);
+    assert_eq!(card.changes[0].path, "project/notes/obsolete.md");
+    assert_eq!(card.changes[0].version, 2);
+    assert!(card.changes[0].deleted);
     assert!(card.findings[0].contains("T-0999"));
 
     let on = state
@@ -4678,7 +4782,7 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         "at": 0, "lane_lag_ms": {"1": 53, "2": 22}, "queue_depth": {"api": 3},
         "run_duration": {"count": 1, "mean_ms": 12.0, "max_ms": 12},
         "account_cooldowns": {}, "account_wait_ms": 83, "dead_events": 2,
-        "timer_lateness": {"count": 0, "mean_ms": null, "max_ms": null},
+        "timer_lateness": {"count": 2, "mean_ms": 24_520.0, "max_ms": 7_200_000},
         "outbox_lag_ms": 125_000, "messages_per_day": {"2026-01-01": 4},
         "silent_run_ratio": 0.25, "decisions_per_day": 5,
         "answer_latency": {"count": 0, "mean_ms": null, "max_ms": null}, "standing_rules_created": 1
@@ -4699,6 +4803,11 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         rows["Run duration"],
         "12 ms avg · 12 ms max · 1 observation"
     );
+    assert_eq!(
+        rows["Timer lateness"],
+        "24.5 s avg · 2 h 0 min max · 2 observations"
+    );
+    assert_eq!(rows["Decisions in 24 hours"], "5 by you · 0 automatic");
     assert_eq!(rows["Silent runs"], "25%");
     assert!(
         state
@@ -5165,9 +5274,9 @@ fn bare_github_references_link_only_outside_words_code_and_urls() {
     assert_eq!(
         references,
         [
-            ("#565", Reference::Github(565)),
-            ("#572", Reference::Github(572)),
-            ("#1", Reference::Github(1)),
+            ("#565", Reference::Github(None, 565)),
+            ("#572", Reference::Github(None, 572)),
+            ("#1", Reference::Github(None, 1)),
             (
                 "https://example.test/page#565",
                 Reference::Web("https://example.test/page#565")
@@ -5209,14 +5318,14 @@ fn bare_github_references_link_only_outside_words_code_and_urls() {
 
     assert_eq!(
         Reference::from_link("threadlane:#565"),
-        Some(Reference::Github(565))
+        Some(Reference::Github(None, 565))
     );
     assert_eq!(Reference::from_link("threadlane:#"), None);
     assert_eq!(Reference::from_link("threadlane:#0"), None);
 }
 
 #[tokio::test]
-async fn project_github_repository_uses_first_github_remote() {
+async fn project_github_repository_links_bare_numbers_only_when_unambiguous() {
     let hub = FakeHub::new("Work", Vec::new());
     let (_dir, core) = core(&[("work", &hub)]);
     let mut state = AppState::default();
@@ -5250,7 +5359,7 @@ async fn project_github_repository_uses_first_github_remote() {
     );
     assert_eq!(state.github_repository("work", "api"), None);
 
-    // First GitHub remote wins, skipping non-GitHub remotes before it.
+    // Two GitHub repositories: a bare `#N` is ambiguous without context.
     state.apply_repositories(
         "work",
         "api",
@@ -5281,9 +5390,99 @@ async fn project_github_repository_uses_first_github_remote() {
             },
         ]),
     );
+    assert_eq!(state.github_repository("work", "api"), None);
+    assert_eq!(
+        markdown_source_for("See #1.", None, None),
+        "See #1.",
+        "multi-repo without context stays plain text"
+    );
+
+    // A task's attached repository is the context, skipping non-GitHub ones.
+    let task_repo =
+        state.github_repository_among("work", "api", Some(&[RepositoryId(1), RepositoryId(3)]));
+    assert_eq!(task_repo.as_deref(), Some("acme/other"));
+    assert_eq!(
+        markdown_source_for("See #1.", None, task_repo.as_deref()),
+        "See [#1](https://github.com/acme/other/pull/1)."
+    );
+    assert_eq!(
+        state.github_repository_among("work", "api", Some(&[RepositoryId(2), RepositoryId(3)])),
+        None
+    );
+
+    // A single GitHub repository, among non-GitHub ones, is unambiguous.
+    state.apply_repositories(
+        "work",
+        "api",
+        Ok(vec![
+            Repository {
+                id: RepositoryId(1),
+                project_id: ProjectId(1),
+                name: "local".into(),
+                remote_url: "/srv/git/local".into(),
+                default_branch: "main".into(),
+                protected_branches: Vec::new(),
+            },
+            Repository {
+                id: RepositoryId(2),
+                project_id: ProjectId(1),
+                name: "ssh".into(),
+                remote_url: "git@github.com:Acme/Widgets.git".into(),
+                default_branch: "main".into(),
+                protected_branches: Vec::new(),
+            },
+        ]),
+    );
     assert_eq!(
         state.github_repository("work", "api").as_deref(),
         Some("acme/widgets")
+    );
+    // A task with no repositories has no context, not the project's only one.
+    assert_eq!(
+        state.github_repository_among("work", "api", Some(&[])),
+        None
+    );
+}
+
+#[test]
+fn qualified_github_references_link_to_their_own_repository() {
+    let text = "See acme/other#7, wheregmis/threadlane#565. Skip a/b/c#1, x.acme/b#2, \
+                acme/b#05, acme/b#7x, `acme/b#9`, and https://github.com/acme/web/issues/3.";
+    let references = segments(text)
+        .into_iter()
+        .filter_map(|segment| match segment {
+            Segment::Link(label, target) => Some((label, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        references,
+        [
+            ("acme/other#7", Reference::Github(Some("acme/other"), 7)),
+            (
+                "wheregmis/threadlane#565",
+                Reference::Github(Some("wheregmis/threadlane"), 565)
+            ),
+            (
+                "https://github.com/acme/web/issues/3",
+                Reference::Web("https://github.com/acme/web/issues/3")
+            ),
+        ]
+    );
+    // Qualified and URL references ignore the context's repository; bare ones use it.
+    for context in [None, Some("acme/widgets")] {
+        assert_eq!(
+            markdown_source_for(
+                "acme/other#7 and https://github.com/acme/web/pull/3",
+                None,
+                context
+            ),
+            "[acme/other#7](https://github.com/acme/other/pull/7) and https://github.com/acme/web/pull/3"
+        );
+    }
+    assert_eq!(
+        markdown_source_for("#7 and acme/other#7", None, Some("acme/widgets")),
+        "[#7](https://github.com/acme/widgets/pull/7) and [acme/other#7](https://github.com/acme/other/pull/7)"
     );
 }
 
@@ -7752,6 +7951,56 @@ async fn agent_topology_builds_three_tier_org_and_lights_up_active_delegations()
     state.space_removed("work");
     assert_eq!(state.topology_project("work"), None);
     assert_eq!(state.topology_selected_agent(), None);
+}
+
+#[tokio::test]
+async fn team_cards_show_each_backend_model_and_cut_long_names() {
+    let hub = FakeHub::new("Work", Vec::new());
+    hub.agents.lock().expect("lock").push(Agent {
+        id: AgentId(1),
+        name: "Engineer".into(),
+        role: "engineer".into(),
+        instructions: String::new(),
+        backends: vec![BackendKind::Claude, BackendKind::Codex],
+        models: json!({"claude": "claude-opus-5-5-extended-thinking", "codex": "gpt-5"}),
+        tools: json!([]),
+        requirements: Default::default(),
+        skills: Vec::new(),
+    });
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+
+    let agent = &state.space("work").expect("space").agents[0];
+    assert_eq!(
+        backend_summary(agent),
+        (
+            "claude · claude-opus-5-5-exte… → codex · gpt-5".to_owned(),
+            "claude · claude-opus-5-5-extended-thinking → codex · gpt-5".to_owned(),
+        )
+    );
+    let topo = state.agent_topology("work", None, &when());
+    let card = topo
+        .nodes
+        .iter()
+        .find(|n| matches!(n.kind, TopologyNodeKind::Agent { .. }))
+        .expect("agent card");
+    assert_eq!(
+        card.subtitle,
+        "engineer · claude · claude-opus-5-5-exte… → codex · gpt-5"
+    );
+    assert_eq!(
+        card.tooltip.as_deref(),
+        Some("engineer · claude · claude-opus-5-5-extended-thinking → codex · gpt-5")
+    );
+
+    // No order and no models is either backend at its default.
+    let mut any = agent.clone();
+    any.backends.clear();
+    any.models = json!({});
+    assert_eq!(backend_summary(&any).0, "Any backend");
+    any.models = json!({"codex": "gpt-5"});
+    assert_eq!(backend_summary(&any).0, "Any backend, codex · gpt-5");
 }
 
 #[tokio::test]

@@ -1534,7 +1534,7 @@ async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
 
     let updated = hub
         .update_task(
-            &lead,
+            Some(&lead),
             created.id,
             TaskUpdate {
                 title: Some("drop it"),
@@ -1561,7 +1561,7 @@ async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
 
     let changed = hub
         .update_task(
-            &lead,
+            Some(&lead),
             created.id,
             TaskUpdate {
                 title: Some("again"),
@@ -1601,7 +1601,7 @@ async fn a_cancelled_task_is_reported_once_and_changes_no_more() {
     );
     let stale = hub
         .update_task(
-            &lead,
+            Some(&lead),
             fresh.id,
             TaskUpdate {
                 title: Some("x"),
@@ -1654,6 +1654,23 @@ async fn only_a_running_task_s_own_lane_finishes_it_under_its_current_lease() {
         "{stale:?}"
     );
     assert_eq!(task(&hub, created.id).await.result, None);
+}
+
+#[tokio::test]
+async fn a_lead_lane_you_are_waiting_on_is_ready_before_older_task_lanes() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 0).await;
+    let task = hub
+        .create_task(None, &new_task(&general, agent, "a", vec![]))
+        .await
+        .unwrap();
+    hub.insert_event(&message(&general, "m1")).await.unwrap();
+
+    assert_eq!(
+        hub.ready_lanes(T0).await.unwrap(),
+        vec![general.lead_lane_id, task.lane_id]
+    );
 }
 
 #[tokio::test]
@@ -1859,6 +1876,7 @@ async fn machines_report_and_accounts_cool_down() {
 /// Writes `task`'s progress file in `run`, which `finish_task` requires.
 async fn write_progress(hub: &HubDb, lease: &Lease, run: &Run, task: &Task) {
     let by = MemoryAuthor {
+        expected_version: None,
         lease: *lease,
         run_id: run.id,
         call_key: "progress".into(),
@@ -1877,6 +1895,7 @@ async fn memory_author(hub: &HubDb) -> (MemoryAuthor, Run) {
     hub.insert_event(&message(&general, "m-1")).await.unwrap();
     let (lease, run) = run_pending(hub, general.lead_lane_id, a, T0).await;
     let by = MemoryAuthor {
+        expected_version: None,
         lease,
         run_id: run.id,
         call_key: "call-1".into(),

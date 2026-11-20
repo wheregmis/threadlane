@@ -161,6 +161,7 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
                 run.tools,
                 [
                     CREATE_TASK,
+                    threadlane_hub::PR_REVIEW_STATUS,
                     FINISH_TASK,
                     PUBLISH_BRANCH,
                     OPEN_PULL_REQUEST,
@@ -169,6 +170,10 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
                     threadlane_hub::CREATE_ISSUE,
                     threadlane_hub::MERGE,
                     threadlane_hub::MARK_READY,
+                    threadlane_hub::LABEL_ISSUE,
+                    threadlane_hub::CLOSE_PULL_REQUEST,
+                    threadlane_core::forge::GITHUB_CLI,
+                    threadlane_hub::ASSIGN_ISSUE,
                     MEMORY_VIEW,
                     MEMORY_CREATE,
                     MEMORY_EDIT,
@@ -179,6 +184,7 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
                     LIST_TIMERS,
                     CANCEL_TIMER,
                     ASK_USER,
+                    threadlane_core::forge::REPORT_LIMITATION,
                 ]
             );
             assert!(

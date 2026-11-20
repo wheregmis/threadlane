@@ -5,16 +5,18 @@ use serde_json::json;
 use threadlane_core::ids::RunId;
 use threadlane_core::link::{LinkError, RunFailure};
 use threadlane_core::model::{
-    LaneKind, Lease, NewOutboxMessage, OutboxKind, RetryPolicy, Run, RunOutcome, RunStatus, Urgency,
+    EventKind, LaneKind, Lease, NewOutboxMessage, OutboxKind, RetryPolicy, Run, RunOutcome,
+    RunStatus, Trust, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{DecisionStore, LeadReply, OutboxStore, SessionStore};
 
 use crate::error::link_error;
 use crate::link::LocalLink;
-use crate::tools::CLIENT_CHANNEL;
+use crate::tools::{CLIENT_CHANNEL, STAY_SILENT, silent_reason};
 
-/// What Claude Code says when a turn needed no answer; never worth sending.
+/// What Claude Code itself returns when a turn ends with no text: a backend
+/// placeholder, not the lead's words. Leads stay silent with stay_silent.
 const FILLER: &str = "No response requested.";
 
 /// Whether a lead's final text is worth delivering.
@@ -51,6 +53,30 @@ impl LocalLink {
             return Ok(RunOutcome::Silent);
         }
         let dreaming = events.iter().any(crate::dreaming::is_dream);
+        let silenced = db
+            .finished_calls(run_id, STAY_SILENT)
+            .await
+            .map_err(link_error)?;
+        // The last accepted call wins; a refused one (empty reason) does not count.
+        let silent_reason = silenced.iter().rev().find_map(silent_reason);
+        // Only a reply to the owner (a message or their answer to ask_user) is
+        // delivered from final text; routine, GitHub and task wakes speak
+        // through send_message alone (#604).
+        let replying = events.iter().any(|event| {
+            event.kind == EventKind::UserMessage
+                || (event.kind == EventKind::DecisionAnswer && event.trust == Trust::User)
+        });
+        // A run that waited on you ended for your answer: its final text, or
+        // the runner's stop notice, is a note for the run detail (#612).
+        let replying = replying
+            && lane.kind == LaneKind::Lead
+            && !db
+                .lane_decisions(lane.id)
+                .await
+                .map_err(link_error)?
+                .iter()
+                .any(|decision| decision.run_id == Some(run_id));
+        let mut rationale = final_text;
         let outcome = if db.count_for_run(run_id).await.map_err(link_error)? > 0 {
             RunOutcome::Sent
         } else if db
@@ -61,10 +87,13 @@ impl LocalLink {
             .any(|decision| decision.run_id == Some(run_id))
         {
             RunOutcome::Deferred
+        } else if let Some(reason) = silent_reason {
+            rationale = Some(reason);
+            RunOutcome::Silent
         } else if let Some(text) = final_text
             .map(str::trim)
             // A dream reviews memory; it has nothing to tell you.
-            .filter(|text| lane.kind == LaneKind::Lead && !dreaming && deliverable(text))
+            .filter(|text| replying && !dreaming && deliverable(text))
         {
             // A lead that just answers is heard, as if it had sent the text.
             let run = self.active_run(lease, run_id).await?;
@@ -104,7 +133,7 @@ impl LocalLink {
             lease,
             run_id,
             outcome,
-            final_text,
+            rationale,
             reply.as_ref(),
             inner.clock.now(),
         )

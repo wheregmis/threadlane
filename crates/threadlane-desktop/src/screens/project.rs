@@ -9,6 +9,7 @@ use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     h_flex, v_flex,
@@ -543,7 +544,6 @@ impl Desktop {
                     Tab::Conversation => AppIcon::MessagesSquare,
                     Tab::Memory => AppIcon::BookOpen,
                     Tab::Team => AppIcon::Bot,
-                    Tab::Workflow => AppIcon::GitFork,
                     Tab::Routines => AppIcon::CalendarClock,
                     Tab::Setup => AppIcon::Settings,
                 };
@@ -551,6 +551,7 @@ impl Desktop {
                     .label(label)
                     .aria_label(label)
                     .icon(Icon::new(icon).size(TYPE_BODY))
+                    .tooltip(move |window, cx| Tooltip::new(tab.tooltip()).build(window, cx))
             }));
         let archived = self.state.is_archived(space, project);
         let paused = self.state.is_paused(space, project);
@@ -582,7 +583,6 @@ impl Desktop {
             ),
             Tab::Memory => self.memory_tab(space, project, when, cx),
             Tab::Team => self.agents_tab(space, project, cx),
-            Tab::Workflow => self.workflow_tab(space, project, archived, window, cx),
             Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Setup => self.setup_tab(space, project, cx),
         };
@@ -2298,7 +2298,7 @@ impl Desktop {
                         this.toggle_dreaming(in_space.clone(), named.clone(), *checked, cx);
                     })),
             )
-            .child(meta("Reviews this project’s tasks and memory. Product limitations can be reported to wheregmis/threadlane on GitHub under your publication permissions.", cx));
+            .child(meta("Reviews this project’s conversations, decisions, tasks and memory. You review any proposed GitHub report before publication.", cx));
         panel = if let Some(gap) = &card.cadence_gap {
             panel.child(gap_line(gap, "dreaming settings", space, cx))
         } else {
@@ -2336,6 +2336,26 @@ impl Desktop {
                     .into_iter()
                     .map(|line| div().text_size(TYPE_BODY).child(line)),
             )
+            .children(card.changes.into_iter().map(|change| {
+                let (space, project) = (space.to_owned(), project.to_owned());
+                let path = change.path;
+                let version = change.version;
+                let action = if change.deleted { "Deleted" } else { "Wrote" };
+                let label = if version > 1 {
+                    format!("{action} {path} · v{} → v{version}", version - 1)
+                } else {
+                    format!("{action} {path} · v{version}")
+                };
+                button(format!("dream-change-{path}-{version}"))
+                    .ghost()
+                    .label(label.clone())
+                    .accessibility_label(format!("Inspect history: {label}"))
+                    .tab_stop(true)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_memory(&space, &project, &path, cx);
+                        this.state.preview_dream_version(&space, &project, version);
+                    }))
+            }))
             .child(section("Memory check"))
             .children(
                 card.findings_gap

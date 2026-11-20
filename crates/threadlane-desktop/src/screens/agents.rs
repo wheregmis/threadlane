@@ -4,19 +4,22 @@ use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::BackendKind;
-use threadlane_desktop::{EmptyRegion, Part, Space, TeamViewMode, When, count_form};
+use threadlane_desktop::{
+    EmptyRegion, Part, Space, TeamViewMode, When, backend_summary, count_form,
+};
 
 use super::agent_edit::backend_picker;
 use super::{empty, gap_line};
 use crate::components::{button, card, count, field, meta, page_header, section};
 use crate::icons::AppIcon;
-use crate::tokens::{FORM_WIDTH, LG, MD, READING_WIDTH, SM, TYPE_META, XL, XS};
+use crate::tokens::{FORM_WIDTH, LG, MD, SCROLLBAR_GUTTER, SM, TYPE_META, XL, XS};
 use crate::{Desktop, Screen, Tab};
 
 impl Desktop {
@@ -55,16 +58,20 @@ impl Desktop {
 
         let topology = team_mode == TeamViewMode::Topology;
         let mut spaces = v_flex()
+            .w_full()
+            .min_w_0()
             .gap(XL)
-            .when(topology, |body| body.flex_1())
-            .when(!topology, |body| body.max_w(READING_WIDTH));
+            .when(topology, |body| body.flex_1());
         for space in self
             .state
             .spaces()
             .iter()
             .filter(|space| scope.is_none_or(|name| space.name == name))
         {
-            let mut part = v_flex().gap(MD).when(topology, |part| part.flex_1());
+            let mut part = v_flex()
+                .min_w_0()
+                .gap(MD)
+                .when(topology, |part| part.flex_1());
             if scope.is_none() {
                 part = part.child(section(space.name.clone()));
             }
@@ -82,9 +89,18 @@ impl Desktop {
                 }
                 part = part.child(self.agent_topology_view(&space.name, topo, cx));
             } else {
-                part = part
-                    .child(self.space_agent_roster(space, cx))
-                    .child(self.space_project_assignments(space, cx));
+                // Give each panel a readable width; flex-wrap stacks them when they
+                // no longer fit side by side, including at larger text sizes.
+                let panel = || v_flex().flex_1().flex_basis(rems(25.)).min_w_0();
+                part = part.child(
+                    h_flex()
+                        .min_w_0()
+                        .items_start()
+                        .flex_wrap()
+                        .gap(XL)
+                        .child(panel().child(self.space_agent_roster(space, cx)))
+                        .child(panel().child(self.space_project_assignments(space, cx))),
+                );
             }
             spaces = spaces.child(part);
         }
@@ -94,11 +110,24 @@ impl Desktop {
             .min_h_0()
             .min_w_0()
             .gap(LG)
-            .child(page_header(
-                "Team",
-                scope.map(|space| meta(space.to_owned(), cx)),
-                Some(h_flex().child(mode_toggle)),
-            ))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .flex_wrap()
+                    .gap(SM)
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex_basis(rems(10.))
+                            .min_w_0()
+                            .child(page_header(
+                                "Team",
+                                scope.map(|space| meta(space.to_owned(), cx)),
+                                None,
+                            )),
+                    )
+                    .child(div().flex_none().child(mode_toggle)),
+            )
             .child(
                 v_flex()
                     .flex_1()
@@ -106,7 +135,7 @@ impl Desktop {
                     .min_w_0()
                     .overflow_y_scrollbar()
                     .id("agents")
-                    .child(spaces),
+                    .child(spaces.when(!topology, |body| body.pr(SCROLLBAR_GUTTER))),
             )
             .into_any_element()
     }
@@ -114,7 +143,7 @@ impl Desktop {
     fn space_agent_roster(&self, space: &Space, cx: &mut Context<Self>) -> Div {
         let open = self.state.agent_form().space.as_deref() == Some(&space.name);
         let view = cx.entity().downgrade();
-        let mut actions = h_flex().gap(SM).flex_wrap();
+        let mut actions = h_flex().min_w_0().max_w_full().gap(SM).flex_wrap();
         for (to, agents) in self.state.copy_targets(&space.name) {
             let label = format!("Copy an agent to {to}…");
             let view = view.clone();
@@ -126,7 +155,11 @@ impl Desktop {
                 .small()
                 .ghost()
                 .icon(AppIcon::Copy)
-                .label(label)
+                .min_w_0()
+                .max_w_full()
+                .accessibility_label(label.clone())
+                .tooltip(label.clone())
+                .child(div().min_w_0().truncate().child(label))
                 .disabled(agents.is_empty())
                 .dropdown_menu(move |mut menu, _, _| {
                     for agent in &agents {
@@ -177,16 +210,7 @@ impl Desktop {
             });
         let mut agents = v_flex();
         for agent in &space.agents {
-            let backends = if agent.backends.is_empty() {
-                "Any backend".to_owned()
-            } else {
-                agent
-                    .backends
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" → ")
-            };
+            let (backends, full_backends) = backend_summary(agent);
             let projects = assignments_loaded.then(|| {
                 // General is the space lead's own project and is not listed.
                 let general = space.active_projects().find(|project| project.is_general);
@@ -209,7 +233,9 @@ impl Desktop {
             let (space_name, agent_name) = (space.name.clone(), agent.name.clone());
             agents = agents.child(
                 h_flex()
-                    .gap(MD)
+                    .min_w_0()
+                    .items_start()
+                    .gap(SM)
                     .py(SM)
                     .border_t_1()
                     .border_color(cx.theme().border)
@@ -220,18 +246,37 @@ impl Desktop {
                             .gap(XS)
                             .child(
                                 div()
+                                    .min_w_0()
+                                    .whitespace_normal()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(agent.name.clone()),
                             )
                             .child(
                                 h_flex()
+                                    .min_w_0()
                                     .gap(SM)
                                     .flex_wrap()
-                                    .children(
-                                        (!agent.role.eq_ignore_ascii_case(&agent.name))
-                                            .then(|| meta(agent.role.clone(), cx)),
+                                    .children((!agent.role.eq_ignore_ascii_case(&agent.name)).then(
+                                        || {
+                                            meta(agent.role.clone(), cx)
+                                                .max_w_full()
+                                                .whitespace_normal()
+                                        },
+                                    ))
+                                    .child(
+                                        meta(backends, cx)
+                                            .max_w_full()
+                                            .whitespace_normal()
+                                            .id(SharedString::from(format!(
+                                                "models-{}-{}",
+                                                space.name, agent.name
+                                            )))
+                                            .aria_label(full_backends.clone())
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(full_backends.clone())
+                                                    .build(window, cx)
+                                            }),
                                     )
-                                    .child(meta(backends, cx))
                                     .children(projects)
                                     .children((skills > 0).then(|| {
                                         meta(
@@ -242,7 +287,9 @@ impl Desktop {
                                             cx,
                                         )
                                     }))
-                                    .children(execution.map(|line| meta(line, cx))),
+                                    .children(execution.map(|line| {
+                                        meta(line, cx).max_w_full().whitespace_normal()
+                                    })),
                             ),
                     )
                     .child(
@@ -251,6 +298,7 @@ impl Desktop {
                             space.name, agent.name
                         )))
                         .small()
+                        .flex_none()
                         .ghost()
                         .icon(AppIcon::Pencil)
                         .label("Edit")
@@ -267,10 +315,7 @@ impl Desktop {
     }
 
     fn space_project_assignments(&self, space: &Space, cx: &mut Context<Self>) -> Div {
-        let projects = v_flex()
-            .gap(SM)
-            .pt(SM)
-            .child(section("Project assignments"));
+        let projects = v_flex().gap(SM).child(section("Project assignments"));
         if let Some(gap) = space.gap(Part::Projects) {
             return projects.child(gap_line(&gap, "projects", &space.name, cx));
         }
@@ -289,7 +334,9 @@ impl Desktop {
                 .project_gap(&space.name, &project.name, Part::Bindings);
             rows = rows.child(
                 h_flex()
-                    .gap(MD)
+                    .min_w_0()
+                    .items_start()
+                    .gap(SM)
                     .py(SM)
                     .border_t_1()
                     .border_color(cx.theme().border)
@@ -301,6 +348,8 @@ impl Desktop {
                             .gap(XS)
                             .child(
                                 div()
+                                    .min_w_0()
+                                    .whitespace_normal()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(project.name.clone()),
                             )
@@ -326,6 +375,7 @@ impl Desktop {
                             space.name, project.name
                         )))
                         .small()
+                        .flex_none()
                         .ghost()
                         .label("Open team")
                         .icon(AppIcon::ChevronRight)

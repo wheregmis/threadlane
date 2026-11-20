@@ -1,4 +1,4 @@
-//! Owner-facing routine activity, project outputs, and reusable review workflows.
+//! Owner-facing routine activity and project outputs.
 use crate::ids::{EventId, RunId, TaskId, TimerId};
 use crate::time::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -54,28 +54,4 @@ pub struct ProjectOutput {
     pub source: OutputSource,
     pub task: Option<TaskId>,
     pub run: Option<RunId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewRecipe {
-    pub implementation: String,
-    pub review: String,
-    pub version: i64,
-}
-
-/// Shared by the installation preview and the routine saved on the hub.
-pub fn review_routine(engineer: &str, reviewer: &str) -> String {
-    format!(
-        "Review open pull requests in this project's registered repositories. Ask {reviewer} to review one PR that still needs review. If changes are needed, propose a task for {engineer}. Send the owner the PR, findings and next decision."
-    )
-}
-
-impl Default for ReviewRecipe {
-    fn default() -> Self {
-        Self {
-            implementation: "Implement the requested change and record the branch, checks and results for review.".into(),
-            review: "Review the implementation and its checks. Summarize your findings for the owner.".into(),
-            version: 0,
-        }
-    }
 }

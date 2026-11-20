@@ -34,6 +34,8 @@ const GH_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 #[derive(Debug, Clone)]
 pub struct GitForge {
     gh: PathBuf,
+    /// The `git` that deletes a closed pull request's branch.
+    git: PathBuf,
     /// The `gh` user's login, looked up once; `None` if that failed.
     login: Arc<OnceCell<Option<String>>>,
 }
@@ -51,8 +53,16 @@ impl GitForge {
     pub fn with_gh(program: impl Into<PathBuf>) -> Self {
         Self {
             gh: program.into(),
+            git: "git".into(),
             login: Arc::default(),
         }
+    }
+
+    /// Deletes branches with `git` from `program`.
+    #[must_use]
+    pub fn with_git(mut self, program: impl Into<PathBuf>) -> Self {
+        self.git = program.into();
+        self
     }
 
     /// Posts a comment-only GitHub review on the submitted commit. The marker
@@ -134,6 +144,134 @@ impl GitForge {
             .clone()
     }
 
+    /// Closes PR `number` of `repo` (`host/owner/name`) only while its head
+    /// is `expected_head`, then deletes its head branch if asked. A PR that is
+    /// already closed at that head is not closed again, so a retry finishes.
+    async fn close_pull_request(
+        &self,
+        remote: &str,
+        repo: &str,
+        number: std::num::NonZeroU64,
+        expected_head: &str,
+        delete_branch: bool,
+    ) -> Result<String, ForgeError> {
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let hostname = format!("--hostname={host}");
+        let endpoint = format!("repos/{name}/pulls/{number}");
+        let here = Path::new(".");
+        let output = self
+            .gh(here, args(&["api", &hostname, "--method=GET", &endpoint]))
+            .await?;
+        let pull: Json = serde_json::from_str(&output)
+            .map_err(|error| ForgeError(format!("invalid pull request response: {error}")))?;
+        if pull["head"]["sha"].as_str() != Some(expected_head) {
+            return Err(ForgeError(format!(
+                "PR #{number} no longer has expected head {expected_head}. Inspect its current head before retrying."
+            )));
+        }
+        let branch = match delete_branch {
+            // GitHub nulls the head repository once the head branch is gone.
+            true if pull["head"]["repo"].is_null() => None,
+            true => Some(closable_head(&pull, name)?),
+            false => None,
+        };
+        let closed = if pull["merged"] == true {
+            format!("Pull request #{number} was already merged")
+        } else {
+            format!("Closed pull request #{number}")
+        };
+        // shortcut: GitHub cannot pin a close to a head SHA, so a push in the moment between the
+        // check above and the PATCH below is not caught; the branch deletion is pinned by a lease.
+        if pull["state"] == "open" {
+            self.gh(
+                here,
+                args(&[
+                    "api",
+                    &hostname,
+                    "--method=PATCH",
+                    &endpoint,
+                    "-f",
+                    "state=closed",
+                ]),
+            )
+            .await?;
+        }
+        let Some(branch) = branch else {
+            return Ok(format!("{closed}."));
+        };
+        // A closed PR's head SHA is frozen, so check the live branch: it may have been reused.
+        let live_ref = format!("repos/{name}/git/ref/heads/{branch}");
+        match self
+            .gh(here, args(&["api", &hostname, "--method=GET", &live_ref]))
+            .await
+        {
+            Err(error) if error.0.contains("(HTTP 404)") => {
+                return Ok(format!(
+                    "{closed}; its branch {branch} was already deleted."
+                ));
+            }
+            Err(error) => return Err(error),
+            Ok(output) => {
+                let live: Json = serde_json::from_str(&output)
+                    .map_err(|error| ForgeError(format!("invalid branch response: {error}")))?;
+                if live["object"]["sha"].as_str() != Some(expected_head) {
+                    return Ok(kept(&closed, branch, expected_head));
+                }
+            }
+        }
+        // The lease makes the deletion atomic: Git refuses it if the branch moved since the check.
+        match self.delete_branch(remote, branch, expected_head).await {
+            Ok(()) => {}
+            Err(error) if error.0.contains("stale info") => {
+                return Ok(kept(&closed, branch, expected_head));
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(format!("{closed} and deleted its branch {branch}."))
+    }
+
+    /// Deletes `branch` on `remote` with `git push --force-with-lease`, so only
+    /// while it still points at `expected_head`. `git push` needs a repository
+    /// to run in, so it runs in an empty one made for the call.
+    async fn delete_branch(
+        &self,
+        remote: &str,
+        branch: &str,
+        expected_head: &str,
+    ) -> Result<(), ForgeError> {
+        static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let scratch =
+            std::env::temp_dir().join(format!("threadlane-delete-{}-{call}", std::process::id()));
+        let target = format!("refs/heads/{branch}");
+        let lease = format!("--force-with-lease={target}:{expected_head}");
+        let git = |argv: Vec<OsString>| {
+            let mut command = Command::new(&self.git);
+            command.args(&argv).env("GIT_TERMINAL_PROMPT", "0");
+            async move {
+                run(command, "git", &argv, GH_TIMEOUT)
+                    .await
+                    .map_err(ForgeError)
+            }
+        };
+        let mut init = args(&["init", "--bare", "--quiet", "--"]);
+        init.push(scratch.clone().into());
+        let result = match git(init).await {
+            Ok(_) => {
+                let mut push = vec![OsString::from("-C"), scratch.clone().into()];
+                push.extend(args(&[
+                    "push", "--quiet", &lease, "--delete", "--", remote, &target,
+                ]));
+                git(push).await.map(drop)
+            }
+            Err(error) => Err(error),
+        };
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        result
+    }
+
     /// `gh <args>` in `worktree`, kept from prompting.
     fn gh_command(&self, worktree: &Path, args: &[OsString]) -> Command {
         let mut command = Command::new(&self.gh);
@@ -150,6 +288,113 @@ impl GitForge {
             .await
             .map_err(ForgeError)
     }
+
+    /// Labels an issue through `gh api`. Refuses a pull request, adds only
+    /// labels the repository already has (the API would create the others),
+    /// and treats removing a label the issue lacks as done.
+    async fn label_issue(
+        &self,
+        repo: &str,
+        number: std::num::NonZeroU64,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<String, ForgeError> {
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let api = |method: &str, endpoint: String, extra: Vec<String>| {
+            let mut argv = args(&[
+                "api",
+                &format!("--hostname={host}"),
+                &format!("--method={method}"),
+            ]);
+            argv.extend(extra.into_iter().map(OsString::from));
+            argv.push(endpoint.into());
+            self.gh(Path::new("."), argv)
+        };
+        let issue = api("GET", format!("repos/{name}/issues/{number}"), Vec::new()).await?;
+        let issue: Json = serde_json::from_str(&issue)
+            .map_err(|error| ForgeError(format!("invalid issue response: {error}")))?;
+        if !issue["pull_request"].is_null() {
+            return Err(ForgeError(format!(
+                "#{number} is a pull request; label_issue labels issues only"
+            )));
+        }
+        let mut report = Vec::new();
+        if !add.is_empty() {
+            let known = api(
+                "GET",
+                format!("repos/{name}/labels"),
+                vec!["--paginate".into(), "--jq=.[].name".into()],
+            )
+            .await?;
+            let known: Vec<&str> = known.lines().map(str::trim).collect();
+            let (found, missing): (Vec<&String>, Vec<&String>) = add
+                .iter()
+                .partition(|label| known.iter().any(|k| k.eq_ignore_ascii_case(label)));
+            if !found.is_empty() {
+                let fields = found
+                    .iter()
+                    .map(|label| format!("--raw-field=labels[]={label}"));
+                api(
+                    "POST",
+                    format!("repos/{name}/issues/{number}/labels"),
+                    fields.collect(),
+                )
+                .await?;
+                report.push(format!("Added {}.", join(&found)));
+            }
+            if !missing.is_empty() {
+                report.push(format!(
+                    "Not added, because {repo} has no such label: {}.",
+                    join(&missing)
+                ));
+            }
+        }
+        for label in remove {
+            let endpoint = format!(
+                "repos/{name}/issues/{number}/labels/{}",
+                path_segment(label)
+            );
+            match api("DELETE", endpoint, Vec::new()).await {
+                Ok(_) => {}
+                // The issue does not have the label (or it does not exist): nothing to remove.
+                Err(ForgeError(error)) if error.contains("HTTP 404") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if !remove.is_empty() {
+            report.push(format!("Removed {}.", remove.join(", ")));
+        }
+        Ok(format!("Issue #{number} in {repo}: {}", report.join(" ")))
+    }
+}
+
+/// The report of a close whose branch was kept because it moved.
+fn kept(closed: &str, branch: &str, expected_head: &str) -> String {
+    format!(
+        "{closed}. Warning: kept branch {branch}, because it no longer points at {expected_head}."
+    )
+}
+
+fn join(labels: &[&String]) -> String {
+    labels
+        .iter()
+        .map(|l| l.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Percent-encodes `text` for one URL path segment.
+fn path_segment(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(b).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn check_branch(branch: &str) -> Result<(), ForgeError> {
@@ -199,6 +444,30 @@ fn pull_request_head<'a>(
         ));
     }
     Ok(head)
+}
+
+/// The head branch of `pull` if it may be deleted: in the registered
+/// repository and not its base or default branch.
+fn closable_head<'a>(pull: &'a Json, name: &str) -> Result<&'a str, ForgeError> {
+    let head = &pull["head"];
+    if !head["repo"]["full_name"]
+        .as_str()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(name))
+    {
+        return Err(ForgeError(
+            "the pull request's head branch is not in the registered repository".into(),
+        ));
+    }
+    let branch = head["ref"]
+        .as_str()
+        .filter(|branch| valid_branch_name(branch))
+        .ok_or_else(|| ForgeError("the pull request has no valid head branch".into()))?;
+    if pull["base"]["ref"] == branch || head["repo"]["default_branch"] == branch {
+        return Err(ForgeError(
+            "the pull request head is the base or default branch".into(),
+        ));
+    }
+    Ok(branch)
 }
 
 async fn push_fast_forward(
@@ -333,6 +602,16 @@ impl Forge for GitForge {
     async fn apply(&self, remote: &str, action: &RepositoryAction) -> Result<String, ForgeError> {
         let repo = normalize_remote(remote)
             .ok_or_else(|| ForgeError("the registered remote is not a forge repository".into()))?;
+        if let RepositoryAction::ClosePullRequest {
+            number,
+            expected_head,
+            delete_branch,
+        } = action
+        {
+            return self
+                .close_pull_request(remote, &repo, *number, expected_head, *delete_branch)
+                .await;
+        }
         let mut argv = match action {
             RepositoryAction::Comment {
                 target,
@@ -357,6 +636,16 @@ impl Forge for GitForge {
                 args(&["pr", "merge", &number.to_string(), "--merge"])
             }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
+            RepositoryAction::LabelIssue {
+                number,
+                add,
+                remove,
+            } => return self.label_issue(&repo, *number, add, remove).await,
+            RepositoryAction::ClosePullRequest { .. } => unreachable!("handled above"),
+            RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
+            RepositoryAction::AssignIssue { number } => {
+                args(&["issue", "edit", &number.to_string(), "--add-assignee=@me"])
+            }
         };
         argv.push(format!("--repo={repo}").into());
         self.gh(Path::new("."), argv).await

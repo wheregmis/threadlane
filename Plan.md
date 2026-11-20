@@ -179,6 +179,7 @@ The full matrix:
 
 - **Project ceiling.** Each project has a maximum mode, inherited from its space. No binding can exceed it. A work project capped at Assisted cannot have an autonomous agent by accident.
 - **Standing rules.** When you answer a decision you can also say "always allow this here". That creates a rule scoped to one agent, one project, one tool, and one argument pattern. Tier 2 rules work in any mode. Tier 3 rules take effect only in Autonomous. Rules are listed in the project's settings and can be revoked. **From Noop:** it starts cautious and takes over more as it proves it decides like you.
+- **Default for a task's own work.** Opening a draft pull request and pushing the task's own branch are allowed without asking in every mode above Off, unless the run is tainted by outside content or the binding has an override for tier 2; such a call is recorded as a decision allowed by default.
 - **Overrides.** Any cell of the matrix can be made stricter per binding. It can be made looser only up to what the ceiling's column allows.
 - **Untrusted input steps the mode down.** A run triggered by external content operates one mode lower than its binding, to a minimum of On request (section 9.1).
 - **Two agents, stricter wins.** When the lead creates a task for another agent from work you did not request, both the lead's and the assignee's modes must permit it.
@@ -538,7 +539,7 @@ A run ends in exactly one of three ways:
 
 - **Only the lead messages you.** The lead's `send_message` tool is the only path for ordinary messages. Task agents report through `finish_task`, which sends a `task_result` event to the lead lane. The lead decides whether and how to tell you, and can merge several parallel results into one message. This gives each project a single point that enforces "quiet by default".
 - **Decisions come from any agent.** A task agent that needs approval or input reaches you directly through a decision (section 9.4).
-- **Final free text is never delivered.** It is stored as the run's rationale. Every `silent` run therefore has a recorded reason, which the evals in section 14 need.
+- **Final free text is a rationale, not a reply.** It is stored as the run's rationale, and delivered only when the run answers a user message or the owner's answer to `ask_user` without calling `send_message` or `stay_silent`. A lead ends any run without a reply by calling `stay_silent` with a reason, which replaces the final text as the rationale. Every `silent` run therefore has a recorded reason, which the evals in section 14 need.
 - **Hard limits.** Every run has a wall-time limit, enforced by the runner, plus a turn limit where the backend offers one. Hitting a limit stops the backend and ends the run as failed with a clear reason, after the session is resumed once for a final turn to save task progress to memory.
 
 ### 4.6 Who owns the loop, and what is recorded
@@ -1149,8 +1150,9 @@ Each tool declares its tier (section 2.3). The gate evaluates in order, and the 
 1. **Forbidden list.** Built-in, then space, then project. Result: block.
 2. **Effective mode.** The lower of the binding's mode and the project ceiling. If the run is tainted by external content, one step lower again, to a minimum of On request.
 3. **Binding overrides and standing rules**, within what the effective mode permits.
-4. **The mode matrix** (section 2.3): allow, classifier review, or ask.
-5. **Classifier**, where the matrix calls for it. It reviews the action in context and either allows or blocks. A block returns to the agent as a tool error so it can find a safer approach. The classifier is a one-shot question to a backend on the hub's computer, with a fixed answer format and no tools (section 5.7).
+4. **The default for a task's own work** (section 2.3): a draft pull request or a push of the task's own branch, in an untainted run with no tier 2 override, is allowed where the matrix would ask or review.
+5. **The mode matrix** (section 2.3): allow, classifier review, or ask.
+6. **Classifier**, where the matrix calls for it. It reviews the action in context and either allows or blocks. A block returns to the agent as a tool error so it can find a safer approach. The classifier is a one-shot question to a backend on the hub's computer, with a fixed answer format and no tools (section 5.7).
 
 **Decisions:**
 

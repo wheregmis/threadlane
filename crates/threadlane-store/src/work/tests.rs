@@ -1,5 +1,6 @@
 use super::*;
 use crate::Bootstrap;
+use crate::db::exec;
 use std::sync::Arc;
 use threadlane_core::ids::LaneId;
 use threadlane_core::model::{DecisionAnswer, TaskStatus};
@@ -113,6 +114,159 @@ async fn usage_includes_failed_runs_and_counts_only_the_latest_report_once() {
     );
     assert_eq!(g.cost, 0.25);
     assert!(g.tasks.is_empty());
+}
+
+/// Runs `(id, session, backend, started_at, usage)` on lane 1, one session per backend, where
+/// `usage` is the finished entry's `usage` JSON or `None` for a run that reported nothing.
+async fn usage_db(runs: &[(i64, i64, &str, i64, Option<&str>)]) -> HubDb {
+    let db = hub().await;
+    let tx = db.db.begin().await.unwrap();
+    for (id, session, backend, started, usage) in runs {
+        exec(
+            tx.conn(),
+            "INSERT OR IGNORE INTO sessions(id,lane_id,status,created_at,last_active_at)
+             VALUES(?1,1,'closed',0,0)",
+            params![*session],
+        )
+        .await
+        .unwrap();
+        exec(
+            tx.conn(),
+            "INSERT INTO runs(id,lane_id,session_id,machine_id,lease_epoch,backend,status,started_at,ended_at)
+             VALUES(?1,1,?2,1,1,?3,'committed',?4,?4+1)",
+            params![*id, *session, *backend, *started],
+        )
+        .await
+        .unwrap();
+        if let Some(usage) = usage {
+            exec(
+                tx.conn(),
+                "INSERT INTO journal(run_id,seq,at,entry)
+                 VALUES(?1,1,?2,json_object('type','finished','usage',json(?3)))",
+                params![*id, *started, *usage],
+            )
+            .await
+            .unwrap();
+        }
+    }
+    tx.commit().await.unwrap();
+    db
+}
+
+async fn usage_since(db: &HubDb, since: i64) -> UsageGroup {
+    let mut groups = db
+        .space_usage(Timestamp::from_millis(since), Timestamp::from_millis(100))
+        .await
+        .unwrap();
+    assert_eq!(groups.len(), 1);
+    groups.pop().unwrap()
+}
+
+fn claude(cost: f64, input: u64) -> String {
+    json!({"total_cost_usd": cost, "usage": {"input_tokens": input, "output_tokens": 1,
+        "cache_read_input_tokens": 100, "cache_creation_input_tokens": 10}})
+    .to_string()
+}
+
+fn codex(input: u64, output: u64) -> String {
+    json!({"usage": {"input_tokens": input, "cached_input_tokens": input / 2, "output_tokens": output}})
+        .to_string()
+}
+
+#[tokio::test]
+async fn usage_counts_a_resumed_claude_sessions_cost_once() {
+    let (a, b, c) = (claude(0.5, 1), claude(0.75, 2), claude(1.0, 3));
+    let db = usage_db(&[
+        (1, 1, "claude", 10, Some(&a)),
+        (2, 1, "claude", 20, Some(&b)),
+        (3, 1, "claude", 30, Some(&c)),
+    ])
+    .await;
+    let g = usage_since(&db, 0).await;
+    assert_eq!(g.cost, 1.0);
+    // Claude's tokens are per run, with cache reads and writes: 3 * 111 + (1 + 2 + 3).
+    assert_eq!((g.tokens, g.token_reports, g.cost_reports), (339, 3, 3));
+    let per_run = db.lane_run_usage(LaneId(1)).await.unwrap();
+    assert_eq!(per_run[&RunId(2)].input_tokens, Some(112));
+    assert_eq!(per_run[&RunId(2)].output_tokens, Some(1));
+    assert_eq!(per_run[&RunId(2)].cost_usd, Some(0.25));
+}
+
+#[tokio::test]
+async fn usage_counts_a_resumed_codex_sessions_tokens_once() {
+    let (a, b, c) = (codex(100, 10), codex(250, 25), codex(400, 40));
+    let db = usage_db(&[
+        (1, 1, "codex", 10, Some(&a)),
+        (2, 1, "codex", 20, Some(&b)),
+        (3, 1, "codex", 30, Some(&c)),
+    ])
+    .await;
+    let g = usage_since(&db, 0).await;
+    assert_eq!((g.tokens, g.token_reports, g.cost_reports), (440, 3, 0));
+    let per_run = db.lane_run_usage(LaneId(1)).await.unwrap();
+    assert_eq!(
+        (
+            per_run[&RunId(3)].input_tokens,
+            per_run[&RunId(3)].output_tokens
+        ),
+        (Some(150), Some(15))
+    );
+}
+
+#[tokio::test]
+async fn usage_takes_a_total_that_restarted_lower_as_is() {
+    let (a, b, c, d) = (codex(100, 0), codex(300, 0), codex(50, 0), codex(120, 0));
+    let db = usage_db(&[
+        (1, 1, "codex", 10, Some(&a)),
+        (2, 1, "codex", 20, Some(&b)),
+        (3, 1, "codex", 30, Some(&c)),
+        (4, 1, "codex", 40, Some(&d)),
+    ])
+    .await;
+    assert_eq!(usage_since(&db, 0).await.tokens, 100 + 200 + 50 + 70);
+}
+
+#[tokio::test]
+async fn usage_differences_across_a_run_that_reported_nothing() {
+    let (a, c) = (claude(0.5, 0), claude(0.8, 0));
+    let db = usage_db(&[
+        (1, 1, "claude", 10, Some(&a)),
+        (2, 1, "claude", 20, None),
+        (3, 1, "claude", 30, Some("{}")),
+        (4, 1, "claude", 40, Some(&c)),
+        // Another session's total is its own.
+        (5, 2, "claude", 50, Some(&a)),
+    ])
+    .await;
+    let g = usage_since(&db, 0).await;
+    assert_eq!((g.runs, g.cost_reports), (5, 3));
+    assert!((g.cost - 1.3).abs() < 1e-9, "{}", g.cost);
+    let per_run = db.lane_run_usage(LaneId(1)).await.unwrap();
+    assert!(!per_run.contains_key(&RunId(2)) && !per_run.contains_key(&RunId(3)));
+    assert!((per_run[&RunId(4)].cost_usd.unwrap() - 0.3).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn usage_window_starting_mid_session_subtracts_the_earlier_total() {
+    let (a, b) = (claude(0.5, 0), claude(0.8, 0));
+    let (c, d) = (codex(100, 10), codex(250, 25));
+    let db = usage_db(&[
+        (1, 1, "claude", 10, Some(&a)),
+        (2, 1, "claude", 30, Some(&b)),
+        (3, 2, "codex", 10, Some(&c)),
+        (4, 2, "codex", 30, Some(&d)),
+    ])
+    .await;
+    let groups = db
+        .space_usage(Timestamp::from_millis(20), Timestamp::from_millis(100))
+        .await
+        .unwrap();
+    let [claude, codex] = groups.as_slice() else {
+        panic!("{groups:?}")
+    };
+    assert_eq!((claude.runs, claude.cost_reports), (1, 1));
+    assert!((claude.cost - 0.3).abs() < 1e-9, "{}", claude.cost);
+    assert_eq!((codex.runs, codex.tokens), (1, 165));
 }
 
 #[tokio::test]

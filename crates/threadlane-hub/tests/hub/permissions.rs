@@ -295,16 +295,30 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
     let (lease, run) = begin(&*hub.link).await;
     let merge = json!({ "repository": "app" });
 
-    // On request, in a project that allows Autonomous: asked, with a rule.
+    // On request: asked, with no rule offered, since it would never apply.
+    assert_eq!(
+        call(&hub, &lease, &run, "c-0", "release", &merge).await,
+        Err(ToolError::WaitingOnYou)
+    );
+    assert!(!decision(&hub, 1).await.offers_standing_rule);
+    // Autonomous: asked, with a rule.
+    hub.api
+        .org(OrgRequest::SetMode {
+            project: None,
+            agent: LEAD_NAME.into(),
+            mode: Mode::Autonomous,
+        })
+        .await
+        .unwrap();
     assert_eq!(
         call(&hub, &lease, &run, "c-1", "release", &merge).await,
         Err(ToolError::WaitingOnYou)
     );
-    assert!(decision(&hub, 1).await.offers_standing_rule);
+    assert!(decision(&hub, 2).await.offers_standing_rule);
     decide(
         &hub,
         DecisionRequest::AnswerAlways {
-            decision: DecisionId(1),
+            decision: DecisionId(2),
             option: "approve".into(),
             note: None,
         },
@@ -333,7 +347,7 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
             Err(ToolError::WaitingOnYou),
             "{mode}"
         );
-        let asked = decision(&hub, i64::try_from(n).unwrap() + 2).await;
+        let asked = decision(&hub, i64::try_from(n).unwrap() + 3).await;
         assert_eq!(asked.status, DecisionStatus::Pending, "{mode}");
     }
     assert_eq!(rules(&hub).await[0].rule.uses, 0);

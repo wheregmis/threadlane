@@ -15,7 +15,7 @@ use threadlane_hub::{
 };
 use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, CombinedTools, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE, MEMORY_EDIT,
-    MEMORY_RENAME, MEMORY_VIEW, SEND_MESSAGE, UPDATE_TASK,
+    MEMORY_RENAME, MEMORY_VIEW, SEND_MESSAGE, STAY_SILENT, UPDATE_TASK,
 };
 use threadlane_testkit::fakes::FakeTools;
 
@@ -198,10 +198,12 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
         names,
         vec![
             SEND_MESSAGE,
+            STAY_SILENT,
             CREATE_TASK,
             UPDATE_TASK,
             CANCEL_TASK,
             LIST_TASKS,
+            threadlane_hub::PR_REVIEW_STATUS,
             MEMORY_VIEW,
             MEMORY_CREATE,
             MEMORY_EDIT,

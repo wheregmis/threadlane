@@ -43,7 +43,7 @@ fn cubic_point(
 
 /// Paints the viewport-clipped architectural dot grid, cubic Bézier edges,
 /// port dots, and directional arrowheads (static; does not repaint on pulse frames).
-fn static_edge_layer(
+pub(crate) fn static_edge_layer(
     id: impl Into<ElementId>,
     edges: Vec<GraphEdge>,
     width: f32,
@@ -91,7 +91,7 @@ fn static_edge_layer(
                     EdgeState::Active => (run_ink, 2.2),
                     EdgeState::Blocked => (fail_ink.opacity(0.9), 2.0),
                     EdgeState::Satisfied => (done_ink.opacity(0.55), 1.5),
-                    EdgeState::Pending => (theme.border.opacity(0.95), 1.4),
+                    EdgeState::Pending => (theme.muted_foreground.opacity(0.7), 1.4),
                 };
 
                 let p0 = (edge.x1, edge.y1);
@@ -683,7 +683,8 @@ impl Desktop {
                     format!("Filter topology to project {project}")
                 }
                 TopologyNodeKind::Agent { agent, .. } => {
-                    format!("Select {agent} to adjust autonomy mode")
+                    let models = node.tooltip.as_deref().unwrap_or_default();
+                    format!("Select {agent} ({models}) to adjust autonomy mode")
                 }
             };
 
@@ -697,6 +698,7 @@ impl Desktop {
                 .border_color(border_color)
                 .bg(bg)
                 .accessibility_label(aria)
+                .when_some(node.tooltip, |card, tip| card.tooltip(tip))
                 .child(
                     v_flex()
                         .size_full()

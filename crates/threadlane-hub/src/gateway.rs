@@ -89,7 +89,9 @@ impl LocalLink {
             .await?;
         let asked = match verdict {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
-            _ if tool == REPORT_LIMITATION && arguments["require_approval"] == true => {
+            _ if tool == REPORT_LIMITATION
+                && (dream.is_some() || arguments["require_approval"] == true) =>
+            {
                 Some(Asked::You {
                     offers_rule: false,
                     proposal: false,
@@ -103,6 +105,7 @@ impl LocalLink {
                 )));
             }
             Verdict::Allow { rule } => rule.map(Asked::Rule),
+            Verdict::AllowByDefault => Some(Asked::Default),
             Verdict::Review { offers_rule } => Some(Asked::Review {
                 offers_rule,
                 proposal: new_work,
@@ -302,8 +305,33 @@ impl LocalLink {
                 context: body,
             }
         } else {
-            crate::publish::proposal(&inner.db, lane, tool, arguments).await?
+            let mut args = arguments.clone();
+            if matches!(asked, Asked::Dream)
+                && let Some(obj) = args.as_object_mut()
+            {
+                obj.remove("expected_version");
+            }
+            crate::publish::proposal(&inner.db, lane, tool, &args).await?
         };
+        // Read here, once the call is recorded, so a repeated call replays
+        // this outcome instead of reading GitHub again.
+        let mut asked = asked;
+        if tool == crate::ASSIGN_ISSUE && !matches!(asked, Asked::Dream) {
+            match crate::publish::issue_claim(&inner.db, inner.github.as_deref(), lane, arguments)
+                .await?
+            {
+                crate::publish::Claim::Free => {}
+                crate::publish::Claim::Yours(message) => return Ok(json!({ "result": message })),
+                // No standing rule allows taking an issue someone else holds.
+                crate::publish::Claim::Held(question) => {
+                    proposal.question = question;
+                    asked = Asked::You {
+                        offers_rule: false,
+                        proposal: false,
+                    };
+                }
+            }
+        }
         if matches!(asked, Asked::Dream) {
             let details = proposal
                 .context
@@ -356,7 +384,7 @@ impl LocalLink {
                     ..
                 }
             ),
-            expires_at: (!matches!(asked, Asked::Rule(_)))
+            expires_at: (!matches!(asked, Asked::Rule(_) | Asked::Default))
                 .then(|| now + inner.settings.decision_expiry),
             created_at: now,
         };
@@ -381,6 +409,11 @@ impl LocalLink {
             Asked::Rule(rule) => inner
                 .db
                 .allow_by_rule(lease, &decision, rule)
+                .await
+                .map(|decision| decision.approved()),
+            Asked::Default => inner
+                .db
+                .allow_by_default(lease, &decision)
                 .await
                 .map(|decision| decision.approved()),
         }
@@ -473,6 +506,10 @@ impl LocalLink {
                 | crate::CREATE_ISSUE
                 | crate::MERGE
                 | crate::MARK_READY
+                | crate::LABEL_ISSUE
+                | crate::CLOSE_PULL_REQUEST
+                | threadlane_core::forge::GITHUB_CLI
+                | crate::ASSIGN_ISSUE
                 | REPORT_LIMITATION
         ) {
             let (remote, action) = if decision.tool == REPORT_LIMITATION {
@@ -535,6 +572,7 @@ impl LocalLink {
         let inner = &self.core.inner;
         let lane = self.check_lease(lease).await?;
         let by = MemoryAuthor {
+            expected_version: None,
             lease: *lease,
             run_id,
             call_key: format!("perform:{}", decision.id),
@@ -633,6 +671,11 @@ impl LocalLink {
             call_id: None,
         };
         let outcome = match tools.create_accepted_task(&context, decision).await {
+            Ok(task) if task.get("review_status").is_some() => json!({
+                "performed": true,
+                "summary": format!("Reused the review on {}.", task["task_id"].as_str().unwrap_or_default()),
+                "result": task,
+            }),
             Ok(task) => json!({
                 "performed": true,
                 "summary": format!(
@@ -694,9 +737,17 @@ impl LocalLink {
 #[derive(Clone, Copy)]
 enum Asked {
     Dream,
-    Review { offers_rule: bool, proposal: bool },
-    You { offers_rule: bool, proposal: bool },
+    Review {
+        offers_rule: bool,
+        proposal: bool,
+    },
+    You {
+        offers_rule: bool,
+        proposal: bool,
+    },
     Rule(StandingRuleId),
+    /// The gate's built-in default allowed it.
+    Default,
 }
 
 /// The record of a call that failed in a way that is safe to answer the same

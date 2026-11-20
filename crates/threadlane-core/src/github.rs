@@ -37,6 +37,10 @@ pub enum GithubKind {
     Mention,
     /// Any other notification: assigned, state changed, subscribed, ...
     Notification,
+    /// A pull request's head commit or state as a notification found it.
+    PullRequestUpdate,
+    /// The observed head commit of a pull request changed.
+    Push,
 }
 
 impl GithubKind {
@@ -50,6 +54,8 @@ impl GithubKind {
             Self::ReviewRequest => "a review request",
             Self::Mention => "a mention",
             Self::Notification => "a notification",
+            Self::PullRequestUpdate => "a pull request update",
+            Self::Push => "a push",
         }
     }
 }
@@ -106,6 +112,21 @@ pub struct PullTarget {
     pub number: Option<u64>,
 }
 
+/// Who holds an issue, as `assign_issue` checks it before asking.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueClaim {
+    /// The login `gh` reads as.
+    pub viewer: String,
+    /// The number names a pull request, not an issue.
+    pub is_pull_request: bool,
+    /// The issue is open.
+    pub open: bool,
+    /// The logins it is assigned to.
+    pub assignees: Vec<String>,
+    /// Open pull requests that reference it, as `(number, author login)`.
+    pub open_pull_requests: Vec<(u64, String)>,
+}
+
 /// Why a call to GitHub failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("github: {0}")]
@@ -127,6 +148,24 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
         target: &PullTarget,
         since: Option<&str>,
     ) -> Result<Vec<GithubItem>, GithubError>;
+
+    /// Append the PR head under the notification's id, then any known details
+    /// under their GitHub activity ids. Keep the items already read on error
+    /// so the hub can deliver them and retry the missing details.
+    async fn activity(
+        &self,
+        notification: &GithubItem,
+        items: &mut Vec<GithubItem>,
+    ) -> Result<(), GithubError> {
+        items.push(notification.clone());
+        Ok(())
+    }
+
+    /// Who holds issue `number` of `repository` (`owner/name`).
+    async fn issue_claim(&self, repository: &str, number: u64) -> Result<IssueClaim, GithubError> {
+        let _ = (repository, number);
+        Err(GithubError("this source cannot read issues".to_owned()))
+    }
 }
 
 /// A remote URL in the one form two spellings of the same repository share:

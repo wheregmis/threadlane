@@ -21,7 +21,7 @@ use threadlane_hub::{
 use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, ENDED_REASON, FINISH_TASK, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE,
     MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW, OFF_REASON, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
-    SEND_MESSAGE, SKIP_REASON, TASK_RULES, UPDATE_TASK,
+    SEND_MESSAGE, SKIP_REASON, STAY_SILENT, TASK_RULES, UPDATE_TASK,
 };
 
 use crate::common::{PAST_LEASE, TestHub, begin, usable_report};
@@ -127,6 +127,17 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         TaskStatus::InReview
     );
     assert!(task_results(&hub).await.is_empty());
+    let target = |number, digit: &str| {
+        threadlane_store::PrReviewHead::new(&widgets, number, &digit.repeat(40)).unwrap()
+    };
+    let pending = hub
+        .db
+        .pr_review_status(project.id, &target(42, "a"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((pending.task, pending.state.as_str()), (id, "in_progress"));
+    assert!(pending.feedback.is_none());
 
     let Begin::Run(review) = hub.link.begin_run(&lease).await.unwrap() else {
         panic!("review never started")
@@ -143,6 +154,57 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
             .await
             .is_err()
     );
+    // The reviewer reads the task's memory but cannot change it (#610).
+    assert!(review.tools.iter().any(|tool| tool.name == MEMORY_VIEW));
+    assert!(!review.tools.iter().any(|tool| tool.name == MEMORY_CREATE));
+    let progress = format!("project/tasks/{id}.md");
+    let viewed = call(
+        &hub,
+        &lease,
+        &review,
+        "view",
+        MEMORY_VIEW,
+        json!({"path": progress}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(viewed["content"], format!("# {id}\nDone."));
+    let listed = call(
+        &hub,
+        &lease,
+        &review,
+        "list",
+        MEMORY_VIEW,
+        json!({"path": "project/tasks"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        listed["files"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(progress))
+    );
+    for (tool, arguments) in [
+        (
+            MEMORY_CREATE,
+            json!({"path": "project/notes/x.md", "content": "x"}),
+        ),
+        (
+            MEMORY_EDIT,
+            json!({"path": progress, "old_text": "Done.", "new_text": "No."}),
+        ),
+        (MEMORY_DELETE, json!({"path": progress})),
+        (
+            MEMORY_RENAME,
+            json!({"from": progress, "to": "project/tasks/y.md"}),
+        ),
+    ] {
+        assert!(matches!(
+            call(&hub, &lease, &review, tool, tool, arguments).await,
+            Err(ToolError::Blocked(_))
+        ));
+    }
     call(
         &hub,
         &lease,
@@ -222,6 +284,24 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         hub.db.delivered_github_review(delivery).await.unwrap();
     }
     assert!(hub.db.pending_github_reviews().await.unwrap().is_empty());
+    for (digit, verdict) in [("a", "changes_requested"), ("b", "approved")] {
+        let recorded = hub
+            .db
+            .pr_review_status(project.id, &target(42, digit))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((recorded.task, recorded.state.as_str()), (id, verdict));
+    }
+    for unmatched in [target(43, "b"), target(42, "c")] {
+        assert!(
+            hub.db
+                .pr_review_status(project.id, &unmatched)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
     let history = hub.db.task_reviews(id).await.unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].reviewer, reviewer.id);
@@ -250,6 +330,10 @@ async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
         })
         .await
         .unwrap();
+    hub.send("scan", "Check PR readiness").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(lead.prompt.contains(r#"set agent to "Checker"."#));
+    finish_run(&hub, &lease, &lead).await;
     let report = hub
         .db
         .create_task(
@@ -630,6 +714,115 @@ async fn create_task_makes_one_queued_task_per_call_however_often_it_is_repeated
 }
 
 #[tokio::test]
+async fn scans_share_one_pr_review_per_head_and_reuse_its_committed_verdict() {
+    let hub = TestHub::with(
+        threadlane_hub::HubSettings {
+            reviewer: Some("Checker".into()),
+            ..Default::default()
+        },
+        std::sync::Arc::new(NoHooks),
+    )
+    .await;
+    hub.hello().await;
+    engineer(&hub, 2).await;
+    let project = hub.general().await;
+    let reviewer = hub
+        .db
+        .create_agent(&NewAgent::named("Checker", "quality"))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: project.id,
+            agent_id: reviewer.id,
+            mode: Mode::OnRequest,
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    hub.db
+        .create_repository(&threadlane_core::model::NewRepository {
+            project_id: project.id,
+            name: "widgets".into(),
+            remote_url: "git@github.com:Acme/Widgets.git".into(),
+            default_branch: "main".into(),
+            protected_branches: vec![],
+        })
+        .await
+        .unwrap();
+    hub.send("scan", "Check PR readiness").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(lead.prompt.contains(r#"set agent to "Checker"."#));
+    let head = "a".repeat(40);
+    let target = json!({"repository":"widgets","number":42,"head":head});
+    let scan = json!({"title":"Review PR 42","goal":"Review the diff","agent":ENGINEER,"pr_review":target});
+    assert_eq!(
+        call(
+            &hub,
+            &lease,
+            &lead,
+            "lookup",
+            threadlane_hub::PR_REVIEW_STATUS,
+            target.clone()
+        )
+        .await
+        .unwrap()["review_status"],
+        "unreviewed"
+    );
+    let (left, right) = tokio::join!(
+        call(&hub, &lease, &lead, "scan1", CREATE_TASK, scan.clone()),
+        call(&hub, &lease, &lead, "scan2", CREATE_TASK, scan.clone()),
+    );
+    let (left, right) = (left.unwrap(), right.unwrap());
+    let (first, repeated) = if left.get("review_status").is_none() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    assert_eq!(first["task_id"], repeated["task_id"]);
+    assert_eq!(repeated["review_status"], "in_progress");
+    assert_eq!(tasks(&hub).await.len(), 1);
+    finish_run(&hub, &lease, &lead).await;
+
+    let (lease, review) = begin(&*hub.link).await;
+    assert_eq!(review.agent_name, ENGINEER);
+    assert!(review.prompt.contains(&head));
+    let target = review.pr_review.as_ref().unwrap();
+    assert_eq!(target.number, 42);
+    assert_eq!(target.revision.commit, head);
+    assert_eq!(target.revision.repository, review.repositories[0].id);
+    write_progress(&hub, &lease, &review, first["task_id"].as_str().unwrap()).await;
+    let mut result =
+        json!({"summary":"All checks pass","pr_verdict":"approved","reviewed_head":"b".repeat(40)});
+    assert!(
+        call(&hub, &lease, &review, "stale", FINISH_TASK, result.clone())
+            .await
+            .is_err()
+    );
+    result["reviewed_head"] = json!(head);
+    let finished = call(&hub, &lease, &review, "verdict", FINISH_TASK, result)
+        .await
+        .unwrap();
+    assert_eq!(finished["finished"], true);
+    finish_run(&hub, &lease, &review).await;
+
+    let (lease, lead) = begin(&*hub.link).await;
+    let reused = call(&hub, &lease, &lead, "scan3", CREATE_TASK, scan.clone())
+        .await
+        .unwrap();
+    assert_eq!(reused["review_status"], "approved");
+    assert_eq!(reused["feedback"], "All checks pass");
+    let mut updated = scan;
+    updated["pr_review"]["head"] = json!("b".repeat(40));
+    let new = call(&hub, &lease, &lead, "scan4", CREATE_TASK, updated)
+        .await
+        .unwrap();
+    assert_ne!(new["task_id"], first["task_id"]);
+    assert_eq!(tasks(&hub).await.len(), 2);
+}
+
+#[tokio::test]
 async fn the_task_tools_check_their_arguments() {
     let (hub, lease, run) = lead_run(2).await;
     let other = hub
@@ -711,10 +904,12 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
         names(&run),
         [
             SEND_MESSAGE,
+            STAY_SILENT,
             CREATE_TASK,
             UPDATE_TASK,
             CANCEL_TASK,
             LIST_TASKS,
+            threadlane_hub::PR_REVIEW_STATUS,
             MEMORY_VIEW,
             MEMORY_CREATE,
             MEMORY_EDIT,
@@ -761,6 +956,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
         names(&run),
         [
             CREATE_TASK,
+            threadlane_hub::PR_REVIEW_STATUS,
             FINISH_TASK,
             PUBLISH_BRANCH,
             OPEN_PULL_REQUEST,
@@ -769,6 +965,10 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             threadlane_hub::CREATE_ISSUE,
             threadlane_hub::MERGE,
             threadlane_hub::MARK_READY,
+            threadlane_hub::LABEL_ISSUE,
+            threadlane_hub::CLOSE_PULL_REQUEST,
+            threadlane_core::forge::GITHUB_CLI,
+            threadlane_hub::ASSIGN_ISSUE,
             MEMORY_VIEW,
             MEMORY_CREATE,
             MEMORY_EDIT,
@@ -779,6 +979,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             LIST_TIMERS,
             CANCEL_TIMER,
             ASK_USER,
+            REPORT_LIMITATION,
         ]
     );
     assert!(
@@ -1480,7 +1681,7 @@ async fn a_task_names_repositories_registered_in_its_project_and_runs_with_the_d
     assert!(
         task_run
             .appended_instructions
-            .contains("Do not run git push or gh to do them yourself"),
+            .contains("Do not run git push or a gh command that changes GitHub yourself"),
         "layer 3"
     );
 
@@ -1573,6 +1774,93 @@ async fn the_lead_can_attach_repositories_and_wake_a_sleeping_task() {
         resumed
             .prompt
             .contains("Verify the existing PR head and resume the fix.")
+    );
+}
+
+#[tokio::test]
+async fn the_user_can_attach_a_repository_to_a_task_that_has_not_ended() {
+    let (hub, lease, lead_run) = lead_run(2).await;
+    let general = hub.general().await;
+    let app = hub
+        .db
+        .create_repository(&threadlane_core::model::NewRepository {
+            project_id: general.id,
+            name: "app".into(),
+            remote_url: "https://github.com/acme/app.git".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        })
+        .await
+        .unwrap();
+    call(
+        &hub,
+        &lease,
+        &lead_run,
+        "create",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &lead_run).await;
+    let (lease, run) = begin(&*hub.link).await;
+    assert!(run.repositories.is_empty());
+    write_progress(&hub, &lease, &run, "T-0001").await;
+    finish_run(&hub, &lease, &run).await;
+    let sleeping = task(&hub, "T-0001").await;
+    assert_eq!(sleeping.status, TaskStatus::Sleeping);
+
+    let attach = |names: &[&str]| TaskRequest::AttachRepositories {
+        task: sleeping.id,
+        repositories: names.iter().map(|name| (*name).to_owned()).collect(),
+    };
+    let unknown = hub.api.tasks(attach(&["other"])).await;
+    assert!(
+        matches!(&unknown, Err(ApiError::Invalid(why)) if why.contains("no repository")),
+        "{unknown:?}"
+    );
+    let TaskReply::Task { task: attached } = hub.api.tasks(attach(&["app", "app"])).await.unwrap()
+    else {
+        panic!("a task");
+    };
+    assert_eq!(attached.repositories, [app.id]);
+    let again = hub.api.tasks(attach(&["app"])).await;
+    assert!(
+        matches!(&again, Err(ApiError::Invalid(why)) if why.contains("already")),
+        "{again:?}"
+    );
+
+    let (lease, resumed) = loop {
+        let (lease, run) = begin(&*hub.link).await;
+        if run.lane_kind == LaneKind::Task {
+            break (lease, run);
+        }
+        finish_run(&hub, &lease, &run).await;
+    };
+    assert_eq!(resumed.task_id, Some(sleeping.id));
+    assert_eq!(resumed.repositories, [app]);
+    assert!(
+        resumed.prompt.contains("The user attached app"),
+        "{}",
+        resumed.prompt
+    );
+    let ask = hub.event(resumed.events[0]).await;
+    assert!(ask.requested);
+    call(
+        &hub,
+        &lease,
+        &resumed,
+        "done",
+        FINISH_TASK,
+        json!({"summary": "Published"}),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &resumed).await;
+    let ended = hub.api.tasks(attach(&["app"])).await;
+    assert!(
+        matches!(&ended, Err(ApiError::Invalid(why)) if why.contains("is done")),
+        "{ended:?}"
     );
 }
 

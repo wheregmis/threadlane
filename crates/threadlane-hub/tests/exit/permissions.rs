@@ -48,6 +48,30 @@ pub(super) async fn engineer_in(world: &World, mode: Mode) {
     db.set_binding_mode(binding.id, mode).await.unwrap();
 }
 
+/// Turns off the default that opens draft pull requests and pushes the task
+/// branch without asking, with an override for tier 2, for tests about asking.
+pub(super) async fn asks_before_sharing(world: &World) {
+    let db = &world.db;
+    let general = db.general_project().await.unwrap();
+    let engineer = db
+        .agents()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.name == ENGINEER)
+        .unwrap();
+    let binding = db
+        .bindings(general.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|binding| binding.agent_id == engineer.id)
+        .unwrap();
+    db.set_binding_overrides(binding.id, &serde_json::json!({"shared_reversible": "ask"}))
+        .await
+        .unwrap();
+}
+
 /// How many task runs the backend was given.
 fn task_runs(sim: &Sim) -> usize {
     sim.backend()
@@ -63,6 +87,9 @@ async fn the_same_scenario_under_each_mode_does_exactly_what_its_row_permits() {
         // Two tasks in `app`, the second after the first; each opens a pull
         // request, a tier 2 call.
         let world = publish_world(World::new().await, ask_script()).await;
+        // The scenario is about asking: drafts are opened without asking
+        // unless an override for tier 2 says otherwise.
+        asks_before_sharing(&world).await;
         world.backend.set_default(plan_tasks_in(
             &["app"],
             &[("page", &[]), ("docs", &["page"])],

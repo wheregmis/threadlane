@@ -127,8 +127,20 @@ impl FakeGh {
                echo 'https://github.test/me/app/pull/7'\n\
              elif [ \"$3\" = \"--paginate\" ] && [ -f {record}/reviews ]; then\n\
                cat {record}/reviews\n\
+             elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/ref/; then\n\
+               cat {record}/ref.json 2>/dev/null || {{ echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }}\n\
+             elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /pulls/; then\n\
+               cat {record}/pull.json\n\
              elif [ \"$1 $2\" = \"api user\" ]; then\n\
                {api_user}\n\
+             elif [ \"$1\" = api ]; then\n\
+               for last; do :; done\n\
+               case \"$3 $last\" in\n\
+                 '--method=GET repos/acme/app/issues/12') echo '{{\"number\":12}}' ;;\n\
+                 '--method=GET repos/acme/app/issues/13') echo '{{\"pull_request\":{{}}}}' ;;\n\
+                 '--method=GET repos/acme/app/labels') printf 'bug\\nNeeds Review\\n' ;;\n\
+                 '--method=DELETE repos/acme/app/issues/12/labels/gone') echo 'Not Found (HTTP 404)' >&2; exit 1 ;;\n\
+               esac\n\
              fi\n"
         );
         let program = dir.path().join("gh");
@@ -384,6 +396,21 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
         .apply(remote, &RepositoryAction::MarkReady { number })
         .await
         .unwrap();
+    forge
+        .apply(
+            remote,
+            &RepositoryAction::GhCli {
+                args: ["issue", "edit", "12", "--add-label=bug"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    forge
+        .apply(remote, &RepositoryAction::AssignIssue { number })
+        .await
+        .unwrap();
     let repo = "--repo=github.test/acme/app";
     assert_eq!(
         gh.invocations(),
@@ -399,6 +426,266 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
             ],
             vec!["pr", "merge", "12", "--merge", repo],
             vec!["pr", "ready", "12", repo],
+            vec!["issue", "edit", "12", "--add-label=bug", repo],
+            vec!["issue", "edit", "12", "--add-assignee=@me", repo],
         ]
     );
+}
+
+#[tokio::test]
+async fn issue_labels_use_gh_api_and_report_labels_the_repository_lacks() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let remote = "git@github.test:ACME/APP.git";
+    let label = |number: u64| RepositoryAction::LabelIssue {
+        number: std::num::NonZeroU64::new(number).unwrap(),
+        add: vec!["needs review".into(), "bug".into(), "nope".into()],
+        remove: vec!["gone".into(), "area: hub".into()],
+    };
+    let report = forge.apply(remote, &label(12)).await.unwrap();
+    assert_eq!(
+        report,
+        "Issue #12 in github.test/acme/app: Added needs review, bug. Not added, because \
+         github.test/acme/app has no such label: nope. Removed gone, area: hub."
+    );
+    let host = "--hostname=github.test";
+    assert_eq!(
+        gh.invocations(),
+        [
+            vec!["api", host, "--method=GET", "repos/acme/app/issues/12"],
+            vec![
+                "api",
+                host,
+                "--method=GET",
+                "--paginate",
+                "--jq=.[].name",
+                "repos/acme/app/labels"
+            ],
+            vec![
+                "api",
+                host,
+                "--method=POST",
+                "--raw-field=labels[]=needs review",
+                "--raw-field=labels[]=bug",
+                "repos/acme/app/issues/12/labels"
+            ],
+            vec![
+                "api",
+                host,
+                "--method=DELETE",
+                "repos/acme/app/issues/12/labels/gone"
+            ],
+            vec![
+                "api",
+                host,
+                "--method=DELETE",
+                "repos/acme/app/issues/12/labels/area%3A%20hub"
+            ],
+        ],
+        "labels the repository lacks are never sent, so none is created"
+    );
+
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let error = forge.apply(remote, &label(13)).await.unwrap_err();
+    assert!(error.0.contains("is a pull request"), "{error}");
+    assert_eq!(
+        gh.invocations().len(),
+        1,
+        "nothing is changed on a pull request"
+    );
+}
+
+#[tokio::test]
+async fn a_branch_is_deleted_only_while_it_still_points_at_the_expected_head() {
+    use threadlane_core::forge::RepositoryAction;
+    let dir = tempfile::tempdir().unwrap();
+    let bare = bare_repository(dir.path(), "app");
+    let remote = "https://github.test/acme/app.git";
+    // Real `git`, with the forge's remote rewritten to the local bare repository.
+    let fake_git = dir.path().join("git");
+    std::fs::write(
+        &fake_git,
+        format!(
+            "#!/bin/sh\nexec git -c url.{}.insteadOf={remote} \"$@\"\n",
+            bare.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let head = git(&bare, &["rev-parse", "main"]).trim().to_owned();
+    let moved = git(
+        &bare,
+        &["commit-tree", "main^{tree}", "-p", "main", "-m", "moved"],
+    )
+    .trim()
+    .to_owned();
+    let close = RepositoryAction::ClosePullRequest {
+        number: 12.try_into().unwrap(),
+        expected_head: head.clone(),
+        delete_branch: true,
+    };
+    let gh = || {
+        let gh = FakeGh::new();
+        let pull = serde_json::json!({
+            "state": "open",
+            "base": {"ref": "main"},
+            "head": {"sha": head, "ref": "dup/pr", "repo": {"full_name": "acme/app", "default_branch": "main"}}
+        });
+        std::fs::write(gh.dir.path().join("pull.json"), pull.to_string()).unwrap();
+        // GitHub's view of the branch, read before the push.
+        let live = serde_json::json!({"object": {"sha": head}});
+        std::fs::write(gh.dir.path().join("ref.json"), live.to_string()).unwrap();
+        gh
+    };
+
+    // Still at the expected head: closed, then deleted.
+    git(&bare, &["update-ref", "refs/heads/dup/pr", &head]);
+    let fake_gh = gh();
+    let forge = GitForge::with_gh(fake_gh.program()).with_git(&fake_git);
+    let done = forge.apply(remote, &close).await.unwrap();
+    assert!(done.contains("and deleted its branch dup/pr"), "{done}");
+    assert_eq!(git(&bare, &["branch", "--list", "dup/pr"]), "");
+    assert!(
+        !fake_gh
+            .invocations()
+            .iter()
+            .any(|argv| argv.contains(&"--method=DELETE".into())),
+        "the branch is deleted by the leased push, not the API"
+    );
+
+    // Pushed to after the check: the lease keeps the push, and the close is still reported.
+    git(&bare, &["update-ref", "refs/heads/dup/pr", &moved]);
+    let fake_gh = gh();
+    let forge = GitForge::with_gh(fake_gh.program()).with_git(&fake_git);
+    let done = forge.apply(remote, &close).await.unwrap();
+    assert!(done.starts_with("Closed pull request #12"), "{done}");
+    assert!(done.contains("Warning: kept branch dup/pr"), "{done}");
+    assert_eq!(git(&bare, &["rev-parse", "dup/pr"]).trim(), moved);
+}
+
+#[tokio::test]
+async fn a_close_is_refused_once_the_head_moved_and_deletes_only_a_same_repository_branch() {
+    use threadlane_core::forge::RepositoryAction;
+    let head = "0123456789abcdef0123456789abcdef01234567";
+    let close = |delete_branch| RepositoryAction::ClosePullRequest {
+        number: 12.try_into().unwrap(),
+        expected_head: head.into(),
+        delete_branch,
+    };
+    let pull = |sha: &str, state: &str, owner: &str, branch: &str| {
+        serde_json::json!({
+            "state": state,
+            "base": {"ref": "main"},
+            "head": {"sha": sha, "ref": branch, "repo": {"full_name": format!("{owner}/app"), "default_branch": "main"}}
+        })
+        .to_string()
+    };
+    let remote = "https://github.test/acme/app.git";
+    let get = vec![
+        "api",
+        "--hostname=github.test",
+        "--method=GET",
+        "repos/acme/app/pulls/12",
+    ];
+    let patch = vec![
+        "api",
+        "--hostname=github.test",
+        "--method=PATCH",
+        "repos/acme/app/pulls/12",
+        "-f",
+        "state=closed",
+    ];
+    let get_ref = vec![
+        "api",
+        "--hostname=github.test",
+        "--method=GET",
+        "repos/acme/app/git/ref/heads/dup/pr",
+    ];
+
+    // The head moved since it was shown: nothing is changed.
+    let gh = FakeGh::new();
+    let moved = "1123456789abcdef0123456789abcdef01234567";
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        pull(moved, "open", "Acme", "dup/pr"),
+    )
+    .unwrap();
+    let forge = GitForge::with_gh(gh.program());
+    let error = forge.apply(remote, &close(true)).await.unwrap_err();
+    assert!(error.0.contains("no longer has expected head"), "{error}");
+    assert_eq!(gh.invocations(), std::slice::from_ref(&get));
+
+    let ref_json = |sha: &str| serde_json::json!({"object": {"sha": sha}}).to_string();
+
+    // A reused branch whose ref moved past the closed PR's frozen head is kept.
+    let gh = FakeGh::new();
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        pull(head, "closed", "acme", "dup/pr"),
+    )
+    .unwrap();
+    std::fs::write(gh.dir.path().join("ref.json"), ref_json(moved)).unwrap();
+    let forge = GitForge::with_gh(gh.program());
+    let done = forge.apply(remote, &close(true)).await.unwrap();
+    assert!(done.contains("Warning: kept branch dup/pr"), "{done}");
+    assert_eq!(gh.invocations(), [get.clone(), get_ref.clone()]);
+
+    // A branch already gone (404) counts as deleted.
+    let gh = FakeGh::new();
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        pull(head, "open", "acme", "dup/pr"),
+    )
+    .unwrap();
+    let forge = GitForge::with_gh(gh.program());
+    let done = forge.apply(remote, &close(true)).await.unwrap();
+    assert!(done.contains("already deleted"), "{done}");
+    assert_eq!(gh.invocations(), [get.clone(), patch, get_ref]);
+
+    // A merged PR is reported as merged; a null head repository means its branch is gone.
+    let gh = FakeGh::new();
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        serde_json::json!({
+            "state": "closed",
+            "merged": true,
+            "base": {"ref": "main"},
+            "head": {"sha": head, "ref": "dup/pr", "repo": null}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let forge = GitForge::with_gh(gh.program());
+    let done = forge.apply(remote, &close(true)).await.unwrap();
+    assert!(done.contains("already merged"), "{done}");
+    assert_eq!(gh.invocations(), std::slice::from_ref(&get));
+
+    // Already closed, as on a retry, and the branch kept.
+    let gh = FakeGh::new();
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        pull(head, "closed", "acme", "dup/pr"),
+    )
+    .unwrap();
+    let forge = GitForge::with_gh(gh.program());
+    forge.apply(remote, &close(false)).await.unwrap();
+    assert_eq!(gh.invocations(), std::slice::from_ref(&get));
+
+    // A fork's branch, or the base branch, is never deleted.
+    for (owner, branch) in [("fork", "dup/pr"), ("acme", "main")] {
+        let gh = FakeGh::new();
+        std::fs::write(
+            gh.dir.path().join("pull.json"),
+            pull(head, "open", owner, branch),
+        )
+        .unwrap();
+        let forge = GitForge::with_gh(gh.program());
+        assert!(
+            forge.apply(remote, &close(true)).await.is_err(),
+            "{owner} {branch}"
+        );
+        assert_eq!(gh.invocations(), std::slice::from_ref(&get));
+    }
 }

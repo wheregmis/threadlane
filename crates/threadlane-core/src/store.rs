@@ -148,6 +148,12 @@ pub trait InboxStore: Send + Sync {
     /// Inserts a routed event, deduplicating on `(source, source_event_id)`.
     async fn insert_event(&self, event: &NewEvent) -> StoreResult<Inserted>;
     async fn event(&self, id: EventId) -> StoreResult<Option<Event>>;
+    /// The payload already delivered for a source event id.
+    async fn source_event_payload(
+        &self,
+        source: &str,
+        source_event_id: &str,
+    ) -> StoreResult<Option<Json>>;
     /// Pending events in a lane, oldest first.
     async fn pending_events(&self, lane_id: LaneId) -> StoreResult<Vec<Event>>;
     /// Marks pending events skipped, with a reason, under the lease.
@@ -349,10 +355,11 @@ pub struct TaskUpdate<'a> {
     pub wake: Option<TaskWake<'a>>,
 }
 
-/// An instruction from the project lead to queue in the task's lane.
+/// A message to queue in the task's lane, from the project lead or the user.
 #[derive(Debug)]
 pub struct TaskWake<'a> {
     pub call_key: String,
+    /// The whole text the task's agent reads.
     pub instruction: &'a str,
     pub requested: bool,
     pub at: Timestamp,
@@ -391,9 +398,10 @@ pub trait TaskStore: Send + Sync {
     async fn left_unwoken(&self, lane_id: LaneId) -> StoreResult<bool>;
     async fn tasks(&self, project_id: ProjectId) -> StoreResult<Vec<Task>>;
     /// Edits a task and queues its wake instruction in the same transaction.
+    /// `lease` is the editing run's, `None` when the user edits it.
     async fn update_task(
         &self,
-        lease: &Lease,
+        lease: Option<&Lease>,
         id: TaskId,
         update: TaskUpdate<'_>,
     ) -> StoreResult<Task>;
@@ -584,6 +592,15 @@ pub trait DecisionStore: Send + Sync {
         lease: &Lease,
         decision: &NewDecision,
         rule: StandingRuleId,
+    ) -> StoreResult<Decision>;
+    /// Records a call the gate's built-in default allowed as a decision
+    /// answered with its first option, its answer marked `by_default`, and
+    /// inserts the answer event, in one transaction and with no card. A
+    /// repeated `(run_id, tool_call_id)` returns the original.
+    async fn allow_by_default(
+        &self,
+        lease: &Lease,
+        decision: &NewDecision,
     ) -> StoreResult<Decision>;
     /// The standing rules of a project, or of every project when `None`,
     /// revoked ones included, oldest first.

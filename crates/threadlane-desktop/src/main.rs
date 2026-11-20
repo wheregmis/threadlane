@@ -934,9 +934,6 @@ impl Desktop {
                     return;
                 }
                 let (fresh_tasks, fresh_lead) = parts;
-                if tab == Tab::Workflow && !self.state.is_archived(&space, &project) {
-                    self.load_work(space.clone(), WorkPage::Workflow, cx);
-                }
                 if tab == Tab::Routines {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }

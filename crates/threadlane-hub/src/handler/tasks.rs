@@ -5,136 +5,16 @@
 use threadlane_core::client::{ApiError, TaskReply, TaskRequest};
 use threadlane_core::model::{Mode, NewTask, TaskOrigin, TaskStatus};
 use threadlane_core::runtime::{WakeTarget, Waker as _};
-use threadlane_core::store::{OrgStore, TaskStore};
+use threadlane_core::store::{OrgStore, TaskStore, TaskUpdate, TaskWake};
 
 use super::{ClientApi, active_project, project_error, required};
 use crate::error::api_error;
-
-fn review_roles<'a>(
-    engineer: &'a str,
-    reviewer: &'a str,
-) -> Result<threadlane_store::ReviewRoles<'a>, ApiError> {
-    let engineer = required("engineer", engineer)?;
-    let reviewer = required("reviewer", reviewer)?;
-    if engineer == reviewer
-        || [engineer, reviewer]
-            .iter()
-            .any(|s| s.len() > 128 || s.contains(['\n', '\r']))
-    {
-        return Err(ApiError::Invalid(
-            "Choose two distinct, single-line specialist names.".into(),
-        ));
-    }
-    Ok(threadlane_store::ReviewRoles { engineer, reviewer })
-}
 
 /// Answers a [`TaskRequest`].
 pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<TaskReply, ApiError> {
     let inner = &api.core.inner;
     let db = &inner.db;
     match request {
-        TaskRequest::SaveReviewRecipe { recipe } => {
-            for step in [&recipe.implementation, &recipe.review] {
-                required("step instructions", step)?;
-                if step.len() > 8192 {
-                    return Err(ApiError::Invalid("Step instructions exceed 8 KiB.".into()));
-                }
-            }
-            Ok(TaskReply::ReviewRecipe {
-                recipe: db
-                    .save_review_recipe(&recipe)
-                    .await
-                    .map_err(project_error)?,
-            })
-        }
-        TaskRequest::StartReviewWorkflow {
-            project,
-            goal,
-            engineer,
-            reviewer,
-            repository,
-            version,
-            client_request_id,
-        } => {
-            let project = api.project_named(Some(&project)).await?;
-            active_project(&project)?;
-            if db.effective_ceiling(project.id).await.map_err(api_error)? == Mode::Off {
-                return Err(ApiError::Invalid("Project mode is off.".into()));
-            }
-            let roles = review_roles(&engineer, &reviewer)?;
-            let goal = required("workflow goal", &goal)?;
-            let request = required("request ID", &client_request_id)?;
-            if request.len() > 128 || goal.len() > 8192 {
-                return Err(ApiError::Invalid("Workflow request is too long.".into()));
-            }
-            let repo = db
-                .repositories(project.id)
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .find(|r| r.name == repository.trim())
-                .ok_or_else(|| {
-                    ApiError::Invalid("Choose a repository registered in this project.".into())
-                })?;
-            let recipe = db.review_recipe().await.map_err(api_error)?;
-            if recipe.version != version {
-                return Err(ApiError::Invalid(
-                    "Reload the saved workflow before starting it.".into(),
-                ));
-            }
-            let task = db
-                .start_review_workflow(project.id, roles, repo.id, goal, &recipe, request)
-                .await
-                .map_err(project_error)?;
-            inner.wake.wake(WakeTarget::Lane(task.lane_id));
-            Ok(TaskReply::Task { task })
-        }
-        TaskRequest::InstallReviewTeam {
-            project,
-            engineer,
-            reviewer,
-            recurrence,
-        } => {
-            use threadlane_core::model::{NewTimer, TimerCategory, TimerCreator};
-            let project = api.project_named(Some(&project)).await?;
-            active_project(&project)?;
-            let roles = review_roles(&engineer, &reviewer)?;
-            crate::recurrence::check(&recurrence).map_err(ApiError::Invalid)?;
-            let now = inner.clock.now();
-            let templates = crate::templates::all().map_err(ApiError::Internal)?;
-            let template = |id| {
-                templates
-                    .iter()
-                    .find(|t| t.id == id)
-                    .ok_or_else(|| ApiError::Internal(format!("Missing {id} template")))
-            };
-            let timer = NewTimer {
-                project_id: project.id,
-                lane_id: project.lead_lane_id,
-                agent_id: None,
-                task_ref: None,
-                category: TimerCategory::Schedule,
-                due_at: crate::recurrence::next_occurrence(&recurrence, now, now)
-                    .map_err(ApiError::Invalid)?,
-                recurrence: Some(recurrence),
-                instruction: threadlane_core::work::review_routine(roles.engineer, roles.reviewer),
-                created_by: TimerCreator::User,
-                created_by_call: Some(format!("review-team:{}", project.id)),
-                requested: true,
-            };
-            let timer = db
-                .install_review_team(
-                    &project,
-                    [
-                        (roles.engineer, template("engineer")?),
-                        (roles.reviewer, template("reviewer")?),
-                    ],
-                    &timer,
-                )
-                .await
-                .map_err(project_error)?;
-            Ok(TaskReply::ReviewTeam { timer })
-        }
         TaskRequest::Create {
             project,
             title,
@@ -261,6 +141,78 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                 .map_err(api_error)?;
             inner.wake.wake(WakeTarget::Lane(retried.lane_id));
             Ok(TaskReply::Task { task: retried })
+        }
+        TaskRequest::AttachRepositories {
+            task: id,
+            repositories,
+        } => {
+            let task = db
+                .task(id)
+                .await
+                .map_err(api_error)?
+                .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+            if task.status.is_terminal() {
+                return Err(ApiError::Invalid(format!(
+                    "task {id} is {}; only a task that has not ended can take a repository",
+                    task.status
+                )));
+            }
+            let registered = db.repositories(task.project_id).await.map_err(api_error)?;
+            let mut added = Vec::new();
+            for name in &repositories {
+                let repository = registered
+                    .iter()
+                    .find(|repository| repository.name == name.trim())
+                    .ok_or_else(|| {
+                        ApiError::Invalid(format!("task {id}'s project has no repository {name:?}"))
+                    })?;
+                if !task.repositories.contains(&repository.id) && !added.contains(repository) {
+                    added.push(repository.clone());
+                }
+            }
+            if added.is_empty() {
+                return Err(ApiError::Invalid(format!(
+                    "task {id} already has every repository named"
+                )));
+            }
+            let names = added
+                .iter()
+                .map(|repository| repository.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let instruction = format!(
+                "The user attached {names} to this task so its work can be published. \
+                 Your progress file is kept, and so is your earlier working directory: \
+                 your next run starts in a worktree of the attached repository and is told \
+                 where the earlier work is. Bring your completed work into the worktree, \
+                 then publish as the task asks."
+            );
+            let ids: Vec<_> = added.iter().map(|repository| repository.id).collect();
+            let updated = db
+                .update_task(
+                    None,
+                    id,
+                    TaskUpdate {
+                        repositories: &ids,
+                        wake: Some(TaskWake {
+                            call_key: format!(
+                                "attach:{}",
+                                ids.iter()
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ),
+                            instruction: &instruction,
+                            requested: true,
+                            at: inner.clock.now(),
+                        }),
+                        ..TaskUpdate::default()
+                    },
+                )
+                .await
+                .map_err(api_error)?;
+            inner.wake.wake(WakeTarget::Lane(updated.lane_id));
+            Ok(TaskReply::Task { task: updated })
         }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }
