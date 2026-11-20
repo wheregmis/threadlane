@@ -410,7 +410,7 @@ impl PendingProjectLoad {
 
 /// The window's one view: the shell and its screens over [`AppState`].
 struct Desktop {
-    state: AppState,
+    state: threadlane_desktop::ConversationState,
     desktop_updatable: bool,
     updates: HashMap<Option<String>, updates::UpdateState>,
     core: Arc<RwLock<ClientCore>>,
@@ -691,7 +691,7 @@ impl Desktop {
         Self {
             work: WorkView::new(window, cx),
             inbox: screens::Inbox::default(),
-            state,
+            state: state.into(),
             core,
             tokio,
             screen,

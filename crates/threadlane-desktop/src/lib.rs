@@ -34,6 +34,7 @@ mod clock;
 mod composer;
 mod control;
 mod conversation;
+mod conversation_cache;
 mod decision_keys;
 mod decision_record;
 mod dreaming;
@@ -58,6 +59,7 @@ pub use control::{
 pub use conversation::{
     Digest, Line, belongs_in_conversation, follow_latest, message_limit, newest_message,
 };
+pub use conversation_cache::ConversationState;
 pub use decision_keys::{
     DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope,
 };
