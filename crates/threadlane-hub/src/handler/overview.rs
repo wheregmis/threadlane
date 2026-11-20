@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use threadlane_core::client::{
     ActivityCursor, ApiError, ConversationEntry, DigestResult, FeedItem, HubApi as _, LeadRun,
-    OverviewReply, OverviewRequest, RecordedEvent, RunStep, RunSummary, RunUsage,
-    TaskActivityEntry, TaskDetail, TaskSummary, WorkOverview,
+    OverviewReply, OverviewRequest, RecordedEvent, RunStep, RunSummary, TaskActivityEntry,
+    TaskDetail, TaskSummary, WorkOverview,
 };
 use threadlane_core::ids::{AgentId, MachineId, ProjectId, TaskId};
 use threadlane_core::model::{
@@ -120,18 +120,6 @@ fn step(entry: &JournalEntry) -> Option<RunStep> {
         kind: kind.to_owned(),
         description,
         at: entry.at,
-    })
-}
-
-fn usage(result: &JournalEntry) -> Option<RunUsage> {
-    let reported = &result.entry["usage"];
-    let input_tokens = reported["usage"]["input_tokens"].as_u64();
-    let output_tokens = reported["usage"]["output_tokens"].as_u64();
-    let cost_usd = reported["total_cost_usd"].as_f64();
-    (input_tokens.is_some() || output_tokens.is_some() || cost_usd.is_some()).then_some(RunUsage {
-        input_tokens,
-        output_tokens,
-        cost_usd,
     })
 }
 
@@ -617,6 +605,10 @@ pub(super) async fn handle(
                 .lane_runs(project.lead_lane_id)
                 .await
                 .map_err(api_error)?;
+            let mut usage = db
+                .lane_run_usage(project.lead_lane_id)
+                .await
+                .map_err(api_error)?;
             let mut listed = Vec::with_capacity(runs.len());
             for run in runs {
                 let sent_message = match run.outcome {
@@ -626,11 +618,7 @@ pub(super) async fn handle(
                 let (latest_step, usage) = if run.status == RunStatus::Active {
                     (latest(db, Some(&run)).await?, None)
                 } else {
-                    let result = db
-                        .latest_journal_entry(run.id, Some("finished"))
-                        .await
-                        .map_err(api_error)?;
-                    (None, result.as_ref().and_then(usage))
+                    (None, usage.remove(&run.id))
                 };
                 listed.push(LeadRun {
                     usage,
@@ -666,30 +654,19 @@ async fn task_detail(db: &HubDb, task: TaskId, full: bool) -> Result<OverviewRep
         .filter(|repository| task.repositories.contains(&repository.id))
         .map(|repository| repository.name)
         .collect();
+    let mut usage = db.lane_run_usage(task.lane_id).await.map_err(api_error)?;
     let mut runs = Vec::new();
     for run in db.lane_runs(task.lane_id).await.map_err(api_error)? {
         let active = run.status == RunStatus::Active;
-        let (steps, usage) = if full {
+        let steps = if full {
             let journal = db.journal(run.id).await.map_err(api_error)?;
-            let usage = if active {
-                None
-            } else {
-                journal
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.entry["type"] == "finished")
-                    .and_then(usage)
-            };
-            (journal.iter().filter_map(step).collect(), usage)
+            journal.iter().filter_map(step).collect()
         } else if active {
-            (latest(db, Some(&run)).await?.into_iter().collect(), None)
+            latest(db, Some(&run)).await?.into_iter().collect()
         } else {
-            let result = db
-                .latest_journal_entry(run.id, Some("finished"))
-                .await
-                .map_err(api_error)?;
-            (Vec::new(), result.as_ref().and_then(usage))
+            Vec::new()
         };
+        let usage = if active { None } else { usage.remove(&run.id) };
         runs.push(RunSummary {
             machine: names.machine(run.machine_id),
             usage,
