@@ -195,6 +195,19 @@ impl WorkflowChoice {
     }
 }
 
+/// Pair fields only when both can usefully share the actual form width.
+fn workflow_pair(first: Div, second: Div) -> Div {
+    let column = |field: Div| field.flex_1().min_w_0().flex_basis(rems(18.));
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .flex_wrap()
+        .items_start()
+        .gap(MD)
+        .child(column(first))
+        .child(column(second))
+}
+
 fn workflow_start_blocker(
     dirty: bool,
     project_off: bool,
@@ -755,17 +768,28 @@ impl Desktop {
         let view = cx.entity().downgrade();
         let generation = self.work.generation;
         let label = choice.label();
-        v_flex().gap(SM).child(meta(label, cx)).child(
+        let action = format!("Choose {}", label.to_lowercase());
+        let value = if selected.is_empty() {
+            action.clone()
+        } else {
+            selected.to_owned()
+        };
+        let accessible = if selected.is_empty() {
+            action
+        } else {
+            format!("{action}, current selection: {selected}")
+        };
+        v_flex().min_w_0().gap(SM).child(meta(label, cx)).child(
             button(choice.id())
                 .small()
                 .outline()
+                .w_full()
+                .min_w_0()
+                .tab_stop(true)
                 .icon(AppIcon::ChevronDown)
-                .label(if selected.is_empty() {
-                    format!("Choose {}", label.to_lowercase())
-                } else {
-                    selected.to_owned()
-                })
-                .accessibility_label(format!("Choose {}", label.to_lowercase()))
+                .label(value.clone())
+                .accessibility_label(accessible)
+                .tooltip(value)
                 .disabled(self.work.saving || options.is_empty())
                 .dropdown_menu(move |mut menu, _, _| {
                     for option in &options {
@@ -794,7 +818,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut body = v_flex().gap(MD).max_w(READING_WIDTH).w_full();
+        let mut body = v_flex().gap(MD).w_full().min_w_0();
         if archived {
             body = body.child(meta(
                 "Unarchive this project to configure or start a workflow.",
@@ -828,6 +852,7 @@ impl Desktop {
             .id("project-workflow-panel")
             .flex_1()
             .min_h_0()
+            .min_w_0()
             .w_full()
             .overflow_y_scrollbar()
             .child(body)
@@ -908,6 +933,9 @@ impl Desktop {
         let save = button("save-recipe")
             .small()
             .label("Save steps for this space")
+            .tab_stop(true)
+            .self_start()
+            .max_w_full()
             .disabled(self.work.saving || !dirty)
             .on_click(cx.listener(move |this, _, _, cx| {
                 let recipe = ReviewRecipe {
@@ -927,6 +955,9 @@ impl Desktop {
         let start = button("run-review")
             .primary()
             .label("Start workflow")
+            .tab_stop(true)
+            .self_start()
+            .max_w_full()
             .disabled(self.work.saving || blocker.is_some())
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.work.implementation.read(cx).value().as_str() != saved.implementation
@@ -970,6 +1001,9 @@ impl Desktop {
         let preset = button("preview-team")
             .small()
             .label("Preview PR review team…")
+            .tab_stop(true)
+            .self_start()
+            .max_w_full()
             .disabled(self.work.saving || self.work.engineer == self.work.reviewer)
             .on_click(cx.listener(move |this, _, window, cx| {
                 let engineer = this.work.engineer.clone();
@@ -1064,28 +1098,73 @@ impl Desktop {
                         )
                 });
             }));
+        let implementation = v_flex().gap(SM).child("1. Implementation").child(
+            Textarea::new(&self.work.implementation)
+                .w_full()
+                .min_w_0()
+                .aria_label("Implementation instructions"),
+        );
+        let review = v_flex().gap(SM).child("2. Review").child(
+            Textarea::new(&self.work.review)
+                .w_full()
+                .min_w_0()
+                .aria_label("Review instructions"),
+        );
+        let engineer = self.workflow_picker(
+            WorkflowChoice::Engineer,
+            &self.work.engineer,
+            specialists.clone(),
+            cx,
+        );
+        let reviewer = self.workflow_picker(
+            WorkflowChoice::Reviewer,
+            &self.work.reviewer,
+            specialists,
+            cx,
+        );
+
         v_flex()
-            .gap(MD)
-            .child(section("Review workflow"))
-            .child(meta("An engineer implements the goal, a reviewer checks the result, and you decide whether to accept it.", cx))
-            .child(section("Reusable steps"))
-            .child("1. Implementation")
+            .w_full()
+            .min_w_0()
+            .gap(LG)
             .child(
-                Textarea::new(&self.work.implementation).aria_label("Implementation instructions"),
+                v_flex().gap(SM).child(section("Review workflow")).child(
+                    meta(
+                        "An engineer implements the goal, a reviewer checks the result, and you decide whether to accept it.",
+                        cx,
+                    )
+                    .max_w(READING_WIDTH)
+                    .whitespace_normal(),
+                ),
             )
-            .child("2. Review")
-            .child(Textarea::new(&self.work.review).aria_label("Review instructions"))
-            .child(save)
-            .child(section("Project team"))
-            .child(self.workflow_picker(WorkflowChoice::Engineer, &self.work.engineer, specialists.clone(), cx))
-            .child(self.workflow_picker(WorkflowChoice::Reviewer, &self.work.reviewer, specialists, cx))
-            .child(preset)
-            .child(section("Start a review workflow"))
-            .child(self.workflow_picker(WorkflowChoice::Repository, &self.work.repository, repositories, cx))
-            .child("Goal")
-            .child(field(&self.work.goal).aria_label("Workflow goal"))
-            .children(blocker.map(|reason| meta(reason, cx)))
-            .child(start)
+            .child(
+                v_flex()
+                    .gap(MD)
+                    .child(section("Reusable steps"))
+                    .child(workflow_pair(implementation, review))
+                    .child(save),
+            )
+            .child(
+                v_flex()
+                    .gap(MD)
+                    .child(section("Project team"))
+                    .child(workflow_pair(engineer, reviewer))
+                    .child(preset),
+            )
+            .child(
+                v_flex()
+                    .gap(MD)
+                    .child(section("Start a review workflow"))
+                    .child(self.workflow_picker(WorkflowChoice::Repository, &self.work.repository, repositories, cx))
+                    .child(
+                        v_flex()
+                            .gap(SM)
+                            .child("Goal")
+                            .child(field(&self.work.goal).w_full().min_w_0().aria_label("Workflow goal")),
+                    )
+                    .children(blocker.map(|reason| meta(reason, cx).whitespace_normal()))
+                    .child(start),
+            )
             .child(self.workflow_runs(space, project, cx))
     }
 

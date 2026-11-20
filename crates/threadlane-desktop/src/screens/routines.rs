@@ -17,7 +17,7 @@ use super::{empty, gap_line, menu_item};
 use crate::components::{button, card, field, meta, page_header, section, status_badge};
 use crate::icons::AppIcon;
 use crate::tokens::{
-    FIELD_RADIUS, FORM_WIDTH, LG, MD, READING_WIDTH, SHORT_FIELD_WIDTH, SM, Status, XL, XS,
+    FIELD_RADIUS, FORM_WIDTH, LG, MD, SCROLLBAR_GUTTER, SHORT_FIELD_WIDTH, SM, Status, XL, XS,
     ZONE_WIDTH,
 };
 use crate::{Desktop, Screen, Tab, TimerChange};
@@ -39,8 +39,7 @@ impl Desktop {
             .min_h_0()
             .min_w_0()
             .w_full()
-            .max_w(READING_WIDTH)
-            .self_center()
+            .pr(SCROLLBAR_GUTTER)
             .overflow_y_scrollbar()
             .id("project-routines")
             .gap(MD)
@@ -149,11 +148,9 @@ impl Desktop {
         groups.retain(|group| scope.is_none_or(|name| group.space == name));
         let mut gaps = self.state.routines_space_gaps();
         gaps.retain(|(space, _)| scope.is_none_or(|name| *space == name));
-        let mut list = v_flex().gap(XL).max_w(READING_WIDTH);
-        if let Some(space) = scope {
-            list =
-                list.child(self.work_link("agenda", "Agenda", space, crate::WorkPage::Agenda, cx));
-        }
+        let agenda = scope
+            .map(|space| self.work_link("agenda", "Agenda", space, crate::WorkPage::Agenda, cx));
+        let mut list = v_flex().min_w_0().w_full().pr(SCROLLBAR_GUTTER).gap(XL);
         if groups.is_empty() && gaps.is_empty() {
             list = list.child(empty(EmptyRegion::AllRoutines, cx));
         }
@@ -175,7 +172,8 @@ impl Desktop {
                 h_flex()
                     .justify_between()
                     .gap(SM)
-                    .child(section(label))
+                    .flex_wrap()
+                    .child(section(label).flex_1().flex_basis(rems(12.)))
                     .child(
                         button(SharedString::from(format!(
                             "routines-of-{}-{}",
@@ -207,11 +205,34 @@ impl Desktop {
             .min_h_0()
             .min_w_0()
             .gap(LG)
-            .child(page_header(
-                "Routines",
-                scope.map(|space| meta(space.to_owned(), cx)),
-                new_routine,
-            ))
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_none()
+                    .flex_wrap()
+                    .pr(SCROLLBAR_GUTTER)
+                    .gap_x(MD)
+                    .gap_y(SM)
+                    .justify_between()
+                    .child(
+                        page_header(
+                            "Routines",
+                            scope.map(|space| meta(space.to_owned(), cx)),
+                            None,
+                        )
+                        .flex_1()
+                        .flex_basis(rems(12.)),
+                    )
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .max_w_full()
+                            .flex_wrap()
+                            .gap(SM)
+                            .children(agenda)
+                            .children(new_routine),
+                    ),
+            )
             .child(
                 v_flex()
                     .flex_1()
@@ -316,10 +337,9 @@ impl Desktop {
                     }))
             });
             let cancel = Consequence::CancelRoutine(space.clone(), project.clone(), id);
-            h_flex()
-                .gap(XS)
-                .children(manual)
-                .child(
+            [
+                manual.map(IntoElement::into_any_element),
+                Some(
                     button(SharedString::from(format!("timer-toggle-{key}")))
                         .small()
                         .icon(icon)
@@ -327,9 +347,10 @@ impl Desktop {
                         .accessibility_label(format!("{label} routine {id}"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.change_timer(space.clone(), project.clone(), id, change, cx);
-                        })),
-                )
-                .child(
+                        }))
+                        .into_any_element(),
+                ),
+                Some(
                     button(SharedString::from(format!("timer-more-{key}")))
                         .small()
                         .ghost()
@@ -344,11 +365,16 @@ impl Desktop {
                                 })
                                 .icon(Icon::new(AppIcon::X).text_color(cx.theme().danger)),
                             )
-                        }),
-                )
+                        })
+                        .into_any_element(),
+                ),
+            ]
         });
         h_flex()
-            .gap(MD)
+            .w_full()
+            .min_w_0()
+            .gap_x(MD)
+            .gap_y(SM)
             .py(MD)
             .justify_between()
             .flex_wrap()
@@ -357,12 +383,15 @@ impl Desktop {
             .child(
                 v_flex()
                     .flex_1()
-                    .min_w_48()
+                    // Use the pane's actual flex width, whether or not its sidebar is open.
+                    .flex_basis(rems(20.))
+                    .min_w_0()
                     .gap(XS)
                     .child(
                         div()
                             .min_w_0()
-                            .truncate()
+                            .whitespace_normal()
+                            .line_clamp(2)
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(Text::new(
                                 SharedString::from(format!("routine-title-{key}")).into(),
@@ -391,6 +420,9 @@ impl Desktop {
             )
             .child(
                 h_flex()
+                    .min_w_0()
+                    .max_w_full()
+                    .flex_wrap()
                     .gap(XS)
                     .child(details)
                     .child(self.work_link(
@@ -403,7 +435,7 @@ impl Desktop {
                         },
                         cx,
                     ))
-                    .children(actions),
+                    .children(actions.into_iter().flatten().flatten()),
             )
     }
 
