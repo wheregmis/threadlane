@@ -2738,7 +2738,9 @@ fn every_tab_is_selected_where_it_is_shown() {
     }
     assert_eq!(
         labels,
-        ["Chat", "Tasks", "Team", "Routines", "Memory", "Setup"]
+        [
+            "Chat", "Tasks", "Team", "Workflow", "Routines", "Memory", "Setup"
+        ]
     );
 }
 

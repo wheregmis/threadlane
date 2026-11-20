@@ -469,6 +469,8 @@ pub enum Tab {
     Memory,
     /// Its agents and their permissions.
     Team,
+    /// Its review workflow.
+    Workflow,
     /// Its routines and follow-ups.
     Routines,
     /// Its repositories and machines.
@@ -477,10 +479,11 @@ pub enum Tab {
 
 impl Tab {
     /// Every tab, in the order the tab bar shows them: Chat first.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Conversation,
         Self::Tasks,
         Self::Team,
+        Self::Workflow,
         Self::Routines,
         Self::Memory,
         Self::Setup,
@@ -494,6 +497,7 @@ impl Tab {
             Self::Conversation => "Chat",
             Self::Memory => "Memory",
             Self::Team => "Team",
+            Self::Workflow => "Workflow",
             Self::Routines => "Routines",
             Self::Setup => "Setup",
         }
