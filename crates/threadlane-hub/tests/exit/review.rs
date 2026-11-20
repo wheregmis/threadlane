@@ -12,7 +12,7 @@ use threadlane_core::model::{
 use threadlane_core::runtime::steps::perform;
 use threadlane_core::store::{InboxStore, OrgStore};
 use threadlane_core::time::Clock;
-use threadlane_hub::{COMMENT, CREATE_ISSUE, MARK_READY, MERGE};
+use threadlane_hub::{COMMENT, CREATE_ISSUE, LABEL_ISSUE, MARK_READY, MERGE};
 use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::{CrashPlan, Script};
 
@@ -22,7 +22,7 @@ use crate::operations::follow_up;
 use crate::permissions::engineer_in;
 use crate::publish::{drive, publish_world};
 
-pub(super) fn actions() -> [(&'static str, Json); 4] {
+pub(super) fn actions() -> [(&'static str, Json); 5] {
     [
         (
             COMMENT,
@@ -34,6 +34,10 @@ pub(super) fn actions() -> [(&'static str, Json); 4] {
         ),
         (MERGE, json!({"repository":"app","number":12})),
         (MARK_READY, json!({"repository":"app","number":12})),
+        (
+            LABEL_ISSUE,
+            json!({"repository":"app","number":7,"add":["bug"],"remove":["triage"]}),
+        ),
     ]
 }
 

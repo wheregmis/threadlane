@@ -965,6 +965,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             threadlane_hub::CREATE_ISSUE,
             threadlane_hub::MERGE,
             threadlane_hub::MARK_READY,
+            threadlane_hub::LABEL_ISSUE,
             MEMORY_VIEW,
             MEMORY_CREATE,
             MEMORY_EDIT,
