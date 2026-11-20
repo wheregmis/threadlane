@@ -101,12 +101,53 @@ pub const DENY_RULES: &[&str] = &[
     "git push",
     "gh pr create",
     "gh pr comment",
+    "gh pr merge",
+    "gh pr ready",
+    "gh pr edit",
+    "gh pr close",
+    "gh pr reopen",
+    "gh pr review",
+    "gh pr lock",
+    "gh pr unlock",
+    "gh pr revert",
+    "gh pr update-branch",
     "gh issue comment",
     "gh issue create",
     "gh issue new",
-    "gh pr merge",
+    "gh issue edit",
+    "gh issue close",
+    "gh issue reopen",
+    "gh issue delete",
+    "gh issue transfer",
+    "gh issue develop",
+    "gh issue lock",
+    "gh issue unlock",
+    "gh issue pin",
+    "gh issue unpin",
+    "gh label",
     "gh release",
+    "gh workflow run",
+    "gh workflow enable",
+    "gh workflow disable",
+    "gh run cancel",
+    "gh run rerun",
+    "gh run delete",
+    "gh cache delete",
+    "gh secret",
+    "gh variable",
+    "gh repo create",
     "gh repo delete",
+    "gh repo edit",
+    "gh repo rename",
+    "gh repo archive",
+    "gh repo unarchive",
+    "gh repo fork",
+    "gh repo sync",
+    "gh repo autolink",
+    "gh repo deploy-key",
+    "gh gist",
+    "gh project",
+    "gh auth",
     // Registering a repository is the user's call, not a task agent's.
     "threadlane repo add",
 ];
@@ -429,5 +470,80 @@ mod rejects_model_tests {
             "The 'gpt-6.2-sol' model is not supported when using Codex with a ChatGPT account."
         ));
         assert!(!super::rejects_model("unexpected status 500"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DENY_RULES;
+
+    /// Every `gh` subcommand that changes GitHub (gh 2.103) is refused, so
+    /// the approval-gated `github_cli` tool is the only way to run it.
+    #[test]
+    fn every_mutating_gh_subcommand_is_denied() {
+        let mutating = [
+            "issue create",
+            "issue comment",
+            "issue edit",
+            "issue close",
+            "issue reopen",
+            "issue delete",
+            "issue transfer",
+            "issue develop",
+            "issue lock",
+            "issue unlock",
+            "issue pin",
+            "issue unpin",
+            "pr create",
+            "pr comment",
+            "pr edit",
+            "pr close",
+            "pr reopen",
+            "pr merge",
+            "pr ready",
+            "pr review",
+            "pr lock",
+            "pr unlock",
+            "pr revert",
+            "pr update-branch",
+            "workflow run",
+            "workflow enable",
+            "workflow disable",
+            "run cancel",
+            "run rerun",
+            "run delete",
+            "cache delete",
+            "secret set",
+            "secret delete",
+            "variable set",
+            "variable delete",
+            "label create",
+            "label edit",
+            "label delete",
+            "label clone",
+            "release create",
+            "release edit",
+            "release delete",
+            "release upload",
+            "repo create",
+            "repo delete",
+            "repo edit",
+            "repo rename",
+            "repo archive",
+            "repo unarchive",
+            "repo fork",
+            "repo sync",
+            "repo autolink create",
+            "repo deploy-key add",
+            "gist create",
+            "project item-add",
+        ];
+        for command in mutating {
+            let command = format!("gh {command}");
+            assert!(
+                DENY_RULES.iter().any(|rule| command.starts_with(rule)),
+                "{command} is not denied"
+            );
+        }
     }
 }

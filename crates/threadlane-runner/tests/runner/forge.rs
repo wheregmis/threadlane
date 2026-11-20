@@ -392,6 +392,17 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
         .apply(remote, &RepositoryAction::MarkReady { number })
         .await
         .unwrap();
+    forge
+        .apply(
+            remote,
+            &RepositoryAction::GhCli {
+                args: ["issue", "edit", "12", "--add-label=bug"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            },
+        )
+        .await
+        .unwrap();
     let repo = "--repo=github.test/acme/app";
     assert_eq!(
         gh.invocations(),
@@ -407,6 +418,7 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
             ],
             vec!["pr", "merge", "12", "--merge", repo],
             vec!["pr", "ready", "12", repo],
+            vec!["issue", "edit", "12", "--add-label=bug", repo],
         ]
     );
 }

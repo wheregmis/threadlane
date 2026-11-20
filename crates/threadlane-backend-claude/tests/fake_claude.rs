@@ -471,23 +471,9 @@ async fn start_passes_every_option() {
 /// refuses every Bash command starting with those words.
 #[tokio::test]
 async fn each_deny_rule_reaches_claude_as_a_disallowed_bash_prefix() {
-    let expected = [
-        ("git push", "Bash(git push:*)"),
-        ("gh pr create", "Bash(gh pr create:*)"),
-        ("gh pr comment", "Bash(gh pr comment:*)"),
-        ("gh issue comment", "Bash(gh issue comment:*)"),
-        ("gh issue create", "Bash(gh issue create:*)"),
-        ("gh issue new", "Bash(gh issue new:*)"),
-        ("gh pr merge", "Bash(gh pr merge:*)"),
-        ("gh release", "Bash(gh release:*)"),
-        ("gh repo delete", "Bash(gh repo delete:*)"),
-        ("threadlane repo add", "Bash(threadlane repo add:*)"),
-    ];
-    assert_eq!(
-        DENY_RULES.to_vec(),
-        expected.map(|(rule, _)| rule).to_vec(),
-        "every rule in the list is checked here"
-    );
+    let expected = DENY_RULES
+        .iter()
+        .map(|rule| (*rule, format!("Bash({rule}:*)")));
     for (rule, disallowed) in expected {
         let fake = recorder();
         let request = RunRequest {
@@ -503,7 +489,7 @@ async fn each_deny_rule_reaches_claude_as_a_disallowed_bash_prefix() {
             .iter()
             .position(|arg| arg == "--disallowedTools")
             .unwrap_or_else(|| panic!("{rule}: no --disallowedTools in {args:?}"));
-        assert_eq!(args[flag + 1..], [disallowed.to_owned()], "{rule}");
+        assert_eq!(args[flag + 1..], [disallowed], "{rule}");
     }
 }
 
