@@ -785,6 +785,8 @@ async fn missed_run_grace_is_validated_and_its_exact_boundary_still_runs() {
 async fn a_missed_routine_does_not_wake_or_replay_and_records_one_skip_after_restart() {
     let crash = CrashPlan::kill_at(scheduler::AFTER_FIRE);
     let hub = TestHub::with(HubSettings::default(), Arc::new(crash.clone())).await;
+    // The clock later passes 02:00, when default dreaming fires in a UTC zone.
+    hub.dreaming_off(None).await;
     let routine = skip_request(
         &hub,
         5,
