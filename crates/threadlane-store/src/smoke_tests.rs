@@ -30,6 +30,7 @@ const TABLES: &[&str] = &[
     "memory_versions",
     "outbox",
     "permission_questions",
+    "pr_review_tasks",
     "project_machines",
     "projects",
     "repositories",

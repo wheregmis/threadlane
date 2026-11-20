@@ -633,6 +633,11 @@ impl LocalLink {
             call_id: None,
         };
         let outcome = match tools.create_accepted_task(&context, decision).await {
+            Ok(task) if task.get("review_status").is_some() => json!({
+                "performed": true,
+                "summary": format!("Reused the review on {}.", task["task_id"].as_str().unwrap_or_default()),
+                "result": task,
+            }),
             Ok(task) => json!({
                 "performed": true,
                 "summary": format!(

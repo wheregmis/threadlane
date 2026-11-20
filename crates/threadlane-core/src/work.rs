@@ -66,7 +66,7 @@ pub struct ReviewRecipe {
 /// Shared by the installation preview and the routine saved on the hub.
 pub fn review_routine(engineer: &str, reviewer: &str) -> String {
     format!(
-        "Review open pull requests in this project's registered repositories. Ask {reviewer} to review one PR that still needs review. If changes are needed, propose a task for {engineer}. Send the owner the PR, findings and next decision."
+        "Check merge readiness for open pull requests in this project's registered repositories. Verify the current head, CI, conflicts and unresolved threads. Look up pr_review_status for that head. Reuse its verdict or wait for the active review. Only for an unreviewed head, assign {reviewer} with create_task.pr_review. Route requested changes to the original task or propose a fix for {engineer}. Send the owner the PR, findings and next decision."
     )
 }
 

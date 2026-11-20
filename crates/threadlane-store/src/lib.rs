@@ -19,6 +19,8 @@ mod machine;
 mod memory;
 mod migrate;
 mod org;
+mod pr_review;
+pub use pr_review::{PrReviewAssignment, PrReviewHead, PrReviewStatus};
 mod outbox;
 mod row;
 mod session;

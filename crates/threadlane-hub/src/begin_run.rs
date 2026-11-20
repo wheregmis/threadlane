@@ -320,6 +320,14 @@ impl LocalLink {
             prompt.push_str("\nWhen delegating in this project, choose the enabled agent whose role fits the goal. Pass its exact name to create_task. Split work across specialties when useful and record dependencies. If no specialist fits, keep the task yourself or ask for the missing capability.\nEnabled project agents: ");
             prompt.push_str(&Json::Array(roster).to_string());
         }
+        if !dreaming
+            && review.is_none()
+            && (lane.kind == LaneKind::Lead
+                || agent.role.eq_ignore_ascii_case("reviewer")
+                || inner.settings.reviewer.as_deref() == Some(agent.name.as_str()))
+        {
+            prompt.push_str("\nFor PR readiness scans, check CI, mergeability and unresolved threads. Before reading a diff or delegating a full PR review, call pr_review_status with the registered repository, number and current full head SHA. Reuse approval and route requested changes back to the original task. If a review is in progress, only its assigned task proceeds. Investigate new findings narrowly. For an unreviewed head, use create_task with pr_review and the Reviewer as assignee.\n");
+        }
         if let Some(review) = &review {
             use std::fmt::Write as _;
             let _ = write!(
