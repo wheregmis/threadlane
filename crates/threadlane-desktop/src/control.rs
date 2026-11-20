@@ -106,7 +106,7 @@ pub struct TaskForm {
     pub repositories: Vec<String>,
     /// The tasks picked that it waits for.
     pub depends_on: Vec<TaskId>,
-    /// Whether the task ends by opening a draft pull request.
+    /// Whether the task's work is kept in a draft pull request.
     pub draft_pr: bool,
 }
 

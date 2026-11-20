@@ -24,14 +24,16 @@ pub struct NewTaskSpec {
     pub repositories: Vec<String>,
     /// Tasks of the project it waits for.
     pub depends_on: Vec<TaskId>,
-    /// Whether the task ends by opening a draft pull request.
+    /// Whether the task's work is kept in a draft pull request.
     pub draft_pr: bool,
 }
 
-/// Added to the goal of a task that ends with a draft pull request, so the
-/// work does not stop at an unpublished branch.
-pub const DRAFT_PR_GOAL: &str = "When the work is done and checked, open a draft pull \
-request for it with open_pull_request before you call finish_task.";
+/// Added to the goal of a task whose work is kept in a draft pull request,
+/// so others can follow it from the first change and it never stops at an
+/// unpublished branch.
+pub const DRAFT_PR_GOAL: &str = "As soon as the first working change exists, open a draft \
+pull request for it with open_pull_request. Push later changes to it with publish_branch and \
+leave it a draft. It must be open before you call finish_task.";
 
 impl ClientCore {
     /// Creates a task of yours in one space, skipping the lead, with a
