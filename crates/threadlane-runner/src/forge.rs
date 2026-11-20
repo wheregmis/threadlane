@@ -642,6 +642,7 @@ impl Forge for GitForge {
                 remove,
             } => return self.label_issue(&repo, *number, add, remove).await,
             RepositoryAction::ClosePullRequest { .. } => unreachable!("handled above"),
+            RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
         };
         argv.push(format!("--repo={repo}").into());
         self.gh(Path::new("."), argv).await

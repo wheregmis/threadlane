@@ -683,7 +683,8 @@ impl Desktop {
                     format!("Filter topology to project {project}")
                 }
                 TopologyNodeKind::Agent { agent, .. } => {
-                    format!("Select {agent} to adjust autonomy mode")
+                    let models = node.tooltip.as_deref().unwrap_or_default();
+                    format!("Select {agent} ({models}) to adjust autonomy mode")
                 }
             };
 
@@ -697,6 +698,7 @@ impl Desktop {
                 .border_color(border_color)
                 .bg(bg)
                 .accessibility_label(aria)
+                .when_some(node.tooltip, |card, tip| card.tooltip(tip))
                 .child(
                     v_flex()
                         .size_full()

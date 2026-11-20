@@ -44,6 +44,9 @@ pub fn valid_label_name(name: &str) -> bool {
 }
 /// Close a registered repository's pull request, optionally deleting its head branch.
 pub const CLOSE_PULL_REQUEST: &str = "close_pull_request";
+/// Run one `gh` command against a registered repository, for a GitHub action
+/// no dedicated tool covers yet. The user always decides it.
+pub const GITHUB_CLI: &str = "github_cli";
 
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -74,6 +77,8 @@ pub enum RepositoryAction {
         expected_head: String,
         delete_branch: bool,
     },
+    /// Run `gh` with these arguments, scoped to the repository with `--repo`.
+    GhCli { args: Vec<String> },
 }
 
 /// Kind of numbered GitHub item to comment on.
