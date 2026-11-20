@@ -111,6 +111,31 @@ impl ClientCore {
         self.one_task(space, TaskRequest::Retry { task: id }).await
     }
 
+    /// Attaches registered `repositories` of its project to task `task`
+    /// (`T-0142`) so it can publish. `None` means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, an id that is not a
+    /// task's, or the hub's error, for example an ended task or an
+    /// unregistered repository.
+    pub async fn attach_repositories(
+        &self,
+        space: Option<&str>,
+        task: &str,
+        repositories: Vec<String>,
+    ) -> Result<Task, ClientError> {
+        let id = self.task_id(space, task)?;
+        self.one_task(
+            space,
+            TaskRequest::AttachRepositories {
+                task: id,
+                repositories,
+            },
+        )
+        .await
+    }
+
     fn task_id(&self, space: Option<&str>, task: &str) -> Result<TaskId, ClientError> {
         let (name, _api) = self.target(space)?;
         TaskId::parse(task).ok_or_else(|| {

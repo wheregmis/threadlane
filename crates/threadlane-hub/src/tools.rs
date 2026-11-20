@@ -424,8 +424,9 @@ impl HubTools {
         let repositories = named_repositories(&self.db, context.project_id, object)
             .await?
             .unwrap_or_default();
-        let instruction = text_field(object, "wake")?;
-        let wake = if let Some(instruction) = instruction {
+        let instruction = text_field(object, "wake")?
+            .map(|text| format!("The project lead asks you to resume: {text}"));
+        let wake = if let Some(instruction) = &instruction {
             let run = self.run(context).await?;
             Some(TaskWake {
                 call_key: effect_key(context, &run, UPDATE_TASK, arguments),
@@ -441,7 +442,7 @@ impl HubTools {
         let updated = self
             .db
             .update_task(
-                &context.lease,
+                Some(&context.lease),
                 task.id,
                 TaskUpdate {
                     title: text_field(object, "title")?,

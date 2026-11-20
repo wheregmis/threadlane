@@ -1629,6 +1629,93 @@ async fn the_lead_can_attach_repositories_and_wake_a_sleeping_task() {
 }
 
 #[tokio::test]
+async fn the_user_can_attach_a_repository_to_a_task_that_has_not_ended() {
+    let (hub, lease, lead_run) = lead_run(2).await;
+    let general = hub.general().await;
+    let app = hub
+        .db
+        .create_repository(&threadlane_core::model::NewRepository {
+            project_id: general.id,
+            name: "app".into(),
+            remote_url: "https://github.com/acme/app.git".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        })
+        .await
+        .unwrap();
+    call(
+        &hub,
+        &lease,
+        &lead_run,
+        "create",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &lead_run).await;
+    let (lease, run) = begin(&*hub.link).await;
+    assert!(run.repositories.is_empty());
+    write_progress(&hub, &lease, &run, "T-0001").await;
+    finish_run(&hub, &lease, &run).await;
+    let sleeping = task(&hub, "T-0001").await;
+    assert_eq!(sleeping.status, TaskStatus::Sleeping);
+
+    let attach = |names: &[&str]| TaskRequest::AttachRepositories {
+        task: sleeping.id,
+        repositories: names.iter().map(|name| (*name).to_owned()).collect(),
+    };
+    let unknown = hub.api.tasks(attach(&["other"])).await;
+    assert!(
+        matches!(&unknown, Err(ApiError::Invalid(why)) if why.contains("no repository")),
+        "{unknown:?}"
+    );
+    let TaskReply::Task { task: attached } = hub.api.tasks(attach(&["app", "app"])).await.unwrap()
+    else {
+        panic!("a task");
+    };
+    assert_eq!(attached.repositories, [app.id]);
+    let again = hub.api.tasks(attach(&["app"])).await;
+    assert!(
+        matches!(&again, Err(ApiError::Invalid(why)) if why.contains("already")),
+        "{again:?}"
+    );
+
+    let (lease, resumed) = loop {
+        let (lease, run) = begin(&*hub.link).await;
+        if run.lane_kind == LaneKind::Task {
+            break (lease, run);
+        }
+        finish_run(&hub, &lease, &run).await;
+    };
+    assert_eq!(resumed.task_id, Some(sleeping.id));
+    assert_eq!(resumed.repositories, [app]);
+    assert!(
+        resumed.prompt.contains("The user attached app"),
+        "{}",
+        resumed.prompt
+    );
+    let ask = hub.event(resumed.events[0]).await;
+    assert!(ask.requested);
+    call(
+        &hub,
+        &lease,
+        &resumed,
+        "done",
+        FINISH_TASK,
+        json!({"summary": "Published"}),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &resumed).await;
+    let ended = hub.api.tasks(attach(&["app"])).await;
+    assert!(
+        matches!(&ended, Err(ApiError::Invalid(why)) if why.contains("is done")),
+        "{ended:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_lead_wake_survives_the_active_implementation_finishing() {
     let (hub, lead, run) = lead_run(2).await;
     call(

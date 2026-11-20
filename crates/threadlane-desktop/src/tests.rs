@@ -912,6 +912,23 @@ impl HubApi for FakeHub {
                     task: summary.task.clone(),
                 })
             }
+            // The fake numbers repositories by name: `app` is 1.
+            TaskRequest::AttachRepositories {
+                task: id,
+                repositories,
+            } => {
+                let summary = tasks
+                    .iter_mut()
+                    .find(|summary| summary.task.id == id)
+                    .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+                if repositories != ["app"] {
+                    return Err(ApiError::Invalid(format!("no {repositories:?}")));
+                }
+                summary.task.repositories.push(RepositoryId(1));
+                Ok(TaskReply::Task {
+                    task: summary.task.clone(),
+                })
+            }
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -3202,6 +3219,71 @@ async fn a_failed_task_offers_retry_and_is_queued_again() {
     assert_eq!(retried.status, TaskStatus::Queued);
     state.apply_task(load_task(&core, "work", TaskId(1)).await);
     assert_eq!(state.task_control("work", TaskId(1)), TaskControl::Cancel);
+}
+
+#[tokio::test]
+async fn a_task_without_a_repository_says_it_cannot_publish_until_one_is_attached() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.tasks.lock().expect("lock").extend([
+        task(1, TaskStatus::Sleeping, None),
+        task(2, TaskStatus::Done, None),
+    ]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    state.apply_task(load_task(&core, "work", TaskId(2)).await);
+    let line = |state: &AppState, id| state.task_publication("work", TaskId(id)).unwrap();
+    assert_eq!(
+        line(&state, 1).line,
+        "Cannot publish: no repository is attached",
+        "the project's repositories are not loaded yet"
+    );
+    state.apply_repositories("work", "api", Ok(Vec::new()));
+    assert!(line(&state, 1).line.contains("has none registered"));
+
+    let repository = |id, name: &str| Repository {
+        id: RepositoryId(id),
+        project_id: ProjectId(1),
+        name: name.into(),
+        remote_url: format!("/srv/git/{name}"),
+        default_branch: "main".into(),
+        protected_branches: Vec::new(),
+    };
+    state.apply_repositories(
+        "work",
+        "api",
+        Ok(vec![repository(1, "app"), repository(2, "docs")]),
+    );
+    assert_eq!(
+        line(&state, 1),
+        Publication {
+            line: "Cannot publish: no repository is attached".into(),
+            attachable: vec!["app".into(), "docs".into()],
+        }
+    );
+    assert_eq!(
+        line(&state, 2),
+        Publication {
+            line: "Cannot publish: no repository was attached before it ended".into(),
+            attachable: Vec::new(),
+        },
+        "an ended task cannot take one"
+    );
+
+    let attached = core
+        .attach_repositories(Some("work"), "T-0001", vec!["app".into()])
+        .await
+        .expect("attached");
+    assert_eq!(attached.repositories, [RepositoryId(1)]);
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    assert_eq!(
+        line(&state, 1),
+        Publication {
+            line: "Can publish to app".into(),
+            attachable: vec!["docs".into()],
+        }
+    );
 }
 
 #[tokio::test]

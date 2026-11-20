@@ -369,6 +369,43 @@ impl Desktop {
         cx.notify();
     }
 
+    /// Attaches registered `repository` to task `task` of `space` so it can
+    /// publish; the hub tells its agent and keeps its earlier work.
+    pub(crate) fn attach_repository(
+        &mut self,
+        space: String,
+        task: TaskId,
+        repository: String,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.state.report(Activity::Working(format!(
+            "Attaching {repository} to {space} / {task}…"
+        )));
+        self.run(
+            async move {
+                let attached = core
+                    .read()
+                    .await
+                    .attach_repositories(Some(&space), &task.to_string(), vec![repository])
+                    .await;
+                (space, attached)
+            },
+            |this, (space, attached), cx| match attached {
+                Ok(task) => {
+                    this.state.report(Activity::Done(format!(
+                        "Attached a repository to {space} / {}.",
+                        task.id
+                    )));
+                    this.load_screen(cx);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
     /// Pauses `project` of `space`, or resumes it.
     pub(crate) fn set_paused(
         &mut self,
