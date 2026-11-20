@@ -312,3 +312,62 @@ async fn a_lead_reply_to_the_owners_answer_is_delivered_once() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_lead_run_that_waited_on_you_never_delivers_its_final_text() {
+    use threadlane_core::client::{DecisionReply, DecisionRequest};
+    use threadlane_core::ids::DecisionId;
+    // Answered before the run commits, the ask no longer holds the run as
+    // deferred; neither the runner's stop notice nor the lead's text may reach you.
+    for text in [
+        "Stopped by the runner: the run went on working after a call of it waited on the user.",
+        "I asked which repo; nothing more to say until you answer.",
+    ] {
+        let hub = TestHub::start().await;
+        hub.hello().await;
+        hub.send("m-1", "Set up the docs site").await;
+        let (lease, run) = begin(&*hub.link).await;
+        let asked = hub
+            .link
+            .call_tool(
+                &lease,
+                run.run_id,
+                Some("toolu_ask"),
+                ASK_USER,
+                &json!({ "question": "Which repo?", "options": ["docs", "app"] }),
+            )
+            .await;
+        assert_eq!(asked, Err(ToolError::WaitingOnYou));
+        let answered = hub
+            .api
+            .decisions(DecisionRequest::Answer {
+                decision: DecisionId(1),
+                option: "docs".to_owned(),
+                note: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(answered, DecisionReply::Answered { .. }));
+        let outcome = hub
+            .link
+            .complete(&lease, run.run_id, Some(text))
+            .await
+            .unwrap();
+        assert_ne!(outcome, RunOutcome::Sent, "{text}");
+        let record = hub.db.run(run.run_id).await.unwrap().unwrap();
+        assert_eq!(
+            record.rationale.as_deref(),
+            Some(text),
+            "kept for the run detail"
+        );
+        hub.core.dispatch_once().await.unwrap();
+        assert!(
+            hub.feed()
+                .await
+                .iter()
+                .all(|entry| entry.message.kind != OutboxKind::Message),
+            "{text}: {:?}",
+            hub.feed().await
+        );
+    }
+}
