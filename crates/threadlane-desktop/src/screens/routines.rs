@@ -383,6 +383,9 @@ impl Desktop {
                                 cx,
                             ))
                             .child(meta(schedule, cx))
+                            .children(row.missed_grace_minutes.map(|minutes| {
+                                meta(format!("Skip if over {minutes} min late"), cx)
+                            }))
                             .children((!row.paused).then(|| meta(row.next, cx))),
                     ),
             )
@@ -414,6 +417,7 @@ impl Desktop {
         let form = self.state.routine_form_mut();
         if !form.is_open_for(space, project) {
             form.open_for = Some((space.to_owned(), project.to_owned()));
+            form.missed_grace_minutes = None;
             self.routine_instruction
                 .update(cx, |input, cx| input.set_value("", window, cx));
         }
@@ -493,6 +497,35 @@ impl Desktop {
                 .child(div().w(SHORT_FIELD_WIDTH).child(field(&self.routine_day)))
                 .child(at),
         };
+        let grace = form.missed_grace_minutes;
+        let policy_label = |grace: Option<u16>| {
+            grace.map_or_else(
+                || "Catch up once".to_owned(),
+                |minutes| format!("Skip if more than {minutes} min late"),
+            )
+        };
+        let view = cx.entity().downgrade();
+        let missed = button("routine-missed-policy")
+            .small()
+            .outline()
+            .label(policy_label(grace))
+            .accessibility_label(format!("Missed run policy: {}", policy_label(grace)))
+            .dropdown_menu(move |mut menu, _, _| {
+                for minutes in [None, Some(5), Some(15), Some(30), Some(60)] {
+                    let view = view.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(policy_label(minutes))
+                            .checked(grace == minutes)
+                            .on_click(move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.state.routine_form_mut().missed_grace_minutes = minutes;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
         let (in_space, named) = (space.to_owned(), project.to_owned());
         card(cx)
             .max_w(FORM_WIDTH)
@@ -515,6 +548,17 @@ impl Desktop {
                         .child(field(&self.routine_zone)),
                 ),
             )
+            .child(
+                h_flex()
+                    .gap(SM)
+                    .flex_wrap()
+                    .child(label("Missed run"))
+                    .child(missed),
+            )
+            .child(meta(
+                "After downtime, the routine never runs more than once to catch up.",
+                cx,
+            ))
             .child(meta(
                 "Work started by this routine counts as work you requested.",
                 cx,

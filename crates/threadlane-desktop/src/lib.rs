@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures_util::{StreamExt as _, stream};
 use serde_json::Value as Json;
 use threadlane_client::{
     ClientCore, ClientError, FeedStream, HubStatus, IssuedCode, SpaceAnswer, SpaceDecisions,
@@ -34,6 +35,7 @@ mod clock;
 mod composer;
 mod control;
 mod conversation;
+mod conversation_cache;
 mod decision_keys;
 mod decision_record;
 mod dreaming;
@@ -58,6 +60,7 @@ pub use control::{
 pub use conversation::{
     Digest, Line, belongs_in_conversation, follow_latest, message_limit, newest_message,
 };
+pub use conversation_cache::ConversationState;
 pub use decision_keys::{
     DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope,
 };
@@ -77,8 +80,8 @@ pub use machines::{
     MachineDetail, MachineHistory, MachineRow, MachineRun, load_machine_history, machine_row,
 };
 pub use memory::{
-    LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, change_memory, editable,
-    load_memory,
+    LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, MemoryVersionRow, change_memory,
+    editable, load_memory,
 };
 pub use permissions::{
     AgentRow, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement, allows,
@@ -467,6 +470,8 @@ pub enum Tab {
     Memory,
     /// Its agents and their permissions.
     Team,
+    /// Its review workflow.
+    Workflow,
     /// Its routines and follow-ups.
     Routines,
     /// Its repositories and machines.
@@ -475,10 +480,11 @@ pub enum Tab {
 
 impl Tab {
     /// Every tab, in the order the tab bar shows them: Chat first.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Conversation,
         Self::Tasks,
         Self::Team,
+        Self::Workflow,
         Self::Routines,
         Self::Memory,
         Self::Setup,
@@ -492,6 +498,7 @@ impl Tab {
             Self::Conversation => "Chat",
             Self::Memory => "Memory",
             Self::Team => "Team",
+            Self::Workflow => "Workflow",
             Self::Routines => "Routines",
             Self::Setup => "Setup",
         }
@@ -733,9 +740,8 @@ pub fn decision_of_tag(tag: &str) -> Option<(&str, &str)> {
         .filter(|(_, id)| DecisionId::parse(id).is_some())
 }
 
-/// What one refresh learned from every paired hub. Made by [`refresh`],
-/// applied with [`AppState::apply`].
-#[derive(Debug)]
+/// What one refresh pass learned from one or more paired hubs.
+#[derive(Debug, Default)]
 pub struct Refresh {
     statuses: Vec<HubStatus>,
     projects: Vec<(String, Result<Vec<ProjectSummary>, ClientError>)>,
@@ -752,6 +758,30 @@ pub struct Refresh {
 }
 
 impl Refresh {
+    /// The paired name of a single-hub result from [`refresh_each`].
+    #[must_use]
+    pub fn refreshed_space(&self) -> Option<&str> {
+        match self.statuses.as_slice() {
+            [status] => Some(&status.name),
+            _ => None,
+        }
+    }
+
+    fn append(&mut self, other: Self) {
+        self.statuses.extend(other.statuses);
+        self.projects.extend(other.projects);
+        self.agents.extend(other.agents);
+        self.clients.extend(other.clients);
+        self.decisions.extend(other.decisions);
+        self.running.extend(other.running);
+        self.leads.extend(other.leads);
+        self.machines.extend(other.machines);
+        self.recent.extend(other.recent);
+        self.recorded.extend(other.recorded);
+        self.held.extend(other.held);
+        self.tasks.extend(other.tasks);
+    }
+
     /// Whether this refresh supplied tasks and lead status for the named project.
     pub fn project_parts(&self, space: &str, project: &str) -> (bool, bool) {
         let active = self.projects.iter().any(|(name, listed)| {
@@ -780,14 +810,69 @@ impl Refresh {
 /// clients, pending decisions, running tasks, machines, and newest items. A
 /// hub that does not answer is reported as such; the others are unaffected.
 pub async fn refresh(core: &ClientCore) -> Refresh {
-    let statuses = core.status().await;
-    let mut projects = Vec::new();
-    let mut agents = Vec::new();
-    let mut clients = Vec::new();
-    let mut tasks = Vec::new();
-    let mut leads = Vec::new();
-    for status in statuses.iter().filter(|status| status.is_reachable()) {
-        let name = status.name.as_str();
+    let mut parts = Vec::with_capacity(core.hubs().len());
+    refresh_each(core, |index, part| {
+        parts.push((index, part));
+        true
+    })
+    .await;
+    // The full snapshot API preserves the stable pairing order.
+    parts.sort_by_key(|(index, _)| *index);
+    let mut refreshed = Refresh::default();
+    for (_, part) in parts {
+        refreshed.append(part);
+    }
+    refreshed
+}
+
+const HUB_REFRESH_LIMIT: usize = 4;
+
+/// Refreshes at most four paired hubs at a time, yielding each complete hub
+/// result immediately rather than waiting for slow peers. Returning false from
+/// the callback stops the pass (such as when the desktop has closed).
+pub async fn refresh_each(core: &ClientCore, mut ready: impl FnMut(usize, Refresh) -> bool) {
+    // Own the pairing values so the buffered futures are Send when the
+    // desktop runs the refresh on Tokio.
+    let hubs = core.hubs().to_vec();
+    let mut parts = stream::iter(hubs.into_iter().enumerate())
+        .map(|(index, hub)| async move { (index, refresh_hub(core, &hub).await) })
+        .buffer_unordered(HUB_REFRESH_LIMIT);
+    while let Some((index, part)) = parts.next().await {
+        if !ready(index, part) {
+            break;
+        }
+    }
+}
+
+async fn refresh_hub(core: &ClientCore, hub: &threadlane_client::PairedHub) -> Refresh {
+    let name = hub.name.as_str();
+    let (mut part, decisions, running, machines, recent, recorded, held) = tokio::join!(
+        refresh_work(core, hub),
+        core.decisions(Some(name)),
+        core.running(Some(name)),
+        core.machines(Some(name)),
+        core.recent(Some(name), RECENT),
+        core.recorded_count(Some(name)),
+        core.held_results(Some(name)),
+    );
+    part.decisions = decisions.unwrap_or_default();
+    part.running = running.unwrap_or_default();
+    part.machines = machines.unwrap_or_default();
+    part.recent = recent.unwrap_or_default();
+    part.recorded = recorded.unwrap_or_default();
+    part.held = held.unwrap_or_default();
+    part
+}
+
+async fn refresh_work(core: &ClientCore, hub: &threadlane_client::PairedHub) -> Refresh {
+    let name = hub.name.as_str();
+    let status = core.status_for(hub).await;
+    let reachable = status.is_reachable();
+    let mut part = Refresh {
+        statuses: vec![status],
+        ..Refresh::default()
+    };
+    if reachable {
         let (work, space_agents, space_clients) = tokio::join!(
             core.work(name),
             core.agents(Some(name)),
@@ -795,9 +880,10 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
         );
         match work {
             Ok(work) => {
-                projects.push((name.to_owned(), Ok(work.projects)));
-                tasks.push((name.to_owned(), Ok(work.tasks)));
-                leads.extend(work.leads.into_iter().map(|lead| (name.to_owned(), lead)));
+                part.projects.push((name.to_owned(), Ok(work.projects)));
+                part.tasks.push((name.to_owned(), Ok(work.tasks)));
+                part.leads
+                    .extend(work.leads.into_iter().map(|lead| (name.to_owned(), lead)));
             }
             Err(error) => {
                 let listed = core
@@ -806,12 +892,13 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
                     .map(|listed| listed.projects);
                 if threadlane_client::unknown_overview(&error, "work") {
                     if let Ok(listed) = &listed {
-                        tasks.push((name.to_owned(), all_tasks(core, name, listed).await));
+                        part.tasks
+                            .push((name.to_owned(), all_tasks(core, name, listed).await));
                         for project in listed.iter().filter(|project| !project.archived) {
                             if let Ok((running_since, stopped)) =
                                 core.lead_status(Some(name), Some(&project.name)).await
                             {
-                                leads.push((
+                                part.leads.push((
                                     name.to_owned(),
                                     threadlane_core::client::ProjectLeadStatus {
                                         project: project.name.clone(),
@@ -823,37 +910,15 @@ pub async fn refresh(core: &ClientCore) -> Refresh {
                         }
                     }
                 } else {
-                    tasks.push((name.to_owned(), Err(error)));
+                    part.tasks.push((name.to_owned(), Err(error)));
                 }
-                projects.push((name.to_owned(), listed));
+                part.projects.push((name.to_owned(), listed));
             }
         }
-        agents.push((name.to_owned(), space_agents));
-        clients.push((name.to_owned(), space_clients));
+        part.agents.push((name.to_owned(), space_agents));
+        part.clients.push((name.to_owned(), space_clients));
     }
-    // The only error with no space named is "no hub paired": nothing to show.
-    let (decisions, running, machines, recent, recorded, held) = tokio::join!(
-        core.decisions(None),
-        core.running(None),
-        core.machines(None),
-        core.recent(None, RECENT),
-        core.recorded_count(None),
-        core.held_results(None),
-    );
-    Refresh {
-        statuses,
-        leads,
-        projects,
-        agents,
-        clients,
-        decisions: decisions.unwrap_or_default(),
-        running: running.unwrap_or_default(),
-        machines: machines.unwrap_or_default(),
-        recent: recent.unwrap_or_default(),
-        recorded: recorded.unwrap_or_default(),
-        held: held.unwrap_or_default(),
-        tasks,
-    }
+    part
 }
 
 /// The tasks of every project in `projects` of `space`, each once; the
@@ -1060,12 +1125,20 @@ pub struct ModesRow {
     pub modes: Result<Vec<Option<Mode>>, Gap>,
 }
 
+/// Status of a request to load an earlier conversation page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EarlierStatus {
+    Loading,
+    Failed(String),
+}
+
 /// An earlier page of a conversation. Made by [`load_earlier`], applied
 /// with [`AppState::apply_earlier`].
 #[derive(Debug)]
 pub struct EarlierLoad {
     space: String,
     project: String,
+    before: Timestamp,
     history: Result<Vec<ConversationEntry>, ClientError>,
     decision_records: Vec<Decision>,
 }
@@ -1085,6 +1158,7 @@ pub async fn load_earlier(
     EarlierLoad {
         space: space.to_owned(),
         project: project.to_owned(),
+        before,
         history,
         decision_records,
     }
@@ -1182,6 +1256,7 @@ pub struct AppState {
     said: BTreeMap<InSpace<EventId>, Said>,
     failures: BTreeMap<InSpace<EventId>, Said>,
     loaded: HashMap<InSpace<String>, Loaded>,
+    earlier_requests: HashMap<InSpace<String>, (Timestamp, EarlierStatus)>,
     projects: HashMap<InSpace<String>, ProjectView>,
     tasks: HashMap<InSpace<TaskId>, TaskDetail>,
     /// Why a task could not be shown, by space and id.
@@ -1241,6 +1316,7 @@ pub struct AppState {
     agent_form: AgentForm,
     /// The agent whose edit view is open.
     agent_edit: Option<AgentEdit>,
+    agent_saves: HashSet<InSpace<String>>,
     /// The picks of the "+ New task" form.
     task_form: TaskForm,
     /// The project whose "+ Add repository" form is open.
@@ -2040,6 +2116,7 @@ impl AppState {
         self.save_conversation_seen();
         self.said.retain(|(space, _), _| space != name);
         self.loaded.retain(|(space, _), _| space != name);
+        self.earlier_requests.retain(|(space, _), _| space != name);
         self.projects.retain(|(space, _), _| space != name);
         self.tasks.retain(|(space, _), _| space != name);
         self.memory.retain(|(space, _), _| space != name);
@@ -2120,6 +2197,27 @@ impl AppState {
     /// Applies a refresh with the timestamp of its connection check.
     pub fn apply_at(&mut self, refresh: Refresh, now: Timestamp) {
         self.checking_connections = false;
+        self.apply_snapshot(refresh, now, false);
+    }
+
+    /// Applies just the hub that answered, preserving other hubs and the
+    /// connection check in progress until the caller has all results.
+    pub fn apply_partial(&mut self, refresh: Refresh) {
+        self.apply_snapshot(refresh, SystemClock.now(), true);
+    }
+
+    /// Reconciles partial refresh state with its complete pairing roster.
+    /// In particular, a pairing operation can change the roster before its
+    /// follow-up cleanup reports an error.
+    pub fn retain_paired_spaces(&mut self, paired: &[String]) {
+        let known: HashSet<_> = paired.iter().map(String::as_str).collect();
+        self.spaces
+            .retain(|space| known.contains(space.name.as_str()));
+        self.queue
+            .retain(|queued| known.contains(queued.space.as_str()));
+    }
+
+    fn apply_snapshot(&mut self, refresh: Refresh, now: Timestamp, partial: bool) {
         let Refresh {
             statuses,
             leads,
@@ -2134,12 +2232,20 @@ impl AppState {
             held,
             tasks,
         } = refresh;
-        let mut spaces = Vec::with_capacity(statuses.len());
+        let mut spaces = if partial {
+            std::mem::take(&mut self.spaces)
+        } else {
+            Vec::with_capacity(statuses.len())
+        };
         for status in statuses {
-            let mut space = self
-                .space(&status.name)
-                .cloned()
-                .unwrap_or_else(|| Space::new(&status.name));
+            let existing = spaces.iter().position(|space| space.name == status.name);
+            let mut space = if let Some(at) = existing {
+                std::mem::replace(&mut spaces[at], Space::new(&status.name))
+            } else {
+                self.space(&status.name)
+                    .cloned()
+                    .unwrap_or_else(|| Space::new(&status.name))
+            };
             (space.reached_by, space.local_socket) = match status.reach {
                 threadlane_client::Reach::Socket { socket } => {
                     (format!("Unix socket {}", socket.display()), Some(socket))
@@ -2159,7 +2265,11 @@ impl AppState {
                     Reach::Unreachable(describe(&error))
                 }
             };
-            spaces.push(space);
+            if let Some(at) = existing {
+                spaces[at] = space;
+            } else {
+                spaces.push(space);
+            }
         }
         let find = |spaces: &mut Vec<Space>, name: &str| -> Option<usize> {
             spaces.iter().position(|space| space.name == name)
@@ -2531,11 +2641,52 @@ impl AppState {
         }
     }
 
-    /// Takes an earlier page of a conversation.
-    pub fn apply_earlier(&mut self, load: EarlierLoad) {
-        self.remember_decisions(&load.space, load.decision_records);
-        if let Ok(entries) = load.history {
-            self.take_history(&load.space, &load.project, entries, false, PAGE);
+    /// What happened to the current earlier page request, if any.
+    #[must_use]
+    pub fn earlier_status(&self, space: &str, project: &str) -> Option<&EarlierStatus> {
+        self.earlier_requests
+            .get(&(space.to_owned(), project.to_owned()))
+            .filter(|(before, status)| {
+                *status == EarlierStatus::Loading || self.earlier(space, project) == Some(*before)
+            })
+            .map(|(_, status)| status)
+    }
+
+    /// Acquires the earlier-page request for this conversation.
+    pub fn begin_earlier(&mut self, space: &str, project: &str, before: Timestamp) -> bool {
+        if self.earlier(space, project) != Some(before)
+            || self.earlier_status(space, project) == Some(&EarlierStatus::Loading)
+        {
+            return false;
+        }
+        self.earlier_requests.insert(
+            (space.to_owned(), project.to_owned()),
+            (before, EarlierStatus::Loading),
+        );
+        true
+    }
+
+    /// Takes an earlier page of a conversation. Returns true when history was applied.
+    pub fn apply_earlier(&mut self, load: EarlierLoad) -> bool {
+        let key = (load.space, load.project);
+        if self.earlier_requests.get(&key) != Some(&(load.before, EarlierStatus::Loading)) {
+            return false;
+        }
+        self.earlier_requests.remove(&key);
+        if self.earlier(&key.0, &key.1) != Some(load.before) {
+            return false;
+        }
+        match load.history {
+            Ok(entries) => {
+                self.remember_decisions(&key.0, load.decision_records);
+                self.take_history(&key.0, &key.1, entries, false, PAGE);
+                true
+            }
+            Err(error) => {
+                self.earlier_requests
+                    .insert(key, (load.before, EarlierStatus::Failed(describe(&error))));
+                false
+            }
         }
     }
 

@@ -23,8 +23,11 @@ use threadlane_core::model::{
     Weekday,
 };
 use threadlane_core::time::Timestamp;
+use tokio::sync::oneshot;
 
 use super::*;
+
+type BlockedInfo = (oneshot::Sender<()>, oneshot::Receiver<()>);
 
 /// A hub with the projects `api` and General, and what it was given.
 /// While `down`, it answers nothing; while `old`, it answers like a hub
@@ -33,6 +36,7 @@ use super::*;
 struct FakeHub {
     space: String,
     down: AtomicBool,
+    blocked_info: Mutex<Option<BlockedInfo>>,
     old: AtomicBool,
     batched_work: AtomicBool,
     project_task_requests: AtomicI64,
@@ -106,6 +110,11 @@ impl FakeHub {
 #[async_trait]
 impl HubApi for FakeHub {
     async fn info(&self) -> Result<HubInfo, ApiError> {
+        let blocked = self.blocked_info.lock().unwrap().take();
+        if let Some((started, release)) = blocked {
+            let _ = started.send(());
+            let _ = release.await;
+        }
         self.up()?;
         Ok(HubInfo {
             space: self.space.clone(),
@@ -934,6 +943,7 @@ fn timer(id: i64, project: ProjectId, recurrence: Option<Recurrence>, by: TimerC
         created_by_call: None,
         last_fired_at: None,
         fire_count: 0,
+        missed_grace_minutes: None,
         requested: by == TimerCreator::User,
     }
 }
@@ -2737,7 +2747,9 @@ fn every_tab_is_selected_where_it_is_shown() {
     }
     assert_eq!(
         labels,
-        ["Chat", "Tasks", "Team", "Routines", "Memory", "Setup"]
+        [
+            "Chat", "Tasks", "Team", "Workflow", "Routines", "Memory", "Setup"
+        ]
     );
 }
 
@@ -4682,6 +4694,7 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
     assert_eq!(rows["Project queues"], "api 3");
     assert_eq!(rows["Oldest pending event"], "53 ms");
     assert_eq!(rows["Outbox lag"], "2 min");
+    assert_eq!(rows["Delivery health"], "Unavailable on this hub");
     assert_eq!(
         rows["Run duration"],
         "12 ms avg · 12 ms max · 1 observation"
@@ -4692,6 +4705,25 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
             .metrics_rows("home", &when)
             .unwrap_err()
             .contains("metrics unavailable")
+    );
+    let mut current = work.metrics.lock().unwrap().clone().unwrap();
+    current.delivery_health = Some(threadlane_core::client::DeliveryHealth {
+        held: 0,
+        next_hold_check: None,
+        retrying: 1,
+        next_retry: Some(current.at),
+        failed_created_in_last_week: 2,
+    });
+    *work.metrics.lock().unwrap() = Some(current);
+    state.apply_metrics("work".to_owned(), load_metrics(&core, "work").await);
+    let rows: BTreeMap<_, _> = state
+        .metrics_rows("work", &when)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        rows["Delivery health"],
+        "0 held; 1 retrying · retry due; 2 permanently failed (created in the past 7 days)"
     );
 }
 
@@ -6495,6 +6527,60 @@ async fn agent_models_follow_the_provider_after_reordering_and_reopening() {
 }
 
 #[tokio::test]
+async fn agent_save_is_single_flight_and_keeps_edits_after_submit() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    work.org(OrgRequest::CreateAgent {
+        name: "Reviewer".into(),
+        role: "reviewer".into(),
+        instructions: "Review.".into(),
+        backends: vec![BackendKind::Claude],
+    })
+    .await
+    .unwrap();
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    let mut submitted = state.open_agent_edit("work", "Reviewer").unwrap();
+    submitted.name = "Critic".into();
+    submitted.instructions = "First draft.".into();
+    let request = state.agent_update(&submitted).unwrap().unwrap();
+    let flight = state.begin_agent_save().expect("first click");
+    assert!(state.agent_saving(&flight));
+    assert!(
+        state.begin_agent_save().is_none(),
+        "second click is a no-op"
+    );
+
+    let mut current = submitted.clone();
+    current.instructions = "Edited while save was pending.".into();
+    state.fail_agent_save(&flight, "Hub disconnected.".into());
+    assert_eq!(
+        state.agent_edit().unwrap().save_error(),
+        Some("Hub disconnected.")
+    );
+    assert!(!state.agent_saving(&flight));
+
+    let retry = state.begin_agent_save().expect("retry is allowed");
+    assert_eq!(state.agent_edit().unwrap().save_error(), None);
+    let agent = core.update_agent(Some("work"), request).await.unwrap();
+    assert!(state.finish_agent_save(&retry, submitted, &current, agent));
+    assert_eq!(state.agent_edit().unwrap().agent, "Critic");
+    assert_eq!(
+        state.agent_update(&current).unwrap(),
+        Some(OrgRequest::UpdateAgent {
+            skills: None,
+            agent: "Critic".into(),
+            name: None,
+            role: None,
+            instructions: Some(current.instructions),
+            backends: None,
+            models: None,
+        }),
+        "only the newer edit needs another save"
+    );
+}
+
+#[tokio::test]
 async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed() {
     let work = FakeHub::new("Work", Vec::new());
     let (_dir, core) = core(&[("work", &work)]);
@@ -6791,7 +6877,8 @@ async fn home_s_timeline_pages_and_stops_where_a_conversation_is_not_loaded() {
         "nothing more loaded yet"
     );
     for (space, project, before) in earlier {
-        state.apply_earlier(load_earlier(&core, &space, &project, before).await);
+        assert!(state.begin_earlier(&space, &project, before));
+        assert!(state.apply_earlier(load_earlier(&core, &space, &project, before).await));
     }
     let shown = timeline_of(&state);
     assert_eq!(shown.len(), 31);
@@ -6803,6 +6890,53 @@ async fn home_s_timeline_pages_and_stops_where_a_conversation_is_not_loaded() {
     // A refresh of the newest page keeps how far back is loaded.
     state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
     assert_eq!(timeline_of(&state).len(), 31);
+}
+
+#[test]
+fn earlier_chat_pages_retry_the_same_cursor_without_dropping_visible_history() {
+    let mut state = AppState::paired(["work"]);
+    let page = (1..=i64::from(PAGE))
+        .map(|offset| said_by_lead(offset + 10, "General", "visible", (offset + 10) * 1_000))
+        .collect();
+    state.take_history("work", "General", page, true, PAGE);
+    let before = state.earlier("work", "General").expect("full initial page");
+    let shown = state.conversation("work", "General", &when());
+
+    assert!(state.begin_earlier("work", "General", before));
+    assert!(!state.begin_earlier("work", "General", before));
+    assert_eq!(
+        state.earlier_status("work", "General"),
+        Some(&EarlierStatus::Loading)
+    );
+    assert_eq!(state.earlier_status("work", "Other project"), None);
+    assert!(!state.apply_earlier(EarlierLoad {
+        space: "work".into(),
+        project: "General".into(),
+        before,
+        history: Err(ClientError::Unreachable {
+            space: "work".into(),
+            reason: "disconnected".into(),
+        }),
+        decision_records: Vec::new(),
+    }));
+    assert!(matches!(
+        state.earlier_status("work", "General"),
+        Some(EarlierStatus::Failed(why)) if why.contains("disconnected")
+    ));
+    assert_eq!(state.conversation("work", "General", &when()), shown);
+    assert_eq!(state.earlier("work", "General"), Some(before));
+
+    assert!(state.begin_earlier("work", "General", before));
+    assert!(state.apply_earlier(EarlierLoad {
+        space: "work".into(),
+        project: "General".into(),
+        before,
+        history: Ok(vec![said_by_lead(1, "General", "earlier", 1_000)]),
+        decision_records: Vec::new(),
+    }));
+    assert!(state.conversation("work", "General", &when()).len() > shown.len());
+    assert_eq!(state.earlier("work", "General"), None);
+    assert_eq!(state.earlier_status("work", "General"), None);
 }
 
 #[tokio::test]
@@ -7371,6 +7505,95 @@ async fn batched_refresh_supplies_the_project_board_and_the_tasks_tab_skips_chat
         TaskId(7)
     );
     assert_eq!(work.project_task_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn concurrent_refresh_yields_a_healthy_hub_without_waiting_for_slow_peers() {
+    let names = ["one", "two", "three", "four", "five"];
+    let hubs: Vec<_> = names
+        .iter()
+        .map(|name| FakeHub::new(name, Vec::new()))
+        .collect();
+    let pairs: Vec<_> = names.into_iter().zip(&hubs).collect();
+    let (_dir, core) = core(&pairs);
+    let mut state = AppState::paired(names.into_iter().chain(["old-pairing"]));
+    let mut gates: Vec<_> = hubs
+        .iter()
+        .map(|hub| {
+            let (started, watch) = oneshot::channel();
+            let (release, blocked) = oneshot::channel();
+            *hub.blocked_info.lock().unwrap() = Some((started, blocked));
+            (watch, Some(release))
+        })
+        .collect();
+    hubs[1].decisions.lock().unwrap().push(decision(2, 42));
+
+    let (send, mut receive) = mpsc::unbounded_channel();
+    let refresh = tokio::spawn(async move {
+        refresh_each(&core, |_, part| send.send(part).is_ok()).await;
+    });
+
+    // The first four peers are all in flight, and the fifth waits for a slot.
+    for (started, _) in &mut gates[..4] {
+        tokio::time::timeout(Duration::from_secs(2), started)
+            .await
+            .expect("a slot should start")
+            .unwrap();
+    }
+    assert!(matches!(
+        gates[4].0.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+
+    // Free only the second slot. Its result appears while slot one is blocked.
+    gates[1].1.take().unwrap().send(()).unwrap();
+    let part = tokio::time::timeout(Duration::from_secs(2), receive.recv())
+        .await
+        .expect("the healthy peer should not be blocked")
+        .unwrap();
+    assert_eq!(part.refreshed_space(), Some("two"));
+    state.checking_connections();
+    state.apply_partial(part);
+    assert!(state.checking_connections);
+    assert_eq!(
+        state.connection("two", &when()).unwrap().status,
+        ConnectionStatus::Live
+    );
+    assert_eq!(
+        state.connection("one", &when()).unwrap().status,
+        ConnectionStatus::Reconnecting
+    );
+    assert_eq!(state.queue.len(), 1);
+
+    tokio::time::timeout(Duration::from_secs(2), &mut gates[4].0)
+        .await
+        .expect("the first free slot should start another peer")
+        .unwrap();
+    for (_, release) in gates {
+        if let Some(release) = release {
+            release.send(()).unwrap();
+        }
+    }
+    while let Some(part) = receive.recv().await {
+        state.apply_partial(part);
+    }
+    refresh.await.unwrap();
+
+    // Keep old pairings while only partial data is available; remove
+    // them from the display when the complete roster has been confirmed.
+    assert!(state.space("old-pairing").is_some());
+    state.retain_paired_spaces(&names.map(str::to_owned));
+    assert!(state.space("old-pairing").is_none());
+    assert_eq!(
+        state
+            .spaces
+            .iter()
+            .map(|space| space.name.as_str())
+            .collect::<Vec<_>>(),
+        names
+    );
+    assert_eq!(state.queue.len(), 1);
+    assert_eq!(state.queue[0].space, "two");
 }
 
 #[tokio::test]

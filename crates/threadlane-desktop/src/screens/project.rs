@@ -10,14 +10,16 @@ use gpui_kit::component::separator::Separator;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::Mode;
 use threadlane_desktop::{
-    Consequence, EmptyRegion, Line, ModeChoice, Part, ProjectTasksViewMode, SpaceTasksViewMode,
-    TaskGroup, When, build_task_dag, message_limit, newest_message, status_label, work_elapsed,
+    Consequence, EarlierStatus, EmptyRegion, Line, ModeChoice, Part, ProjectTasksViewMode,
+    SpaceTasksViewMode, TaskGroup, When, build_task_dag, message_limit, newest_message,
+    status_label, work_elapsed,
 };
 
 use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
@@ -40,6 +42,17 @@ pub(super) const MODES: [(Mode, &str); 4] = [
     (Mode::Assisted, "Assisted"),
     (Mode::Autonomous, "Autonomous"),
 ];
+
+/// Keep at least 24 rem for the chat when both rails fit.
+fn chat_details_in_sheet(viewport_width: Pixels, rem: Pixels, sidebar_collapsed: bool) -> bool {
+    let left = if sidebar_collapsed {
+        Pixels::ZERO
+    } else {
+        SIDEBAR_WIDTH
+    };
+    let available = (viewport_width - left - LG * 2.).min(READING_WIDTH);
+    available - SIDEBAR_WIDTH - LG < rem * 24.
+}
 
 impl Desktop {
     pub(crate) fn space_tasks(
@@ -102,9 +115,8 @@ impl Desktop {
                         let (space, project, view) =
                             (in_space.clone(), project.clone(), view.clone());
                         menu = menu.item(PopupMenuItem::new(project.clone()).on_click(
-                            move |_, _, cx| {
+                            move |_, window, cx| {
                                 let _ = view.update(cx, |this, cx| {
-                                    this.state.open_task_form(&space, &project, true);
                                     this.go(
                                         Screen::Project {
                                             space: space.clone(),
@@ -113,6 +125,7 @@ impl Desktop {
                                         },
                                         cx,
                                     );
+                                    this.show_new_task_form(&space, &project, window, cx);
                                 });
                             },
                         ));
@@ -476,11 +489,12 @@ impl Desktop {
     }
 
     pub(crate) fn project(
-        &self,
+        &mut self,
         space: &str,
         project: &str,
         tab: Tab,
         when: &When,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if tab == Tab::Conversation && self.is_main_chat(space, project) {
@@ -501,7 +515,7 @@ impl Desktop {
                 .self_center()
                 .gap(MD)
                 .child(page_header("Chat", Some(context), actions))
-                .child(self.conversation_tab(space, project, when, cx))
+                .child(self.conversation_tab(space, project, when, false, cx))
                 .into_any_element();
         }
         let (in_space, named) = (space.to_owned(), project.to_owned());
@@ -509,6 +523,7 @@ impl Desktop {
         // under it instead of carrying a half-finished slide from another tab.
         let bar = TabBar::new(SharedString::from(format!("project-tabs-{}", tab.label())))
             .underline()
+            .menu(true)
             .selected_index(tab.index())
             .on_click(cx.listener(move |this, index: &usize, _, cx| {
                 let tab = Tab::at(*index).unwrap_or(Tab::Tasks);
@@ -528,16 +543,14 @@ impl Desktop {
                     Tab::Conversation => AppIcon::MessagesSquare,
                     Tab::Memory => AppIcon::BookOpen,
                     Tab::Team => AppIcon::Bot,
+                    Tab::Workflow => AppIcon::GitFork,
                     Tab::Routines => AppIcon::CalendarClock,
                     Tab::Setup => AppIcon::Settings,
                 };
-                KitTab::new().aria_label(label).child(
-                    h_flex()
-                        .gap(XS)
-                        .flex_none()
-                        .child(Icon::new(icon).size(TYPE_BODY))
-                        .child(label),
-                )
+                KitTab::new()
+                    .label(label)
+                    .aria_label(label)
+                    .icon(Icon::new(icon).size(TYPE_BODY))
             }));
         let archived = self.state.is_archived(space, project);
         let paused = self.state.is_paused(space, project);
@@ -556,9 +569,20 @@ impl Desktop {
         let lead_mode = self.state.lead_mode(space, project);
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
-            Tab::Conversation => self.conversation_tab(space, project, when, cx),
+            Tab::Conversation => self.conversation_tab(
+                space,
+                project,
+                when,
+                chat_details_in_sheet(
+                    window.viewport_size().width,
+                    window.rem_size(),
+                    self.sidebar_collapsed,
+                ),
+                cx,
+            ),
             Tab::Memory => self.memory_tab(space, project, when, cx),
             Tab::Team => self.agents_tab(space, project, cx),
+            Tab::Workflow => self.workflow_tab(space, project, archived, window, cx),
             Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Setup => self.setup_tab(space, project, cx),
         };
@@ -587,15 +611,6 @@ impl Desktop {
                 },
                 cx,
             ));
-            if !archived {
-                actions = actions.child(self.work_link(
-                    "project-review-workflow",
-                    "Review workflow",
-                    space,
-                    crate::WorkPage::Workflow(project.into()),
-                    cx,
-                ));
-            }
         }
         if archived {
             actions = actions.child(
@@ -648,10 +663,12 @@ impl Desktop {
                         .icon(AppIcon::ListPlus)
                         .label("New task")
                         .accessibility_label("Create a task directly")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state
-                                .open_task_form(&task_space, &task_project, !form_open);
-                            cx.notify();
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if form_open {
+                                this.hide_new_task_form(&task_space, &task_project, window, cx);
+                            } else {
+                                this.show_new_task_form(&task_space, &task_project, window, cx);
+                            }
                         })),
                 );
         }
@@ -1233,21 +1250,44 @@ impl Desktop {
         space: &str,
         project: &str,
         when: &When,
+        details_in_sheet: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let mut lines = v_flex().gap(MD);
+        // Always keep this control and the history status in a single child before the rows.
+        let mut history = v_flex().gap(XS).items_start();
+        let mut has_header = false;
         if let Some(before) = self.state.earlier(space, project) {
+            has_header = true;
+            let status = self.state.earlier_status(space, project);
+            let label = match status {
+                Some(EarlierStatus::Loading) => "Loading earlier messages…",
+                Some(EarlierStatus::Failed(error)) => {
+                    history = history.child(meta(
+                        format!("Could not load earlier messages: {error}"),
+                        cx,
+                    ));
+                    "Retry"
+                }
+                None => "Show earlier",
+            };
             let (space, project) = (space.to_owned(), project.to_owned());
-            lines = lines.child(button("earlier").small().label("Show earlier").on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.earlier(space.clone(), project.clone(), before, cx);
-                }),
-            ));
+            history = history.child(
+                button("earlier")
+                    .small()
+                    .tab_stop(true)
+                    .label(label)
+                    .disabled(status == Some(&EarlierStatus::Loading))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.earlier(space.clone(), project.clone(), before, cx);
+                    })),
+            );
         }
         if let Some(gap) = self.state.project_gap(space, project, Part::Conversation) {
-            lines = lines.child(gap_line(&gap, "conversation", space, cx));
+            has_header = true;
+            history = history.child(gap_line(&gap, "conversation", space, cx));
         }
+        let mut lines = v_flex().gap(MD).children(has_header.then_some(history));
         let main_chat = self.is_main_chat(space, project);
         let conversation = self.state.conversation(space, project, when);
         if conversation.is_empty()
@@ -1719,7 +1759,49 @@ impl Desktop {
             lines = lines.child(self.recorded_section(space, project, recorded, cx));
         }
 
-        let side = (!main_chat).then(|| self.conversation_sidebar(space, project, when, cx));
+        let details = (!main_chat && details_in_sheet).then(|| {
+            let (space, project) = (space.to_owned(), project.to_owned());
+            button("conversation-details")
+                .small()
+                .outline()
+                .self_start()
+                .icon(AppIcon::Columns3)
+                .label("Conversation details")
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    let view = cx.entity().downgrade();
+                    let (space, project) = (space.clone(), project.clone());
+                    window.open_sheet(cx, move |sheet, window, cx| {
+                        let width = RULES_WIDTH.min(window.viewport_size().width);
+                        let content = view.update(cx, |this, cx| {
+                            this.conversation_details(&space, &project, &this.when(), true, cx)
+                        });
+                        let view = view.clone();
+                        sheet
+                            .title("Conversation details")
+                            .size(width)
+                            .resizable(false)
+                            .children(content.ok())
+                            .on_close(move |_, window, cx| {
+                                // Resizing during the sheet can remove its opener.
+                                let _gone = view.update(cx, |this, cx| {
+                                    if !this.keyboard_focus.contains_focused(window, cx) {
+                                        this.keyboard_focus.focus(window, cx);
+                                    }
+                                });
+                            })
+                    });
+                }))
+        });
+        let side = (!main_chat && !details_in_sheet).then(|| {
+            v_flex()
+                .id("conversation-sidebar")
+                .w(SIDEBAR_WIDTH)
+                .h_full()
+                .flex_none()
+                .pr(SCROLLBAR_GUTTER)
+                .overflow_y_scrollbar()
+                .child(self.conversation_details(space, project, when, false, cx))
+        });
         h_flex()
             .flex_1()
             .min_h_0()
@@ -1731,7 +1813,15 @@ impl Desktop {
                     .h_full()
                     .min_w_0()
                     .gap(SM)
-                    .child(self.conversation_scroller(space, project, lines, cx))
+                    .children(details)
+                    .child(self.conversation_scroller(
+                        space,
+                        project,
+                        lines,
+                        &conversation,
+                        has_header,
+                        cx,
+                    ))
                     .children((!self.state.is_archived(space, project)).then(|| {
                         let page = (space.to_owned(), project.to_owned());
                         let picker = self.to_picker(
@@ -1756,21 +1846,29 @@ impl Desktop {
             .into_any_element()
     }
 
-    fn conversation_sidebar(
+    fn open_conversation_detail(
+        &mut self,
+        screen: Screen,
+        in_sheet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if in_sheet {
+            window.close_sheet(cx);
+            self.keyboard_focus.focus(window, cx);
+        }
+        self.go(screen, cx);
+    }
+
+    fn conversation_details(
         &self,
         space: &str,
         project: &str,
         when: &When,
+        in_sheet: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut side = v_flex()
-            .w(SIDEBAR_WIDTH)
-            .h_full()
-            .flex_none()
-            .gap(SM)
-            .pr(SCROLLBAR_GUTTER)
-            .overflow_y_scrollbar()
-            .id("conversation-sidebar");
+        let mut side = v_flex().gap(SM);
         side = side.child(section("From this conversation"));
         // The hub does not record which message made a task, so the tasks
         // are listed here rather than under the message.
@@ -1828,7 +1926,9 @@ impl Desktop {
                         format!("from-{}", summary.task.id),
                         format!("{} {}", summary.task.id, summary.task.title),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(screen.clone(), cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_conversation_detail(screen.clone(), in_sheet, window, cx);
+                    })),
                 )
                 .child(
                     h_flex()
@@ -1863,7 +1963,9 @@ impl Desktop {
                     .ghost()
                     .self_start()
                     .label(format!("View all {total_tasks} tasks"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(all_screen.clone(), cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_conversation_detail(all_screen.clone(), in_sheet, window, cx);
+                    })),
             );
         }
         side = side.child(section("Open decisions"));
@@ -1927,7 +2029,9 @@ impl Desktop {
                 .small()
                 .icon(AppIcon::BookOpen)
                 .label("Open memory")
-                .on_click(cx.listener(move |this, _, _, cx| this.go(memory.clone(), cx))),
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_conversation_detail(memory.clone(), in_sheet, window, cx);
+                })),
         )
         .into_any_element()
     }
@@ -2106,13 +2210,55 @@ impl Desktop {
                     }
                 };
                 detail = detail.child(section("Versions"));
-                let versions = self.state.memory_versions(space, project, when);
+                let versions = self.state.memory_version_rows(space, project, when);
                 if let Some(gap) = self.state.memory_versions_gap(space, project) {
                     detail = detail.child(gap_line(&gap, "memory versions", space, cx));
                 } else if versions.is_empty() {
                     detail = detail.child(empty(EmptyRegion::MemoryVersions, cx));
                 }
-                detail = detail.children(versions.into_iter().map(|line| meta(line, cx)));
+                detail = detail.children(versions.into_iter().map(|row| {
+                    let (in_space, named) = (space.to_owned(), project.to_owned());
+                    let label = if row.current {
+                        format!("{} · current", row.label)
+                    } else {
+                        row.label
+                    };
+                    button(format!(
+                        "memory-version-{space}-{project}-{path}-{}",
+                        row.version
+                    ))
+                    .ghost()
+                    .label(label.clone())
+                    .accessibility_label(format!("Inspect {label}"))
+                    .tab_stop(true)
+                    .selected(row.selected)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state
+                            .inspect_memory_version(&in_space, &named, row.version);
+                        cx.notify();
+                    }))
+                }));
+                if let Some(version) = self.state.memory_inspected(space, project) {
+                    detail =
+                        detail.child(section(format!("Version {} · read-only", version.version)));
+                    if version.deleted {
+                        detail = detail.child(meta(
+                            "This version records a deletion; it has no file contents.",
+                            cx,
+                        ));
+                    } else {
+                        detail = detail.child(self.prose(
+                            format!(
+                                "memory-history-{space}-{project}-{path}-{}",
+                                version.version
+                            ),
+                            space,
+                            Some(project),
+                            version.content.clone(),
+                            cx,
+                        ));
+                    }
+                }
             }
         }
         h_flex()
@@ -2659,10 +2805,57 @@ pub(super) fn mode_name(mode: Mode) -> &'static str {
 impl Desktop {
     /// The "New task" form (wireframe 2, note 3): title, goal, the agent
     /// that does it, its repositories, and the tasks it waits for.
-    fn task_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> Div {
+    fn show_new_task_form(
+        &mut self,
+        space: &str,
+        project: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.open_task_form(space, project, true);
+        self.task_form_return_focus = window.focused(cx);
+        let target = self.screen.clone();
+        let view = cx.entity().downgrade();
+        let (space, project) = (space.to_owned(), project.to_owned());
+        window.on_next_frame(move |window, cx| {
+            let _gone = view.update(cx, |this, cx| {
+                if this.screen == target
+                    && this.state.task_form(&space, &project).is_some()
+                    && !this.state.is_archived(&space, &project)
+                {
+                    this.task_title.focus_handle(cx).focus(window, cx);
+                }
+            });
+        });
+        cx.notify();
+    }
+
+    fn hide_new_task_form(
+        &mut self,
+        space: &str,
+        project: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_new_task_focus(window, cx);
+        self.state.open_task_form(space, project, false);
+        cx.notify();
+    }
+
+    pub(crate) fn restore_new_task_focus(&mut self, window: &mut Window, cx: &mut App) {
+        let return_to = self.task_form_return_focus.take();
+        if self.task_form_focus.contains_focused(window, cx) {
+            return_to
+                .filter(|focus| self.keyboard_focus.contains(focus, window))
+                .unwrap_or_else(|| self.keyboard_focus.clone())
+                .focus(window, cx);
+        }
+    }
+
+    fn task_form(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let Some(form) = self.state.task_form(space, project) else {
-            return div();
+            return div().into_any_element();
         };
         let label = |text: &'static str| {
             div()
@@ -2745,14 +2938,26 @@ impl Desktop {
         let (in_space, named) = (space.to_owned(), project.to_owned());
         let (close_space, close_project) = (space.to_owned(), project.to_owned());
         v_flex()
+            .id("new-task-form")
+            .track_focus(&self.task_form_focus)
             .gap(SM)
             .p(MD)
             .border_1()
             .border_color(cx.theme().border)
             .rounded(ROW_RADIUS)
             .child(section("New task"))
-            .child(field(&self.task_title))
-            .child(field(&self.task_goal))
+            .child(
+                v_flex()
+                    .gap(XS)
+                    .child(meta("Title", cx))
+                    .child(field(&self.task_title).aria_label("Title")),
+            )
+            .child(
+                v_flex()
+                    .gap(XS)
+                    .child(meta("Goal", cx))
+                    .child(field(&self.task_goal).aria_label("Goal")),
+            )
             .child(
                 h_flex()
                     .gap(SM)
@@ -2793,21 +2998,20 @@ impl Desktop {
                             .primary()
                             .icon(AppIcon::ListPlus)
                             .label("Create task")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.create_task(in_space.clone(), named.clone(), cx);
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.create_task(in_space.clone(), named.clone(), window, cx);
                             })),
                     )
                     .child(
                         button("task-close")
                             .icon(AppIcon::X)
                             .label("Cancel")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state
-                                    .open_task_form(&close_space, &close_project, false);
-                                cx.notify();
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.hide_new_task_form(&close_space, &close_project, window, cx);
                             })),
                     ),
             )
+            .into_any_element()
     }
 
     /// Select a checkout or enter its clone details manually.
@@ -2979,4 +3183,18 @@ fn handoff_preview(text: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or(trimmed);
     first_line.to_owned()
+}
+
+#[cfg(test)]
+mod chat_details_tests {
+    use super::{chat_details_in_sheet, px};
+
+    #[test]
+    fn narrow_chat_uses_drawer_without_changing_global_sidebar() {
+        assert!(chat_details_in_sheet(px(640.), px(16.), false));
+        assert!(chat_details_in_sheet(px(760.), px(16.), false));
+        assert!(!chat_details_in_sheet(px(760.), px(16.), true));
+        assert!(!chat_details_in_sheet(px(1024.), px(16.), false));
+        assert!(chat_details_in_sheet(px(1024.), px(24.), false));
+    }
 }

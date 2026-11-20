@@ -549,6 +549,10 @@ enum RoutineCommand {
         /// The time zone, for example Europe/Berlin; this computer's if left out.
         #[arg(long)]
         zone: Option<String>,
+        /// Skip an automatic run if more than this many minutes late (1–1440).
+        /// Without this option, catch up once after downtime.
+        #[arg(long, value_name = "MINUTES")]
+        skip_after_minutes: Option<u16>,
         /// The instruction; several words are joined with spaces.
         #[arg(required = true, trailing_var_arg = true)]
         instruction: Vec<String>,
@@ -1170,6 +1174,7 @@ async fn routine(core: &ClientCore, command: RoutineCommand) -> anyhow::Result<(
             weekdays,
             at,
             zone,
+            skip_after_minutes,
             instruction,
         } => {
             let rule = match (every, daily, at) {
@@ -1189,11 +1194,12 @@ async fn routine(core: &ClientCore, command: RoutineCommand) -> anyhow::Result<(
                 })?,
             };
             let timer = core
-                .add_routine(
+                .add_routine_with_grace(
                     space.as_deref(),
                     project.as_deref(),
                     &instruction.join(" "),
                     Recurrence { rule, zone },
+                    skip_after_minutes,
                 )
                 .await?;
             println!("created routine {}", timer_line(&timer));
@@ -1236,8 +1242,11 @@ fn timer_line(timer: &Timer) -> String {
         TimerCreator::User => String::new(),
         other => format!(", set by {other}"),
     };
+    let policy = timer
+        .missed_grace_minutes
+        .map_or_else(String::new, |n| format!(", skip if more than {n}m late"));
     format!(
-        "{} {what}, {next}{paused}{by}: {}",
+        "{} {what}, {next}{paused}{by}{policy}: {}",
         timer.id, timer.instruction
     )
 }

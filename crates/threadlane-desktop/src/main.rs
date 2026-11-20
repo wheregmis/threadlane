@@ -7,7 +7,7 @@
 //! (Plan.md §18.4 item 3): every hub call is spawned there and its result
 //! handed back to the view. The screens live in `screens/`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::Future;
 use std::process::{Command, ExitCode};
@@ -26,7 +26,7 @@ use threadlane_core::time::{Clock as _, SystemClock, Timestamp};
 use threadlane_desktop::{
     Activity, AppState, Appearance, DecisionKey, RoutineText, Tab, When, change_memory,
     decision_of_tag, describe, load_earlier, load_memory, load_modes, load_project_tab,
-    load_routines, load_task_overview, load_timeline, mode_label, pump, refresh,
+    load_routines, load_task_overview, load_timeline, mode_label, pump, refresh_each,
 };
 use threadlane_desktop::{DreamingAction, change_dreaming, load_dreaming, load_metrics};
 use tokio::runtime::Runtime;
@@ -38,6 +38,7 @@ mod icons;
 mod keyboard;
 mod local_hub;
 mod menus;
+mod refresh_gate;
 mod repository;
 mod screens;
 mod tokens;
@@ -46,7 +47,8 @@ mod work;
 use work::{WorkPage, WorkView};
 
 use icons::DesktopAssets;
-use keyboard::DecisionScroll;
+use keyboard::{DecisionScroll, HistoryScroll};
+use refresh_gate::RefreshGate;
 use tokens::{LG, MD, TABULAR, TYPE_BODY};
 
 /// How often the app asks every hub again, so reachability, what runs, and
@@ -295,6 +297,11 @@ impl Screen {
         }
     }
 
+    /// Unscoped views load auxiliary data once the full roster is refreshed.
+    fn loads_after_refresh_pass(&self) -> bool {
+        matches!(self, Self::Home | Self::Agents(None) | Self::Routines(None))
+    }
+
     /// The screen `THREADLANE_DESKTOP_OPEN` names: `home` or `inbox`, `agents`,
     /// `machines`, `<space>/<project>[/chat|tasks|team|routines|memory|setup]`
     /// or `<space>/T-0001`. For looking at a screen without clicking to it.
@@ -410,7 +417,7 @@ impl PendingProjectLoad {
 
 /// The window's one view: the shell and its screens over [`AppState`].
 struct Desktop {
-    state: AppState,
+    state: threadlane_desktop::ConversationState,
     desktop_updatable: bool,
     updates: HashMap<Option<String>, updates::UpdateState>,
     core: Arc<RwLock<ClientCore>>,
@@ -420,6 +427,7 @@ struct Desktop {
     inbox: screens::Inbox,
     task_activity: TaskActivity,
     task_activity_request: Option<Task<()>>,
+    refresh_gate: RefreshGate,
     project_load: Option<Task<()>>,
     project_load_pending: Option<PendingProjectLoad>,
     keyboard_focus: FocusHandle,
@@ -431,6 +439,7 @@ struct Desktop {
     reveal_linked_decision: Option<DecisionKey>,
     conversation_at_bottom: bool,
     conversation_follow: Rc<Cell<bool>>,
+    history_scroll: Rc<RefCell<HistoryScroll>>,
     scroll_to_decision: Rc<Cell<DecisionScroll>>,
     decision_inputs: HashMap<DecisionKey, (Entity<InputState>, Subscription)>,
     composer: Entity<TextareaState>,
@@ -492,6 +501,8 @@ struct Desktop {
     /// The "+ New task" form's title and goal.
     task_title: Entity<InputState>,
     task_goal: Entity<InputState>,
+    task_form_focus: FocusHandle,
+    task_form_return_focus: Option<FocusHandle>,
     /// Empty these fields at the next render, which has the window it needs.
     clear_fields: Vec<Entity<InputState>>,
     /// Whether the window was full screen at the last render, which the
@@ -617,10 +628,13 @@ impl Desktop {
         });
         let refresh_loop = cx.spawn(async move |this, cx| {
             loop {
-                if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| this.start_refresh(false, cx))
+                    .is_err()
+                {
                     return;
                 }
-                // By then the refresh has answered: ask again soon if it left gaps.
+                // Poll more often while the last result left gaps. A tick never overlaps a request.
                 cx.background_executor().timer(RETRY_EVERY).await;
                 match this.update(cx, |this, _| this.state.retry_soon()) {
                     Ok(true) => {}
@@ -690,12 +704,13 @@ impl Desktop {
         Self {
             work: WorkView::new(window, cx),
             inbox: screens::Inbox::default(),
-            state,
+            state: state.into(),
             core,
             tokio,
             screen,
             task_activity: TaskActivity::default(),
             task_activity_request: None,
+            refresh_gate: RefreshGate::default(),
             project_load: None,
             project_load_pending: None,
             keyboard_focus,
@@ -707,6 +722,7 @@ impl Desktop {
             reveal_linked_decision: None,
             conversation_at_bottom: true,
             conversation_follow: Rc::new(Cell::new(conversation)),
+            history_scroll: Rc::default(),
             scroll_to_decision: Rc::new(Cell::new(if conversation {
                 DecisionScroll::None
             } else {
@@ -754,6 +770,8 @@ impl Desktop {
             repository_branch,
             task_title,
             task_goal,
+            task_form_focus: cx.focus_handle(),
+            task_form_return_focus: None,
             clear_fields: Vec::new(),
             full_screen: false,
             offset_minutes: local_offset_minutes(),
@@ -792,50 +810,97 @@ impl Desktop {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.start_refresh(true, cx);
+    }
+
+    fn start_refresh(&mut self, explicit: bool, cx: &mut Context<Self>) {
+        let Some(pairing_revision) = self.refresh_gate.begin(explicit) else {
+            return;
+        };
         self.state.checking_connections();
         cx.notify();
         let core = Arc::clone(&self.core);
-        // The open screen loads once the refresh is in: the Agents screen
-        // needs the projects it lists.
-        self.run(
-            async move { refresh(&*core.read().await).await },
-            |this, refreshed, cx| {
-                let open_project = match &this.screen {
-                    Screen::Project { space, project, .. } => {
-                        Some((space.clone(), project.clone()))
-                    }
-                    Screen::Task { space, task } => this
-                        .state
-                        .task(space, *task)
-                        .map(|detail| (space.clone(), detail.summary.project.clone())),
-                    _ => None,
-                };
-                let parts = match &this.screen {
-                    Screen::Project { space, project, .. } => {
-                        refreshed.project_parts(space, project)
-                    }
-                    _ => (false, false),
-                };
-                this.state.apply(refreshed);
-                // Refreshes run every REFRESH_EVERY, so this re-checks well within a minute.
-                for alert in this.state.reminders(SystemClock.now()) {
-                    if this.state.notifies(&alert) {
-                        this.remind(alert, cx);
-                    }
-                }
-                if let Some((space, project)) = open_project
-                    && this.state.project_absent(&space, &project)
+        let (send, mut receive) = mpsc::unbounded_channel();
+        let job = self.tokio.spawn(async move {
+            let core = core.read().await;
+            refresh_each(&core, |_, part| send.send(part).is_ok()).await;
+            core.hubs()
+                .iter()
+                .map(|hub| hub.name.clone())
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            while let Some(part) = receive.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.refresh_gate.is_current(pairing_revision) {
+                            this.apply_refresh(part, cx);
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
                 {
-                    this.state.report(Activity::Failed(format!(
-                        "No project {project:?} in {space}."
-                    )));
-                    this.go(Screen::Home, cx);
-                } else {
-                    this.load_screen_with_parts(parts, cx);
+                    job.abort();
+                    return;
                 }
-            },
-            cx,
-        );
+            }
+            let roster = job.await;
+            let _ = this.update(cx, |this, cx| {
+                let (current, again) = this.refresh_gate.finish(pairing_revision);
+                this.state.finish_checking_connections();
+                if current && let Ok(roster) = roster {
+                    this.state.retain_paired_spaces(&roster);
+                    // These unscoped screens fetch auxiliary data across all hubs.
+                    // Load once, rather than re-querying every hub on each result.
+                    if this.screen.loads_after_refresh_pass() {
+                        this.load_screen(cx);
+                    }
+                }
+                if again {
+                    this.start_refresh(true, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_refresh(&mut self, refreshed: threadlane_desktop::Refresh, cx: &mut Context<Self>) {
+        let selected_hub = refreshed
+            .refreshed_space()
+            .is_some_and(|space| self.screen.space() == Some(space));
+        let open_project = match &self.screen {
+            Screen::Project { space, project, .. } => Some((space.clone(), project.clone())),
+            Screen::Task { space, task } => self
+                .state
+                .task(space, *task)
+                .map(|detail| (space.clone(), detail.summary.project.clone())),
+            _ => None,
+        };
+        let parts = match &self.screen {
+            Screen::Project { space, project, .. } => refreshed.project_parts(space, project),
+            _ => (false, false),
+        };
+        self.state.apply_partial(refreshed);
+        // Refreshes run every REFRESH_EVERY, so this re-checks well within a minute.
+        for alert in self.state.reminders(SystemClock.now()) {
+            if self.state.notifies(&alert) {
+                self.remind(alert, cx);
+            }
+        }
+        if !selected_hub {
+            return;
+        }
+        if let Some((space, project)) = open_project
+            && self.state.project_absent(&space, &project)
+        {
+            self.state.report(Activity::Failed(format!(
+                "No project {project:?} in {space}."
+            )));
+            self.go(Screen::Home, cx);
+        } else {
+            self.load_screen_with_parts(parts, cx);
+        }
     }
 
     /// Loads what the open screen shows beyond what a refresh brings.
@@ -869,6 +934,9 @@ impl Desktop {
                     return;
                 }
                 let (fresh_tasks, fresh_lead) = parts;
+                if tab == Tab::Workflow && !self.state.is_archived(&space, &project) {
+                    self.load_work(space.clone(), WorkPage::Workflow, cx);
+                }
                 if tab == Tab::Routines {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }
@@ -1195,6 +1263,8 @@ impl Desktop {
             self.clear_fields.push(self.dream_cadence.clone());
         }
         if self.screen != screen {
+            self.task_form_return_focus = None;
+            self.state.clear_memory_inspection();
             self.work.leave();
             self.inbox = screens::Inbox::default();
             self.project_load = None;
@@ -1206,6 +1276,7 @@ impl Desktop {
             self.reveal_linked_decision = None;
             self.conversation_at_bottom = true;
             self.conversation_follow = Rc::new(Cell::new(false));
+            self.history_scroll = Rc::default();
             if let Screen::Project {
                 space,
                 project,
@@ -1382,12 +1453,31 @@ impl Desktop {
         before: Timestamp,
         cx: &mut Context<Self>,
     ) {
+        if !self.state.begin_earlier(&space, &project, before) {
+            return;
+        }
         let core = Arc::clone(&self.core);
         self.run(
-            async move { load_earlier(&*core.read().await, &space, &project, before).await },
-            |this, loaded, _| this.state.apply_earlier(loaded),
+            async move {
+                let loaded = load_earlier(&*core.read().await, &space, &project, before).await;
+                (space, project, loaded)
+            },
+            |this, (space, project, loaded), _| {
+                if this.state.apply_earlier(loaded)
+                    && !this.conversation_follow.get()
+                    && this.reveal_linked_decision.is_none()
+                    && matches!(
+                        &this.screen,
+                        Screen::Project { space: shown_space, project: shown_project, tab: Tab::Conversation }
+                            if shown_space == &space && shown_project == &project
+                    )
+                {
+                    this.history_scroll.borrow_mut().preserve();
+                }
+            },
             cx,
         );
+        cx.notify();
     }
 
     fn issue_code(&mut self, space: String, cx: &mut Context<Self>) {
@@ -1647,6 +1737,7 @@ impl Desktop {
     }
 
     fn space_paired(&mut self, name: &str, message: String, cx: &mut Context<Self>) {
+        self.refresh_gate.pairing_changed();
         self.state.open_paired_space(name);
         self.state.select_space(name);
         self.state.report(Activity::Done(message));
@@ -1675,6 +1766,7 @@ impl Desktop {
             self.routine_day.read(cx).value(),
             self.routine_zone.read(cx).value(),
         );
+        let grace = self.state.routine_form().missed_grace_minutes;
         let recurrence = self.state.routine_form().recurrence(RoutineText {
             every: &every,
             at: &at,
@@ -1703,7 +1795,13 @@ impl Desktop {
                 let added = core
                     .read()
                     .await
-                    .add_routine(Some(&space), Some(&project), &instruction, recurrence)
+                    .add_routine_with_grace(
+                        Some(&space),
+                        Some(&project),
+                        &instruction,
+                        recurrence,
+                        grace,
+                    )
                     .await;
                 (space, project, added)
             },
@@ -1784,6 +1882,7 @@ impl Desktop {
             },
             |this, (name, unpaired), cx| match unpaired {
                 Ok(()) => {
+                    this.refresh_gate.pairing_changed();
                     this.state.space_removed(&name);
                     this.state
                         .report(Activity::Done(format!("Unpaired {name}.")));
@@ -1801,6 +1900,7 @@ impl Desktop {
                     if gone {
                         this.go(Screen::Machines, cx);
                     }
+                    this.refresh(cx);
                 }
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
             },
@@ -1849,7 +1949,7 @@ impl Render for Desktop {
                 space,
                 project,
                 tab,
-            } => self.project(&space, &project, tab, &when, cx),
+            } => self.project(&space, &project, tab, &when, window, cx),
             Screen::Task { space, task } => self.task(&space, task, &when, cx),
             Screen::Agents(scope) => self.agents(scope.as_deref(), &when, cx),
             Screen::SpaceTasks { space } => self.space_tasks(&space, &when, cx),
@@ -1964,6 +2064,21 @@ mod activity_tests {
         assert!(empty.is_empty());
         empty.error = Some((None, "request failed".into()));
         assert!(!empty.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod refresh_screen_tests {
+    use super::Screen;
+
+    #[test]
+    fn refresh_end_loads_unscoped_auxiliary_screens_including_home() {
+        assert!(Screen::Home.loads_after_refresh_pass());
+        assert!(Screen::Agents(None).loads_after_refresh_pass());
+        assert!(Screen::Routines(None).loads_after_refresh_pass());
+        assert!(!Screen::Agents(Some("Work".into())).loads_after_refresh_pass());
+        assert!(!Screen::Routines(Some("Work".into())).loads_after_refresh_pass());
+        assert!(!Screen::Machines.loads_after_refresh_pass());
     }
 }
 

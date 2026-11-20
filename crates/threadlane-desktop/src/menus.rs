@@ -369,7 +369,10 @@ fn desktop_action<A: Action + Clone>(
         let action = action.clone();
         let view = view.clone();
         on_window(cx, move |window, cx| {
-            let _gone = view.update(cx, |this, cx| handle(this, &action, window, cx));
+            // The active sheet owns keyboard focus and handles Escape itself.
+            if !window.has_active_sheet(cx) {
+                let _gone = view.update(cx, |this, cx| handle(this, &action, window, cx));
+            }
         });
     });
 }

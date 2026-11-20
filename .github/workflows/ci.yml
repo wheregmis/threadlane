@@ -38,9 +38,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      # MBX object archives do not contain Cargo registry or Git downloads.
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: workspace-${{ runner.os }}
+          key: ci-registry-${{ runner.os }}
+          cache-targets: false
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Cache compiler objects
+        uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
+        with:
+          version: '1.30.0'
+          backend: github
+          github-cache-mode: objects
+          cache-generation: threadlane-ci-v1
+          isolate-objects-cache: true
+          clean-target-before-export: true
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: mbx clippy --workspace --all-targets -- -D warnings
+      - run: mbx test --workspace

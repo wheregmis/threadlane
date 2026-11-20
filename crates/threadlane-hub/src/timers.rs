@@ -446,7 +446,8 @@ impl HubCore {
     /// One scheduler pass (Plan.md §7.3): fires every active timer that is
     /// due, each in one transaction, then wakes the lanes that got events.
     /// A routine that missed several occurrences fires once, for the one it
-    /// was due at, and moves to its next occurrence after now. Returns how
+    /// was due at, and moves to its next occurrence after now, unless it opts
+    /// to skip beyond a grace. Skips record history without waking a lane. Returns how
     /// many events were inserted.
     ///
     /// # Errors
@@ -471,6 +472,20 @@ impl HubCore {
                 }
                 _ => None,
             };
+            if let Some(next) = next.filter(|_| timer.skips_late_at(now)) {
+                match inner
+                    .db
+                    .skip_late_routine(timer.id, timer.due_at, next, now)
+                    .await
+                {
+                    Ok(())
+                    | Err(StoreError::Conflict(_) | StoreError::NotFound { kind: "timer", .. }) => {
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                inner.hook.reach(scheduler::AFTER_FIRE)?;
+                continue;
+            }
             match inner.db.fire(timer.id, timer.due_at, next, now).await {
                 Ok(Inserted::New(_)) => {
                     lanes.insert(timer.lane_id);
@@ -517,22 +532,10 @@ fn ended(error: StoreError) -> ApiError {
 pub(crate) async fn handle(core: &HubCore, request: TimerRequest) -> Result<TimerReply, ApiError> {
     let inner = &core.inner;
     let db = &inner.db;
-    let project = |name: Option<String>| async move {
-        match name {
-            None => db.general_project().await.map_err(api_error),
-            Some(name) => db
-                .projects()
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .find(|project| project.name == name)
-                .ok_or_else(|| ApiError::NotFound(format!("project {name:?}"))),
-        }
-    };
     match request {
         TimerRequest::List { project: name } => Ok(TimerReply::Timers {
             timers: db
-                .project_timers(project(name).await?.id)
+                .project_timers(timer_project(db, name).await?.id)
                 .await
                 .map_err(api_error)?,
         }),
@@ -542,34 +545,24 @@ pub(crate) async fn handle(core: &HubCore, request: TimerRequest) -> Result<Time
             recurrence,
             client_request_id,
         } => {
-            let instruction = instruction.trim();
-            if instruction.is_empty() {
-                return Err(ApiError::Invalid("the instruction is empty".into()));
-            }
-            if client_request_id.trim().is_empty() {
-                return Err(ApiError::Invalid("the client request id is empty".into()));
-            }
-            checked(&recurrence)?;
-            let project = project(name).await?;
-            let now = inner.clock.now();
-            let due_at = next_occurrence(&recurrence, now, now).map_err(ApiError::Invalid)?;
-            let timer = db
-                .create_timer(&NewTimer {
-                    project_id: project.id,
-                    lane_id: project.lead_lane_id,
-                    agent_id: None,
-                    task_ref: None,
-                    category: TimerCategory::Schedule,
-                    due_at,
-                    recurrence: Some(recurrence),
-                    instruction: instruction.to_owned(),
-                    created_by: TimerCreator::User,
-                    created_by_call: Some(format!("client:{client_request_id}")),
-                    requested: true,
-                })
-                .await
-                .map_err(api_error)?;
-            Ok(TimerReply::Timer { timer })
+            create_owner_routine(core, name, instruction, recurrence, client_request_id, None).await
+        }
+        TimerRequest::CreateRoutineSkippingLate {
+            project: name,
+            instruction,
+            recurrence,
+            client_request_id,
+            grace_minutes,
+        } => {
+            create_owner_routine(
+                core,
+                name,
+                instruction,
+                recurrence,
+                client_request_id,
+                Some(grace_minutes),
+            )
+            .await
         }
         TimerRequest::RunOnce {
             timer: id,
@@ -613,4 +606,67 @@ pub(crate) async fn handle(core: &HubCore, request: TimerRequest) -> Result<Time
         }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }
+}
+
+async fn timer_project(
+    db: &HubDb,
+    name: Option<String>,
+) -> Result<threadlane_core::model::Project, ApiError> {
+    match name {
+        None => db.general_project().await.map_err(api_error),
+        Some(name) => db
+            .projects()
+            .await
+            .map_err(api_error)?
+            .into_iter()
+            .find(|project| project.name == name)
+            .ok_or_else(|| ApiError::NotFound(format!("project {name:?}"))),
+    }
+}
+
+async fn create_owner_routine(
+    core: &HubCore,
+    name: Option<String>,
+    instruction: String,
+    recurrence: Recurrence,
+    client_request_id: String,
+    grace_minutes: Option<u16>,
+) -> Result<TimerReply, ApiError> {
+    let inner = &core.inner;
+    let db = &inner.db;
+    let instruction = instruction.trim();
+    if instruction.is_empty() {
+        return Err(ApiError::Invalid("the instruction is empty".into()));
+    }
+    if client_request_id.trim().is_empty() {
+        return Err(ApiError::Invalid("the client request id is empty".into()));
+    }
+    checked(&recurrence)?;
+    let project = timer_project(db, name).await?;
+    let now = inner.clock.now();
+    let due_at = next_occurrence(&recurrence, now, now).map_err(ApiError::Invalid)?;
+    let request = NewTimer {
+        project_id: project.id,
+        lane_id: project.lead_lane_id,
+        agent_id: None,
+        task_ref: None,
+        category: TimerCategory::Schedule,
+        due_at,
+        recurrence: Some(recurrence),
+        instruction: instruction.to_owned(),
+        created_by: TimerCreator::User,
+        created_by_call: Some(format!("client:{client_request_id}")),
+        requested: true,
+    };
+    let timer = match grace_minutes {
+        Some(grace) => db
+            .create_routine_skipping_late(&request, grace)
+            .await
+            .map_err(|error| match error {
+                StoreError::Invalid(why) => ApiError::Invalid(why),
+                other => api_error(other),
+            })?,
+        None => db.create_timer(&request).await.map_err(api_error)?,
+    };
+    Ok(TimerReply::Timer { timer })
 }

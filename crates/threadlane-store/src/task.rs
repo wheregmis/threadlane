@@ -39,6 +39,19 @@ pub const NO_GH_REASON: &str =
 /// left nothing to wake it: no decision, timer or event.
 pub const UNWOKEN_REASON: &str = "ended without finishing and nothing is set to wake it";
 
+/// One DB-backed page of agent-visible tasks, including counts for empty pages.
+#[derive(Debug)]
+pub struct TaskListPage {
+    /// The selected page, in task ID order.
+    pub tasks: Vec<Task>,
+    /// All tasks visible for this listing before pagination.
+    pub total: usize,
+    /// Older terminal tasks excluded from the default listing.
+    pub hidden_finished: usize,
+}
+
+const TERMINAL: &str = "'done', 'failed', 'cancelled'";
+
 const TASK_FIELDS: &str = "id, project_id, lane_id, agent_id, title, goal, repositories,
     parent_task_id, origin, status, priority, created_by_call, last_machine_id, waiting_reason,
     result, created_at";
@@ -1019,6 +1032,98 @@ impl HubDb {
             }
         }
         Ok(tasks)
+    }
+
+    /// Reads one project page and its counts in a single database snapshot.
+    /// With `recent_finished`, include only that many recent terminal tasks;
+    /// an attempt with no result event sorts by task creation time instead.
+    pub async fn task_list_page(
+        &self,
+        project: ProjectId,
+        recent_finished: Option<usize>,
+        offset: usize,
+        limit: usize,
+    ) -> StoreResult<TaskListPage> {
+        let as_sql = |n| i64::try_from(n).unwrap_or(i64::MAX);
+        let mut values = params![project.get(), as_sql(limit), as_sql(offset)];
+        let (ctes, visible) = if let Some(recent) = recent_finished {
+            values.extend(params![as_sql(recent), TASK_SOURCE]);
+            // Match task_completion_times' current-attempt event lookup. The
+            // recent cohort ranks by ending time; the page is still shown by ID.
+            (
+                format!(
+                    "WITH terminal AS (
+                    SELECT id, created_at FROM tasks
+                    WHERE project_id = ?1 AND status IN ({TERMINAL})
+                 ), attempts AS (
+                    SELECT id, created_at, (
+                        SELECT COUNT(*) FROM events WHERE source = ?5
+                        AND source_event_id >= 'retry:' || terminal.id || ':'
+                        AND source_event_id < 'retry:' || terminal.id || ';'
+                    ) AS retries FROM terminal
+                 ), recent AS (
+                    SELECT attempts.id FROM attempts LEFT JOIN events
+                    ON source = ?5 AND source_event_id = 'result:' || attempts.id ||
+                       CASE WHEN retries = 0 THEN '' ELSE ':retry' || retries END
+                    ORDER BY COALESCE(received_at, attempts.created_at) DESC, attempts.id DESC
+                    LIMIT ?4
+                 ), counts AS (
+                    SELECT MAX((SELECT COUNT(*) FROM terminal) - ?4, 0) AS hidden,
+                           COUNT(*) AS total FROM tasks WHERE project_id = ?1
+                 )"
+                ),
+                format!("AND (status NOT IN ({TERMINAL}) OR id IN (SELECT id FROM recent))"),
+            )
+        } else {
+            (
+                "WITH counts AS (
+                SELECT 0 AS hidden, COUNT(*) AS total FROM tasks WHERE project_id = ?1
+            )"
+                .to_owned(),
+                String::new(),
+            )
+        };
+        let conn = self.db.reader()?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "{ctes}, page_ids AS (
+                    SELECT id FROM tasks WHERE project_id = ?1 {visible}
+                    ORDER BY id LIMIT ?2 OFFSET ?3
+                ), page AS (
+                    SELECT {TASK_FIELDS} FROM tasks WHERE id IN (SELECT id FROM page_ids)
+                )
+                SELECT page.*, d.depends_on, counts.total - counts.hidden, counts.hidden
+                FROM counts LEFT JOIN page ON TRUE
+                LEFT JOIN task_dependencies d ON d.task_id = page.id
+                ORDER BY page.id, d.depends_on"
+                ),
+                values,
+            )
+            .await
+            .map_err(crate::db::db_err)?;
+        let mut result = TaskListPage {
+            tasks: Vec::new(),
+            total: 0,
+            hidden_finished: 0,
+        };
+        while let Some(row) = rows.next().await.map_err(crate::db::db_err)? {
+            let cols = Cols(&row);
+            result.total = usize::try_from(cols.i64(17)?).unwrap_or(usize::MAX);
+            result.hidden_finished = usize::try_from(cols.i64(18)?).unwrap_or(usize::MAX);
+            let Some(id): Option<TaskId> = cols.opt_id(0)? else {
+                break;
+            };
+            let dependency = cols.opt_id(16)?;
+            if let Some(task) = result.tasks.last_mut().filter(|task| task.id == id) {
+                task.depends_on.extend(dependency);
+            } else {
+                result
+                    .tasks
+                    .push(decode_task(&row, dependency.into_iter().collect())?);
+            }
+        }
+        Ok(result)
     }
 
     /// Completion time of the current attempt for each supplied task.
