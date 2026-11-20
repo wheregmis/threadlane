@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use threadlane_core::ids::LaneId;
-use threadlane_core::store::MemoryStore;
+use threadlane_core::model::{NewOutboxMessage, OutboxKind, OutboxMessage, Urgency};
+use threadlane_core::store::{MemoryStore, OutboxStore};
 use threadlane_core::time::{Clock, Sleep, Timestamp};
 
 use super::*;
@@ -179,6 +180,107 @@ async fn outbox_lag_includes_retrying_rows_and_excludes_terminal_rows() {
     assert_eq!(metrics().await.outbox_lag_ms, Some(25));
 }
 
+async fn message(
+    db: &HubDb,
+    project_id: Option<ProjectId>,
+    created_at: Timestamp,
+    not_before: Option<Timestamp>,
+) -> OutboxMessage {
+    db.enqueue(&NewOutboxMessage {
+        project_id,
+        lane_id: None,
+        session_id: None,
+        run_id: None,
+        tool_call_id: None,
+        kind: OutboxKind::Message,
+        decision_id: None,
+        channel: "client".into(),
+        body: serde_json::json!({"text": "private content"}),
+        urgency: Urgency::Normal,
+        not_before,
+        created_at,
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn delivery_health_separates_pacing_retry_and_failure_by_scope() {
+    let db = HubDb::open_in_memory(&Bootstrap::default(), Arc::new(FixedClock))
+        .await
+        .unwrap();
+    let minute = Duration::from_secs(60);
+    let paced = message(&db, Some(GENERAL), NOW, None).await;
+    let retried_then_paced = message(&db, Some(GENERAL), NOW, None).await;
+    db.delivery_failed(&retried_then_paced, "transient", NOW - minute, Some(NOW))
+        .await
+        .unwrap();
+    db.hold_delivery(paced.id, NOW + minute, "quiet")
+        .await
+        .unwrap();
+    db.hold_delivery(retried_then_paced.id, NOW + minute + minute, "rate")
+        .await
+        .unwrap();
+
+    let retry = message(&db, Some(GENERAL), NOW, None).await;
+    db.delivery_failed(&retry, "transient", NOW, Some(NOW + minute))
+        .await
+        .unwrap();
+    let terminal = message(&db, Some(GENERAL), NOW - DAY, None).await;
+    let old_terminal = message(&db, Some(GENERAL), NOW - DELIVERY_WEEK, None).await;
+    let space_notice = message(&db, None, NOW, None).await;
+    for failed in [&terminal, &old_terminal, &space_notice] {
+        db.delivery_failed(failed, "permanent", NOW, None)
+            .await
+            .unwrap();
+    }
+    let sent = message(&db, Some(GENERAL), NOW, None).await;
+    db.mark_sent(sent.id, Some("private-channel-message-id"), NOW)
+        .await
+        .unwrap();
+    // A queued message with no failed attempt is not a retry.
+    message(&db, Some(GENERAL), NOW, Some(NOW + minute)).await;
+
+    let health = db
+        .operations_metrics(Some(GENERAL))
+        .await
+        .unwrap()
+        .delivery_health
+        .unwrap();
+    assert_eq!(
+        health,
+        DeliveryHealth {
+            held: 2,
+            next_hold_check: Some(NOW + minute),
+            retrying: 1,
+            next_retry: Some(NOW + minute),
+            failed_created_in_last_week: 1,
+        }
+    );
+    assert_eq!(
+        db.operations_metrics(None)
+            .await
+            .unwrap()
+            .delivery_health
+            .unwrap()
+            .failed_created_in_last_week,
+        2
+    );
+
+    // Compare the serialized shape, not just the counts: a health snapshot
+    // contains no body, raw error, or destination/adapter metadata.
+    assert_eq!(
+        serde_json::to_value(health).unwrap(),
+        serde_json::json!({
+            "held": 2,
+            "next_hold_check": (NOW + minute).as_millis(),
+            "retrying": 1,
+            "next_retry": (NOW + minute).as_millis(),
+            "failed_created_in_last_week": 1,
+        })
+    );
+}
+
 #[tokio::test]
 async fn message_counts_use_delivery_time_and_utc_days() {
     assert_eq!(
@@ -315,6 +417,44 @@ async fn agent_skills_migrate_onto_a_version_20_database() -> StoreResult<()> {
     })
     .await?;
     assert_eq!(skills, "[]");
+    let version = query_one(&conn, "PRAGMA user_version", (), |row| Cols(row).i64(0)).await?;
+    assert_eq!(version, crate::SCHEMA_VERSION);
+    Ok(())
+}
+
+#[tokio::test]
+async fn existing_version_22_routines_retain_their_missed_run_policy() -> StoreResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v22.db");
+    {
+        let sqlite = rusqlite::Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..22] {
+            sqlite.execute_batch(sql).unwrap();
+        }
+        sqlite
+            .execute_batch(
+                r#"PRAGMA user_version = 22;
+                 INSERT INTO projects(id, name, max_parallel_tasks, created_at)
+                 VALUES(1, 'General', 1, 0);
+                 INSERT INTO lanes(id, project_id, kind) VALUES(1, 1, 'lead');
+                 INSERT INTO timers(id, project_id, lane_id, category, due_at,
+                     recurrence, instruction, status, created_by, requested)
+                 VALUES(1, 1, 1, 'schedule', 60,
+                     '{"rule":"interval","minutes":5,"zone":"UTC"}',
+                     'Keep the first routine', 'active', 'user', 1);"#,
+            )
+            .unwrap();
+    }
+    let db = Db::open(DbLocation::File(&path)).await?;
+    let conn = db.reader()?;
+    let (due, grace) = query_one(
+        &conn,
+        "SELECT due_at, missed_grace_minutes FROM timers WHERE id = 1",
+        (),
+        |row| Ok((Cols(row).i64(0)?, Cols(row).opt_i64(1)?)),
+    )
+    .await?;
+    assert_eq!((due, grace), (60, None));
     let version = query_one(&conn, "PRAGMA user_version", (), |row| Cols(row).i64(0)).await?;
     assert_eq!(version, crate::SCHEMA_VERSION);
     Ok(())

@@ -7,7 +7,7 @@
 //! (Plan.md §18.4 item 3): every hub call is spawned there and its result
 //! handed back to the view. The screens live in `screens/`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::Future;
 use std::process::{Command, ExitCode};
@@ -46,7 +46,7 @@ mod work;
 use work::{WorkPage, WorkView};
 
 use icons::DesktopAssets;
-use keyboard::DecisionScroll;
+use keyboard::{DecisionScroll, HistoryScroll};
 use tokens::{LG, MD, TABULAR, TYPE_BODY};
 
 /// How often the app asks every hub again, so reachability, what runs, and
@@ -410,7 +410,7 @@ impl PendingProjectLoad {
 
 /// The window's one view: the shell and its screens over [`AppState`].
 struct Desktop {
-    state: AppState,
+    state: threadlane_desktop::ConversationState,
     desktop_updatable: bool,
     updates: HashMap<Option<String>, updates::UpdateState>,
     core: Arc<RwLock<ClientCore>>,
@@ -431,6 +431,7 @@ struct Desktop {
     reveal_linked_decision: Option<DecisionKey>,
     conversation_at_bottom: bool,
     conversation_follow: Rc<Cell<bool>>,
+    history_scroll: Rc<RefCell<HistoryScroll>>,
     scroll_to_decision: Rc<Cell<DecisionScroll>>,
     decision_inputs: HashMap<DecisionKey, (Entity<InputState>, Subscription)>,
     composer: Entity<TextareaState>,
@@ -692,7 +693,7 @@ impl Desktop {
         Self {
             work: WorkView::new(window, cx),
             inbox: screens::Inbox::default(),
-            state,
+            state: state.into(),
             core,
             tokio,
             screen,
@@ -709,6 +710,7 @@ impl Desktop {
             reveal_linked_decision: None,
             conversation_at_bottom: true,
             conversation_follow: Rc::new(Cell::new(conversation)),
+            history_scroll: Rc::default(),
             scroll_to_decision: Rc::new(Cell::new(if conversation {
                 DecisionScroll::None
             } else {
@@ -873,6 +875,9 @@ impl Desktop {
                     return;
                 }
                 let (fresh_tasks, fresh_lead) = parts;
+                if tab == Tab::Workflow && !self.state.is_archived(&space, &project) {
+                    self.load_work(space.clone(), WorkPage::Workflow, cx);
+                }
                 if tab == Tab::Routines {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
                 }
@@ -1200,6 +1205,7 @@ impl Desktop {
         }
         if self.screen != screen {
             self.task_form_return_focus = None;
+            self.state.clear_memory_inspection();
             self.work.leave();
             self.inbox = screens::Inbox::default();
             self.project_load = None;
@@ -1211,6 +1217,7 @@ impl Desktop {
             self.reveal_linked_decision = None;
             self.conversation_at_bottom = true;
             self.conversation_follow = Rc::new(Cell::new(false));
+            self.history_scroll = Rc::default();
             if let Screen::Project {
                 space,
                 project,
@@ -1387,12 +1394,31 @@ impl Desktop {
         before: Timestamp,
         cx: &mut Context<Self>,
     ) {
+        if !self.state.begin_earlier(&space, &project, before) {
+            return;
+        }
         let core = Arc::clone(&self.core);
         self.run(
-            async move { load_earlier(&*core.read().await, &space, &project, before).await },
-            |this, loaded, _| this.state.apply_earlier(loaded),
+            async move {
+                let loaded = load_earlier(&*core.read().await, &space, &project, before).await;
+                (space, project, loaded)
+            },
+            |this, (space, project, loaded), _| {
+                if this.state.apply_earlier(loaded)
+                    && !this.conversation_follow.get()
+                    && this.reveal_linked_decision.is_none()
+                    && matches!(
+                        &this.screen,
+                        Screen::Project { space: shown_space, project: shown_project, tab: Tab::Conversation }
+                            if shown_space == &space && shown_project == &project
+                    )
+                {
+                    this.history_scroll.borrow_mut().preserve();
+                }
+            },
             cx,
         );
+        cx.notify();
     }
 
     fn issue_code(&mut self, space: String, cx: &mut Context<Self>) {
@@ -1680,6 +1706,7 @@ impl Desktop {
             self.routine_day.read(cx).value(),
             self.routine_zone.read(cx).value(),
         );
+        let grace = self.state.routine_form().missed_grace_minutes;
         let recurrence = self.state.routine_form().recurrence(RoutineText {
             every: &every,
             at: &at,
@@ -1708,7 +1735,13 @@ impl Desktop {
                 let added = core
                     .read()
                     .await
-                    .add_routine(Some(&space), Some(&project), &instruction, recurrence)
+                    .add_routine_with_grace(
+                        Some(&space),
+                        Some(&project),
+                        &instruction,
+                        recurrence,
+                        grace,
+                    )
                     .await;
                 (space, project, added)
             },
@@ -1854,7 +1887,7 @@ impl Render for Desktop {
                 space,
                 project,
                 tab,
-            } => self.project(&space, &project, tab, &when, cx),
+            } => self.project(&space, &project, tab, &when, window, cx),
             Screen::Task { space, task } => self.task(&space, task, &when, cx),
             Screen::Agents(scope) => self.agents(scope.as_deref(), &when, cx),
             Screen::SpaceTasks { space } => self.space_tasks(&space, &when, cx),

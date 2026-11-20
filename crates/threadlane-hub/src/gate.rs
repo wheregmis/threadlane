@@ -79,8 +79,8 @@ pub fn may_start_unrequested(mode: Mode) -> bool {
 /// The pattern a standing rule made from this call stores: its target
 /// fields, as given.
 #[must_use]
-pub fn rule_pattern(arguments: &Json) -> Json {
-    let targets: Map<String, Json> = TARGET_FIELDS
+pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
+    let mut targets: Map<String, Json> = TARGET_FIELDS
         .iter()
         .filter_map(|field| {
             let value = arguments.get(*field)?;
@@ -89,6 +89,11 @@ pub fn rule_pattern(arguments: &Json) -> Json {
                 .then(|| ((*field).to_owned(), value.clone()))
         })
         .collect();
+    if tool == crate::FAST_FORWARD_PULL_REQUEST
+        && let Some(number) = arguments["number"].as_u64()
+    {
+        targets.insert("number".into(), number.into());
+    }
     Json::Object(targets)
 }
 
@@ -172,7 +177,7 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
             _ => verdict,
         };
     }
-    let pattern = rule_pattern(input.arguments);
+    let pattern = rule_pattern(input.tool, input.arguments);
     let ruled = match row {
         Row::Tier(Tier::SharedReversible | Tier::SharedHardToUndo) | Row::Instructions => {
             pattern.as_object().is_some_and(|p| !p.is_empty())
@@ -589,14 +594,27 @@ mod tests {
     #[test]
     fn a_pattern_keeps_the_target_fields_and_drops_free_text() {
         assert_eq!(
-            rule_pattern(&json!({ "repository": "app", "title": "x", "body": "y" })),
+            rule_pattern(
+                "create_issue",
+                &json!({ "repository": "app", "title": "x", "body": "y" })
+            ),
             json!({ "repository": "app" })
         );
         assert_eq!(
-            rule_pattern(&json!({ "from": "a.md", "to": "b.md" })),
+            rule_pattern("memory_rename", &json!({ "from": "a.md", "to": "b.md" })),
             json!({ "from": "a.md", "to": "b.md" })
         );
-        assert_eq!(rule_pattern(&json!({ "content": "z" })), json!({}));
+        assert_eq!(
+            rule_pattern(MEMORY_EDIT, &json!({ "content": "z" })),
+            json!({})
+        );
+        assert_eq!(
+            rule_pattern(
+                crate::FAST_FORWARD_PULL_REQUEST,
+                &json!({"repository":"app","number":42})
+            ),
+            json!({"repository":"app","number":42})
+        );
     }
 
     #[test]

@@ -16,8 +16,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::model::Mode;
 use threadlane_desktop::{
-    Consequence, EmptyRegion, Line, ModeChoice, Part, ProjectTasksViewMode, SpaceTasksViewMode,
-    TaskGroup, When, build_task_dag, message_limit, newest_message, status_label, work_elapsed,
+    Consequence, EarlierStatus, EmptyRegion, Line, ModeChoice, Part, ProjectTasksViewMode,
+    SpaceTasksViewMode, TaskGroup, When, build_task_dag, message_limit, newest_message,
+    status_label, work_elapsed,
 };
 
 use super::{delete_project::delete_project_item, empty, gap_line, link, menu_item};
@@ -476,11 +477,12 @@ impl Desktop {
     }
 
     pub(crate) fn project(
-        &self,
+        &mut self,
         space: &str,
         project: &str,
         tab: Tab,
         when: &When,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if tab == Tab::Conversation && self.is_main_chat(space, project) {
@@ -509,6 +511,7 @@ impl Desktop {
         // under it instead of carrying a half-finished slide from another tab.
         let bar = TabBar::new(SharedString::from(format!("project-tabs-{}", tab.label())))
             .underline()
+            .menu(true)
             .selected_index(tab.index())
             .on_click(cx.listener(move |this, index: &usize, _, cx| {
                 let tab = Tab::at(*index).unwrap_or(Tab::Tasks);
@@ -528,16 +531,14 @@ impl Desktop {
                     Tab::Conversation => AppIcon::MessagesSquare,
                     Tab::Memory => AppIcon::BookOpen,
                     Tab::Team => AppIcon::Bot,
+                    Tab::Workflow => AppIcon::GitFork,
                     Tab::Routines => AppIcon::CalendarClock,
                     Tab::Setup => AppIcon::Settings,
                 };
-                KitTab::new().aria_label(label).child(
-                    h_flex()
-                        .gap(XS)
-                        .flex_none()
-                        .child(Icon::new(icon).size(TYPE_BODY))
-                        .child(label),
-                )
+                KitTab::new()
+                    .label(label)
+                    .aria_label(label)
+                    .icon(Icon::new(icon).size(TYPE_BODY))
             }));
         let archived = self.state.is_archived(space, project);
         let paused = self.state.is_paused(space, project);
@@ -559,6 +560,7 @@ impl Desktop {
             Tab::Conversation => self.conversation_tab(space, project, when, cx),
             Tab::Memory => self.memory_tab(space, project, when, cx),
             Tab::Team => self.agents_tab(space, project, cx),
+            Tab::Workflow => self.workflow_tab(space, project, archived, window, cx),
             Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Setup => self.setup_tab(space, project, cx),
         };
@@ -587,15 +589,6 @@ impl Desktop {
                 },
                 cx,
             ));
-            if !archived {
-                actions = actions.child(self.work_link(
-                    "project-review-workflow",
-                    "Review workflow",
-                    space,
-                    crate::WorkPage::Workflow(project.into()),
-                    cx,
-                ));
-            }
         }
         if archived {
             actions = actions.child(
@@ -1238,18 +1231,40 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let mut lines = v_flex().gap(MD);
+        // Always keep this control and the history status in a single child before the rows.
+        let mut history = v_flex().gap(XS).items_start();
+        let mut has_header = false;
         if let Some(before) = self.state.earlier(space, project) {
+            has_header = true;
+            let status = self.state.earlier_status(space, project);
+            let label = match status {
+                Some(EarlierStatus::Loading) => "Loading earlier messages…",
+                Some(EarlierStatus::Failed(error)) => {
+                    history = history.child(meta(
+                        format!("Could not load earlier messages: {error}"),
+                        cx,
+                    ));
+                    "Retry"
+                }
+                None => "Show earlier",
+            };
             let (space, project) = (space.to_owned(), project.to_owned());
-            lines = lines.child(button("earlier").small().label("Show earlier").on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.earlier(space.clone(), project.clone(), before, cx);
-                }),
-            ));
+            history = history.child(
+                button("earlier")
+                    .small()
+                    .tab_stop(true)
+                    .label(label)
+                    .disabled(status == Some(&EarlierStatus::Loading))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.earlier(space.clone(), project.clone(), before, cx);
+                    })),
+            );
         }
         if let Some(gap) = self.state.project_gap(space, project, Part::Conversation) {
-            lines = lines.child(gap_line(&gap, "conversation", space, cx));
+            has_header = true;
+            history = history.child(gap_line(&gap, "conversation", space, cx));
         }
+        let mut lines = v_flex().gap(MD).children(has_header.then_some(history));
         let main_chat = self.is_main_chat(space, project);
         let conversation = self.state.conversation(space, project, when);
         if conversation.is_empty()
@@ -1733,7 +1748,14 @@ impl Desktop {
                     .h_full()
                     .min_w_0()
                     .gap(SM)
-                    .child(self.conversation_scroller(space, project, lines, cx))
+                    .child(self.conversation_scroller(
+                        space,
+                        project,
+                        lines,
+                        &conversation,
+                        has_header,
+                        cx,
+                    ))
                     .children((!self.state.is_archived(space, project)).then(|| {
                         let page = (space.to_owned(), project.to_owned());
                         let picker = self.to_picker(
@@ -2108,13 +2130,55 @@ impl Desktop {
                     }
                 };
                 detail = detail.child(section("Versions"));
-                let versions = self.state.memory_versions(space, project, when);
+                let versions = self.state.memory_version_rows(space, project, when);
                 if let Some(gap) = self.state.memory_versions_gap(space, project) {
                     detail = detail.child(gap_line(&gap, "memory versions", space, cx));
                 } else if versions.is_empty() {
                     detail = detail.child(empty(EmptyRegion::MemoryVersions, cx));
                 }
-                detail = detail.children(versions.into_iter().map(|line| meta(line, cx)));
+                detail = detail.children(versions.into_iter().map(|row| {
+                    let (in_space, named) = (space.to_owned(), project.to_owned());
+                    let label = if row.current {
+                        format!("{} · current", row.label)
+                    } else {
+                        row.label
+                    };
+                    button(format!(
+                        "memory-version-{space}-{project}-{path}-{}",
+                        row.version
+                    ))
+                    .ghost()
+                    .label(label.clone())
+                    .accessibility_label(format!("Inspect {label}"))
+                    .tab_stop(true)
+                    .selected(row.selected)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state
+                            .inspect_memory_version(&in_space, &named, row.version);
+                        cx.notify();
+                    }))
+                }));
+                if let Some(version) = self.state.memory_inspected(space, project) {
+                    detail =
+                        detail.child(section(format!("Version {} · read-only", version.version)));
+                    if version.deleted {
+                        detail = detail.child(meta(
+                            "This version records a deletion; it has no file contents.",
+                            cx,
+                        ));
+                    } else {
+                        detail = detail.child(self.prose(
+                            format!(
+                                "memory-history-{space}-{project}-{path}-{}",
+                                version.version
+                            ),
+                            space,
+                            Some(project),
+                            version.content.clone(),
+                            cx,
+                        ));
+                    }
+                }
             }
         }
         h_flex()

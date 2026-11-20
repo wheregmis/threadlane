@@ -29,6 +29,7 @@ pub struct AgentEdit {
     opened_fields: Arc<AgentFields>,
     /// Whether the instructions show rendered as Markdown.
     pub preview: bool,
+    save_error: Option<String>,
 }
 
 /// What the edit view's text fields hold.
@@ -61,7 +62,11 @@ impl AgentEdit {
     /// The extra picker option for a saved order outside the presets.
     #[must_use]
     pub fn saved_backend_label(&self) -> Option<String> {
-        (self.opened_with == BACKENDS.len()).then(|| {
+        (!self.saved_backends.is_empty()
+            && !BACKENDS
+                .iter()
+                .any(|(_, kinds)| *kinds == self.saved_backends))
+        .then(|| {
             self.saved_backends
                 .iter()
                 .map(ToString::to_string)
@@ -74,6 +79,12 @@ impl AgentEdit {
         BACKENDS
             .get(self.backends)
             .map_or(&self.saved_backends, |(_, kinds)| *kinds)
+    }
+
+    /// Why the latest save failed, if any.
+    #[must_use]
+    pub fn save_error(&self) -> Option<&str> {
+        self.save_error.as_deref()
     }
 
     /// The selected backends in preference order, or all for an unrestricted agent.
@@ -133,6 +144,7 @@ impl AppState {
             installed_skills: None,
             opened_fields: Arc::new(fields.clone()),
             preview: false,
+            save_error: None,
         });
         Some(fields)
     }
@@ -201,6 +213,79 @@ impl AppState {
             return Ok(Some(request));
         };
         Ok(None)
+    }
+
+    /// Whether this agent already has a save in flight, even across visits.
+    #[must_use]
+    pub fn agent_saving(&self, edit: &AgentEdit) -> bool {
+        self.agent_saves
+            .contains(&(edit.space.clone(), edit.agent.clone()))
+    }
+
+    /// Acquires the save slot for the open editor, clearing any prior error.
+    pub fn begin_agent_save(&mut self) -> Option<AgentEdit> {
+        let edit = self.agent_edit.as_mut()?;
+        if !self
+            .agent_saves
+            .insert((edit.space.clone(), edit.agent.clone()))
+        {
+            return None;
+        }
+        edit.save_error = None;
+        Some(edit.clone())
+    }
+
+    /// Releases the originating save slot and reports failure only in that editor.
+    pub fn fail_agent_save(&mut self, saved_from: &AgentEdit, error: String) {
+        self.agent_saves
+            .remove(&(saved_from.space.clone(), saved_from.agent.clone()));
+        if let Some(edit) = &mut self.agent_edit
+            && Arc::ptr_eq(&edit.opened_fields, &saved_from.opened_fields)
+        {
+            edit.save_error = Some(error);
+        }
+    }
+
+    /// Shows a validation failure without dropping the draft.
+    pub fn agent_save_validation(&mut self, error: String) {
+        if let Some(edit) = &mut self.agent_edit {
+            edit.save_error = Some(error);
+        }
+    }
+
+    /// Reconciles a saved agent with the draft that is currently visible.
+    /// Returns true if there are later edits to save in the same form.
+    pub fn finish_agent_save(
+        &mut self,
+        saved_from: &AgentEdit,
+        mut submitted: AgentFields,
+        current: &AgentFields,
+        agent: Agent,
+    ) -> bool {
+        self.agent_saves
+            .remove(&(saved_from.space.clone(), saved_from.agent.clone()));
+        let newer_edits = self.agent_edit.as_ref().is_some_and(|edit| {
+            Arc::ptr_eq(&edit.opened_fields, &saved_from.opened_fields)
+                && (current != &submitted
+                    || edit.backends != saved_from.backends
+                    || !same_skills(&edit.skills, &saved_from.skills))
+        });
+        if newer_edits {
+            // These are the values represented by the completed request. Comparing the next
+            // Save against them sends only the additional edits, including deliberate undo.
+            submitted.name = submitted.name.trim().to_owned();
+            submitted.role = submitted.role.trim().to_owned();
+            for (_, model) in &mut submitted.models {
+                *model = model.trim().to_owned();
+            }
+            if let Some(edit) = &mut self.agent_edit {
+                edit.opened_fields = Arc::new(submitted);
+                edit.opened_with = saved_from.backends;
+                edit.original_skills.clone_from(&saved_from.skills);
+            }
+        }
+        self.agent_updated(saved_from, agent);
+        newer_edits
     }
 
     /// Takes an agent its hub changed: its card and bindings show it at

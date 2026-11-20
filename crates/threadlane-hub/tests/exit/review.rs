@@ -1,17 +1,24 @@
 //! Stage C through the real gate and runner with a recording forge.
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{AgentBackend, BackendError};
-use threadlane_core::model::{EventKind, EventStatus, Mode, NewEvent, OutboxKind, Trust};
+use threadlane_core::client::{DecisionRequest, OrgReply, OrgRequest};
+use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
+use threadlane_core::model::{
+    DecisionKind, EventKind, EventStatus, Mode, NewEvent, OutboxKind, Trust,
+};
 use threadlane_core::runtime::steps::perform;
-use threadlane_core::store::InboxStore;
+use threadlane_core::store::{InboxStore, OrgStore};
 use threadlane_core::time::Clock;
 use threadlane_hub::{COMMENT, CREATE_ISSUE, MARK_READY, MERGE};
+use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::{CrashPlan, Script};
 
 use crate::harness::{PAST_LEASE, Sim, World, plan_tasks_in};
 use crate::invariants::assert_invariants;
+use crate::operations::follow_up;
 use crate::permissions::engineer_in;
 use crate::publish::{drive, publish_world};
 
@@ -44,6 +51,108 @@ async fn world(tool: &str, args: Json, mode: Mode) -> World {
 async fn work(sim: &Sim) {
     sim.work_until_idle().await.unwrap();
     sim.dispatch().await.unwrap();
+}
+
+#[tokio::test]
+async fn project_leads_report_limitations_upstream_with_approval_as_needed() {
+    for (review, require_approval, automatic) in [
+        (Some("allow"), false, true),
+        (None, false, false),
+        (Some("allow"), true, false),
+    ] {
+        let w = World::new().await;
+        let sim = w.boot(CrashPlan::new()).await;
+        let OrgReply::Project { project } = sim
+            .api
+            .org(OrgRequest::CreateProject {
+                name: "Private project".into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected a project");
+        };
+        let mut space = w.db.space().await.unwrap();
+        space.mode_ceiling = Mode::Assisted;
+        w.db.update_space(&space).await.unwrap();
+        let binding = w.db.lead_binding(project.id).await.unwrap().unwrap();
+        w.db.set_binding_mode(binding.id, Mode::Assisted)
+            .await
+            .unwrap();
+        if let Some(verdict) = review {
+            w.backend.push_answer(answer(verdict));
+        }
+        w.backend.set_default(Script::new().finish(""));
+        w.backend.route(
+            "A scheduled wake.",
+            Script::new()
+                .call("report", REPORT_LIMITATION, json!({
+                    "title": "Allow a follow-up task to update a pull request",
+                    "situation": "A task has a fix locally but cannot publish it to the existing pull request.",
+                    "suggestion": "Explain how to publish the fix from the task lane.",
+                    "require_approval": require_approval,
+                }))
+                .finish(""),
+        );
+        follow_up(&sim, Some(&project.name), Duration::ZERO).await;
+        assert_eq!(sim.core.schedule_once().await.unwrap(), 1);
+        work(&sim).await;
+
+        let runs = w.backend.received();
+        assert!(runs[0].tools.iter().any(|tool| tool == REPORT_LIMITATION));
+        assert!(runs[0].appended_instructions.contains(REPORT_LIMITATION));
+        let decisions = sim.decisions().await;
+        assert_eq!(decisions.len(), 1);
+        let decision = &decisions[0];
+        assert_eq!(decision.kind, DecisionKind::Approval);
+        assert_eq!(decision.tool, REPORT_LIMITATION);
+        assert_eq!(decision.approved(), automatic);
+        assert_eq!(w.forge.calls().len(), usize::from(automatic));
+        let feed = sim.feed().await;
+        assert_eq!(feed.len(), usize::from(!automatic));
+        let questions = w.backend.questions();
+        assert_eq!(questions.len(), usize::from(!require_approval));
+        if !require_approval {
+            assert!(questions[0].contains("public GitHub issue for wheregmis/threadlane"));
+        }
+
+        if !automatic {
+            assert_eq!(feed[0].message.kind, OutboxKind::Decision);
+            assert!(decision.question.contains("wheregmis/threadlane"));
+            assert!(decision.context.contains("the existing pull request"));
+            sim.api
+                .decisions(DecisionRequest::Answer {
+                    decision: decision.id,
+                    option: "approve".into(),
+                    note: None,
+                })
+                .await
+                .unwrap();
+            work(&sim).await;
+        }
+        let calls = w.forge.calls();
+        let [
+            ForgeCall::Apply {
+                remote,
+                action: RepositoryAction::CreateIssue { title, body },
+            },
+        ] = calls.as_slice()
+        else {
+            panic!("expected one upstream issue, got {calls:?}");
+        };
+        assert_eq!(remote, "https://github.com/wheregmis/threadlane");
+        assert_eq!(title, "Allow a follow-up task to update a pull request");
+        assert!(body.contains("the existing pull request"));
+        assert!(!body.contains(&project.name));
+
+        follow_up(&sim, Some(&project.name), Duration::ZERO).await;
+        assert_eq!(sim.core.schedule_once().await.unwrap(), 1);
+        work(&sim).await;
+        assert_eq!(sim.decisions().await.len(), 1);
+        assert_eq!(w.forge.calls().len(), 1);
+        assert_invariants(&sim, REPORT_LIMITATION).await;
+    }
 }
 
 #[tokio::test]
@@ -100,7 +209,7 @@ async fn autonomous_merge_with_a_standing_rule_still_needs_review() {
     work(&sim).await;
     assert!(w.backend.questions().is_empty());
     sim.api
-        .decisions(threadlane_core::client::DecisionRequest::AnswerAlways {
+        .decisions(DecisionRequest::AnswerAlways {
             decision: sim.decisions().await[0].id,
             option: "approve".into(),
             note: None,

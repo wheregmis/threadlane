@@ -13,6 +13,10 @@ pub const ONTO_TASK: &str = "onto_task";
 /// The tool that opens a draft pull request from the task's branch,
 /// publishing the branch in the same call (tier 2, task lanes only).
 pub const OPEN_PULL_REQUEST: &str = "open_pull_request";
+/// Fast-forward an existing pull request from an approved task commit.
+pub const FAST_FORWARD_PULL_REQUEST: &str = "fast_forward_pull_request";
+/// The full commit ID the caller expects the pull request head to be at.
+pub const EXPECTED_HEAD: &str = "expected_head";
 
 /// Post a comment on a registered repository's issue or pull request.
 pub const COMMENT: &str = "comment";
@@ -66,11 +70,27 @@ pub struct ApprovedBranch<'a> {
     pub revision: &'a str,
 }
 
+/// The exact pull request and revisions authorized for a fast-forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PullRequestUpdate<'a> {
+    pub number: std::num::NonZeroU64,
+    pub expected_head: &'a str,
+    pub revision: &'a str,
+}
+
 /// Performs approved repository effects with the forge tools' existing logins (invariant 8).
 #[async_trait]
 pub trait Forge: Send + Sync + fmt::Debug {
     /// Pushes the approved commit to the named branch on the remote. Safe to repeat.
     async fn push(&self, worktree: &Path, branch: ApprovedBranch<'_>) -> Result<(), ForgeError>;
+
+    /// Fast-forwards an open same-repository PR and returns its head branch.
+    async fn fast_forward_pull_request(
+        &self,
+        worktree: &Path,
+        repository: &crate::model::Repository,
+        update: PullRequestUpdate<'_>,
+    ) -> Result<String, ForgeError>;
 
     /// Pushes `branch`, then opens a draft pull request from it onto `base`.
     /// Returns the pull request's URL. Not safe to repeat: a second call may

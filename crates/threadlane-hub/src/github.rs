@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use threadlane_core::forge::{COMMENT, MARK_READY, MERGE};
 use threadlane_core::github::{
-    DEFAULT_POLL_INTERVAL, GITHUB_SOURCE, GithubItem, GithubKind, PullTarget, normalize_remote,
-    pull_request_number,
+    DEFAULT_POLL_INTERVAL, Feed, GITHUB_SOURCE, GithubItem, GithubKind, GithubSource, PullTarget,
+    normalize_remote, pull_request_number,
 };
 use threadlane_core::ids::{LaneId, ProjectId};
 use threadlane_core::model::{EventKind, Inserted, NewEvent, TaskStatus, Trust};
@@ -64,7 +64,7 @@ struct Registered {
 
 /// One active task's branch, and pull request once opened or acted on, in
 /// one repository.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Work {
     project: ProjectId,
     lane: LaneId,
@@ -87,6 +87,19 @@ fn github_key(repository: &str) -> Option<String> {
 }
 
 impl Work {
+    fn cursor_key(&self) -> String {
+        match (self.target.branch.as_str(), self.target.number) {
+            ("", Some(number)) => format!("github:{}#{number}", self.target.repository),
+            (branch, _) => format!("github:{}@{branch}", self.target.repository),
+        }
+    }
+
+    fn shares_target(&self, other: &Self) -> bool {
+        self.target.repository == other.target.repository
+            && ((!self.target.branch.is_empty() && self.target.branch == other.target.branch)
+                || (self.target.number.is_some() && self.target.number == other.target.number))
+    }
+
     /// Whether `item`, in the repository of normalized remote `key`, is
     /// about this work's pull request or branch.
     fn is_about(&self, item: &GithubItem, key: &str) -> bool {
@@ -209,6 +222,22 @@ impl Routes {
         Ok(routes)
     }
 
+    /// A fetched target can still be applied to its exact route, or to its
+    /// own project's lead if it finished while the request was outstanding.
+    fn revalidate(&self, work: &Work, was_ended: bool) -> Option<(&Work, bool)> {
+        if !was_ended && let Some(active) = self.work.iter().find(|active| *active == work) {
+            return Some((active, false));
+        }
+        // Do not notify the lead if an active task took over the same work.
+        if self.work.iter().any(|active| active.shares_target(work)) {
+            return None;
+        }
+        self.ended
+            .iter()
+            .find(|ended| ended.project == work.project && ended.target == work.target)
+            .map(|ended| (ended, true))
+    }
+
     /// Where a feed item goes: `(project, lane, requested)`, or `None` when
     /// its repository is not registered here.
     fn route(&self, item: &GithubItem) -> Option<(ProjectId, LaneId, bool)> {
@@ -251,64 +280,125 @@ impl HubCore {
         if !logged_in {
             return Ok(pass);
         }
-        let _removal = inner.project_removal.lock().await;
-        let routes = Routes::read(&inner.db).await?;
-        let mut lanes = BTreeSet::new();
-        // Ended tasks' work the feed reported activity on in this pass.
-        let mut refresh: Vec<&Work> = Vec::new();
-
+        let _poll = inner.github_poll.lock().await;
         let cursor = inner.db.source_cursor(FEED_CURSOR).await?;
-        match source.notifications(cursor.as_deref()).await {
+        let feed = match source.notifications(cursor.as_deref()).await {
             Ok(feed) => {
                 inner.hook.reach(AFTER_FETCH)?;
                 if let Some(interval) = feed.poll_interval {
                     pass.next_in = interval.max(Duration::from_secs(1));
                 }
-                for item in &feed.items {
-                    if let Some(work) = routes.ended_for(item)
-                        && !refresh.iter().any(|seen| std::ptr::eq(*seen, work))
-                    {
-                        refresh.push(work);
-                    }
-                    if let Some((project, lane, requested)) = routes.route(item) {
-                        pass.inserted += self
-                            .insert(project, lane, requested, item, &mut lanes)
-                            .await?;
-                    }
-                    inner.hook.reach(AFTER_INSERT)?;
-                }
-                if let Some(next) = feed.cursor.filter(|next| cursor.as_ref() != Some(next)) {
-                    inner
-                        .db
-                        .set_source_cursor(FEED_CURSOR, &next, inner.clock.now())
-                        .await?;
-                    inner.hook.reach(AFTER_CURSOR)?;
-                }
+                Some(feed)
             }
-            Err(error) => tracing::warn!(%error, "could not read the GitHub notifications"),
-        }
+            Err(error) => {
+                tracing::warn!(%error, "could not read the GitHub notifications");
+                None
+            }
+        };
 
-        let followed = routes.work.iter().map(|work| (work, false));
-        for (work, ended) in followed.chain(refresh.into_iter().map(|work| (work, true))) {
-            let key = match (work.target.branch.as_str(), work.target.number) {
-                ("", Some(number)) => format!("github:{}#{number}", work.target.repository),
-                (branch, _) => format!("github:{}@{branch}", work.target.repository),
+        let mut lanes = BTreeSet::new();
+        let followed = {
+            let _removal = inner.project_removal.lock().await;
+            let routes = Routes::read(&inner.db).await?;
+            let refresh = if let Some(feed) = feed {
+                self.apply_github_feed(&routes, feed, cursor.as_deref(), &mut pass, &mut lanes)
+                    .await?
+            } else {
+                Vec::new()
             };
+            routes
+                .work
+                .into_iter()
+                .map(|work| (work, false))
+                .chain(refresh.into_iter().map(|work| (work, true)))
+                .collect::<Vec<_>>()
+        };
+        pass.inserted += self
+            .refresh_github_work(source.as_ref(), followed, &mut lanes)
+            .await?;
+
+        for lane in &lanes {
+            inner.wake.wake(WakeTarget::Lane(*lane));
+        }
+        inner.hook.reach(AFTER_WAKE)?;
+        Ok(pass)
+    }
+
+    async fn apply_github_feed(
+        &self,
+        routes: &Routes,
+        feed: Feed,
+        cursor: Option<&str>,
+        pass: &mut GithubPass,
+        lanes: &mut BTreeSet<LaneId>,
+    ) -> Result<Vec<Work>, HubError> {
+        let inner = &self.inner;
+        let mut refresh = Vec::new();
+        for item in &feed.items {
+            if let Some(work) = routes.ended_for(item)
+                && !refresh.contains(work)
+            {
+                refresh.push(work.clone());
+            }
+            if let Some((project, lane, requested)) = routes.route(item) {
+                pass.inserted += self.insert(project, lane, requested, item, lanes).await?;
+            }
+            inner.hook.reach(AFTER_INSERT)?;
+        }
+        if let Some(next) = feed.cursor.filter(|next| cursor != Some(next.as_str())) {
+            inner
+                .db
+                .set_source_cursor(FEED_CURSOR, &next, inner.clock.now())
+                .await?;
+            inner.hook.reach(AFTER_CURSOR)?;
+        }
+        Ok(refresh)
+    }
+
+    async fn refresh_github_work(
+        &self,
+        source: &dyn GithubSource,
+        followed: Vec<(Work, bool)>,
+        lanes: &mut BTreeSet<LaneId>,
+    ) -> Result<usize, HubError> {
+        let inner = &self.inner;
+        let mut fetched = Vec::new();
+        for (work, ended) in followed {
+            let key = work.cursor_key();
             let since = inner.db.source_cursor(&key).await?;
-            let items = match source.pull_request(&work.target, since.as_deref()).await {
-                Ok(items) => items,
+            match source.pull_request(&work.target, since.as_deref()).await {
+                Ok(items) => {
+                    inner.hook.reach(AFTER_FETCH)?;
+                    if !items.is_empty() {
+                        fetched.push((work, ended, key, items));
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(%error, target = ?work.target, "could not read a task's work on GitHub");
-                    continue;
                 }
+            }
+        }
+        if fetched.is_empty() {
+            return Ok(0);
+        }
+        let _removal = inner.project_removal.lock().await;
+        // A target may have been deleted, cancelled, or changed while GitHub was
+        // queried. Do not write events or advance that target's cursor until
+        // its current route has been verified.
+        let current = Routes::read(&inner.db).await?;
+        let mut inserted = 0;
+        for (work, ended, key, items) in fetched {
+            let Some((work, ended)) = current.revalidate(&work, ended) else {
+                continue;
             };
-            inner.hook.reach(AFTER_FETCH)?;
+            // Earlier results in this pass may share the same cursor key.
+            let since = inner.db.source_cursor(&key).await?;
             for item in &items {
-                if ended && !needs_attention(item) {
+                if since.as_deref() > Some(item.at.as_str()) || (ended && !needs_attention(item)) {
                     continue;
                 }
-                pass.inserted += self
-                    .insert(work.project, work.lane, true, item, &mut lanes)
+                inserted += self
+                    .insert(work.project, work.lane, true, item, lanes)
                     .await?;
                 inner.hook.reach(AFTER_INSERT)?;
             }
@@ -321,12 +411,7 @@ impl HubCore {
                 inner.hook.reach(AFTER_CURSOR)?;
             }
         }
-
-        for lane in &lanes {
-            inner.wake.wake(WakeTarget::Lane(*lane));
-        }
-        inner.hook.reach(AFTER_WAKE)?;
-        Ok(pass)
+        Ok(inserted)
     }
 
     /// Inserts one item as an `outside_event` of the GitHub source. Returns
