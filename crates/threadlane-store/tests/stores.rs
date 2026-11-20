@@ -1657,6 +1657,23 @@ async fn only_a_running_task_s_own_lane_finishes_it_under_its_current_lease() {
 }
 
 #[tokio::test]
+async fn a_lead_lane_you_are_waiting_on_is_ready_before_older_task_lanes() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 0).await;
+    let task = hub
+        .create_task(None, &new_task(&general, agent, "a", vec![]))
+        .await
+        .unwrap();
+    hub.insert_event(&message(&general, "m1")).await.unwrap();
+
+    assert_eq!(
+        hub.ready_lanes(T0).await.unwrap(),
+        vec![general.lead_lane_id, task.lane_id]
+    );
+}
+
+#[tokio::test]
 async fn a_task_lane_is_granted_only_when_its_task_is_eligible() {
     let hub = hub().await;
     let a = machine(&hub, "a").await;

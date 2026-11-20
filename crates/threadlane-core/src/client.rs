@@ -1398,7 +1398,7 @@ pub struct OperationsMetrics {
     /// Age of the oldest pending event per lane with pending work.
     #[serde(deserialize_with = "deserialize_lane_lag")]
     pub lane_lag_ms: BTreeMap<LaneId, i64>,
-    /// Pending events across all lanes of each included project, including zeros.
+    /// Lanes with pending events in each included project, including zeros.
     pub queue_depth: BTreeMap<String, i64>,
     /// Time from start to end for every ended run.
     pub run_duration: Latency,
@@ -1407,7 +1407,7 @@ pub struct OperationsMetrics {
     /// Space-wide elapsed time from recorded account-blocked notices to
     /// their matching resumed notices, or to the snapshot for an open interval.
     pub account_wait_ms: i64,
-    /// Events currently dead.
+    /// Events currently dead that were received in the past 7 days.
     pub dead_events: i64,
     /// Time from due to fired for each recorded timer occurrence.
     pub timer_lateness: Latency,
@@ -1420,9 +1420,14 @@ pub struct OperationsMetrics {
     pub messages_per_day: BTreeMap<String, i64>,
     /// Silent committed runs divided by all committed runs, absent if none.
     pub silent_run_ratio: Option<f64>,
-    /// Decisions created in the rolling 24 hours up to the snapshot.
+    /// Decisions created in the rolling 24 hours up to the snapshot that the
+    /// classifier did not answer.
     pub decisions_per_day: i64,
-    /// Time from creation to answer for decisions with status answered.
+    /// Decisions created in the same 24 hours that the classifier answered;
+    /// zero from older hubs.
+    #[serde(default)]
+    pub classifier_decisions_per_day: i64,
+    /// Time from creation to answer for decisions you answered.
     pub answer_latency: Latency,
     /// Standing rules ever created, including revoked rules.
     pub standing_rules_created: i64,

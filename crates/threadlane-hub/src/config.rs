@@ -329,6 +329,21 @@ impl Default for GithubConfig {
     }
 }
 
+/// The `[power]` table: how the hub keeps its machine working.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PowerConfig {
+    /// On macOS, keep the machine from idle sleep while the hub runs, so
+    /// timers fire on time and leases do not lapse.
+    pub keep_awake: bool,
+}
+
+impl Default for PowerConfig {
+    fn default() -> Self {
+        Self { keep_awake: true }
+    }
+}
+
 /// Everything in `hub.toml`. Every table is optional.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -341,6 +356,7 @@ pub struct HubConfig {
     pub backends: BackendsConfig,
     pub iroh: IrohConfig,
     pub github: GithubConfig,
+    pub power: PowerConfig,
 }
 
 impl HubConfig {
@@ -779,6 +795,15 @@ mod tests {
             HubConfig::parse("[runner]\ndebounce_secs = 0").is_ok(),
             "no debounce is allowed"
         );
+    }
+
+    #[test]
+    fn power_settings_parse() {
+        assert!(HubConfig::default().power.keep_awake);
+        let config = HubConfig::parse("[power]\nkeep_awake = false").unwrap();
+        assert!(!config.power.keep_awake);
+        assert!(HubConfig::parse("[power]\nkeep_awake = \"yes\"").is_err());
+        assert!(HubConfig::parse("[power]\nkeepawake = true").is_err());
     }
 
     #[test]
