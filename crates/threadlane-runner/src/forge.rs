@@ -357,6 +357,7 @@ impl Forge for GitForge {
                 args(&["pr", "merge", &number.to_string(), "--merge"])
             }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
+            RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
         };
         argv.push(format!("--repo={repo}").into());
         self.gh(Path::new("."), argv).await
