@@ -448,7 +448,8 @@ impl InboxStore for HubDb {
                AND NOT (l.kind = 'task' AND EXISTS (
                    SELECT 1 FROM decisions d WHERE d.lane_id = l.id AND d.status = 'pending'))
              GROUP BY l.id
-             ORDER BY l.kind != 'lead', MIN(e.id)",
+             ORDER BY MIN(CASE WHEN l.kind = 'lead' AND e.trust = 'user' THEN 0 ELSE 1 END),
+                      MIN(e.id)",
             params![now.as_millis()],
             |row| Cols(row).id(0),
         )

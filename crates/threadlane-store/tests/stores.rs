@@ -1657,7 +1657,7 @@ async fn only_a_running_task_s_own_lane_finishes_it_under_its_current_lease() {
 }
 
 #[tokio::test]
-async fn lead_lanes_are_ready_before_older_task_lanes() {
+async fn a_lead_lane_you_are_waiting_on_is_ready_before_older_task_lanes() {
     let hub = hub().await;
     let general = hub.general_project().await.unwrap();
     let agent = engineer(&hub, &general, 0).await;
