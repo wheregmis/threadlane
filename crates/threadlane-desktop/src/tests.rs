@@ -6516,6 +6516,60 @@ async fn agent_models_follow_the_provider_after_reordering_and_reopening() {
 }
 
 #[tokio::test]
+async fn agent_save_is_single_flight_and_keeps_edits_after_submit() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    work.org(OrgRequest::CreateAgent {
+        name: "Reviewer".into(),
+        role: "reviewer".into(),
+        instructions: "Review.".into(),
+        backends: vec![BackendKind::Claude],
+    })
+    .await
+    .unwrap();
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    let mut submitted = state.open_agent_edit("work", "Reviewer").unwrap();
+    submitted.name = "Critic".into();
+    submitted.instructions = "First draft.".into();
+    let request = state.agent_update(&submitted).unwrap().unwrap();
+    let flight = state.begin_agent_save().expect("first click");
+    assert!(state.agent_saving(&flight));
+    assert!(
+        state.begin_agent_save().is_none(),
+        "second click is a no-op"
+    );
+
+    let mut current = submitted.clone();
+    current.instructions = "Edited while save was pending.".into();
+    state.fail_agent_save(&flight, "Hub disconnected.".into());
+    assert_eq!(
+        state.agent_edit().unwrap().save_error(),
+        Some("Hub disconnected.")
+    );
+    assert!(!state.agent_saving(&flight));
+
+    let retry = state.begin_agent_save().expect("retry is allowed");
+    assert_eq!(state.agent_edit().unwrap().save_error(), None);
+    let agent = core.update_agent(Some("work"), request).await.unwrap();
+    assert!(state.finish_agent_save(&retry, submitted, &current, agent));
+    assert_eq!(state.agent_edit().unwrap().agent, "Critic");
+    assert_eq!(
+        state.agent_update(&current).unwrap(),
+        Some(OrgRequest::UpdateAgent {
+            skills: None,
+            agent: "Critic".into(),
+            name: None,
+            role: None,
+            instructions: Some(current.instructions),
+            backends: None,
+            models: None,
+        }),
+        "only the newer edit needs another save"
+    );
+}
+
+#[tokio::test]
 async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed() {
     let work = FakeHub::new("Work", Vec::new());
     let (_dir, core) = core(&[("work", &work)]);
