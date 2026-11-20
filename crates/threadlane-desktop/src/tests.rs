@@ -4685,13 +4685,10 @@ async fn dreaming_card_applies_project_settings_versions_and_findings() {
     state.apply_dreaming(load_dreaming(&core, "work", "api", 0).await);
     let card = state.dreaming_card("work", "api", &when);
     assert!(!card.enabled && !card.disabled);
-    assert_eq!(
-        card.last,
-        [
-            "Last dream · 00:02",
-            "Deleted project/notes/obsolete.md · version 2"
-        ]
-    );
+    assert_eq!(card.last, ["Last dream · 00:02"]);
+    assert_eq!(card.changes[0].path, "project/notes/obsolete.md");
+    assert_eq!(card.changes[0].version, 2);
+    assert!(card.changes[0].deleted);
     assert!(card.findings[0].contains("T-0999"));
 
     let on = state

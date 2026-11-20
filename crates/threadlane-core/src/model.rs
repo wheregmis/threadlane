@@ -1290,6 +1290,8 @@ pub struct MemoryFile {
 /// (Plan.md §8.3 "every write is versioned with the run that made it").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryAuthor {
+    /// Observed source version for a conditional write. Zero means absent.
+    pub expected_version: Option<i64>,
     /// The writing run's lease; a stale one writes nothing (invariant 10).
     pub lease: Lease,
     pub run_id: RunId,

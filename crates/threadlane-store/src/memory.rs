@@ -141,6 +141,25 @@ async fn replayed_in(
     .await
 }
 
+async fn check_version(conn: &Connection, by: &MemoryAuthor, path: &str) -> StoreResult<()> {
+    if let Some(expected) = by.expected_version {
+        let observed = query_opt(
+            conn,
+            "SELECT version FROM memory_files WHERE path = ?1 AND deleted = 0",
+            params![path],
+            |row| Cols(row).i64(0),
+        )
+        .await?
+        .unwrap_or(0);
+        if observed != expected {
+            return Err(StoreError::Conflict(format!(
+                "{path} changed (expected v{expected}, found v{observed}); read it again"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn write_version(
     conn: &Connection,
     by: Stamp<'_>,
@@ -283,6 +302,14 @@ impl MemoryStore for HubDb {
         if let Some(file) = replayed_in(conn, by, path).await? {
             return Ok(file);
         }
+        check_version(conn, by, path).await?;
+        if by.expected_version.is_some()
+            && let Some(current) = live_in(conn, path).await?
+            && current.content == content
+        {
+            tx.commit().await?;
+            return Ok(current);
+        }
         let file = write_version(conn, by.into(), path, content, false).await?;
         reindex_in(conn, by.into(), &[path]).await?;
         tx.commit().await?;
@@ -303,6 +330,7 @@ impl MemoryStore for HubDb {
         if let Some(file) = replayed_in(conn, by, path).await? {
             return Ok(file);
         }
+        check_version(conn, by, path).await?;
         let current = existing_in(conn, path).await?;
         let found = if old.is_empty() {
             0
@@ -318,6 +346,10 @@ impl MemoryStore for HubDb {
                      is around it so that it occurs once"
                 )
             }));
+        }
+        if by.expected_version.is_some() && old == new {
+            tx.commit().await?;
+            return Ok(current);
         }
         let content = current.content.replacen(old, new, 1);
         checked(path, &content)?;
@@ -335,6 +367,7 @@ impl MemoryStore for HubDb {
         if let Some(file) = replayed_in(conn, by, path).await? {
             return Ok(file);
         }
+        check_version(conn, by, path).await?;
         existing_in(conn, path).await?;
         let file = write_version(conn, by.into(), path, "", true).await?;
         reindex_in(conn, by.into(), &[path]).await?;
@@ -354,6 +387,7 @@ impl MemoryStore for HubDb {
         if let Some(file) = replayed_in(conn, by, to).await? {
             return Ok(file);
         }
+        check_version(conn, by, from).await?;
         let current = existing_in(conn, from).await?;
         // The content must be allowed where it lands.
         checked(to, &current.content)?;

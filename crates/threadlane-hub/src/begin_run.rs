@@ -238,6 +238,12 @@ impl LocalLink {
             .map_err(link_error)?;
         inner.hook.reach(step::AFTER_START_RUN)?;
 
+        if dreaming {
+            db.prepare_dream(lane.project_id, events[0].id, lease)
+                .await
+                .map_err(link_error)?;
+        }
+
         // 7. Context.
         let project = db
             .project(lane.project_id)

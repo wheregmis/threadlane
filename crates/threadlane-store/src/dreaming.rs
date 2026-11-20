@@ -2,9 +2,9 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::client::{DreamChange, DreamSummary};
-use threadlane_core::ids::{LaneId, ProjectId, RunId, TimerId};
+use threadlane_core::ids::{EventId, LaneId, ProjectId, RunId, TimerId};
 use threadlane_core::model::{
-    DecisionAnswer, DecisionOption, NewTimer, Recurrence, TimerCategory, TimerCreator,
+    DecisionAnswer, DecisionOption, Lease, NewTimer, Recurrence, Task, TimerCategory, TimerCreator,
 };
 use threadlane_core::store::StoreResult;
 use threadlane_core::time::Timestamp;
@@ -14,6 +14,14 @@ use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
 use crate::row::{Cols, params};
 use crate::timer::insert_timer_in;
+
+/// Maximum records of each kind reviewed per occurrence. Unread rows sort first next time.
+const REVIEW_LIMIT: usize = 200;
+
+const CHOICES: &str =
+    "FROM decisions d JOIN events e ON e.source='decision' AND e.source_event_id='answer:' || d.id
+    WHERE d.project_id=?1 AND e.project_id=d.project_id AND d.kind='input' AND d.tool='ask_user'
+    AND d.status='answered' AND d.run_id IS NOT NULL AND e.trust='user'";
 
 async fn active_timer(
     conn: &Connection,
@@ -86,6 +94,38 @@ async fn last_dream(
         },
     )
     .await
+}
+
+/// A periodic full check also finds repository changes made outside the hub.
+pub(crate) async fn quiet_since_dream(
+    conn: &Connection,
+    project: ProjectId,
+    now: Timestamp,
+) -> StoreResult<bool> {
+    let Some((last, _, ended)) = last_dream(conn, project).await? else {
+        return Ok(false);
+    };
+    if now.saturating_since(ended) >= std::time::Duration::from_secs(7 * 24 * 3600) {
+        return Ok(false);
+    }
+    query_one(
+        conn,
+        "SELECT EXISTS (SELECT 1 FROM dream_batches b JOIN run_events re ON re.event_id=b.event_id
+        WHERE b.project_id=?1 AND re.run_id=?2
+        AND NOT EXISTS(SELECT 1 FROM dream_items i WHERE i.project_id=?1 AND i.last_review=0
+            AND NOT EXISTS(SELECT 1 FROM runs done WHERE done.id=i.seen_run AND done.status='committed'))
+        AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=?1 AND e.id>b.event_id AND e.kind!='dream')
+        AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.project_id=?1 AND NOT EXISTS(
+            SELECT 1 FROM dream_items i WHERE i.project_id=?1 AND i.kind='task' AND i.item_id=t.id))
+        AND NOT EXISTS(SELECT 1 FROM runs r JOIN lanes l ON l.id=r.lane_id WHERE l.project_id=?1 AND r.id>b.run_floor
+            AND (r.ended_at>b.since_at OR (r.ended_at=b.since_at AND r.id>b.since_run))
+            AND NOT EXISTS(SELECT 1 FROM dream_items i WHERE i.project_id=?1 AND i.kind='run' AND i.item_id=r.id)
+            AND NOT EXISTS(SELECT 1 FROM run_events re JOIN events e ON e.id=re.event_id WHERE re.run_id=r.id AND e.kind='dream' AND e.trust='system' AND e.source='timer'))
+        AND NOT EXISTS(SELECT 1 FROM memory_versions v WHERE v.id>b.memory_id AND v.path GLOB 'projects/'||?1||'/*'
+            AND NOT EXISTS(SELECT 1 FROM run_events re WHERE re.run_id=v.written_by_run AND re.event_id=b.event_id)))",
+        params![project.get(), last.get()],
+        |r| Cols(r).bool(0),
+    ).await
 }
 
 impl HubDb {
@@ -166,31 +206,50 @@ impl HubDb {
         tx.commit().await
     }
 
-    /// Reads recent choices explicitly answered by the user in this project.
-    pub async fn recent_user_choices(&self, project: ProjectId) -> StoreResult<Vec<Json>> {
+    /// A long gap since the last committed dream can hide a reversal outside the
+    /// Lead's bounded recent evidence. Defer defaults until the next review.
+    pub async fn preferences_need_review(&self, project: ProjectId) -> StoreResult<bool> {
+        query_one(&self.db.reader()?, "SELECT EXISTS(
+            SELECT 1 FROM events e WHERE e.project_id=?1 AND e.trust='user' AND e.kind IN ('user_message','decision_answer')
+            AND e.id > (SELECT MAX(re.event_id) FROM run_events re JOIN events d ON d.id=re.event_id
+                JOIN runs r ON r.id=re.run_id WHERE r.status='committed' AND d.kind='dream' AND d.source='timer'
+                AND d.trust='system' AND d.project_id=?1) LIMIT 1 OFFSET 20)",
+            params![project.get()], |r|Cols(r).bool(0)).await
+    }
+
+    /// Owner-answered input cards for the Lead, including older cited cards.
+    pub async fn user_choices(&self, project: ProjectId, cited: &[i64]) -> StoreResult<Vec<Json>> {
         let conn = self.db.reader()?;
-        // shortcut: review the newest 20 choices, add topic-based retrieval if older choices are needed.
-        query_all(
+        let mut ids = query_all(
             &conn,
-            "SELECT d.id, d.run_id, d.question, d.options, d.answer FROM decisions d
-             JOIN events e ON e.source = 'decision' AND e.source_event_id = 'answer:' || d.id
-             WHERE d.project_id = ?1 AND d.kind = 'input' AND d.tool = 'ask_user'
-               AND d.status = 'answered' AND d.run_id IS NOT NULL AND e.trust = 'user'
-             ORDER BY d.answered_at DESC, d.id DESC LIMIT 20",
+            &format!("SELECT d.id {CHOICES} ORDER BY d.answered_at DESC, d.id DESC LIMIT 20"),
             params![project.get()],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        ids.extend_from_slice(cited);
+        self.choice_records(project, &ids).await
+    }
+
+    /// Resolve just the requested decision IDs against first-party answer events.
+    pub async fn choice_records(&self, project: ProjectId, ids: &[i64]) -> StoreResult<Vec<Json>> {
+        query_all(
+            &self.db.reader()?,
+            &format!(
+                "SELECT d.id, d.run_id, d.question, d.options, d.answer {CHOICES}
+            AND d.id IN (SELECT value FROM json_each(?2)) ORDER BY d.answered_at DESC, d.id DESC"
+            ),
+            params![project.get(), json!(ids).to_string()],
             |row| {
                 let c = Cols(row);
                 let options: Vec<DecisionOption> = c.de(3)?;
                 let answer: DecisionAnswer = c.de(4)?;
-                Ok(json!({
-                    "decision_id": c.i64(0)?,
-                    "run_id": c.i64(1)?,
-                    "question": c.text(2)?,
-                    "chosen": options.get(answer.option as usize).map(|option| &option.label),
-                    "options": options.iter().map(|option| &option.label).collect::<Vec<_>>(),
-                    "note": answer.note,
-                    "answered_at": answer.answered_at,
-                }))
+                Ok(
+                    json!({"decision_id": c.i64(0)?, "run_id": c.i64(1)?, "question": c.text(2)?,
+                    "chosen": options.get(answer.option as usize).map(|o| &o.label),
+                    "options": options.iter().map(|o| &o.label).collect::<Vec<_>>(),
+                    "note": answer.note, "answered_at": answer.answered_at}),
+                )
             },
         )
         .await
@@ -229,51 +288,247 @@ impl HubDb {
         Ok(Some(DreamSummary { at, changes }))
     }
 
-    /// Finished project runs since the preceding dream began, with only their delivered messages.
-    pub async fn dream_history(&self, project: ProjectId) -> StoreResult<Vec<Json>> {
-        let conn = self.db.reader()?;
-        let since = last_dream(&conn, project).await?;
-        let runs = query_all(
-            &conn,
-            "SELECT r.id, r.session_id, r.outcome, r.rationale, r.status
-             FROM runs r JOIN lanes l ON l.id = r.lane_id WHERE l.project_id = ?1
-             AND r.ended_at IS NOT NULL AND (r.ended_at > ?2 OR (r.ended_at = ?2 AND r.id > ?3))
-             AND NOT EXISTS (
-                 SELECT 1 FROM run_events re JOIN events e ON e.id = re.event_id WHERE re.run_id = r.id
-                 AND e.kind = 'dream' AND e.source = 'timer' AND e.trust = 'system'
-             ) ORDER BY r.ended_at, r.id",
+    /// Fix membership for an occurrence. Unread work and failed attempts remain eligible.
+    pub async fn prepare_dream(
+        &self,
+        project: ProjectId,
+        event: EventId,
+        lease: &Lease,
+    ) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        crate::inbox::check_lease(conn, lease).await?;
+        let prior = query_opt(
+            conn,
+            "SELECT event_id FROM dream_batches WHERE project_id=?1",
+            params![project.get()],
+            |r| Cols(r).id::<EventId>(0),
+        )
+        .await?;
+        if prior == Some(event) {
+            return tx.commit().await;
+        }
+        exec(
+            conn,
+            "UPDATE dream_items SET last_review=seen_run, seen_run=NULL WHERE project_id=?1
+            AND seen_run IN (SELECT id FROM runs WHERE status='committed')",
+            params![project.get()],
+        )
+        .await?;
+        exec(
+            conn,
+            "UPDATE dream_items SET seen_run=NULL WHERE project_id=?1 AND seen_run IS NOT NULL",
+            params![project.get()],
+        )
+        .await?;
+        // Existing hubs start at the legacy committed marker. Keep that lower bound on subsequent passes.
+        let legacy = if prior.is_none() {
+            last_dream(conn, project).await?
+        } else {
+            None
+        };
+        exec(
+            conn,
+            "INSERT INTO dream_batches(project_id,event_id,since_at,since_run) VALUES(?1,?2,?3,?4)
+            ON CONFLICT(project_id) DO UPDATE SET event_id=excluded.event_id",
             params![
                 project.get(),
-                since.map_or(i64::MIN, |(_, start, _)| start.as_millis()),
-                since.map_or(0, |(run, _, _)| run.get()),
+                event.get(),
+                legacy.map_or(i64::MIN, |(_, start, _)| start.as_millis()),
+                legacy.map_or(0, |(id, _, _)| id.get())
             ],
-            |row| {
-                let c = Cols(row);
-                Ok((c.id::<RunId>(0)?, json!({
-                    "run_id": c.i64(0)?,
-                    "session_id": c.i64(1)?,
-                    "outcome": c.opt_text(2)?,
-                    "rationale": c.opt_text(3)?,
-                    "status": c.text(4)?,
-                })))
-            },
-        ).await?;
-        let mut history = Vec::with_capacity(runs.len());
-        for (run, mut record) in runs {
-            let messages = query_all(
-                &conn,
-                "SELECT body, sent_at FROM outbox WHERE run_id = ?1 AND project_id = ?2
-                 AND status = 'sent' AND kind = 'message' ORDER BY id",
-                params![run.get(), project.get()],
-                |row| {
-                    let c = Cols(row);
-                    Ok(json!({ "body": c.json(0)?, "sent_at": c.opt_ts(1)? }))
-                },
-            )
-            .await?;
-            record["sent_messages"] = json!(messages);
-            history.push(record);
+        )
+        .await?;
+        exec(
+            conn,
+            "UPDATE dream_batches SET memory_id=COALESCE((SELECT MAX(id) FROM memory_versions),0)
+             WHERE project_id=?1",
+            params![project.get()],
+        )
+        .await?;
+        exec(conn, "INSERT OR IGNORE INTO dream_items(project_id,kind,item_id)
+            SELECT l.project_id,'run',r.id FROM runs r JOIN lanes l ON l.id=r.lane_id
+            JOIN dream_batches b ON b.project_id=l.project_id
+            WHERE l.project_id=?1 AND r.id>b.run_floor AND (r.ended_at>b.since_at OR (r.ended_at=b.since_at AND r.id>b.since_run))
+              AND NOT EXISTS (SELECT 1 FROM run_events re JOIN events e ON e.id=re.event_id
+                WHERE re.run_id=r.id AND e.kind='dream' AND e.source='timer' AND e.trust='system')",params![project.get()]).await?;
+        // A run that started before the dream can still finish after it.
+        exec(
+            conn,
+            "UPDATE dream_batches SET run_floor=COALESCE(
+               (SELECT MIN(r.id)-1 FROM runs r JOIN lanes l ON l.id=r.lane_id
+                WHERE l.project_id=?1 AND r.status='active'),
+               (SELECT MAX(id) FROM runs),0) WHERE project_id=?1",
+            params![project.get()],
+        )
+        .await?;
+        exec(
+            conn,
+            "INSERT OR IGNORE INTO dream_items(project_id,kind,item_id)
+            SELECT project_id,'task',id FROM tasks WHERE project_id=?1
+             AND id > COALESCE((SELECT MAX(item_id) FROM dream_items WHERE project_id=?1 AND kind='task'),0)",
+            params![project.get()],
+        )
+        .await?;
+        exec(
+            conn,
+            &format!(
+                "INSERT OR IGNORE INTO dream_items(project_id,kind,item_id)
+            SELECT d.project_id,'choice',d.id {CHOICES} AND e.id > ?2"
+            ),
+            params![project.get(), prior.map_or(0, EventId::get)],
+        )
+        .await?;
+        tx.commit().await
+    }
+
+    /// Read a stable page of identifiers. Previously unreviewed tasks and choices come first.
+    pub async fn dream_ids(
+        &self,
+        project: ProjectId,
+        kind: &str,
+        offset: usize,
+        limit: usize,
+    ) -> StoreResult<(usize, Vec<i64>)> {
+        let conn = self.db.reader()?;
+        let filter =
+            "FROM dream_items WHERE project_id=?1 AND kind=?2 AND (kind!='run' OR last_review=0)";
+        let count = query_one(
+            &conn,
+            &format!("SELECT COUNT(*) FROM (SELECT 1 {filter} LIMIT {REVIEW_LIMIT})"),
+            params![project.get(), kind],
+            |r| Cols(r).i64(0),
+        )
+        .await?;
+        let limit = limit.min(REVIEW_LIMIT.saturating_sub(offset));
+        let order = if kind == "choice" { "DESC" } else { "ASC" };
+        let ids = query_all(
+            &conn,
+            &format!(
+                "SELECT item_id {filter} ORDER BY last_review,item_id {order} LIMIT ?3 OFFSET ?4"
+            ),
+            params![
+                project.get(),
+                kind,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX)
+            ],
+            |r| Cols(r).i64(0),
+        )
+        .await?;
+        Ok((count as usize, ids))
+    }
+
+    /// Stage only the returned identifiers. A committed run makes the review durable.
+    pub async fn seen_dream_page(
+        &self,
+        project: ProjectId,
+        event: EventId,
+        lease: &Lease,
+        run: RunId,
+        kind: &str,
+        ids: &[i64],
+    ) -> StoreResult<()> {
+        if ids.is_empty() {
+            return Ok(());
         }
-        Ok(history)
+        let tx = self.db.begin().await?;
+        crate::inbox::check_lease(tx.conn(), lease).await?;
+        exec(tx.conn(),"UPDATE dream_items SET seen_run=?3 WHERE project_id=?1 AND kind=?2 AND item_id IN (SELECT value FROM json_each(?4))
+            AND EXISTS(SELECT 1 FROM dream_batches WHERE project_id=?1 AND event_id=?5)",params![project.get(),kind,run.get(),json!(ids).to_string(),event.get()]).await?;
+        tx.commit().await
+    }
+
+    /// Recent limitation titles for the agent. The publication gateway checks the full history.
+    pub async fn previous_dream_reports(
+        &self,
+        project: ProjectId,
+        lane: LaneId,
+    ) -> StoreResult<Vec<Json>> {
+        query_all(&self.db.reader()?, "SELECT json_extract(arguments,'$.title'),status,outcome
+            FROM decisions WHERE project_id=?1 AND lane_id=?2 AND tool='report_threadlane_limitation'
+            ORDER BY id DESC LIMIT 50",params![project.get(),lane.get()],|row| {
+                let c=Cols(row);
+                Ok(json!({"title":c.opt_text(0)?,"status":c.text(1)?,"outcome":c.opt_json(2)?}))
+            }).await
+    }
+
+    /// Most recent completed review for each task on this page.
+    pub async fn dream_reviews(
+        &self,
+        project: ProjectId,
+        ids: &[i64],
+    ) -> StoreResult<std::collections::BTreeMap<i64, Json>> {
+        let rows=query_all(&self.db.reader()?, "SELECT t.id,r.submission_run,r.verdict_run,r.verdict,r.feedback FROM tasks t
+            JOIN task_reviews r ON r.submission_run=(SELECT MAX(v.submission_run) FROM task_reviews v
+                WHERE v.task_id=t.id AND v.state IN ('approved','changes_requested'))
+            WHERE t.project_id=?1 AND t.id IN (SELECT value FROM json_each(?2))",params![project.get(),json!(ids).to_string()],|row| {
+                let c=Cols(row);
+                Ok((c.i64(0)?,json!({"submission_run":c.i64(1)?,"review_run":c.opt_i64(2)?,"verdict":c.opt_text(3)?,"feedback":c.opt_text(4)?})))
+            }).await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Hydrate one task page using the normal task and dependency decoder.
+    pub async fn dream_tasks(&self, project: ProjectId, ids: &[i64]) -> StoreResult<Vec<Task>> {
+        self.tasks_with_dependencies(
+            "project_id=?1 AND id IN (SELECT value FROM json_each(?2))",
+            params![project.get(), json!(ids).to_string()],
+        )
+        .await
+    }
+
+    /// Only first-party, human chat text is eligible. The canonical run prevents retries
+    /// from turning one event into multiple observations. Images never enter the projection.
+    async fn owner_messages(
+        &self,
+        project: ProjectId,
+        ids: &[i64],
+        filter: &str,
+    ) -> StoreResult<Vec<Json>> {
+        query_all(&self.db.reader()?, &format!("SELECT e.id,r.id,e.received_at,json_extract(e.payload,'$.text'),
+            (SELECT json_extract(o.body,'$.text') FROM outbox o
+             WHERE o.project_id=e.project_id AND o.lane_id=e.lane_id AND o.session_id=r.session_id
+             AND o.status='sent' AND o.kind='message' AND o.sent_at<e.received_at
+             AND NOT EXISTS (SELECT 1 FROM events between_e WHERE between_e.lane_id=e.lane_id
+                AND between_e.source='client' AND between_e.kind='user_message' AND between_e.id<e.id
+                AND between_e.received_at>=o.sent_at)
+             ORDER BY o.sent_at DESC,o.id DESC LIMIT 1)
+            FROM events e JOIN runs r ON r.id=(SELECT MIN(re.run_id) FROM run_events re WHERE re.event_id=e.id)
+            WHERE e.project_id=?1 AND e.source='client' AND e.trust='user' AND e.kind='user_message'
+            AND json_type(e.payload,'$.text')='text' AND ({filter}) ORDER BY e.id DESC"),
+            params![project.get(),json!(ids).to_string()],|row|{
+                let c=Cols(row);
+                Ok(json!({"event_id":c.i64(0)?,"run_id":c.i64(1)?,"received_at":c.ts(2)?,
+                    "text":c.text(3)?,"previous_reply":c.opt_text(4)?}))
+            }).await
+    }
+
+    /// Project chat belonging to the runs on a session page.
+    pub async fn dream_messages(&self, project: ProjectId, runs: &[i64]) -> StoreResult<Vec<Json>> {
+        self.owner_messages(project, runs, "r.id IN (SELECT value FROM json_each(?2))")
+            .await
+    }
+
+    /// Resolve citations alongside the newest project messages that may contradict them.
+    pub async fn preference_messages(
+        &self,
+        project: ProjectId,
+        cited: &[i64],
+    ) -> StoreResult<Vec<Json>> {
+        self.owner_messages(project,cited,"e.id IN (SELECT value FROM json_each(?2)) OR e.id IN
+            (SELECT id FROM events WHERE project_id=?1 AND source='client' AND kind='user_message' AND trust='user' ORDER BY id DESC LIMIT 20)").await
+    }
+
+    /// Finished run summaries and delivered messages for the selected page.
+    pub async fn dream_history(&self, project: ProjectId, ids: &[i64]) -> StoreResult<Vec<Json>> {
+        query_all(&self.db.reader()?, "SELECT r.id,r.session_id,r.outcome,r.rationale,r.status,
+            (SELECT json_group_array(json_object('body',json(o.body),'sent_at',o.sent_at)) FROM
+                (SELECT body,sent_at FROM outbox WHERE run_id=r.id AND project_id=?1 AND status='sent' AND kind='message' ORDER BY id) o)
+            FROM runs r JOIN lanes l ON l.id=r.lane_id WHERE l.project_id=?1 AND r.id IN (SELECT value FROM json_each(?2)) ORDER BY r.id",
+            params![project.get(),json!(ids).to_string()], |row|{
+                let c=Cols(row);
+                Ok(json!({"run_id":c.i64(0)?,"session_id":c.i64(1)?,"outcome":c.opt_text(2)?,"rationale":c.opt_text(3)?,"status":c.text(4)?,"sent_messages":c.json(5)?}))
+            }).await
     }
 }

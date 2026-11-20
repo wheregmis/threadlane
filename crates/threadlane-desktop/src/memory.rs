@@ -359,6 +359,11 @@ impl AppState {
         gap_in(&view.answers, crate::Part::MemoryVersions)
     }
 
+    /// Select the version named by a dream while its path's history loads.
+    pub fn preview_dream_version(&mut self, space: &str, project: &str, version: i64) {
+        self.memory_view_mut(space, project).inspected_version = Some(version);
+    }
+
     /// Inspect only a version already loaded for this file. This never changes
     /// the current file, the editor, or the server.
     pub fn inspect_memory_version(&mut self, space: &str, project: &str, version: i64) {
@@ -604,6 +609,20 @@ mod history_inspection_tests {
         state.clear_memory_inspection();
         assert!(state.memory_inspected("work", "api").is_none());
         assert!(state.memory_editing("work", "api"));
+    }
+
+    #[test]
+    fn dream_change_opens_a_deleted_version_after_history_loads() {
+        let mut state = AppState::default();
+        state.select_memory("work", "api", PATH);
+        state.preview_dream_version("work", "api", 2);
+        state.apply_memory(load("work", "api", vec![file(1, false), file(2, true)]));
+        assert!(state.memory_inspected("work", "api").unwrap().deleted);
+        state.inspect_memory_version("work", "api", 1);
+        assert_eq!(
+            state.memory_inspected("work", "api").unwrap(),
+            &file(1, false)
+        );
     }
 
     #[test]
