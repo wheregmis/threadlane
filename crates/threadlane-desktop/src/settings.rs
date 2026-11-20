@@ -595,20 +595,22 @@ impl AppState {
                 values.join(" · ")
             }
         };
+        let span = |ms: i64| match ms {
+            60_000.. => crate::clock::duration(Duration::from_millis(ms as u64)),
+            1_000.. => format!("{:.1} s", ms as f64 / 1_000.0),
+            ms => format!("{ms} ms"),
+        };
         let latency = |latency: &Latency| match (latency.mean_ms, latency.max_ms) {
             (Some(mean), Some(max)) => format!(
-                "{mean:.0} ms avg · {max} ms max · {} {}",
+                "{} avg · {} max · {} {}",
+                span(mean.round() as i64),
+                span(max),
                 latency.count,
                 count_form(latency.count, "observation", "observations")
             ),
             _ => "No observations".to_owned(),
         };
-        let age = |value: Option<i64>| match value {
-            Some(ms @ 60_000..) => crate::clock::duration(Duration::from_millis(ms as u64)),
-            Some(ms @ 1_000..) => format!("{:.1} s", ms as f64 / 1_000.0),
-            Some(ms) => format!("{ms} ms"),
-            None => "Empty".to_owned(),
-        };
+        let age = |value: Option<i64>| value.map_or_else(|| "Empty".to_owned(), span);
         let delivery = metrics.delivery_health.as_ref().map_or_else(
             || "Unavailable on this hub".to_owned(),
             |health| {
@@ -683,7 +685,10 @@ impl AppState {
             ),
             (
                 "Decisions in 24 hours",
-                metrics.decisions_per_day.to_string(),
+                format!(
+                    "{} by you · {} automatic",
+                    metrics.decisions_per_day, metrics.classifier_decisions_per_day
+                ),
             ),
             ("Answer latency", latency(&metrics.answer_latency)),
             (

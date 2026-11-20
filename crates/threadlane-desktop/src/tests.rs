@@ -4760,7 +4760,7 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         "at": 0, "lane_lag_ms": {"1": 53, "2": 22}, "queue_depth": {"api": 3},
         "run_duration": {"count": 1, "mean_ms": 12.0, "max_ms": 12},
         "account_cooldowns": {}, "account_wait_ms": 83, "dead_events": 2,
-        "timer_lateness": {"count": 0, "mean_ms": null, "max_ms": null},
+        "timer_lateness": {"count": 2, "mean_ms": 24_520.0, "max_ms": 7_200_000},
         "outbox_lag_ms": 125_000, "messages_per_day": {"2026-01-01": 4},
         "silent_run_ratio": 0.25, "decisions_per_day": 5,
         "answer_latency": {"count": 0, "mean_ms": null, "max_ms": null}, "standing_rules_created": 1
@@ -4781,6 +4781,11 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
         rows["Run duration"],
         "12 ms avg · 12 ms max · 1 observation"
     );
+    assert_eq!(
+        rows["Timer lateness"],
+        "24.5 s avg · 2 h 0 min max · 2 observations"
+    );
+    assert_eq!(rows["Decisions in 24 hours"], "5 by you · 0 automatic");
     assert_eq!(rows["Silent runs"], "25%");
     assert!(
         state
