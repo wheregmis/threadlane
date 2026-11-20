@@ -32,6 +32,8 @@ pub const CLIENT_CHANNEL: &str = "client";
 
 /// Name of the lead's messaging tool.
 pub const SEND_MESSAGE: &str = "send_message";
+/// Name of the lead's tool for ending a run without a reply.
+pub const STAY_SILENT: &str = "stay_silent";
 
 /// Creates a task; in a task lane, a subtask (Plan.md §5.1).
 pub const CREATE_TASK: &str = "create_task";
@@ -67,6 +69,7 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         }
         // ask_project_lead is offered to the General lead only (begin_run).
         SEND_MESSAGE
+        | STAY_SILENT
         | UPDATE_TASK
         | CANCEL_TASK
         | LIST_TASKS
@@ -187,6 +190,29 @@ impl HubTools {
             }),
             tier: Tier::Local,
             safe_to_repeat: false,
+        }
+    }
+
+    fn stay_silent_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: STAY_SILENT.to_owned(),
+            description: "End this run without messaging the user, and record why. The \
+                          reason is kept in the run record and never delivered. Use it when \
+                          nothing needs saying, then end your turn."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Why nothing needs saying, for the run record."
+                    }
+                },
+                "required": ["reason"],
+                "additionalProperties": false
+            }),
+            tier: Tier::Local,
+            safe_to_repeat: true,
         }
     }
 
@@ -1143,6 +1169,14 @@ fn task_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+/// The reason of a `stay_silent` call, if its arguments give one.
+pub(crate) fn silent_reason(arguments: &Json) -> Option<&str> {
+    arguments["reason"]
+        .as_str()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+}
+
 fn parse_send_message(arguments: &Json) -> Result<(String, Urgency), ToolError> {
     let invalid = |message: &str| ToolError::InvalidArguments(message.to_owned());
     let object: &Map<String, Json> = arguments
@@ -1176,7 +1210,10 @@ fn parse_send_message(arguments: &Json) -> Result<(String, Urgency), ToolError> 
 #[async_trait]
 impl ToolRegistry for HubTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = vec![Self::send_message_definition()];
+        let mut definitions = vec![
+            Self::send_message_definition(),
+            Self::stay_silent_definition(),
+        ];
         definitions.extend(task_definitions());
         definitions.extend(crate::publish::definitions());
         definitions.extend(crate::memory::definitions());
@@ -1201,6 +1238,12 @@ impl ToolRegistry for HubTools {
     ) -> Result<Json, ToolError> {
         match name {
             SEND_MESSAGE => self.send_message(context, &arguments).await,
+            // The call's record is the outcome: commit reads the reason.
+            STAY_SILENT => silent_reason(&arguments)
+                .map(|_| json!({ "silent": true }))
+                .ok_or_else(|| {
+                    ToolError::InvalidArguments("reason must be a non-empty string".to_owned())
+                }),
             CREATE_TASK => self.create_task(context, &arguments).await,
             UPDATE_TASK => self.update_task(context, &arguments).await,
             CANCEL_TASK => self.cancel_task(context, &arguments).await,

@@ -23,15 +23,6 @@ const GENERAL_REPORT: &str = "API's lead reports the docs are written.";
 
 #[tokio::test]
 async fn the_owner_asks_general_for_a_projects_goal_its_lead_does_it_and_general_reports_back() {
-    ask_and_report(true).await;
-}
-
-#[tokio::test]
-async fn a_project_leads_final_text_reaches_the_space_lead() {
-    ask_and_report(false).await;
-}
-
-async fn ask_and_report(explicit_message: bool) {
     let world = World::new().await;
     let sim = world.boot(CrashPlan::new()).await;
     let OrgReply::Project { project } = sim
@@ -70,13 +61,9 @@ async fn ask_and_report(explicit_message: bool) {
             .finish("Reported back."),
     );
     // The API lead, on its task's result.
-    let report = if explicit_message {
-        Script::new()
-            .call("toolu_a2", SEND_MESSAGE, json!({ "text": API_REPORT }))
-            .finish("Reported.")
-    } else {
-        Script::new().finish(API_REPORT)
-    };
+    let report = Script::new()
+        .call("toolu_a2", SEND_MESSAGE, json!({ "text": API_REPORT }))
+        .finish("Reported.");
     backend.route("task_result", report);
     // The API lead, on the space lead's ask.
     backend.route(

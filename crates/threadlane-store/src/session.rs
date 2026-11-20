@@ -663,6 +663,20 @@ impl SessionStore for HubDb {
 }
 
 impl HubDb {
+    /// The arguments of the run's last finished call to `tool`, if any.
+    pub async fn finished_call(&self, run: RunId, tool: &str) -> StoreResult<Option<Json>> {
+        let conn = self.db.reader()?;
+        query_opt(
+            &conn,
+            "SELECT arguments FROM tool_calls
+             WHERE run_id = ?1 AND tool = ?2 AND status = 'finished'
+             ORDER BY id DESC LIMIT 1",
+            params![run.get(), tool],
+            |row| Cols(row).json(0),
+        )
+        .await
+    }
+
     /// Newest journal entries for a lane, before an optional exclusive position.
     pub async fn lane_journal_page(
         &self,
