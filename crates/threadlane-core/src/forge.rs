@@ -28,6 +28,8 @@ pub const REPORT_LIMITATION: &str = "report_threadlane_limitation";
 pub const MERGE: &str = "merge";
 /// Mark a registered repository's draft pull request ready for review.
 pub const MARK_READY: &str = "mark_ready";
+/// Close a registered repository's pull request, optionally deleting its head branch.
+pub const CLOSE_PULL_REQUEST: &str = "close_pull_request";
 
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -44,6 +46,13 @@ pub enum RepositoryAction {
     Merge { number: std::num::NonZeroU64 },
     /// Mark the numbered draft pull request ready for review.
     MarkReady { number: std::num::NonZeroU64 },
+    /// Close the numbered pull request if its head is still `expected_head`,
+    /// then delete its head branch if asked.
+    ClosePullRequest {
+        number: std::num::NonZeroU64,
+        expected_head: String,
+        delete_branch: bool,
+    },
 }
 
 /// Kind of numbered GitHub item to comment on.

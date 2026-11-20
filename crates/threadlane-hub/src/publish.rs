@@ -5,8 +5,8 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, MARK_READY, MERGE, ONTO_TASK,
-    OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, MARK_READY,
+    MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -55,7 +55,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: schema,
-        tier: if name == MERGE {
+        tier: if matches!(name, MERGE | CLOSE_PULL_REQUEST) {
             Tier::SharedHardToUndo
         } else {
             Tier::SharedReversible
@@ -143,6 +143,22 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 "required":["repository","number"],"additionalProperties":false
             }),
         ),
+        define(
+            CLOSE_PULL_REQUEST,
+            "Close an open pull request in a registered project repository, such as a superseded \
+             duplicate, and optionally delete its head branch. Give the PR number and its current \
+             full head SHA: the close is refused if the head has moved.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "expected_head":{"type":"string","description":"The current full commit SHA of the PR head."},
+                    "delete_branch":{"type":"boolean","description":"Also delete the PR's head branch. Default false."}
+                },
+                "required":["repository","number","expected_head"],"additionalProperties":false
+            }),
+        ),
     ]
 }
 
@@ -196,6 +212,24 @@ pub(crate) fn repository_action(
             fields(a, &["repository", "number"])?;
             Ok(RepositoryAction::MarkReady { number: number()? })
         }
+        CLOSE_PULL_REQUEST => {
+            fields(a, &["repository", "number", EXPECTED_HEAD, "delete_branch"])?;
+            let expected_head = a[EXPECTED_HEAD]
+                .as_str()
+                .filter(|head| valid_commit_id(head))
+                .ok_or_else(|| invalid("expected_head must be a full commit SHA"))?
+                .to_owned();
+            let delete_branch = match a.get("delete_branch") {
+                None | Some(Json::Null) => false,
+                Some(Json::Bool(delete)) => *delete,
+                Some(_) => return Err(invalid("delete_branch must be true or false")),
+            };
+            Ok(RepositoryAction::ClosePullRequest {
+                number: number()?,
+                expected_head,
+                delete_branch,
+            })
+        }
         _ => Err(invalid("unknown repository action")),
     }
 }
@@ -233,6 +267,7 @@ pub(crate) async fn proposal(
             | CREATE_ISSUE
             | MERGE
             | MARK_READY
+            | CLOSE_PULL_REQUEST
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -276,9 +311,25 @@ pub(crate) async fn proposal(
                 names(false)
             ))
         })?;
-    if matches!(tool, COMMENT | CREATE_ISSUE | MERGE | MARK_READY) {
-        repository_action(tool, arguments)?;
-        let question = match tool {
+    if matches!(
+        tool,
+        COMMENT | CREATE_ISSUE | MERGE | MARK_READY | CLOSE_PULL_REQUEST
+    ) {
+        let action = repository_action(tool, arguments)?;
+        let question = match &action {
+            threadlane_core::forge::RepositoryAction::ClosePullRequest {
+                number,
+                expected_head,
+                delete_branch,
+            } => format!(
+                "Close pull request #{number} in {name}{} if its head is still {expected_head}?",
+                if *delete_branch {
+                    " and delete its head branch"
+                } else {
+                    ""
+                }
+            ),
+            _ => match tool {
             COMMENT => format!(
                 "Comment on {} #{} in {name}?",
                 arguments["target"].as_str().unwrap_or_default(),
@@ -290,6 +341,7 @@ pub(crate) async fn proposal(
                 arguments["number"]
             ),
             _ => format!("Create issue {} in {name}?", arguments["title"]),
+            },
         };
         return Ok(Proposal {
             question,
