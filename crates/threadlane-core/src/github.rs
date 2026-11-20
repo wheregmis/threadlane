@@ -37,6 +37,8 @@ pub enum GithubKind {
     Mention,
     /// Any other notification: assigned, state changed, subscribed, ...
     Notification,
+    /// A pull request's head commit or state as a notification found it.
+    PullRequestUpdate,
 }
 
 impl GithubKind {
@@ -50,6 +52,7 @@ impl GithubKind {
             Self::ReviewRequest => "a review request",
             Self::Mention => "a mention",
             Self::Notification => "a notification",
+            Self::PullRequestUpdate => "a pull request update",
         }
     }
 }
@@ -127,6 +130,14 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
         target: &PullTarget,
         since: Option<&str>,
     ) -> Result<Vec<GithubItem>, GithubError>;
+
+    /// What a notification about a pull request reports, as that pull
+    /// request is now: its head commit and state, and its latest review and
+    /// comment. Each has an id of its own, so the same activity notified
+    /// again is the same item. By default, the notification itself.
+    async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
+        Ok(vec![notification.clone()])
+    }
 }
 
 /// A remote URL in the one form two spellings of the same repository share:

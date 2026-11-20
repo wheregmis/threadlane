@@ -118,20 +118,23 @@ impl GhSource {
         Ok(pages)
     }
 
-    /// The head branch and commit of pull request `number`, read from
-    /// `pulls/<n>`.
-    async fn head(&self, repository: &str, number: u64) -> Result<(String, String), GithubError> {
-        let path = format!("repos/{repository}/pulls/{number}");
-        let (ok, output) = self.get(&[], &path).await?;
+    /// The JSON of a one-page GET that must succeed.
+    async fn get_json(&self, path: &str) -> Result<Json, GithubError> {
+        let (ok, output) = self.get(&[], path).await?;
         let answer = parse_answer(&output)?;
         if !ok || !(200..=299).contains(&answer.status) {
             return Err(GithubError(format!("gh api {path} failed")));
         }
-        let body: Json = serde_json::from_str(&answer.body)
-            .map_err(|error| GithubError(format!("gh api {path} answered: {error}")))?;
-        let field = |pointer| text(&body, pointer).filter(|value| !value.is_empty());
-        field("/head/ref")
-            .zip(field("/head/sha"))
+        serde_json::from_str(&answer.body)
+            .map_err(|error| GithubError(format!("gh api {path} answered: {error}")))
+    }
+
+    /// The head branch and commit of pull request `number`, read from
+    /// `pulls/<n>`.
+    async fn head(&self, repository: &str, number: u64) -> Result<(String, String), GithubError> {
+        let path = format!("repos/{repository}/pulls/{number}");
+        let body = self.get_json(&path).await?;
+        head_of(&body)
             .ok_or_else(|| GithubError(format!("gh api {path} names no head branch and commit")))
     }
 
@@ -235,6 +238,71 @@ impl GithubSource for GhSource {
         items.sort_by(|a, b| a.at.cmp(&b.at));
         Ok(items)
     }
+
+    // shortcut: inline review comments (`pulls/<n>/comments`) are not read;
+    // add them if leads need line comments.
+    async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
+        let (Some(number), repository) = (notification.pull_request, &notification.repository)
+        else {
+            return Ok(vec![notification.clone()]);
+        };
+        if !valid_full_name(repository) {
+            return Err(GithubError(format!(
+                "{repository:?} is not a repository name"
+            )));
+        }
+        let path = format!("repos/{repository}/pulls/{number}");
+        let pull = self.get_json(&path).await?;
+        let (branch, sha) = head_of(&pull)
+            .ok_or_else(|| GithubError(format!("gh api {path} names no head branch and commit")))?;
+        let state = if pull["merged"] == true {
+            "merged".to_owned()
+        } else {
+            text(&pull, "/state").unwrap_or_default()
+        };
+        let target = PullTarget {
+            repository: repository.clone(),
+            branch,
+            number: Some(number),
+        };
+        // The notified kind is in the id: a new reason, such as a review
+        // request, is news even when the head did not move.
+        let notified = serde_json::to_value(notification.kind).unwrap_or_default();
+        let mut items = vec![GithubItem {
+            id: format!(
+                "pull:{repository}#{number}:{sha}:{state}:{}",
+                notified.as_str().unwrap_or_default()
+            ),
+            kind: GithubKind::PullRequestUpdate,
+            branch: Some(target.branch.clone()),
+            title: format!("head {sha}, {state}"),
+            body: format!(
+                "{}\nNotified as {}.",
+                notification.title,
+                notification.kind.describe()
+            ),
+            url: text(&pull, "/html_url"),
+            ..notification.clone()
+        }];
+        let latest = |mut found: Vec<GithubItem>| found.pop();
+        items.extend(latest(
+            self.get_items(
+                &format!("repos/{repository}/pulls/{number}/reviews?per_page=100"),
+                &target,
+                parse_reviews,
+            )
+            .await?,
+        ));
+        items.extend(latest(
+            self.get_items(
+                &format!("repos/{repository}/issues/{number}/comments?per_page=100"),
+                &target,
+                parse_comments,
+            )
+            .await?,
+        ));
+        Ok(items)
+    }
 }
 
 /// `owner/name` with the characters GitHub allows in them.
@@ -263,6 +331,12 @@ fn encode(text: &str) -> String {
             other => format!("%{other:02X}"),
         })
         .collect()
+}
+
+/// The head branch and commit of a `pulls/<n>` answer.
+fn head_of(pull: &Json) -> Option<(String, String)> {
+    let field = |pointer| text(pull, pointer).filter(|value| !value.is_empty());
+    field("/head/ref").zip(field("/head/sha"))
 }
 
 fn text(value: &Json, pointer: &str) -> Option<String> {
@@ -387,13 +461,21 @@ fn notification(value: &Json) -> Option<GithubItem> {
     };
     // A workflow run's subject is "<workflow> workflow run <result> for
     // <branch> branch", and names no pull request.
-    let branch = match subject_type.as_str() {
-        "CheckSuite" => title
+    let mut branch = None;
+    if subject_type == "CheckSuite"
+        && let Some((run, found)) = title
             .strip_suffix(" branch")
             .and_then(|rest| rest.rsplit_once(" for "))
-            .map(|(_, branch)| branch.to_owned()),
-        _ => None,
-    };
+    {
+        // As a check run reads: "<workflow>: <result>".
+        let renamed = run
+            .split_once(" workflow run ")
+            .map(|(workflow, result)| format!("{workflow}: {result}"));
+        branch = Some(found.to_owned());
+        if let Some(renamed) = renamed {
+            title = renamed;
+        }
+    }
     if kind == GithubKind::Notification && !reason.is_empty() {
         title = format!("{title} ({})", reason.replace('_', " "));
     }
@@ -815,6 +897,94 @@ case "$last" in
             "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/commits/threadlane%2FT-0001/check-runs?per_page=100",
             "a known branch needs no lookup"
         );
+    }
+
+    #[test]
+    fn a_workflow_run_notification_names_its_check_and_result() {
+        let feed = parse_feed(FEED).unwrap();
+        assert_eq!(feed.items[2].title, "CI: failed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pull_request_notification_reports_its_head_review_and_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes = |pull: &str| {
+            [
+                ("*/pulls/42", "pull.http", ok(pull)),
+                ("*/reviews*", "reviews.http", ok(REVIEWS)),
+                ("*/comments*", "comments.http", ok(COMMENTS)),
+            ]
+        };
+        let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(PULL)));
+        let notification = parse_feed(FEED).unwrap().items.remove(0);
+        let items = source.activity(&notification).await.unwrap();
+        let sha = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
+        let ids: Vec<_> = items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                format!("pull:acme/widgets#42:{sha}:open:review_request").as_str(),
+                "review:80",
+                "comment:1700000001",
+            ]
+        );
+        let head = &items[0];
+        assert_eq!(head.kind, GithubKind::PullRequestUpdate);
+        assert_eq!(head.title, format!("head {sha}, open"));
+        assert_eq!(head.pull_request, Some(42));
+        assert_eq!(
+            head.body,
+            "Add the settings page\nNotified as a review request."
+        );
+        let review = &items[1];
+        assert_eq!(review.kind, GithubKind::Review);
+        assert_eq!(review.author.as_deref(), Some("octocat"));
+        assert_eq!(review.title, "changes requested");
+        let comment = &items[2];
+        assert_eq!(comment.kind, GithubKind::Comment);
+        assert_eq!(comment.author.as_deref(), Some("stranger"));
+        assert_eq!(
+            calls(dir.path())[0],
+            "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/pulls/42"
+        );
+
+        // The same activity notified again is the same items.
+        let again = GithubItem {
+            id: "notification:12000000001:2026-11-17T09:10:00Z".into(),
+            at: "2026-11-17T09:10:00Z".into(),
+            ..notification.clone()
+        };
+        let repeat = source.activity(&again).await.unwrap();
+        let repeat_ids: Vec<_> = repeat.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(repeat_ids, ids);
+
+        // A new head is a new item; the rest stays the same.
+        let pushed = PULL.replace(sha, "1111111111111111111111111111111111111111");
+        let merged = pushed.replace(
+            "\"state\": \"open\",",
+            "\"state\": \"closed\", \"merged\": true,",
+        );
+        for (pull, head) in [
+            (
+                pushed,
+                "head 1111111111111111111111111111111111111111, open",
+            ),
+            (
+                merged,
+                "head 1111111111111111111111111111111111111111, merged",
+            ),
+        ] {
+            let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(&pull)));
+            let items = source.activity(&again).await.unwrap();
+            assert_eq!(items[0].title, head);
+            assert!(!ids.contains(&items[0].id.as_str()), "{}", items[0].id);
+            assert_eq!(items[1].id, "review:80");
+        }
+
+        // Anything not about a pull request reports itself.
+        let issue = parse_feed(FEED).unwrap().items.remove(1);
+        assert_eq!(source.activity(&issue).await.unwrap(), [issue]);
     }
 
     #[cfg(unix)]

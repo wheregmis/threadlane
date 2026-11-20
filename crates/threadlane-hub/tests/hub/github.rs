@@ -975,3 +975,85 @@ async fn assert_deleted_while_paused(hub: &TestHub, github: &PausedGithub, proje
         .expect("deletion completed while GitHub was blocked")
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_pull_request_notification_says_what_happened_and_wakes_once_per_activity() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let general = hub.general().await;
+    // One thread, notified at each update, as GitHub's feed lists it.
+    let notified = |at: &str| {
+        let id = format!("notification:7:{at}");
+        GithubItem {
+            author: None,
+            ..item(&id, GithubKind::Notification, WIDGETS_NAME, Some(42), at)
+        }
+    };
+    let head = |sha: &str, at: &str| GithubItem {
+        title: format!("head {sha}, open"),
+        author: None,
+        ..item(
+            &format!("pull:acme/widgets#42:{sha}:open:notification"),
+            GithubKind::PullRequestUpdate,
+            WIDGETS_NAME,
+            Some(42),
+            at,
+        )
+    };
+    let review = GithubItem {
+        title: "approved".into(),
+        ..item(
+            "review:5",
+            GithubKind::Review,
+            WIDGETS_NAME,
+            Some(42),
+            "2026-11-17T08:00:00Z",
+        )
+    };
+    let comment = |id: &str, at: &str| item(id, GithubKind::Comment, WIDGETS_NAME, Some(42), at);
+    let deliver = |at: &str, activity: Vec<GithubItem>| {
+        let notification = notified(at);
+        github.set_activity(&notification.id, activity);
+        github.notify(notification);
+    };
+
+    let t1 = "2026-11-17T08:00:00Z";
+    deliver(t1, vec![head("aaa", t1), review.clone()]);
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 2);
+    let events = github_events(&hub).await;
+    assert!(
+        events
+            .iter()
+            .all(|event| (event.lane_id, event.requested) == (general.lead_lane_id, false)),
+        "no task owns #42, so its lead hears of it"
+    );
+    let first: GithubItem = serde_json::from_value(events[0].payload.clone()).unwrap();
+    assert_eq!(first.kind, GithubKind::PullRequestUpdate);
+    assert_eq!(first.title, "head aaa, open", "the new head");
+
+    // The same activity delivered again inserts nothing, so wakes nobody.
+    let t2 = "2026-11-17T08:01:00Z";
+    deliver(t2, vec![head("aaa", t2), review.clone()]);
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 0);
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 0);
+
+    // Later distinct activity on the same pull request still arrives.
+    let t3 = "2026-11-17T08:02:00Z";
+    deliver(
+        t3,
+        vec![head("aaa", t3), review.clone(), comment("comment:9", t3)],
+    );
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    let t4 = "2026-11-17T08:03:00Z";
+    deliver(t4, vec![head("bbb", t4), review, comment("comment:9", t3)]);
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    assert_eq!(
+        ids(&github_events(&hub).await),
+        [
+            "pull:acme/widgets#42:aaa:open:notification",
+            "review:5",
+            "comment:9",
+            "pull:acme/widgets#42:bbb:open:notification",
+        ]
+    );
+}

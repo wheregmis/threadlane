@@ -341,7 +341,17 @@ impl HubCore {
                 refresh.push(work.clone());
             }
             if let Some((project, lane, requested)) = routes.route(item) {
-                pass.inserted += self.insert(project, lane, requested, item, lanes).await?;
+                let (items, thread) = self.activity(item).await?;
+                for item in &items {
+                    pass.inserted += self.insert(project, lane, requested, item, lanes).await?;
+                }
+                // Marked after its items, so a crash in between reads it again.
+                if let Some(thread) = thread {
+                    inner
+                        .db
+                        .set_source_cursor(&thread, &item.at, inner.clock.now())
+                        .await?;
+                }
             }
             inner.hook.reach(AFTER_INSERT)?;
         }
@@ -412,6 +422,33 @@ impl HubCore {
             }
         }
         Ok(inserted)
+    }
+
+    /// What a feed item reports. A notification about a pull request is
+    /// read as its activity (see [`GithubSource::activity`]), once per thread
+    /// update: the feed lists every unread thread each time it changes, and
+    /// a thread seen at this update already gives nothing new. Also returns
+    /// the cursor that marks the thread seen, to save after the items.
+    async fn activity(
+        &self,
+        item: &GithubItem,
+    ) -> Result<(Vec<GithubItem>, Option<String>), HubError> {
+        let inner = &self.inner;
+        let (Some(source), Some(_)) = (inner.github.as_ref(), item.pull_request) else {
+            return Ok((vec![item.clone()], None));
+        };
+        let Some(thread) = item.id.strip_suffix(&format!(":{}", item.at)) else {
+            return Ok((vec![item.clone()], None));
+        };
+        let key = format!("github:{thread}");
+        if inner.db.source_cursor(&key).await?.as_deref() >= Some(item.at.as_str()) {
+            return Ok((Vec::new(), None));
+        }
+        let items = source.activity(item).await.unwrap_or_else(|error| {
+            tracing::warn!(%error, id = item.id, "could not read what a GitHub notification reports");
+            vec![item.clone()]
+        });
+        Ok((items, Some(key)))
     }
 
     /// Inserts one item as an `outside_event` of the GitHub source. Returns

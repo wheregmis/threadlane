@@ -498,6 +498,8 @@ struct GithubState {
     /// Items on a task's work, by `(repository, branch)`.
     work: Vec<(String, String, GithubItem)>,
     poll_interval: Option<std::time::Duration>,
+    /// What a notification reports, by its id; unlisted ones report themselves.
+    activity: Vec<(String, Vec<GithubItem>)>,
 }
 
 /// A [`GithubSource`] that touches no network. It records every call, keeps
@@ -522,6 +524,11 @@ impl FakeGithub {
         lock(&self.state)
             .work
             .push((repository.to_owned(), branch.to_owned(), item));
+    }
+
+    /// What the notification `id` reports, as [`GithubSource::activity`].
+    pub fn set_activity(&self, id: &str, items: Vec<GithubItem>) {
+        lock(&self.state).activity.push((id.to_owned(), items));
     }
 
     /// What the feed answers as the interval it asks for.
@@ -583,5 +590,14 @@ impl GithubSource for FakeGithub {
             .collect();
         items.sort_by(|a, b| a.at.cmp(&b.at));
         Ok(items)
+    }
+
+    async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
+        let state = lock(&self.state);
+        Ok(state
+            .activity
+            .iter()
+            .find(|(id, _)| *id == notification.id)
+            .map_or_else(|| vec![notification.clone()], |(_, items)| items.clone()))
     }
 }
