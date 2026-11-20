@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -394,6 +394,7 @@ impl Inner {
         }
         let mut performed = self.perform(lane, assignment).await?;
         performed.push_str(&self.bring_in_base(assignment).await);
+        performed.push_str(&self.earlier_work(lane, assignment, &working_dir).await);
         lane.check()?;
         self.link.check_running(&lane.lease()).await?;
 
@@ -1173,6 +1174,29 @@ impl Inner {
         }
     }
 
+    /// Where a task that worked without a repository left its work, once a
+    /// repository is attached and its runs start in a worktree instead.
+    async fn earlier_work(
+        &self,
+        lane: &LaneState,
+        assignment: &RunAssignment,
+        working_dir: &Path,
+    ) -> String {
+        if assignment.task_id.is_none() || assignment.review.is_some() {
+            return String::new();
+        }
+        let earlier = self.config.lanes_dir.join(lane.lease().lane_id.to_string());
+        if earlier == working_dir || !has_work(&earlier).await {
+            return String::new();
+        }
+        format!(
+            "\nYour work from before a repository was attached is in {}. \
+             Your working directory is now {}: bring any completed work you still need into it.\n",
+            earlier.display(),
+            working_dir.display()
+        )
+    }
+
     /// The task's worktree of its first repository, set up if needed, for a
     /// task that names repositories; otherwise `<lanes_dir>/<lane id>`,
     /// created if missing.
@@ -1494,6 +1518,19 @@ fn publish_target(
             .ok_or_else(|| "onto_task is not a task id".to_owned()),
         _ => Ok(task_branch(task)),
     }
+}
+
+/// Whether `dir` holds anything besides review checkouts, which share it.
+async fn has_work(dir: &Path) -> bool {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return false;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_name() != "reviews" {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

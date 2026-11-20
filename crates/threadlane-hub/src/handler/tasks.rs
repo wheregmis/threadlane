@@ -358,9 +358,10 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                 .join(", ");
             let instruction = format!(
                 "The user attached {names} to this task so its work can be published. \
-                 Your earlier working directory and progress file are kept. From your next \
-                 run you also have a worktree of each attached repository: bring your \
-                 completed work into it, then publish as the task asks."
+                 Your progress file is kept, and so is your earlier working directory: \
+                 your next run starts in a worktree of the attached repository and is told \
+                 where the earlier work is. Bring your completed work into the worktree, \
+                 then publish as the task asks."
             );
             let ids: Vec<_> = added.iter().map(|repository| repository.id).collect();
             let updated = db
