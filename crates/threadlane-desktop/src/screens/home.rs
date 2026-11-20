@@ -574,8 +574,14 @@ impl Desktop {
                 Some(self.digest_entry(space, digest, cx).into_any_element())
             } else {
                 (!text.trim().is_empty()).then(|| {
-                    self.prose(id.clone(), space, entry.project, text.clone(), cx)
-                        .into_any_element()
+                    self.prose(
+                        id.clone(),
+                        space,
+                        entry.repository_project(),
+                        text.clone(),
+                        cx,
+                    )
+                    .into_any_element()
                 })
             };
             let open_conversation = |key, label, screen: Screen| {

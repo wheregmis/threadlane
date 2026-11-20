@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use threadlane_core::backend::NativeSession;
+use threadlane_core::forge::REPORT_LIMITATION;
 use threadlane_core::link::Begin;
 use threadlane_core::model::RunOutcome;
 use threadlane_core::store::OutboxStore;
@@ -212,6 +213,7 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
             CANCEL_TIMER,
             ASK_USER,
             ASK_PROJECT_LEAD,
+            REPORT_LIMITATION,
             "read_notes",
             "merge_pull_request",
             "delete_repository"

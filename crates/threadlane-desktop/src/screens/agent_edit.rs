@@ -20,7 +20,7 @@ use threadlane_desktop::{Activity, AgentEdit, AgentFields, BACKENDS, Tab, descri
 use super::project::mode_name;
 use crate::components::{button, card, field, meta, page_header, section};
 use crate::icons::AppIcon;
-use crate::tokens::{FIELD_RADIUS, FORM_WIDTH, LG, MD, ROW_RADIUS, SM, TYPE_BODY, XS};
+use crate::tokens::{FIELD_RADIUS, FORM_WIDTH, LG, MD, ROW_RADIUS, SM, Status, TYPE_BODY, XS};
 use crate::{Desktop, Screen};
 
 /// Backend order and per-backend models, shared by the create and edit forms.
@@ -329,8 +329,17 @@ impl Desktop {
 
     /// Sends what changed in the edit view to the hub.
     fn save_agent(&mut self, cx: &mut Context<Self>) {
-        let request = match self.state.agent_update(&self.agent_fields(cx)) {
+        if self
+            .state
+            .agent_edit()
+            .is_some_and(|edit| self.state.agent_saving(edit))
+        {
+            return;
+        }
+        let submitted = self.agent_fields(cx);
+        let request = match self.state.agent_update(&submitted) {
             Err(why) => {
+                self.state.agent_save_validation(why.clone());
                 self.state.report(Activity::Failed(why));
                 cx.notify();
                 return;
@@ -342,7 +351,7 @@ impl Desktop {
             }
             Ok(Some(request)) => request,
         };
-        let Some(edit) = self.state.agent_edit().cloned() else {
+        let Some(edit) = self.state.begin_agent_save() else {
             return;
         };
         let core = Arc::clone(&self.core);
@@ -357,16 +366,25 @@ impl Desktop {
                     .await;
                 (edit, saved)
             },
-            |this, (edit, saved), cx| match saved {
+            move |this, (edit, saved), cx| match saved {
                 Ok(agent) => {
-                    this.state.report(Activity::Done(format!(
-                        "Saved {}. It applies from its next run.",
-                        agent.name
-                    )));
-                    this.state.agent_updated(&edit, agent);
+                    let name = agent.name.clone();
+                    let current = this.agent_fields(cx);
+                    let more = this
+                        .state
+                        .finish_agent_save(&edit, submitted, &current, agent);
+                    this.state.report(Activity::Done(if more {
+                        format!("Saved {name}. Newer edits still need to be saved.")
+                    } else {
+                        format!("Saved {name}. It applies from its next run.")
+                    }));
                     this.refresh(cx);
                 }
-                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+                Err(error) => {
+                    let why = describe(&error);
+                    this.state.fail_agent_save(&edit, why.clone());
+                    this.state.report(Activity::Failed(why));
+                }
             },
             cx,
         );
@@ -522,6 +540,7 @@ impl Desktop {
                 .into_any_element()
         };
 
+        let saving = self.state.agent_saving(edit);
         let actions = h_flex()
             .gap(SM)
             .flex_wrap()
@@ -530,7 +549,8 @@ impl Desktop {
                     .small()
                     .primary()
                     .icon(AppIcon::Check)
-                    .label("Save")
+                    .label(if saving { "Saving…" } else { "Save" })
+                    .disabled(saving)
                     .on_click(cx.listener(|this, _, _, cx| this.save_agent(cx))),
             )
             .child(
@@ -539,15 +559,14 @@ impl Desktop {
                     .ghost()
                     .icon(AppIcon::X)
                     .label("Cancel")
+                    .disabled(saving)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.state.close_agent_edit();
                         cx.notify();
                     })),
             );
-        let delete = self
-            .state
-            .offers_agent_delete(&edit.space, &edit.agent)
-            .then(|| {
+        let delete =
+            (!saving && self.state.offers_agent_delete(&edit.space, &edit.agent)).then(|| {
                 let (space, agent) = (edit.space.clone(), edit.agent.clone());
                 button("agent-edit-delete")
                     .small()
@@ -593,6 +612,10 @@ impl Desktop {
                     .child(mode),
             )
             .child(instructions)
+            .children(edit.save_error().map(|error| {
+                meta(format!("Could not save agent: {error}"), cx)
+                    .text_color(Status::Failed.colors(cx.theme()).0)
+            }))
             .child(meta("Changes apply from the next run.", cx));
 
         let mut bound = v_flex().gap(SM).child(section("Project assignments"));

@@ -91,6 +91,15 @@ pub(crate) async fn check_lease(conn: &Connection, lease: &Lease) -> StoreResult
 /// Inserts an event inside the caller's transaction, deduplicating on
 /// `(source, source_event_id)`.
 pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> StoreResult<Inserted> {
+    insert_event_with_skip_in(conn, event, None).await
+}
+
+/// Records a terminal receipt without routing an event to a task or lane.
+pub(crate) async fn insert_event_with_skip_in(
+    conn: &Connection,
+    event: &NewEvent,
+    skip_reason: Option<&str>,
+) -> StoreResult<Inserted> {
     let existing: Option<EventId> = query_opt(
         conn,
         "SELECT id FROM events WHERE source = ?1 AND source_event_id = ?2",
@@ -129,7 +138,10 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
             "Project {name:?} is archived."
         )));
     }
-    let skipped = archived.is_some() && event.kind == EventKind::OutsideEvent;
+    let skip_reason = skip_reason.or_else(|| {
+        (archived.is_some() && event.kind == EventKind::OutsideEvent)
+            .then_some(crate::ARCHIVED_EVENT_REASON)
+    });
     let id: EventId = query_one(
         conn,
         concat!("INSERT INTO events (id, project_id, lane_id, source, source_event_id, kind, payload, trust,
@@ -147,9 +159,9 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
             opt_raw(event.session_ref, |id| id.get()),
             opt_raw(event.decision_ref, |id| id.get()),
             opt_raw(event.reply_to_ref, |id| id.get()),
-            if skipped { "skipped" } else { "pending" },
+            if skip_reason.is_some() { "skipped" } else { "pending" },
             event.received_at.as_millis(),
-            skipped.then_some(crate::ARCHIVED_EVENT_REASON),
+            skip_reason,
         ],
         |row| Cols(row).id(0),
     )
@@ -160,7 +172,7 @@ pub(crate) async fn insert_event_in(conn: &Connection, event: &NewEvent) -> Stor
         params![id.get()],
     )
     .await?;
-    if skipped {
+    if skip_reason.is_some() {
         return Ok(Inserted::New(id));
     }
     if event.kind == EventKind::Stop {

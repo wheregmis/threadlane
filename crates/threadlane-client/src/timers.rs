@@ -43,11 +43,37 @@ impl ClientCore {
         instruction: &str,
         recurrence: Recurrence,
     ) -> Result<Timer, ClientError> {
-        let request = TimerRequest::CreateRoutine {
-            project: project.map(str::to_owned),
-            instruction: instruction.to_owned(),
-            recurrence,
-            client_request_id: uuid::Uuid::new_v4().to_string(),
+        self.add_routine_with_grace(space, project, instruction, recurrence, None)
+            .await
+    }
+
+    /// Creates an owner routine with optional late-skip grace. Older hubs refuse
+    /// the opt-in rather than creating a routine with a different policy.
+    pub async fn add_routine_with_grace(
+        &self,
+        space: Option<&str>,
+        project: Option<&str>,
+        instruction: &str,
+        recurrence: Recurrence,
+        grace_minutes: Option<u16>,
+    ) -> Result<Timer, ClientError> {
+        let project = project.map(str::to_owned);
+        let instruction = instruction.to_owned();
+        let client_request_id = uuid::Uuid::new_v4().to_string();
+        let request = match grace_minutes {
+            Some(grace_minutes) => TimerRequest::CreateRoutineSkippingLate {
+                project,
+                instruction,
+                recurrence,
+                client_request_id,
+                grace_minutes,
+            },
+            None => TimerRequest::CreateRoutine {
+                project,
+                instruction,
+                recurrence,
+                client_request_id,
+            },
         };
         self.one_timer(space, request).await
     }

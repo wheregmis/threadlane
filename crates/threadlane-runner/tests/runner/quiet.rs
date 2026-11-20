@@ -109,7 +109,7 @@ async fn a_hub_that_cannot_answer_costs_only_the_extra_turn() {
 
 #[tokio::test]
 async fn failed_stopped_usage_limited_and_deferred_runs_take_none() {
-    let endings: [(Script, Option<Result<serde_json::Value, ToolError>>); 4] = [
+    let endings = [
         (Script::new().fail("boom"), None),
         (
             Script::new()
@@ -123,6 +123,12 @@ async fn failed_stopped_usage_limited_and_deferred_runs_take_none() {
                 .call("toolu_a", "publish_branch", json!({}))
                 .finish("waiting on the user"),
             Some(Err(ToolError::WaitingOnYou)),
+        ),
+        (
+            Script::new()
+                .call("toolu_a", "publish_branch", json!({}))
+                .finish("the push is authorized"),
+            Some(Err(ToolError::AuthorizedAndQueued)),
         ),
     ];
     for (script, tool) in endings {

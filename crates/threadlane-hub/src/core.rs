@@ -45,6 +45,8 @@ pub(crate) struct Inner {
     pub(crate) backends: Vec<Arc<dyn threadlane_core::backend::AgentBackend>>,
     /// Where the GitHub poller reads; `None` runs no poller.
     pub(crate) github: Option<Arc<dyn GithubSource>>,
+    // Serialize cursor readers independently of the project-deletion lock.
+    pub(crate) github_poll: Arc<tokio::sync::Mutex<()>>,
     pub(crate) workspaces: Option<PathBuf>,
     pub(crate) workspace_files: Option<Arc<dyn Workspaces>>,
     pub(crate) project_removal: Arc<tokio::sync::Mutex<()>>,
@@ -63,7 +65,7 @@ pub struct HubCore {
 
 impl HubCore {
     /// Builds the hub with the built-in tools and the `client` channel, after making sure the defaults
-    /// exist (a lead agent, lead bindings, the hub's machine row).
+    /// exist (a lead agent, lead bindings, the hub's machine row, dreaming where unset).
     ///
     /// # Errors
     ///
@@ -82,7 +84,7 @@ impl HubCore {
             Arc::clone(&wake) as Arc<dyn Waker>,
             settings.reviewer.clone(),
         ));
-        Ok(Self {
+        let core = Self {
             inner: Arc::new(Inner {
                 db,
                 clock,
@@ -94,12 +96,15 @@ impl HubCore {
                 channels: vec![Arc::new(ClientChannel)],
                 iroh: None,
                 github: None,
+                github_poll: Arc::default(),
                 workspaces: None,
                 workspace_files: None,
                 project_removal: Arc::default(),
                 backends: Vec::new(),
             }),
-        })
+        };
+        core.ensure_dreaming().await?;
+        Ok(core)
     }
 
     /// Attaches local workspace files and shares their lock with the embedded runner.

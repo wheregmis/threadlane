@@ -5,7 +5,8 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, MARK_READY, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, MARK_READY, MERGE, ONTO_TASK,
+    OPEN_PULL_REQUEST, PUBLISH_BRANCH,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -93,6 +94,21 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["repository", "title"],
                 "additionalProperties": false
+            }),
+        ),
+        define(
+            FAST_FORWARD_PULL_REQUEST,
+            "Fast-forward an existing open pull request in a task repository to your task's commit. \
+             Give the PR number and its current full head SHA. Your commit must contain that head.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "repository": repository,
+                    "number":{"type":"integer","minimum":1},
+                    "expected_head":{"type":"string","description":"The current full commit SHA of the PR head."}
+                },
+                "required":["repository","number","expected_head"],
+                "additionalProperties":false
             }),
         ),
         define(
@@ -210,7 +226,13 @@ pub(crate) async fn proposal(
     }
     if !matches!(
         tool,
-        PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE | MARK_READY
+        PUBLISH_BRANCH
+            | OPEN_PULL_REQUEST
+            | FAST_FORWARD_PULL_REQUEST
+            | COMMENT
+            | CREATE_ISSUE
+            | MERGE
+            | MARK_READY
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -279,16 +301,22 @@ pub(crate) async fn proposal(
             ),
         });
     }
-    let allowed: &[&str] = if tool == PUBLISH_BRANCH {
-        &["repository", ONTO_TASK, DIFF_PREVIEW, PUBLISH_REVISION]
-    } else {
-        &[
+    let allowed: &[&str] = match tool {
+        PUBLISH_BRANCH => &["repository", ONTO_TASK, DIFF_PREVIEW, PUBLISH_REVISION],
+        FAST_FORWARD_PULL_REQUEST => &[
+            "repository",
+            "number",
+            EXPECTED_HEAD,
+            DIFF_PREVIEW,
+            PUBLISH_REVISION,
+        ],
+        _ => &[
             "repository",
             "title",
             "body",
             DIFF_PREVIEW,
             PUBLISH_REVISION,
-        ]
+        ],
     };
     let object = fields(arguments, allowed)?;
     if !task.repositories.contains(&repository.id) {
@@ -304,6 +332,28 @@ pub(crate) async fn proposal(
         .ok_or_else(|| invalid("publish requires a full commit SHA from the runner"))?;
     let branch = task_branch(task.id);
     let about = format!("Task {}: {}. Commit: {revision}.", task.id, task.title);
+    if tool == FAST_FORWARD_PULL_REQUEST {
+        let number = object
+            .get("number")
+            .and_then(Json::as_u64)
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or_else(|| invalid("number must be a positive integer"))?;
+        let head = object
+            .get(EXPECTED_HEAD)
+            .and_then(Json::as_str)
+            .filter(|head| valid_commit_id(head))
+            .ok_or_else(|| invalid("expected_head must be a full commit SHA"))?;
+        if threadlane_core::github::normalize_remote(&repository.remote_url).is_none() {
+            return Err(invalid("the registered remote is not a GitHub repository"));
+        }
+        return Ok(Proposal {
+            question: format!("Fast-forward pull request #{number} in {name}?"),
+            context: format!(
+                "{about} Expected PR head: {head}. Remote: {}.",
+                repository.remote_url
+            ),
+        });
+    }
     if tool == PUBLISH_BRANCH {
         let Some(onto) = object.get(ONTO_TASK).filter(|onto| !onto.is_null()) else {
             return Ok(Proposal {

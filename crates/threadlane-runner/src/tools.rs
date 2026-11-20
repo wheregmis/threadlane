@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
-use threadlane_core::forge::{OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{
+    EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+};
 use threadlane_core::ids::{RunId, TaskId};
 use threadlane_core::link::{
     DIFF_PREVIEW, FINISH_TASK, HubLink, MERGE_CHECKS, PROGRESS_WRITTEN, PUBLISH_REVISION,
@@ -92,7 +94,11 @@ impl LaneTools {
 
     /// `publish_branch` / `open_pull_request` arguments with a runner-computed
     /// revision and diff so the approval card can show what will be pushed.
-    async fn with_publish_preview(&self, mut arguments: Json) -> Result<Json, ToolError> {
+    async fn with_publish_preview(
+        &self,
+        name: &str,
+        mut arguments: Json,
+    ) -> Result<Json, ToolError> {
         if let Some(object) = arguments.as_object_mut() {
             object.remove(DIFF_PREVIEW);
             object.remove(PUBLISH_REVISION);
@@ -106,6 +112,17 @@ impl LaneTools {
         let Some(repository) = repositories.iter().find(|repo| repo.name == repo_name) else {
             return Ok(arguments);
         };
+        let expected_head = if name == FAST_FORWARD_PULL_REQUEST {
+            let head = arguments[EXPECTED_HEAD]
+                .as_str()
+                .filter(|head| threadlane_core::workspace::valid_commit_id(head))
+                .ok_or_else(|| {
+                    ToolError::InvalidArguments("expected_head must be a full commit SHA".into())
+                })?;
+            Some(head)
+        } else {
+            None
+        };
         let message = format!("Threadlane: work of {task}, run {}", self.run_id);
         self.workspaces
             .checkpoint(*task, std::slice::from_ref(repository), &message)
@@ -113,7 +130,7 @@ impl LaneTools {
             .map_err(|error| ToolError::Failed(error.to_string()))?;
         let preview = self
             .workspaces
-            .preview_publish(*task, repository)
+            .preview_publish(*task, repository, expected_head)
             .await
             .map_err(|error| ToolError::Failed(error.to_string()))?;
         arguments[PUBLISH_REVISION] = serde_json::json!(preview.revision);
@@ -144,13 +161,16 @@ impl ToolEndpoint for LaneTools {
             Some(Stop::Shutdown) | None => {}
         }
         // Nothing more happens in a run that waits on you (Plan.md §9.4).
-        if self.lane.deferred() {
-            return Err(ToolError::WaitingOnYou);
+        if let Some(error) = self.lane.deferred() {
+            return Err(error);
         }
         let arguments = if name == FINISH_TASK {
             self.with_merge_checks(arguments).await
-        } else if matches!(name, PUBLISH_BRANCH | OPEN_PULL_REQUEST) {
-            self.with_publish_preview(arguments).await?
+        } else if matches!(
+            name,
+            PUBLISH_BRANCH | OPEN_PULL_REQUEST | FAST_FORWARD_PULL_REQUEST
+        ) {
+            self.with_publish_preview(name, arguments).await?
         } else {
             arguments
         };
@@ -170,7 +190,9 @@ impl ToolEndpoint for LaneTools {
             }
             Err(ToolError::Killed(killed)) => self.lane.signal(Stop::Killed(*killed)),
             Err(ToolError::LeaseLost) => self.lane.signal(Stop::LeaseLost),
-            Err(ToolError::WaitingOnYou) => self.lane.set_deferred(true),
+            Err(error @ (ToolError::WaitingOnYou | ToolError::AuthorizedAndQueued)) => {
+                self.lane.set_deferred(Some(error.clone()));
+            }
             Ok(output) if output.get(PROGRESS_WRITTEN) == Some(&Json::Bool(true)) => {
                 self.lane.set_progress_written(true);
             }

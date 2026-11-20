@@ -143,7 +143,7 @@ async fn a_rule_removes_the_next_identical_ask_but_not_another_target_and_a_revo
     .await;
     assert_eq!(
         second,
-        Err(ToolError::WaitingOnYou),
+        Err(ToolError::AuthorizedAndQueued),
         "the run ends to perform it"
     );
     let by_rule = decision(&hub, 2).await;
@@ -447,6 +447,7 @@ async fn a_decision_expires_as_declined_once() {
 #[tokio::test]
 async fn an_answered_decision_does_not_expire() {
     let hub = TestHub::with(hourly(), Arc::new(NoHooks)).await;
+    hub.dreaming_off(None).await;
     asked_with_expiry(&hub).await;
     decide(
         &hub,

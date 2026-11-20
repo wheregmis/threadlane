@@ -934,6 +934,7 @@ fn timer(id: i64, project: ProjectId, recurrence: Option<Recurrence>, by: TimerC
         created_by_call: None,
         last_fired_at: None,
         fire_count: 0,
+        missed_grace_minutes: None,
         requested: by == TimerCreator::User,
     }
 }
@@ -2737,7 +2738,9 @@ fn every_tab_is_selected_where_it_is_shown() {
     }
     assert_eq!(
         labels,
-        ["Chat", "Tasks", "Team", "Routines", "Memory", "Setup"]
+        [
+            "Chat", "Tasks", "Team", "Workflow", "Routines", "Memory", "Setup"
+        ]
     );
 }
 
@@ -4682,6 +4685,7 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
     assert_eq!(rows["Project queues"], "api 3");
     assert_eq!(rows["Oldest pending event"], "53 ms");
     assert_eq!(rows["Outbox lag"], "2 min");
+    assert_eq!(rows["Delivery health"], "Unavailable on this hub");
     assert_eq!(
         rows["Run duration"],
         "12 ms avg · 12 ms max · 1 observation"
@@ -4692,6 +4696,25 @@ async fn metrics_cards_show_each_hubs_snapshot_and_its_own_error() {
             .metrics_rows("home", &when)
             .unwrap_err()
             .contains("metrics unavailable")
+    );
+    let mut current = work.metrics.lock().unwrap().clone().unwrap();
+    current.delivery_health = Some(threadlane_core::client::DeliveryHealth {
+        held: 0,
+        next_hold_check: None,
+        retrying: 1,
+        next_retry: Some(current.at),
+        failed_created_in_last_week: 2,
+    });
+    *work.metrics.lock().unwrap() = Some(current);
+    state.apply_metrics("work".to_owned(), load_metrics(&core, "work").await);
+    let rows: BTreeMap<_, _> = state
+        .metrics_rows("work", &when)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        rows["Delivery health"],
+        "0 held; 1 retrying · retry due; 2 permanently failed (created in the past 7 days)"
     );
 }
 
@@ -5121,7 +5144,7 @@ T-0002
 #[test]
 fn bare_github_references_link_only_outside_words_code_and_urls() {
     let text = "Fix #565 (#572) **#1**, skip abc#5, foo_#6, foo-#7, #, #0, #05, #5abc, \
-                ##565, &#33;, foo/#5, `#565`, # Heading, https://example.test/page#565, \
+                ##565, &#33;, foo/#5, \\#5, `#565`, # Heading, https://example.test/page#565, \
                 <https://example.test/page#566>, and [see #567](https://example.test/page#568).";
     let references = segments(text)
         .into_iter()
@@ -5161,11 +5184,11 @@ fn bare_github_references_link_only_outside_words_code_and_urls() {
 
     assert_eq!(
         markdown_source_for(
-            "See #565, abc#5, #, and https://example.test/page#565.",
+            "See #565, \\#5, abc#5, #, and https://example.test/page#565.",
             None,
             Some(&https_repo),
         ),
-        "See [#565](https://github.com/wheregmis/threadlane/pull/565), abc#5, #, and https://example.test/page#565."
+        "See [#565](https://github.com/wheregmis/threadlane/pull/565), \\#5, abc#5, #, and https://example.test/page#565."
     );
     assert_eq!(
         markdown_source_for("See #565.", None, Some(&ssh_repo)),
@@ -6495,6 +6518,60 @@ async fn agent_models_follow_the_provider_after_reordering_and_reopening() {
 }
 
 #[tokio::test]
+async fn agent_save_is_single_flight_and_keeps_edits_after_submit() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    work.org(OrgRequest::CreateAgent {
+        name: "Reviewer".into(),
+        role: "reviewer".into(),
+        instructions: "Review.".into(),
+        backends: vec![BackendKind::Claude],
+    })
+    .await
+    .unwrap();
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    let mut submitted = state.open_agent_edit("work", "Reviewer").unwrap();
+    submitted.name = "Critic".into();
+    submitted.instructions = "First draft.".into();
+    let request = state.agent_update(&submitted).unwrap().unwrap();
+    let flight = state.begin_agent_save().expect("first click");
+    assert!(state.agent_saving(&flight));
+    assert!(
+        state.begin_agent_save().is_none(),
+        "second click is a no-op"
+    );
+
+    let mut current = submitted.clone();
+    current.instructions = "Edited while save was pending.".into();
+    state.fail_agent_save(&flight, "Hub disconnected.".into());
+    assert_eq!(
+        state.agent_edit().unwrap().save_error(),
+        Some("Hub disconnected.")
+    );
+    assert!(!state.agent_saving(&flight));
+
+    let retry = state.begin_agent_save().expect("retry is allowed");
+    assert_eq!(state.agent_edit().unwrap().save_error(), None);
+    let agent = core.update_agent(Some("work"), request).await.unwrap();
+    assert!(state.finish_agent_save(&retry, submitted, &current, agent));
+    assert_eq!(state.agent_edit().unwrap().agent, "Critic");
+    assert_eq!(
+        state.agent_update(&current).unwrap(),
+        Some(OrgRequest::UpdateAgent {
+            skills: None,
+            agent: "Critic".into(),
+            name: None,
+            role: None,
+            instructions: Some(current.instructions),
+            backends: None,
+            models: None,
+        }),
+        "only the newer edit needs another save"
+    );
+}
+
+#[tokio::test]
 async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed() {
     let work = FakeHub::new("Work", Vec::new());
     let (_dir, core) = core(&[("work", &work)]);
@@ -6791,7 +6868,8 @@ async fn home_s_timeline_pages_and_stops_where_a_conversation_is_not_loaded() {
         "nothing more loaded yet"
     );
     for (space, project, before) in earlier {
-        state.apply_earlier(load_earlier(&core, &space, &project, before).await);
+        assert!(state.begin_earlier(&space, &project, before));
+        assert!(state.apply_earlier(load_earlier(&core, &space, &project, before).await));
     }
     let shown = timeline_of(&state);
     assert_eq!(shown.len(), 31);
@@ -6803,6 +6881,53 @@ async fn home_s_timeline_pages_and_stops_where_a_conversation_is_not_loaded() {
     // A refresh of the newest page keeps how far back is loaded.
     state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
     assert_eq!(timeline_of(&state).len(), 31);
+}
+
+#[test]
+fn earlier_chat_pages_retry_the_same_cursor_without_dropping_visible_history() {
+    let mut state = AppState::paired(["work"]);
+    let page = (1..=i64::from(PAGE))
+        .map(|offset| said_by_lead(offset + 10, "General", "visible", (offset + 10) * 1_000))
+        .collect();
+    state.take_history("work", "General", page, true, PAGE);
+    let before = state.earlier("work", "General").expect("full initial page");
+    let shown = state.conversation("work", "General", &when());
+
+    assert!(state.begin_earlier("work", "General", before));
+    assert!(!state.begin_earlier("work", "General", before));
+    assert_eq!(
+        state.earlier_status("work", "General"),
+        Some(&EarlierStatus::Loading)
+    );
+    assert_eq!(state.earlier_status("work", "Other project"), None);
+    assert!(!state.apply_earlier(EarlierLoad {
+        space: "work".into(),
+        project: "General".into(),
+        before,
+        history: Err(ClientError::Unreachable {
+            space: "work".into(),
+            reason: "disconnected".into(),
+        }),
+        decision_records: Vec::new(),
+    }));
+    assert!(matches!(
+        state.earlier_status("work", "General"),
+        Some(EarlierStatus::Failed(why)) if why.contains("disconnected")
+    ));
+    assert_eq!(state.conversation("work", "General", &when()), shown);
+    assert_eq!(state.earlier("work", "General"), Some(before));
+
+    assert!(state.begin_earlier("work", "General", before));
+    assert!(state.apply_earlier(EarlierLoad {
+        space: "work".into(),
+        project: "General".into(),
+        before,
+        history: Ok(vec![said_by_lead(1, "General", "earlier", 1_000)]),
+        decision_records: Vec::new(),
+    }));
+    assert!(state.conversation("work", "General", &when()).len() > shown.len());
+    assert_eq!(state.earlier("work", "General"), None);
+    assert_eq!(state.earlier_status("work", "General"), None);
 }
 
 #[tokio::test]
@@ -6956,6 +7081,126 @@ async fn home_timeline_entries_have_stable_prose_ids_and_disclosure_for_said_mes
     state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
     assert_eq!(state.timeline()[3].prose_id(), work_said_id);
     assert!(state.message_expanded(&work_said_id));
+}
+
+#[tokio::test]
+async fn inbox_timeline_loads_repositories_and_links_github_references_per_project() {
+    let work = FakeHub::new("Work", Vec::new());
+    let home = FakeHub::new("Home", Vec::new());
+    *work.repositories.lock().unwrap() = vec![Repository {
+        id: RepositoryId(1),
+        project_id: ProjectId(1),
+        name: "threadlane".into(),
+        remote_url: "https://github.com/wheregmis/threadlane.git".into(),
+        default_branch: "main".into(),
+        protected_branches: Vec::new(),
+    }];
+    *home.repositories.lock().unwrap() = vec![
+        Repository {
+            id: RepositoryId(1),
+            project_id: ProjectId(1),
+            name: "site".into(),
+            remote_url: "git@github.com:acme/site.git".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        },
+        Repository {
+            id: RepositoryId(2),
+            project_id: ProjectId(2),
+            name: "notes".into(),
+            remote_url: "/srv/git/notes".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        },
+    ];
+    work.histories.lock().unwrap().extend([
+        (
+            "api".to_owned(),
+            vec![
+                said_by_you(1, "Check #572", 1_000),
+                said_by_lead(1, "api", "Merged #572", 2_000),
+            ],
+        ),
+        (
+            "General".to_owned(),
+            vec![
+                said_by_you(2, "Any news on #572?", 3_000),
+                ConversationEntry::ProjectReply {
+                    event_id: EventId(3),
+                    project: "api".to_owned(),
+                    ask_event_id: None,
+                    text: "The lead of api replied: #572 is ready".to_owned(),
+                    at: Timestamp::from_millis(4_000),
+                },
+            ],
+        ),
+    ]);
+    home.histories.lock().unwrap().extend([
+        (
+            "api".to_owned(),
+            vec![said_by_lead(1, "api", "Opened #572", 5_000)],
+        ),
+        (
+            "General".to_owned(),
+            vec![said_by_lead(2, "General", "Note #572", 6_000)],
+        ),
+    ]);
+    *work.recent.lock().unwrap() = vec![account_notice(9, "quota", "Notice #572")];
+
+    let (_dir, core) = core(&[("work", &work), ("home", &home)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    // Cold launch Inbox: only load_timeline runs (no load_project).
+    state.apply_timeline(load_timeline(&core, state.timeline_projects()).await);
+
+    assert_eq!(
+        state.github_repository("work", "api").as_deref(),
+        Some("wheregmis/threadlane")
+    );
+    assert_eq!(state.github_repository("work", "General"), None);
+    assert_eq!(
+        state.github_repository("home", "api").as_deref(),
+        Some("acme/site")
+    );
+    assert_eq!(state.github_repository("home", "General"), None);
+
+    let rendered: Vec<(String, String)> = state
+        .timeline()
+        .iter()
+        .map(|entry| {
+            let repo = entry
+                .repository_project()
+                .and_then(|project| state.github_repository(entry.space, project));
+            (
+                entry.prose_id(),
+                markdown_source_for(&entry.text(), None, repo.as_deref()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rendered,
+        [
+            ("result-home-2".to_owned(), "Note #572".to_owned()),
+            (
+                "result-home-1".to_owned(),
+                "Opened [#572](https://github.com/acme/site/pull/572)".to_owned(),
+            ),
+            (
+                "timeline-said-work-3".to_owned(),
+                "The lead of api replied: [#572](https://github.com/wheregmis/threadlane/pull/572) is ready".to_owned(),
+            ),
+            ("timeline-said-work-2".to_owned(), "Any news on #572?".to_owned()),
+            (
+                "result-work-1".to_owned(),
+                "Merged [#572](https://github.com/wheregmis/threadlane/pull/572)".to_owned(),
+            ),
+            (
+                "timeline-said-work-1".to_owned(),
+                "Check [#572](https://github.com/wheregmis/threadlane/pull/572)".to_owned(),
+            ),
+            ("result-work-9".to_owned(), "Notice #572".to_owned()),
+        ]
+    );
 }
 
 #[tokio::test]

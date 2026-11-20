@@ -34,6 +34,7 @@ mod clock;
 mod composer;
 mod control;
 mod conversation;
+mod conversation_cache;
 mod decision_keys;
 mod decision_record;
 mod dreaming;
@@ -58,6 +59,7 @@ pub use control::{
 pub use conversation::{
     Digest, Line, belongs_in_conversation, follow_latest, message_limit, newest_message,
 };
+pub use conversation_cache::ConversationState;
 pub use decision_keys::{
     DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope,
 };
@@ -77,8 +79,8 @@ pub use machines::{
     MachineDetail, MachineHistory, MachineRow, MachineRun, load_machine_history, machine_row,
 };
 pub use memory::{
-    LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, change_memory, editable,
-    load_memory,
+    LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, MemoryVersionRow, change_memory,
+    editable, load_memory,
 };
 pub use permissions::{
     AgentRow, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement, allows,
@@ -467,6 +469,8 @@ pub enum Tab {
     Memory,
     /// Its agents and their permissions.
     Team,
+    /// Its review workflow.
+    Workflow,
     /// Its routines and follow-ups.
     Routines,
     /// Its repositories and machines.
@@ -475,10 +479,11 @@ pub enum Tab {
 
 impl Tab {
     /// Every tab, in the order the tab bar shows them: Chat first.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Conversation,
         Self::Tasks,
         Self::Team,
+        Self::Workflow,
         Self::Routines,
         Self::Memory,
         Self::Setup,
@@ -492,6 +497,7 @@ impl Tab {
             Self::Conversation => "Chat",
             Self::Memory => "Memory",
             Self::Team => "Team",
+            Self::Workflow => "Workflow",
             Self::Routines => "Routines",
             Self::Setup => "Setup",
         }
@@ -1060,12 +1066,20 @@ pub struct ModesRow {
     pub modes: Result<Vec<Option<Mode>>, Gap>,
 }
 
+/// Status of a request to load an earlier conversation page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EarlierStatus {
+    Loading,
+    Failed(String),
+}
+
 /// An earlier page of a conversation. Made by [`load_earlier`], applied
 /// with [`AppState::apply_earlier`].
 #[derive(Debug)]
 pub struct EarlierLoad {
     space: String,
     project: String,
+    before: Timestamp,
     history: Result<Vec<ConversationEntry>, ClientError>,
     decision_records: Vec<Decision>,
 }
@@ -1085,6 +1099,7 @@ pub async fn load_earlier(
     EarlierLoad {
         space: space.to_owned(),
         project: project.to_owned(),
+        before,
         history,
         decision_records,
     }
@@ -1182,6 +1197,7 @@ pub struct AppState {
     said: BTreeMap<InSpace<EventId>, Said>,
     failures: BTreeMap<InSpace<EventId>, Said>,
     loaded: HashMap<InSpace<String>, Loaded>,
+    earlier_requests: HashMap<InSpace<String>, (Timestamp, EarlierStatus)>,
     projects: HashMap<InSpace<String>, ProjectView>,
     tasks: HashMap<InSpace<TaskId>, TaskDetail>,
     /// Why a task could not be shown, by space and id.
@@ -1241,6 +1257,7 @@ pub struct AppState {
     agent_form: AgentForm,
     /// The agent whose edit view is open.
     agent_edit: Option<AgentEdit>,
+    agent_saves: HashSet<InSpace<String>>,
     /// The picks of the "+ New task" form.
     task_form: TaskForm,
     /// The project whose "+ Add repository" form is open.
@@ -2040,6 +2057,7 @@ impl AppState {
         self.save_conversation_seen();
         self.said.retain(|(space, _), _| space != name);
         self.loaded.retain(|(space, _), _| space != name);
+        self.earlier_requests.retain(|(space, _), _| space != name);
         self.projects.retain(|(space, _), _| space != name);
         self.tasks.retain(|(space, _), _| space != name);
         self.memory.retain(|(space, _), _| space != name);
@@ -2531,11 +2549,52 @@ impl AppState {
         }
     }
 
-    /// Takes an earlier page of a conversation.
-    pub fn apply_earlier(&mut self, load: EarlierLoad) {
-        self.remember_decisions(&load.space, load.decision_records);
-        if let Ok(entries) = load.history {
-            self.take_history(&load.space, &load.project, entries, false, PAGE);
+    /// What happened to the current earlier page request, if any.
+    #[must_use]
+    pub fn earlier_status(&self, space: &str, project: &str) -> Option<&EarlierStatus> {
+        self.earlier_requests
+            .get(&(space.to_owned(), project.to_owned()))
+            .filter(|(before, status)| {
+                *status == EarlierStatus::Loading || self.earlier(space, project) == Some(*before)
+            })
+            .map(|(_, status)| status)
+    }
+
+    /// Acquires the earlier-page request for this conversation.
+    pub fn begin_earlier(&mut self, space: &str, project: &str, before: Timestamp) -> bool {
+        if self.earlier(space, project) != Some(before)
+            || self.earlier_status(space, project) == Some(&EarlierStatus::Loading)
+        {
+            return false;
+        }
+        self.earlier_requests.insert(
+            (space.to_owned(), project.to_owned()),
+            (before, EarlierStatus::Loading),
+        );
+        true
+    }
+
+    /// Takes an earlier page of a conversation. Returns true when history was applied.
+    pub fn apply_earlier(&mut self, load: EarlierLoad) -> bool {
+        let key = (load.space, load.project);
+        if self.earlier_requests.get(&key) != Some(&(load.before, EarlierStatus::Loading)) {
+            return false;
+        }
+        self.earlier_requests.remove(&key);
+        if self.earlier(&key.0, &key.1) != Some(load.before) {
+            return false;
+        }
+        match load.history {
+            Ok(entries) => {
+                self.remember_decisions(&key.0, load.decision_records);
+                self.take_history(&key.0, &key.1, entries, false, PAGE);
+                true
+            }
+            Err(error) => {
+                self.earlier_requests
+                    .insert(key, (load.before, EarlierStatus::Failed(describe(&error))));
+                false
+            }
         }
     }
 

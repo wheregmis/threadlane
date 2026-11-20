@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST, MARK_READY, MERGE, OPEN_PULL_REQUEST,
+    PUBLISH_BRANCH, REPORT_LIMITATION,
 };
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
@@ -16,7 +17,9 @@ use threadlane_core::model::{
     Run, Task, TaskOrigin, TaskReviewVerdict, TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{LeadReply, OrgStore, SessionStore, StoreError, TaskStore};
+use threadlane_core::store::{
+    LeadReply, OrgStore, SessionStore, StoreError, TaskStore, TaskUpdate, TaskWake,
+};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry};
 use threadlane_core::workspace::{MergeCheck, ReviewRevision};
@@ -32,7 +35,7 @@ pub const SEND_MESSAGE: &str = "send_message";
 
 /// Creates a task; in a task lane, a subtask (Plan.md §5.1).
 pub const CREATE_TASK: &str = "create_task";
-/// The lead changes a task's title, goal, or priority.
+/// The lead edits an unfinished task, attaches repositories, or wakes it.
 pub const UPDATE_TASK: &str = "update_task";
 /// The lead cancels a task.
 pub const CANCEL_TASK: &str = "cancel_task";
@@ -59,17 +62,23 @@ const MAX_LABEL: usize = 80;
 #[must_use]
 pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
     match tool {
-        threadlane_core::forge::REPORT_LIMITATION
-        | crate::dreaming::PROJECT_SESSIONS
-        | crate::dreaming::PROJECT_DECISIONS
-        | FINISH_REVIEW => false,
+        crate::dreaming::PROJECT_SESSIONS | crate::dreaming::PROJECT_DECISIONS | FINISH_REVIEW => {
+            false
+        }
         // ask_project_lead is offered to the General lead only (begin_run).
         SEND_MESSAGE
         | UPDATE_TASK
         | CANCEL_TASK
         | LIST_TASKS
+        | REPORT_LIMITATION
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
-        FINISH_TASK | PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE
+        FINISH_TASK
+        | PUBLISH_BRANCH
+        | OPEN_PULL_REQUEST
+        | FAST_FORWARD_PULL_REQUEST
+        | COMMENT
+        | CREATE_ISSUE
+        | MERGE
         | MARK_READY => kind == LaneKind::Task,
         _ => true,
     }
@@ -367,24 +376,58 @@ impl HubTools {
         context: &ToolContext,
         arguments: &Json,
     ) -> Result<Json, ToolError> {
-        let object = fields(arguments, &["task_id", "title", "goal", "priority"])?;
+        let object = fields(
+            arguments,
+            &[
+                "task_id",
+                "title",
+                "goal",
+                "priority",
+                "repositories",
+                "wake",
+            ],
+        )?;
         let task = self
             .project_task(
                 context,
                 object.get("task_id").ok_or_else(|| missing("task_id"))?,
             )
             .await?;
+        let repositories = named_repositories(&self.db, context.project_id, object)
+            .await?
+            .unwrap_or_default();
+        let instruction = text_field(object, "wake")?;
+        let wake = if let Some(instruction) = instruction {
+            let run = self.run(context).await?;
+            Some(TaskWake {
+                call_key: effect_key(context, &run, UPDATE_TASK, arguments),
+                instruction,
+                requested: crate::timers::run_requested(&self.db, run.id, context.task_id)
+                    .await
+                    .map_err(tool_error)?,
+                at: self.clock.now(),
+            })
+        } else {
+            None
+        };
         let updated = self
             .db
             .update_task(
                 &context.lease,
                 task.id,
-                text_field(object, "title")?,
-                text_field(object, "goal")?,
-                priority_field(object)?,
+                TaskUpdate {
+                    title: text_field(object, "title")?,
+                    goal: text_field(object, "goal")?,
+                    priority: priority_field(object)?,
+                    repositories: &repositories,
+                    wake,
+                },
             )
             .await
             .map_err(tool_error)?;
+        if instruction.is_some() {
+            self.waker.wake(WakeTarget::Lane(updated.lane_id));
+        }
         Ok(task_json(&updated))
     }
 
@@ -436,53 +479,37 @@ impl HubTools {
                 .ok_or_else(|| invalid("all must be true or false"))?,
         };
         let (offset, limit) = crate::page::offset_limit(object, TASK_PAGE, MAX_TASK_PAGE)?;
-        let tasks = self
+        let listed = self
             .db
-            .tasks(context.project_id)
-            .await
-            .map_err(tool_error)?;
-        let finished: Vec<&Task> = tasks
-            .iter()
-            .filter(|task| task.status.is_terminal())
-            .collect();
-        let hidden = if all {
-            0
-        } else {
-            finished.len().saturating_sub(RECENT_FINISHED)
-        };
-        // The finished tasks that ended least recently are the ones hidden by
-        // default; one with no recorded end counts as ending when created.
-        let ids: Vec<TaskId> = finished.iter().map(|task| task.id).collect();
-        let ended = self
-            .db
-            .task_completion_times(&ids)
-            .await
-            .map_err(tool_error)?;
-        let mut by_end = finished;
-        by_end.sort_by_key(|task| {
-            (
-                ended.get(&task.id).copied().unwrap_or(task.created_at),
-                task.id,
+            .task_list_page(
+                context.project_id,
+                (!all).then_some(RECENT_FINISHED),
+                offset,
+                limit,
             )
-        });
-        let hide: std::collections::HashSet<TaskId> =
-            by_end.iter().take(hidden).map(|task| task.id).collect();
-        let listed: Vec<Json> = tasks
+            .await
+            .map_err(tool_error)?;
+        let entries: Vec<Json> = listed
+            .tasks
             .iter()
-            .filter(|task| !hide.contains(&task.id))
             .map(|task| {
                 let mut entry = task_line(task);
                 entry["agent"] = agent(task);
                 entry
             })
             .collect();
-        let (page, next) = crate::page::take(&listed, offset, limit);
+        // A DB page is row-bounded; the wire page may be smaller due to its
+        // serialized size budget. Resume after the last entry actually sent.
+        let (page, _) = crate::page::take(&entries, 0, limit);
+        let next = offset.saturating_add(page.len());
+        let next = (next < listed.total).then_some(next);
         let mut result = json!({
             "tasks": page,
             "detail": "Results are cut to one line. Call list_tasks with task_id for a task's \
                        full goal and result.",
         });
-        crate::page::mark(&mut result, LIST_TASKS, listed.len(), next);
+        crate::page::mark(&mut result, LIST_TASKS, listed.total, next);
+        let hidden = listed.hidden_finished;
         if hidden > 0 {
             result["hidden_finished"] = json!(format!(
                 "{hidden} older finished tasks are not listed. Call list_tasks with all: true \
@@ -1024,7 +1051,7 @@ fn task_definitions() -> Vec<ToolDefinition> {
         ),
         define(
             UPDATE_TASK,
-            "Change the title, goal, or priority of a task that has not ended.",
+            "Edit an unfinished task, attach registered repositories, or wake it with an instruction.",
             Tier::Local,
             json!({
                 "type": "object",
@@ -1032,7 +1059,16 @@ fn task_definitions() -> Vec<ToolDefinition> {
                     "task_id": task_id.clone(),
                     "title": { "type": "string" },
                     "goal": { "type": "string" },
-                    "priority": { "type": "integer" }
+                    "priority": { "type": "integer" },
+                    "repositories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Registered repository names to add. Worktrees are available on the next run."
+                    },
+                    "wake": {
+                        "type": "string",
+                        "description": "Instruction to queue in this task's lane. Wakes a sleeping task without answering pending decisions or resuming a user-stopped lane."
+                    }
                 },
                 "required": ["task_id"],
                 "additionalProperties": false
@@ -1147,6 +1183,7 @@ impl ToolRegistry for HubTools {
         definitions.extend(crate::timers::definitions());
         definitions.push(ask_user_definition());
         definitions.push(crate::space_lead::definition());
+        definitions.push(crate::dreaming::report_definition());
         definitions
     }
 
@@ -1200,11 +1237,16 @@ impl ToolRegistry for HubTools {
                 .await
             }
             // The gate asks before these, and the runner performs them.
-            PUBLISH_BRANCH | OPEN_PULL_REQUEST | COMMENT | CREATE_ISSUE | MERGE | MARK_READY => {
-                Err(ToolError::Blocked(format!(
-                    "{name} is performed only once the user approves it"
-                )))
-            }
+            PUBLISH_BRANCH
+            | OPEN_PULL_REQUEST
+            | FAST_FORWARD_PULL_REQUEST
+            | COMMENT
+            | CREATE_ISSUE
+            | MERGE
+            | MARK_READY
+            | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
+                "{name} is performed only once the user approves it"
+            ))),
             // The gate always asks: the answer is the outcome.
             ASK_USER => Err(ToolError::Blocked(format!(
                 "{name} is answered by the user, through a decision"
@@ -1360,6 +1402,7 @@ mod tests {
             );
             names.push(ASK_USER.to_owned());
             names.push(crate::space_lead::ASK_PROJECT_LEAD.to_owned());
+            names.push(crate::dreaming::report_definition().name);
             names
                 .into_iter()
                 .filter(|name| offered_in(name, kind))
@@ -1388,7 +1431,7 @@ mod tests {
                     LIST_TASKS
                 ][..],
                 &memory,
-                &[crate::space_lead::ASK_PROJECT_LEAD]
+                &[crate::space_lead::ASK_PROJECT_LEAD, REPORT_LIMITATION]
             ]
             .concat()
         );
@@ -1400,6 +1443,7 @@ mod tests {
                     FINISH_TASK,
                     PUBLISH_BRANCH,
                     OPEN_PULL_REQUEST,
+                    FAST_FORWARD_PULL_REQUEST,
                     COMMENT,
                     CREATE_ISSUE,
                     MERGE,

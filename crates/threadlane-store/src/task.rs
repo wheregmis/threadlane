@@ -11,7 +11,7 @@ use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
 };
-use threadlane_core::store::{StoreError, StoreResult, TaskStore};
+use threadlane_core::store::{StoreError, StoreResult, TaskStore, TaskUpdate};
 use threadlane_core::time::Timestamp;
 use turso::{Connection, Row};
 
@@ -24,6 +24,7 @@ use crate::task_review;
 
 /// Source name of `task_start` and `task_result` events.
 pub const TASK_SOURCE: &str = "task";
+pub(crate) const TASK_WAKE_SOURCE: &str = "task-wake";
 
 /// The `waiting_reason` of a task that may not start for lack of a model
 /// account (Plan.md §5.3 "blocked, not failed").
@@ -37,6 +38,19 @@ pub const NO_GH_REASON: &str =
 /// The `waiting_reason` of a task whose run ended without `finish_task` and
 /// left nothing to wake it: no decision, timer or event.
 pub const UNWOKEN_REASON: &str = "ended without finishing and nothing is set to wake it";
+
+/// One DB-backed page of agent-visible tasks, including counts for empty pages.
+#[derive(Debug)]
+pub struct TaskListPage {
+    /// The selected page, in task ID order.
+    pub tasks: Vec<Task>,
+    /// All tasks visible for this listing before pagination.
+    pub total: usize,
+    /// Older terminal tasks excluded from the default listing.
+    pub hidden_finished: usize,
+}
+
+const TERMINAL: &str = "'done', 'failed', 'cancelled'";
 
 const TASK_FIELDS: &str = "id, project_id, lane_id, agent_id, title, goal, repositories,
     parent_task_id, origin, status, priority, created_by_call, last_machine_id, waiting_reason,
@@ -259,6 +273,18 @@ pub(crate) async fn transition(
     Ok(())
 }
 
+/// Queues another implementation run and clears the previous result.
+pub(crate) async fn requeue_after_result(conn: &Connection, task: &Task) -> StoreResult<()> {
+    transition(conn, task, TaskStatus::Queued).await?;
+    exec(
+        conn,
+        "UPDATE tasks SET result = NULL, waiting_reason = NULL WHERE id = ?1",
+        params![task.id.get()],
+    )
+    .await?;
+    Ok(())
+}
+
 async fn insert_start_event(conn: &Connection, task: &Task) -> StoreResult<()> {
     insert_event_in(
         conn,
@@ -476,8 +502,8 @@ pub(crate) async fn on_run_started(
 }
 
 /// [`SessionStore::commit_run`]: a running task with a pending decision
-/// waits on you; one that recorded its result is done, with the branch and
-/// pull request performed for it; otherwise it sleeps until an event
+/// waits on you; one that recorded its result finishes unless a lead wake
+/// is pending; otherwise it sleeps until an event
 /// arrives, or is queued again if one already has. A task left sleeping
 /// with nothing to wake it, neither a timer of its own nor a published
 /// branch, carries [`UNWOKEN_REASON`], and its lead lane is told once per
@@ -503,6 +529,16 @@ pub(crate) async fn on_run_committed(
         return task_review::start_review(conn, &task, run_id, now).await;
     }
     if task.result.is_some() {
+        let wake = query_opt(
+            conn,
+            "SELECT 1 FROM events WHERE lane_id = ?1 AND status = 'pending' AND source = ?2 LIMIT 1",
+            params![lane_id.get(), TASK_WAKE_SOURCE],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        if wake.is_some() {
+            return requeue_after_result(conn, &task).await;
+        }
         let result = with_published(conn, &task).await?;
         exec(
             conn,
@@ -998,6 +1034,98 @@ impl HubDb {
         Ok(tasks)
     }
 
+    /// Reads one project page and its counts in a single database snapshot.
+    /// With `recent_finished`, include only that many recent terminal tasks;
+    /// an attempt with no result event sorts by task creation time instead.
+    pub async fn task_list_page(
+        &self,
+        project: ProjectId,
+        recent_finished: Option<usize>,
+        offset: usize,
+        limit: usize,
+    ) -> StoreResult<TaskListPage> {
+        let as_sql = |n| i64::try_from(n).unwrap_or(i64::MAX);
+        let mut values = params![project.get(), as_sql(limit), as_sql(offset)];
+        let (ctes, visible) = if let Some(recent) = recent_finished {
+            values.extend(params![as_sql(recent), TASK_SOURCE]);
+            // Match task_completion_times' current-attempt event lookup. The
+            // recent cohort ranks by ending time; the page is still shown by ID.
+            (
+                format!(
+                    "WITH terminal AS (
+                    SELECT id, created_at FROM tasks
+                    WHERE project_id = ?1 AND status IN ({TERMINAL})
+                 ), attempts AS (
+                    SELECT id, created_at, (
+                        SELECT COUNT(*) FROM events WHERE source = ?5
+                        AND source_event_id >= 'retry:' || terminal.id || ':'
+                        AND source_event_id < 'retry:' || terminal.id || ';'
+                    ) AS retries FROM terminal
+                 ), recent AS (
+                    SELECT attempts.id FROM attempts LEFT JOIN events
+                    ON source = ?5 AND source_event_id = 'result:' || attempts.id ||
+                       CASE WHEN retries = 0 THEN '' ELSE ':retry' || retries END
+                    ORDER BY COALESCE(received_at, attempts.created_at) DESC, attempts.id DESC
+                    LIMIT ?4
+                 ), counts AS (
+                    SELECT MAX((SELECT COUNT(*) FROM terminal) - ?4, 0) AS hidden,
+                           COUNT(*) AS total FROM tasks WHERE project_id = ?1
+                 )"
+                ),
+                format!("AND (status NOT IN ({TERMINAL}) OR id IN (SELECT id FROM recent))"),
+            )
+        } else {
+            (
+                "WITH counts AS (
+                SELECT 0 AS hidden, COUNT(*) AS total FROM tasks WHERE project_id = ?1
+            )"
+                .to_owned(),
+                String::new(),
+            )
+        };
+        let conn = self.db.reader()?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "{ctes}, page_ids AS (
+                    SELECT id FROM tasks WHERE project_id = ?1 {visible}
+                    ORDER BY id LIMIT ?2 OFFSET ?3
+                ), page AS (
+                    SELECT {TASK_FIELDS} FROM tasks WHERE id IN (SELECT id FROM page_ids)
+                )
+                SELECT page.*, d.depends_on, counts.total - counts.hidden, counts.hidden
+                FROM counts LEFT JOIN page ON TRUE
+                LEFT JOIN task_dependencies d ON d.task_id = page.id
+                ORDER BY page.id, d.depends_on"
+                ),
+                values,
+            )
+            .await
+            .map_err(crate::db::db_err)?;
+        let mut result = TaskListPage {
+            tasks: Vec::new(),
+            total: 0,
+            hidden_finished: 0,
+        };
+        while let Some(row) = rows.next().await.map_err(crate::db::db_err)? {
+            let cols = Cols(&row);
+            result.total = usize::try_from(cols.i64(17)?).unwrap_or(usize::MAX);
+            result.hidden_finished = usize::try_from(cols.i64(18)?).unwrap_or(usize::MAX);
+            let Some(id): Option<TaskId> = cols.opt_id(0)? else {
+                break;
+            };
+            let dependency = cols.opt_id(16)?;
+            if let Some(task) = result.tasks.last_mut().filter(|task| task.id == id) {
+                task.depends_on.extend(dependency);
+            } else {
+                result
+                    .tasks
+                    .push(decode_task(&row, dependency.into_iter().collect())?);
+            }
+        }
+        Ok(result)
+    }
+
     /// Completion time of the current attempt for each supplied task.
     pub async fn task_completion_times(
         &self,
@@ -1062,13 +1190,11 @@ impl TaskStore for HubDb {
         &self,
         lease: &Lease,
         id: TaskId,
-        title: Option<&str>,
-        goal: Option<&str>,
-        priority: Option<i64>,
+        update: TaskUpdate<'_>,
     ) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
-        let task = existing_task(conn, id).await?;
+        let mut task = existing_task(conn, id).await?;
         check_run_lease(conn, Some(lease), task.project_id).await?;
         if task.status.is_terminal() {
             return Err(StoreError::Conflict(format!(
@@ -1076,17 +1202,56 @@ impl TaskStore for HubDb {
                 task.status
             )));
         }
+        for repository in update.repositories {
+            if task.repositories.contains(repository) {
+                continue;
+            }
+            let registered = query_opt(
+                conn,
+                "SELECT 1 FROM repositories WHERE project_id = ?1 AND id = ?2",
+                params![task.project_id.get(), repository.get()],
+                |row| Cols(row).i64(0),
+            )
+            .await?;
+            if registered.is_none() {
+                return Err(StoreError::Invalid(format!(
+                    "repository {repository} is not registered in this task's project"
+                )));
+            }
+            task.repositories.push(*repository);
+        }
         exec(
             conn,
-            "UPDATE tasks SET title = ?1, goal = ?2, priority = ?3 WHERE id = ?4",
+            "UPDATE tasks SET title = ?1, goal = ?2, priority = ?3, repositories = ?4 WHERE id = ?5",
             params![
-                title.unwrap_or(&task.title),
-                goal.unwrap_or(&task.goal),
-                priority.unwrap_or(task.priority),
+                update.title.unwrap_or(&task.title),
+                update.goal.unwrap_or(&task.goal),
+                update.priority.unwrap_or(task.priority),
+                json_text(&task.repositories)?,
                 id.get()
             ],
         )
         .await?;
+        if let Some(wake) = update.wake {
+            insert_event_in(
+                conn,
+                &NewEvent {
+                    project_id: task.project_id,
+                    lane_id: task.lane_id,
+                    source: TASK_WAKE_SOURCE.to_owned(),
+                    source_event_id: format!("{id}:{}", wake.call_key),
+                    kind: EventKind::System,
+                    payload: json!({"text": format!("The project lead asks you to resume: {}", wake.instruction)}),
+                    trust: Trust::System,
+                    requested: task.origin.is_requested() || wake.requested,
+                    session_ref: None,
+                    decision_ref: None,
+                    reply_to_ref: None,
+                    received_at: wake.at,
+                },
+            )
+            .await?;
+        }
         let updated = existing_task(conn, id).await?;
         tx.commit().await?;
         Ok(updated)

@@ -112,3 +112,14 @@ acted on".
 
 The Routines screen in the app, decision expiry, dreaming's cadence, more
 sources, anything on a second machine.
+
+### Missed runs for owner routines
+
+An automatic run normally catches up once after downtime, then returns to its
+original cadence. For a time-sensitive routine, choose a grace when creating it
+in the desktop app, or use `threadlane routine add --every 1h --skip-after-minutes 15 "Check the queue"`.
+A run that is exactly at the grace boundary still runs. If it is later, the hub
+records one skipped occurrence, schedules the first future occurrence, and does
+not start an agent or replay the intervening runs. Run once, pause/resume,
+agent schedules, one-shot follow-ups, and Dreaming retain their existing
+behavior.
