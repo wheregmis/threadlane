@@ -75,10 +75,11 @@ impl Desktop {
                         .flex_none()
                         .text_right(),
                 )
-                .child(div().flex_1().min_w_0().child(self.prose(
+                .child(div().flex_1().min_w_0().child(self.prose_among(
                     id,
                     space,
                     Some(&summary.project),
+                    &summary.task.repositories,
                     moment.text,
                     cx,
                 )));

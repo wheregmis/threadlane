@@ -9,8 +9,9 @@ pub enum Reference<'a> {
     Task(TaskId),
     /// A decision in the current space.
     Decision(DecisionId),
-    /// A GitHub pull request or issue number in the project's repository.
-    Github(u64),
+    /// A GitHub pull request or issue number, in the named `owner/repo` when
+    /// the text qualified it, else in the repository of the prose's context.
+    Github(Option<&'a str>, u64),
     /// An HTTP or HTTPS URL.
     Web(&'a str),
 }
@@ -23,7 +24,7 @@ impl<'a> Reference<'a> {
             return match id.as_bytes().first()? {
                 b'T' => TaskId::parse(id).map(Self::Task),
                 b'D' => DecisionId::parse(id).map(Self::Decision),
-                b'#' => parse_github_number(id).map(Self::Github),
+                b'#' => parse_github_number(id).map(|number| Self::Github(None, number)),
                 _ => None,
             };
         }
@@ -114,6 +115,15 @@ pub fn segments(text: &str) -> Vec<Segment<'_>> {
                     .trim_end_matches(['.', ',', ';', '!', '?', ')', ']']);
                 end = start + url.len();
                 Some(Segment::Link(url, Reference::Web(url)))
+            } else if ch.is_ascii_alphanumeric()
+                && !matches!(text[..start].chars().next_back(), Some('/' | '.'))
+                && let Some((len, hash, number)) = qualified_github(rest)
+            {
+                end = start + len;
+                Some(Segment::Link(
+                    &rest[..len],
+                    Reference::Github(Some(&rest[..hash]), number),
+                ))
             } else if matches!(ch, 'T' | 'D') && rest.as_bytes().get(1) == Some(&b'-') {
                 let digits = rest[2..].bytes().take_while(u8::is_ascii_digit).count();
                 let id = &rest[..2 + digits];
@@ -137,7 +147,7 @@ pub fn segments(text: &str) -> Vec<Segment<'_>> {
                 if digits > 0 && boundary(rest[token.len()..].chars().next()) {
                     parse_github_number(token).map(|number| {
                         end = start + token.len();
-                        Segment::Link(token, Reference::Github(number))
+                        Segment::Link(token, Reference::Github(None, number))
                     })
                 } else {
                     None
@@ -160,6 +170,38 @@ pub fn segments(text: &str) -> Vec<Segment<'_>> {
         result.push(Segment::Text(&text[plain..]));
     }
     result
+}
+
+/// Matches `owner/repo#N` at the start of `rest`: its length, the offset of
+/// `#`, and `N`.
+fn qualified_github(rest: &str) -> Option<(usize, usize, u64)> {
+    let hash = rest
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
+        .count();
+    if rest.as_bytes().get(hash) != Some(&b'#') {
+        return None;
+    }
+    let (owner, repo) = rest[..hash].split_once('/')?;
+    if owner.is_empty()
+        || !owner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        || repo.is_empty()
+        || repo.contains('/')
+    {
+        return None;
+    }
+    let len = hash
+        + 1
+        + rest[hash + 1..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+    if !boundary(rest[len..].chars().next()) {
+        return None;
+    }
+    parse_github_number(&rest[hash..len]).map(|number| (len, hash, number))
 }
 
 fn boundary(ch: Option<char>) -> bool {
@@ -261,7 +303,9 @@ pub fn markdown_source_with_time(text: &str, when: Option<&crate::When>) -> Stri
 }
 
 /// Prepares source for the Markdown view, optionally humanizing timestamps and
-/// linking bare `#N` references to `github_repo` (`owner/repo`).
+/// linking bare `#N` references to `github_repo` (`owner/repo`). Pass `None`
+/// when the context has no single repository, so a bare `#N` stays plain text;
+/// `owner/repo#N` always links to its own repository.
 #[must_use]
 pub fn markdown_source_for(
     text: &str,
@@ -278,8 +322,8 @@ pub fn markdown_source_for(
             Segment::ImageMarker => source.push_str("&#33;"),
             Segment::Angle => source.push_str("&lt;"),
             Segment::Code(code) | Segment::Link(code, Reference::Web(_)) => source.push_str(code),
-            Segment::Link(label, Reference::Github(number)) => {
-                if let Some(repo) = github_repo {
+            Segment::Link(label, Reference::Github(repo, number)) => {
+                if let Some(repo) = repo.or(github_repo) {
                     source.push('[');
                     source.push_str(label);
                     source.push_str("](");

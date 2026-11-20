@@ -340,15 +340,22 @@ pub(crate) async fn proposal(
         COMMENT | CREATE_ISSUE | MERGE | MARK_READY | LABEL_ISSUE
     ) {
         let action = repository_action(tool, arguments)?;
+        // `owner/repo#N` links to the right repository in a multi-repository project.
+        let slug = threadlane_core::github::normalize_remote(&repository.remote_url)
+            .and_then(|remote| remote.strip_prefix("github.com/").map(str::to_owned))
+            .unwrap_or_default();
         let question = match tool {
             COMMENT => format!(
-                "Comment on {} #{} in {name}?",
+                "Comment on {} {slug}#{} in {name}?",
                 arguments["target"].as_str().unwrap_or_default(),
                 arguments["number"]
             ),
-            MERGE => format!("Merge pull request #{} in {name}?", arguments["number"]),
+            MERGE => format!(
+                "Merge pull request {slug}#{} in {name}?",
+                arguments["number"]
+            ),
             MARK_READY => format!(
-                "Mark draft pull request #{} in {name} ready for review?",
+                "Mark draft pull request {slug}#{} in {name} ready for review?",
                 arguments["number"]
             ),
             LABEL_ISSUE => {
@@ -365,7 +372,7 @@ pub(crate) async fn proposal(
                     change.push(format!("remove {}", remove.join(", ")));
                 }
                 format!(
-                    "Label issue #{} in {name}: {}?",
+                    "Label issue {slug}#{} in {name}: {}?",
                     arguments["number"],
                     change.join("; ")
                 )
@@ -424,11 +431,12 @@ pub(crate) async fn proposal(
             .and_then(Json::as_str)
             .filter(|head| valid_commit_id(head))
             .ok_or_else(|| invalid("expected_head must be a full commit SHA"))?;
-        if threadlane_core::github::normalize_remote(&repository.remote_url).is_none() {
+        let Some(remote) = threadlane_core::github::normalize_remote(&repository.remote_url) else {
             return Err(invalid("the registered remote is not a GitHub repository"));
-        }
+        };
+        let slug = remote.strip_prefix("github.com/").unwrap_or_default();
         return Ok(Proposal {
-            question: format!("Fast-forward pull request #{number} in {name}?"),
+            question: format!("Fast-forward pull request {slug}#{number} in {name}?"),
             context: format!(
                 "{about} Expected PR head: {head}. Remote: {}.",
                 repository.remote_url
