@@ -50,7 +50,7 @@ mod settings;
 mod tasks;
 mod timeline;
 
-pub use agent_edit::{AgentBinding, AgentEdit, AgentFields};
+pub use agent_edit::{AgentBinding, AgentEdit, AgentFields, backend_summary};
 pub use clock::{When, duration, format_count, parse_iso_utc};
 pub use composer::{Destination, Draft, Outgoing, SEND_HOLD_SECONDS, SendRequest, sends_on_enter};
 pub use control::{

@@ -7863,6 +7863,56 @@ async fn agent_topology_builds_three_tier_org_and_lights_up_active_delegations()
 }
 
 #[tokio::test]
+async fn team_cards_show_each_backend_model_and_cut_long_names() {
+    let hub = FakeHub::new("Work", Vec::new());
+    hub.agents.lock().expect("lock").push(Agent {
+        id: AgentId(1),
+        name: "Engineer".into(),
+        role: "engineer".into(),
+        instructions: String::new(),
+        backends: vec![BackendKind::Claude, BackendKind::Codex],
+        models: json!({"claude": "claude-opus-5-5-extended-thinking", "codex": "gpt-5"}),
+        tools: json!([]),
+        requirements: Default::default(),
+        skills: Vec::new(),
+    });
+    let (_dir, core) = core(&[("work", &hub)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+
+    let agent = &state.space("work").expect("space").agents[0];
+    assert_eq!(
+        backend_summary(agent),
+        (
+            "claude · claude-opus-5-5-exte… → codex · gpt-5".to_owned(),
+            "claude · claude-opus-5-5-extended-thinking → codex · gpt-5".to_owned(),
+        )
+    );
+    let topo = state.agent_topology("work", None, &when());
+    let card = topo
+        .nodes
+        .iter()
+        .find(|n| matches!(n.kind, TopologyNodeKind::Agent { .. }))
+        .expect("agent card");
+    assert_eq!(
+        card.subtitle,
+        "engineer · claude · claude-opus-5-5-exte… → codex · gpt-5"
+    );
+    assert_eq!(
+        card.tooltip.as_deref(),
+        Some("engineer · claude · claude-opus-5-5-extended-thinking → codex · gpt-5")
+    );
+
+    // No order and no models is either backend at its default.
+    let mut any = agent.clone();
+    any.backends.clear();
+    any.models = json!({});
+    assert_eq!(backend_summary(&any).0, "Any backend");
+    any.models = json!({"codex": "gpt-5"});
+    assert_eq!(backend_summary(&any).0, "Any backend, codex · gpt-5");
+}
+
+#[tokio::test]
 async fn agent_topology_shows_general_handoffs_and_keeps_queued_lead_edge_pending() {
     let mut general_run = task(30, TaskStatus::Running, None);
     general_run.project = "General".into();
