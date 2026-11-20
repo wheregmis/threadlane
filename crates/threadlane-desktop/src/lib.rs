@@ -470,8 +470,6 @@ pub enum Tab {
     Memory,
     /// Its agents and their permissions.
     Team,
-    /// Its review workflow.
-    Workflow,
     /// Its routines and follow-ups.
     Routines,
     /// Its repositories and machines.
@@ -480,11 +478,10 @@ pub enum Tab {
 
 impl Tab {
     /// Every tab, in the order the tab bar shows them: Chat first.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Conversation,
         Self::Tasks,
         Self::Team,
-        Self::Workflow,
         Self::Routines,
         Self::Memory,
         Self::Setup,
@@ -498,7 +495,6 @@ impl Tab {
             Self::Conversation => "Chat",
             Self::Memory => "Memory",
             Self::Team => "Team",
-            Self::Workflow => "Workflow",
             Self::Routines => "Routines",
             Self::Setup => "Setup",
         }
@@ -512,7 +508,6 @@ impl Tab {
             Self::Conversation => "Chat with the lead",
             Self::Memory => "Memory: notes and progress files",
             Self::Team => "Team: agents and permissions",
-            Self::Workflow => "Workflow: how work gets reviewed",
             Self::Routines => "Routines and follow-ups",
             Self::Setup => "Setup: repositories and machines",
         }

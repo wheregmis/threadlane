@@ -397,16 +397,6 @@ pub(super) async fn handle(
                     .ok_or_else(|| ApiError::NotFound("Attachment".into()))?,
             })
         }
-        OverviewRequest::ProjectWorkflow { project } => {
-            let project = api.project_named(Some(&project)).await?;
-            Ok(OverviewReply::ProjectWorkflow {
-                graph: db.project_workflow(project.id).await.map_err(api_error)?,
-                recipe: db.review_recipe().await.map_err(api_error)?,
-            })
-        }
-        OverviewRequest::ReviewRecipe => Ok(OverviewReply::ReviewRecipe {
-            recipe: db.review_recipe().await.map_err(api_error)?,
-        }),
         OverviewRequest::Tasks { project } => {
             let project = api.project_named(project.as_deref()).await?;
             let names = Names::of(db).await?;

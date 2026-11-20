@@ -544,7 +544,6 @@ impl Desktop {
                     Tab::Conversation => AppIcon::MessagesSquare,
                     Tab::Memory => AppIcon::BookOpen,
                     Tab::Team => AppIcon::Bot,
-                    Tab::Workflow => AppIcon::GitFork,
                     Tab::Routines => AppIcon::CalendarClock,
                     Tab::Setup => AppIcon::Settings,
                 };
@@ -584,7 +583,6 @@ impl Desktop {
             ),
             Tab::Memory => self.memory_tab(space, project, when, cx),
             Tab::Team => self.agents_tab(space, project, cx),
-            Tab::Workflow => self.workflow_tab(space, project, archived, window, cx),
             Tab::Routines => self.routines_tab(space, project, when, cx),
             Tab::Setup => self.setup_tab(space, project, cx),
         };
