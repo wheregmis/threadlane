@@ -772,6 +772,10 @@ async fn scans_share_one_pr_review_per_head_and_reuse_its_committed_verdict() {
     let (lease, review) = begin(&*hub.link).await;
     assert_eq!(review.agent_name, "Reviewer");
     assert!(review.prompt.contains(&head));
+    let target = review.pr_review.as_ref().unwrap();
+    assert_eq!(target.number, 42);
+    assert_eq!(target.revision.commit, head);
+    assert_eq!(target.revision.repository, review.repositories[0].id);
     write_progress(&hub, &lease, &review, first["task_id"].as_str().unwrap()).await;
     let mut result =
         json!({"summary":"All checks pass","pr_verdict":"approved","reviewed_head":"b".repeat(40)});

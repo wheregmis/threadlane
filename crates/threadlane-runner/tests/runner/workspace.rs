@@ -6,9 +6,9 @@ use std::path::Path;
 use serde_json::json;
 use tempfile::TempDir;
 use threadlane_core::ids::{ProjectId, RepositoryId, RunId, TaskId};
-use threadlane_core::link::{PROGRESS_WRITTEN, RunReview};
+use threadlane_core::link::{PROGRESS_WRITTEN, PullRequestReview, RunReview};
 use threadlane_core::model::{LaneKind, Repository};
-use threadlane_core::workspace::{ReviewRevision, Workspaces};
+use threadlane_core::workspace::{ReviewCheckout, ReviewRevision, Workspaces};
 use threadlane_runner::GitWorkspaces;
 use threadlane_testkit::Script;
 use threadlane_testkit::git::{bare_repository, git};
@@ -367,6 +367,86 @@ async fn the_merge_check_names_the_base_and_the_conflicting_files_and_touches_no
 }
 
 #[tokio::test]
+async fn a_standalone_pr_review_fetches_its_head_and_completes_from_a_detached_checkout() {
+    let h = Harness::new();
+    let mut s = setup();
+    s.workspaces = GitWorkspaces::new(h.config.lanes_dir.parent().unwrap().join("workspaces"));
+    let task_tree = s.prepare(T1).await;
+    let task_head = git(&task_tree, &["rev-parse", "HEAD"]);
+    let seed = s.dir.path().join("remotes/app-seed");
+    git(&seed, &["commit", "--allow-empty", "-m", "PR-only commit"]);
+    git(
+        &seed,
+        &["push", &s.repository.remote_url, "HEAD:refs/pull/42/head"],
+    );
+    let head = git(&seed, &["rev-parse", "HEAD"]).trim().to_owned();
+
+    let mut assignment = assignment(11);
+    assignment.lane_kind = LaneKind::Task;
+    assignment.task_id = Some(T1);
+    assignment.pr_review = Some(PullRequestReview {
+        number: 42,
+        revision: ReviewRevision {
+            repository: s.repository.id,
+            commit: head.clone(),
+        },
+    });
+    assignment.repositories.push(s.repository.clone());
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment)));
+    h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
+    h.link.push_tool(Ok(json!({"finished": true})));
+    h.backend.scripted.push(
+        Script::new()
+            .call("progress", "memory_create", json!({}))
+            .call(
+                "verdict",
+                "finish_task",
+                json!({"reviewed_head":head,"pr_verdict":"approved","summary":"Reviewed"}),
+            )
+            .finish("Reviewed"),
+    );
+    h.runner.work_once().await.unwrap();
+    let runs = h.backend.scripted.received();
+    let checkout = &runs[0].working_dir;
+    assert_ne!(checkout, &task_tree);
+    assert_eq!(git(checkout, &["rev-parse", "HEAD"]).trim(), head);
+    assert_eq!(
+        git(checkout, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "HEAD"
+    );
+    assert_eq!(branch(&task_tree), "threadlane/T-0001");
+    assert_eq!(git(&task_tree, &["rev-parse", "HEAD"]), task_head);
+    // Approval or progress follow-ups resume in the same checkout, even after inspecting a PR branch.
+    git(checkout, &["switch", "-c", "reviewed-pr"]);
+    let resumed = s
+        .workspaces
+        .prepare_review(
+            T1,
+            ReviewCheckout::PullRequest(42),
+            std::slice::from_ref(&s.repository),
+            &[ReviewRevision {
+                repository: s.repository.id,
+                commit: head.clone(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed, std::slice::from_ref(checkout));
+    assert_eq!(
+        git(checkout, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "HEAD"
+    );
+    let calls = h.calls();
+    assert!(calls.iter().any(|call| matches!(call, Call::Tool {tool, arguments, ..} if tool == "finish_task" && arguments["reviewed_head"] == head)));
+    assert!(
+        calls
+            .iter()
+            .any(|call| matches!(call, Call::Complete { .. }))
+    );
+}
+
+#[tokio::test]
 async fn a_review_uses_the_submitted_commit_after_the_implementation_branch_moves() {
     let h = Harness::new();
     let mut s = setup();
@@ -431,14 +511,19 @@ async fn a_review_uses_the_submitted_commit_after_the_implementation_branch_move
     );
     assert_eq!(
         s.workspaces
-            .prepare_review(T1, RunId(10), repositories, &revisions)
+            .prepare_review(
+                T1,
+                ReviewCheckout::Submission(RunId(10)),
+                repositories,
+                &revisions
+            )
             .await
             .unwrap(),
         std::slice::from_ref(review)
     );
     assert!(
         s.workspaces
-            .prepare_review(T1, RunId(10), repositories, &[])
+            .prepare_review(T1, ReviewCheckout::Submission(RunId(10)), repositories, &[])
             .await
             .is_err()
     );

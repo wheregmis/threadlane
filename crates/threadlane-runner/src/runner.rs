@@ -29,7 +29,9 @@ use threadlane_core::runtime::steps::runner::{
 };
 use threadlane_core::runtime::{Killed, Step, StepHook};
 use threadlane_core::time::{Clock, Timestamp};
-use threadlane_core::workspace::{MergeCheck, Workspaces, task_branch, task_ref, valid_commit_id};
+use threadlane_core::workspace::{
+    MergeCheck, ReviewCheckout, Workspaces, task_branch, task_ref, valid_commit_id,
+};
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -1211,7 +1213,7 @@ impl Inner {
                     self.workspaces
                         .prepare_review(
                             task,
-                            review.submission,
+                            ReviewCheckout::Submission(review.submission),
                             &assignment.repositories,
                             &review.revisions,
                         )
@@ -1225,6 +1227,28 @@ impl Inner {
                 }
             }
             .map_err(|error| format!("could not set up the task's worktrees: {error}"))?;
+            // Task checkpoints and approved actions still use the managed task branches.
+            // Give the Reviewer its own checkout, even when the target is not the first repository.
+            if let Some(review) = &assignment.pr_review {
+                let repository = assignment
+                    .repositories
+                    .iter()
+                    .find(|repo| repo.id == review.revision.repository)
+                    .ok_or_else(|| "the assigned PR repository is missing".to_owned())?;
+                return self
+                    .workspaces
+                    .prepare_review(
+                        task,
+                        ReviewCheckout::PullRequest(review.number),
+                        std::slice::from_ref(repository),
+                        std::slice::from_ref(&review.revision),
+                    )
+                    .await
+                    .map_err(|error| format!("could not prepare the PR review checkout: {error}"))?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "no PR review checkout was set up".to_owned());
+            }
             if !assignment.repositories.is_empty() {
                 return paths
                     .into_iter()

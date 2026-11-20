@@ -135,12 +135,12 @@ impl HubDb {
         Ok(assignment)
     }
 
-    pub async fn assigned_pr_head(&self, task: TaskId) -> StoreResult<Option<String>> {
+    pub async fn assigned_pr_head(&self, task: TaskId) -> StoreResult<Option<(String, String)>> {
         query_opt(
             &self.db.reader()?,
-            "SELECT head FROM pr_review_tasks WHERE task_id = ?1",
+            "SELECT pull_url, head FROM pr_review_tasks WHERE task_id = ?1",
             params![task.get()],
-            |row| Cols(row).text(0),
+            |row| Ok((Cols(row).text(0)?, Cols(row).text(1)?)),
         )
         .await
     }

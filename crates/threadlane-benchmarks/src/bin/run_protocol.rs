@@ -41,6 +41,7 @@ fn main() {
         agent_name: "Developer".into(),
         repositories: vec![],
         review: None,
+        pr_review: None,
         events: (1..=32).map(EventId).collect(),
         perform: vec![],
         backend: BackendKind::Codex,

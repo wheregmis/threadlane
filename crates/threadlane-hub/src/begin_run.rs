@@ -5,8 +5,9 @@ use std::collections::HashMap;
 
 use serde_json::Value as Json;
 use threadlane_core::backend::{DENY_RULES, NativeSession, free_backends};
+use threadlane_core::github::{normalize_remote, pull_request_number};
 use threadlane_core::ids::{AgentId, EventId, SessionId};
-use threadlane_core::link::{Begin, LinkError, RunAssignment, RunReview};
+use threadlane_core::link::{Begin, LinkError, PullRequestReview, RunAssignment, RunReview};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     Agent, BackendKind, Binding, Event, Lane, LaneKind, Lease, Mode, Repository, Session,
@@ -366,6 +367,35 @@ impl LocalLink {
                 review.as_ref().map(|round| round.revisions.as_slice()),
             )
             .await?;
+        let pr_review = if let Some(task) = &task
+            && review.is_none()
+            && let Some((url, commit)) = db.assigned_pr_head(task.id).await.map_err(link_error)?
+        {
+            let number = pull_request_number(&url).ok_or_else(|| {
+                LinkError::Rejected(format!("Invalid assigned PR URL for {}", task.id))
+            })?;
+            let repository = repositories
+                .iter()
+                .find(|repo| {
+                    normalize_remote(&repo.remote_url)
+                        .is_some_and(|remote| url == format!("https://{remote}/pull/{number}"))
+                })
+                .ok_or_else(|| {
+                    LinkError::Rejected(format!(
+                        "Assigned PR repository for {} is unavailable",
+                        task.id
+                    ))
+                })?;
+            Some(PullRequestReview {
+                number,
+                revision: ReviewRevision {
+                    repository: repository.id,
+                    commit,
+                },
+            })
+        } else {
+            None
+        };
         let space_lead_ask = if lane.kind == LaneKind::Lead {
             crate::space_lead::answered_ask(db, &events)
                 .await
@@ -388,6 +418,7 @@ impl LocalLink {
             task_id: task.as_ref().map(|task| task.id),
             agent_name: agent.name.clone(),
             repositories,
+            pr_review,
             review: review.as_ref().map(|review| RunReview {
                 submission: review.submission,
                 revisions: review.revisions.clone(),

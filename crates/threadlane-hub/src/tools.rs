@@ -395,7 +395,7 @@ impl HubTools {
             }
             let _ = write!(
                 spec.goal,
-                "\nReview {} at exactly {}. Verify the checked-out commit before reading its diff. Pass reviewed_head and pr_verdict to finish_task.",
+                "\nReview {} at exactly {}. Verify HEAD in the review checkout before reading its diff. Keep the managed task branch intact. Pass reviewed_head and pr_verdict to finish_task.",
                 target.url, target.head
             );
             match self
@@ -608,7 +608,7 @@ impl HubTools {
                 .assigned_pr_head(task_id)
                 .await
                 .map_err(tool_error)?;
-            if let Some(head) = assigned {
+            if let Some((_, head)) = assigned {
                 if arguments["reviewed_head"].as_str() != Some(&head) {
                     return Err(invalid(
                         "reviewed_head must match the assigned full PR head SHA",
