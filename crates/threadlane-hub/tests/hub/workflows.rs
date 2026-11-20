@@ -164,3 +164,128 @@ async fn saved_workflow_creates_one_pair_and_rolls_back_if_a_role_is_invalid() {
     assert_eq!(tasks[1].depends_on, [tasks[0].id]);
     assert!(tasks[1].goal.contains("Check the acceptance criteria."));
 }
+
+#[tokio::test]
+async fn canvas_saves_per_project_and_launches_the_saved_dependency_graph_once() {
+    use threadlane_core::work::{WorkflowGraph, WorkflowStep};
+    let hub = TestHub::start().await;
+    let project = hub.general().await;
+    hub.api
+        .tasks(TaskRequest::InstallReviewTeam {
+            project: project.name.clone(),
+            engineer: "Engineer".into(),
+            reviewer: "Reviewer".into(),
+            recurrence: schedule(),
+        })
+        .await
+        .unwrap();
+    hub.api
+        .org(OrgRequest::AddRepository {
+            project: Some(project.name.clone()),
+            name: "demo".into(),
+            remote_url: "https://github.com/example/demo.git".into(),
+            default_branch: None,
+        })
+        .await
+        .unwrap();
+    let save = |graph| TaskRequest::SaveProjectWorkflow {
+        project: project.name.clone(),
+        graph,
+    };
+    let start = |version, id: &str| TaskRequest::StartProjectWorkflow {
+        project: project.name.clone(),
+        repository: "demo".into(),
+        goal: "Ship search".into(),
+        version,
+        client_request_id: id.into(),
+    };
+    let mut graph = WorkflowGraph::from_review(&ReviewRecipe::default());
+    graph.steps.push(WorkflowStep {
+        id: 9,
+        name: "Test".into(),
+        agent: "Engineer".into(),
+        instructions: "Run checks".into(),
+        after: vec![],
+        owner_review: false,
+        position: Some([368, 144]),
+    });
+    graph.steps[1].after.push(9);
+    graph.steps.reverse();
+    let mut invalid = graph.clone();
+    invalid.steps[0].after.push(2);
+    assert!(hub.api.tasks(save(invalid)).await.is_err());
+    let TaskReply::ProjectWorkflow { graph: saved } =
+        hub.api.tasks(save(graph.clone())).await.unwrap()
+    else {
+        panic!("expected saved graph")
+    };
+    assert!(hub.api.tasks(save(graph)).await.is_err());
+    let OverviewReply::ProjectWorkflow { graph: loaded, .. } = hub
+        .api
+        .overview(OverviewRequest::ProjectWorkflow {
+            project: project.name.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected graph")
+    };
+    assert_eq!(loaded.as_ref(), Some(&saved));
+    assert_eq!(saved.steps[0].position, Some([368, 144]));
+    assert!(
+        hub.api
+            .tasks(start(saved.version - 1, "stale"))
+            .await
+            .is_err()
+    );
+    let result = hub.api.tasks(start(saved.version, "launch")).await.unwrap();
+    let tasks = hub.db.tasks(project.id).await.unwrap();
+    assert_eq!(tasks.len(), 3);
+    let review = tasks
+        .iter()
+        .find(|t| t.title.starts_with("Review"))
+        .unwrap();
+    let mut roots: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.depends_on.is_empty())
+        .map(|t| t.id)
+        .collect();
+    roots.sort();
+    assert_eq!(review.depends_on, roots);
+    assert!(
+        review
+            .created_by_call
+            .as_deref()
+            .unwrap()
+            .starts_with("canvas-review:")
+    );
+    let reviewer = hub
+        .db
+        .agents()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.name == "Reviewer")
+        .unwrap();
+    assert_eq!(review.agent_id, reviewer.id);
+    assert!(tasks.iter().all(|t| t.goal.contains("Ship search")));
+    assert!(roots.iter().all(|id| review.goal.contains(&id.to_string())));
+    // The unbound agent is on the last step: no partial run may survive.
+    let mut edited = saved.clone();
+    edited.steps.iter_mut().find(|s| s.id == 2).unwrap().agent = "Missing".into();
+    let TaskReply::ProjectWorkflow { graph: edited } = hub.api.tasks(save(edited)).await.unwrap()
+    else {
+        panic!("expected saved graph")
+    };
+    assert!(
+        hub.api
+            .tasks(start(edited.version, "another"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        hub.api.tasks(start(saved.version, "launch")).await.unwrap(),
+        result
+    );
+    assert_eq!(hub.db.tasks(project.id).await.unwrap().len(), 3);
+}

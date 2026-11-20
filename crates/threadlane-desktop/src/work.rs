@@ -1,11 +1,11 @@
 //! Focused views reached from a project, a routine, or the space sidebar.
 use crate::{
     Desktop, Screen, Tab,
-    components::{button, field, meta, page_header, section},
+    components::{button, card, field, meta, page_header, section},
     describe,
     icons::AppIcon,
     local_zone,
-    tokens::{LG, MD, READING_WIDTH, SIDEBAR_WIDTH, SM},
+    tokens::{LG, MD, READING_WIDTH, SIDEBAR_WIDTH, SM, XL},
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
@@ -29,6 +29,9 @@ use threadlane_core::{
 };
 use threadlane_desktop::{Activity, When, count_form, format_count};
 
+mod canvas;
+use canvas::CanvasDraft;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorkPage {
     History {
@@ -48,6 +51,7 @@ pub(super) enum WorkPage {
         index: u32,
     },
     Workflow,
+    ProjectWorkflow(String),
 }
 
 impl WorkPage {
@@ -76,6 +80,9 @@ impl WorkPage {
                 index: *index,
             },
             Self::Workflow => OverviewRequest::ReviewRecipe,
+            Self::ProjectWorkflow(project) => OverviewRequest::ProjectWorkflow {
+                project: project.clone(),
+            },
         }
     }
     fn title(&self) -> &'static str {
@@ -85,7 +92,7 @@ impl WorkPage {
             Self::Usage(_) => "Space usage",
             Self::Outputs { .. } => "Project outputs",
             Self::Image { .. } => "Attachment",
-            Self::Workflow => "Review workflow",
+            Self::Workflow | Self::ProjectWorkflow(_) => "Review workflow",
         }
     }
 }
@@ -96,6 +103,9 @@ pub(super) struct WorkView {
     generation: u64,
     saving: bool,
     loaded_recipe: Option<i64>,
+    editing_steps: bool,
+    canvas: Option<CanvasDraft>,
+    show_canvas: bool,
     loaded_search: bool,
     expanded_usage: HashSet<(String, String, String)>,
     retry_workflow: Option<(TaskRequest, String)>,
@@ -103,7 +113,7 @@ pub(super) struct WorkView {
     review: Entity<TextareaState>,
     engineer: String,
     reviewer: String,
-    goal: Entity<InputState>,
+    goal: Entity<TextareaState>,
     repository: String,
     search: Entity<InputState>,
     zone: String,
@@ -112,10 +122,12 @@ pub(super) struct WorkView {
 
 impl WorkView {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
-        let mut input =
-            |value: &str| cx.new(|cx| InputState::new(window, cx).default_value(value.to_owned()));
-        let goal = input("");
-        let search = input("");
+        let goal = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(3)
+                .placeholder("What should this workflow accomplish?")
+        });
+        let search = cx.new(|cx| InputState::new(window, cx));
         let implementation = cx.new(|cx| TextareaState::new(window, cx).rows(3));
         let review = cx.new(|cx| TextareaState::new(window, cx).rows(3));
         cx.observe(&goal, |_, _, cx| cx.notify()).detach();
@@ -128,6 +140,9 @@ impl WorkView {
             saving: false,
             manual: Default::default(),
             loaded_recipe: None,
+            editing_steps: false,
+            canvas: None,
+            show_canvas: true,
             loaded_search: false,
             expanded_usage: HashSet::new(),
             retry_workflow: None,
@@ -146,11 +161,35 @@ impl WorkView {
         self.data = None;
         self.loading = false;
         self.loaded_recipe = None;
+        self.editing_steps = false;
+        self.canvas = None;
+        self.show_canvas = true;
         self.loaded_search = false;
         self.expanded_usage.clear();
         self.retry_workflow = None;
         self.saving = false;
     }
+    fn identify_run(&mut self, request: &mut TaskRequest) {
+        if self
+            .retry_workflow
+            .as_ref()
+            .is_none_or(|(draft, _)| draft != request)
+        {
+            self.retry_workflow = Some((request.clone(), ClientCore::request_id()));
+        }
+        if let Some((_, id)) = &self.retry_workflow {
+            match request {
+                TaskRequest::StartProjectWorkflow {
+                    client_request_id, ..
+                }
+                | TaskRequest::StartReviewWorkflow {
+                    client_request_id, ..
+                } => client_request_id.clone_from(id),
+                _ => {}
+            }
+        }
+    }
+
     fn moment(&self, at: threadlane_core::time::Timestamp, when: &When) -> String {
         jiff::Timestamp::from_millisecond(at.as_millis())
             .ok()
@@ -164,6 +203,7 @@ impl WorkView {
 
 #[derive(Clone, Copy)]
 enum WorkflowChoice {
+    Step(u32),
     Repository,
     Engineer,
     Reviewer,
@@ -172,25 +212,28 @@ enum WorkflowChoice {
 impl WorkflowChoice {
     fn label(self) -> &'static str {
         match self {
+            Self::Step(_) => "Step agent",
             Self::Repository => "Repository",
             Self::Engineer => "Engineer",
             Self::Reviewer => "Reviewer",
         }
     }
 
-    fn id(self) -> &'static str {
+    fn id(self) -> ElementId {
         match self {
-            Self::Repository => "workflow-repository",
-            Self::Engineer => "workflow-engineer",
-            Self::Reviewer => "workflow-reviewer",
+            Self::Step(id) => ("workflow-step-agent", id as usize).into(),
+            Self::Repository => "workflow-repository".into(),
+            Self::Engineer => "workflow-engineer".into(),
+            Self::Reviewer => "workflow-reviewer".into(),
         }
     }
 
-    fn field(self, work: &mut WorkView) -> &mut String {
+    fn field(self, work: &mut WorkView) -> Option<&mut String> {
         match self {
-            Self::Repository => &mut work.repository,
-            Self::Engineer => &mut work.engineer,
-            Self::Reviewer => &mut work.reviewer,
+            Self::Step(id) => Some(&mut work.canvas.as_mut()?.step_mut(id)?.agent),
+            Self::Repository => Some(&mut work.repository),
+            Self::Engineer => Some(&mut work.engineer),
+            Self::Reviewer => Some(&mut work.reviewer),
         }
     }
 }
@@ -203,44 +246,19 @@ fn workflow_start_blocker(
     goal: &str,
 ) -> Option<&'static str> {
     if dirty {
-        Some("Save the edited steps before starting.")
+        Some("Save your shared instructions before starting.")
     } else if project_off {
         Some("Turn on this project before starting.")
     } else if !roles_ready {
         Some("Choose two enabled specialists on the project team, or install a review team.")
     } else if !repository_ready {
-        Some("Choose a repository registered in this project.")
+        Some("Choose a project repository. Add repositories in Setup.")
     } else if goal.trim().is_empty() {
         Some("Add a goal to start the workflow.")
+    } else if goal.trim().len() > 8192 {
+        Some("Shorten the goal to 8 KiB or less.")
     } else {
         None
-    }
-}
-
-struct ViewWorkflowRuns<'a> {
-    implementations: Vec<&'a threadlane_core::client::TaskSummary>,
-    reviews: std::collections::HashMap<TaskId, &'a threadlane_core::client::TaskSummary>,
-}
-
-impl<'a> ViewWorkflowRuns<'a> {
-    fn from_tasks(tasks: &'a [threadlane_core::client::TaskSummary]) -> Self {
-        let mut runs = Self {
-            implementations: Vec::new(),
-            reviews: Default::default(),
-        };
-        for row in tasks {
-            let Some(call) = row.task.created_by_call.as_deref() else {
-                continue;
-            };
-            if call.starts_with("workflow-implement:") {
-                runs.implementations.push(row);
-            } else if call.starts_with("workflow-review:")
-                && let [first] = row.task.depends_on.as_slice()
-            {
-                runs.reviews.insert(*first, row);
-            }
-        }
-        runs
     }
 }
 
@@ -698,7 +716,7 @@ impl Desktop {
                 match result {
                     Ok(TaskReply::Task { task }) => {
                         this.state.report(Activity::Done(format!(
-                            "Started review workflow at {} in {project}.",
+                            "Started workflow at {} in {project}.",
                             task.id
                         )));
                         if visible {
@@ -710,6 +728,19 @@ impl Desktop {
                                 cx,
                             );
                         }
+                    }
+                    Ok(TaskReply::ProjectWorkflow { graph }) => {
+                        if visible
+                            && let Some(Ok(OverviewReply::ProjectWorkflow { graph: saved, .. })) =
+                                &mut this.work.data
+                        {
+                            if let Some(draft) = &mut this.work.canvas {
+                                draft.saved(graph.version);
+                            }
+                            *saved = Some(graph);
+                        }
+                        this.state
+                            .report(Activity::Done(format!("Saved the workflow for {project}.")));
                     }
                     Ok(TaskReply::ReviewTeam { timer }) => {
                         this.state.report(Activity::Done(format!(
@@ -729,7 +760,14 @@ impl Desktop {
                     }
                     Ok(TaskReply::ReviewRecipe { recipe }) => {
                         if visible {
-                            this.work.data = Some(Ok(OverviewReply::ReviewRecipe { recipe }));
+                            if let Some(Ok(OverviewReply::ProjectWorkflow {
+                                recipe: saved, ..
+                            })) = &mut this.work.data
+                            {
+                                *saved = recipe;
+                            } else {
+                                this.work.data = Some(Ok(OverviewReply::ReviewRecipe { recipe }));
+                            }
                         }
                         this.state.report(Activity::Done(format!(
                             "Saved the review workflow in {space}."
@@ -751,39 +789,54 @@ impl Desktop {
         selected: &str,
         options: Vec<String>,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let view = cx.entity().downgrade();
         let generation = self.work.generation;
         let label = choice.label();
-        v_flex().gap(SM).child(meta(label, cx)).child(
-            button(choice.id())
-                .small()
-                .outline()
-                .icon(AppIcon::ChevronDown)
-                .label(if selected.is_empty() {
-                    format!("Choose {}", label.to_lowercase())
+        let current = selected.to_owned();
+        button(choice.id())
+            .small()
+            .outline()
+            .icon(AppIcon::ChevronDown)
+            .label(if selected.is_empty() {
+                format!("Choose {}", label.to_lowercase())
+            } else {
+                selected.to_owned()
+            })
+            .accessibility_label(format!(
+                "{label}, {}",
+                if selected.is_empty() {
+                    "unselected"
                 } else {
-                    selected.to_owned()
-                })
-                .accessibility_label(format!("Choose {}", label.to_lowercase()))
-                .disabled(self.work.saving || options.is_empty())
-                .dropdown_menu(move |mut menu, _, _| {
-                    for option in &options {
-                        let (picked, view) = (option.clone(), view.clone());
-                        menu = menu.item(PopupMenuItem::new(option.clone()).on_click(
-                            move |_, _, cx| {
+                    selected
+                }
+            ))
+            .when(!selected.is_empty(), |button| {
+                button.tooltip(selected.to_owned())
+            })
+            .disabled(self.work.saving || options.is_empty())
+            .dropdown_menu(move |mut menu, _, _| {
+                for option in &options {
+                    let (picked, view) = (option.clone(), view.clone());
+                    menu = menu.item(
+                        PopupMenuItem::new(option.clone())
+                            .checked(*option == current)
+                            .on_click(move |_, _, cx| {
                                 let _ = view.update(cx, |this, cx| {
-                                    if this.work.generation == generation && !this.work.saving {
-                                        *choice.field(&mut this.work) = picked.clone();
+                                    if this.work.generation == generation
+                                        && !this.work.saving
+                                        && let Some(field) = choice.field(&mut this.work)
+                                    {
+                                        field.clone_from(&picked);
                                         cx.notify();
                                     }
                                 });
-                            },
-                        ));
-                    }
-                    menu
-                }),
-        )
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element()
     }
 
     pub(super) fn workflow_tab(
@@ -803,9 +856,44 @@ impl Desktop {
         } else {
             match self.work.data.as_ref() {
                 None => body = body.child(meta("Loading review workflow…", cx)),
+                Some(Ok(OverviewReply::ProjectWorkflow { graph, recipe })) => {
+                    let graph = graph.clone();
+                    let recipe = recipe.clone();
+                    self.initialize_review(space, project, &recipe, window, cx);
+                    let canvas = self.work.show_canvas;
+                    let modes = h_flex().gap(SM).children(
+                        [(true, "Workflow canvas"), (false, "Review preset")].map(
+                            |(value, label)| {
+                                button(label)
+                                    .small()
+                                    .outline()
+                                    .selected(canvas == value)
+                                    .label(label)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.work.show_canvas = value;
+                                        cx.notify();
+                                    }))
+                            },
+                        ),
+                    );
+                    body = body.child(modes);
+                    if canvas {
+                        body = body.child(self.workflow_canvas(
+                            space,
+                            project,
+                            graph.as_ref(),
+                            &recipe,
+                            window,
+                            cx,
+                        ));
+                    } else {
+                        body = body.child(self.review_form(space, project, &recipe, cx));
+                    }
+                }
                 Some(Ok(OverviewReply::ReviewRecipe { recipe })) => {
                     let recipe = recipe.clone();
-                    body = body.child(self.review_form(space, project, &recipe, window, cx));
+                    self.initialize_review(space, project, &recipe, window, cx);
+                    body = body.child(self.review_form(space, project, &recipe, cx));
                 }
                 Some(result) => {
                     let message = result.as_ref().err().map_or(
@@ -821,6 +909,18 @@ impl Desktop {
                                 this.load_screen(cx);
                             })),
                     );
+                    let named = space.to_owned();
+                    body = body.child(
+                        h_flex().child(
+                            button("legacy-workflow")
+                                .small()
+                                .label("Open review preset")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.work.data = None;
+                                    this.load_work(named.clone(), WorkPage::Workflow, cx);
+                                })),
+                        ),
+                    );
                 }
             }
         }
@@ -834,15 +934,14 @@ impl Desktop {
             .into_any_element()
     }
 
-    fn review_form(
+    fn initialize_review(
         &mut self,
         space: &str,
         project: &str,
         recipe: &ReviewRecipe,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Div {
-        use gpui_kit::component::WindowExt as _;
+    ) {
         if self.work.loaded_recipe != Some(recipe.version) {
             if self.work.loaded_recipe.is_none() {
                 let repos = self.state.task_repositories(space, project);
@@ -866,6 +965,16 @@ impl Desktop {
                 .update(cx, |f, cx| f.set_value(recipe.review.clone(), window, cx));
             self.work.loaded_recipe = Some(recipe.version);
         }
+    }
+
+    fn review_form(
+        &mut self,
+        space: &str,
+        project: &str,
+        recipe: &ReviewRecipe,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        use gpui_kit::component::WindowExt as _;
         let repositories = self.state.task_repositories(space, project);
         if self.work.repository.is_empty() && repositories.len() == 1 {
             self.work.repository.clone_from(&repositories[0]);
@@ -907,7 +1016,7 @@ impl Desktop {
         let (s, p) = (space.to_owned(), project.to_owned());
         let save = button("save-recipe")
             .small()
-            .label("Save steps for this space")
+            .label("Save shared instructions")
             .disabled(self.work.saving || !dirty)
             .on_click(cx.listener(move |this, _, _, cx| {
                 let recipe = ReviewRecipe {
@@ -926,6 +1035,7 @@ impl Desktop {
         let saved = recipe.clone();
         let start = button("run-review")
             .primary()
+            .icon(AppIcon::Play)
             .label("Start workflow")
             .disabled(self.work.saving || blocker.is_some())
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -947,28 +1057,13 @@ impl Desktop {
                     goal: this.work.goal.read(cx).value().to_string(),
                     client_request_id: String::new(),
                 };
-                if this
-                    .work
-                    .retry_workflow
-                    .as_ref()
-                    .is_none_or(|(draft, _)| draft != &request)
-                {
-                    this.work.retry_workflow = Some((request.clone(), ClientCore::request_id()));
-                }
-                if let (
-                    TaskRequest::StartReviewWorkflow {
-                        client_request_id, ..
-                    },
-                    Some((_, id)),
-                ) = (&mut request, &this.work.retry_workflow)
-                {
-                    client_request_id.clone_from(id);
-                }
+                this.work.identify_run(&mut request);
                 this.workflow_action(s.clone(), p.clone(), request, cx);
             }));
         let (s, p) = (space.to_owned(), project.to_owned());
         let preset = button("preview-team")
             .small()
+            .ghost()
             .label("Preview PR review team…")
             .disabled(self.work.saving || self.work.engineer == self.work.reviewer)
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1064,28 +1159,123 @@ impl Desktop {
                         )
                 });
             }));
-        v_flex()
-            .gap(MD)
+        let launch = card(cx)
             .child(section("Review workflow"))
-            .child(meta("An engineer implements the goal, a reviewer checks the result, and you decide whether to accept it.", cx))
-            .child(section("Reusable steps"))
-            .child("1. Implementation")
+            .child(meta("Goal", cx))
             .child(
-                Textarea::new(&self.work.implementation).aria_label("Implementation instructions"),
+                Textarea::new(&self.work.goal)
+                    .aria_label("Workflow goal")
+                    .disabled(self.work.saving),
             )
-            .child("2. Review")
-            .child(Textarea::new(&self.work.review).aria_label("Review instructions"))
-            .child(save)
-            .child(section("Project team"))
-            .child(self.workflow_picker(WorkflowChoice::Engineer, &self.work.engineer, specialists.clone(), cx))
-            .child(self.workflow_picker(WorkflowChoice::Reviewer, &self.work.reviewer, specialists, cx))
-            .child(preset)
-            .child(section("Start a review workflow"))
-            .child(self.workflow_picker(WorkflowChoice::Repository, &self.work.repository, repositories, cx))
-            .child("Goal")
-            .child(field(&self.work.goal).aria_label("Workflow goal"))
-            .children(blocker.map(|reason| meta(reason, cx)))
-            .child(start)
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .justify_between()
+                    .gap(SM)
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .flex_wrap()
+                            .gap(SM)
+                            .child(meta("Repository", cx))
+                            .child(self.workflow_picker(
+                                WorkflowChoice::Repository,
+                                &self.work.repository,
+                                repositories,
+                                cx,
+                            )),
+                    )
+                    .child(start),
+            )
+            .children(blocker.map(|reason| meta(reason, cx)));
+        let engineer = self.workflow_picker(
+            WorkflowChoice::Engineer,
+            &self.work.engineer,
+            specialists.clone(),
+            cx,
+        );
+        let reviewer = self.workflow_picker(
+            WorkflowChoice::Reviewer,
+            &self.work.reviewer,
+            specialists,
+            cx,
+        );
+        let stage = |title, contents: AnyElement| {
+            card(cx)
+                .flex_1()
+                .flex_basis(rems(12.))
+                .child(section(title))
+                .child(contents)
+        };
+        let stages = h_flex()
+            .items_stretch()
+            .flex_wrap()
+            .gap(SM)
+            .child(stage("1. Implement", engineer))
+            .child(stage("2. Review", reviewer))
+            .child(stage(
+                "3. Decide",
+                meta("You decide whether to accept the review.", cx).into_any_element(),
+            ));
+        let toggle = button("edit-workflow-steps")
+            .ghost()
+            .small()
+            .icon(if self.work.editing_steps {
+                AppIcon::ChevronDown
+            } else {
+                AppIcon::ChevronRight
+            })
+            .label(if self.work.editing_steps {
+                "Hide shared instructions"
+            } else if dirty {
+                "Edit shared instructions (unsaved)"
+            } else {
+                "Edit shared instructions"
+            })
+            .selected(self.work.editing_steps)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.work.editing_steps = !this.work.editing_steps;
+                cx.notify();
+            }));
+        let steps = v_flex()
+            .gap(SM)
+            .child(section("Workflow steps"))
+            .child(stages)
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .justify_between()
+                    .gap(SM)
+                    .child(toggle)
+                    .child(preset),
+            )
+            .when(self.work.editing_steps, |steps| {
+                steps.child(
+                    v_flex()
+                        .gap(SM)
+                        .child(meta(
+                            format!("These instructions apply to review workflows across {space}."),
+                            cx,
+                        ))
+                        .child("Implementation instructions")
+                        .child(
+                            Textarea::new(&self.work.implementation)
+                                .aria_label("Implementation instructions")
+                                .disabled(self.work.saving),
+                        )
+                        .child("Review instructions")
+                        .child(
+                            Textarea::new(&self.work.review)
+                                .aria_label("Review instructions")
+                                .disabled(self.work.saving),
+                        )
+                        .child(h_flex().child(save)),
+                )
+            });
+        v_flex()
+            .gap(XL)
+            .child(launch)
+            .child(steps)
             .child(self.workflow_runs(space, project, cx))
     }
 
@@ -1094,31 +1284,61 @@ impl Desktop {
         let Some(view) = self.state.project(space, project) else {
             return panel.child(meta("Loading tasks…", cx));
         };
-        let runs = ViewWorkflowRuns::from_tasks(&view.tasks);
-        if runs.implementations.is_empty() {
-            return panel.child(meta("No review workflows started in this project yet.", cx));
-        }
-        for first in runs.implementations.into_iter().rev().take(5) {
-            let review = runs.reviews.get(&first.task.id);
-            let label = |step: &str, row: &threadlane_core::client::TaskSummary| {
-                format!(
-                    "{step} · {} · {} · {}",
-                    row.task.id, row.agent, row.task.status
-                )
+        let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+        for row in &view.tasks {
+            let Some((kind, suffix)) = row
+                .task
+                .created_by_call
+                .as_deref()
+                .and_then(|key| key.split_once(':'))
+            else {
+                continue;
             };
+            let (run, step) = match kind {
+                "workflow-implement" => ((false, suffix), "Implement"),
+                "workflow-review" => ((false, suffix), "Review"),
+                "canvas" | "canvas-review" => {
+                    let Some((_, run)) = suffix.split_once(':') else {
+                        continue;
+                    };
+                    let title = row
+                        .task
+                        .title
+                        .split_once(" · ")
+                        .map_or(row.task.title.as_str(), |(step, _)| step);
+                    ((true, run), title)
+                }
+                _ => continue,
+            };
+            groups.entry(run).or_default().push((row, step));
+        }
+        let mut runs: Vec<_> = groups.into_values().collect();
+        runs.sort_by_key(|rows| rows[0].0.task.id);
+        if runs.is_empty() {
+            return panel.child(meta("No workflows started in this project yet.", cx));
+        }
+        for rows in runs.into_iter().rev().take(5) {
             panel = panel.child(
                 v_flex()
                     .gap(SM)
-                    .child(meta(first.task.title.clone(), cx))
-                    .child(self.source_task_label(
-                        space,
-                        first.task.id,
-                        label("Implement", first),
-                        cx,
-                    ))
-                    .children(review.map(|row| {
-                        self.source_task_label(space, row.task.id, label("Review", row), cx)
-                    })),
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .py(SM)
+                    .child(rows[0].0.task.title.clone())
+                    .child(h_flex().flex_wrap().gap(SM).children(rows.into_iter().map(
+                        |(row, step)| {
+                            let status = threadlane_desktop::status_label(
+                                row.task.status,
+                                row.task.waiting_reason.as_deref(),
+                            );
+                            self.source_task_label(
+                                space,
+                                row.task.id,
+                                format!("{step} · {} · {} · {status}", row.task.id, row.agent),
+                                cx,
+                            )
+                        },
+                    ))),
             );
         }
         panel
@@ -1527,5 +1747,15 @@ mod usage_tests {
         assert_eq!(reported_cost(0.0, 0), "—");
         assert_eq!(reported_cost(0.0, 2), "USD 0.0000");
         assert_eq!(reported_cost(1.2345, 1), "USD 1.2345");
+    }
+
+    #[test]
+    fn workflow_goal_limit_counts_trimmed_utf8_bytes() {
+        let goal = "é".repeat(4096);
+        assert_eq!(
+            workflow_start_blocker(false, false, true, true, &format!(" {goal}\n")),
+            None
+        );
+        assert!(workflow_start_blocker(false, false, true, true, &format!("{goal}!")).is_some());
     }
 }

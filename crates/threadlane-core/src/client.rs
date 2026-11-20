@@ -763,6 +763,9 @@ pub enum OverviewRequest {
         event: EventId,
         index: u32,
     },
+    ProjectWorkflow {
+        project: String,
+    },
     ReviewRecipe,
     /// Every task of a project, oldest first. `None` means the General
     /// project.
@@ -886,6 +889,10 @@ pub enum OverviewReply {
     },
     OutputImage {
         image: ImageAttachment,
+    },
+    ProjectWorkflow {
+        graph: Option<crate::work::WorkflowGraph>,
+        recipe: crate::work::ReviewRecipe,
     },
     ReviewRecipe {
         recipe: crate::work::ReviewRecipe,
@@ -1283,6 +1290,17 @@ pub enum TimerReply {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskRequest {
+    SaveProjectWorkflow {
+        project: String,
+        graph: crate::work::WorkflowGraph,
+    },
+    StartProjectWorkflow {
+        project: String,
+        goal: String,
+        repository: String,
+        version: i64,
+        client_request_id: String,
+    },
     SaveReviewRecipe {
         recipe: crate::work::ReviewRecipe,
     },
@@ -1336,6 +1354,9 @@ pub enum TaskRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskReply {
+    ProjectWorkflow {
+        graph: crate::work::WorkflowGraph,
+    },
     ReviewRecipe {
         recipe: crate::work::ReviewRecipe,
     },

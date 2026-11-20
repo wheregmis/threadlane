@@ -17,7 +17,9 @@ use threadlane_core::model::{
 };
 use threadlane_core::store::{StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
-use threadlane_core::work::{Occurrence, OutputSource, ProjectOutput, ReviewRecipe, UsageGroup};
+use threadlane_core::work::{
+    Occurrence, OutputSource, ProjectOutput, ReviewRecipe, UsageGroup, WorkflowGraph,
+};
 use turso::Connection;
 
 #[cfg(test)]
@@ -94,7 +96,139 @@ async fn bound_specialist(
         params![project.get(),name],|row|Cols(row).id(0)).await?.ok_or_else(||StoreError::Invalid(format!("Bind an enabled specialist named {name:?} to this project.")))
 }
 
+async fn project_graph(
+    conn: &Connection,
+    project: ProjectId,
+) -> StoreResult<Option<WorkflowGraph>> {
+    query_one(
+        conn,
+        "SELECT workflow FROM projects WHERE id=?1",
+        params![project.get()],
+        |row| Cols(row).opt_de(0),
+    )
+    .await
+}
+
 impl HubDb {
+    pub async fn project_workflow(&self, project: ProjectId) -> StoreResult<Option<WorkflowGraph>> {
+        project_graph(&self.db.reader()?, project).await
+    }
+
+    pub async fn save_project_workflow(
+        &self,
+        project: ProjectId,
+        mut graph: WorkflowGraph,
+    ) -> StoreResult<WorkflowGraph> {
+        graph
+            .validate()
+            .map_err(|error| StoreError::Invalid(error.into()))?;
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        crate::org::require_active_project(conn, project).await?;
+        let current = project_graph(conn, project)
+            .await?
+            .map_or(0, |saved| saved.version);
+        if graph.version != current {
+            return Err(StoreError::Invalid(
+                "The workflow changed on another client. Reopen it before saving.".into(),
+            ));
+        }
+        graph.version += 1;
+        exec(
+            conn,
+            "UPDATE projects SET workflow=?1 WHERE id=?2",
+            params![json_text(&graph)?, project.get()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(graph)
+    }
+
+    pub async fn start_project_workflow(
+        &self,
+        project: ProjectId,
+        repository: RepositoryId,
+        goal: &str,
+        version: i64,
+        request: &str,
+    ) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        crate::org::require_active_project(conn, project).await?;
+        // The first task is the receipt even if the graph has since been edited.
+        for prefix in ["canvas", "canvas-review"] {
+            if let Some(task) =
+                crate::task::task_by_call(conn, &format!("{prefix}:0:{project}:{request}")).await?
+            {
+                tx.commit().await?;
+                return Ok(task);
+            }
+        }
+        let graph = project_graph(conn, project)
+            .await?
+            .filter(|graph| graph.version == version)
+            .ok_or_else(|| {
+                StoreError::Invalid("Reload the saved workflow before starting it.".into())
+            })?;
+        let layers = graph
+            .layers()
+            .map_err(|error| StoreError::Invalid(error.into()))?;
+        let mut tasks = std::collections::HashMap::new();
+        let mut first = None;
+        for (index, step) in layers.into_iter().flatten().enumerate() {
+            let depends_on: Vec<TaskId> = step.after.iter().map(|id| tasks[id]).collect();
+            let mut prompt = format!("{goal}\n\n{}", step.instructions);
+            if !depends_on.is_empty() {
+                let sources = depends_on
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                prompt.push_str(&format!("\n\nUse the recorded results of {sources}."));
+            }
+            let prefix = if step.owner_review {
+                "canvas-review"
+            } else {
+                "canvas"
+            };
+            let task = crate::task::insert_task_in(
+                conn,
+                None,
+                &NewTask {
+                    project_id: project,
+                    agent_id: bound_specialist(conn, project, &step.agent).await?,
+                    title: format!(
+                        "{} · {}",
+                        step.name,
+                        goal.lines()
+                            .next()
+                            .unwrap_or(goal)
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                    ),
+                    goal: prompt,
+                    repositories: vec![repository],
+                    parent_task_id: None,
+                    depends_on,
+                    origin: TaskOrigin::User,
+                    status: TaskStatus::Queued,
+                    priority: 0,
+                    created_by_call: Some(format!("{prefix}:{index}:{project}:{request}")),
+                    created_at: self.now(),
+                },
+                None,
+            )
+            .await?;
+            tasks.insert(step.id, task.id);
+            first.get_or_insert(task);
+        }
+        let first =
+            first.ok_or_else(|| StoreError::Invalid("Add a step before starting.".into()))?;
+        tx.commit().await?;
+        Ok(first)
+    }
+
     pub async fn start_review_workflow(
         &self,
         project: ProjectId,

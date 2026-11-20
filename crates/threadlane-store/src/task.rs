@@ -100,6 +100,10 @@ async fn task_in(
     }
 }
 
+pub(crate) async fn task_by_call(conn: &Connection, call: &str) -> StoreResult<Option<Task>> {
+    task_in(conn, "created_by_call = ?1", call.into()).await
+}
+
 async fn existing_task(conn: &Connection, id: TaskId) -> StoreResult<Task> {
     task_in(conn, "id = ?1", id.get().into())
         .await?
@@ -367,10 +371,9 @@ pub(crate) async fn complete_result(
     now: Timestamp,
 ) -> StoreResult<()> {
     if let Some(result) = &task.result
-        && task
-            .created_by_call
-            .as_deref()
-            .is_some_and(|key| key.starts_with("workflow-review:"))
+        && task.created_by_call.as_deref().is_some_and(|key| {
+            key.starts_with("workflow-review:") || key.starts_with("canvas-review:")
+        })
         && crate::work::needs_owner_decision(conn, task, result, run, now).await?
     {
         wait_on_decision(conn, task).await?;
@@ -879,7 +882,7 @@ pub(crate) async fn insert_task_in(
     }
     check_run_lease(conn, lease, task.project_id).await?;
     if let Some(call) = &task.created_by_call
-        && let Some(existing) = task_in(conn, "created_by_call = ?1", call.as_str().into()).await?
+        && let Some(existing) = task_by_call(conn, call).await?
     {
         return Ok(existing);
     }

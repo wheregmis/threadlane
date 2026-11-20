@@ -28,6 +28,41 @@ fn review_roles<'a>(
     Ok(threadlane_store::ReviewRoles { engineer, reviewer })
 }
 
+async fn workflow_target(
+    api: &ClientApi,
+    project: &str,
+    repository: &str,
+    goal: &str,
+    request: &str,
+) -> Result<
+    (
+        threadlane_core::ids::ProjectId,
+        threadlane_core::ids::RepositoryId,
+    ),
+    ApiError,
+> {
+    let project = api.project_named(Some(project)).await?;
+    active_project(&project)?;
+    let db = &api.core.inner.db;
+    if db.effective_ceiling(project.id).await.map_err(api_error)? == Mode::Off {
+        return Err(ApiError::Invalid("Project mode is off.".into()));
+    }
+    if required("workflow goal", goal)?.len() > 8192 || required("request ID", request)?.len() > 128
+    {
+        return Err(ApiError::Invalid("Workflow request is too long.".into()));
+    }
+    let repo = db
+        .repositories(project.id)
+        .await
+        .map_err(api_error)?
+        .into_iter()
+        .find(|r| r.name == repository.trim())
+        .ok_or_else(|| {
+            ApiError::Invalid("Choose a repository registered in this project.".into())
+        })?;
+    Ok((project.id, repo.id))
+}
+
 /// Answers a [`TaskRequest`].
 pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<TaskReply, ApiError> {
     let inner = &api.core.inner;
@@ -47,6 +82,37 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                     .map_err(project_error)?,
             })
         }
+        TaskRequest::SaveProjectWorkflow { project, graph } => {
+            let project = api.project_named(Some(&project)).await?;
+            Ok(TaskReply::ProjectWorkflow {
+                graph: db
+                    .save_project_workflow(project.id, graph)
+                    .await
+                    .map_err(project_error)?,
+            })
+        }
+        TaskRequest::StartProjectWorkflow {
+            project,
+            repository,
+            goal,
+            version,
+            client_request_id,
+        } => {
+            let (project, repo) =
+                workflow_target(api, &project, &repository, &goal, &client_request_id).await?;
+            let task = db
+                .start_project_workflow(
+                    project,
+                    repo,
+                    goal.trim(),
+                    version,
+                    client_request_id.trim(),
+                )
+                .await
+                .map_err(project_error)?;
+            inner.wake.wake(WakeTarget::Runners);
+            Ok(TaskReply::Task { task })
+        }
         TaskRequest::StartReviewWorkflow {
             project,
             goal,
@@ -56,26 +122,9 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
             version,
             client_request_id,
         } => {
-            let project = api.project_named(Some(&project)).await?;
-            active_project(&project)?;
-            if db.effective_ceiling(project.id).await.map_err(api_error)? == Mode::Off {
-                return Err(ApiError::Invalid("Project mode is off.".into()));
-            }
+            let (project, repo) =
+                workflow_target(api, &project, &repository, &goal, &client_request_id).await?;
             let roles = review_roles(&engineer, &reviewer)?;
-            let goal = required("workflow goal", &goal)?;
-            let request = required("request ID", &client_request_id)?;
-            if request.len() > 128 || goal.len() > 8192 {
-                return Err(ApiError::Invalid("Workflow request is too long.".into()));
-            }
-            let repo = db
-                .repositories(project.id)
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .find(|r| r.name == repository.trim())
-                .ok_or_else(|| {
-                    ApiError::Invalid("Choose a repository registered in this project.".into())
-                })?;
             let recipe = db.review_recipe().await.map_err(api_error)?;
             if recipe.version != version {
                 return Err(ApiError::Invalid(
@@ -83,7 +132,14 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                 ));
             }
             let task = db
-                .start_review_workflow(project.id, roles, repo.id, goal, &recipe, request)
+                .start_review_workflow(
+                    project,
+                    roles,
+                    repo,
+                    goal.trim(),
+                    &recipe,
+                    client_request_id.trim(),
+                )
                 .await
                 .map_err(project_error)?;
             inner.wake.wake(WakeTarget::Lane(task.lane_id));
