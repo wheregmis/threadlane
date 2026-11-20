@@ -934,6 +934,7 @@ fn timer(id: i64, project: ProjectId, recurrence: Option<Recurrence>, by: TimerC
         created_by_call: None,
         last_fired_at: None,
         fire_count: 0,
+        missed_grace_minutes: None,
         requested: by == TimerCreator::User,
     }
 }

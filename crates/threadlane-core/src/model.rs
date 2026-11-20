@@ -868,6 +868,9 @@ pub struct Timer {
     pub due_at: Timestamp,
     /// Schedules only: a recurrence rule plus a named time zone.
     pub recurrence: Option<Recurrence>,
+    /// Owner-created schedules can skip when lateness exceeds this grace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missed_grace_minutes: Option<u16>,
     pub instruction: String,
     pub status: TimerStatus,
     pub created_by: TimerCreator,
@@ -878,6 +881,22 @@ pub struct Timer {
     /// its creator (docs/milestone-8.md §1 decision 3).
     pub requested: bool,
 }
+
+impl Timer {
+    /// Whether to skip an overdue automatically scheduled occurrence.
+    #[must_use]
+    pub fn skips_late_at(&self, now: Timestamp) -> bool {
+        self.category == TimerCategory::Schedule
+            && self.created_by == TimerCreator::User
+            && self.recurrence.is_some()
+            && self.missed_grace_minutes.is_some_and(|minutes| {
+                now.saturating_since(self.due_at) > Duration::from_secs(u64::from(minutes) * 60)
+            })
+    }
+}
+
+/// Longest configurable grace before skipping a missed owner routine, in minutes.
+pub const MAX_MISSED_GRACE_MINUTES: u16 = 24 * 60;
 
 /// The most timers a project may have that have not ended, active or paused
 /// (docs/milestone-8.md §1 decision 5).

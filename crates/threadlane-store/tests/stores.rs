@@ -3250,3 +3250,57 @@ async fn deleting_an_agent_waits_for_its_tasks_and_keeps_its_history() {
         "{missing:?}"
     );
 }
+
+#[tokio::test]
+async fn skipped_routine_receipt_and_cursor_survive_a_database_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("routine.db");
+    let bootstrap = Bootstrap::default();
+    let open = || HubDb::open(&path, &bootstrap, Arc::new(SystemClock));
+    let hub = open().await.unwrap();
+    let project = hub.general_project().await.unwrap();
+    let routine = hub
+        .create_routine_skipping_late(
+            &NewTimer {
+                project_id: project.id,
+                lane_id: project.lead_lane_id,
+                agent_id: None,
+                task_ref: None,
+                category: TimerCategory::Schedule,
+                due_at: T0,
+                recurrence: Some(Recurrence {
+                    zone: "UTC".into(),
+                    rule: Rule::Interval { minutes: 15 },
+                }),
+                instruction: "A punctual routine.".into(),
+                created_by: TimerCreator::User,
+                created_by_call: None,
+                requested: true,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+    let now = T0 + Duration::from_secs(66 * 60);
+    let next = T0 + Duration::from_secs(75 * 60);
+    let skip = || hub.skip_late_routine(routine.id, T0, next, now);
+    let (a, b) = tokio::join!(skip(), skip());
+    assert!(matches!(
+        (a, b),
+        (Ok(()), Err(StoreError::Conflict(_))) | (Err(StoreError::Conflict(_)), Ok(()))
+    ));
+    drop(hub);
+
+    let hub = open().await.unwrap();
+    assert_eq!(hub.timer(routine.id).await.unwrap().unwrap().due_at, next);
+    assert!(hub.due_timers(now).await.unwrap().is_empty());
+    assert!(
+        hub.pending_events(routine.lane_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let history = hub.routine_history(Some(routine.id), None).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].status, "skipped");
+}

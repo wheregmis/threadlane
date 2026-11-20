@@ -31,6 +31,8 @@ pub struct RoutineRow {
     pub by: String,
     /// `Fired 3 times · last 08:00`, or `Not fired yet`.
     pub fired: String,
+    /// Grace for automatic runs, if late occurrences should be skipped.
+    pub missed_grace_minutes: Option<u16>,
     /// `Active` or `Paused`.
     pub status: &'static str,
     /// Whether it is paused, so the row offers Resume rather than Pause.
@@ -85,6 +87,8 @@ pub struct RoutineForm {
     pub hours: bool,
     /// The weekdays picked, Monday first.
     pub days: Vec<Weekday>,
+    /// None means one catch-up after downtime.
+    pub missed_grace_minutes: Option<u16>,
 }
 
 impl Default for RoutineForm {
@@ -94,6 +98,7 @@ impl Default for RoutineForm {
             cadence: Cadence::default(),
             hours: false,
             days: vec![Weekday::Mon],
+            missed_grace_minutes: None,
         }
     }
 }
@@ -296,6 +301,7 @@ fn row_of(timer: &Timer, when: &When, confirming: bool) -> RoutineRow {
         },
         by,
         fired,
+        missed_grace_minutes: timer.missed_grace_minutes,
         status: if paused { "Paused" } else { "Active" },
         paused,
         confirming,

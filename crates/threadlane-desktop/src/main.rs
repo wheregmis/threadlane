@@ -1675,6 +1675,7 @@ impl Desktop {
             self.routine_day.read(cx).value(),
             self.routine_zone.read(cx).value(),
         );
+        let grace = self.state.routine_form().missed_grace_minutes;
         let recurrence = self.state.routine_form().recurrence(RoutineText {
             every: &every,
             at: &at,
@@ -1703,7 +1704,13 @@ impl Desktop {
                 let added = core
                     .read()
                     .await
-                    .add_routine(Some(&space), Some(&project), &instruction, recurrence)
+                    .add_routine_with_grace(
+                        Some(&space),
+                        Some(&project),
+                        &instruction,
+                        recurrence,
+                        grace,
+                    )
                     .await;
                 (space, project, added)
             },

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value as Json, json};
-use threadlane_core::client::{DecisionRequest, TimerReply, TimerRequest};
+use threadlane_core::client::{ApiError, DecisionRequest, TimerReply, TimerRequest};
 use threadlane_core::ids::DecisionId;
 use threadlane_core::link::{Begin, HubLink, Perform, RunAssignment};
 use threadlane_core::model::{
@@ -721,4 +721,154 @@ async fn a_kill_between_the_scheduler_steps_fires_nothing_twice() {
         let routine = restarted.db.timer(routine.id).await.unwrap().unwrap();
         assert_eq!(routine.fire_count, 1, "killed at {step}");
     }
+}
+
+async fn skip_request(hub: &TestHub, grace_minutes: u16, recurrence: Recurrence) -> Timer {
+    let TimerReply::Timer { timer } = hub
+        .api
+        .timers(TimerRequest::CreateRoutineSkippingLate {
+            project: None,
+            instruction: "Only useful at the scheduled time.".into(),
+            recurrence,
+            client_request_id: "skip-late".into(),
+            grace_minutes,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected a timer");
+    };
+    timer
+}
+
+#[tokio::test]
+async fn missed_run_grace_is_validated_and_its_exact_boundary_still_runs() {
+    let hub = hub().await;
+    for grace_minutes in [0, 1441] {
+        let result = hub
+            .api
+            .timers(TimerRequest::CreateRoutineSkippingLate {
+                project: None,
+                instruction: "Invalid grace.".into(),
+                recurrence: daily(9, 0, "UTC"),
+                client_request_id: format!("invalid-{grace_minutes}"),
+                grace_minutes,
+            })
+            .await;
+        assert!(matches!(result, Err(ApiError::Invalid(why)) if why.contains("grace")));
+    }
+    assert!(
+        hub.db
+            .project_timers(hub.general().await.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let routine = skip_request(&hub, 5, daily(9, 0, "UTC")).await;
+    assert_eq!(routine.missed_grace_minutes, Some(5));
+    assert_eq!(
+        skip_request(&hub, 30, daily(10, 0, "UTC")).await,
+        routine,
+        "request replay keeps the first policy and time"
+    );
+    hub.clock.set(routine.due_at + Duration::from_secs(5 * 60));
+
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 1);
+    assert_eq!(timer_events(&hub).await[0].status, EventStatus::Pending);
+    assert_eq!(
+        hub.db.timer(routine.id).await.unwrap().unwrap().fire_count,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_missed_routine_does_not_wake_or_replay_and_records_one_skip_after_restart() {
+    let crash = CrashPlan::kill_at(scheduler::AFTER_FIRE);
+    let hub = TestHub::with(HubSettings::default(), Arc::new(crash.clone())).await;
+    let routine = skip_request(
+        &hub,
+        5,
+        Recurrence {
+            rule: Rule::Interval { minutes: 15 },
+            zone: "UTC".into(),
+        },
+    )
+    .await;
+    // 5 minutes and 1ms past the fourth due time. Old occurrences must not replay.
+    hub.clock
+        .set(routine.due_at + Duration::from_millis(50 * 60 * 1_000 + 1));
+    assert!(hub.core.schedule_once().await.is_err());
+    assert_eq!(crash.killed(), Some(scheduler::AFTER_FIRE));
+
+    let hub = hub.restart(Arc::new(NoHooks)).await;
+    let saved = hub.db.timer(routine.id).await.unwrap().unwrap();
+    assert_eq!(saved.due_at, routine.due_at + Duration::from_secs(60 * 60));
+    assert_eq!(saved.fire_count, 0);
+    assert_eq!(saved.last_fired_at, None);
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
+    assert!(
+        hub.db
+            .pending_events(saved.lane_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let history = hub
+        .db
+        .routine_history(Some(routine.id), None)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].due, routine.due_at);
+    assert_eq!(history[0].status, "skipped");
+    assert_eq!(history[0].started, None);
+    assert!(!history[0].manual);
+    assert!(
+        history[0]
+            .result
+            .as_deref()
+            .unwrap()
+            .contains("more than 5 minutes late")
+    );
+
+    // Pausing does not record a skip. Running once is still allowed on a paused
+    // overdue routine and leaves its schedule unchanged.
+    hub.api
+        .timers(TimerRequest::Pause { timer: routine.id })
+        .await
+        .unwrap();
+    hub.clock
+        .set(saved.due_at + Duration::from_secs(2 * 60 * 60));
+    assert_eq!(hub.core.schedule_once().await.unwrap(), 0);
+    assert_eq!(
+        hub.db
+            .routine_history(Some(routine.id), None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let TimerReply::Timer { timer: manual } = hub
+        .api
+        .timers(TimerRequest::RunOnce {
+            timer: routine.id,
+            client_request_id: "owner-tested".into(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected the routine")
+    };
+    assert_eq!(manual.due_at, saved.due_at);
+    assert_eq!(manual.status, TimerStatus::Paused);
+    assert_eq!(manual.fire_count, 1);
+    let history = hub
+        .db
+        .routine_history(Some(routine.id), None)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].status, "pending");
+    assert!(history[0].manual);
 }

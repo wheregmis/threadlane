@@ -1245,6 +1245,15 @@ pub enum TimerRequest {
         recurrence: Recurrence,
         client_request_id: String,
     },
+    /// Owner routine with a missed-run grace. A separate operation makes old hubs reject
+    /// the opt-in rather than silently falling back to catch-up.
+    CreateRoutineSkippingLate {
+        project: Option<String>,
+        instruction: String,
+        recurrence: Recurrence,
+        client_request_id: String,
+        grace_minutes: u16,
+    },
     /// Pauses a timer; it fires nothing until resumed.
     Pause { timer: TimerId },
     /// Resumes a paused timer: a routine at its next occurrence from now, a
