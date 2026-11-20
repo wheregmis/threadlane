@@ -132,9 +132,9 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
     ) -> Result<Vec<GithubItem>, GithubError>;
 
     /// What a notification about a pull request reports, as that pull
-    /// request is now: its head commit and state, and its latest review and
-    /// comment. Each has an id of its own, so the same activity notified
-    /// again is the same item. By default, the notification itself.
+    /// request is now: the notification, with its id, naming the head commit
+    /// and state, then the latest review and comment, with ids apart from
+    /// [`GithubSource::pull_request`]'s. By default, the notification itself.
     async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
         Ok(vec![notification.clone()])
     }

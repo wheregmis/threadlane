@@ -498,8 +498,9 @@ struct GithubState {
     /// Items on a task's work, by `(repository, branch)`.
     work: Vec<(String, String, GithubItem)>,
     poll_interval: Option<std::time::Duration>,
-    /// What a notification reports, by its id; unlisted ones report themselves.
-    activity: Vec<(String, Vec<GithubItem>)>,
+    /// What a notification reports, by its id, or `None` to fail; unlisted
+    /// ones report themselves.
+    activity: Vec<(String, Option<Vec<GithubItem>>)>,
 }
 
 /// A [`GithubSource`] that touches no network. It records every call, keeps
@@ -527,8 +528,16 @@ impl FakeGithub {
     }
 
     /// What the notification `id` reports, as [`GithubSource::activity`].
+    /// The latest call for an `id` wins.
     pub fn set_activity(&self, id: &str, items: Vec<GithubItem>) {
-        lock(&self.state).activity.push((id.to_owned(), items));
+        lock(&self.state)
+            .activity
+            .push((id.to_owned(), Some(items)));
+    }
+
+    /// Makes [`GithubSource::activity`] fail for the notification `id`.
+    pub fn fail_activity(&self, id: &str) {
+        lock(&self.state).activity.push((id.to_owned(), None));
     }
 
     /// What the feed answers as the interval it asks for.
@@ -594,10 +603,15 @@ impl GithubSource for FakeGithub {
 
     async fn activity(&self, notification: &GithubItem) -> Result<Vec<GithubItem>, GithubError> {
         let state = lock(&self.state);
-        Ok(state
+        match state
             .activity
             .iter()
+            .rev()
             .find(|(id, _)| *id == notification.id)
-            .map_or_else(|| vec![notification.clone()], |(_, items)| items.clone()))
+        {
+            None => Ok(vec![notification.clone()]),
+            Some((_, Some(items))) => Ok(items.clone()),
+            Some((_, None)) => Err(GithubError(format!("{} failed", notification.id))),
+        }
     }
 }

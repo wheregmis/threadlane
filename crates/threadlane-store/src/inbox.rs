@@ -390,6 +390,18 @@ impl InboxStore for HubDb {
         .await
     }
 
+    async fn has_source_event(&self, source: &str, source_event_id: &str) -> StoreResult<bool> {
+        let conn = self.db.reader()?;
+        let existing: Option<EventId> = query_opt(
+            &conn,
+            "SELECT id FROM events WHERE source = ?1 AND source_event_id = ?2",
+            params![source, source_event_id],
+            |row| Cols(row).id(0),
+        )
+        .await?;
+        Ok(existing.is_some())
+    }
+
     async fn pending_events(&self, lane_id: LaneId) -> StoreResult<Vec<Event>> {
         let conn = self.db.reader()?;
         query_all(

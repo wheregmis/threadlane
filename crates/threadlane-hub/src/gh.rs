@@ -265,14 +265,9 @@ impl GithubSource for GhSource {
             branch,
             number: Some(number),
         };
-        // The notified kind is in the id: a new reason, such as a review
-        // request, is news even when the head did not move.
-        let notified = serde_json::to_value(notification.kind).unwrap_or_default();
+        // The notification's own id: each update of the thread is one item,
+        // and the same update delivered again is the same item.
         let mut items = vec![GithubItem {
-            id: format!(
-                "pull:{repository}#{number}:{sha}:{state}:{}",
-                notified.as_str().unwrap_or_default()
-            ),
             kind: GithubKind::PullRequestUpdate,
             branch: Some(target.branch.clone()),
             title: format!("head {sha}, {state}"),
@@ -284,12 +279,19 @@ impl GithubSource for GhSource {
             url: text(&pull, "/html_url"),
             ..notification.clone()
         }];
-        let latest = |mut found: Vec<GithubItem>| found.pop();
+        // Ids apart from `pull_request`'s, so a task given this pull request
+        // later still gets the same review and comment in its own lane.
+        let latest = |mut found: Vec<GithubItem>| {
+            found.pop().map(|item| GithubItem {
+                id: format!("notified:{}", item.id),
+                ..item
+            })
+        };
         items.extend(latest(
             self.get_items(
                 &format!("repos/{repository}/pulls/{number}/reviews?per_page=100"),
                 &target,
-                parse_reviews,
+                last_review,
             )
             .await?,
         ));
@@ -331,6 +333,20 @@ fn encode(text: &str) -> String {
             other => format!("%{other:02X}"),
         })
         .collect()
+}
+
+/// The last submitted review of a page, unless Threadlane posted it: an
+/// older review is not what happened now.
+fn last_review(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
+    let last = answer
+        .as_array()
+        .and_then(|reviews| {
+            reviews
+                .iter()
+                .rfind(|review| review["submitted_at"].is_string())
+        })
+        .cloned();
+    parse_reviews(&Json::Array(last.into_iter().collect()), target)
 }
 
 /// The head branch and commit of a `pulls/<n>` answer.
@@ -909,14 +925,21 @@ case "$last" in
     #[tokio::test]
     async fn a_pull_request_notification_reports_its_head_review_and_comment() {
         let dir = tempfile::tempdir().unwrap();
-        let routes = |pull: &str| {
+        // The reviews without Threadlane's own, which is the latest.
+        let mut human: Json = serde_json::from_str(REVIEWS).unwrap();
+        human
+            .as_array_mut()
+            .unwrap()
+            .retain(|review| review["id"] != 82);
+        let human = human.to_string();
+        let routes = |pull: &str, reviews: &str| {
             [
                 ("*/pulls/42", "pull.http", ok(pull)),
-                ("*/reviews*", "reviews.http", ok(REVIEWS)),
+                ("*/reviews*", "reviews.http", ok(reviews)),
                 ("*/comments*", "comments.http", ok(COMMENTS)),
             ]
         };
-        let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(PULL)));
+        let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(PULL, &human)));
         let notification = parse_feed(FEED).unwrap().items.remove(0);
         let items = source.activity(&notification).await.unwrap();
         let sha = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
@@ -924,10 +947,11 @@ case "$last" in
         assert_eq!(
             ids,
             [
-                format!("pull:acme/widgets#42:{sha}:open:review_request").as_str(),
-                "review:80",
-                "comment:1700000001",
-            ]
+                notification.id.as_str(),
+                "notified:review:80",
+                "notified:comment:1700000001",
+            ],
+            "the notification, then ids apart from the task's work"
         );
         let head = &items[0];
         assert_eq!(head.kind, GithubKind::PullRequestUpdate);
@@ -949,17 +973,12 @@ case "$last" in
             "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/pulls/42"
         );
 
-        // The same activity notified again is the same items.
-        let again = GithubItem {
-            id: "notification:12000000001:2026-11-17T09:10:00Z".into(),
-            at: "2026-11-17T09:10:00Z".into(),
-            ..notification.clone()
-        };
-        let repeat = source.activity(&again).await.unwrap();
-        let repeat_ids: Vec<_> = repeat.iter().map(|item| item.id.as_str()).collect();
-        assert_eq!(repeat_ids, ids);
+        // When Threadlane's own review is the latest, an older one is no news.
+        let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(PULL, REVIEWS)));
+        let items = source.activity(&notification).await.unwrap();
+        assert!(items.iter().all(|item| item.kind != GithubKind::Review));
 
-        // A new head is a new item; the rest stays the same.
+        // The head as it is now: pushed, then merged.
         let pushed = PULL.replace(sha, "1111111111111111111111111111111111111111");
         let merged = pushed.replace(
             "\"state\": \"open\",",
@@ -975,11 +994,9 @@ case "$last" in
                 "head 1111111111111111111111111111111111111111, merged",
             ),
         ] {
-            let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(&pull)));
-            let items = source.activity(&again).await.unwrap();
+            let source = GhSource::with_gh(fake_gh_with(dir.path(), &routes(&pull, &human)));
+            let items = source.activity(&notification).await.unwrap();
             assert_eq!(items[0].title, head);
-            assert!(!ids.contains(&items[0].id.as_str()), "{}", items[0].id);
-            assert_eq!(items[1].id, "review:80");
         }
 
         // Anything not about a pull request reports itself.

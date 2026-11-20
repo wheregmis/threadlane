@@ -148,6 +148,8 @@ pub trait InboxStore: Send + Sync {
     /// Inserts a routed event, deduplicating on `(source, source_event_id)`.
     async fn insert_event(&self, event: &NewEvent) -> StoreResult<Inserted>;
     async fn event(&self, id: EventId) -> StoreResult<Option<Event>>;
+    /// Whether an event from `source` with this `source_event_id` exists.
+    async fn has_source_event(&self, source: &str, source_event_id: &str) -> StoreResult<bool>;
     /// Pending events in a lane, oldest first.
     async fn pending_events(&self, lane_id: LaneId) -> StoreResult<Vec<Event>>;
     /// Marks pending events skipped, with a reason, under the lease.

@@ -17,7 +17,7 @@
 //! the repository and the pull request's number, whose branch the source
 //! looks up.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use threadlane_core::forge::{COMMENT, MARK_READY, MERGE};
@@ -296,13 +296,25 @@ impl HubCore {
             }
         };
 
+        let activity = match &feed {
+            Some(feed) => self.feed_activity(source.as_ref(), feed).await?,
+            None => HashMap::new(),
+        };
+
         let mut lanes = BTreeSet::new();
         let followed = {
             let _removal = inner.project_removal.lock().await;
             let routes = Routes::read(&inner.db).await?;
             let refresh = if let Some(feed) = feed {
-                self.apply_github_feed(&routes, feed, cursor.as_deref(), &mut pass, &mut lanes)
-                    .await?
+                self.apply_github_feed(
+                    &routes,
+                    feed,
+                    &activity,
+                    cursor.as_deref(),
+                    &mut pass,
+                    &mut lanes,
+                )
+                .await?
             } else {
                 Vec::new()
             };
@@ -328,6 +340,7 @@ impl HubCore {
         &self,
         routes: &Routes,
         feed: Feed,
+        activity: &HashMap<String, Vec<GithubItem>>,
         cursor: Option<&str>,
         pass: &mut GithubPass,
         lanes: &mut BTreeSet<LaneId>,
@@ -341,16 +354,13 @@ impl HubCore {
                 refresh.push(work.clone());
             }
             if let Some((project, lane, requested)) = routes.route(item) {
-                let (items, thread) = self.activity(item).await?;
-                for item in &items {
+                // A task's lane reads the details from its own work instead.
+                let items = activity
+                    .get(&item.id)
+                    .filter(|_| !requested)
+                    .map_or(std::slice::from_ref(item), Vec::as_slice);
+                for item in items {
                     pass.inserted += self.insert(project, lane, requested, item, lanes).await?;
-                }
-                // Marked after its items, so a crash in between reads it again.
-                if let Some(thread) = thread {
-                    inner
-                        .db
-                        .set_source_cursor(&thread, &item.at, inner.clock.now())
-                        .await?;
                 }
             }
             inner.hook.reach(AFTER_INSERT)?;
@@ -424,31 +434,34 @@ impl HubCore {
         Ok(inserted)
     }
 
-    /// What a feed item reports. A notification about a pull request is
-    /// read as its activity (see [`GithubSource::activity`]), once per thread
-    /// update: the feed lists every unread thread each time it changes, and
-    /// a thread seen at this update already gives nothing new. Also returns
-    /// the cursor that marks the thread seen, to save after the items.
-    async fn activity(
+    /// What each new notification about a pull request reports for the
+    /// lead (see [`GithubSource::activity`]), by notification id. Read
+    /// before the project-removal lock, as GitHub can be slow; the routes
+    /// are read again under it. A notification already inserted is not read
+    /// again, so a repeat delivery costs no call and wakes no one.
+    async fn feed_activity(
         &self,
-        item: &GithubItem,
-    ) -> Result<(Vec<GithubItem>, Option<String>), HubError> {
+        source: &dyn GithubSource,
+        feed: &Feed,
+    ) -> Result<HashMap<String, Vec<GithubItem>>, HubError> {
         let inner = &self.inner;
-        let (Some(source), Some(_)) = (inner.github.as_ref(), item.pull_request) else {
-            return Ok((vec![item.clone()], None));
-        };
-        let Some(thread) = item.id.strip_suffix(&format!(":{}", item.at)) else {
-            return Ok((vec![item.clone()], None));
-        };
-        let key = format!("github:{thread}");
-        if inner.db.source_cursor(&key).await?.as_deref() >= Some(item.at.as_str()) {
-            return Ok((Vec::new(), None));
+        let routes = Routes::read(&inner.db).await?;
+        let mut activity = HashMap::new();
+        for item in &feed.items {
+            let for_lead = matches!(routes.route(item), Some((_, _, false)));
+            if !for_lead
+                || item.pull_request.is_none()
+                || inner.db.has_source_event(GITHUB_SOURCE, &item.id).await?
+            {
+                continue;
+            }
+            let items = source.activity(item).await.unwrap_or_else(|error| {
+                tracing::warn!(%error, id = item.id, "could not read what a GitHub notification reports");
+                vec![item.clone()]
+            });
+            activity.insert(item.id.clone(), items);
         }
-        let items = source.activity(item).await.unwrap_or_else(|error| {
-            tracing::warn!(%error, id = item.id, "could not read what a GitHub notification reports");
-            vec![item.clone()]
-        });
-        Ok((items, Some(key)))
+        Ok(activity)
     }
 
     /// Inserts one item as an `outside_event` of the GitHub source. Returns
