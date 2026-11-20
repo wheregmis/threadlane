@@ -1,0 +1,50 @@
+name: Linux cache pilot
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/cache-pilot.yml
+      - .github/workflows/cache-pilot-build.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-pilot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cold:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'codex/ci-cache-pilot'
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [rust-cache, mbx]
+    uses: ./.github/workflows/cache-pilot-build.yml
+    with:
+      backend: ${{ matrix.backend }}
+      phase: cold
+
+  warm:
+    needs: cold
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [rust-cache, mbx]
+    uses: ./.github/workflows/cache-pilot-build.yml
+    with:
+      backend: ${{ matrix.backend }}
+      phase: warm
+
+  edited:
+    needs: warm
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [rust-cache, mbx]
+    uses: ./.github/workflows/cache-pilot-build.yml
+    with:
+      backend: ${{ matrix.backend }}
+      phase: edited

@@ -1,0 +1,130 @@
+name: Linux cache pilot build
+
+on:
+  workflow_call:
+    inputs:
+      backend:
+        required: true
+        type: string
+      phase:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ inputs.backend }} / ${{ inputs.phase }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev cmake libclang-dev \
+            libfontconfig-dev libwayland-dev wayland-protocols \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb-xkb-dev libxcb-randr0-dev \
+            libxcb-image0-dev libxcb-icccm4-dev libxcb-keysyms1-dev \
+            libxcb-util-dev libvulkan-dev libasound2-dev \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+
+      # Unique per run attempt; reused across the three benchmark phases.
+      - name: Restore Cargo build and download cache (baseline)
+        if: inputs.backend == 'rust-cache'
+        id: baseline
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: cache-pilot-${{ github.run_id }}-${{ github.run_attempt }}
+          shared-key: baseline-workspace
+          key: workspace-${{ runner.os }}
+          save-if: ${{ inputs.phase == 'cold' }}
+
+      # MBX objects don't contain Cargo registry or git downloads.
+      - name: Restore Cargo downloads (MBX)
+        if: inputs.backend == 'mbx'
+        id: downloads
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: cache-pilot-${{ github.run_id }}-${{ github.run_attempt }}
+          shared-key: mbx-downloads
+          cache-targets: false
+          cache-bin: false
+          save-if: ${{ inputs.phase == 'cold' }}
+
+      - name: Restore compiler objects (MBX)
+        if: inputs.backend == 'mbx'
+        id: mbx
+        uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
+        with:
+          version: '1.30.0'
+          backend: github
+          github-cache-mode: objects
+          isolate-objects-cache: true
+          cache-key: mbx-pilot-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          save-on-pull-request: ${{ inputs.phase == 'cold' }}
+
+      - name: Verify cache state before timing the build
+        env:
+          BASELINE_HIT: ${{ steps.baseline.outputs.cache-hit }}
+          DOWNLOADS_HIT: ${{ steps.downloads.outputs.cache-hit }}
+          MBX_HIT: ${{ steps.mbx.outputs.cache-hit }}
+          MBX_SAVE: ${{ steps.mbx.outputs.cache-save-eligible }}
+          BACKEND: ${{ inputs.backend }}
+          PHASE: ${{ inputs.phase }}
+        run: |
+          set -euo pipefail
+          {
+            printf '### Cache pilot: %s / %s\n\n' "$BACKEND" "$PHASE"
+            printf -- '- Checkout: %s\n' "$(git rev-parse HEAD)"
+            printf -- '- Exact hits (baseline / downloads / objects): %s / %s / %s\n' \
+              "${BASELINE_HIT:-n/a}" "${DOWNLOADS_HIT:-n/a}" "${MBX_HIT:-n/a}"
+            printf -- '- Compare full job time, including cache post-steps.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          expected=false
+          if [[ "$PHASE" != cold ]]; then expected=true; fi
+          if [[ "$BACKEND" == rust-cache ]]; then
+            hits=("$BASELINE_HIT")
+          else
+            hits=("$DOWNLOADS_HIT" "$MBX_HIT")
+            if [[ "$PHASE" == cold && "$MBX_SAVE" != true ]]; then
+              echo "::error::MBX is not eligible to save this run's cold cache"
+              exit 1
+            fi
+          fi
+          for hit in "${hits[@]}"; do
+            if [[ "${hit:-false}" != "$expected" ]]; then
+              echo "::error::Unexpected cache state for $PHASE: expected exact hit=$expected, got ${hit:-false}"
+              exit 1
+            fi
+          done
+
+      - name: Apply a source-only edit in the runner
+        if: inputs.phase == 'edited'
+        run: printf '\n// Cache pilot source edit (runner only).\n' >> crates/threadlane-desktop/src/lib.rs
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy (baseline)
+        if: inputs.backend == 'rust-cache'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Workspace tests (baseline)
+        if: inputs.backend == 'rust-cache'
+        run: cargo test --workspace
+      - name: Clippy (MBX)
+        if: inputs.backend == 'mbx'
+        run: mbx clippy --workspace --all-targets -- -D warnings
+      - name: Workspace tests (MBX)
+        if: inputs.backend == 'mbx'
+        run: mbx test --workspace
