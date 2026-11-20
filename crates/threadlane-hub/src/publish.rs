@@ -5,8 +5,8 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, LABEL_ISSUE, MARK_READY,
-    MAX_LABELS, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH, valid_label_name,
+    COMMENT, CREATE_ISSUE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, LABEL_ISSUE,
+    MARK_READY, MAX_LABELS, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH, valid_label_name,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -55,7 +55,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: schema,
-        tier: if name == MERGE {
+        tier: if matches!(name, MERGE | GITHUB_CLI) {
             Tier::SharedHardToUndo
         } else {
             Tier::SharedReversible
@@ -157,7 +157,82 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 "required":["repository","number"],"additionalProperties":false
             }),
         ),
+        define(
+            GITHUB_CLI,
+            "Run one gh command against a registered project repository, for a GitHub change no \
+             other tool makes, such as closing an issue. The user always decides it and sees the \
+             exact command. Give the arguments after gh, without --repo, which is set from \
+             repository. End your turn when it waits on the user.",
+            json!({
+                "type":"object","properties":{
+                    "repository":repository,
+                    "args":{"type":"array","items":{"type":"string"},"minItems":2,
+                        "description":"The gh arguments, as [\"issue\",\"close\",\"629\"]. The first is one of issue, pr, label, release, run, workflow."},
+                    "missing_tool":{"type":"string","description":"One line: the dedicated tool Threadlane lacks, as \"Close or reopen an issue\"."}
+                },
+                "required":["repository","args","missing_tool"],"additionalProperties":false
+            }),
+        ),
     ]
+}
+
+/// The `gh` commands `github_cli` may run: each acts on one repository and
+/// takes `--repo`.
+const GH_COMMANDS: &[&str] = &["issue", "pr", "label", "release", "run", "workflow"];
+
+/// The `gh` arguments of a `github_cli` call, checked: a command that takes
+/// `--repo`, no repository of the agent's choosing, nothing interactive, and
+/// not an action a dedicated tool already makes.
+fn gh_args(a: &Json) -> Result<Vec<String>, ToolError> {
+    let args = a["args"]
+        .as_array()
+        .filter(|args| (2..=40).contains(&args.len()))
+        .and_then(|args| {
+            args.iter()
+                .map(|arg| {
+                    arg.as_str()
+                        .filter(|arg| plain_text(arg))
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| invalid("args must be 2 to 40 strings of plain text"))?;
+    if !GH_COMMANDS.contains(&args[0].as_str()) {
+        return Err(invalid(&format!(
+            "args must start with one of {}",
+            GH_COMMANDS.join(", ")
+        )));
+    }
+    let dedicated = match (args[0].as_str(), args[1].as_str()) {
+        ("pr", "create") => Some(OPEN_PULL_REQUEST),
+        ("pr", "merge") => Some(MERGE),
+        ("pr", "ready") => Some(MARK_READY),
+        ("pr" | "issue", "comment") => Some(COMMENT),
+        ("issue", "create" | "new") => Some(CREATE_ISSUE),
+        ("issue", "edit")
+            if args
+                .iter()
+                .any(|arg| arg.starts_with("--add-label") || arg.starts_with("--remove-label")) =>
+        {
+            Some(LABEL_ISSUE)
+        }
+        _ => None,
+    };
+    if let Some(tool) = dedicated {
+        return Err(invalid(&format!("use the {tool} tool for this")));
+    }
+    if let Some(flag) = args.iter().find(|arg| {
+        let flag = arg.split('=').next().unwrap_or_default();
+        matches!(flag, "--repo" | "--web" | "--editor" | "--body-file" | "-F")
+            || (arg.starts_with("-R") && !arg.starts_with("--"))
+            || (flag == "-w")
+    }) {
+        return Err(invalid(&format!(
+            "{flag} is not allowed: the repository comes from repository, and nothing may open \
+             a browser, an editor or a file"
+        )));
+    }
+    Ok(args)
 }
 
 /// Parses the arguments again before handing the stored call to the runner.
@@ -231,6 +306,11 @@ pub(crate) fn repository_action(
                 remove,
             })
         }
+        GITHUB_CLI => {
+            fields(a, &["repository", "args", "missing_tool"])?;
+            missing_tool(a)?;
+            Ok(RepositoryAction::GhCli { args: gh_args(a)? })
+        }
         _ => Err(invalid("unknown repository action")),
     }
 }
@@ -292,6 +372,7 @@ pub(crate) async fn proposal(
             | MERGE
             | MARK_READY
             | LABEL_ISSUE
+            | GITHUB_CLI
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -335,6 +416,21 @@ pub(crate) async fn proposal(
                 names(false)
             ))
         })?;
+    if tool == GITHUB_CLI {
+        repository_action(tool, arguments)?;
+        let args = gh_args(arguments)?;
+        return Ok(Proposal {
+            question: format!("Run gh {} in {name}?", shell_words(&args)),
+            context: format!(
+                "Task {}: {}.\nThreadlane has no tool for this yet: {}. The agent asks to use the \
+                 GitHub CLI instead, with --repo set to {}.",
+                task.id,
+                task.title,
+                missing_tool(arguments)?,
+                repository.remote_url
+            ),
+        });
+    }
     if matches!(
         tool,
         COMMENT | CREATE_ISSUE | MERGE | MARK_READY | LABEL_ISSUE
@@ -495,6 +591,34 @@ pub(crate) async fn proposal(
     })
 }
 
+fn missing_tool(a: &Json) -> Result<&str, ToolError> {
+    a["missing_tool"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| plain_line(s))
+        .ok_or_else(|| {
+            invalid("missing_tool must be one plain line naming the tool Threadlane lacks")
+        })
+}
+
+/// The arguments as you would type them, each quoted when it needs to be.
+fn shell_words(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if !arg.is_empty()
+                && arg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_=.,:/@#+".contains(c))
+            {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(crate) fn issue_title(args: &Json) -> Result<String, ToolError> {
     args["title"]
         .as_str()
@@ -548,6 +672,53 @@ mod tests {
         ] {
             assert!(parse(bad.clone()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn github_cli_runs_only_repository_scoped_gh_commands() {
+        let call = |args: Json| {
+            repository_action(
+                GITHUB_CLI,
+                &json!({"repository":"app","args":args,"missing_tool":"Label issues"}),
+            )
+        };
+        assert_eq!(
+            call(json!(["issue", "close", "629", "--reason=not planned"])),
+            Ok(threadlane_core::forge::RepositoryAction::GhCli {
+                args: ["issue", "close", "629", "--reason=not planned"]
+                    .map(str::to_owned)
+                    .to_vec()
+            })
+        );
+        for bad in [
+            json!(["api", "repos/x/y", "-X", "DELETE"]),
+            json!(["auth", "token"]),
+            json!(["repo", "delete"]),
+            json!(["issue", "edit", "1", "--repo=other/repo"]),
+            json!(["issue", "edit", "1", "-Rother/repo"]),
+            json!(["issue", "edit", "1", "--body-file", "/etc/passwd"]),
+            json!(["pr", "view", "1", "--web"]),
+            json!(["pr", "merge", "1"]),
+            json!(["issue", "comment", "1"]),
+            json!(["issue", "edit", "1", "--add-label=bug"]),
+            json!(["issue"]),
+            json!(["issue", "edit", 1]),
+        ] {
+            assert!(call(bad.clone()).is_err(), "{bad}");
+        }
+        assert!(
+            repository_action(
+                GITHUB_CLI,
+                &json!({"repository":"app","args":["issue","edit","1"],"missing_tool":"--force"})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            shell_words(
+                &["issue", "edit", "1", "--add-label=good first issue", "it's"].map(str::to_owned)
+            ),
+            "issue edit 1 '--add-label=good first issue' 'it'\\''s'"
+        );
     }
 
     #[test]

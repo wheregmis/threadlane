@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 use threadlane_core::forge::{
-    COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST, LABEL_ISSUE, MARK_READY, MERGE,
+    COMMENT, CREATE_ISSUE, FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, LABEL_ISSUE, MARK_READY, MERGE,
     OPEN_PULL_REQUEST, PUBLISH_BRANCH, REPORT_LIMITATION,
 };
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
@@ -76,7 +76,6 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | UPDATE_TASK
         | CANCEL_TASK
         | LIST_TASKS
-        | REPORT_LIMITATION
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
         FINISH_TASK
         | PUBLISH_BRANCH
@@ -86,7 +85,8 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | CREATE_ISSUE
         | MERGE
         | MARK_READY
-        | LABEL_ISSUE => kind == LaneKind::Task,
+        | LABEL_ISSUE
+        | GITHUB_CLI => kind == LaneKind::Task,
         _ => true,
     }
 }
@@ -1393,6 +1393,7 @@ impl ToolRegistry for HubTools {
             | MERGE
             | MARK_READY
             | LABEL_ISSUE
+            | GITHUB_CLI
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
             ))),
@@ -1599,9 +1600,11 @@ mod tests {
                     CREATE_ISSUE,
                     MERGE,
                     MARK_READY,
-                    LABEL_ISSUE
+                    LABEL_ISSUE,
+                    GITHUB_CLI
                 ][..],
-                &memory
+                &memory,
+                &[REPORT_LIMITATION]
             ]
             .concat()
         );
