@@ -746,12 +746,19 @@ pub fn task_header(detail: &TaskDetail, when: &When) -> TaskHeader {
     let machine = run
         .map(|row| row.machine.as_str())
         .or(summary.machine.as_deref());
-    let backend = run.and_then(|row| row.run.backend);
+    // The model the run asked for (#629); none is the backend's own default.
+    let backend = run.and_then(|row| {
+        let backend = row.run.backend?;
+        Some(match &row.run.model {
+            Some(model) => format!("{backend} · {model}"),
+            None => format!("{backend} · default model"),
+        })
+    });
     let mut meta = format!(
         "{} · {} · {}",
         summary.agent,
         machine.unwrap_or("no machine yet"),
-        backend.map_or_else(|| "no backend yet".to_owned(), |kind| kind.to_string())
+        backend.as_deref().unwrap_or("no backend yet")
     );
     let start = if running {
         summary

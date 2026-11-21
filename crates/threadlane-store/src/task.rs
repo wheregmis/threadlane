@@ -6,10 +6,12 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{free_backends, usable_backends};
-use threadlane_core::ids::{DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId};
+use threadlane_core::ids::{
+    AgentId, DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, TaskId,
+};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
-    BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Task, TaskStatus, Trust,
+    BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Run, Task, TaskStatus, Trust,
 };
 use threadlane_core::store::{StoreError, StoreResult, TaskStore, TaskUpdate};
 use threadlane_core::time::Timestamp;
@@ -357,7 +359,11 @@ pub(crate) async fn end_task(
         payload[key] = json!(why);
     }
     tell_lead(conn, task, result_key(conn, task.id).await?, payload, now).await?;
-    if matches!(status, TaskStatus::Failed | TaskStatus::Cancelled) {
+    // Fixing the agent's setup and retrying can still finish a task that
+    // failed on configuration, so what waits for it stays blocked.
+    if matches!(status, TaskStatus::Failed | TaskStatus::Cancelled)
+        && !(status == TaskStatus::Failed && configuration_result(task))
+    {
         cancel_dependents(conn, task, status, now).await?;
     }
     Ok(())
@@ -469,6 +475,115 @@ async fn cancel_dependents(
         .await?;
     }
     Ok(())
+}
+
+/// Queues failed task `id` again: the user's retry when `lead` is `None`,
+/// else the lead's, which only a configuration failure allows, on the agent
+/// it names or the same one.
+async fn retry_in(
+    conn: &Connection,
+    id: TaskId,
+    lead: Option<Option<AgentId>>,
+    now: Timestamp,
+) -> StoreResult<Task> {
+    let task = existing_task(conn, id).await?;
+    if task.status != TaskStatus::Failed {
+        return Err(StoreError::Conflict(format!(
+            "task {id} is {}; only a failed task can be retried",
+            task.status
+        )));
+    }
+    if lead.is_some() && !is_configuration_failure(&task) {
+        return Err(StoreError::Conflict(format!(
+            "task {id} did not fail on its agent's configuration; only the user can retry it"
+        )));
+    }
+    // The error is kept in the lead's report of how the attempt ended.
+    let error: Option<Json> = query_opt(
+        conn,
+        "SELECT payload FROM events WHERE source = ?1 AND source_event_id = ?2",
+        params![TASK_SOURCE, result_key(conn, id).await?],
+        |row| Cols(row).json(0),
+    )
+    .await?;
+    let error = error
+        .as_ref()
+        .and_then(|payload| payload["error"].as_str())
+        .unwrap_or("unknown");
+    // The one way out of `failed`, which the lifecycle otherwise ends.
+    exec(
+        conn,
+        "UPDATE tasks SET status = ?1, waiting_reason = NULL, result = NULL WHERE id = ?2",
+        params![TaskStatus::Queued.as_str(), id.get()],
+    )
+    .await?;
+    // The user asked for it now: the failed attempts' backoff does not hold it.
+    exec(
+        conn,
+        "UPDATE lanes SET backoff_until = NULL WHERE id = ?1",
+        params![task.lane_id.get()],
+    )
+    .await?;
+    if let Some(Some(agent)) = lead {
+        exec(
+            conn,
+            "UPDATE tasks SET agent_id = ?1 WHERE id = ?2",
+            params![agent.get(), id.get()],
+        )
+        .await?;
+    }
+    let (kind, trust, text) = if lead.is_some() {
+        (
+            EventKind::System,
+            Trust::System,
+            format!(
+                "The project lead retried {id}. The last attempt failed with: {error}\n\n\
+                 Any earlier work is committed on the task branch. Continue from it."
+            ),
+        )
+    } else {
+        (
+            EventKind::UserMessage,
+            Trust::User,
+            format!(
+                "The user asked for a retry of {id}. The last attempt failed with: {error}\n\n\
+                 Your earlier work is committed on the task branch. Continue from it; \
+                 do not start over."
+            ),
+        )
+    };
+    let attempt = retries(conn, id).await? + 1;
+    insert_event_in(
+        conn,
+        &NewEvent {
+            project_id: task.project_id,
+            lane_id: task.lane_id,
+            source: TASK_SOURCE.to_owned(),
+            source_event_id: format!("retry:{}:{attempt}", id.get()),
+            kind,
+            payload: json!({ "text": text }),
+            trust,
+            requested: true,
+            session_ref: None,
+            decision_ref: None,
+            reply_to_ref: None,
+            received_at: now,
+        },
+    )
+    .await?;
+    existing_task(conn, id).await
+}
+
+/// Whether `task` failed because its backend refused the agent's setup.
+pub(crate) fn is_configuration_failure(task: &Task) -> bool {
+    task.status == TaskStatus::Failed && configuration_result(task)
+}
+
+/// Whether `task`'s result records a configuration failure.
+fn configuration_result(task: &Task) -> bool {
+    task.result
+        .as_ref()
+        .is_some_and(|result| result["configuration_failure"] == true)
 }
 
 /// Why a task was cancelled when `dependency` ended as `status`.
@@ -607,11 +722,14 @@ async fn left_unwoken(conn: &Connection, lane_id: LaneId) -> StoreResult<bool> {
 /// its events died.
 ///
 /// [`SessionStore::fail_run`]: threadlane_core::store::SessionStore::fail_run
+/// `configuration` is the run, when its backend refused the agent's setup:
+/// a task that dies of it records a configuration failure as its result.
 pub(crate) async fn on_run_failed(
     conn: &Connection,
     lane_id: LaneId,
     died: bool,
     error: &str,
+    configuration: Option<&Run>,
     now: Timestamp,
 ) -> StoreResult<()> {
     let Some(task) = task_of_lane(conn, lane_id).await? else {
@@ -630,6 +748,25 @@ pub(crate) async fn on_run_failed(
         return Ok(());
     }
     if died {
+        let task = match configuration {
+            Some(run) => {
+                let result = json!({
+                    "configuration_failure": true,
+                    "error": error,
+                    "agent_id": run.agent_id,
+                    "backend": run.backend,
+                    "model": run.model,
+                });
+                exec(
+                    conn,
+                    "UPDATE tasks SET result = ?1 WHERE id = ?2",
+                    params![json_text(&result)?, task.id.get()],
+                )
+                .await?;
+                existing_task(conn, task.id).await?
+            }
+            None => task,
+        };
         end_task(conn, &task, TaskStatus::Failed, Some(error), now).await
     } else if wait_on_decision(conn, &task).await? {
         Ok(())
@@ -721,6 +858,19 @@ async fn waiting_reason(
     )
     .await?;
     if !waiting_for.is_empty() {
+        let mut blocked = Vec::new();
+        for id in &waiting_for {
+            if is_configuration_failure(&existing_task(conn, *id).await?) {
+                blocked.push(id.to_string());
+            }
+        }
+        if !blocked.is_empty() {
+            return Ok(Some(format!(
+                "blocked: {} failed because the backend refused its agent's setup; \
+                 retry it after fixing the agent, or reassign it to another agent",
+                blocked.join(", ")
+            )));
+        }
         let names: Vec<String> = waiting_for.iter().map(ToString::to_string).collect();
         return Ok(Some(format!("waiting for {} to be done", names.join(", "))));
     }
@@ -955,17 +1105,23 @@ pub(crate) async fn insert_task_in(
         .await?;
     }
     let created = existing_task(conn, id).await?;
-    let ended_badly = query_opt(
+    let ended: Vec<TaskId> = query_all(
         conn,
-        "SELECT t.id, t.status FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on
-             WHERE d.task_id = ?1 AND t.status IN ('failed', 'cancelled') ORDER BY t.id LIMIT 1",
+        "SELECT t.id FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on
+             WHERE d.task_id = ?1 AND t.status IN ('failed', 'cancelled') ORDER BY t.id",
         params![id.get()],
-        |row| {
-            let c = Cols(row);
-            Ok((c.id::<TaskId>(0)?, c.parse::<TaskStatus>(1)?))
-        },
+        |row| Cols(row).id(0),
     )
     .await?;
+    let mut ended_badly = None;
+    for dependency in ended {
+        // One that failed on configuration can still be retried: it waits, blocked.
+        let dependency = existing_task(conn, dependency).await?;
+        if !is_configuration_failure(&dependency) {
+            ended_badly = Some((dependency.id, dependency.status));
+            break;
+        }
+    }
     if let Some((dependency, status)) = ended_badly {
         // It could never start: cancel it as if it had been waiting.
         let reason = dependency_ended(dependency, status);
@@ -984,6 +1140,43 @@ pub(crate) async fn insert_task_in(
 }
 
 impl HubDb {
+    /// The lead retries task `id`, which failed on its agent's
+    /// configuration, on `agent` or, with `None`, on the same agent.
+    pub async fn lead_retry_task(
+        &self,
+        id: TaskId,
+        agent: Option<AgentId>,
+        now: Timestamp,
+    ) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let retried = retry_in(tx.conn(), id, Some(agent), now).await?;
+        tx.commit().await?;
+        Ok(retried)
+    }
+
+    /// Failed tasks, in every project, whose backend refused their agent's
+    /// setup and that nobody has retried yet; newest first.
+    pub async fn configuration_failures(&self) -> StoreResult<Vec<Task>> {
+        let conn = self.db.reader()?;
+        // shortcut: matches the compact JSON this module writes; a JSON query if results ever get rewritten.
+        let ids: Vec<TaskId> = query_all(
+            &conn,
+            "SELECT id FROM tasks WHERE status = 'failed'
+             AND result LIKE '%\"configuration_failure\":true%' ORDER BY id DESC",
+            (),
+            |row| Cols(row).id(0),
+        )
+        .await?;
+        let mut tasks = Vec::new();
+        for id in ids {
+            let task = existing_task(&conn, id).await?;
+            if is_configuration_failure(&task) {
+                tasks.push(task);
+            }
+        }
+        Ok(tasks)
+    }
+
     /// Lists tasks for the supplied project membership, even if a project is archived concurrently.
     pub async fn tasks_for_projects(&self, projects: &[ProjectId]) -> StoreResult<Vec<Task>> {
         let ids = json_text(&json!(
@@ -1281,64 +1474,7 @@ impl TaskStore for HubDb {
 
     async fn retry_task(&self, id: TaskId, now: Timestamp) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        let task = existing_task(conn, id).await?;
-        if task.status != TaskStatus::Failed {
-            return Err(StoreError::Conflict(format!(
-                "task {id} is {}; only a failed task can be retried",
-                task.status
-            )));
-        }
-        // The error is kept in the lead's report of how the attempt ended.
-        let error: Option<Json> = query_opt(
-            conn,
-            "SELECT payload FROM events WHERE source = ?1 AND source_event_id = ?2",
-            params![TASK_SOURCE, result_key(conn, id).await?],
-            |row| Cols(row).json(0),
-        )
-        .await?;
-        let error = error
-            .as_ref()
-            .and_then(|payload| payload["error"].as_str())
-            .unwrap_or("unknown");
-        // The one way out of `failed`, which the lifecycle otherwise ends.
-        exec(
-            conn,
-            "UPDATE tasks SET status = ?1, waiting_reason = NULL, result = NULL WHERE id = ?2",
-            params![TaskStatus::Queued.as_str(), id.get()],
-        )
-        .await?;
-        // The user asked for it now: the failed attempts' backoff does not hold it.
-        exec(
-            conn,
-            "UPDATE lanes SET backoff_until = NULL WHERE id = ?1",
-            params![task.lane_id.get()],
-        )
-        .await?;
-        let attempt = retries(conn, id).await? + 1;
-        insert_event_in(
-            conn,
-            &NewEvent {
-                project_id: task.project_id,
-                lane_id: task.lane_id,
-                source: TASK_SOURCE.to_owned(),
-                source_event_id: format!("retry:{}:{attempt}", id.get()),
-                kind: EventKind::UserMessage,
-                payload: json!({ "text": format!(
-                    "The user asked for a retry of {id}. The last attempt failed with: {error}\n\n\
-                     Your earlier work is committed on the task branch. Continue from it; \
-                     do not start over."
-                ) }),
-                trust: Trust::User,
-                requested: true,
-                session_ref: None,
-                decision_ref: None,
-                reply_to_ref: None,
-                received_at: now,
-            },
-        )
-        .await?;
-        let retried = existing_task(conn, id).await?;
+        let retried = retry_in(tx.conn(), id, None, now).await?;
         tx.commit().await?;
         Ok(retried)
     }

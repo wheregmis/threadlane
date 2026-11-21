@@ -80,6 +80,8 @@ struct FakeHub {
     project_ceilings: Mutex<Vec<(Option<String>, Mode)>>,
     /// The decisions answered with "always".
     always: Mutex<Vec<DecisionId>>,
+    /// The hub's default model per backend, as `info` reports it.
+    default_models: Mutex<BTreeMap<BackendKind, String>>,
 }
 
 impl FakeHub {
@@ -121,6 +123,7 @@ impl HubApi for FakeHub {
             mode_ceiling: self.ceiling.lock().expect("lock").unwrap_or(Mode::Assisted),
             schema_version: 1,
             update_version: None,
+            default_models: self.default_models.lock().expect("lock").clone(),
         })
     }
 
@@ -1860,6 +1863,7 @@ fn a_task_s_timeline_has_its_runs_decisions_and_result() {
             lease_epoch: 1,
             agent_id: Some(AgentId(2)),
             backend: Some(BackendKind::Claude),
+            model: None,
             status,
             outcome,
             rationale: None,
@@ -2814,6 +2818,7 @@ fn the_task_screen_shows_usage_and_whether_its_branch_is_published() {
             lease_epoch: 1,
             agent_id: Some(AgentId(2)),
             backend: Some(BackendKind::Claude),
+            model: None,
             status: if ended.is_some() {
                 RunStatus::Committed
             } else {
@@ -4173,6 +4178,7 @@ async fn quiet_lead_runs_group_in_chronological_order_and_reveal_why() {
             lease_epoch: 1,
             agent_id: None,
             backend: None,
+            model: None,
             status: if outcome.is_some() {
                 RunStatus::Committed
             } else {
@@ -4271,6 +4277,7 @@ async fn running_elapsed_advances_on_home_and_the_task_without_reloading() {
             lease_epoch: 1,
             agent_id: Some(running.task.agent_id),
             backend: Some(BackendKind::Claude),
+            model: None,
             status: RunStatus::Active,
             outcome: None,
             rationale: None,
@@ -4358,6 +4365,7 @@ async fn stage_b_stops_running_lanes_and_sending_a_message_resumes_them() {
         lease_epoch: 1,
         agent_id: None,
         backend: None,
+        model: None,
         status: RunStatus::Stopped,
         outcome: None,
         rationale: None,
@@ -5880,6 +5888,7 @@ async fn task_header_and_activity_use_journal_clock_and_finished_usage() {
             lease_epoch: 1,
             agent_id: Some(running.task.agent_id),
             backend: Some(BackendKind::Claude),
+            model: Some("opus".to_owned()),
             status,
             outcome: None,
             rationale: None,
@@ -5911,7 +5920,7 @@ async fn task_header_and_activity_use_journal_clock_and_finished_usage() {
     let header = task_header(detail, &work.when());
     assert_eq!(
         header.meta,
-        "Engineer · macbook · claude · started 00:01 · running for 3 min"
+        "Engineer · macbook · claude · opus · started 00:01 · running for 3 min"
     );
     assert_eq!(
         header.latest.unwrap(),
@@ -5948,7 +5957,7 @@ async fn task_header_and_activity_use_journal_clock_and_finished_usage() {
     let header = task_header(state.task("dev", TaskId(1)).unwrap(), &when());
     assert_eq!(
         header.meta,
-        "Engineer · macbook · claude · started 00:01 · took 11 min"
+        "Engineer · macbook · claude · opus · started 00:01 · took 11 min"
     );
     assert_eq!(header.latest, None);
 }
@@ -6274,6 +6283,7 @@ async fn machine_detail_reads_capabilities_and_filters_active_and_recent_runs_by
         lease_epoch: 1,
         agent_id: Some(summary.task.agent_id),
         backend: Some(BackendKind::Claude),
+        model: None,
         status,
         outcome: None,
         rationale: None,
@@ -7971,9 +7981,10 @@ async fn team_cards_show_each_backend_model_and_cut_long_names() {
     let mut state = AppState::paired(["work"]);
     state.apply(refresh(&core).await);
 
-    let agent = &state.space("work").expect("space").agents[0];
+    let space = state.space("work").expect("space");
+    let agent = &space.agents[0];
     assert_eq!(
-        backend_summary(agent),
+        backend_summary(agent, space.default_models()),
         (
             "claude · claude-opus-5-5-exte… → codex · gpt-5".to_owned(),
             "claude · claude-opus-5-5-extended-thinking → codex · gpt-5".to_owned(),
@@ -7994,13 +8005,25 @@ async fn team_cards_show_each_backend_model_and_cut_long_names() {
         Some("engineer · claude · claude-opus-5-5-extended-thinking → codex · gpt-5")
     );
 
-    // No order and no models is either backend at its default.
+    // No order is any backend, each at its own model or its default (#630).
     let mut any = agent.clone();
     any.backends.clear();
-    any.models = json!({});
-    assert_eq!(backend_summary(&any).0, "Any backend");
     any.models = json!({"codex": "gpt-5"});
-    assert_eq!(backend_summary(&any).0, "Any backend, codex · gpt-5");
+    let none = BTreeMap::new();
+    assert_eq!(
+        backend_summary(&any, &none).0,
+        "Any backend: claude · default model, codex · gpt-5, antigravity · default model"
+    );
+
+    // The hub's configured default shows for a backend the agent sets no model for.
+    *hub.default_models.lock().expect("lock") =
+        BTreeMap::from([(BackendKind::Claude, "sonnet".to_owned())]);
+    state.apply(refresh(&core).await);
+    let space = state.space("work").expect("space");
+    assert_eq!(
+        backend_summary(&any, space.default_models()).0,
+        "Any backend: claude · sonnet (default), codex · gpt-5, antigravity · default model"
+    );
 }
 
 #[tokio::test]

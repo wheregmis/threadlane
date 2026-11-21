@@ -78,12 +78,15 @@ impl HubCore {
     ) -> Result<Self, HubError> {
         ensure_defaults(&db).await?;
         let wake = Arc::new(WakeHub::default());
-        let tools: Arc<dyn ToolRegistry> = Arc::new(HubTools::new(
-            db.clone(),
-            Arc::clone(&clock),
-            Arc::clone(&wake) as Arc<dyn Waker>,
-            settings.reviewer.clone(),
-        ));
+        let tools: Arc<dyn ToolRegistry> = Arc::new(
+            HubTools::new(
+                db.clone(),
+                Arc::clone(&clock),
+                Arc::clone(&wake) as Arc<dyn Waker>,
+                settings.reviewer.clone(),
+            )
+            .with_default_models(settings.default_models.clone()),
+        );
         let core = Self {
             inner: Arc::new(Inner {
                 db,

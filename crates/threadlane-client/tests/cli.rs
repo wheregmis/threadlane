@@ -120,6 +120,7 @@ impl HubApi for FakeHub {
             mode_ceiling: Mode::Assisted,
             schema_version: 1,
             update_version: None,
+            default_models: Default::default(),
         })
     }
 

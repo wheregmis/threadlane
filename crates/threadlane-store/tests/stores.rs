@@ -43,6 +43,7 @@ fn new_run(events: Vec<EventId>, started_at: Timestamp) -> StartRun {
         session: SessionChoice::New,
         agent_id: None,
         backend: None,
+        model: None,
         native_session_id: None,
         events,
         started_at,
@@ -77,6 +78,7 @@ fn retry(count_attempt: bool, max_attempts: u32) -> RetryPolicy {
         count_attempt,
         max_attempts,
         backoff_until: T0 + Duration::from_secs(30),
+        configuration: false,
     }
 }
 
@@ -514,6 +516,7 @@ async fn one_lease_per_lane_with_fencing() {
         session: SessionChoice::New,
         agent_id: None,
         backend: None,
+        model: None,
         native_session_id: None,
         events: events.clone(),
         started_at: later,
@@ -557,6 +560,7 @@ async fn run_lifecycle_commits_events_exactly_once() {
         session: SessionChoice::New,
         agent_id: None,
         backend: Some(BackendKind::Claude),
+        model: None,
         native_session_id: None,
         events: events.clone(),
         started_at: T0,
@@ -654,6 +658,7 @@ async fn failed_runs_retry_with_backoff_then_die() {
                     session: SessionChoice::New,
                     agent_id: None,
                     backend: None,
+                    model: None,
                     native_session_id: None,
                     events,
                     started_at: now,
@@ -671,6 +676,7 @@ async fn failed_runs_retry_with_backoff_then_die() {
                     count_attempt: true,
                     max_attempts: 3,
                     backoff_until,
+                    configuration: false,
                 },
                 now,
             )
@@ -722,6 +728,7 @@ async fn expired_leases_return_claimed_events_and_abandon_runs() {
                 session: SessionChoice::New,
                 agent_id: None,
                 backend: None,
+                model: None,
                 native_session_id: None,
                 events: events.clone(),
                 started_at: T0,
@@ -763,6 +770,7 @@ async fn system_tool_calls_take_effect_at_most_once() {
                 session: SessionChoice::New,
                 agent_id: None,
                 backend: None,
+                model: None,
                 native_session_id: None,
                 events,
                 started_at: T0,
@@ -2900,6 +2908,121 @@ async fn a_failed_task_cancels_what_waits_for_it_transitively_with_one_result_ea
     assert_eq!(late.status, TaskStatus::Cancelled);
     assert!(hub.pending_events(late.lane_id).await.unwrap().is_empty());
     assert_eq!(task_results(&hub, &general).await.len(), 4);
+}
+
+#[tokio::test]
+async fn a_configuration_failure_records_its_setup_and_blocks_what_waits_for_it() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let a = machine(&hub, "a").await;
+    let schema = hub
+        .create_task(None, &new_task(&general, agent, "schema", vec![]))
+        .await
+        .unwrap();
+    let migration = hub
+        .create_task(
+            None,
+            &new_task(&general, agent, "migration", vec![schema.id]),
+        )
+        .await
+        .unwrap();
+
+    let lease = hub
+        .grant_lease(schema.lane_id, a, T0, LEASE_TTL)
+        .await
+        .unwrap()
+        .expect("free");
+    let events = hub.pending_events(schema.lane_id).await.unwrap();
+    let run = hub
+        .start_run(
+            &lease,
+            &StartRun {
+                agent_id: Some(agent),
+                backend: Some(BackendKind::Codex),
+                model: Some("gpt-x".to_owned()),
+                ..new_run(events.iter().map(|e| e.id).collect(), T0)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(run.model.as_deref(), Some("gpt-x"));
+    let policy = RetryPolicy {
+        configuration: true,
+        ..retry(true, 1)
+    };
+    hub.fail_run(&lease, run.id, "model is not supported", policy, T0)
+        .await
+        .unwrap();
+    hub.release_lease(&lease).await.unwrap();
+
+    let failed = task(&hub, schema.id).await;
+    assert_eq!(failed.status, TaskStatus::Failed);
+    let result = failed.result.expect("a result");
+    assert_eq!(result["configuration_failure"], true);
+    assert_eq!(result["error"], "model is not supported");
+    assert_eq!(result["backend"], "codex");
+    assert_eq!(result["model"], "gpt-x");
+    assert_eq!(
+        hub.configuration_failures()
+            .await
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect::<Vec<_>>(),
+        [schema.id]
+    );
+
+    // What waits for it is blocked, not cancelled, and so is a task added later.
+    assert_eq!(task(&hub, migration.id).await.status, TaskStatus::Queued);
+    let late = hub
+        .create_task(None, &new_task(&general, agent, "late", vec![schema.id]))
+        .await
+        .unwrap();
+    assert_eq!(late.status, TaskStatus::Queued);
+    assert_eq!(
+        hub.grant_lease(migration.lane_id, a, T0, LEASE_TTL)
+            .await
+            .unwrap(),
+        None
+    );
+    let reason = task(&hub, migration.id).await.waiting_reason.unwrap();
+    assert!(
+        reason.starts_with("blocked: T-0001 failed because the backend refused"),
+        "{reason}"
+    );
+
+    // The lead retries it on another agent; a failure of any other kind it may not retry.
+    let other = hub
+        .create_agent(&NewAgent::named("Claude engineer", "engineer"))
+        .await
+        .unwrap();
+    let retried = hub
+        .lead_retry_task(schema.id, Some(other.id), T0)
+        .await
+        .unwrap();
+    assert_eq!(retried.status, TaskStatus::Queued);
+    assert_eq!(retried.agent_id, other.id);
+    assert_eq!(retried.result, None);
+    assert!(hub.configuration_failures().await.unwrap().is_empty());
+    let retry_event = hub
+        .pending_events(schema.lane_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.source_event_id.starts_with("retry:"))
+        .expect("retry event");
+    assert_eq!(retry_event.trust, Trust::System);
+
+    let (lease, run) = run_pending(&hub, schema.lane_id, a, T0).await;
+    hub.fail_run(&lease, run.id, "boom", retry(true, 1), T0)
+        .await
+        .unwrap();
+    assert_eq!(task(&hub, migration.id).await.status, TaskStatus::Cancelled);
+    assert!(
+        hub.lead_retry_task(schema.id, None, T0).await.is_err(),
+        "only the user retries an ordinary failure"
+    );
 }
 
 /// Reports a machine with Claude logged in on account `label`.

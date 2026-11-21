@@ -313,7 +313,9 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
 
     assert!(
         lead.prompt
-            .contains(r#"{"name":"Iris","role":"frontend developer"}"#)
+            .contains(r#""name":"Iris","role":"frontend developer""#),
+        "{}",
+        lead.prompt
     );
 
     // The first run: the instructions loaded in every run, no task index,
