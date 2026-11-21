@@ -412,20 +412,26 @@ impl HubDb {
         let conn = self.db.reader()?;
         let filter =
             "FROM dream_items WHERE project_id=?1 AND kind=?2 AND (kind!='run' OR last_review=0)";
+        // Choices page newest first with no cap, so the latest answers stay reachable (#621).
+        let (cap, order, limit) = if kind == "choice" {
+            (String::new(), "last_review!=0,item_id DESC", limit)
+        } else {
+            (
+                format!(" LIMIT {REVIEW_LIMIT}"),
+                "last_review,item_id",
+                limit.min(REVIEW_LIMIT.saturating_sub(offset)),
+            )
+        };
         let count = query_one(
             &conn,
-            &format!("SELECT COUNT(*) FROM (SELECT 1 {filter} LIMIT {REVIEW_LIMIT})"),
+            &format!("SELECT COUNT(*) FROM (SELECT 1 {filter}{cap})"),
             params![project.get(), kind],
             |r| Cols(r).i64(0),
         )
         .await?;
-        let limit = limit.min(REVIEW_LIMIT.saturating_sub(offset));
-        let order = if kind == "choice" { "DESC" } else { "ASC" };
         let ids = query_all(
             &conn,
-            &format!(
-                "SELECT item_id {filter} ORDER BY last_review,item_id {order} LIMIT ?3 OFFSET ?4"
-            ),
+            &format!("SELECT item_id {filter} ORDER BY {order} LIMIT ?3 OFFSET ?4"),
             params![
                 project.get(),
                 kind,
