@@ -81,6 +81,10 @@ pub fn may_start_unrequested(mode: Mode) -> bool {
 /// fields, as given.
 #[must_use]
 pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
+    // A batch merge is approved once for its named, pinned list, never by a standing rule (#692).
+    if tool == crate::MERGE && arguments.get("pulls").is_some() {
+        return Json::Object(Map::new());
+    }
     let mut targets: Map<String, Json> = TARGET_FIELDS
         .iter()
         .filter_map(|field| {
@@ -689,6 +693,35 @@ mod tests {
             V::AskOffer
         );
         assert_eq!(decide(crate::COMMENT, other_issue), V::AskOffer);
+    }
+
+    #[test]
+    fn a_merge_rule_never_covers_a_batch_and_a_batch_offers_no_rule() {
+        let batch =
+            json!({"repository":"app","pulls":[{"number":7,"expected_head":"0".repeat(40)}]});
+        assert_eq!(rule_pattern(crate::MERGE, &batch), json!({}));
+        let rules = vec![rule(
+            crate::MERGE,
+            rule_pattern(crate::MERGE, &json!({"repository":"app","number":7})),
+            false,
+        )];
+        let overrides = Overrides::new();
+        for mode in [ON, AS, AU] {
+            let verdict = gate(&GateInput {
+                tool: crate::MERGE,
+                tier: Tier::SharedHardToUndo,
+                arguments: &batch,
+                mode,
+                space_ceiling: AU,
+                project_ceiling: None,
+                overrides: &overrides,
+                rules: &rules,
+                tainted: false,
+                requested: true,
+                new_work: None,
+            });
+            assert_eq!(short(&verdict), V::Ask, "{mode}");
+        }
     }
 
     #[test]

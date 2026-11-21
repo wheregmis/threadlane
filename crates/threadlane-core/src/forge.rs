@@ -26,6 +26,8 @@ pub const CREATE_ISSUE: &str = "create_issue";
 pub const REPORT_LIMITATION: &str = "report_threadlane_limitation";
 /// Merge a registered repository's pull request.
 pub const MERGE: &str = "merge";
+/// The most pull requests one `merge` call may name in `pulls`.
+pub const MAX_MERGE_BATCH: usize = 20;
 /// Mark a registered repository's draft pull request ready for review.
 pub const MARK_READY: &str = "mark_ready";
 /// Add or remove labels on a registered repository's issue (not a pull request).
@@ -70,6 +72,11 @@ pub enum RepositoryAction {
     CreateIssue { title: String, body: String },
     /// Merge the numbered pull request.
     Merge { number: std::num::NonZeroU64 },
+    /// Merge these pull requests in this order, each only if its head is
+    /// still the paired commit; stop at the first that fails (#692).
+    MergeBatch {
+        pulls: Vec<(std::num::NonZeroU64, String)>,
+    },
     /// Mark the numbered draft pull request ready for review.
     MarkReady { number: std::num::NonZeroU64 },
     /// Replace the numbered pull request's title and/or body; `None` keeps it.

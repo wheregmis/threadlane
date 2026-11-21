@@ -6,8 +6,9 @@
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
     ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST, EXPECTED_HEAD,
-    FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, LABEL_ISSUE, MARK_READY, MAX_LABELS, MERGE, ONTO_TASK,
-    OPEN_PULL_REQUEST, PUBLISH_BRANCH, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD, valid_label_name,
+    FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, LABEL_ISSUE, MARK_READY, MAX_LABELS, MAX_MERGE_BATCH,
+    MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD,
+    valid_label_name,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -141,10 +142,23 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         ),
         define(
             MERGE,
-            "Merge a pull request in a registered project repository.",
+            "Merge a pull request in a registered project repository. To merge a batch the user \
+             asked for on one approval, give pulls instead of number: the pull requests in merge \
+             order, each with its current full head SHA. Each merges only if its head is still \
+             that SHA; the batch stops at the first that fails.",
             json!({
-                "type":"object","properties":{"repository":repository,"number":{"type":"integer","minimum":1}},
-                "required":["repository","number"],"additionalProperties":false
+                "type":"object","properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "pulls":{"type":"array","minItems":1,"maxItems":MAX_MERGE_BATCH,"items":{
+                        "type":"object","properties":{
+                            "number":{"type":"integer","minimum":1},
+                            "expected_head":{"type":"string","description":"The pull request's current full head SHA."}
+                        },
+                        "required":["number","expected_head"],"additionalProperties":false
+                    }}
+                },
+                "required":["repository"],"additionalProperties":false
             }),
         ),
         define(
@@ -436,6 +450,36 @@ pub(crate) async fn issue_claim(
     })
 }
 
+/// A batch merge's pulls, in order: each a distinct pull request pinned to a
+/// full head SHA.
+fn merge_batch(pulls: &Json) -> Result<Vec<(std::num::NonZeroU64, String)>, ToolError> {
+    let pulls = pulls
+        .as_array()
+        .filter(|pulls| (1..=MAX_MERGE_BATCH).contains(&pulls.len()))
+        .ok_or_else(|| {
+            invalid(&format!(
+                "pulls must list 1 to {MAX_MERGE_BATCH} pull requests"
+            ))
+        })?;
+    let mut batch: Vec<(std::num::NonZeroU64, String)> = Vec::with_capacity(pulls.len());
+    for pull in pulls {
+        fields(pull, &["number", EXPECTED_HEAD])?;
+        let number = pull["number"]
+            .as_u64()
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or_else(|| invalid("each pull needs a positive integer number"))?;
+        let head = pull[EXPECTED_HEAD]
+            .as_str()
+            .filter(|sha| valid_commit_id(sha))
+            .ok_or_else(|| invalid("each pull needs expected_head, a full commit SHA"))?;
+        if batch.iter().any(|(seen, _)| *seen == number) {
+            return Err(invalid(&format!("pull request #{number} is listed twice")));
+        }
+        batch.push((number, head.to_owned()));
+    }
+    Ok(batch)
+}
+
 /// Parses the arguments again before handing the stored call to the runner.
 pub(crate) fn repository_action(
     tool: &str,
@@ -483,6 +527,12 @@ pub(crate) fn repository_action(
             Ok(RepositoryAction::CreateIssue {
                 title,
                 body: body()?,
+            })
+        }
+        MERGE if a.get("pulls").is_some() => {
+            fields(a, &["repository", "pulls"])?;
+            Ok(RepositoryAction::MergeBatch {
+                pulls: merge_batch(&a["pulls"])?,
             })
         }
         MERGE => {
@@ -873,6 +923,19 @@ pub(crate) async fn proposal(
                     "Request a fresh review of pull request {slug}#{number} in {name} ({}), if \
                      its head is still {expected_head}?",
                     asks.join(" and ")
+                )
+            }
+            threadlane_core::forge::RepositoryAction::MergeBatch { pulls } => {
+                let list: Vec<String> = pulls
+                    .iter()
+                    .enumerate()
+                    .map(|(at, (number, head))| format!("{}. {slug}#{number} at {head}", at + 1))
+                    .collect();
+                format!(
+                    "Merge these {} pull requests in {name}, in this order, each only if its \
+                     head is still the commit shown? The batch stops at the first that fails.\n{}",
+                    pulls.len(),
+                    list.join("\n")
                 )
             }
             threadlane_core::forge::RepositoryAction::LabelIssue {

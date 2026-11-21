@@ -311,6 +311,45 @@ impl GitForge {
         ))
     }
 
+    /// Merges `pulls` in order, each only if GitHub still sees its pinned
+    /// head, and stops at the first that fails, saying which merged.
+    async fn merge_batch(
+        &self,
+        repo: &str,
+        pulls: &[(std::num::NonZeroU64, String)],
+    ) -> Result<String, ForgeError> {
+        let mut merged = Vec::new();
+        for (number, head) in pulls {
+            let merge = self
+                .gh(
+                    Path::new("."),
+                    args(&[
+                        "pr",
+                        "merge",
+                        &number.to_string(),
+                        "--merge",
+                        &format!("--match-head-commit={head}"),
+                        &format!("--repo={repo}"),
+                    ]),
+                )
+                .await;
+            if let Err(error) = merge {
+                let done = if merged.is_empty() {
+                    "none merged".to_owned()
+                } else {
+                    format!("merged {}", merged.join(", "))
+                };
+                return Err(ForgeError(format!(
+                    "batch stopped at #{number} (expected head {head}), {done}, the rest not \
+                     attempted: {}",
+                    error.0
+                )));
+            }
+            merged.push(format!("#{number}"));
+        }
+        Ok(format!("merged {} in order", merged.join(", ")))
+    }
+
     /// Closes PR `number` of `repo` (`host/owner/name`) only while its head
     /// is `expected_head`, then deletes its head branch if asked. A PR that is
     /// already closed at that head is not closed again, so a retry finishes.
@@ -805,6 +844,7 @@ impl Forge for GitForge {
                     .request_review(&repo, *number, expected_head, reviewers, comment.as_deref())
                     .await;
             }
+            RepositoryAction::MergeBatch { pulls } => return self.merge_batch(&repo, pulls).await,
             _ => {}
         }
         let mut argv = match action {
@@ -848,7 +888,8 @@ impl Forge for GitForge {
             } => return self.label_issue(&repo, *number, add, remove).await,
             RepositoryAction::ClosePullRequest { .. }
             | RepositoryAction::ResolveReviewThread { .. }
-            | RepositoryAction::RequestReview { .. } => unreachable!("handled above"),
+            | RepositoryAction::RequestReview { .. }
+            | RepositoryAction::MergeBatch { .. } => unreachable!("handled above"),
             RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
             RepositoryAction::AssignIssue { number } => {
                 args(&["issue", "edit", &number.to_string(), "--add-assignee=@me"])
