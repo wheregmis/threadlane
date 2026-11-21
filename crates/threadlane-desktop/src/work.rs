@@ -341,7 +341,8 @@ impl Desktop {
             SIDEBAR_WIDTH
         };
         let content_width =
-            (window.viewport_size().width - sidebar - LG * 2. - SM).min(READING_WIDTH);
+            (window.viewport_size().width - sidebar - LG * 2. - SM)
+                .min(READING_WIDTH.to_pixels(window.rem_size()));
         // Leave room for the numeric columns and a readable agent column.
         let compact = content_width < window.rem_size() * 40.;
         let border = cx.theme().border;

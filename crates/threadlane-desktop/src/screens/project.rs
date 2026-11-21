@@ -51,7 +51,7 @@ fn chat_details_in_sheet(viewport_width: Pixels, rem: Pixels, sidebar_collapsed:
     } else {
         SIDEBAR_WIDTH
     };
-    let available = (viewport_width - left - LG * 2.).min(READING_WIDTH);
+    let available = (viewport_width - left - LG * 2.).min(READING_WIDTH.to_pixels(rem));
     available - SIDEBAR_WIDTH - LG < rem * 24.
 }
 
@@ -108,9 +108,9 @@ impl Desktop {
             let view = cx.entity().downgrade();
             button("space-new-task")
                 .small()
-                .primary()
+                .outline()
                 .icon(AppIcon::ListPlus)
-                .label("New task")
+                .label("New task…")
                 .dropdown_menu(move |mut menu, _, _| {
                     for project in &projects {
                         let (space, project, view) =
@@ -448,9 +448,18 @@ impl Desktop {
                                     .min_w_0()
                                     .gap(SM)
                                     .items_center()
-                                    .children((!row.quiet).then(|| status_dot(status_kind, cx)))
+                                    .child(
+                                        h_flex()
+                                            .w(TYPE_META)
+                                            .flex_none()
+                                            .justify_center()
+                                            .children(
+                                                (!row.quiet).then(|| status_dot(status_kind, cx)),
+                                            ),
+                                    )
                                     .child(
                                         div()
+                                            .w(rems(4.5))
                                             .flex_none()
                                             .text_size(TYPE_META)
                                             .font_family(mono.clone())
@@ -467,17 +476,33 @@ impl Desktop {
                                             .text_color(title_color)
                                             .child(row.title),
                                     )
-                                    .child(meta(row.project, cx).flex_none())
-                                    .child(meta(row.agent, cx).flex_none())
+                                    .child(
+                                        meta(row.project, cx)
+                                            .w(rems(7.5))
+                                            .flex_none()
+                                            .truncate(),
+                                    )
+                                    .child(
+                                        meta(row.agent, cx)
+                                            .w(rems(6.5))
+                                            .flex_none()
+                                            .truncate(),
+                                    )
                                     .child(
                                         meta(row.time, cx)
+                                            .w(rems(5.5))
                                             .flex_none()
                                             .font_features(TABULAR.clone())
                                             .text_right(),
                                     )
-                                    .children(
-                                        (!row.quiet)
-                                            .then(|| status_badge(row.status, status_kind, cx)),
+                                    .child(
+                                        h_flex()
+                                            .w(rems(8.5))
+                                            .flex_none()
+                                            .justify_end()
+                                            .children((!row.quiet).then(|| {
+                                                status_badge(row.status, status_kind, cx)
+                                            })),
                                     ),
                             );
                         block = block.child(row_el);
@@ -550,7 +575,7 @@ impl Desktop {
                 KitTab::new()
                     .label(label)
                     .aria_label(label)
-                    .icon(Icon::new(icon).size(TYPE_BODY))
+                    .icon(Icon::new(icon).small())
                     .tooltip(move |window, cx| Tooltip::new(tab.tooltip()).build(window, cx))
             }));
         let archived = self.state.is_archived(space, project);
@@ -622,59 +647,8 @@ impl Desktop {
                         this.set_archived(pause_space.clone(), pause_project.clone(), false, cx);
                     })),
             );
-        } else {
-            actions = actions
-                .child(
-                    button("pause-project")
-                        .small()
-                        .icon(if paused {
-                            AppIcon::Play
-                        } else {
-                            AppIcon::Pause
-                        })
-                        .label(if paused {
-                            "Resume project"
-                        } else {
-                            "Pause project"
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_paused(
-                                pause_space.clone(),
-                                pause_project.clone(),
-                                !paused,
-                                cx,
-                            );
-                        })),
-                )
-                .children(self.state.offers_archive(space, project).then(|| {
-                    let action = Consequence::ArchiveProject(space.to_owned(), project.to_owned());
-                    button("archive-project")
-                        .small()
-                        .ghost()
-                        .label("Archive project…")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.confirm_action(action.clone(), window, cx);
-                        }))
-                }))
-                .child(
-                    button("new-task")
-                        .small()
-                        .primary()
-                        .icon(AppIcon::ListPlus)
-                        .label("New task")
-                        .accessibility_label("Create a task directly")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if form_open {
-                                this.hide_new_task_form(&task_space, &task_project, window, cx);
-                            } else {
-                                this.show_new_task_form(&task_space, &task_project, window, cx);
-                            }
-                        })),
-                );
-        }
-        if self.state.offers_delete(space, project) {
-            let (space, project) = (space.to_owned(), project.to_owned());
-            if archived {
+            if self.state.offers_delete(space, project) {
+                let (space, project) = (space.to_owned(), project.to_owned());
                 actions = actions.child(
                     button("delete-archived-project")
                         .small()
@@ -690,24 +664,72 @@ impl Desktop {
                             );
                         })),
                 );
-            } else {
-                let view = cx.entity().downgrade();
-                actions = actions.child(
+            }
+        } else {
+            let offers_archive = self.state.offers_archive(space, project);
+            let offers_delete = self.state.offers_delete(space, project);
+            let view = cx.entity().downgrade();
+            let (menu_space, menu_project) = (space.to_owned(), project.to_owned());
+            actions = actions
+                .child(
+                    button("new-task")
+                        .small()
+                        .outline()
+                        .icon(AppIcon::ListPlus)
+                        .label("New task…")
+                        .accessibility_label("Create a task directly")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if form_open {
+                                this.hide_new_task_form(&task_space, &task_project, window, cx);
+                            } else {
+                                this.show_new_task_form(&task_space, &task_project, window, cx);
+                            }
+                        })),
+                )
+                .child(
                     button("project-overflow")
                         .small()
                         .ghost()
                         .label("More")
+                        .dropdown_caret(true)
                         .accessibility_label("More project actions")
-                        .dropdown_menu(move |menu, _, cx| {
-                            menu.item(delete_project_item(
+                        .dropdown_menu(move |mut menu, _, cx| {
+                            let (ps, pp) = (pause_space.clone(), pause_project.clone());
+                            menu = menu.item(menu_item(
                                 &view,
-                                space.clone(),
-                                project.clone(),
-                                cx,
-                            ))
+                                if paused {
+                                    "Resume project"
+                                } else {
+                                    "Pause project"
+                                },
+                                move |this, _, cx| {
+                                    this.set_paused(ps.clone(), pp.clone(), !paused, cx);
+                                },
+                            ));
+                            if offers_archive {
+                                let action = Consequence::ArchiveProject(
+                                    menu_space.clone(),
+                                    menu_project.clone(),
+                                );
+                                menu = menu.item(menu_item(
+                                    &view,
+                                    "Archive project…",
+                                    move |this, window, cx| {
+                                        this.confirm_action(action.clone(), window, cx)
+                                    },
+                                ));
+                            }
+                            if offers_delete {
+                                menu = menu.separator().item(delete_project_item(
+                                    &view,
+                                    menu_space.clone(),
+                                    menu_project.clone(),
+                                    cx,
+                                ));
+                            }
+                            menu
                         }),
                 );
-            }
         }
         let form = (!archived && form_open).then(|| self.task_form(space, project, cx));
         let context = h_flex()
@@ -793,7 +815,7 @@ impl Desktop {
                     .p(SM)
                     .border_dashed()
                     .child(div().whitespace_normal().child(proposal.title))
-                    .child(meta(proposal.meta, cx).text_right())
+                    .child(meta(proposal.meta, cx))
                     .child(
                         h_flex()
                             .gap(XS)
@@ -868,8 +890,8 @@ impl Desktop {
                                         this.go(screen.clone(), cx)
                                     })),
                             )
-                            .child(meta(task_card.meta, cx).text_right())
-                            .children(task_card.merge.map(|merge| meta(merge, cx).text_right()))
+                            .child(meta(task_card.meta, cx))
+                            .children(task_card.merge.map(|merge| meta(merge, cx)))
                             .children(answer),
                     )
                     .context_menu(move |menu, _, _| {
@@ -1044,9 +1066,16 @@ impl Desktop {
                                     .min_w_0()
                                     .gap(SM)
                                     .items_center()
-                                    .children((!quiet).then(|| status_dot(status_kind, cx)))
+                                    .child(
+                                        h_flex()
+                                            .w(TYPE_META)
+                                            .flex_none()
+                                            .justify_center()
+                                            .children((!quiet).then(|| status_dot(status_kind, cx))),
+                                    )
                                     .child(
                                         div()
+                                            .w(rems(4.5))
                                             .flex_none()
                                             .text_size(TYPE_META)
                                             .font_family(mono.clone())
@@ -1067,15 +1096,27 @@ impl Desktop {
                                             })
                                             .child(task.title.clone()),
                                     )
-                                    .child(meta(summary.agent.clone(), cx).flex_none())
+                                    .child(
+                                        meta(summary.agent.clone(), cx)
+                                            .w(rems(7.))
+                                            .flex_none()
+                                            .truncate(),
+                                    )
                                     .child(
                                         meta(time, cx)
+                                            .w(rems(5.5))
                                             .flex_none()
                                             .font_features(TABULAR.clone())
                                             .text_right(),
                                     )
-                                    .children(
-                                        (!quiet).then(|| status_badge(status, status_kind, cx)),
+                                    .child(
+                                        h_flex()
+                                            .w(rems(8.5))
+                                            .flex_none()
+                                            .justify_end()
+                                            .children((!quiet).then(|| {
+                                                status_badge(status, status_kind, cx)
+                                            })),
                                     ),
                             ),
                     );
@@ -1326,8 +1367,7 @@ impl Desktop {
                         reply: bool| {
                 let reply = reply && main_chat;
                 let id = format!("conversation-{space}-{project}-{id}");
-                let quote = text.to_owned();
-                let menu_text = quote.clone();
+                let menu_text = text.to_owned();
                 let menu_view = cx.entity().downgrade();
                 v_flex()
                     .id(SharedString::from(format!("menu-{id}")))
@@ -1346,7 +1386,7 @@ impl Desktop {
                                     .justify_center()
                                     .rounded_full()
                                     .bg(run_tint)
-                                    .child(Icon::new(ic).size(TYPE_META).text_color(run_ink))
+                                    .child(Icon::new(ic).xsmall().text_color(run_ink))
                             }))
                             .child(
                                 div()
@@ -1355,16 +1395,6 @@ impl Desktop {
                                     .child(who.to_owned()),
                             )
                             .child(div().flex_1())
-                            .children(reply.then(|| {
-                                button(SharedString::from(format!("reply-{id}")))
-                                    .ghost()
-                                    .small()
-                                    .tab_stop(true)
-                                    .label("Reply")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.reply_to(&quote, window, cx)
-                                    }))
-                            }))
                             .child(
                                 meta(time.to_owned(), cx)
                                     .font_features(TABULAR.clone())
@@ -1443,7 +1473,7 @@ impl Desktop {
                                     .items_center()
                                     .child(
                                         Icon::new(AppIcon::GitFork)
-                                            .size(TYPE_META)
+                                            .xsmall()
                                             .text_color(muted),
                                     )
                                     .child(
@@ -1520,7 +1550,7 @@ impl Desktop {
                                     .items_center()
                                     .child(
                                         Icon::new(AppIcon::GitFork)
-                                            .size(TYPE_META)
+                                            .xsmall()
                                             .text_color(run_ink),
                                     )
                                     .child(
@@ -1771,7 +1801,9 @@ impl Desktop {
                     let view = cx.entity().downgrade();
                     let (space, project) = (space.clone(), project.clone());
                     window.open_sheet(cx, move |sheet, window, cx| {
-                        let width = RULES_WIDTH.min(window.viewport_size().width);
+                        let width = RULES_WIDTH
+            .to_pixels(window.rem_size())
+            .min(window.viewport_size().width);
                         let content = view.update(cx, |this, cx| {
                             this.conversation_details(&space, &project, &this.when(), true, cx)
                         });

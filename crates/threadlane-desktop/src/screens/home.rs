@@ -63,7 +63,7 @@ impl Inbox {
 }
 
 impl Desktop {
-    pub(crate) fn home(&self, when: &When, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn home(&self, when: &When, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let message = button("message-lead")
             .icon(AppIcon::MessagesSquare)
             .label("Message a lead")
@@ -99,8 +99,11 @@ impl Desktop {
                     ),
             )
             .child(Tab::new().aria_label("Activity").child("Activity"));
+        let wide_split = self.inbox.tab == InboxTab::NeedsYou
+            && window.viewport_size().width >= px(1060.)
+            && pending > 0;
         let content = match self.inbox.tab {
-            InboxTab::NeedsYou => self.inbox_needs_you(when, cx),
+            InboxTab::NeedsYou => self.inbox_needs_you(when, wide_split, cx),
             InboxTab::Activity => self.inbox_activity(when, cx),
         };
         v_flex()
@@ -108,8 +111,7 @@ impl Desktop {
             .min_h_0()
             .min_w_0()
             .w_full()
-            .max_w(READING_WIDTH)
-            .self_center()
+            .when(!wide_split, |page| page.max_w(READING_WIDTH).self_center())
             .gap(MD)
             .child(
                 v_flex()
@@ -175,7 +177,7 @@ impl Desktop {
         chips
     }
 
-    fn inbox_needs_you(&self, when: &When, cx: &mut Context<Self>) -> Div {
+    fn inbox_needs_you(&self, when: &When, wide_split: bool, cx: &mut Context<Self>) -> Div {
         let state = &self.state;
         let banners: Vec<_> = state
             .spaces()
@@ -184,20 +186,24 @@ impl Desktop {
             .filter_map(|space| {
                 let text = state.blocked(&space.name)?;
                 Some(
-                    v_flex()
-                        .gap(XS)
-                        .items_start()
+                    h_flex()
+                        .w_full()
+                        .gap(SM)
+                        .items_center()
                         .child(
-                            Alert::warning(
-                                SharedString::from(format!("blocked-{}", space.name)),
-                                text,
-                            )
-                            .title(format!("{} is blocked", space.name)),
+                            div().flex_1().min_w_0().child(
+                                Alert::warning(
+                                    SharedString::from(format!("blocked-{}", space.name)),
+                                    text,
+                                )
+                                .title(format!("{} is blocked", space.name)),
+                            ),
                         )
                         .child(
                             button(SharedString::from(format!("accounts-{}", space.name)))
                                 .small()
-                                .ghost()
+                                .outline()
+                                .flex_none()
                                 .tab_stop(true)
                                 .label("Model accounts")
                                 .on_click(
@@ -210,13 +216,14 @@ impl Desktop {
 
         let mut needs = v_flex().gap(SM).pb(SM);
         let gaps = state.gaps(Part::Decisions);
-        if state.caught_up() {
+        let queued_decisions: Vec<_> = state.needs_you().collect();
+        if banners.is_empty() && gaps.is_empty() && queued_decisions.is_empty() {
             return needs
                 .pt(LG)
                 .items_start()
                 .child(section("You’re caught up"))
                 .child(meta(
-                    "No decisions, blockers or running tasks in the spaces shown.",
+                    "No decisions or blockers in the spaces shown.",
                     cx,
                 ))
                 .child(
@@ -236,7 +243,55 @@ impl Desktop {
             needs = needs.child(gap_line(gap, "decisions", space, cx));
         }
         let current = state.current_decision().map(DecisionKey::from);
-        for queued in state.needs_you() {
+        if wide_split && !queued_decisions.is_empty() {
+            let mut queue_list = v_flex().w(rems(20.)).flex_none().gap(XS);
+            let mut active_card = None;
+            for queued in &queued_decisions {
+                let key = DecisionKey::from(*queued);
+                let open = current.as_ref() == Some(&key);
+                let (question, _) = question_parts(&queued.decision.question);
+                let project = state.project_name(&key.space, queued.decision.project_id);
+                let place = inbox_place(&key.space, project);
+                let when_label = when.moment(queued.decision.created_at);
+                if open {
+                    active_card = Some(self.decision(queued, when, cx));
+                }
+                let select_key = key.clone();
+                queue_list = queue_list.child(
+                    inbox_row(
+                        format!("inbox-decision-{}-{}", key.space, key.id),
+                        question.clone(),
+                        place.clone(),
+                        meta(when_label, cx),
+                        cx,
+                    )
+                    .selected(open)
+                    .accessibility_label(format!("Review {question} ({place})"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.select_decision(select_key.clone());
+                        this.scroll_to_decision.set(DecisionScroll::Card);
+                        cx.notify();
+                    })),
+                );
+            }
+            let detail = active_card.unwrap_or_else(|| {
+                crate::components::empty_state(
+                    "Select a decision to review its details and options.",
+                    Some("Press j or k to step through the queue, or click any row on the left."),
+                    cx,
+                )
+            });
+            return needs.child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_start()
+                    .gap(LG)
+                    .child(queue_list)
+                    .child(v_flex().flex_1().min_w_0().child(detail)),
+            );
+        }
+        for queued in queued_decisions {
             let key = DecisionKey::from(queued);
             let open = current.as_ref() == Some(&key);
             let (question, _) = question_parts(&queued.decision.question);
@@ -277,14 +332,7 @@ impl Desktop {
                     .children(open.then(|| self.decision(queued, when, cx))),
             );
         }
-        needs.children(self.inbox_tasks(
-            "Running tasks",
-            &state.running(),
-            Part::Running,
-            None,
-            when,
-            cx,
-        ))
+        needs
     }
 
     fn inbox_activity(&self, when: &When, cx: &mut Context<Self>) -> Div {

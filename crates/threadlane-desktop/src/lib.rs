@@ -1311,6 +1311,8 @@ pub struct AppState {
     metrics: HashMap<String, Result<threadlane_core::client::OperationsMetrics, String>>,
     /// The last action and where it stands.
     activity: Option<Activity>,
+    /// Monotonic counter incremented each time `activity` is reported.
+    activity_revision: u64,
     /// The space you asked to unpair, until you confirm or cancel.
     unpairing: Option<String>,
     /// Spaces unpaired since the app started: their feed is no longer shown.
@@ -1340,6 +1342,10 @@ pub struct AppState {
     skip_send_hold: bool,
     /// The space the sidebar shows, as last chosen; saved in `desktop.json`.
     selected_space: Option<String>,
+    /// Persisted shell layout preferences; saved in `desktop.json`.
+    sidebar_collapsed: bool,
+    sidebar_width: Option<f32>,
+    window_size: Option<(f32, f32)>,
     composer: composer::Composer,
     conversation_read: HashMap<InSpace<String>, conversation::ConversationRead>,
     expanded_messages: HashSet<String>,
@@ -2067,16 +2073,23 @@ impl AppState {
         self.activity.as_ref()
     }
 
+    /// Monotonic revision of the last reported activity, for detecting updates.
+    #[must_use]
+    pub fn activity_revision(&self) -> u64 {
+        self.activity_revision
+    }
+
     /// Records the last action: it stays shown, on every screen, until the
     /// next one.
     pub fn report(&mut self, activity: Activity) {
+        self.activity_revision = self.activity_revision.wrapping_add(1);
         self.activity = Some(activity);
     }
 
     /// Records that `text` (an id, a branch, a link) was put on the
     /// clipboard: the status area says so.
     pub fn copied(&mut self, text: &str) {
-        self.activity = Some(Activity::Done(format!("Copied {text}")));
+        self.report(Activity::Done(format!("Copied {text}")));
     }
 
     /// Whether no hub is paired, so the app shows how to pair one instead
