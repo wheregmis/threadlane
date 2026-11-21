@@ -395,3 +395,90 @@ async fn review_event(
     .await?;
     Ok(())
 }
+
+/// The lead queues the review round of `task` again after its Reviewer
+/// failed on its configuration, on `reviewer` if it names another (#672).
+/// Repeating the call `call_key` retries once.
+pub(crate) async fn retry_review(
+    conn: &Connection,
+    task: &Task,
+    reviewer: Option<AgentId>,
+    call_key: &str,
+    now: Timestamp,
+) -> StoreResult<Task> {
+    let round = query_opt(
+        conn,
+        "SELECT submission_run, configuration_failure FROM task_reviews
+         WHERE task_id = ?1 AND state = 'pending'",
+        params![task.id.get()],
+        |row| Ok((Cols(row).id::<RunId>(0)?, Cols(row).opt_text(1)?)),
+    )
+    .await?;
+    let Some((submission, failure)) = round else {
+        return Err(StoreError::Conflict(format!(
+            "task {} has no review round to retry",
+            task.id
+        )));
+    };
+    let source_event_id = format!("retry:{}:", submission.get());
+    let earlier: Vec<Json> = query_all(
+        conn,
+        "SELECT payload FROM events WHERE source = ?1 AND source_event_id LIKE ?2",
+        params![TASK_REVIEW_SOURCE, format!("{source_event_id}%")],
+        |row| Cols(row).json(0),
+    )
+    .await?;
+    if earlier
+        .iter()
+        .any(|payload| payload["call_key"] == call_key)
+    {
+        return crate::task::existing_task(conn, task.id).await;
+    }
+    if failure.is_none() {
+        return Err(StoreError::Conflict(format!(
+            "task {} is in review and its Reviewer did not fail on its configuration; \
+             only a review that did can be retried",
+            task.id
+        )));
+    }
+    if let Some(reviewer) = reviewer {
+        if reviewer == task.agent_id {
+            return Err(StoreError::Invalid(
+                "the Reviewer must be a different agent".into(),
+            ));
+        }
+        exec(
+            conn,
+            "UPDATE task_reviews SET reviewer = ?2 WHERE submission_run = ?1",
+            params![submission.get(), reviewer.get()],
+        )
+        .await?;
+    }
+    exec(
+        conn,
+        "UPDATE task_reviews SET configuration_failure = NULL WHERE submission_run = ?1",
+        params![submission.get()],
+    )
+    .await?;
+    exec(
+        conn,
+        "UPDATE tasks SET waiting_reason = NULL WHERE id = ?1",
+        params![task.id.get()],
+    )
+    .await?;
+    exec(
+        conn,
+        "UPDATE lanes SET backoff_until = NULL WHERE id = ?1",
+        params![task.lane_id.get()],
+    )
+    .await?;
+    review_event(
+        conn,
+        task,
+        format!("{source_event_id}{}", earlier.len() + 1),
+        json!({"submission": submission, "call_key": call_key}),
+        now,
+    )
+    .await?;
+    crate::task::existing_task(conn, task.id).await
+}
