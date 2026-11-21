@@ -684,15 +684,11 @@ async fn instructions_change_in_a_run_you_triggered_and_otherwise_wait_for_your_
         other.call("i2", MEMORY_EDIT, edit.clone()).await,
         Err(ToolError::WaitingOnYou)
     );
-    let viewed = other
-        .call(
-            "v1",
-            MEMORY_VIEW,
-            json!({ "path": "project/instructions.md" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(viewed["content"], json!("Reply in English."), "not yet");
+    assert_eq!(
+        hub.db.read(instructions).await.unwrap().unwrap().content,
+        "Reply in English.",
+        "not yet"
+    );
     assert_eq!(other.end().await, RunOutcome::Deferred);
     let decision = hub.db.decision(DecisionId(1)).await.unwrap().unwrap();
     assert_eq!(decision.tool, MEMORY_EDIT);
