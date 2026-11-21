@@ -14,7 +14,7 @@ use threadlane_desktop::{
 };
 
 use super::{delete_project::delete_project_item, empty, gap_line, menu_item};
-use crate::components::{button, icon_button, meta, row, status_dot};
+use crate::components::{button, icon_button, meta, row, status_badge, status_dot};
 use crate::icons::AppIcon;
 use crate::menus::{
     GoHome, NavigateBack, NavigateForward, OpenPalette, OpenSettings, SidebarShortcut,
@@ -300,6 +300,12 @@ impl Desktop {
             .children(
                 self.state
                     .selected_space()
+                    .filter(|space| self.state.is_space_paused(&space.name))
+                    .map(|_| meta("Paused: no new run starts until you resume it", cx).px(MD)),
+            )
+            .children(
+                self.state
+                    .selected_space()
                     .and_then(|space| self.state.connection_warning(&space.name, when))
                     .map(|warning| meta(warning.label, cx).px(MD)),
             );
@@ -550,6 +556,7 @@ impl Desktop {
             .map(|space| (space.name.clone(), space.name == selected.name))
             .collect();
         let name = selected.name.clone();
+        let paused = self.state.is_space_paused(&name);
         let view = cx.entity().downgrade();
         let style = ButtonCustomVariant::new(cx)
             .foreground(cx.theme().sidebar_foreground)
@@ -560,7 +567,11 @@ impl Desktop {
             .w_full()
             .h(ROW_HEIGHT)
             .tab_stop(true)
-            .accessibility_label(format!("Space: {name} — switch spaces"))
+            .accessibility_label(if paused {
+                format!("Space: {name}, paused — switch spaces")
+            } else {
+                format!("Space: {name} — switch spaces")
+            })
             .child(
                 h_flex()
                     .w_full()
@@ -575,6 +586,7 @@ impl Desktop {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(name.clone()),
                     )
+                    .children(paused.then(|| status_badge("Paused", Status::Waiting, cx)))
                     .child(Icon::new(AppIcon::ChevronDown).small()),
             )
             .dropdown_menu(move |mut menu, _, _| {
@@ -595,7 +607,17 @@ impl Desktop {
                     );
                 }
                 let settings = Screen::Settings(Some(name.clone()));
+                let pause = name.clone();
                 menu.separator()
+                    .item(menu_item(
+                        &view,
+                        if paused {
+                            "Resume space"
+                        } else {
+                            "Pause space"
+                        },
+                        move |this, _, cx| this.set_space_paused(pause.clone(), !paused, cx),
+                    ))
                     .item(menu_item(&view, "Space settings", move |this, _, cx| {
                         this.go(settings.clone(), cx)
                     }))

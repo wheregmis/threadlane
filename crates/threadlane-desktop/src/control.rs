@@ -601,6 +601,26 @@ impl AppState {
         }
     }
 
+    /// Whether `space` itself is paused, as its hub last said.
+    #[must_use]
+    pub fn is_space_paused(&self, space: &str) -> bool {
+        self.space(space)
+            .and_then(|known| known.info.as_ref())
+            .is_some_and(|info| info.paused)
+    }
+
+    /// Takes whether its hub paused or resumed `space`.
+    pub fn space_paused_set(&mut self, space: &str, paused: bool) {
+        if let Some(info) = self
+            .spaces
+            .iter_mut()
+            .find(|known| known.name == space)
+            .and_then(|known| known.info.as_mut())
+        {
+            info.paused = paused;
+        }
+    }
+
     /// Whether `project` of `space` is paused, as its hub last listed it.
     #[must_use]
     pub fn is_paused(&self, space: &str, project: &str) -> bool {

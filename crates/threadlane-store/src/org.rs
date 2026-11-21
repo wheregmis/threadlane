@@ -203,7 +203,7 @@ impl OrgStore for HubDb {
         let conn = self.db.reader()?;
         query_one(
             &conn,
-            "SELECT name, mode_ceiling, quiet_hours, channels FROM space WHERE id = 1",
+            "SELECT name, mode_ceiling, quiet_hours, channels, paused FROM space WHERE id = 1",
             (),
             |row| {
                 let c = Cols(row);
@@ -212,6 +212,7 @@ impl OrgStore for HubDb {
                     mode_ceiling: c.parse(1)?,
                     quiet_hours: c.opt_de(2)?,
                     channels: c.de(3)?,
+                    paused: c.bool(4)?,
                 })
             },
         )
@@ -222,12 +223,14 @@ impl OrgStore for HubDb {
         let tx = self.db.begin().await?;
         exec(
             tx.conn(),
-            "UPDATE space SET name = ?1, mode_ceiling = ?2, quiet_hours = ?3, channels = ?4 WHERE id = 1",
+            "UPDATE space SET name = ?1, mode_ceiling = ?2, quiet_hours = ?3, channels = ?4, paused = ?5
+             WHERE id = 1",
             params![
                 settings.name.as_str(),
                 settings.mode_ceiling.as_str(),
                 settings.quiet_hours.as_ref().map(json_text).transpose()?,
                 json_text(&settings.channels)?,
+                settings.paused,
             ],
         )
         .await?;
