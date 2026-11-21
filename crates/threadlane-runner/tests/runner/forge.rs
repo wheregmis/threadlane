@@ -15,6 +15,23 @@ use threadlane_core::workspace::{Workspaces, task_branch};
 use threadlane_runner::{GitForge, GitWorkspaces};
 use threadlane_testkit::git::{bare_repository, git};
 
+/// Writes an executable script that no test's child process can hold open
+/// for writing. A file this process wrote can leak its write descriptor into
+/// a child another test thread forks at that moment, and running it then
+/// fails with "Text file busy" (ETXTBSY) on Linux; `cp` writes the copy in
+/// its own process, so this process never opens it.
+fn write_script(path: &Path, script: &str) {
+    let draft = path.with_extension("draft");
+    std::fs::write(&draft, script).unwrap();
+    let copied = std::process::Command::new("cp")
+        .arg(&draft)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(copied.success(), "cp {}", path.display());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 const TASK: TaskId = TaskId(1);
 
 /// A task's worktree of `app`, with one commit of work on its branch, and
@@ -148,8 +165,7 @@ impl FakeGh {
              fi\n"
         );
         let program = dir.path().join("gh");
-        std::fs::write(&program, script).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&program, &script);
         Self { dir }
     }
 
@@ -341,8 +357,7 @@ fn gh_auth(code: u8) -> (TempDir, PathBuf) {
          exit {code}\n",
         dir.path().display()
     );
-    std::fs::write(&program, script).unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&program, &script);
     (dir, program)
 }
 
@@ -534,15 +549,13 @@ async fn a_branch_is_deleted_only_while_it_still_points_at_the_expected_head() {
     let remote = "https://github.test/acme/app.git";
     // Real `git`, with the forge's remote rewritten to the local bare repository.
     let fake_git = dir.path().join("git");
-    std::fs::write(
+    write_script(
         &fake_git,
-        format!(
+        &format!(
             "#!/bin/sh\nexec git -c url.{}.insteadOf={remote} \"$@\"\n",
             bare.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let head = git(&bare, &["rev-parse", "main"]).trim().to_owned();
     let moved = git(
         &bare,

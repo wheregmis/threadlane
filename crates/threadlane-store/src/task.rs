@@ -761,10 +761,21 @@ pub(crate) async fn on_run_failed(
         return Ok(());
     };
     if task.status == TaskStatus::InReview && died {
+        // The result stays the implementer's; a refused setup is named in the reason.
+        // shortcut: the lead cannot retry the review itself; add a review retry if this recurs.
+        let reason = match configuration {
+            Some(run) => format!(
+                "Reviewer failed on its configuration (agent {}, backend {}, model {}): {error}",
+                run.agent_id.map_or("none".to_owned(), |id| id.to_string()),
+                run.backend.map_or("none", |backend| backend.as_str()),
+                run.model.as_deref().unwrap_or("default"),
+            ),
+            None => format!("Reviewer failed: {error}"),
+        };
         exec(
             conn,
             "UPDATE tasks SET waiting_reason = ?2 WHERE id = ?1",
-            params![task.id.get(), format!("Reviewer failed: {error}")],
+            params![task.id.get(), reason],
         )
         .await?;
         return Ok(());

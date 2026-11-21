@@ -373,9 +373,29 @@ async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
         "{submitted}"
     );
     hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
     assert_eq!(
         task(&hub, &report.id.to_string()).await.status,
         TaskStatus::InReview
+    );
+
+    // The reviewer's backend refuses its setup: the task names that, keeping its result.
+    let (lease, review) = begin(&*hub.link).await;
+    assert_eq!(review.agent_name, "Checker");
+    let rejected = RunFailure::Rejected {
+        message: "The 'gpt-x' model is not supported".into(),
+    };
+    hub.link
+        .fail(&lease, review.run_id, &rejected)
+        .await
+        .unwrap();
+    let reviewed = task(&hub, &report.id.to_string()).await;
+    assert_eq!(reviewed.status, TaskStatus::InReview);
+    let reason = reviewed.waiting_reason.unwrap();
+    assert!(
+        reason.starts_with("Reviewer failed on its configuration (agent ")
+            && reason.contains("not supported"),
+        "{reason}"
     );
 }
 

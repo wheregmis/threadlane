@@ -335,6 +335,23 @@ async fn a_refused_model_is_a_configuration_failure_the_lead_can_see_and_reassig
             .await
             .unwrap();
     }
+    let iris_id = hub
+        .db
+        .agents()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.name == "Iris")
+        .unwrap()
+        .id;
+    let iris = hub
+        .db
+        .bindings(general.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.agent_id == iris_id)
+        .unwrap();
     hub.send("m-1", "Build it").await;
 
     // The lead sees each agent's backend and model, the hub default included.
@@ -410,6 +427,26 @@ async fn a_refused_model_is_a_configuration_failure_the_lead_can_see_and_reassig
         matches!(&refused, Err(threadlane_core::tools::ToolError::Failed(why)) if why.contains("would fail to start")),
         "{refused:?}"
     );
+    // Retrying on its own agent once that agent is off is refused the same way.
+    hub.db.set_binding_mode(iris.id, Mode::Off).await.unwrap();
+    let off = hub
+        .link
+        .call_tool(
+            &lease,
+            lead.run_id,
+            Some("retry-own-off"),
+            RETRY_TASK,
+            &json!({ "task_id": "T-0001" }),
+        )
+        .await;
+    assert!(
+        matches!(&off, Err(threadlane_core::tools::ToolError::InvalidArguments(why)) if why.contains(r#"agent "Iris" is off"#)),
+        "{off:?}"
+    );
+    hub.db
+        .set_binding_mode(iris.id, Mode::OnRequest)
+        .await
+        .unwrap();
     // An agent set to off would never run it.
     let off = hub
         .link

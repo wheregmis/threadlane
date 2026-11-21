@@ -539,25 +539,40 @@ impl HubTools {
                 object.get("task_id").ok_or_else(|| missing("task_id"))?,
             )
             .await?;
-        let agent = match text_field(object, "agent")? {
-            Some(name) => {
-                let agent = bound_agent(&self.db, context.project_id, name).await?;
-                let bindings = self
+        let named = text_field(object, "agent")?;
+        let (agent, name) = match named {
+            Some(name) => (
+                bound_agent(&self.db, context.project_id, name).await?,
+                name.to_owned(),
+            ),
+            None => {
+                let agent = self
                     .db
-                    .bindings(context.project_id)
+                    .agent(task.agent_id)
                     .await
-                    .map_err(tool_error)?;
-                // An agent set to off never runs: the task and what waits for it would stall.
-                if bindings
-                    .iter()
-                    .any(|binding| binding.agent_id == agent && binding.mode == Mode::Off)
-                {
-                    return Err(ToolError::InvalidArguments(format!(
-                        "agent {name:?} is off in this project, so it would never run {}; \
-                         name an enabled agent",
-                        task.id
-                    )));
-                }
+                    .map_err(tool_error)?
+                    .ok_or_else(|| ToolError::Failed(format!("{} has no agent", task.id)))?;
+                (agent.id, agent.name)
+            }
+        };
+        let bindings = self
+            .db
+            .bindings(context.project_id)
+            .await
+            .map_err(tool_error)?;
+        // An agent set to off never runs: the task and what waits for it would stall.
+        if bindings
+            .iter()
+            .any(|binding| binding.agent_id == agent && binding.mode == Mode::Off)
+        {
+            return Err(ToolError::InvalidArguments(format!(
+                "agent {name:?} is off in this project, so it would never run {}; \
+                 name an enabled agent",
+                task.id
+            )));
+        }
+        let agent = match named {
+            Some(_) => {
                 self.check_setup(context.project_id, agent).await?;
                 Some(agent)
             }
