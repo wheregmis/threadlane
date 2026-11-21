@@ -64,20 +64,21 @@ async fn status(
         })
     };
     // Read the original round, including history whose GitHub delivery was acknowledged.
+    // Match on the canonical PR URL, not the registration: two registrations can share a remote (#666).
     let original = query_opt(conn, "SELECT t.id, CASE WHEN r.state IN ('submitted','pending') THEN 'in_progress' ELSE r.state END,
             CASE WHEN r.state IN ('approved','changes_requested') THEN r.feedback END
         FROM tasks t JOIN task_reviews r ON r.task_id = t.id
         JOIN runs run ON run.id = r.submission_run
         JOIN json_each(r.revisions) revision
         JOIN repositories repo ON repo.id = revision.value ->> '$.repository'
-        WHERE t.project_id = ?1 AND repo.id = ?2 AND revision.value ->> '$.commit' = ?3
+        WHERE t.project_id = ?1 AND revision.value ->> '$.commit' = ?2
           AND (r.state IN ('pending','approved','changes_requested') OR (r.state = 'submitted' AND run.status = 'active'))
           AND EXISTS (SELECT 1 FROM decisions d WHERE d.lane_id = t.lane_id
                 AND d.tool IN ('open_pull_request','publish_branch','fast_forward_pull_request')
                 AND d.outcome ->> '$.performed' = 1 AND d.outcome ->> '$.repository' = repo.name
-                AND lower(d.outcome ->> '$.pull_request') = ?4)
+                AND lower(d.outcome ->> '$.pull_request') = ?3)
         ORDER BY r.submission_run DESC LIMIT 1",
-        params![project.get(),target.repository.get(),target.head.as_str(),target.url.as_str()], decode).await?;
+        params![project.get(),target.head.as_str(),target.url.as_str()], decode).await?;
     if let Some(original) = original {
         return Ok(Some(original));
     }
