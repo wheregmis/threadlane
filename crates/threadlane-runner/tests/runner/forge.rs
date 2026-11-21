@@ -895,3 +895,59 @@ async fn a_fresh_review_is_requested_only_at_the_approved_head() {
         .unwrap();
     assert_eq!(gh.invocations().len(), 2);
 }
+
+#[tokio::test]
+async fn a_base_missing_from_the_remote_is_refused_before_anything_is_pushed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (worktree, remote) = worktree_with_work(dir.path()).await;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let branch = task_branch(TASK);
+    let revision = git(&worktree, &["rev-parse", "HEAD"]);
+    let approved = ApprovedBranch {
+        name: &branch,
+        revision: revision.trim(),
+    };
+    let error = forge
+        .open_draft_pull_request(
+            &worktree,
+            approved,
+            "release",
+            "t",
+            "Body",
+            "Engineer, T-0001",
+        )
+        .await
+        .unwrap_err();
+    assert!(error.0.contains("\"release\" does not exist"), "{error:?}");
+    assert!(gh.invocations().is_empty(), "no pull request asked for");
+    assert!(
+        std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &branch])
+            .current_dir(&remote)
+            .output()
+            .unwrap()
+            .stdout
+            .is_empty(),
+        "nothing pushed"
+    );
+
+    git(&remote, &["branch", "release", "main"]);
+    forge
+        .open_draft_pull_request(
+            &worktree,
+            approved,
+            "release",
+            "t",
+            "Body",
+            "Engineer, T-0001",
+        )
+        .await
+        .unwrap();
+    let create = gh
+        .invocations()
+        .into_iter()
+        .find(|call| call[1] == "create")
+        .unwrap();
+    assert_eq!(create[5..7], ["--base", "release"]);
+}

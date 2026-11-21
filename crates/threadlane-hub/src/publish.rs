@@ -13,7 +13,9 @@ use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
 use threadlane_core::store::{OrgStore, TaskStore};
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
-use threadlane_core::workspace::{task_branch, valid_commit_id, valid_repository_name};
+use threadlane_core::workspace::{
+    task_branch, valid_branch_name, valid_commit_id, valid_repository_name,
+};
 use threadlane_store::HubDb;
 
 use crate::error::tool_error;
@@ -89,13 +91,18 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         define(
             OPEN_PULL_REQUEST,
             "Open a draft pull request from your task's branch of one repository into its \
-             default branch, pushing the branch first. End your turn if the call waits for approval.",
+             default branch, or into base when given, pushing the branch first. End your turn if \
+             the call waits for approval.",
             json!({
                 "type": "object",
                 "properties": {
                     "repository": repository,
                     "title": { "type": "string", "description": "One line." },
-                    "body": { "type": "string", "description": "What changed and why." }
+                    "body": { "type": "string", "description": "What changed and why." },
+                    "base": {
+                        "type": "string",
+                        "description": "The branch to merge into, which must exist on the remote. Defaults to the repository's default branch."
+                    }
                 },
                 "required": ["repository", "title"],
                 "additionalProperties": false
@@ -898,6 +905,7 @@ pub(crate) async fn proposal(
             "repository",
             "title",
             "body",
+            "base",
             DIFF_PREVIEW,
             PUBLISH_REVISION,
         ],
@@ -985,10 +993,14 @@ pub(crate) async fn proposal(
             ));
         }
     };
+    let base = match object.get("base") {
+        None | Some(Json::Null) => repository.default_branch.as_str(),
+        Some(Json::String(base)) if valid_branch_name(base) => base.as_str(),
+        Some(_) => return Err(invalid("base must be a valid branch name")),
+    };
     Ok(Proposal {
         question: format!(
-            "Open a draft pull request from {branch} into {} of {name}, titled {title:?}?",
-            repository.default_branch
+            "Open a draft pull request from {branch} into {base} of {name}, titled {title:?}?"
         ),
         context: format!(
             "{about} The branch is pushed to {} first.\n\n{body}",

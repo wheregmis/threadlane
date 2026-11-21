@@ -721,6 +721,19 @@ impl Forge for GitForge {
         opened_by: &str,
     ) -> Result<String, ForgeError> {
         check_branch(base)?;
+        let base_ref = format!("refs/heads/{base}");
+        git(
+            Some(worktree),
+            [
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                base_ref.as_str(),
+            ],
+        )
+        .await
+        .map_err(|_| ForgeError(format!("base branch {base:?} does not exist on the remote")))?;
         self.push(worktree, branch).await?;
         let title = format!("--title={title}");
         let body = match self.login(worktree).await {
