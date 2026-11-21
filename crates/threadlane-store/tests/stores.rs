@@ -467,6 +467,112 @@ async fn events_deduplicate_and_must_match_their_lane() {
 }
 
 #[tokio::test]
+async fn a_paused_space_grants_no_lane_but_lets_a_running_one_finish_and_survives_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.db");
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    {
+        let hub = HubDb::open(&path, &Bootstrap::default(), clock.clone())
+            .await
+            .unwrap();
+        let general = hub.general_project().await.unwrap();
+        let other = hub
+            .create_project(&NewProject {
+                name: "API".into(),
+                max_parallel_tasks: 1,
+                ..NewProject::default()
+            })
+            .await
+            .unwrap();
+        let a = machine(&hub, "a").await;
+        hub.insert_event(&message(&general, "m1")).await.unwrap();
+        let running = hub
+            .grant_lease(general.lead_lane_id, a, T0, LEASE_TTL)
+            .await
+            .unwrap()
+            .unwrap();
+        let space = hub.space().await.unwrap();
+        hub.update_space(&SpaceSettings {
+            paused: true,
+            ..space
+        })
+        .await
+        .unwrap();
+        hub.insert_event(&message(&other, "m2")).await.unwrap();
+        assert!(hub.ready_lanes(T0).await.unwrap().is_empty());
+        assert_eq!(
+            hub.grant_lease(other.lead_lane_id, a, T0, LEASE_TTL)
+                .await
+                .unwrap(),
+            None
+        );
+        // The run already going keeps its lease.
+        hub.renew_lease(&running, T0, LEASE_TTL).await.unwrap();
+    }
+    let hub = HubDb::open(&path, &Bootstrap::default(), clock)
+        .await
+        .unwrap();
+    let space = hub.space().await.unwrap();
+    assert!(space.paused, "the pause survives a reopen");
+    hub.update_space(&SpaceSettings {
+        paused: false,
+        ..space
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        hub.ready_lanes(T0).await.unwrap().len(),
+        1,
+        "queued work is ready"
+    );
+}
+
+#[tokio::test]
+async fn a_pause_after_the_grant_refuses_the_run_and_keeps_its_events_queued() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let a = machine(&hub, "a").await;
+    hub.insert_event(&message(&general, "m1")).await.unwrap();
+    let lane = general.lead_lane_id;
+    let lease = hub
+        .grant_lease(lane, a, T0, LEASE_TTL)
+        .await
+        .unwrap()
+        .unwrap();
+    let events: Vec<EventId> = hub
+        .pending_events(lane)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.id)
+        .collect();
+    let space = hub.space().await.unwrap();
+    hub.update_space(&SpaceSettings {
+        paused: true,
+        ..space.clone()
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        hub.start_run(&lease, &new_run(events.clone(), T0)).await,
+        Err(StoreError::Stopped)
+    ));
+    assert_eq!(hub.pending_events(lane).await.unwrap().len(), 1);
+    hub.release_lease(&lease).await.unwrap();
+    assert_eq!(hub.lane(lane).await.unwrap().unwrap().lease_owner, None);
+
+    hub.update_space(&SpaceSettings {
+        paused: false,
+        ..space
+    })
+    .await
+    .unwrap();
+    let (_, run) = run_pending(&hub, lane, a, T0).await;
+    assert_eq!(hub.pending_events(lane).await.unwrap().len(), 0);
+    assert_eq!(run.lane_id, lane);
+}
+
+#[tokio::test]
 async fn one_lease_per_lane_with_fencing() {
     let hub = hub().await;
     let general = hub.general_project().await.unwrap();

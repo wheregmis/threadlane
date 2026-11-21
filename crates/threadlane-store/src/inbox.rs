@@ -458,6 +458,7 @@ impl InboxStore for HubDb {
              JOIN projects p ON p.id = l.project_id
              JOIN events e ON e.lane_id = l.id AND e.status = 'pending'
              WHERE p.archived_at IS NULL AND l.stopped = 0 AND (p.paused = 0 OR l.kind = 'task')
+               AND NOT EXISTS (SELECT 1 FROM space WHERE paused != 0)
                AND (l.lease_owner IS NULL OR l.lease_expires_at <= ?1)
                AND (l.backoff_until IS NULL OR l.backoff_until <= ?1)
                AND NOT (l.kind = 'task' AND EXISTS (
@@ -493,6 +494,7 @@ impl InboxStore for HubDb {
         let unavailable = query_one(
             tx.conn(),
             "SELECT l.stopped != 0 OR p.archived_at IS NOT NULL
+                 OR EXISTS (SELECT 1 FROM space WHERE paused != 0)
              FROM lanes l JOIN projects p ON p.id = l.project_id WHERE l.id = ?1",
             params![lane_id.get()],
             |row| Cols(row).bool(0),

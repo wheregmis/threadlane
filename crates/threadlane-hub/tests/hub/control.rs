@@ -236,6 +236,27 @@ async fn a_paused_project_is_not_granted_until_resumed() {
 }
 
 #[tokio::test]
+async fn a_paused_space_starts_nothing_until_resumed() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let pause = |paused| OrgRequest::SetSpacePaused { paused };
+    let Ok(OrgReply::SpacePaused { paused }) = hub.api.org(pause(true)).await else {
+        panic!("paused");
+    };
+    assert!(paused);
+    assert!(hub.api.info().await.unwrap().paused);
+    hub.send("m-1", "while the space is paused").await;
+    assert!(hub.link.request_work().await.unwrap().is_none());
+
+    let Ok(OrgReply::SpacePaused { paused }) = hub.api.org(pause(false)).await else {
+        panic!("resumed");
+    };
+    assert!(!paused && !hub.api.info().await.unwrap().paused);
+    let played = play(&*hub.link, Reply::Silent).await.unwrap();
+    assert_eq!(played.runs.len(), 1, "the queued message runs once resumed");
+}
+
+#[tokio::test]
 async fn events_nobody_asked_for_are_listed_as_recorded_and_counted() {
     // Under On request, the lead's default mode; `initiative` checks the
     // list in each mode.

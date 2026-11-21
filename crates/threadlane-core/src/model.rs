@@ -398,6 +398,10 @@ pub struct SpaceSettings {
     pub quiet_hours: Option<QuietHours>,
     /// Channel names messages are delivered on, in order of preference.
     pub channels: Vec<String>,
+    /// A paused space starts no run; runs already going finish, and events
+    /// queue until it is resumed.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl Default for SpaceSettings {
@@ -407,6 +411,7 @@ impl Default for SpaceSettings {
             mode_ceiling: Mode::OnRequest,
             quiet_hours: None,
             channels: vec!["client".to_owned()],
+            paused: false,
         }
     }
 }
