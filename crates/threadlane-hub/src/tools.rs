@@ -964,7 +964,7 @@ const MAX_TASK_PAGE: usize = 200;
 const LINE_CHARS: usize = 200;
 
 /// A task in one line: its goal left out and its result cut to a line.
-fn task_line(task: &Task) -> Json {
+pub(crate) fn task_line(task: &Task) -> Json {
     let line = |text: &str| crate::page::one_line(text, LINE_CHARS);
     let result = task
         .result
