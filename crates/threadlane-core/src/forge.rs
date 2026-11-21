@@ -52,6 +52,10 @@ pub const GITHUB_CLI: &str = "github_cli";
 pub const ASSIGN_ISSUE: &str = "assign_issue";
 /// Replace the title and/or body of a registered repository's pull request.
 pub const EDIT_PULL_REQUEST: &str = "edit_pull_request";
+/// Reply to and resolve one review thread of a pull request, naming the fixing commit.
+pub const RESOLVE_REVIEW_THREAD: &str = "resolve_review_thread";
+/// Ask reviewers, or a review bot by its trigger comment, to review a pull request again.
+pub const REQUEST_REVIEW: &str = "request_review";
 
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -92,6 +96,23 @@ pub enum RepositoryAction {
     GhCli { args: Vec<String> },
     /// Assign the numbered issue to the logged-in user.
     AssignIssue { number: std::num::NonZeroU64 },
+    /// If the numbered pull request's head is still `expected_head` and contains
+    /// `fixed_by`, reply `body` on its review thread `thread_id` and resolve it.
+    ResolveReviewThread {
+        number: std::num::NonZeroU64,
+        expected_head: String,
+        thread_id: String,
+        fixed_by: String,
+        body: String,
+    },
+    /// If the numbered pull request's head is still `expected_head`, re-request
+    /// `reviewers` and post `comment`, such as a review bot's trigger.
+    RequestReview {
+        number: std::num::NonZeroU64,
+        expected_head: String,
+        reviewers: Vec<String>,
+        comment: Option<String>,
+    },
 }
 
 /// Kind of numbered GitHub item to comment on.
