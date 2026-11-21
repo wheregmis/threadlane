@@ -188,11 +188,11 @@ impl ToolEndpoint for LaneTools {
             }
             Err(ToolError::Killed(killed)) => self.lane.signal(Stop::Killed(*killed)),
             Err(ToolError::LeaseLost) => self.lane.signal(Stop::LeaseLost),
-            Err(error @ (ToolError::WaitingOnYou | ToolError::AuthorizedAndQueued)) => {
-                // A card waiting on you outweighs a queued call.
-                if self.lane.deferred() != Some(ToolError::WaitingOnYou) {
-                    self.lane.set_deferred(Some(error.clone()));
-                }
+            // A card waiting on you outweighs a queued call.
+            Err(error @ (ToolError::WaitingOnYou | ToolError::AuthorizedAndQueued))
+                if self.lane.deferred() != Some(ToolError::WaitingOnYou) =>
+            {
+                self.lane.set_deferred(Some(error.clone()));
             }
             Ok(output) if output.get(PROGRESS_WRITTEN) == Some(&Json::Bool(true)) => {
                 self.lane.set_progress_written(true);
