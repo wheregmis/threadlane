@@ -379,6 +379,95 @@ async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
     );
 }
 
+/// A started run of the engineer's task, cancelled by you while it runs.
+async fn cancelled_mid_run(hub: &TestHub) -> (Task, Lease, RunAssignment) {
+    let engineer = engineer(hub, 1).await;
+    let created = hub
+        .db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: hub.general().await.id,
+                agent_id: engineer,
+                title: "Draft report".into(),
+                goal: "Draft a report".into(),
+                repositories: vec![],
+                parent_task_id: None,
+                depends_on: vec![],
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.lane_kind, LaneKind::Task);
+    hub.db
+        .cancel_task(None, created.id, hub.clock.now())
+        .await
+        .unwrap();
+    (created, lease, run)
+}
+
+fn blocked(result: Result<Json, ToolError>, why: &str) {
+    match result {
+        Err(ToolError::Blocked(message)) => {
+            assert!(message.contains(why), "{why:?} in {message:?}")
+        }
+        other => panic!("expected a refusal saying {why:?}, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_run_whose_task_is_cancelled_is_told_on_its_next_call() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let (cancelled, lease, run) = cancelled_mid_run(&hub).await;
+    blocked(
+        call(&hub, &lease, &run, "timers", LIST_TIMERS, json!({})).await,
+        &format!("{} was cancelled at ", cancelled.id),
+    );
+    // It can still record what it found.
+    write_progress(&hub, &lease, &run, &cancelled.id.to_string()).await;
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    assert_eq!(
+        task(&hub, &cancelled.id.to_string()).await.status,
+        TaskStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn finish_task_for_a_cancelled_task_is_refused_naming_its_status() {
+    let hub = TestHub::with(
+        threadlane_hub::HubSettings {
+            reviewer: Some("Reviewer".into()),
+            ..Default::default()
+        },
+        std::sync::Arc::new(NoHooks),
+    )
+    .await;
+    hub.hello().await;
+    let (cancelled, lease, run) = cancelled_mid_run(&hub).await;
+    blocked(
+        call(
+            &hub,
+            &lease,
+            &run,
+            "finish",
+            FINISH_TASK,
+            json!({"summary": "Ready"}),
+        )
+        .await,
+        "was cancelled",
+    );
+    let after = task(&hub, &cancelled.id.to_string()).await;
+    assert_eq!(after.status, TaskStatus::Cancelled);
+    assert_eq!(after.result, None);
+}
+
 #[tokio::test]
 async fn the_reviewers_own_task_finishes_without_a_review_round() {
     let hub = TestHub::with(
