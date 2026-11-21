@@ -143,6 +143,24 @@ async fn ending_a_run_commits_uncommitted_work_on_the_task_branch_and_a_clean_tr
 }
 
 #[tokio::test]
+async fn an_unfinished_run_commits_tracked_changes_and_leaves_scratch_files_out() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("README.md"), "# app, changed\n").unwrap();
+    std::fs::write(path.join("scratch.sh"), "sleep 600").unwrap();
+    s.workspaces
+        .checkpoint_tracked(T1, std::slice::from_ref(&s.repository), "Timed out")
+        .await
+        .expect("checkpoint");
+    assert_eq!(commits(&path), 2, "the tracked change is kept");
+    assert_eq!(
+        git(&path, &["status", "--porcelain"]),
+        "?? scratch.sh\n",
+        "the scratch file stays in the worktree, uncommitted"
+    );
+}
+
+#[tokio::test]
 async fn work_on_another_branch_is_not_committed() {
     let s = setup();
     let path = s.prepare(T1).await;

@@ -292,8 +292,33 @@ impl GitWorkspaces {
         Ok(files)
     }
 
-    /// Commits what is uncommitted in one worktree on the task branch.
-    async fn commit(&self, path: &Path, task: TaskId, message: &str) -> Result<(), WorkspaceError> {
+    async fn checkpoint_all(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+        message: &str,
+        untracked: bool,
+    ) -> Result<(), WorkspaceError> {
+        for repository in repositories {
+            check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
+            if self.is_ready(task, repository) {
+                self.commit(&self.worktree(task, repository), task, message, untracked)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Commits what is uncommitted in one worktree on the task branch:
+    /// untracked files too when `untracked`, otherwise tracked files only.
+    async fn commit(
+        &self,
+        path: &Path,
+        task: TaskId,
+        message: &str,
+        untracked: bool,
+    ) -> Result<(), WorkspaceError> {
         let branch = task_branch(task);
         let head = git(Some(path), ["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
         if head.trim() != branch {
@@ -303,7 +328,11 @@ impl GitWorkspaces {
                 head.trim()
             )));
         }
-        git(Some(path), ["add", "--all"]).await?;
+        git(
+            Some(path),
+            ["add", if untracked { "--all" } else { "--update" }],
+        )
+        .await?;
         if git(Some(path), ["diff", "--cached", "--quiet"])
             .await
             .is_ok()
@@ -581,15 +610,17 @@ impl Workspaces for GitWorkspaces {
         repositories: &[Repository],
         message: &str,
     ) -> Result<(), WorkspaceError> {
-        for repository in repositories {
-            check(repository)?;
-            let _repo = self.lock_repository(repository.id).await;
-            if self.is_ready(task, repository) {
-                self.commit(&self.worktree(task, repository), task, message)
-                    .await?;
-            }
-        }
-        Ok(())
+        self.checkpoint_all(task, repositories, message, true).await
+    }
+
+    async fn checkpoint_tracked(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+        message: &str,
+    ) -> Result<(), WorkspaceError> {
+        self.checkpoint_all(task, repositories, message, false)
+            .await
     }
     async fn check_merge(
         &self,
