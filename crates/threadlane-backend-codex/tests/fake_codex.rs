@@ -132,9 +132,19 @@ impl Fake {
             .replace("@DIR@", &dir.path().display().to_string())
             .replace("@RULES@", RULES_FILE);
         let program = dir.path().join("codex");
-        std::fs::write(&program, script).expect("writes fake codex");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        // Write a draft and `cp` it to the executable, so this process never
+        // holds the executable open for writing (a forking sibling test would
+        // otherwise make exec fail with ETXTBSY).
+        let draft = dir.path().join("codex.draft");
+        std::fs::write(&draft, script).expect("writes fake codex");
+        std::fs::set_permissions(&draft, std::fs::Permissions::from_mode(0o755))
             .expect("makes fake codex executable");
+        let copied = std::process::Command::new("cp")
+            .arg(&draft)
+            .arg(&program)
+            .status()
+            .expect("runs cp");
+        assert!(copied.success(), "cp installs fake codex");
         Self {
             dir,
             work: tempfile::tempdir().expect("temp dir"),
