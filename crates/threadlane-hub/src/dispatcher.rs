@@ -7,6 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 use threadlane_core::adapters::{ChannelAdapter, Delivered, DeliveryError};
+use threadlane_core::ids::ProjectId;
 use threadlane_core::model::{NewOutboxMessage, OutboxKind, OutboxMessage, Pacing, Urgency};
 use threadlane_core::runtime::steps::dispatcher as step;
 use threadlane_core::runtime::{WakeTarget, Waker};
@@ -19,7 +20,7 @@ use crate::pacing::Quiet;
 use crate::tools::CLIENT_CHANNEL;
 
 /// Messages read per dispatcher pass.
-const BATCH: u32 = 100;
+pub(crate) const BATCH: u32 = 100;
 const HOUR: Duration = Duration::from_secs(3600);
 
 /// The client channel. Delivering does nothing: being marked sent is what
@@ -97,6 +98,8 @@ impl HubCore {
             ready.push(Some((message, was_quiet, hold.as_deref() == Some("rate"))));
         }
         let mut sent = 0;
+        let mut cached_projects: Option<HashMap<ProjectId, String>> = None;
+        let mut cached_rate_hold: Option<Timestamp> = None;
         for index in 0..ready.len() {
             let Some((mut message, quiet_release, rate_held)) = ready[index].take() else {
                 continue;
@@ -153,12 +156,20 @@ impl HubCore {
                         continue;
                     }
                     message = if group.len() > 1 {
-                        self.digest(&group, now).await?
+                        self.digest(&group, now, &mut cached_projects).await?
                     } else {
                         group.remove(0)
                     };
                 }
-                if let Some(until) = self.rate_hold(&pacing, inner.clock.now()).await? {
+                let until = match cached_rate_hold {
+                    Some(until) => Some(until),
+                    None => {
+                        let hold = self.rate_hold(&pacing, inner.clock.now()).await?;
+                        cached_rate_hold = hold;
+                        hold
+                    }
+                };
+                if let Some(until) = until {
                     self.hold(&message, until, "rate").await?;
                     continue;
                 }
@@ -210,7 +221,9 @@ impl HubCore {
                 }
                 Err(error) => return Err(error.into()),
             }
-            inner.wake.delivered();
+            if message.channel == CLIENT_CHANNEL {
+                inner.wake.delivered();
+            }
             inner.hook.reach(step::AFTER_MARK_SENT)?;
             sent += 1;
         }
@@ -251,15 +264,22 @@ impl HubCore {
         &self,
         originals: &[OutboxMessage],
         now: Timestamp,
+        cached_projects: &mut Option<HashMap<ProjectId, String>>,
     ) -> Result<OutboxMessage, HubError> {
         let inner = &self.inner;
-        let projects: HashMap<_, _> = inner
-            .db
-            .projects()
-            .await?
-            .into_iter()
-            .map(|project| (project.id, project.name))
-            .collect();
+        let projects = match cached_projects {
+            Some(projects) => projects,
+            None => {
+                let loaded = inner
+                    .db
+                    .projects()
+                    .await?
+                    .into_iter()
+                    .map(|project| (project.id, project.name))
+                    .collect();
+                cached_projects.insert(loaded)
+            }
+        };
         let mut groups = Vec::<(_, Vec<&OutboxMessage>)>::new();
         for message in originals {
             if let Some((_, entries)) = groups

@@ -112,6 +112,16 @@ impl WriteTx<'_> {
         self.writer.needs_rollback = false;
         Ok(())
     }
+
+    pub(crate) async fn rollback(mut self) -> StoreResult<()> {
+        self.writer
+            .conn
+            .execute("ROLLBACK", ())
+            .await
+            .map_err(db_err)?;
+        self.writer.needs_rollback = false;
+        Ok(())
+    }
 }
 
 /// Maps a Turso error onto the store's error kinds.

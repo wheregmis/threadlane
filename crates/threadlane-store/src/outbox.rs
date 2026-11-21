@@ -263,29 +263,47 @@ impl OutboxStore for HubDb {
         body: &Json,
         now: Timestamp,
     ) -> StoreResult<Option<OutboxMessage>> {
-        let tx = self.db.begin().await?;
-        let last: Option<String> = query_opt(
-            tx.conn(),
-            "SELECT tool_call_id FROM outbox WHERE tool_call_id LIKE ?1 ORDER BY id DESC LIMIT 1",
-            params![format!("{ACCOUNT_NOTICE}%")],
+        let upper = format!("{ACCOUNT_NOTICE}\u{10ffff}");
+        let parse_last = |last: Option<String>| -> StoreResult<(u64, bool)> {
+            match last {
+                None => Ok((0, false)),
+                Some(key) => {
+                    let rest = key.strip_prefix(ACCOUNT_NOTICE).unwrap_or_default();
+                    let (episode, state) = rest.split_once(':').unwrap_or_default();
+                    let episode: u64 = episode
+                        .parse()
+                        .map_err(|_| StoreError::Corrupt(format!("account notice key {key:?}")))?;
+                    Ok((episode, state == "blocked"))
+                }
+            }
+        };
+        let fast_last: Option<String> = query_opt(
+            &self.db.reader()?,
+            "SELECT tool_call_id FROM outbox WHERE tool_call_id >= ?1 AND tool_call_id < ?2 ORDER BY id DESC LIMIT 1",
+            params![ACCOUNT_NOTICE, upper.as_str()],
             |row| Cols(row).text(0),
         )
         .await?;
-        let (episode, was_blocked) = match &last {
-            None => (0, false),
-            Some(key) => {
-                let rest = key.strip_prefix(ACCOUNT_NOTICE).unwrap_or_default();
-                let (episode, state) = rest.split_once(':').unwrap_or_default();
-                let episode: u64 = episode
-                    .parse()
-                    .map_err(|_| StoreError::Corrupt(format!("account notice key {key:?}")))?;
-                (episode, state == "blocked")
-            }
-        };
+        let (_, fast_was_blocked) = parse_last(fast_last)?;
+        if blocked == fast_was_blocked {
+            return Ok(None);
+        }
+        let tx = self.db.begin().await?;
+        let last: Option<String> = query_opt(
+            tx.conn(),
+            "SELECT tool_call_id FROM outbox WHERE tool_call_id >= ?1 AND tool_call_id < ?2 ORDER BY id DESC LIMIT 1",
+            params![ACCOUNT_NOTICE, upper.as_str()],
+            |row| Cols(row).text(0),
+        )
+        .await?;
+        let (episode, was_blocked) = parse_last(last)?;
         let key = match (blocked, was_blocked) {
             (true, false) => format!("{ACCOUNT_NOTICE}{}:blocked", episode + 1),
             (false, true) => format!("{ACCOUNT_NOTICE}{episode}:resumed"),
-            _ => return Ok(None),
+            _ => {
+                tx.rollback().await?;
+                return Ok(None);
+            }
         };
         let queued = enqueue_in(
             tx.conn(),

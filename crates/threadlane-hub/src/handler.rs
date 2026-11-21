@@ -105,18 +105,6 @@ impl ClientApi {
         Ok(())
     }
 
-    async fn binding_summary(&self, binding: Binding) -> Result<BindingSummary, ApiError> {
-        let agent = self
-            .core
-            .inner
-            .db
-            .agent(binding.agent_id)
-            .await
-            .map_err(api_error)?
-            .ok_or_else(|| ApiError::Internal(format!("agent {} not found", binding.agent_id)))?;
-        Ok(binding_summary(agent, &binding))
-    }
-
     /// Answers a decision by option label; with `always`, also creates the
     /// standing rule it offers, in the same transaction.
     async fn answer(
@@ -439,7 +427,7 @@ impl HubApi for ClientApi {
                         clock.sleep_until(deadline).await;
                     }
                 }
-                () = clock.sleep_until(deadline) => {}
+                () = clock.sleep_until(deadline) => return Ok(Vec::new()),
             }
         }
     }
@@ -745,9 +733,21 @@ impl HubApi for ClientApi {
             }
             OrgRequest::Bindings { project } => {
                 let project = self.project_named(project.as_deref()).await?;
-                let mut bindings = Vec::new();
-                for binding in db.bindings(project.id).await.map_err(api_error)? {
-                    bindings.push(self.binding_summary(binding).await?);
+                let (raw_bindings, all_agents) = tokio::try_join!(
+                    db.bindings(project.id),
+                    db.all_agents(),
+                )
+                .map_err(api_error)?;
+                let agents: HashMap<_, _> = all_agents
+                    .into_iter()
+                    .map(|agent| (agent.id, agent))
+                    .collect();
+                let mut bindings = Vec::with_capacity(raw_bindings.len());
+                for binding in raw_bindings {
+                    let agent = agents.get(&binding.agent_id).cloned().ok_or_else(|| {
+                        ApiError::Internal(format!("agent {} not found", binding.agent_id))
+                    })?;
+                    bindings.push(binding_summary(agent, &binding));
                 }
                 Ok(OrgReply::Bindings { bindings })
             }
@@ -878,7 +878,6 @@ impl HubApi for ClientApi {
                     .into(),
             )),
             OrgRequest::SetSpaceCeiling { mode } => {
-                let _dispatch = self.core.inner.dispatch.lock().await;
                 let mut space = db.space().await.map_err(api_error)?;
                 space.mode_ceiling = mode;
                 db.update_space(&space).await.map_err(api_error)?;
@@ -1021,10 +1020,38 @@ impl HubApi for ClientApi {
                     Some(name) => Some(self.project_named(Some(&name)).await?.id),
                     None => None,
                 };
-                let mut rules = Vec::new();
-                for rule in db.standing_rules(project).await.map_err(api_error)? {
-                    rules.push(self.rule_summary(rule).await?);
-                }
+                let (raw_rules, all_projects, all_agents) = tokio::try_join!(
+                    db.standing_rules(project),
+                    db.projects(),
+                    db.all_agents(),
+                )
+                .map_err(api_error)?;
+                let projects: HashMap<_, _> = all_projects
+                    .into_iter()
+                    .map(|p| (p.id, p.name))
+                    .collect();
+                let agents: HashMap<_, _> = all_agents
+                    .into_iter()
+                    .map(|a| (a.id, a.name))
+                    .collect();
+                let rules = raw_rules
+                    .into_iter()
+                    .map(|rule| {
+                        let project = projects
+                            .get(&rule.project_id)
+                            .cloned()
+                            .unwrap_or_else(|| rule.project_id.to_string());
+                        let agent = agents
+                            .get(&rule.agent_id)
+                            .cloned()
+                            .unwrap_or_else(|| rule.agent_id.to_string());
+                        StandingRuleSummary {
+                            rule,
+                            project,
+                            agent,
+                        }
+                    })
+                    .collect();
                 Ok(DecisionReply::StandingRules { rules })
             }
             DecisionRequest::RevokeRule { rule } => {

@@ -557,9 +557,16 @@ impl LocalLink {
         pending: Vec<Event>,
         now: Timestamp,
     ) -> Result<(Option<Session>, Vec<Event>), LinkError> {
+        let latest = self
+            .core
+            .inner
+            .db
+            .latest_open_session(lane.id)
+            .await
+            .map_err(link_error)?;
         let mut routed: Vec<(Event, Option<Session>)> = Vec::with_capacity(pending.len());
         for event in pending {
-            let session = self.route(lane, &event, now).await?;
+            let session = self.route(lane, &event, now, latest.as_ref()).await?;
             routed.push((event, session));
         }
         let first_key = routed
@@ -611,6 +618,7 @@ impl LocalLink {
         lane: &Lane,
         event: &Event,
         now: Timestamp,
+        latest: Option<&Session>,
     ) -> Result<Option<Session>, LinkError> {
         let db = &self.core.inner.db;
         // 1. The answer to a decision resumes the decision's session.
@@ -639,7 +647,7 @@ impl LocalLink {
                 return Ok(Some(session));
             }
         }
-        let latest = db.latest_open_session(lane.id).await.map_err(link_error)?;
+        let latest = latest.cloned();
         Ok(match lane.kind {
             // 4. A task lane resumes its current session.
             LaneKind::Task => latest,

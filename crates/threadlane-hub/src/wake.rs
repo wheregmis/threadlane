@@ -55,6 +55,7 @@ impl Mailbox {
 pub(crate) struct WakeHub {
     links: Mutex<Vec<Weak<Mailbox>>>,
     dispatcher: Notify,
+    reviews: Notify,
     deliveries: watch::Sender<u64>,
     revocations: watch::Sender<u64>,
 }
@@ -64,6 +65,7 @@ impl Default for WakeHub {
         Self {
             links: Mutex::default(),
             dispatcher: Notify::new(),
+            reviews: Notify::new(),
             deliveries: watch::Sender::new(0),
             revocations: watch::Sender::new(0),
         }
@@ -97,6 +99,16 @@ impl WakeHub {
     /// waits is kept for the next wait.
     pub(crate) async fn dispatcher_woken(&self) {
         self.dispatcher.notified().await;
+    }
+
+    /// Wakes the GitHub review delivery loop when a review is queued.
+    pub(crate) fn wake_reviews(&self) {
+        self.reviews.notify_one();
+    }
+
+    /// Completes after the next review-delivery hint.
+    pub(crate) async fn reviews_woken(&self) {
+        self.reviews.notified().await;
     }
 
     /// Tells feed waiters that something was delivered.

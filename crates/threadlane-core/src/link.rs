@@ -236,6 +236,12 @@ pub trait HubLink: Send + Sync + fmt::Debug {
     /// Asks placement for one lane (Plan.md §5.4).
     async fn request_work(&self) -> Result<Option<Lease>, LinkError>;
 
+    /// Current run slot limit for this machine, or `None` to use the runner's
+    /// configured `max_parallel`.
+    async fn max_parallel(&self) -> Result<Option<u32>, LinkError> {
+        Ok(None)
+    }
+
     /// Pending events in the leased lane, oldest first. Used for the
     /// debounce window (Plan.md §4.8); it changes nothing.
     async fn pending(&self, lease: &Lease) -> Result<Vec<Event>, LinkError>;

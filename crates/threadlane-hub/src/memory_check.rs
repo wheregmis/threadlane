@@ -60,16 +60,25 @@ async fn repository_files(repo: &Repository, workspaces: Option<&Path>) -> RepoF
             .unwrap_or(&repo.remote_url),
     );
     if path.is_absolute()
-        && let Ok(root) = path.canonicalize()
+        && let Ok(root) = tokio::fs::canonicalize(path).await
     {
-        if root.join(".git").exists() || !root.join("objects").is_dir() {
+        let has_git = tokio::fs::try_exists(root.join(".git"))
+            .await
+            .unwrap_or(false);
+        let has_objects_dir = tokio::fs::metadata(root.join("objects"))
+            .await
+            .is_ok_and(|meta| meta.is_dir());
+        if has_git || !has_objects_dir {
             return RepoFiles::Local(root);
         }
         return git_files(&root, &[format!("refs/heads/{}", repo.default_branch)]).await;
     }
     if let Some(root) = workspaces {
         let clone = root.join("clones").join(repo.id.to_string());
-        if clone.join(".git").is_dir() {
+        if tokio::fs::metadata(clone.join(".git"))
+            .await
+            .is_ok_and(|meta| meta.is_dir())
+        {
             return git_files(
                 &clone,
                 &[

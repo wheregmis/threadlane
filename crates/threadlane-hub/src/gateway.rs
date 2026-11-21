@@ -15,7 +15,7 @@ use threadlane_core::model::{
 use threadlane_core::runtime::steps::{perform, tool_call as step};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{DecisionStore, OrgStore, SessionStore, TaskStore};
-use threadlane_core::tools::{ToolContext, ToolDefinition, ToolError, Verdict};
+use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, Verdict};
 
 use crate::context::format_time;
 use crate::dreaming;
@@ -220,7 +220,11 @@ impl LocalLink {
             .as_ref()
             .map(|binding| gate::overrides(&binding.overrides))
             .unwrap_or_default();
-        let rules: Vec<StandingRule> = match run.agent_id {
+        let needs_rules = matches!(
+            definition.tier,
+            Tier::SharedReversible | Tier::SharedHardToUndo
+        ) || memory::protected(&definition.name, arguments);
+        let rules: Vec<StandingRule> = match run.agent_id.filter(|_| needs_rules) {
             Some(agent) => db
                 .standing_rules(Some(project_id))
                 .await

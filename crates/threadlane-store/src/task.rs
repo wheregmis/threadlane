@@ -811,14 +811,14 @@ pub(crate) async fn check_eligible(
     lane_id: LaneId,
     machine_id: MachineId,
     now: Timestamp,
-) -> StoreResult<bool> {
+) -> StoreResult<(bool, bool)> {
     let task = task_of_lane(conn, lane_id).await?;
     let reason = match &task {
         Some(task) if task.status.is_terminal() => None,
         Some(task) if task.status == TaskStatus::InReview => {
             match task_review::pending_in(conn, task.id).await? {
                 Some(review) if !review.revisions.is_empty() && review.machine != machine_id => {
-                    return Ok(false);
+                    return Ok((false, false));
                 }
                 Some(_) => match waiting_reason(conn, task, now).await? {
                     Some(reason) => Some(reason),
@@ -836,13 +836,20 @@ pub(crate) async fn check_eligible(
         },
         None => blocked(conn, lane_id, machine_id, now).await?,
     };
-    exec(
-        conn,
-        "UPDATE tasks SET waiting_reason = ?1 WHERE lane_id = ?2",
-        params![reason.as_deref(), lane_id.get()],
-    )
-    .await?;
-    Ok(reason.is_none())
+    let changed = if let Some(task) = &task
+        && task.waiting_reason != reason
+    {
+        exec(
+            conn,
+            "UPDATE tasks SET waiting_reason = ?1 WHERE lane_id = ?2",
+            params![reason.as_deref(), lane_id.get()],
+        )
+        .await?
+            > 0
+    } else {
+        false
+    };
+    Ok((reason.is_none(), changed))
 }
 
 impl HubDb {
@@ -850,8 +857,13 @@ impl HubDb {
     pub async fn review_can_start(&self, lease: &Lease, now: Timestamp) -> StoreResult<bool> {
         let tx = self.db.begin().await?;
         check_lease(tx.conn(), lease).await?;
-        let allowed = check_eligible(tx.conn(), lease.lane_id, lease.machine_id, now).await?;
-        tx.commit().await?;
+        let (allowed, changed) =
+            check_eligible(tx.conn(), lease.lane_id, lease.machine_id, now).await?;
+        if changed {
+            tx.commit().await?;
+        } else {
+            tx.rollback().await?;
+        }
         Ok(allowed)
     }
 
@@ -1003,6 +1015,12 @@ impl HubDb {
     /// Running and in-review candidates across all projects.
     pub async fn running_tasks(&self) -> StoreResult<Vec<Task>> {
         self.tasks_with_dependencies("status IN ('running', 'in_review')", ())
+            .await
+    }
+
+    /// Open (non-terminal) tasks across all projects.
+    pub async fn open_tasks(&self) -> StoreResult<Vec<Task>> {
+        self.tasks_with_dependencies("status NOT IN ('done', 'failed', 'cancelled')", ())
             .await
     }
 
