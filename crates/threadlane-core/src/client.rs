@@ -34,6 +34,10 @@ pub struct HubInfo {
     /// Running release version when the hub supports in-app updates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_version: Option<String>,
+    /// The model each backend runs for an agent that names none. A backend
+    /// missing here runs its own default model.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub default_models: BTreeMap<BackendKind, String>,
 }
 
 /// An update request can select a release version, never a download location.

@@ -631,7 +631,7 @@ impl AppState {
                     |el| format!("{} · {el}", t.task.id),
                 )
             });
-            let (backends, full_backends) = crate::backend_summary(agent);
+            let (backends, full_backends) = crate::backend_summary(agent, space.default_models());
             node_coords.insert(id.clone(), (col2_x, y));
             nodes.push(TopologyNode {
                 id,

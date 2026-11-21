@@ -272,6 +272,16 @@ pub struct Space {
 }
 
 impl Space {
+    /// The model each backend runs for an agent that names none, as its hub
+    /// last said; empty before it said or for a hub too old to say.
+    #[must_use]
+    pub fn default_models(&self) -> &BTreeMap<threadlane_core::model::BackendKind, String> {
+        static NONE: BTreeMap<threadlane_core::model::BackendKind, String> = BTreeMap::new();
+        self.info
+            .as_ref()
+            .map_or(&NONE, |info| &info.default_models)
+    }
+
     /// The project that stores this space's Main Chat.
     #[must_use]
     pub fn main_chat_project(&self) -> Option<&str> {

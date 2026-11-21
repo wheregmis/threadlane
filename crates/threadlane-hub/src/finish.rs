@@ -179,6 +179,7 @@ impl LocalLink {
                         count_attempt: false,
                         max_attempts: inner.settings.max_attempts,
                         backoff_until: now,
+                        configuration: false,
                     },
                 )
             }
@@ -190,6 +191,7 @@ impl LocalLink {
                     count_attempt: false,
                     max_attempts: inner.settings.max_attempts,
                     backoff_until: now,
+                    configuration: false,
                 },
             ),
             // Retrying the same setup fails the same way: die on this attempt.
@@ -201,6 +203,7 @@ impl LocalLink {
                     count_attempt: true,
                     max_attempts: 1,
                     backoff_until: now,
+                    configuration: true,
                 },
             ),
             counted => {
@@ -223,6 +226,7 @@ impl LocalLink {
                         count_attempt: true,
                         max_attempts: inner.settings.max_attempts,
                         backoff_until: now + inner.settings.retry_backoff(attempts),
+                        configuration: false,
                     },
                 )
             }
