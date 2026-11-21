@@ -139,6 +139,16 @@ impl AppState {
         self.appearance = Appearance::from_saved(&saved);
         self.skip_send_hold = saved["hold_messages"].as_bool() == Some(false);
         self.selected_space = saved["selected_space"].as_str().map(str::to_owned);
+        self.sidebar_collapsed = saved["sidebar_collapsed"].as_bool().unwrap_or(false);
+        self.sidebar_width = saved["sidebar_width"]
+            .as_f64()
+            .filter(|w| w.is_finite() && *w > 0.0)
+            .map(|w| w as f32);
+        self.window_size = saved["window_size"].as_object().and_then(|obj| {
+            let w = obj.get("width")?.as_f64()?;
+            let h = obj.get("height")?.as_f64()?;
+            (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then_some((w as f32, h as f32))
+        });
         let seen = serde_json::from_value::<BTreeMap<String, BTreeMap<String, i64>>>(
             saved["conversation_seen"].clone(),
         )
@@ -155,6 +165,71 @@ impl AppState {
             })
             .collect();
         self.client_dir = Some(dir);
+    }
+
+    /// Whether the sidebar was collapsed when last saved.
+    #[must_use]
+    pub fn sidebar_collapsed(&self) -> bool {
+        self.sidebar_collapsed
+    }
+
+    /// Saves whether the sidebar is collapsed.
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) {
+        if self.sidebar_collapsed == collapsed {
+            return;
+        }
+        self.sidebar_collapsed = collapsed;
+        if let Some(dir) = &self.client_dir {
+            let mut saved = read(dir);
+            saved["sidebar_collapsed"] = json!(collapsed);
+            let _ = write(dir, &saved);
+        }
+    }
+
+    /// Saved sidebar width in logical pixels, if any.
+    #[must_use]
+    pub fn sidebar_width(&self) -> Option<f32> {
+        self.sidebar_width
+    }
+
+    /// Saves the sidebar width in logical pixels.
+    pub fn set_sidebar_width(&mut self, width: f32) {
+        if !width.is_finite() || width <= 0.0 {
+            return;
+        }
+        let rounded = width.round();
+        if self.sidebar_width == Some(rounded) {
+            return;
+        }
+        self.sidebar_width = Some(rounded);
+        if let Some(dir) = &self.client_dir {
+            let mut saved = read(dir);
+            saved["sidebar_width"] = json!(rounded);
+            let _ = write(dir, &saved);
+        }
+    }
+
+    /// Saved window size `(width, height)` in logical pixels, if any.
+    #[must_use]
+    pub fn window_size(&self) -> Option<(f32, f32)> {
+        self.window_size
+    }
+
+    /// Saves the window size `(width, height)` in logical pixels.
+    pub fn set_window_size(&mut self, width: f32, height: f32) {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let rounded = (width.round(), height.round());
+        if self.window_size == Some(rounded) {
+            return;
+        }
+        self.window_size = Some(rounded);
+        if let Some(dir) = &self.client_dir {
+            let mut saved = read(dir);
+            saved["window_size"] = json!({ "width": rounded.0, "height": rounded.1 });
+            let _ = write(dir, &saved);
+        }
     }
 
     /// Which appearance the desktop should use.

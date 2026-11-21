@@ -7,7 +7,7 @@ use gpui_kit::component::{Sizable as _, WindowExt as _, v_flex};
 use gpui_kit::*;
 use threadlane_desktop::{Consequence, EmptyRegion, Gap};
 
-use crate::components::{button, empty_state, meta};
+use crate::components::{button, empty_state};
 use crate::icons::AppIcon;
 use crate::tokens::{MD, TYPE_BODY, XS};
 use crate::{Desktop, Screen};
@@ -66,22 +66,29 @@ impl Desktop {
             self.perform_consequence(action, cx);
             return;
         };
+        let destructive = matches!(
+            action,
+            Consequence::CancelTask(..)
+                | Consequence::CancelRoutine(..)
+                | Consequence::RevokeRule(..)
+                | Consequence::Unpair(..)
+                | Consequence::DeleteMemory(..)
+        );
         let view = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |dialog, _, cx| {
+        window.open_alert_dialog(cx, move |dialog, _, _| {
             let confirm = view.clone();
             let action = action.clone();
             dialog
                 .confirm()
                 .title(copy.title.clone())
-                .description(
-                    v_flex()
-                        .gap(XS)
-                        .child(copy.sentence.clone())
-                        .child(meta("Press Enter to confirm, or Esc to cancel.", cx)),
-                )
+                .description(copy.sentence.clone())
                 .ok_text(copy.button)
-                .ok_variant(ButtonVariant::Danger)
-                .cancel_text("Keep it")
+                .ok_variant(if destructive {
+                    ButtonVariant::Danger
+                } else {
+                    ButtonVariant::Primary
+                })
+                .cancel_text("Cancel")
                 .on_ok(move |_, _, cx| {
                     let _gone =
                         confirm.update(cx, |this, cx| this.perform_consequence(action.clone(), cx));

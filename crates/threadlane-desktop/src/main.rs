@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState, Undo};
-use gpui_kit::component::{ActiveTheme as _, Theme, h_flex, v_flex};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
+use gpui_kit::component::{ActiveTheme as _, Theme, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
 use threadlane_core::client::{ActivityCursor, TaskActivityEntry};
@@ -38,6 +40,8 @@ mod icons;
 mod keyboard;
 mod local_hub;
 mod menus;
+mod navigation;
+mod palette;
 mod refresh_gate;
 mod repository;
 mod screens;
@@ -49,7 +53,13 @@ use work::{WorkPage, WorkView};
 use icons::DesktopAssets;
 use keyboard::{DecisionScroll, HistoryScroll};
 use refresh_gate::RefreshGate;
-use tokens::{LG, MD, TABULAR, TYPE_BODY};
+use tokens::{
+    LG, MD, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TABULAR, TYPE_BODY,
+    WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+};
+
+/// Unique notification slot for transient desktop activity feedback.
+struct ActivityToast;
 
 /// How often the app asks every hub again, so reachability, what runs, and
 /// the open screen stay current.
@@ -123,8 +133,13 @@ fn main() -> ExitCode {
             }
         })
         .detach();
+        let initial_size = state.window_size().map_or_else(
+            || size(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT),
+            |(w, h)| size(px(w).max(WINDOW_MIN_WIDTH), px(h).max(WINDOW_MIN_HEIGHT)),
+        );
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(780.)), cx)),
+            window_bounds: Some(WindowBounds::centered(initial_size, cx)),
+            window_min_size: Some(size(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)),
             titlebar: Some(TitlebarOptions {
                 title: Some("Threadlane".into()),
                 ..Default::default()
@@ -423,6 +438,7 @@ struct Desktop {
     core: Arc<RwLock<ClientCore>>,
     tokio: tokio::runtime::Handle,
     screen: Screen,
+    nav_history: navigation::NavHistory,
     work: WorkView,
     inbox: screens::Inbox,
     task_activity: TaskActivity,
@@ -432,6 +448,11 @@ struct Desktop {
     project_load_pending: Option<PendingProjectLoad>,
     keyboard_focus: FocusHandle,
     sidebar_collapsed: bool,
+    sidebar_width: Pixels,
+    sidebar_resizable: Entity<ResizableState>,
+    last_activity_revision: u64,
+    join_error: Option<String>,
+    routine_error: Option<String>,
     decision_scroll: ScrollHandle,
     board_scroll: ScrollHandle,
     dag_scroll: ScrollHandle,
@@ -586,6 +607,7 @@ impl Desktop {
         let subscriptions = vec![
             cx.subscribe_in(&space_name, window, |this, input, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
+                    this.join_error = None;
                     let suggested = this
                         .state
                         .client_dir()
@@ -600,11 +622,28 @@ impl Desktop {
                     cx.notify();
                 }
             }),
-            cx.subscribe_in(&hub_dir, window, |_this, _input, event, _window, cx| {
-                if matches!(event, InputEvent::Change) {
+            cx.subscribe_in(&join_code, window, |this, _input, event, _window, cx| {
+                if matches!(event, InputEvent::Change) && this.join_error.is_some() {
+                    this.join_error = None;
                     cx.notify();
                 }
             }),
+            cx.subscribe_in(&hub_dir, window, |this, _input, event, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.join_error = None;
+                    cx.notify();
+                }
+            }),
+            cx.subscribe_in(
+                &routine_instruction,
+                window,
+                |this, _input, event, _window, cx| {
+                    if matches!(event, InputEvent::Change) && this.routine_error.is_some() {
+                        this.routine_error = None;
+                        cx.notify();
+                    }
+                },
+            ),
             cx.observe(&project_name, |this, name, cx| {
                 if this.project_name_missing && !name.read(cx).value().trim().is_empty() {
                     this.project_name_missing = false;
@@ -701,6 +740,11 @@ impl Desktop {
             this.keyboard_focus.focus(window, cx);
         })
         .detach();
+        let sidebar_collapsed = state.sidebar_collapsed();
+        let sidebar_width = state.sidebar_width().map_or(SIDEBAR_WIDTH, |w| {
+            px(w).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+        });
+        let sidebar_resizable = cx.new(|_| ResizableState::default());
         Self {
             work: WorkView::new(window, cx),
             inbox: screens::Inbox::default(),
@@ -708,13 +752,19 @@ impl Desktop {
             core,
             tokio,
             screen,
+            nav_history: navigation::NavHistory::default(),
             task_activity: TaskActivity::default(),
             task_activity_request: None,
             refresh_gate: RefreshGate::default(),
             project_load: None,
             project_load_pending: None,
             keyboard_focus,
-            sidebar_collapsed: false,
+            sidebar_collapsed,
+            sidebar_width,
+            sidebar_resizable,
+            last_activity_revision: 0,
+            join_error: None,
+            routine_error: None,
             decision_scroll: ScrollHandle::default(),
             board_scroll: ScrollHandle::default(),
             dag_scroll: ScrollHandle::default(),
@@ -1248,7 +1298,32 @@ impl Desktop {
         });
     }
 
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.state.set_sidebar_collapsed(self.sidebar_collapsed);
+        cx.notify();
+    }
+
     fn go(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        self.nav_history.record(self.screen.clone(), &screen);
+        self.navigate_to(screen, cx);
+    }
+
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.nav_history.go_back(self.screen.clone()) {
+            self.navigate_to(target, cx);
+        }
+    }
+
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.nav_history.go_forward(self.screen.clone()) {
+            self.navigate_to(target, cx);
+        }
+    }
+
+    fn navigate_to(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        self.join_error = None;
+        self.routine_error = None;
         if matches!(
             self.screen,
             Screen::Project {
@@ -1619,12 +1694,11 @@ impl Desktop {
         let name = self.space_name.read(cx).value().trim().to_owned();
         let code = self.join_code.read(cx).value().trim().to_owned();
         if name.is_empty() || code.is_empty() {
-            self.state.report(Activity::Failed(
-                "Give the space a name and paste its join code.".to_owned(),
-            ));
+            self.join_error = Some("Give the space a name and paste its join code.".to_owned());
             cx.notify();
             return;
         }
+        self.join_error = None;
         let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
         self.state
             .report(Activity::Working(format!("Pairing {name}…")));
@@ -1658,11 +1732,11 @@ impl Desktop {
         let name = self.space_name.read(cx).value().trim().to_owned();
         let dir = self.hub_dir.read(cx).value().to_string();
         if name.is_empty() {
-            self.state
-                .report(Activity::Failed("Give the space a name.".to_owned()));
+            self.join_error = Some("Give the space a name.".to_owned());
             cx.notify();
             return;
         }
+        self.join_error = None;
         let dir = screens::machines::parse_hub_dir(&dir, std::env::var_os("HOME").as_deref());
         let (core, shown) = (Arc::clone(&self.core), self.shown.clone());
         let client_dir = self.state.client_dir().map(std::path::Path::to_path_buf);
@@ -1775,9 +1849,12 @@ impl Desktop {
             (false, recurrence) => recurrence,
         };
         let recurrence = match recurrence {
-            Ok(recurrence) => recurrence,
+            Ok(recurrence) => {
+                self.routine_error = None;
+                recurrence
+            }
             Err(why) => {
-                self.state.report(Activity::Failed(why));
+                self.routine_error = Some(why);
                 cx.notify();
                 return;
             }
@@ -1880,6 +1957,7 @@ impl Desktop {
             |this, (name, unpaired), cx| match unpaired {
                 Ok(()) => {
                     this.refresh_gate.pairing_changed();
+                    this.nav_history.prune_space(&name);
                     this.state.space_removed(&name);
                     this.state
                         .report(Activity::Done(format!("Unpaired {name}.")));
@@ -1904,10 +1982,41 @@ impl Desktop {
             cx,
         );
     }
+    fn sync_activity_notifications(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rev = self.state.activity_revision();
+        if rev == self.last_activity_revision {
+            return;
+        }
+        self.last_activity_revision = rev;
+        let Some(activity) = self.state.activity().cloned() else {
+            return;
+        };
+        match activity {
+            Activity::Working(_) => {}
+            Activity::Done(text) => {
+                window.push_notification(Notification::success(text).id::<ActivityToast>(), cx);
+            }
+            Activity::Failed(why) => {
+                window.push_notification(
+                    Notification::error(why)
+                        .title("Action failed")
+                        .id::<ActivityToast>()
+                        .autohide(false),
+                    cx,
+                );
+            }
+        }
+    }
 }
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_activity_notifications(window, cx);
+        let viewport = window.viewport_size();
+        if viewport.width >= WINDOW_MIN_WIDTH && viewport.height >= WINDOW_MIN_HEIGHT {
+            self.state
+                .set_window_size(f32::from(viewport.width), f32::from(viewport.height));
+        }
         if let Some(text) = self.fill_editor.take() {
             self.memory_editor
                 .update(cx, |editor, cx| editor.set_value(text, window, cx));
@@ -1941,7 +2050,7 @@ impl Render for Desktop {
         let when = self.when();
         let body = match self.screen.clone() {
             Screen::Work { space, page } => self.work_screen(&space, &page, &when, window, cx),
-            Screen::Home => self.home(&when, cx),
+            Screen::Home => self.home(&when, window, cx),
             Screen::Project {
                 space,
                 project,
@@ -1965,12 +2074,53 @@ impl Render for Desktop {
         } else {
             body
         };
+        let main_pane = v_flex()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .p(LG)
+            .gap(MD)
+            .children(self.sidebar_collapsed.then(|| self.collapsed_nav_strip(cx)))
+            .children(
+                self.state
+                    .connection_banner()
+                    .map(|text| component::alert::Alert::warning("unreachable-spaces", text)),
+            )
+            .children(self.page_connections(&when, cx))
+            // The body takes the spare height so the activity line stays at the bottom.
+            .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
+            .children(self.activity(cx));
+
+        let shell: AnyElement = if self.sidebar_collapsed {
+            main_pane.into_any_element()
+        } else {
+            let desktop = cx.entity().downgrade();
+            h_resizable("desktop-shell")
+                .with_state(&self.sidebar_resizable)
+                .on_resize(move |state, _, cx| {
+                    if let Some(&width) = state.read(cx).sizes().first() {
+                        let clamped = width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                        let _ = desktop.update(cx, |this, _| {
+                            this.sidebar_width = clamped;
+                            this.state.set_sidebar_width(f32::from(clamped));
+                        });
+                    }
+                })
+                .child(
+                    resizable_panel()
+                        .size(self.sidebar_width)
+                        .size_range(SIDEBAR_MIN_WIDTH..SIDEBAR_MAX_WIDTH)
+                        .child(self.sidebar(&when, cx)),
+                )
+                .child(resizable_panel().child(main_pane))
+                .into_any_element()
+        };
+
         h_flex()
             .id("desktop")
             .track_focus(&self.keyboard_focus)
             .key_context(menus::KEY_CONTEXT)
             .capture_action(cx.listener(|this, _: &Undo, window, cx| {
-                use gpui_kit::component::WindowExt as _;
                 if !window.has_active_dialog(cx) && this.undo_draft(window, cx) {
                     cx.stop_propagation();
                 }
@@ -1981,24 +2131,7 @@ impl Render for Desktop {
             .text_size(TYPE_BODY)
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .children((!self.sidebar_collapsed).then(|| self.sidebar(&when, cx)))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .h_full()
-                    .min_w_0()
-                    .p(LG)
-                    .gap(MD)
-                    .children(
-                        self.state.connection_banner().map(|text| {
-                            component::alert::Alert::warning("unreachable-spaces", text)
-                        }),
-                    )
-                    .children(self.page_connections(&when, cx))
-                    // The body takes the spare height so the activity line stays at the bottom.
-                    .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
-                    .children(self.activity(cx)),
-            )
+            .child(shell)
     }
 }
 

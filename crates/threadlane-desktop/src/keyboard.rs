@@ -12,7 +12,7 @@ use threadlane_desktop::{
     DecisionChoice, DecisionCommand, DecisionEffect, DecisionKey, DecisionScope, Line,
 };
 
-use crate::components::{key_hint, meta, section};
+use crate::components::{key_hint, section};
 use crate::menus;
 use crate::tokens::{FORM_WIDTH, MD, SCROLLBAR_GUTTER, SHORTCUTS_HEIGHT_FRACTION, SM, XS};
 use crate::{Desktop, Screen, Tab};
@@ -203,7 +203,12 @@ impl Desktop {
         };
         let question = queued.decision.question.clone();
         let view = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
+        let ok_label = if choice.option.chars().count() <= 24 {
+            choice.option.clone()
+        } else {
+            "Choose option".to_owned()
+        };
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let confirm = view.clone();
             let selection = choice.clone();
             let cancel = view.clone();
@@ -214,11 +219,11 @@ impl Desktop {
                     v_flex()
                         .gap(XS)
                         .child(question.clone())
-                        .child(format!("Selected option · {}", choice.option))
-                        .child(meta("Press Enter to confirm, Esc to cancel", cx)),
+                        .child(format!("Selected option · {}", choice.option)),
                 )
-                .ok_text("Confirm")
-                .ok_variant(ButtonVariant::Danger)
+                .ok_text(ok_label.clone())
+                .ok_variant(ButtonVariant::Primary)
+                .cancel_text("Cancel")
                 .on_ok(move |_, _, cx| {
                     let _gone = confirm.update(cx, |this, cx| {
                         if let Some(choice) = this.state.confirm_decision(&selection) {
@@ -392,6 +397,7 @@ impl Desktop {
                                 .small()
                                 .rounded_full()
                                 .tab_stop(true)
+                                .icon(crate::icons::AppIcon::ArrowDown)
                                 .label("Jump to latest")
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx))),
                         ),

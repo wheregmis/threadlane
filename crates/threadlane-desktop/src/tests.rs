@@ -4923,6 +4923,26 @@ fn the_selected_space_round_trips_and_falls_back_to_the_first() {
 }
 
 #[test]
+fn shell_layout_preferences_round_trip_in_desktop_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::default();
+    state.set_client_dir(dir.path().to_owned());
+    assert!(!state.sidebar_collapsed());
+    assert_eq!(state.sidebar_width(), None);
+    assert_eq!(state.window_size(), None);
+
+    state.set_sidebar_collapsed(true);
+    state.set_sidebar_width(264.4);
+    state.set_window_size(1280.2, 820.6);
+
+    let mut reloaded = AppState::default();
+    reloaded.set_client_dir(dir.path().to_owned());
+    assert!(reloaded.sidebar_collapsed());
+    assert_eq!(reloaded.sidebar_width(), Some(264.0));
+    assert_eq!(reloaded.window_size(), Some((1280.0, 821.0)));
+}
+
+#[test]
 fn desktop_appearance_round_trips_with_existing_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(SETTINGS_FILE);

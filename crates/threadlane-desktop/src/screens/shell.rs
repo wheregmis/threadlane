@@ -5,7 +5,9 @@ use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMen
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 use threadlane_desktop::{
     Activity, AppState, Connection, ConnectionStatus, Consequence, EmptyRegion, Part, Space, When,
@@ -14,11 +16,11 @@ use threadlane_desktop::{
 use super::{delete_project::delete_project_item, empty, gap_line, menu_item};
 use crate::components::{button, icon_button, meta, row, status_badge, status_dot};
 use crate::icons::AppIcon;
-use crate::menus::{GoHome, OpenSettings, SidebarShortcut, shortcut_hint};
-use crate::tokens::{
-    BAR_HEIGHT, LG, MD, ROW_HEIGHT, ROW_RADIUS, SIDEBAR_WIDTH, SM, Status, TYPE_EMPHASIS,
-    TYPE_SECTION, XS,
+use crate::menus::{
+    GoHome, NavigateBack, NavigateForward, OpenPalette, OpenSettings, SidebarShortcut,
+    ToggleSidebar, shortcut_hint,
 };
+use crate::tokens::{BAR_HEIGHT, LG, MD, ROW_HEIGHT, SM, Status, TYPE_EMPHASIS, XS};
 use crate::{Desktop, Screen, Tab};
 
 struct NavigationRow {
@@ -115,7 +117,7 @@ fn sidebar_entries(state: &AppState) -> Vec<SidebarEntry<'_>> {
         [
             (
                 "usage",
-                AppIcon::Columns3,
+                AppIcon::ChartColumn,
                 "Usage",
                 Screen::Work {
                     space: space.name.clone(),
@@ -203,27 +205,96 @@ impl Desktop {
             .nth(index)
     }
 
-    pub(crate) fn sidebar(&self, when: &When, cx: &mut Context<Self>) -> impl IntoElement {
-        let bar = v_flex()
-            .w(SIDEBAR_WIDTH)
+    fn nav_controls(&self, show_expand: bool, cx: &mut Context<Self>) -> Div {
+        let with_hint = |label: &str, action: &dyn Action| {
+            shortcut_hint(cx, action)
+                .map_or_else(|| label.to_owned(), |hint| format!("{label}  {hint}"))
+        };
+        let back = icon_button(
+            "nav-back",
+            AppIcon::ArrowLeft,
+            with_hint("Back", &NavigateBack),
+        )
+        .disabled(!self.nav_history.can_go_back())
+        .on_click(cx.listener(|this, _, _, cx| this.go_back(cx)));
+        let forward = icon_button(
+            "nav-forward",
+            AppIcon::ArrowRight,
+            with_hint("Forward", &NavigateForward),
+        )
+        .disabled(!self.nav_history.can_go_forward())
+        .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx)));
+        let search = icon_button(
+            "open-palette",
+            AppIcon::Search,
+            with_hint("Quick switcher…", &OpenPalette),
+        )
+        .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)));
+
+        let mut strip = h_flex().gap(XS).items_center();
+        if show_expand {
+            strip = strip.child(
+                icon_button(
+                    "expand-sidebar",
+                    AppIcon::PanelLeftOpen,
+                    with_hint("Show sidebar", &ToggleSidebar),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            );
+        }
+        strip.child(back).child(forward).child(search)
+    }
+
+    /// Quiet navigation strip shown in the main workspace when the sidebar is collapsed.
+    pub(crate) fn collapsed_nav_strip(&self, cx: &mut Context<Self>) -> Div {
+        h_flex()
             .flex_none()
+            .gap(SM)
+            .items_center()
+            .child(self.nav_controls(true, cx))
+    }
+
+    pub(crate) fn sidebar(&self, when: &When, cx: &mut Context<Self>) -> impl IntoElement {
+        let collapse_tip = shortcut_hint(cx, &ToggleSidebar).map_or_else(
+            || "Hide sidebar".to_owned(),
+            |hint| format!("Hide sidebar  {hint}"),
+        );
+        let bar = v_flex()
+            .w_full()
+            .min_w_0()
             .h_full()
             .gap(XS)
             .p(SM)
             .pt(LG)
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
             .child(
                 h_flex()
                     .h(BAR_HEIGHT)
-                    .px(MD)
+                    .pl(MD)
+                    .pr(XS)
                     .gap(SM)
-                    .text_size(TYPE_EMPHASIS)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(img(logo()).size(px(20.)).rounded(px(5.)).flex_none())
-                    .child("Threadlane"),
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap(SM)
+                            .min_w_0()
+                            .text_size(TYPE_EMPHASIS)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(img(logo()).size(px(20.)).rounded(px(5.)).flex_none())
+                            .child(div().min_w_0().truncate().child("Threadlane")),
+                    )
+                    .child(
+                        icon_button("collapse-sidebar", AppIcon::PanelLeftClose, collapse_tip)
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .px(XS)
+                    .justify_between()
+                    .items_center()
+                    .child(self.nav_controls(false, cx)),
             )
             .child(self.space_switcher(when, cx))
             .children(
@@ -516,7 +587,7 @@ impl Desktop {
                             .child(name.clone()),
                     )
                     .children(paused.then(|| status_badge("Paused", Status::Waiting, cx)))
-                    .child(Icon::new(AppIcon::ChevronDown).size(TYPE_SECTION)),
+                    .child(Icon::new(AppIcon::ChevronDown).small()),
             )
             .dropdown_menu(move |mut menu, _, _| {
                 for (space, checked) in &spaces {
@@ -583,7 +654,7 @@ impl Desktop {
                 div().flex_1().min_w_0().child(
                     button("go-machines")
                         .custom(style)
-                        .rounded(ROW_RADIUS)
+                        .rounded(cx.theme().radius)
                         .w_full()
                         .h_auto()
                         .min_h(ROW_HEIGHT)
@@ -598,7 +669,7 @@ impl Desktop {
                             h_flex()
                                 .w_full()
                                 .gap(SM)
-                                .child(Icon::new(AppIcon::Monitor).size(TYPE_SECTION))
+                                .child(Icon::new(AppIcon::Monitor).small())
                                 .child(
                                     v_flex().items_start().min_w_0().child("Machines").children(
                                         running
@@ -665,23 +736,11 @@ impl Desktop {
         (!warnings.is_empty()).then(|| h_flex().gap(MD).flex_wrap().children(warnings))
     }
 
-    /// The last action and where it stands, until the next one.
+    /// Shows a compact status line only while an operation is actively in flight.
+    /// Completed and failed results surface as non-blocking notifications.
     pub(crate) fn activity(&self, cx: &App) -> Option<Div> {
-        let activity = self.state.activity()?;
-        if let Activity::Failed(why) = activity {
-            return Some(
-                crate::components::empty_state(
-                    "The last action could not be completed.",
-                    Some(why),
-                    cx,
-                )
-                .flex_none(),
-            );
-        }
-        let status = match activity {
-            Activity::Working(_) => Status::Running,
-            Activity::Done(_) => Status::Done,
-            Activity::Failed(_) => Status::Failed,
+        let Activity::Working(text) = self.state.activity()? else {
+            return None;
         };
         Some(
             v_flex()
@@ -691,8 +750,8 @@ impl Desktop {
                 .child(
                     h_flex()
                         .gap(SM)
-                        .child(status_dot(status, cx))
-                        .child(meta(activity.text().to_owned(), cx)),
+                        .child(status_dot(Status::Running, cx))
+                        .child(meta(text.clone(), cx)),
                 ),
         )
     }

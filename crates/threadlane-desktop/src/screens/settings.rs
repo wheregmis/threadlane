@@ -3,7 +3,6 @@
 //! notifications it raises, and its version.
 
 use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
@@ -11,7 +10,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use threadlane_core::model::Mode;
-use threadlane_desktop::{Consequence, PACING_FIELDS};
+use threadlane_desktop::{Appearance, Consequence, PACING_FIELDS};
 
 use super::gap_line;
 
@@ -19,6 +18,7 @@ use super::project::mode_name;
 use crate::Desktop;
 use crate::components::{button, card, field, heading, meta, section};
 use crate::icons::AppIcon;
+use crate::menus::{DarkAppearance, LightAppearance, SystemAppearance};
 use crate::tokens::{LABEL_WIDTH, MD, READING_WIDTH, SM, TYPE_BODY, XL, XS};
 
 impl Desktop {
@@ -128,7 +128,53 @@ impl Desktop {
             .state
             .client_dir()
             .map_or_else(unknown, |dir| dir.display().to_string());
+        let appearance = self.state.appearance();
+        let appearance_control = ButtonGroup::new("app-appearance")
+            .outline()
+            .compact()
+            .child(
+                button("appearance-system")
+                    .label("System")
+                    .selected(appearance == Appearance::System),
+            )
+            .child(
+                button("appearance-light")
+                    .label("Light")
+                    .selected(appearance == Appearance::Light),
+            )
+            .child(
+                button("appearance-dark")
+                    .label("Dark")
+                    .selected(appearance == Appearance::Dark),
+            )
+            .on_click(|clicked: &Vec<usize>, window, cx| {
+                let action: Option<Box<dyn Action>> = match clicked.first().copied() {
+                    Some(0) => Some(Box::new(SystemAppearance)),
+                    Some(1) => Some(Box::new(LightAppearance)),
+                    Some(2) => Some(Box::new(DarkAppearance)),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    window.dispatch_action(action, cx);
+                }
+            });
         screen
+            .child(
+                card(cx).child(section("Appearance")).child(
+                    h_flex()
+                        .gap(MD)
+                        .items_center()
+                        .text_size(TYPE_BODY)
+                        .child(
+                            div()
+                                .w(LABEL_WIDTH)
+                                .flex_none()
+                                .text_color(muted)
+                                .child("Theme"),
+                        )
+                        .child(appearance_control),
+                ),
+            )
             .child(
                 card(cx)
                     .child(section("Notifications"))
@@ -153,9 +199,12 @@ impl Desktop {
                 card(cx)
                     .child(section("This app"))
                     .child(
-                        Checkbox::new("hold-messages")
+                        Switch::new("hold-messages")
                             .checked(self.state.hold_messages())
                             .label("Hold messages for 3 seconds so a send can be undone")
+                            .accessibility_label(
+                                "Hold messages for 3 seconds so a send can be undone",
+                            )
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.set_hold_messages(*checked, cx);
                             })),
