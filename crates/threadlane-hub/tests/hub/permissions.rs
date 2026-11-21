@@ -9,20 +9,25 @@ use serde_json::{Value as Json, json};
 use threadlane_core::client::{
     ApiError, DecisionReply, DecisionRequest, OrgReply, OrgRequest, StandingRuleSummary,
 };
+use threadlane_core::github::PullRequestState;
 use threadlane_core::ids::{DecisionId, StandingRuleId};
+use threadlane_core::link::Begin;
 use threadlane_core::link::RunAssignment;
 use threadlane_core::model::{
-    Cell, Decision, DecisionStatus, EventKind, Lease, Mode, OutboxKind, Trust,
+    Cell, Decision, DecisionStatus, EventKind, Lease, Mode, NewAgent, NewBinding, NewRepository,
+    NewTask, OutboxKind, TaskOrigin, TaskStatus, Trust,
 };
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::runtime::steps::scheduler;
-use threadlane_core::store::{DecisionStore, InboxStore, OrgStore, OutboxStore, TimerStore};
+use threadlane_core::store::{
+    DecisionStore, InboxStore, OrgStore, OutboxStore, TaskStore, TimerStore,
+};
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
 use threadlane_hub::{CombinedTools, HubSettings, LEAD_NAME, MEMORY_CREATE};
-use threadlane_store::NO_RESPONSE;
-use threadlane_testkit::CrashPlan;
-use threadlane_testkit::fakes::FakeTools;
+use threadlane_store::{Bootstrap, HubDb, NO_RESPONSE};
+use threadlane_testkit::fakes::{FakeGithub, FakeTools, GithubCall};
+use threadlane_testkit::{CrashPlan, FakeClock};
 
 use crate::common::{TestHub, begin};
 
@@ -641,4 +646,280 @@ async fn an_override_is_stricter_freely_and_looser_only_to_the_ceiling() {
     )
     .await;
     assert!(listed.is_ok(), "{listed:?}");
+}
+
+/// The head the Reviewer approved in [`own_merge`].
+fn approved_head() -> String {
+    "a".repeat(40)
+}
+
+/// Pull request 42 of `acme/widgets` from `branch`, at `head`, mergeable,
+/// with one check that ended as `check`.
+fn widgets_pull(branch: &str, head: &str, check: &str) -> PullRequestState {
+    PullRequestState {
+        head_repository: "acme/widgets".into(),
+        head_ref: branch.into(),
+        head_sha: head.into(),
+        draft: false,
+        mergeable_state: "clean".into(),
+        checks: vec![Some(check.into())],
+    }
+}
+
+/// A task of `origin` in `widgets` on GitHub, worked by an Assisted
+/// Engineer, whose submission at [`approved_head`] the Reviewer approved
+/// while you asked for more, so the Engineer runs again. GitHub answers
+/// `pull` for pull request 42. Returns the hub, GitHub, and the Engineer's
+/// lease and run after the approval.
+async fn own_merge(
+    origin: TaskOrigin,
+    pull: PullRequestState,
+) -> (TestHub, FakeGithub, Lease, RunAssignment) {
+    let github = FakeGithub::default();
+    let clock = FakeClock::at_default_start();
+    let db = HubDb::open_in_memory(&Bootstrap::default(), Arc::new(clock.clone()))
+        .await
+        .unwrap();
+    let core = threadlane_hub::HubCore::new(
+        db,
+        Arc::new(clock.clone()),
+        Arc::new(NoHooks),
+        HubSettings {
+            reviewer: Some("Reviewer".into()),
+            ..HubSettings::default()
+        },
+    )
+    .await
+    .unwrap()
+    .with_github(Arc::new(github.clone()));
+    let hub = TestHub::around(core, clock).await;
+    hub.hello().await;
+    autonomous_space(&hub).await;
+    let project = hub.general().await;
+    let engineer = hub
+        .db
+        .create_agent(&NewAgent::named("Engineer", "engineer"))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: project.id,
+            agent_id: engineer.id,
+            mode: Mode::Assisted,
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    hub.db
+        .create_agent(&NewAgent::named("Reviewer", "reviewer"))
+        .await
+        .unwrap();
+    let widgets = hub
+        .db
+        .create_repository(&NewRepository {
+            project_id: project.id,
+            name: "widgets".into(),
+            remote_url: "https://github.com/acme/widgets.git".into(),
+            default_branch: "main".into(),
+            protected_branches: vec![],
+        })
+        .await
+        .unwrap();
+    let task = hub
+        .db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: project.id,
+                agent_id: engineer.id,
+                title: "Fix widgets".into(),
+                goal: "Fix the widgets and merge them".into(),
+                repositories: vec![widgets.id],
+                parent_task_id: None,
+                depends_on: vec![],
+                origin,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    github.set_pull_request("acme/widgets", 42, Ok(pull));
+
+    let (lease, implementation) = begin(&*hub.link).await;
+    call(
+        &hub,
+        &lease,
+        &implementation,
+        "progress",
+        MEMORY_CREATE,
+        &json!({ "path": format!("project/tasks/{}.md", task.id), "content": "# Fix\nDone." }),
+    )
+    .await
+    .unwrap();
+    call(
+        &hub,
+        &lease,
+        &implementation,
+        "submit",
+        threadlane_hub::FINISH_TASK,
+        &json!({"summary":"Fixed","merge":[{"repository":"widgets","branch":"main","base":"main","conflicts":[],"revision":approved_head()}]}),
+    )
+    .await
+    .unwrap();
+    hub.link
+        .complete(&lease, implementation.run_id, None)
+        .await
+        .unwrap();
+    let Begin::Run(review) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("the review never started")
+    };
+    call(
+        &hub,
+        &lease,
+        &review,
+        "approval",
+        "finish_review",
+        &json!({"verdict":"approved","feedback":"Looks right","checks":"rerun"}),
+    )
+    .await
+    .unwrap();
+    // You asked for more meanwhile, so the approval sends the task back.
+    hub.insert(|event| {
+        event.lane_id = task.lane_id;
+        event.kind = EventKind::UserMessage;
+        event.trust = Trust::User;
+        event.payload = json!({ "text": "Merge it once it is approved" });
+    })
+    .await;
+    hub.link
+        .complete(&lease, review.run_id, None)
+        .await
+        .unwrap();
+    let Begin::Run(run) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("the Engineer never ran again")
+    };
+    assert_eq!(run.task_id, Some(task.id));
+    (hub, github, lease, *run)
+}
+
+/// How many times GitHub was asked for a pull request's state.
+fn pull_reads(github: &FakeGithub) -> usize {
+    github
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, GithubCall::PullRequestState { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn a_requested_task_merges_its_own_green_approved_pull_request_without_asking() {
+    let branch = threadlane_core::workspace::task_branch(threadlane_core::ids::TaskId(1));
+    let (hub, github, lease, run) = own_merge(
+        TaskOrigin::User,
+        widgets_pull(&branch, &approved_head(), "success"),
+    )
+    .await;
+    let merge = json!({"repository": "widgets", "number": 42});
+    let merged = call(&hub, &lease, &run, "merge", threadlane_hub::MERGE, &merge).await;
+    assert_eq!(merged, Err(ToolError::AuthorizedAndQueued));
+    let decision = hub
+        .db
+        .lane_decisions(lease.lane_id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(decision.tool, threadlane_hub::MERGE);
+    assert!(decision.approved());
+    assert_eq!(decision.answer.as_ref().unwrap()["by_default"], true);
+    assert_eq!(cards(&hub).await, 0, "nothing reaches you");
+    assert_eq!(pull_reads(&github), 1);
+    // A repeated call replays its outcome and reads GitHub no more.
+    let again = call(&hub, &lease, &run, "merge", threadlane_hub::MERGE, &merge).await;
+    assert_eq!(again, Err(ToolError::AuthorizedAndQueued));
+    assert_eq!(pull_reads(&github), 1);
+}
+
+#[tokio::test]
+async fn an_own_merge_asks_when_a_check_fails_or_another_head_was_approved() {
+    let branch = threadlane_core::workspace::task_branch(threadlane_core::ids::TaskId(1));
+    for pull in [
+        widgets_pull(&branch, &approved_head(), "failure"),
+        widgets_pull(&branch, &"b".repeat(40), "success"),
+        PullRequestState {
+            mergeable_state: "dirty".into(),
+            ..widgets_pull(&branch, &approved_head(), "success")
+        },
+    ] {
+        let (hub, github, lease, run) = own_merge(TaskOrigin::User, pull.clone()).await;
+        let merged = call(
+            &hub,
+            &lease,
+            &run,
+            "merge",
+            threadlane_hub::MERGE,
+            &json!({"repository": "widgets", "number": 42}),
+        )
+        .await;
+        assert_eq!(merged, Err(ToolError::WaitingOnYou), "{pull:?}");
+        assert_eq!(cards(&hub).await, 1, "{pull:?}");
+        assert_eq!(pull_reads(&github), 1, "{pull:?}");
+    }
+}
+
+#[tokio::test]
+async fn another_branchs_pull_request_or_work_you_did_not_request_asks_as_before() {
+    let branch = threadlane_core::workspace::task_branch(threadlane_core::ids::TaskId(1));
+    let fork = PullRequestState {
+        head_repository: "stranger/widgets".into(),
+        ..widgets_pull(&branch, &approved_head(), "success")
+    };
+    for (origin, pull, reads) in [
+        (
+            TaskOrigin::User,
+            widgets_pull("threadlane/T-0002", &approved_head(), "success"),
+            1,
+        ),
+        (TaskOrigin::User, fork, 1),
+        (
+            TaskOrigin::Agent,
+            widgets_pull(&branch, &approved_head(), "success"),
+            0,
+        ),
+    ] {
+        let (hub, github, lease, run) = own_merge(origin, pull.clone()).await;
+        let merged = call(
+            &hub,
+            &lease,
+            &run,
+            "merge",
+            threadlane_hub::MERGE,
+            &json!({"repository": "widgets", "number": 42}),
+        )
+        .await;
+        assert_eq!(merged, Err(ToolError::WaitingOnYou), "{origin:?} {pull:?}");
+        assert_eq!(cards(&hub).await, 1, "{origin:?} {pull:?}");
+        assert_eq!(pull_reads(&github), reads, "{origin:?} {pull:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_pull_request_asks_as_before() {
+    let (hub, github, lease, run) = own_merge(TaskOrigin::User, PullRequestState::default()).await;
+    github.set_pull_request("acme/widgets", 42, Err("rate limited".into()));
+    let merged = call(
+        &hub,
+        &lease,
+        &run,
+        "merge",
+        threadlane_hub::MERGE,
+        &json!({"repository": "widgets", "number": 42}),
+    )
+    .await;
+    assert_eq!(merged, Err(ToolError::WaitingOnYou));
+    assert_eq!(cards(&hub).await, 1);
 }

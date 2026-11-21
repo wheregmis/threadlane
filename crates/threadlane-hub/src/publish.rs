@@ -339,7 +339,7 @@ fn gh_args(a: &Json) -> Result<Vec<String>, ToolError> {
 }
 
 /// `owner/name` of a remote on github.com, the host the GitHub source reads.
-fn github_repository(remote: &str) -> Option<String> {
+pub(crate) fn github_repository(remote: &str) -> Option<String> {
     threadlane_core::github::normalize_remote(remote)?
         .strip_prefix("github.com/")
         .map(str::to_owned)

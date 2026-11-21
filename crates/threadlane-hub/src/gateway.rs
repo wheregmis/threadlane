@@ -10,17 +10,18 @@ use threadlane_core::link::{LinkError, Perform};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     Decision, DecisionKind, DecisionOption, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run,
-    RunStatus, StandingRule, TaskStatus, ToolCallBegin, ToolCallKey, Trust,
+    RunStatus, StandingRule, TaskReviewVerdict, TaskStatus, ToolCallBegin, ToolCallKey, Trust,
 };
 use threadlane_core::runtime::steps::{perform, tool_call as step};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{DecisionStore, OrgStore, SessionStore, TaskStore};
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, Verdict};
+use threadlane_core::workspace::task_branch;
 
 use crate::context::format_time;
 use crate::dreaming;
 use crate::error::{link_error, link_to_tool, tool_error};
-use crate::gate::{self, GateInput};
+use crate::gate::{self, GateInput, OwnWork};
 use crate::link::LocalLink;
 use crate::memory;
 use crate::publish::approval_options;
@@ -128,9 +129,9 @@ impl LocalLink {
             _ => arguments,
         };
         let (verdict, new_work) = self
-            .gate(&run, &lane, &definition, arguments, &events)
+            .gate(&run, &lane, &definition, arguments, &events, None)
             .await?;
-        let asked = match verdict {
+        let mut asked = match verdict {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
             _ if tool == REPORT_LIMITATION
                 && (dream.is_some() || arguments["require_approval"] == true) =>
@@ -178,6 +179,32 @@ impl LocalLink {
             ToolCallBegin::Finished(result) => return replay(result),
             ToolCallBegin::OutcomeUnknown => return Err(ToolError::OutcomeUnknown),
             ToolCallBegin::Perform => {}
+        }
+        // A requested task's own step is decided again on its own-work row.
+        // Read here, once the call is recorded, so a repeated call replays
+        // this outcome instead of reading GitHub again.
+        if dream.is_none()
+            && matches!(asked, Some(Asked::You { .. } | Asked::Review { .. }))
+            && let Some(own) = self.own_work(&lane, tool, arguments).await?
+        {
+            let (verdict, _) = self
+                .gate(&run, &lane, &definition, arguments, &events, Some(own))
+                .await?;
+            asked = match verdict {
+                Verdict::AllowByDefault => Some(Asked::Default),
+                Verdict::Allow { rule: Some(rule) } => Some(Asked::Rule(rule)),
+                Verdict::Review { offers_rule } => Some(Asked::Review {
+                    offers_rule,
+                    proposal: false,
+                }),
+                Verdict::Ask { offers_rule } => Some(Asked::You {
+                    offers_rule,
+                    proposal: false,
+                }),
+                // The row never allows without a record, nor blocks what the
+                // matrix let through; keep the matrix's answer.
+                Verdict::Allow { rule: None } | Verdict::Block { .. } => asked,
+            };
         }
         // A run that waits on you does nothing more (Plan.md §9.4), but each
         // further gated call of its turn still gets its own card (#675).
@@ -240,6 +267,84 @@ impl LocalLink {
         Ok(decisions.iter().any(|d| d.run_id == Some(run.id)))
     }
 
+    /// Whether the call is a step of the lane's own task on its own branch
+    /// or pull request, and the task is work you requested
+    /// (docs/autonomy-rework.md §3 stage A). A pull request counts when its
+    /// head is the task's branch in the same repository, one of the task's;
+    /// for `merge`, its checks pass when it is green on GitHub and the task's
+    /// latest review approved exactly its head. `None` for anything else,
+    /// and when GitHub cannot say, so the matrix decides as before.
+    async fn own_work(
+        &self,
+        lane: &Lane,
+        tool: &str,
+        arguments: &Json,
+    ) -> Result<Option<OwnWork>, ToolError> {
+        let inner = &self.core.inner;
+        let db = &inner.db;
+        if !gate::own_work_tool(tool, arguments) {
+            return Ok(None);
+        }
+        let Some(task) = (match lane.task_id {
+            Some(id) => db.task(id).await.map_err(tool_error)?,
+            None => None,
+        })
+        .filter(|task| task.origin.is_requested()) else {
+            return Ok(None);
+        };
+        // Both push and open the task's own branch: only onto_task names another.
+        if matches!(tool, crate::PUBLISH_BRANCH | crate::OPEN_PULL_REQUEST) {
+            return Ok(Some(OwnWork { checks_pass: true }));
+        }
+        let (Some(name), Some(number)) = (
+            arguments["repository"].as_str(),
+            arguments["number"].as_u64(),
+        ) else {
+            return Ok(None);
+        };
+        let Some((repository, full_name)) = db
+            .repositories(lane.project_id)
+            .await
+            .map_err(tool_error)?
+            .into_iter()
+            .find(|repository| {
+                repository.name == name && task.repositories.contains(&repository.id)
+            })
+            .and_then(|repository| {
+                let full_name = crate::publish::github_repository(&repository.remote_url)?;
+                Some((repository, full_name))
+            })
+        else {
+            return Ok(None);
+        };
+        let Some(github) = inner.github.as_deref() else {
+            return Ok(None);
+        };
+        let Ok(pull) = github.pull_request_state(&full_name, number).await else {
+            return Ok(None);
+        };
+        if pull.head_ref != task_branch(task.id)
+            || !pull.head_repository.eq_ignore_ascii_case(&full_name)
+        {
+            return Ok(None);
+        }
+        let checks_pass = tool != crate::MERGE
+            || (pull.green()
+                && db
+                    .task_reviews(task.id)
+                    .await
+                    .map_err(tool_error)?
+                    .last()
+                    .is_some_and(|review| {
+                        review.verdict == Some(TaskReviewVerdict::Approved)
+                            && review.revisions.iter().any(|revision| {
+                                revision.repository == repository.id
+                                    && revision.commit == pull.head_sha
+                            })
+                    }));
+        Ok(Some(OwnWork { checks_pass }))
+    }
+
     /// Gathers what governs the call and asks the gate (Plan.md §9.1).
     /// Also says whether the call starts work you did not request, which
     /// makes asking about it a proposal.
@@ -250,6 +355,7 @@ impl LocalLink {
         definition: &ToolDefinition,
         arguments: &Json,
         events: &[threadlane_core::model::Event],
+        own_work: Option<OwnWork>,
     ) -> Result<(Verdict, bool), ToolError> {
         let db = &self.core.inner.db;
         let project_id = lane.project_id;
@@ -333,6 +439,7 @@ impl LocalLink {
             tainted,
             requested,
             new_work,
+            own_work,
         });
         Ok((verdict, new_work.is_some()))
     }

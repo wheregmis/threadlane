@@ -25,7 +25,9 @@
 //! - its comments: `repos/<owner>/<name>/issues/<n>/comments?per_page=100[&since=<time>]`;
 //! - who holds an issue, before `assign_issue` asks: `repos/<owner>/<name>/issues/<n>`,
 //!   its `timeline?per_page=100` for open pull requests that cross-reference it,
-//!   and `user` for the login `gh` reads as.
+//!   and `user` for the login `gh` reads as;
+//! - a pull request's state, before a task's own step on it: `repos/<owner>/<name>/pulls/<n>`
+//!   for its head, draft flag and `mergeable_state`, and the check runs on its head commit.
 //!
 //! With `--include` each answer starts with the status line and headers. A
 //! `Link` header's `rel="next"` is followed, as another such GET of the path
@@ -39,8 +41,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::github::{
-    Feed, GithubError, GithubItem, GithubKind, GithubSource, IssueClaim, PullTarget,
-    REVIEW_MARKER_PREFIX, pull_request_number,
+    Feed, GithubError, GithubItem, GithubKind, GithubSource, IssueClaim, PullRequestState,
+    PullTarget, REVIEW_MARKER_PREFIX, pull_request_number,
 };
 use tokio::process::Command;
 
@@ -395,6 +397,46 @@ impl GithubSource for GhSource {
                 .filter_map(|user| text(user, "/login"))
                 .collect(),
             open_pull_requests,
+        })
+    }
+
+    async fn pull_request_state(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<PullRequestState, GithubError> {
+        if !valid_full_name(repository) {
+            return Err(GithubError(format!(
+                "{repository:?} is not a repository name"
+            )));
+        }
+        let path = format!("repos/{repository}/pulls/{number}");
+        let pull = self.get_json(&path).await?;
+        let (head_ref, head_sha) = head_of(&pull)
+            .ok_or_else(|| GithubError(format!("gh api {path} names no head branch and commit")))?;
+        let path = format!(
+            "repos/{repository}/commits/{}/check-runs?per_page=100",
+            encode(&head_sha)
+        );
+        let mut checks = Vec::new();
+        for page in self.get_pages(&[], &path).await? {
+            let page = page.json(&path)?;
+            let runs = page.get("check_runs").and_then(Json::as_array);
+            checks.extend(runs.into_iter().flatten().map(|run| {
+                (run["status"] == "completed")
+                    .then(|| text(run, "/conclusion"))
+                    .flatten()
+            }));
+        }
+        Ok(PullRequestState {
+            head_repository: text(&pull, "/head/repo/full_name").unwrap_or_default(),
+            head_ref,
+            head_sha,
+            draft: pull["draft"] == true,
+            mergeable_state: text(&pull, "/mergeable_state")
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+            checks,
         })
     }
 }
@@ -1333,6 +1375,48 @@ case "$last" in
             "a bad name never reaches gh"
         );
         assert_eq!(calls(dir.path()).len(), 4);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pull_request_state_reads_its_head_mergeability_and_every_check_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pull: Json = serde_json::from_str(PULL).unwrap();
+        pull["head"]["repo"] = serde_json::json!({"full_name": "acme/widgets"});
+        pull["draft"] = true.into();
+        pull["mergeable_state"] = "CLEAN".into();
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                ("*/pulls/529", "pull.http", ok(&pull.to_string())),
+                ("*check-runs*", "check-runs.http", ok(CHECK_RUNS)),
+            ],
+        ));
+        let state = source
+            .pull_request_state("acme/widgets", 529)
+            .await
+            .unwrap();
+        assert_eq!(
+            state,
+            PullRequestState {
+                head_repository: "acme/widgets".into(),
+                head_ref: "codex/agent-model-preferences".into(),
+                head_sha: "6dcb09b5b57875f334f61aebed695e2e4193db5e".into(),
+                draft: true,
+                mergeable_state: "clean".into(),
+                checks: vec![Some("failure".into()), Some("success".into()), None],
+            }
+        );
+        assert!(!state.green(), "a failed and a running check");
+        assert_eq!(
+            calls(dir.path()),
+            [
+                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/pulls/529",
+                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/commits/6dcb09b5b57875f334f61aebed695e2e4193db5e/check-runs?per_page=100",
+            ]
+        );
+        assert!(source.pull_request_state("acme/../x", 529).await.is_err());
+        assert!(source.pull_request_state("acme/widgets", 7).await.is_err());
     }
 
     #[cfg(unix)]

@@ -13,7 +13,7 @@ use threadlane_core::adapters::{
 };
 use threadlane_core::forge::{ApprovedBranch, Forge, ForgeError, PullRequestUpdate};
 use threadlane_core::github::{
-    Feed, GithubError, GithubItem, GithubSource, IssueClaim, PullTarget,
+    Feed, GithubError, GithubItem, GithubSource, IssueClaim, PullRequestState, PullTarget,
 };
 use threadlane_core::model::{OutboxMessage, Repository};
 use threadlane_core::runtime::{WakeTarget, Waker};
@@ -493,6 +493,10 @@ pub enum GithubCall {
         repository: String,
         number: u64,
     },
+    PullRequestState {
+        repository: String,
+        number: u64,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -508,6 +512,8 @@ struct GithubState {
     activity: Vec<(String, Vec<GithubItem>, bool)>,
     /// What [`GithubSource::issue_claim`] answers, by `(repository, number)`.
     claims: Vec<(String, u64, Result<IssueClaim, String>)>,
+    /// What [`GithubSource::pull_request_state`] answers, by `(repository, number)`.
+    pulls: Vec<(String, u64, Result<PullRequestState, String>)>,
 }
 
 /// A [`GithubSource`] that touches no network. It records every call, keeps
@@ -555,6 +561,20 @@ impl FakeGithub {
         lock(&self.state)
             .claims
             .push((repository.to_owned(), number, claim));
+    }
+
+    /// What [`GithubSource::pull_request_state`] answers for pull request
+    /// `number` of `repository`: the state, or the error. Unscripted ones
+    /// fail. The latest call wins.
+    pub fn set_pull_request(
+        &self,
+        repository: &str,
+        number: u64,
+        state: Result<PullRequestState, String>,
+    ) {
+        lock(&self.state)
+            .pulls
+            .push((repository.to_owned(), number, state));
     }
 
     /// What the feed answers as the interval it asks for.
@@ -654,6 +674,31 @@ impl GithubSource for FakeGithub {
             .map_or_else(
                 || Err(GithubError(format!("no claim for {repository}#{number}"))),
                 |(_, _, claim)| claim.clone().map_err(GithubError),
+            )
+    }
+
+    async fn pull_request_state(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<PullRequestState, GithubError> {
+        let mut state = lock(&self.state);
+        state.calls.push(GithubCall::PullRequestState {
+            repository: repository.to_owned(),
+            number,
+        });
+        state
+            .pulls
+            .iter()
+            .rev()
+            .find(|(r, n, _)| r == repository && *n == number)
+            .map_or_else(
+                || {
+                    Err(GithubError(format!(
+                        "no pull request {repository}#{number}"
+                    )))
+                },
+                |(_, _, pull)| pull.clone().map_err(GithubError),
             )
     }
 }

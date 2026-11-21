@@ -41,6 +41,19 @@ pub struct GateInput<'a> {
     /// mode in the project. The call starts new work, so the initiative row
     /// decides it, at the stricter of the two agents' modes (Plan.md §2.3).
     pub new_work: Option<Mode>,
+    /// Set when the call acts on the run's own task branch or pull request,
+    /// as the hub checked it, and the task is work you requested
+    /// (docs/autonomy-rework.md §3 stage A).
+    pub own_work: Option<OwnWork>,
+}
+
+/// A call on a requested task's own branch or pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnWork {
+    /// For `merge`: the reviewer approved the pull request's current head,
+    /// its checks passed, and it merges cleanly. Always true for the other
+    /// own-work tools.
+    pub checks_pass: bool,
 }
 
 /// What the matrix has a row for.
@@ -55,6 +68,11 @@ enum Row {
     /// proposal), or an agent's routine, whose events are never requested
     /// (Plan.md §7.3). Asks below Autonomous.
     Initiative,
+    /// A requested task's own step: publishing its branch, opening, readying,
+    /// editing or merging its own pull request. Allowed in every mode but
+    /// Off, reviewed when the run read outside content, and asked when a
+    /// merge's checks do not pass.
+    OwnWork { tainted: bool, checks_pass: bool },
 }
 
 /// The cell of `row` in the column of `mode` (Plan.md §2.3, the matrix).
@@ -65,6 +83,14 @@ fn cell(row: Row, mode: Mode) -> Cell {
         (Row::Tier(Tier::SharedReversible), Mode::OnRequest) => Cell::Ask,
         (Row::Tier(Tier::SharedReversible), _) => Cell::Review,
         (Row::Initiative, Mode::Autonomous) => Cell::Allow,
+        (
+            Row::OwnWork {
+                checks_pass: false, ..
+            },
+            _,
+        ) => Cell::Ask,
+        (Row::OwnWork { tainted: true, .. }, _) => Cell::Review,
+        (Row::OwnWork { .. }, _) => Cell::Allow,
         (Row::Tier(Tier::SharedHardToUndo) | Row::Instructions | Row::Initiative, _) => Cell::Ask,
     }
 }
@@ -150,6 +176,16 @@ fn allowed_by_default(tool: &str, arguments: &Json) -> bool {
         || (tool == PUBLISH_BRANCH && arguments.get(ONTO_TASK).is_none_or(Json::is_null))
 }
 
+/// Whether the own-work row can decide the call: the default's tools, and
+/// readying, editing or merging a pull request.
+pub(crate) fn own_work_tool(tool: &str, arguments: &Json) -> bool {
+    allowed_by_default(tool, arguments)
+        || matches!(
+            tool,
+            crate::MARK_READY | crate::EDIT_PULL_REQUEST | crate::MERGE
+        )
+}
+
 /// Decides one call, first rule that applies wins (Plan.md §9.1):
 ///
 /// 1. the forbidden tier blocks;
@@ -163,7 +199,9 @@ fn allowed_by_default(tool: &str, arguments: &Json) -> bool {
 ///    default when it opens a draft pull request or pushes the task's own
 ///    branch, the run is untainted, and the binding sets no override for the
 ///    tier;
-/// 5. otherwise the matrix's cell for the row and the effective mode.
+/// 5. otherwise the matrix's cell for the row and the effective mode. A
+///    requested task's own step is on the own-work row, whose allow is
+///    recorded as allowed by default; an override only makes it stricter.
 #[must_use]
 pub fn gate(input: &GateInput<'_>) -> Verdict {
     // shortcut: the forbidden list is the built-in tier only; add space and
@@ -190,6 +228,14 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
         Row::Initiative
     } else if !input.requested && crate::memory::protected(input.tool, input.arguments) {
         Row::Instructions
+    } else if let Some(own) = input
+        .own_work
+        .filter(|_| own_work_tool(input.tool, input.arguments))
+    {
+        Row::OwnWork {
+            tainted: input.tainted,
+            checks_pass: own.checks_pass,
+        }
     } else {
         Row::Tier(input.tier)
     };
@@ -207,9 +253,9 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
     }
     let pattern = rule_pattern(input.tool, input.arguments);
     let ruled = match row {
-        Row::Tier(Tier::SharedReversible | Tier::SharedHardToUndo) | Row::Instructions => {
-            pattern.as_object().is_some_and(|p| !p.is_empty())
-        }
+        Row::Tier(Tier::SharedReversible | Tier::SharedHardToUndo)
+        | Row::Instructions
+        | Row::OwnWork { .. } => pattern.as_object().is_some_and(|p| !p.is_empty()),
         _ => false,
     };
     if ruled && matches!(verdict, Cell::Ask | Cell::Review) {
@@ -237,6 +283,7 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
     // A tier 3 rule applies only where the agent acts in Autonomous.
     let offers_rule = ruled && (input.tier < Tier::SharedHardToUndo || mode == Mode::Autonomous);
     match verdict {
+        Cell::Allow if matches!(row, Row::OwnWork { .. }) => Verdict::AllowByDefault,
         Cell::Allow => Verdict::Allow { rule: None },
         Cell::Review => Verdict::Review { offers_rule },
         Cell::Ask => Verdict::Ask { offers_rule },
@@ -317,6 +364,8 @@ mod tests {
         requested: bool,
         /// The assignee's mode, for a task from unrequested work.
         new_work: Option<Mode>,
+        /// Whether a merge's checks pass, for a requested task's own step.
+        own: Option<bool>,
         expect: V,
     }
 
@@ -333,6 +382,7 @@ mod tests {
             tainted: false,
             requested: true,
             new_work: None,
+            own: None,
             expect,
         }
     }
@@ -617,6 +667,149 @@ mod tests {
                 ..case("a rule for the protected file", T1, ON, Rule)
             },
         ];
+        // A requested task's own steps (docs/autonomy-rework.md §3 stage A):
+        // allowed by default in every mode, reviewed when tainted, and a
+        // merge whose checks fail asks.
+        let own = |c: Case, tool: &'static str, checks_pass: bool| Case {
+            tool,
+            own: Some(checks_pass),
+            ..c
+        };
+        let own_tools = [
+            ("publish_branch", T2),
+            ("open_pull_request", T2),
+            ("mark_ready", T2),
+            ("edit_pull_request", T2),
+            ("merge", T3),
+        ];
+        let mut table = table;
+        for (tool, tier) in own_tools {
+            for mode in [ON, AS, AU] {
+                table.extend([
+                    own(case("own work", tier, mode, Default), tool, true),
+                    tainted(own(
+                        case("tainted own work", tier, mode, Review),
+                        tool,
+                        true,
+                    )),
+                    own(case("own work off", tier, Mode::Off, Block), tool, true),
+                    Case {
+                        project: Some(Mode::Off),
+                        ..own(case("own work off ceiling", tier, mode, Block), tool, true)
+                    },
+                    Case {
+                        space: ON,
+                        ..own(
+                            case("own work under on request", tier, mode, Default),
+                            tool,
+                            true,
+                        )
+                    },
+                    Case {
+                        overrides: &[(T2, Cell::Block), (T3, Cell::Block)],
+                        ..own(
+                            case("an override blocks own work", tier, mode, Block),
+                            tool,
+                            true,
+                        )
+                    },
+                    Case {
+                        overrides: &[(T2, Cell::Allow), (T3, Cell::Allow)],
+                        ..tainted(own(
+                            case("an override cannot loosen own work", tier, mode, Review),
+                            tool,
+                            true,
+                        ))
+                    },
+                    own(case("own work forbidden", TF, mode, Block), tool, true),
+                ]);
+            }
+        }
+        for mode in [ON, AS, AU] {
+            table.extend([
+                // As any tier 3 ask: a rule is offered where one would apply.
+                own(
+                    case(
+                        "a merge whose checks fail",
+                        T3,
+                        mode,
+                        if mode == AU { AskOffer } else { Ask },
+                    ),
+                    "merge",
+                    false,
+                ),
+                tainted(own(
+                    case("a tainted merge whose checks fail", T3, mode, Ask),
+                    "merge",
+                    false,
+                )),
+            ]);
+        }
+        table.extend([
+            Case {
+                overrides: &[(T2, Cell::Ask)],
+                ..own(
+                    case("an override asks about an own push", T2, AU, AskOffer),
+                    "publish_branch",
+                    true,
+                )
+            },
+            Case {
+                overrides: &[(T2, Cell::Review)],
+                ..own(
+                    case("an override reviews an own push", T2, ON, Review),
+                    "publish_branch",
+                    true,
+                )
+            },
+            Case {
+                overrides: &[(T3, Cell::Ask)],
+                ..own(
+                    case("an override asks about own merge", T3, ON, Ask),
+                    "merge",
+                    true,
+                )
+            },
+            Case {
+                overrides: &[(T3, Cell::Ask)],
+                ..own(
+                    case(
+                        "an override asks about own merge autonomous",
+                        T3,
+                        AU,
+                        AskOffer,
+                    ),
+                    "merge",
+                    true,
+                )
+            },
+            Case {
+                rule: Some("merge"),
+                ..own(
+                    case("a merge rule still reviews failing checks", T3, AU, Review),
+                    "merge",
+                    false,
+                )
+            },
+            tainted(Case {
+                rule: Some("merge"),
+                ..own(
+                    case("a tainted merge rule asks on failing checks", T3, AU, Ask),
+                    "merge",
+                    false,
+                )
+            }),
+            own(
+                case("a comment is not own work", T2, ON, AskOffer),
+                "comment",
+                true,
+            ),
+            own(
+                case("nor is a close", T3, AU, AskOffer),
+                "close_pull_request",
+                true,
+            ),
+        ]);
         let mut failures = Vec::new();
         for row in &table {
             let arguments = if row.tool == MEMORY_EDIT {
@@ -632,6 +825,7 @@ mod tests {
                     false,
                 )],
                 Some("revoked") => vec![rule("comment", json!({ "repository": "app" }), true)],
+                Some("merge") => vec![rule(crate::MERGE, json!({ "repository": "app" }), false)],
                 Some(name) => vec![rule("comment", json!({ "repository": name }), false)],
             };
             let overrides: Overrides = row.overrides.iter().copied().collect();
@@ -647,6 +841,7 @@ mod tests {
                 tainted: row.tainted,
                 requested: row.requested,
                 new_work: row.new_work,
+                own_work: row.own.map(|checks_pass| OwnWork { checks_pass }),
             });
             if short(&got) != row.expect {
                 failures.push(format!("{}: {got:?}, expected {:?}", row.what, row.expect));
@@ -677,6 +872,7 @@ mod tests {
                 tainted: false,
                 requested: true,
                 new_work: None,
+                own_work: None,
             }))
         };
         let other_issue = json!({"repository":"app","number":8,"remove":["question"]});
@@ -789,6 +985,10 @@ mod tests {
             );
         }
         let onto = json!({"repository":"app","onto_task":"T-0001"});
+        assert!(
+            !own_work_tool("publish_branch", &onto),
+            "a push onto another task is not own work"
+        );
         let verdict = gate(&GateInput {
             tool: "publish_branch",
             tier: T2,
@@ -801,6 +1001,7 @@ mod tests {
             tainted: false,
             requested: true,
             new_work: None,
+            own_work: Some(OwnWork { checks_pass: true }),
         });
         assert_eq!(
             short(&verdict),
