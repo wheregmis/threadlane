@@ -1576,3 +1576,63 @@ async fn sessions_keep_cut_tasks_structured_and_can_list_only_recent_ones() {
     }
     complete(&hub, &lease, &dream).await;
 }
+
+#[tokio::test]
+async fn sessions_page_every_task_past_the_old_cap_of_two_hundred() {
+    use threadlane_core::model::{NewTask, TaskOrigin, TaskStatus};
+
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    set(&hub, None).await;
+    let project = hub.general().await;
+    let agent = hub.db.bindings(project.id).await.unwrap()[0].agent_id;
+    for index in 0..205 {
+        hub.db
+            .create_task(
+                None,
+                &NewTask {
+                    project_id: project.id,
+                    agent_id: agent,
+                    title: format!("Task {index}"),
+                    goal: "Reviewed by the dream".into(),
+                    repositories: vec![],
+                    parent_task_id: None,
+                    depends_on: vec![],
+                    origin: TaskOrigin::User,
+                    status: TaskStatus::Proposed,
+                    priority: 0,
+                    created_by_call: None,
+                    created_at: hub.clock.now(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut offset = 0;
+    loop {
+        let page = call(
+            &*hub.link,
+            &lease,
+            &dream,
+            SESSIONS,
+            json!({"offset": offset, "limit": 200}),
+        )
+        .await
+        .unwrap();
+        let total_runs = page["total_runs"].as_u64().unwrap();
+        assert_eq!(page["total"].as_u64().unwrap(), total_runs + 205);
+        for task in page["tasks"].as_array().unwrap() {
+            assert!(ids.insert(task["task_id"].as_str().unwrap().to_owned()));
+        }
+        let Some(next) = page["next_offset"].as_u64() else {
+            break;
+        };
+        offset = next;
+    }
+    assert_eq!(ids.len(), 205);
+}
