@@ -105,6 +105,28 @@ impl LocalLink {
             }
             definition
         };
+        // A failed report is filed again from its saved text, not retyped (#679).
+        let retried;
+        let arguments = match arguments.get("retry") {
+            Some(id) if tool == REPORT_LIMITATION => {
+                let id = id.as_str().and_then(DecisionId::parse).ok_or_else(|| {
+                    ToolError::InvalidArguments("retry must be a decision id".into())
+                })?;
+                retried = db
+                    .decision(id)
+                    .await
+                    .map_err(tool_error)?
+                    .filter(|d| d.lane_id == lane.id && failed_report(d))
+                    .ok_or_else(|| {
+                        ToolError::Blocked(format!(
+                            "{id} is not an approved report in this lane that failed to file"
+                        ))
+                    })?
+                    .arguments;
+                &retried
+            }
+            _ => arguments,
+        };
         let (verdict, new_work) = self
             .gate(&run, &lane, &definition, arguments, &events)
             .await?;
@@ -329,7 +351,7 @@ impl LocalLink {
         key: &ToolCallKey,
         tool: &str,
         arguments: &Json,
-        asked: Asked,
+        mut asked: Asked,
     ) -> Result<Json, ToolError> {
         let inner = &self.core.inner;
         // Checks the call, so a refused one is refused before any ask
@@ -351,6 +373,14 @@ impl LocalLink {
                     "This limitation has already been reported or considered.".into(),
                 ));
             }
+            // The user approved this exact text already; only its filing failed (#679).
+            if existing.iter().any(|d| {
+                failed_report(d)
+                    && dreaming::report_issue(&d.arguments)
+                        .is_ok_and(|(t, b)| t == title && b == body)
+            }) {
+                asked = Asked::Default;
+            }
             crate::publish::Proposal {
                 question: format!("Open issue “{title}” in wheregmis/threadlane?"),
                 context: body,
@@ -366,7 +396,6 @@ impl LocalLink {
         };
         // Read here, once the call is recorded, so a repeated call replays
         // this outcome instead of reading GitHub again.
-        let mut asked = asked;
         if tool == crate::ASSIGN_ISSUE && !matches!(asked, Asked::Dream) {
             match crate::publish::issue_claim(&inner.db, inner.github.as_deref(), lane, arguments)
                 .await?
@@ -803,6 +832,14 @@ enum Asked {
     Rule(StandingRuleId),
     /// The gate's built-in default allowed it.
     Default,
+}
+
+/// An approved limitation report whose filing failed, with its text as approved.
+fn failed_report(d: &Decision) -> bool {
+    d.tool == REPORT_LIMITATION
+        && d.approved()
+        && d.outcome.as_ref().is_some_and(|o| o["performed"] == false)
+        && derived_call_key(&d.tool, &d.arguments) == d.arguments_hash
 }
 
 /// The record of a call that failed in a way that is safe to answer the same

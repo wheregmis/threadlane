@@ -712,6 +712,110 @@ async fn dream_reports_go_to_upstream_once_after_approval() {
 }
 
 #[tokio::test]
+async fn a_report_that_failed_to_file_is_retried_by_id_under_its_approval() {
+    use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
+    use threadlane_core::link::Perform;
+
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    hub.general().await;
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let report = json!({"title":"Explain blocked tasks", "situation":"A blocked task gave no reason.", "suggestion":"Show the blocking dependency."});
+    assert_eq!(
+        call(&*hub.link, &lease, &dream, REPORT_LIMITATION, report).await,
+        Err(ToolError::WaitingOnYou)
+    );
+    complete(&hub, &lease, &dream).await;
+    let DecisionReply::Pending { decisions } =
+        hub.api.decisions(DecisionRequest::Pending).await.unwrap()
+    else {
+        panic!("expected pending issue")
+    };
+    let first = decisions[0].id;
+    hub.api
+        .decisions(DecisionRequest::Answer {
+            decision: first,
+            option: "approve".into(),
+            note: None,
+        })
+        .await
+        .unwrap();
+    let (lease, followup) = begin(&*hub.link).await;
+    hub.link
+        .begin_perform(&lease, followup.run_id, first)
+        .await
+        .unwrap();
+    hub.link
+        .finish_perform(
+            &lease,
+            followup.run_id,
+            first,
+            &json!({"performed":false,"error":"network unreachable"}),
+        )
+        .await
+        .unwrap();
+    complete(&hub, &lease, &followup).await;
+
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let history = call(&*hub.link, &lease, &dream, SESSIONS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(history["previous_reports"][0]["id"], first.to_string());
+    assert!(matches!(
+        call(
+            &*hub.link,
+            &lease,
+            &dream,
+            REPORT_LIMITATION,
+            json!({"retry":"D-9999"})
+        )
+        .await,
+        Err(ToolError::Blocked(_))
+    ));
+    assert_eq!(
+        call(
+            &*hub.link,
+            &lease,
+            &dream,
+            REPORT_LIMITATION,
+            json!({"retry": first.to_string()})
+        )
+        .await,
+        Err(ToolError::AuthorizedAndQueued)
+    );
+    complete(&hub, &lease, &dream).await;
+    let DecisionReply::Pending { decisions } =
+        hub.api.decisions(DecisionRequest::Pending).await.unwrap()
+    else {
+        panic!("expected a decision list")
+    };
+    assert!(decisions.is_empty(), "the retry asked again: {decisions:?}");
+    let (lease, followup) = begin(&*hub.link).await;
+    let [retry] = followup.perform[..] else {
+        panic!("expected one retry, got {:?}", followup.perform)
+    };
+    assert_ne!(retry, first);
+    let Perform::Repository {
+        action: RepositoryAction::CreateIssue { title, body },
+        ..
+    } = hub
+        .link
+        .begin_perform(&lease, followup.run_id, retry)
+        .await
+        .unwrap()
+    else {
+        panic!("expected an issue")
+    };
+    assert_eq!(title, "Explain blocked tasks");
+    assert!(body.contains("Show the blocking dependency."));
+}
+
+#[tokio::test]
 async fn instruction_changes_are_advisory_and_the_answer_does_not_wake_a_lead() {
     let hub = TestHub::start().await;
     hub.hello().await;

@@ -2,7 +2,7 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::client::{DreamChange, DreamSummary};
-use threadlane_core::ids::{EventId, LaneId, ProjectId, RunId, TimerId};
+use threadlane_core::ids::{DecisionId, EventId, LaneId, ProjectId, RunId, TimerId};
 use threadlane_core::model::{
     DecisionAnswer, DecisionOption, Lease, NewTimer, Recurrence, Task, TimerCategory, TimerCreator,
 };
@@ -495,11 +495,12 @@ impl HubDb {
         project: ProjectId,
         lane: LaneId,
     ) -> StoreResult<Vec<Json>> {
-        query_all(&self.db.reader()?, "SELECT json_extract(arguments,'$.title'),status,outcome
+        query_all(&self.db.reader()?, "SELECT json_extract(arguments,'$.title'),status,outcome,id
             FROM decisions WHERE project_id=?1 AND lane_id=?2 AND tool='report_threadlane_limitation'
             ORDER BY id DESC LIMIT 50",params![project.get(),lane.get()],|row| {
                 let c=Cols(row);
-                Ok(json!({"title":c.opt_text(0)?,"status":c.text(1)?,"outcome":c.opt_json(2)?}))
+                // The id lets an agent retry a report that failed to file (#679).
+                Ok(json!({"id":DecisionId(c.i64(3)?).to_string(),"title":c.opt_text(0)?,"status":c.text(1)?,"outcome":c.opt_json(2)?}))
             }).await
     }
 
