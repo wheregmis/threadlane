@@ -371,6 +371,7 @@ done
 pwd -P > @DIR@/cwd
 printf '%s' "$CLAUDE_CONFIG_DIR" > @DIR@/config-dir
 printf '%s' "$CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" > @DIR@/no-background
+printf '%s %s' "$BASH_DEFAULT_TIMEOUT_MS" "$BASH_MAX_TIMEOUT_MS" > @DIR@/bash-timeout
 IFS= read -r prompt
 printf '%s\n' "$prompt" > @DIR@/stdin
 {}"#,
@@ -443,6 +444,7 @@ async fn start_passes_every_option() {
     assert_eq!(fake.record("config-dir"), config_dir.display().to_string());
     // Nothing backgrounded may outlive the headless turn.
     assert_eq!(fake.record("no-background"), "1");
+    assert_eq!(fake.record("bash-timeout"), "7200000 7200000");
 
     let config: Json = serde_json::from_str(&fake.record("mcp-config")).expect("config is JSON");
     let server = &config["mcpServers"]["threadlane"];

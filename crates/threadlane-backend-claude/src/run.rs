@@ -35,6 +35,8 @@ const KILL_WAIT: Duration = Duration::from_secs(5);
 /// ends, so a backgrounded command would die unseen. Documented on Claude
 /// Code's environment variables page: it removes `run_in_background` and
 /// stops timed-out shell commands moving to the background.
+/// Per-command limit for the agent: 2 hours, in milliseconds.
+const COMMAND_TIMEOUT_MS: &str = "7200000";
 const DISABLE_BACKGROUND_TASKS: &str = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS";
 
 /// How long to wait for the rest of stderr once the process has exited.
@@ -118,6 +120,9 @@ impl Launch {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env(DISABLE_BACKGROUND_TASKS, "1")
+            // Claude's Bash tool caps commands at 10 minutes by default; long test suites need more.
+            .env("BASH_DEFAULT_TIMEOUT_MS", COMMAND_TIMEOUT_MS)
+            .env("BASH_MAX_TIMEOUT_MS", COMMAND_TIMEOUT_MS)
             .kill_on_drop(true);
         if let Some(dir) = &self.config_dir {
             command.env("CLAUDE_CONFIG_DIR", dir);
