@@ -883,18 +883,27 @@ impl HubTools {
         context: &ToolContext,
         arguments: &Json,
     ) -> Result<Json, ToolError> {
-        let object = fields(arguments, &["verdict", "feedback", "checks"])?;
+        let object = fields(arguments, &["verdict", "feedback", "checks", "checks_note"])?;
         let verdict = text_field(object, "verdict")?
             .ok_or_else(|| missing("verdict"))?
             .parse::<TaskReviewVerdict>()
             .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
         // Tells the lead a verified approval from one that relied on the submitter's logs.
+        let note = text_field(object, "checks_note")?;
         let checks = match text_field(object, "checks")?.ok_or_else(|| missing("checks"))? {
-            "rerun" => "Checks: rerun independently in the review checkout.",
-            "from_submission" => "Checks: not rerun; taken from the submission.",
+            "rerun" => "Checks: rerun independently in the review checkout.".to_owned(),
+            "from_submission" => "Checks: not rerun; taken from the submission.".to_owned(),
+            "partial" => format!(
+                "Checks: partially rerun; verified: {}",
+                note.ok_or_else(|| missing("checks_note"))?
+            ),
+            "not_applicable" => format!(
+                "Checks: not applicable (no code checks); verified: {}",
+                note.ok_or_else(|| missing("checks_note"))?
+            ),
             other => {
                 return Err(ToolError::InvalidArguments(format!(
-                    "checks must be rerun or from_submission, not {other:?}"
+                    "checks must be rerun, from_submission, partial or not_applicable, not {other:?}"
                 )));
             }
         };
@@ -1434,9 +1443,10 @@ fn task_definitions() -> Vec<ToolDefinition> {
                 "feedback": {"type": "string"},
                 "checks": {
                     "type": "string",
-                    "enum": ["rerun", "from_submission"],
-                    "description": "rerun: you ran the build and tests yourself in the review checkout; from_submission: you relied on the submitter's results."
-                }
+                    "enum": ["rerun", "from_submission", "partial", "not_applicable"],
+                    "description": "rerun: you ran the build and tests yourself in the review checkout; from_submission: you relied on the submitter's results; partial: you re-verified only some of it; not_applicable: no code checks apply (e.g. memory-only work, read-only scans). partial and not_applicable require checks_note."
+                },
+                "checks_note": {"type": "string", "description": "What you re-verified yourself. Required when checks is partial or not_applicable."}
             }, "required": ["verdict", "feedback", "checks"], "additionalProperties": false }),
         ),
     ]
