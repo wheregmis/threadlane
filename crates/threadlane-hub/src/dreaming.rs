@@ -169,9 +169,11 @@ pub(crate) fn report_definition() -> ToolDefinition {
         description:
             "Report a public-safe Threadlane limitation to wheregmis/threadlane on GitHub. \
                       Set require_approval if you are unsure Threadlane caused the blocker. \
-                      If the call answers 'waiting on you', end your turn."
+                      If the call answers 'waiting on you', end your turn. \
+                      To retry an approved report that failed to file, pass only retry with its \
+                      decision id (as D-0123); its saved text is filed under the same approval."
                 .into(),
-        input_schema: json!({"type":"object","properties":{"title":{"type":"string"},"situation":{"type":"string"},"suggestion":{"type":"string"},"require_approval":{"type":"boolean"}},"required":["title","situation","suggestion"],"additionalProperties":false}),
+        input_schema: json!({"type":"object","properties":{"title":{"type":"string"},"situation":{"type":"string"},"suggestion":{"type":"string"},"require_approval":{"type":"boolean"},"retry":{"type":"string"}},"additionalProperties":false}),
         tier: Tier::SharedReversible,
         safe_to_repeat: false,
     }
