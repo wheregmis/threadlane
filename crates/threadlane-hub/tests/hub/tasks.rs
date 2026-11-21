@@ -907,6 +907,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             STAY_SILENT,
             CREATE_TASK,
             UPDATE_TASK,
+            threadlane_hub::RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
             threadlane_hub::PR_REVIEW_STATUS,
