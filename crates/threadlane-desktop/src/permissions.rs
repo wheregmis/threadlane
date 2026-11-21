@@ -167,7 +167,7 @@ pub struct RuleRow {
     pub id: StandingRuleId,
     /// `Open draft pull requests in app`.
     pub allows: String,
-    /// `Granted from D-0009 · used 6 times`.
+    /// `Created from Engineer in D-0009 · used 6 times`.
     pub from: String,
     /// While you are asked to confirm revoking it, what the question says.
     pub confirm: Option<String>,
@@ -424,7 +424,7 @@ impl AppState {
                 .map(|view| view.rules.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .filter(|listed| listed.agent == agent && listed.rule.revoked_at.is_none())
+                .filter(|listed| listed.rule.revoked_at.is_none())
                 .map(|listed| self.rule_row(space, listed))
                 .collect::<Vec<_>>()),
         };
@@ -451,14 +451,16 @@ impl AppState {
             1 => "used once".to_owned(),
             n => format!("used {n} times"),
         };
+        // A rule covers every agent here; the one it came from is kept for audit.
         let from = match rule.created_from_decision {
-            Some(decision) => format!("Granted from {decision} · {uses}"),
-            None => capitalized(&uses),
+            Some(decision) => format!("Created from {} in {decision} · {uses}", listed.agent),
+            None => format!("Created from {} · {uses}", listed.agent),
         };
         let confirm = (self.revoking.as_ref() == Some(&(space.to_owned(), rule.id))).then(|| {
             format!(
-                "Revoke \"{allows}\" for {}? Its next matching call asks you again.",
-                listed.agent
+                "Revoke \"{allows}\" for every agent in {}? Its next matching call asks \
+                 you again.",
+                listed.project
             )
         });
         RuleRow {

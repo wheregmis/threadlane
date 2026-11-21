@@ -30,7 +30,8 @@ pub struct GateInput<'a> {
     pub space_ceiling: Mode,
     pub project_ceiling: Option<Mode>,
     pub overrides: &'a Overrides,
-    /// The agent's standing rules in the project, revoked ones included.
+    /// The project's standing rules, whichever agent each was created from,
+    /// revoked ones included.
     pub rules: &'a [StandingRule],
     /// The run consumes external content (Plan.md §9.1 step 2).
     pub tainted: bool,
@@ -259,6 +260,7 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
         | Row::OwnWork { .. } => pattern.as_object().is_some_and(|p| !p.is_empty()),
         _ => false,
     };
+    let mut reviewed_by = None;
     if ruled && matches!(verdict, Cell::Ask | Cell::Review) {
         let rule = input.rules.iter().find(|rule| {
             rule.revoked_at.is_none() && rule.tool == input.tool && rule.pattern == pattern
@@ -269,7 +271,10 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
                     rule: Some(rule.id),
                 };
             }
-            Some(_) if mode == Mode::Autonomous => verdict = Cell::Review,
+            Some(rule) if mode == Mode::Autonomous => {
+                reviewed_by = (verdict == Cell::Ask).then_some(rule.id);
+                verdict = Cell::Review;
+            }
             _ => {}
         }
     }
@@ -286,7 +291,10 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
     match verdict {
         Cell::Allow if matches!(row, Row::OwnWork { .. }) => Verdict::AllowByDefault,
         Cell::Allow => Verdict::Allow { rule: None },
-        Cell::Review => Verdict::Review { offers_rule },
+        Cell::Review => Verdict::Review {
+            offers_rule,
+            rule: reviewed_by,
+        },
         Cell::Ask => Verdict::Ask { offers_rule },
         Cell::Block => Verdict::Block {
             reason: format!(

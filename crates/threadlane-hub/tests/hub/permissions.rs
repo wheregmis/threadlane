@@ -14,8 +14,8 @@ use threadlane_core::ids::{AgentId, DecisionId, ProjectId, RepositoryId, Standin
 use threadlane_core::link::Begin;
 use threadlane_core::link::RunAssignment;
 use threadlane_core::model::{
-    Cell, Decision, DecisionStatus, EventKind, Lease, Mode, NewAgent, NewBinding, NewRepository,
-    NewTask, OutboxKind, Task, TaskOrigin, TaskStatus, Trust,
+    BackendKind, Cell, Decision, DecisionStatus, EventKind, Lease, Mode, NewAgent, NewBinding,
+    NewRepository, NewTask, OutboxKind, Task, TaskOrigin, TaskStatus, Trust,
 };
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::runtime::steps::scheduler;
@@ -27,7 +27,7 @@ use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
 use threadlane_hub::{CombinedTools, HubSettings, LEAD_NAME, MEMORY_CREATE};
 use threadlane_store::{Bootstrap, HubDb, NO_RESPONSE};
 use threadlane_testkit::fakes::{FakeGithub, FakeTools, GithubCall};
-use threadlane_testkit::{CrashPlan, FakeClock};
+use threadlane_testkit::{CrashPlan, FakeClock, ScriptedBackend};
 
 use crate::common::{TestHub, begin};
 
@@ -214,6 +214,146 @@ async fn a_rule_removes_the_next_identical_ask_but_not_another_target_and_a_revo
     assert_eq!(rules(&hub).await[0].rule.uses, 1);
 }
 
+/// Binds `agent` to `project` in On request.
+async fn bind_on_request(hub: &TestHub, project: ProjectId, agent: AgentId) {
+    hub.db
+        .bind(&NewBinding {
+            project_id: project,
+            agent_id: agent,
+            mode: Mode::OnRequest,
+            is_lead: false,
+            max_parallel: 3,
+        })
+        .await
+        .unwrap();
+}
+
+/// A new task of `agent` in `project`, and its first run; any other lane
+/// granted first just ends its run.
+async fn task_run(hub: &TestHub, project: ProjectId, agent: AgentId) -> (Lease, RunAssignment) {
+    let task = hub
+        .db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: project,
+                agent_id: agent,
+                title: "Write the instructions".into(),
+                goal: "Write the project instructions".into(),
+                repositories: vec![],
+                parent_task_id: None,
+                depends_on: vec![],
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    loop {
+        let lease = hub.link.request_work().await.unwrap().expect("granted");
+        match hub.link.begin_run(&lease).await.unwrap() {
+            Begin::Run(run) if run.task_id == Some(task.id) => return (lease, *run),
+            Begin::Run(run) => {
+                hub.link.complete(&lease, run.run_id, None).await.unwrap();
+            }
+            Begin::Idle => {}
+        }
+        hub.link.release(&lease).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_rule_covers_every_agent_of_its_project_and_no_other_project() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let general = hub.general().await.id;
+    let Ok(OrgReply::Project { project }) = org(
+        &hub,
+        OrgRequest::CreateProject {
+            name: "Gadgets".into(),
+            description: String::new(),
+        },
+    )
+    .await
+    else {
+        panic!("no project")
+    };
+    let gadgets = project.id;
+    let backend = hub
+        .db
+        .create_agent(&NewAgent::named("Backend", "backend"))
+        .await
+        .unwrap()
+        .id;
+    let fullstack = hub
+        .db
+        .create_agent(&NewAgent::named("Fullstack", "fullstack"))
+        .await
+        .unwrap()
+        .id;
+    bind_on_request(&hub, general, backend).await;
+    bind_on_request(&hub, general, fullstack).await;
+    bind_on_request(&hub, gadgets, fullstack).await;
+    let instructions = write("project/instructions.md", "A");
+    // Whether `agent`'s call in `project` waits on you.
+    let asks = async |project, agent, id: &str| {
+        let (lease, run) = task_run(&hub, project, agent).await;
+        let result = call(&hub, &lease, &run, id, MEMORY_CREATE, &instructions).await;
+        hub.link.complete(&lease, run.run_id, None).await.unwrap();
+        hub.link.release(&lease).await.unwrap();
+        match result {
+            Err(ToolError::WaitingOnYou) => true,
+            Err(ToolError::AuthorizedAndQueued) => false,
+            other => panic!("{other:?}"),
+        }
+    };
+
+    // Backend asks, and you always allow it.
+    let (lease, run) = task_run(&hub, general, backend).await;
+    let asked = call(&hub, &lease, &run, "c-1", MEMORY_CREATE, &instructions).await;
+    assert_eq!(asked, Err(ToolError::WaitingOnYou));
+    let asked = hub.db.lane_decisions(lease.lane_id).await.unwrap()[0].id;
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+    decide(
+        &hub,
+        DecisionRequest::AnswerAlways {
+            decision: asked,
+            option: "approve".into(),
+            note: None,
+        },
+    )
+    .await
+    .unwrap();
+    let listed = rules(&hub).await;
+    assert_eq!(
+        (listed[0].agent.as_str(), listed[0].project.as_str()),
+        ("Backend", "General"),
+        "kept as the agent it was created from"
+    );
+
+    // Fullstack's matching call in General is allowed by it; in Gadgets it asks.
+    assert!(!asks(general, fullstack, "c-2").await);
+    assert_eq!(rules(&hub).await[0].rule.uses, 1);
+    assert!(asks(gadgets, fullstack, "c-3").await);
+
+    // Revoked, it allows nobody.
+    decide(
+        &hub,
+        DecisionRequest::RevokeRule {
+            rule: listed[0].rule.id,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(asks(general, fullstack, "c-4").await);
+    assert!(asks(general, backend, "c-5").await);
+    assert_eq!(rules(&hub).await[0].rule.uses, 1);
+}
+
 #[tokio::test]
 async fn always_is_refused_where_no_rule_could_apply() {
     let hub = TestHub::start().await;
@@ -290,8 +430,13 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
         Ok(json!({ "merged": true })),
     );
     let tools = CombinedTools::new(vec![base.core.tools(), Arc::new(fake.clone())]);
+    // A reviewer with no answer queued is unavailable.
+    let reviewer = ScriptedBackend::new(BackendKind::Claude, Arc::new(base.clock.clone()));
     let hub = TestHub::around(
-        base.core.clone().with_tools(Arc::new(tools)),
+        base.core
+            .clone()
+            .with_tools(Arc::new(tools))
+            .with_backends(vec![Arc::new(reviewer.clone())]),
         base.clock.clone(),
     )
     .await;
@@ -357,6 +502,18 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
     }
     assert_eq!(rules(&hub).await[0].rule.uses, 0);
     assert!(fake.calls().is_empty());
+
+    // A reviewer allows it: the call proceeds and the rule counts a use.
+    reviewer.push_answer(Ok(
+        json!({"verdict":"allow","reason":"The release was requested."}),
+    ));
+    assert_eq!(
+        call(&hub, &lease, &run, "c-5", "release", &merge).await,
+        Err(ToolError::WaitingOnYou),
+        "the run ends; the classifier's answer resumes it"
+    );
+    assert!(decision(&hub, 6).await.approved());
+    assert_eq!(rules(&hub).await[0].rule.uses, 1);
 }
 
 /// A pending decision in General's lead lane, asked one hour before it

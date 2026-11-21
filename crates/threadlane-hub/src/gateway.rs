@@ -150,9 +150,10 @@ impl LocalLink {
             }
             Verdict::Allow { rule } => rule.map(Asked::Rule),
             Verdict::AllowByDefault => Some(Asked::Default),
-            Verdict::Review { offers_rule } => Some(Asked::Review {
+            Verdict::Review { offers_rule, rule } => Some(Asked::Review {
                 offers_rule,
                 proposal: new_work,
+                rule,
             }),
             Verdict::Ask { offers_rule } => Some(Asked::You {
                 offers_rule,
@@ -193,9 +194,10 @@ impl LocalLink {
             asked = match verdict {
                 Verdict::AllowByDefault => Some(Asked::Default),
                 Verdict::Allow { rule: Some(rule) } => Some(Asked::Rule(rule)),
-                Verdict::Review { offers_rule } => Some(Asked::Review {
+                Verdict::Review { offers_rule, rule } => Some(Asked::Review {
                     offers_rule,
                     proposal: false,
+                    rule,
                 }),
                 Verdict::Ask { offers_rule } => Some(Asked::You {
                     offers_rule,
@@ -388,14 +390,13 @@ impl LocalLink {
             definition.tier,
             Tier::SharedReversible | Tier::SharedHardToUndo
         ) || memory::protected(&definition.name, arguments);
-        let rules: Vec<StandingRule> = match run.agent_id.filter(|_| needs_rules) {
-            Some(agent) => db
+        // A rule covers every agent bound in its project, whichever it was
+        // created from.
+        let rules: Vec<StandingRule> = match binding.filter(|_| needs_rules) {
+            Some(_) => db
                 .standing_rules(Some(project_id))
                 .await
-                .map_err(tool_error)?
-                .into_iter()
-                .filter(|rule| rule.agent_id == agent)
-                .collect(),
+                .map_err(tool_error)?,
             None => Vec::new(),
         };
         let tainted = events.iter().any(|e| e.trust == Trust::External)
@@ -586,7 +587,7 @@ impl LocalLink {
             created_at: now,
         };
         let authorized = match asked {
-            Asked::Review { .. } => {
+            Asked::Review { rule, .. } => {
                 let (id, reason) = self.classify(lease, run, &decision).await?;
                 if reason.is_some() {
                     decision.offers_standing_rule = false;
@@ -594,7 +595,7 @@ impl LocalLink {
                 }
                 inner
                     .db
-                    .reviewed_decision(lease, &id, &decision, reason.as_deref())
+                    .reviewed_decision(lease, &id, &decision, reason.as_deref(), rule)
                     .await
                     .map(|()| false)
             }
@@ -941,6 +942,8 @@ enum Asked {
     Review {
         offers_rule: bool,
         proposal: bool,
+        /// The tier 3 standing rule that had it reviewed instead of asked.
+        rule: Option<StandingRuleId>,
     },
     You {
         offers_rule: bool,

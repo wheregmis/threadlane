@@ -150,8 +150,12 @@ pub enum Verdict {
     /// rule-allowed call is, with the decision marked as allowed by default.
     AllowByDefault,
     /// Classifier review. An unavailable or malformed answer opens a decision
-    /// with the same `offers_rule` semantics as [`Verdict::Ask`].
-    Review { offers_rule: bool },
+    /// with the same `offers_rule` semantics as [`Verdict::Ask`]. `rule` is
+    /// the tier 3 standing rule that turned an ask into this review.
+    Review {
+        offers_rule: bool,
+        rule: Option<StandingRuleId>,
+    },
     /// Pause the call as a decision. `offers_rule` says whether answering it
     /// "always" could create a standing rule that would apply here.
     Ask { offers_rule: bool },

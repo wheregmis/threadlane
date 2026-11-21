@@ -3812,24 +3812,33 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
         Some((None, "As its mode sets it"))
     );
 
-    // Its standing rules only, in words, and Revoke asks first.
-    assert_eq!(may.rules_title, "Standing rule (1)");
+    // The project's standing rules, each with the agent it came from, in
+    // words, and Revoke asks first.
+    assert_eq!(may.rules_title, "Standing rules (2)");
     let rules = may.rules.expect("listed");
     assert_eq!(rules[0].allows, "Open draft pull requests in app");
-    assert_eq!(rules[0].from, "Granted from D-0009 · used 6 times");
+    assert_eq!(
+        rules[0].from,
+        "Created from Engineer in D-0009 · used 6 times"
+    );
+    assert_eq!(rules[1].from, "Created from Lead in D-0009 · used once");
     assert_eq!(rules[0].confirm, None);
     state.ask_revoke("work", rules[0].id);
     let may = state.may_do("work", "api", "Engineer").expect("bound");
     assert_eq!(
         may.rules.expect("listed")[0].confirm.as_deref(),
         Some(
-            "Revoke \"Open draft pull requests in app\" for Engineer? Its next matching call asks you again."
+            "Revoke \"Open draft pull requests in app\" for every agent in api? Its next matching call asks you again."
         )
     );
     let revoked = core.revoke_rule(Some("work"), "1").await.expect("revoked");
     state.rule_revoked("work", &revoked);
     let may = state.may_do("work", "api", "Engineer").expect("bound");
-    assert_eq!(may.rules, Ok(Vec::new()), "a revoked rule leaves the list");
+    assert_eq!(
+        may.rules.map(|rules| rules.len()),
+        Ok(1),
+        "a revoked rule leaves the list"
+    );
     assert_eq!(
         state
             .may_do("work", "api", "Lead")

@@ -623,6 +623,7 @@ impl HubDb {
         key: &str,
         new: &NewDecision,
         reason: Option<&str>,
+        rule: Option<StandingRuleId>,
     ) -> StoreResult<()> {
         let tx = self.db.begin().await?;
         let conn = tx.conn();
@@ -638,6 +639,21 @@ impl HubDb {
             let (decision, inserted) = insert_decision_in(conn, Some(lease), new).await?;
             if inserted {
                 if let Some(reason) = reason {
+                    // A rule that had it reviewed is used once the classifier
+                    // allows it, as a rule that allows a call is.
+                    if let Some(rule) = rule {
+                        let used = exec(
+                            conn,
+                            "UPDATE standing_rules SET uses = uses + 1 WHERE id = ?1 AND revoked_at IS NULL",
+                            params![rule.get()],
+                        )
+                        .await?;
+                        if used == 0 {
+                            return Err(StoreError::Conflict(format!(
+                                "standing rule {rule} is revoked or does not exist"
+                            )));
+                        }
+                    }
                     close_in(conn, &decision, DecisionStatus::Answered,
                         &json!({"option":0,"classifier":"allow","reason":reason,"standing_rule":false,"answered_at":new.created_at}),
                         format!("The classifier allowed {} ({}). Its outcome follows.", decision.id, new.tool),
