@@ -139,14 +139,14 @@ fn detail(record: &Json) -> Json {
 async fn session_task(db: &HubDb, project: ProjectId, reference: &Json) -> Result<Json, ToolError> {
     let err = crate::error::tool_error;
     let id = crate::tools::task_ref(reference)?;
+    let ids = [id.get()];
+    let times = db.dream_task_times(project, &ids).await.map_err(err)?;
     let task = db
         .task(id)
         .await
         .map_err(err)?
         .filter(|task| task.project_id == project)
         .ok_or_else(|| invalid(&format!("no task {id} in this project")))?;
-    let ids = [id.get()];
-    let times = db.dream_task_times(project, &ids).await.map_err(err)?;
     let mut record = task_record(&task, &times);
     if let Some(review) = db
         .dream_reviews(project, &ids)
@@ -543,10 +543,12 @@ impl HubCore {
                         .unwrap_or_default()
                 );
             }
+            // Times first: a change between the reads then repeats a task under
+            // updated_after instead of hiding it.
+            let times = db.dream_task_times(project, &tasks).await.map_err(err)?;
             let mut listed = db.dream_tasks(project, &tasks).await.map_err(err)?;
             listed.sort_by_key(|t| tasks.iter().position(|id| *id == t.id.get()));
             let mut reviews = db.dream_reviews(project, &tasks).await.map_err(err)?;
-            let times = db.dream_task_times(project, &tasks).await.map_err(err)?;
             items.iter_mut().for_each(page::clip_fields);
             for task in &listed {
                 let mut record = task_record(task, &times);
