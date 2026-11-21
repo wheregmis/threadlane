@@ -21,7 +21,7 @@ use threadlane_hub::{
 use threadlane_hub::{
     CANCEL_TASK, CREATE_TASK, ENDED_REASON, FINISH_TASK, LIST_TASKS, MEMORY_CREATE, MEMORY_DELETE,
     MEMORY_EDIT, MEMORY_RENAME, MEMORY_VIEW, OFF_REASON, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
-    SEND_MESSAGE, SKIP_REASON, STAY_SILENT, TASK_RULES, UPDATE_TASK,
+    RETRY_TASK, SEND_MESSAGE, SKIP_REASON, STAY_SILENT, TASK_RULES, UPDATE_TASK,
 };
 
 use crate::common::{PAST_LEASE, TestHub, begin, usable_report};
@@ -567,9 +567,92 @@ async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
     let reason = reviewed.waiting_reason.unwrap();
     assert!(
         reason.starts_with("Reviewer failed on its configuration (agent ")
-            && reason.contains("not supported"),
+            && reason.contains("not supported")
+            && reason.contains("retry the review with retry_task"),
         "{reason}"
     );
+    hub.link.release(&lease).await.unwrap();
+
+    // The lead sees it among the configuration failures and retries the
+    // review on another Reviewer (#672).
+    let failures = hub.db.configuration_failures(project.id).await.unwrap();
+    assert_eq!(
+        failures.iter().map(|task| task.id).collect::<Vec<_>>(),
+        [report.id]
+    );
+    assert_eq!(
+        failures[0].result.as_ref().unwrap()["configuration_failure"],
+        true
+    );
+    let auditor = hub
+        .db
+        .create_agent(&NewAgent::named("Auditor", "reviewer"))
+        .await
+        .unwrap();
+    let fixed: serde_json::Map<String, Json> = threadlane_core::model::BackendKind::ALL
+        .iter()
+        .map(|backend| (backend.as_str().to_owned(), json!("fixed-model")))
+        .collect();
+    hub.db
+        .bind(&NewBinding {
+            project_id: project.id,
+            agent_id: auditor.id,
+            mode: Mode::OnRequest,
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    hub.send("retry", "Retry the review").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert_eq!(lead.lane_kind, LaneKind::Lead);
+    assert!(lead.prompt.contains("which queues its review again"));
+    let arguments = json!({"task_id": report.id.to_string(), "agent": "Auditor"});
+    // On the setup that was refused, Auditor would fail the same way.
+    let refused = hub
+        .link
+        .call_tool(&lease, lead.run_id, Some("r0"), RETRY_TASK, &arguments)
+        .await;
+    assert!(
+        matches!(&refused, Err(ToolError::Failed(why)) if why.contains("would fail to start")),
+        "{refused:?}"
+    );
+    hub.db
+        .update_agent(&threadlane_core::model::Agent {
+            models: Json::Object(fixed),
+            ..auditor
+        })
+        .await
+        .unwrap();
+    for key in ["r1", "r1"] {
+        let retried = hub
+            .link
+            .call_tool(&lease, lead.run_id, Some(key), RETRY_TASK, &arguments)
+            .await
+            .unwrap();
+        assert_eq!(retried["status"], "in_review", "{retried}");
+    }
+    // Once retried, the round is no longer a configuration failure.
+    let again = hub
+        .link
+        .call_tool(&lease, lead.run_id, Some("r2"), RETRY_TASK, &arguments)
+        .await;
+    assert!(
+        matches!(&again, Err(ToolError::Failed(why)) if why.contains("did not fail on its configuration")),
+        "{again:?}"
+    );
+    assert!(
+        hub.db
+            .configuration_failures(project.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    finish_run(&hub, &lease, &lead).await;
+
+    let (_, review) = begin(&*hub.link).await;
+    assert_eq!(review.agent_name, "Auditor");
+    assert_eq!(review.task_id, Some(report.id));
 }
 
 /// A started run of the engineer's task, cancelled by you while it runs.
@@ -1189,7 +1272,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             STAY_SILENT,
             CREATE_TASK,
             UPDATE_TASK,
-            threadlane_hub::RETRY_TASK,
+            RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
             threadlane_hub::PR_REVIEW_STATUS,
