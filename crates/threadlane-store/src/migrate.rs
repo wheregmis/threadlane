@@ -36,7 +36,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0027_publication_blocker.sql"),
     include_str!("../migrations/0028_run_model.sql"),
     include_str!("../migrations/0029_space_paused.sql"),
-    include_str!("../migrations/0030_review_configuration_failure.sql"),
+    include_str!("../migrations/0031_review_configuration_failure.sql"),
 ];
 
 /// The schema version this build expects.
