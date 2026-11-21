@@ -12,11 +12,27 @@ use turso::Connection;
 
 use crate::HubDb;
 use crate::db::{exec, query_all, query_one, query_opt};
-use crate::row::{Cols, params};
+use crate::row::{Cols, opt_ts, params};
 use crate::timer::insert_timer_in;
 
 /// Maximum records of each kind reviewed per occurrence. Unread rows sort first next time.
 const REVIEW_LIMIT: usize = 200;
+
+/// The last activity of task row `t`: its creation, the latest event or run in
+/// its lane, or its latest result or retry event in the lead's lane. Tasks keep
+/// no update time of their own, and every status change leaves one of these.
+fn task_updated_at() -> String {
+    let source = crate::task::TASK_SOURCE;
+    format!(
+        "MAX(t.created_at,
+        COALESCE((SELECT MAX(e.received_at) FROM events e WHERE e.lane_id=t.lane_id),0),
+        COALESCE((SELECT MAX(COALESCE(r.ended_at,r.started_at)) FROM runs r WHERE r.lane_id=t.lane_id),0),
+        COALESCE((SELECT MAX(e.received_at) FROM events e WHERE e.source='{source}'
+            AND (e.source_event_id='result:'||t.id
+                OR (e.source_event_id>='result:'||t.id||':' AND e.source_event_id<'result:'||t.id||';')
+                OR (e.source_event_id>='retry:'||t.id||':' AND e.source_event_id<'retry:'||t.id||';'))),0))"
+    )
+}
 
 const CHOICES: &str =
     "FROM decisions d JOIN events e ON e.source='decision' AND e.source_event_id='answer:' || d.id
@@ -402,16 +418,23 @@ impl HubDb {
     }
 
     /// Read a stable page of identifiers. Previously unreviewed tasks and choices come first.
+    /// `updated_after` keeps only tasks with activity after it.
     pub async fn dream_ids(
         &self,
         project: ProjectId,
         kind: &str,
+        updated_after: Option<Timestamp>,
         offset: usize,
         limit: usize,
     ) -> StoreResult<(usize, Vec<i64>)> {
         let conn = self.db.reader()?;
-        let filter =
-            "FROM dream_items WHERE project_id=?1 AND kind=?2 AND (kind!='run' OR last_review=0)";
+        let after = opt_ts(updated_after);
+        let filter = format!(
+            "FROM dream_items WHERE project_id=?1 AND kind=?2 AND (kind!='run' OR last_review=0)
+            AND (?3 IS NULL OR kind!='task' OR item_id IN
+                (SELECT t.id FROM tasks t WHERE t.project_id=?1 AND {} > ?3))",
+            task_updated_at()
+        );
         // Choices page newest first with no cap, so the latest answers stay reachable (#621).
         let (cap, order, limit) = if kind == "choice" {
             (String::new(), "last_review!=0,item_id DESC", limit)
@@ -425,16 +448,17 @@ impl HubDb {
         let count = query_one(
             &conn,
             &format!("SELECT COUNT(*) FROM (SELECT 1 {filter}{cap})"),
-            params![project.get(), kind],
+            params![project.get(), kind, after.clone()],
             |r| Cols(r).i64(0),
         )
         .await?;
         let ids = query_all(
             &conn,
-            &format!("SELECT item_id {filter} ORDER BY {order} LIMIT ?3 OFFSET ?4"),
+            &format!("SELECT item_id {filter} ORDER BY {order} LIMIT ?4 OFFSET ?5"),
             params![
                 project.get(),
                 kind,
+                after,
                 i64::try_from(limit).unwrap_or(i64::MAX),
                 i64::try_from(offset).unwrap_or(i64::MAX)
             ],
@@ -491,6 +515,26 @@ impl HubDb {
                 let c=Cols(row);
                 Ok((c.i64(0)?,json!({"submission_run":c.i64(1)?,"review_run":c.opt_i64(2)?,"verdict":c.opt_text(3)?,"feedback":c.opt_text(4)?})))
             }).await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// When each task on this page last saw activity, see [`task_updated_at`].
+    pub async fn dream_task_times(
+        &self,
+        project: ProjectId,
+        ids: &[i64],
+    ) -> StoreResult<std::collections::BTreeMap<i64, Timestamp>> {
+        let rows = query_all(
+            &self.db.reader()?,
+            &format!(
+                "SELECT t.id,{} FROM tasks t
+                WHERE t.project_id=?1 AND t.id IN (SELECT value FROM json_each(?2))",
+                task_updated_at()
+            ),
+            params![project.get(), json!(ids).to_string()],
+            |row| Ok((Cols(row).i64(0)?, Cols(row).ts(1)?)),
+        )
+        .await?;
         Ok(rows.into_iter().collect())
     }
 
