@@ -532,6 +532,8 @@ impl LocalLink {
                 | threadlane_core::forge::GITHUB_CLI
                 | crate::ASSIGN_ISSUE
                 | crate::EDIT_PULL_REQUEST
+                | crate::RESOLVE_REVIEW_THREAD
+                | crate::REQUEST_REVIEW
                 | REPORT_LIMITATION
         ) {
             let (remote, action) = if decision.tool == REPORT_LIMITATION {

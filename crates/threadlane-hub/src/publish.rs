@@ -7,7 +7,7 @@ use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
     ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST, EXPECTED_HEAD,
     FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, LABEL_ISSUE, MARK_READY, MAX_LABELS, MERGE, ONTO_TASK,
-    OPEN_PULL_REQUEST, PUBLISH_BRANCH, valid_label_name,
+    OPEN_PULL_REQUEST, PUBLISH_BRANCH, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD, valid_label_name,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -56,7 +56,11 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: schema,
-        tier: if matches!(name, MERGE | CLOSE_PULL_REQUEST | GITHUB_CLI) {
+        // The owner judges whether a reviewer's thread is fixed and when a fresh review is due.
+        tier: if matches!(
+            name,
+            MERGE | CLOSE_PULL_REQUEST | GITHUB_CLI | RESOLVE_REVIEW_THREAD | REQUEST_REVIEW
+        ) {
             Tier::SharedHardToUndo
         } else {
             Tier::SharedReversible
@@ -212,6 +216,43 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                     "body":{"type":"string","description":"The new body, replacing the whole description."}
                 },
                 "required":["repository","number"],"additionalProperties":false
+            }),
+        ),
+        define(
+            RESOLVE_REVIEW_THREAD,
+            "Reply to one review thread of a pull request in a registered project repository and \
+             resolve it, once a commit on the PR fixes what it raised. The user always decides it. \
+             It is refused if the PR head is no longer expected_head or does not contain fixed_by. \
+             End your turn when it waits on the user.",
+            json!({
+                "type":"object","properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "expected_head":{"type":"string","description":"The current full commit SHA of the PR head."},
+                    "thread_id":{"type":"string","description":"The thread's GraphQL node ID, as PRRT_kwDO..."},
+                    "fixed_by":{"type":"string","description":"The full SHA of the commit that fixes the thread."},
+                    "body":{"type":"string","description":"The reply: how the commit fixes it. A line naming fixed_by is added."}
+                },
+                "required":["repository","number","expected_head","thread_id","fixed_by","body"],
+                "additionalProperties":false
+            }),
+        ),
+        define(
+            REQUEST_REVIEW,
+            "Ask for a fresh review of a pull request's current head in a registered project \
+             repository: re-request reviewers, post a review bot's documented trigger comment \
+             (such as \"@coderabbitai review\"), or both. The user always decides it. It is \
+             refused if the PR head is no longer expected_head. End your turn when it waits on \
+             the user.",
+            json!({
+                "type":"object","properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "expected_head":{"type":"string","description":"The current full commit SHA of the PR head."},
+                    "reviewers":{"type":"array","items":{"type":"string"},"description":"GitHub logins to re-request."},
+                    "comment":{"type":"string","description":"A comment to post, such as a review bot's trigger."}
+                },
+                "required":["repository","number","expected_head"],"additionalProperties":false
             }),
         ),
     ]
@@ -407,6 +448,13 @@ pub(crate) fn repository_action(
             "body must be plain text of at most 20000 characters",
         )),
     };
+    let commit = |key: &str| {
+        a[key]
+            .as_str()
+            .filter(|sha| valid_commit_id(sha))
+            .map(str::to_owned)
+            .ok_or_else(|| invalid(&format!("{key} must be a full commit SHA")))
+    };
     match tool {
         COMMENT => {
             fields(a, &["repository", "target", "number", "body"])?;
@@ -461,11 +509,7 @@ pub(crate) fn repository_action(
         }
         CLOSE_PULL_REQUEST => {
             fields(a, &["repository", "number", EXPECTED_HEAD, "delete_branch"])?;
-            let expected_head = a[EXPECTED_HEAD]
-                .as_str()
-                .filter(|head| valid_commit_id(head))
-                .ok_or_else(|| invalid("expected_head must be a full commit SHA"))?
-                .to_owned();
+            let expected_head = commit(EXPECTED_HEAD)?;
             let delete_branch = match a.get("delete_branch") {
                 None | Some(Json::Null) => false,
                 Some(Json::Bool(delete)) => *delete,
@@ -505,11 +549,99 @@ pub(crate) fn repository_action(
                 body,
             })
         }
+        RESOLVE_REVIEW_THREAD => {
+            fields(
+                a,
+                &[
+                    "repository",
+                    "number",
+                    EXPECTED_HEAD,
+                    "thread_id",
+                    "fixed_by",
+                    "body",
+                ],
+            )?;
+            let thread_id = a["thread_id"]
+                .as_str()
+                .filter(|id| {
+                    (1..=100).contains(&id.len())
+                        && id
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                })
+                .ok_or_else(|| invalid("thread_id must be a review thread's GraphQL node ID"))?
+                .to_owned();
+            let body = body()?;
+            if body.trim().is_empty() {
+                return Err(invalid("say how the commit fixes the thread in body"));
+            }
+            Ok(RepositoryAction::ResolveReviewThread {
+                number: number()?,
+                expected_head: commit(EXPECTED_HEAD)?,
+                thread_id,
+                fixed_by: commit("fixed_by")?,
+                body,
+            })
+        }
+        REQUEST_REVIEW => {
+            fields(
+                a,
+                &[
+                    "repository",
+                    "number",
+                    EXPECTED_HEAD,
+                    "reviewers",
+                    "comment",
+                ],
+            )?;
+            let bad = || invalid("reviewers must be a list of at most 15 GitHub logins");
+            let reviewers: Vec<String> = match a.get("reviewers") {
+                None | Some(Json::Null) => Vec::new(),
+                Some(Json::Array(items)) if items.len() <= 15 => items
+                    .iter()
+                    .map(|item| {
+                        item.as_str()
+                            .filter(|login| valid_login(login))
+                            .map(str::to_owned)
+                            .ok_or_else(bad)
+                    })
+                    .collect::<Result<_, _>>()?,
+                Some(_) => return Err(bad()),
+            };
+            let comment = match a.get("comment") {
+                None | Some(Json::Null) => None,
+                Some(Json::String(s)) if plain_text(s) && !s.trim().is_empty() => Some(s.clone()),
+                Some(_) => {
+                    return Err(invalid(
+                        "comment must be plain text of at most 20000 characters",
+                    ));
+                }
+            };
+            if reviewers.is_empty() && comment.is_none() {
+                return Err(invalid("name reviewers, a comment, or both"));
+            }
+            Ok(RepositoryAction::RequestReview {
+                number: number()?,
+                expected_head: commit(EXPECTED_HEAD)?,
+                reviewers,
+                comment,
+            })
+        }
         _ => Err(invalid("unknown repository action")),
     }
 }
 
 /// The label names under `key`, which may be absent.
+/// Whether `login` can be a GitHub user login: 1 to 39 letters, digits and
+/// inner single hyphens.
+fn valid_login(login: &str) -> bool {
+    (1..=39).contains(&login.len())
+        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !login.starts_with('-')
+        && !login.ends_with('-')
+        && !login.contains("--")
+}
+
 fn labels(a: &Json, key: &str) -> Result<Vec<String>, ToolError> {
     let bad = || {
         invalid(&format!(
@@ -586,6 +718,8 @@ pub(crate) async fn proposal(
             | GITHUB_CLI
             | ASSIGN_ISSUE
             | EDIT_PULL_REQUEST
+            | RESOLVE_REVIEW_THREAD
+            | REQUEST_REVIEW
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -668,6 +802,8 @@ pub(crate) async fn proposal(
             | CLOSE_PULL_REQUEST
             | ASSIGN_ISSUE
             | EDIT_PULL_REQUEST
+            | RESOLVE_REVIEW_THREAD
+            | REQUEST_REVIEW
     ) {
         let action = repository_action(tool, arguments)?;
         if tool == ASSIGN_ISSUE && github_repository(&repository.remote_url).is_none() {
@@ -703,6 +839,35 @@ pub(crate) async fn proposal(
                     _ => "new body".to_owned(),
                 }
             ),
+            threadlane_core::forge::RepositoryAction::ResolveReviewThread {
+                number,
+                expected_head,
+                thread_id,
+                fixed_by,
+                ..
+            } => format!(
+                "Resolve review thread {thread_id} on pull request {slug}#{number} in {name} as \
+                 fixed by {fixed_by}, if its head is still {expected_head}?"
+            ),
+            threadlane_core::forge::RepositoryAction::RequestReview {
+                number,
+                expected_head,
+                reviewers,
+                comment,
+            } => {
+                let mut asks = Vec::new();
+                if !reviewers.is_empty() {
+                    asks.push(format!("re-request {}", reviewers.join(", ")));
+                }
+                if let Some(comment) = comment {
+                    asks.push(format!("comment {comment:?}"));
+                }
+                format!(
+                    "Request a fresh review of pull request {slug}#{number} in {name} ({}), if \
+                     its head is still {expected_head}?",
+                    asks.join(" and ")
+                )
+            }
             threadlane_core::forge::RepositoryAction::LabelIssue {
                 number,
                 add,
@@ -920,6 +1085,69 @@ pub(crate) fn plain_text(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_actions_need_full_heads_a_thread_id_and_something_to_ask() {
+        use threadlane_core::forge::RepositoryAction;
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        let number = std::num::NonZeroU64::new(12).unwrap();
+        let with = |base: Json, extra: Json| {
+            let mut a = base;
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            a
+        };
+        let resolve = |extra: Json| {
+            let a = json!({"repository":"app","number":12,"expected_head":head,
+                "thread_id":"PRRT_kw-1","fixed_by":head,"body":"Fixed the guard."});
+            repository_action(RESOLVE_REVIEW_THREAD, &with(a, extra))
+        };
+        assert_eq!(
+            resolve(json!({})),
+            Ok(RepositoryAction::ResolveReviewThread {
+                number,
+                expected_head: head.into(),
+                thread_id: "PRRT_kw-1".into(),
+                fixed_by: head.into(),
+                body: "Fixed the guard.".into(),
+            })
+        );
+        for bad in [
+            json!({"expected_head":"0123456"}),
+            json!({"fixed_by":"main"}),
+            json!({"thread_id":""}),
+            json!({"thread_id":"PRRT x"}),
+            json!({"body":"  "}),
+            json!({"extra":1}),
+        ] {
+            assert!(resolve(bad.clone()).is_err(), "{bad}");
+        }
+        let request = |extra: Json| {
+            let a = json!({"repository":"app","number":12,"expected_head":head});
+            repository_action(REQUEST_REVIEW, &with(a, extra))
+        };
+        assert_eq!(
+            request(json!({"reviewers":["octo-cat"],"comment":"@coderabbitai review"})),
+            Ok(RepositoryAction::RequestReview {
+                number,
+                expected_head: head.into(),
+                reviewers: vec!["octo-cat".into()],
+                comment: Some("@coderabbitai review".into()),
+            })
+        );
+        for bad in [
+            json!({}),
+            json!({"reviewers":[]}),
+            json!({"comment":" "}),
+            json!({"reviewers":["-x"]}),
+            json!({"reviewers":["a b"]}),
+            json!({"reviewers":"octocat"}),
+            json!({"reviewers":["a"],"expected_head":"abc"}),
+        ] {
+            assert!(request(bad.clone()).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn edit_pull_request_replaces_a_title_or_body_and_needs_one() {

@@ -75,6 +75,7 @@ pub use crate::tools::{
 pub use threadlane_core::forge::{
     ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST,
     FAST_FORWARD_PULL_REQUEST, LABEL_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    REQUEST_REVIEW, RESOLVE_REVIEW_THREAD,
 };
 
 /// Installs the global `tracing` subscriber. `RUST_LOG` overrides the

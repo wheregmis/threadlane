@@ -97,13 +97,17 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
             | crate::LABEL_ISSUE
             | crate::CLOSE_PULL_REQUEST
             | crate::EDIT_PULL_REQUEST
+            | crate::RESOLVE_REVIEW_THREAD
+            | crate::REQUEST_REVIEW
     ) && let Some(number) = arguments["number"].as_u64()
     {
         targets.insert("number".into(), number.into());
     }
-    // A standing rule to close one PR covers only the head it was shown.
-    if tool == crate::CLOSE_PULL_REQUEST
-        && let Some(head) = arguments.get(threadlane_core::forge::EXPECTED_HEAD)
+    // A standing rule for these covers only the PR head it was shown.
+    if matches!(
+        tool,
+        crate::CLOSE_PULL_REQUEST | crate::RESOLVE_REVIEW_THREAD | crate::REQUEST_REVIEW
+    ) && let Some(head) = arguments.get(threadlane_core::forge::EXPECTED_HEAD)
     {
         targets.insert(threadlane_core::forge::EXPECTED_HEAD.into(), head.clone());
     }
@@ -709,6 +713,16 @@ mod tests {
             ),
             json!({"repository":"app","number":42,"expected_head":head})
         );
+        for tool in [crate::RESOLVE_REVIEW_THREAD, crate::REQUEST_REVIEW] {
+            assert_eq!(
+                rule_pattern(
+                    tool,
+                    &json!({"repository":"app","number":42,"expected_head":head,"thread_id":"PRRT_1"})
+                ),
+                json!({"repository":"app","number":42,"expected_head":head}),
+                "{tool}"
+            );
+        }
     }
 
     #[test]

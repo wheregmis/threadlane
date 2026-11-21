@@ -129,6 +129,10 @@ impl FakeGh {
                cat {record}/reviews\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/ref/; then\n\
                cat {record}/ref.json 2>/dev/null || {{ echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }}\n\
+             elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /compare/; then\n\
+               cat {record}/compare.json\n\
+             elif [ \"$3\" = graphql ] && [ -f {record}/thread.json ]; then\n\
+               cat {record}/thread.json\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /pulls/; then\n\
                cat {record}/pull.json\n\
              elif [ \"$1 $2\" = \"api user\" ]; then\n\
@@ -713,4 +717,181 @@ async fn a_close_is_refused_once_the_head_moved_and_deletes_only_a_same_reposito
         );
         assert_eq!(gh.invocations(), std::slice::from_ref(&get));
     }
+}
+
+const PR_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+const OLD_HEAD: &str = "1123456789abcdef0123456789abcdef01234567";
+
+/// A fake `gh` whose PR #12 has head `head`.
+fn gh_at(head: &str) -> FakeGh {
+    let gh = FakeGh::new();
+    let pull = serde_json::json!({"state": "open", "head": {"sha": head}});
+    std::fs::write(gh.dir.path().join("pull.json"), pull.to_string()).unwrap();
+    gh
+}
+
+fn get_pull() -> Vec<String> {
+    [
+        "api",
+        "--hostname=github.test",
+        "--method=GET",
+        "repos/acme/app/pulls/12",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+#[tokio::test]
+async fn a_review_thread_is_resolved_only_at_the_approved_head_on_its_own_pull_request() {
+    use threadlane_core::forge::RepositoryAction;
+    let remote = "https://github.test/acme/app.git";
+    let fixed_by = "2223456789abcdef0123456789abcdef01234567";
+    let resolve = RepositoryAction::ResolveReviewThread {
+        number: 12.try_into().unwrap(),
+        expected_head: PR_HEAD.into(),
+        thread_id: "PRRT_kw1".into(),
+        fixed_by: fixed_by.into(),
+        body: "Guarded the null case.".into(),
+    };
+    let thread = |number: u64, owner: &str, resolved: bool| {
+        serde_json::json!({"data": {"node": {"isResolved": resolved,
+            "pullRequest": {"number": number, "repository": {"nameWithOwner": format!("{owner}/app")}}}}})
+        .to_string()
+    };
+    let setup = |head: &str, status: &str, thread: String| {
+        let gh = gh_at(head);
+        let compare = serde_json::json!({"status": status}).to_string();
+        std::fs::write(gh.dir.path().join("compare.json"), compare).unwrap();
+        std::fs::write(gh.dir.path().join("thread.json"), thread).unwrap();
+        gh
+    };
+
+    // The head moved past the approval: nothing else is asked or changed.
+    let gh = setup(OLD_HEAD, "ahead", thread(12, "acme", false));
+    let error = GitForge::with_gh(gh.program())
+        .apply(remote, &resolve)
+        .await
+        .unwrap_err();
+    assert!(error.0.contains("no longer has expected head"), "{error}");
+    assert_eq!(gh.invocations(), [get_pull()]);
+
+    // The head does not contain the fixing commit.
+    let gh = setup(PR_HEAD, "diverged", thread(12, "acme", false));
+    let error = GitForge::with_gh(gh.program())
+        .apply(remote, &resolve)
+        .await
+        .unwrap_err();
+    assert!(error.0.contains("does not contain"), "{error}");
+    assert_eq!(gh.invocations().len(), 2);
+
+    // A thread of another pull request or repository is refused.
+    for other in [thread(13, "acme", false), thread(12, "evil", false)] {
+        let gh = setup(PR_HEAD, "ahead", other);
+        let error = GitForge::with_gh(gh.program())
+            .apply(remote, &resolve)
+            .await
+            .unwrap_err();
+        assert!(error.0.contains("not a review thread of PR #12"), "{error}");
+        assert_eq!(gh.invocations().len(), 3);
+    }
+
+    // An already resolved thread, as on a retry, gets no second reply.
+    let gh = setup(PR_HEAD, "identical", thread(12, "Acme", true));
+    let done = GitForge::with_gh(gh.program())
+        .apply(remote, &resolve)
+        .await
+        .unwrap();
+    assert!(done.contains("already resolved"), "{done}");
+    assert_eq!(gh.invocations().len(), 3);
+
+    // At the head and containing the fix: one reply naming the commit, then the resolve.
+    let gh = setup(PR_HEAD, "ahead", thread(12, "acme", false));
+    let done = GitForge::with_gh(gh.program())
+        .apply(remote, &resolve)
+        .await
+        .unwrap();
+    assert!(
+        done.starts_with("Resolved review thread PRRT_kw1"),
+        "{done}"
+    );
+    let calls = gh.invocations();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0], get_pull());
+    assert_eq!(
+        calls[1][3],
+        format!("repos/acme/app/compare/{fixed_by}...{PR_HEAD}")
+    );
+    let mutation = &calls[3];
+    assert!(mutation[4].contains("resolveReviewThread"), "{mutation:?}");
+    assert_eq!(mutation[6], "id=PRRT_kw1");
+    assert_eq!(
+        mutation[8],
+        format!("body=Guarded the null case.\n\nFixed in {fixed_by}.")
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_review_is_requested_only_at_the_approved_head() {
+    use threadlane_core::forge::RepositoryAction;
+    let remote = "https://github.test/acme/app.git";
+    let request = |reviewers: &[&str], comment: Option<&str>| RepositoryAction::RequestReview {
+        number: 12.try_into().unwrap(),
+        expected_head: PR_HEAD.into(),
+        reviewers: reviewers.iter().map(|r| (*r).to_owned()).collect(),
+        comment: comment.map(str::to_owned),
+    };
+
+    let gh = gh_at(OLD_HEAD);
+    let error = GitForge::with_gh(gh.program())
+        .apply(remote, &request(&["octocat"], Some("@coderabbitai review")))
+        .await
+        .unwrap_err();
+    assert!(error.0.contains("no longer has expected head"), "{error}");
+    assert_eq!(gh.invocations(), [get_pull()]);
+
+    let gh = gh_at(PR_HEAD);
+    let done = GitForge::with_gh(gh.program())
+        .apply(
+            remote,
+            &request(&["octocat", "hubot"], Some("@coderabbitai review")),
+        )
+        .await
+        .unwrap();
+    assert!(done.contains("at 0123456789abcdef"), "{done}");
+    assert_eq!(
+        gh.invocations(),
+        [
+            get_pull(),
+            [
+                "api",
+                "--hostname=github.test",
+                "--method=POST",
+                "repos/acme/app/pulls/12/requested_reviewers",
+                "-f",
+                "reviewers[]=octocat",
+                "-f",
+                "reviewers[]=hubot",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            [
+                "api",
+                "--hostname=github.test",
+                "--method=POST",
+                "repos/acme/app/issues/12/comments",
+                "-f",
+                "body=@coderabbitai review",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        ]
+    );
+
+    // A comment alone posts only the comment.
+    let gh = gh_at(PR_HEAD);
+    GitForge::with_gh(gh.program())
+        .apply(remote, &request(&[], Some("@coderabbitai review")))
+        .await
+        .unwrap();
+    assert_eq!(gh.invocations().len(), 2);
 }
