@@ -7,15 +7,17 @@ use serde_json::{Value as Json, json};
 use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
 use threadlane_core::ids::{DecisionId, RunId, StandingRuleId};
 use threadlane_core::link::{LinkError, Perform};
+use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     Decision, DecisionKind, DecisionOption, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run,
-    RunStatus, StandingRule, ToolCallBegin, ToolCallKey, Trust,
+    RunStatus, StandingRule, TaskStatus, ToolCallBegin, ToolCallKey, Trust,
 };
 use threadlane_core::runtime::steps::{perform, tool_call as step};
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{DecisionStore, OrgStore, SessionStore};
+use threadlane_core::store::{DecisionStore, OrgStore, SessionStore, TaskStore};
 use threadlane_core::tools::{ToolContext, ToolDefinition, ToolError, Verdict};
 
+use crate::context::format_time;
 use crate::dreaming;
 use crate::error::{link_error, link_to_tool, tool_error};
 use crate::gate::{self, GateInput};
@@ -61,6 +63,25 @@ impl LocalLink {
                 && event.payload.get("submission").is_some()
         });
         let dream = events.iter().find(|event| dreaming::is_dream(event));
+        // A run whose task was cancelled under it is told so on its next call
+        // and can only record what it found (#648).
+        if let Some(task_id) = lane.task_id
+            && !memory::is_memory(tool)
+            && let Some(task) = db.task(task_id).await.map_err(tool_error)?
+            && task.status == TaskStatus::Cancelled
+        {
+            let at = db
+                .task_completed_at(task_id)
+                .await
+                .map_err(tool_error)?
+                .map_or_else(String::new, |at| format!(" at {}", format_time(at)));
+            return Err(ToolError::Blocked(format!(
+                "{task_id} was cancelled{at}; it is no longer running, and nothing this run \
+                 does for it is submitted. Record anything worth keeping in {} with the memory \
+                 tools, then end your turn.",
+                progress_path(task.project_id, task_id)
+            )));
+        }
         let definition = if dream.is_some() {
             let definition = dreaming::definitions()
                 .into_iter()
