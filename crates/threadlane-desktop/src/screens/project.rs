@@ -477,17 +477,9 @@ impl Desktop {
                                             .child(row.title),
                                     )
                                     .child(
-                                        meta(row.project, cx)
-                                            .w(rems(7.5))
-                                            .flex_none()
-                                            .truncate(),
+                                        meta(row.project, cx).w(rems(7.5)).flex_none().truncate(),
                                     )
-                                    .child(
-                                        meta(row.agent, cx)
-                                            .w(rems(6.5))
-                                            .flex_none()
-                                            .truncate(),
-                                    )
+                                    .child(meta(row.agent, cx).w(rems(6.5)).flex_none().truncate())
                                     .child(
                                         meta(row.time, cx)
                                             .w(rems(5.5))
@@ -1071,7 +1063,9 @@ impl Desktop {
                                             .w(TYPE_META)
                                             .flex_none()
                                             .justify_center()
-                                            .children((!quiet).then(|| status_dot(status_kind, cx))),
+                                            .children(
+                                                (!quiet).then(|| status_dot(status_kind, cx)),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -1110,13 +1104,9 @@ impl Desktop {
                                             .text_right(),
                                     )
                                     .child(
-                                        h_flex()
-                                            .w(rems(8.5))
-                                            .flex_none()
-                                            .justify_end()
-                                            .children((!quiet).then(|| {
-                                                status_badge(status, status_kind, cx)
-                                            })),
+                                        h_flex().w(rems(8.5)).flex_none().justify_end().children(
+                                            (!quiet).then(|| status_badge(status, status_kind, cx)),
+                                        ),
                                     ),
                             ),
                     );
@@ -1471,11 +1461,7 @@ impl Desktop {
                                     .w_full()
                                     .gap(SM)
                                     .items_center()
-                                    .child(
-                                        Icon::new(AppIcon::GitFork)
-                                            .xsmall()
-                                            .text_color(muted),
-                                    )
+                                    .child(Icon::new(AppIcon::GitFork).xsmall().text_color(muted))
                                     .child(
                                         div()
                                             .text_size(TYPE_META)
@@ -1548,11 +1534,7 @@ impl Desktop {
                                     .w_full()
                                     .gap(SM)
                                     .items_center()
-                                    .child(
-                                        Icon::new(AppIcon::GitFork)
-                                            .xsmall()
-                                            .text_color(run_ink),
-                                    )
+                                    .child(Icon::new(AppIcon::GitFork).xsmall().text_color(run_ink))
                                     .child(
                                         div()
                                             .text_size(TYPE_META)
@@ -1802,8 +1784,8 @@ impl Desktop {
                     let (space, project) = (space.clone(), project.clone());
                     window.open_sheet(cx, move |sheet, window, cx| {
                         let width = RULES_WIDTH
-            .to_pixels(window.rem_size())
-            .min(window.viewport_size().width);
+                            .to_pixels(window.rem_size())
+                            .min(window.viewport_size().width);
                         let content = view.update(cx, |this, cx| {
                             this.conversation_details(&space, &project, &this.when(), true, cx)
                         });

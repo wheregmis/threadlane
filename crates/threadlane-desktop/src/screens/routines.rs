@@ -595,11 +595,11 @@ impl Desktop {
                 "Work started by this routine counts as work you requested.",
                 cx,
             ))
-            .children(self.routine_error.as_ref().map(|error| {
-                div()
-                    .text_color(cx.theme().danger)
-                    .child(error.clone())
-            }))
+            .children(
+                self.routine_error
+                    .as_ref()
+                    .map(|error| div().text_color(cx.theme().danger).child(error.clone())),
+            )
             .child(
                 h_flex()
                     .gap(SM)

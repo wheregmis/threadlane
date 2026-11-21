@@ -210,9 +210,13 @@ impl Desktop {
             shortcut_hint(cx, action)
                 .map_or_else(|| label.to_owned(), |hint| format!("{label}  {hint}"))
         };
-        let back = icon_button("nav-back", AppIcon::ArrowLeft, with_hint("Back", &NavigateBack))
-            .disabled(!self.nav_history.can_go_back())
-            .on_click(cx.listener(|this, _, _, cx| this.go_back(cx)));
+        let back = icon_button(
+            "nav-back",
+            AppIcon::ArrowLeft,
+            with_hint("Back", &NavigateBack),
+        )
+        .disabled(!self.nav_history.can_go_back())
+        .on_click(cx.listener(|this, _, _, cx| this.go_back(cx)));
         let forward = icon_button(
             "nav-forward",
             AppIcon::ArrowRight,
@@ -251,8 +255,10 @@ impl Desktop {
     }
 
     pub(crate) fn sidebar(&self, when: &When, cx: &mut Context<Self>) -> impl IntoElement {
-        let collapse_tip = shortcut_hint(cx, &ToggleSidebar)
-            .map_or_else(|| "Hide sidebar".to_owned(), |hint| format!("Hide sidebar  {hint}"));
+        let collapse_tip = shortcut_hint(cx, &ToggleSidebar).map_or_else(
+            || "Hide sidebar".to_owned(),
+            |hint| format!("Hide sidebar  {hint}"),
+        );
         let bar = v_flex()
             .w_full()
             .min_w_0()

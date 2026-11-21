@@ -741,11 +741,9 @@ impl Desktop {
         })
         .detach();
         let sidebar_collapsed = state.sidebar_collapsed();
-        let sidebar_width = state
-            .sidebar_width()
-            .map_or(SIDEBAR_WIDTH, |w| {
-                px(w).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
-            });
+        let sidebar_width = state.sidebar_width().map_or(SIDEBAR_WIDTH, |w| {
+            px(w).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+        });
         let sidebar_resizable = cx.new(|_| ResizableState::default());
         Self {
             work: WorkView::new(window, cx),
@@ -1996,10 +1994,7 @@ impl Desktop {
         match activity {
             Activity::Working(_) => {}
             Activity::Done(text) => {
-                window.push_notification(
-                    Notification::success(text).id::<ActivityToast>(),
-                    cx,
-                );
+                window.push_notification(Notification::success(text).id::<ActivityToast>(), cx);
             }
             Activity::Failed(why) => {
                 window.push_notification(
@@ -2087,9 +2082,9 @@ impl Render for Desktop {
             .gap(MD)
             .children(self.sidebar_collapsed.then(|| self.collapsed_nav_strip(cx)))
             .children(
-                self.state.connection_banner().map(|text| {
-                    component::alert::Alert::warning("unreachable-spaces", text)
-                }),
+                self.state
+                    .connection_banner()
+                    .map(|text| component::alert::Alert::warning("unreachable-spaces", text)),
             )
             .children(self.page_connections(&when, cx))
             // The body takes the spare height so the activity line stays at the bottom.

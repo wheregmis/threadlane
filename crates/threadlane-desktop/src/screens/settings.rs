@@ -160,22 +160,20 @@ impl Desktop {
             });
         screen
             .child(
-                card(cx)
-                    .child(section("Appearance"))
-                    .child(
-                        h_flex()
-                            .gap(MD)
-                            .items_center()
-                            .text_size(TYPE_BODY)
-                            .child(
-                                div()
-                                    .w(LABEL_WIDTH)
-                                    .flex_none()
-                                    .text_color(muted)
-                                    .child("Theme"),
-                            )
-                            .child(appearance_control),
-                    ),
+                card(cx).child(section("Appearance")).child(
+                    h_flex()
+                        .gap(MD)
+                        .items_center()
+                        .text_size(TYPE_BODY)
+                        .child(
+                            div()
+                                .w(LABEL_WIDTH)
+                                .flex_none()
+                                .text_color(muted)
+                                .child("Theme"),
+                        )
+                        .child(appearance_control),
+                ),
             )
             .child(
                 card(cx)
@@ -204,7 +202,9 @@ impl Desktop {
                         Switch::new("hold-messages")
                             .checked(self.state.hold_messages())
                             .label("Hold messages for 3 seconds so a send can be undone")
-                            .accessibility_label("Hold messages for 3 seconds so a send can be undone")
+                            .accessibility_label(
+                                "Hold messages for 3 seconds so a send can be undone",
+                            )
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.set_hold_messages(*checked, cx);
                             })),

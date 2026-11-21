@@ -222,10 +222,7 @@ impl Desktop {
                 .pt(LG)
                 .items_start()
                 .child(section("You’re caught up"))
-                .child(meta(
-                    "No decisions or blockers in the spaces shown.",
-                    cx,
-                ))
+                .child(meta("No decisions or blockers in the spaces shown.", cx))
                 .child(
                     button("inbox-view-activity")
                         .outline()

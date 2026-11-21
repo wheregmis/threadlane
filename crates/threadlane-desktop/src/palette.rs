@@ -122,7 +122,12 @@ pub(crate) fn build_sections(state: &AppState) -> Vec<PaletteSection> {
             } else {
                 "Usage".into()
             },
-            keywords: vec![name.clone(), "tokens".into(), "cost".into(), "metrics".into()],
+            keywords: vec![
+                name.clone(),
+                "tokens".into(),
+                "cost".into(),
+                "metrics".into(),
+            ],
             icon: AppIcon::ChartColumn,
             action: PaletteAction::Go(Screen::Work {
                 space: name.clone(),
@@ -158,11 +163,7 @@ pub(crate) fn build_sections(state: &AppState) -> Vec<PaletteSection> {
             };
             projects.push(PaletteEntry {
                 label,
-                keywords: vec![
-                    space.name.clone(),
-                    project.name.clone(),
-                    "project".into(),
-                ],
+                keywords: vec![space.name.clone(), project.name.clone(), "project".into()],
                 icon: AppIcon::Folder,
                 action: PaletteAction::Go(Screen::Project {
                     space: space.name.clone(),
@@ -185,7 +186,10 @@ pub(crate) fn build_sections(state: &AppState) -> Vec<PaletteSection> {
         for summary in &space.tasks {
             let id = summary.task.id.to_string();
             let label = if multi_space {
-                format!("{id} {} ({} / {})", summary.task.title, space.name, summary.project)
+                format!(
+                    "{id} {} ({} / {})",
+                    summary.task.title, space.name, summary.project
+                )
             } else {
                 format!("{id} {} ({})", summary.task.title, summary.project)
             };
