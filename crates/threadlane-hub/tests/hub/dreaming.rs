@@ -1291,3 +1291,146 @@ async fn dream_freezes_membership_and_pages_more_than_twenty_decisions() {
     .unwrap();
     assert_eq!(later["tasks"][0]["title"], "Arrived during review");
 }
+
+/// Asks the owner in `run` and answers, then lets the resumed run finish.
+async fn ask_and_answer(hub: &TestHub, lease: &Lease, run: &RunAssignment, question: &str) {
+    assert_eq!(
+        call(
+            &*hub.link,
+            lease,
+            run,
+            "ask_user",
+            json!({"question":question,"options":["Table","Prose"]})
+        )
+        .await,
+        Err(ToolError::WaitingOnYou)
+    );
+    complete(hub, lease, run).await;
+    let pending = hub.db.pending_decisions(lease.lane_id).await.unwrap();
+    hub.api
+        .decisions(DecisionRequest::Answer {
+            decision: pending[0].id,
+            option: "Table".into(),
+            note: Some(format!("Note for {question}")),
+        })
+        .await
+        .unwrap();
+    let (lease, resumed) = begin(&*hub.link).await;
+    assert_eq!(resumed.lane_kind, run.lane_kind, "the asking lane resumes");
+    complete(hub, &lease, &resumed).await;
+}
+
+/// Pages through choices in a new dream, at most `max_pages` pages.
+async fn dream_choices(hub: &TestHub, limit: u64, max_pages: usize) -> Vec<Json> {
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    assert!(dream.dreaming);
+    let mut pages = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = call(
+            &*hub.link,
+            &lease,
+            &dream,
+            DECISIONS,
+            json!({"limit":limit,"offset":offset}),
+        )
+        .await
+        .unwrap();
+        let next = page["next_offset"].as_u64();
+        assert_eq!(page["more_remain"], next.is_some(), "{page}");
+        pages.push(page);
+        match next {
+            Some(next) if pages.len() < max_pages => offset = next,
+            _ => break,
+        }
+    }
+    complete(hub, &lease, &dream).await;
+    pages
+}
+
+#[tokio::test]
+async fn reviewed_choices_page_newest_first_across_lead_and_task_runs() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    set(&hub, None).await;
+    let project = hub.general().await;
+    let agent = hub
+        .db
+        .create_agent(&threadlane_core::model::NewAgent::named(
+            "Engineer", "engineer",
+        ))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&threadlane_core::model::NewBinding {
+            project_id: project.id,
+            agent_id: agent.id,
+            mode: threadlane_core::model::Mode::OnRequest,
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    for index in 0..3 {
+        hub.send(&format!("old-{index}"), "Prepare a weekly report.")
+            .await;
+        let (lease, lead) = begin(&*hub.link).await;
+        ask_and_answer(&hub, &lease, &lead, &format!("Old {index}")).await;
+    }
+    set(&hub, Some(interval())).await;
+    let first = dream_choices(&hub, 50, 1).await;
+    assert_eq!(first[0]["total"], 3);
+
+    // Newer answers, from a task run and then a lead run.
+    hub.send("task", "Build the report page.").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    call(
+        &*hub.link,
+        &lease,
+        &lead,
+        "create_task",
+        json!({"title":"page","goal":"page is done","agent":"Engineer"}),
+    )
+    .await
+    .unwrap();
+    complete(&hub, &lease, &lead).await;
+    let (lease, task_run) = begin(&*hub.link).await;
+    assert!(task_run.task_id.is_some(), "a task run asks");
+    ask_and_answer(&hub, &lease, &task_run, "Newer from task").await;
+    hub.send("lead", "One more report.").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    ask_and_answer(&hub, &lease, &lead, "Newest from lead").await;
+    // This dream reads only the unread page, so the old choices keep their earlier review.
+    let second = dream_choices(&hub, 2, 1).await;
+    assert_eq!(second[0]["more_remain"], true);
+
+    // Every choice is reviewed now; the newest still come first.
+    let pages = dream_choices(&hub, 2, usize::MAX).await;
+    let questions: Vec<_> = pages
+        .iter()
+        .flat_map(|page| page["recent_user_choices"].as_array().unwrap().clone())
+        .map(|choice| {
+            assert_eq!(choice["chosen"], "Table");
+            choice["question"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(
+        questions,
+        [
+            "Newest from lead",
+            "Newer from task",
+            "Old 2",
+            "Old 1",
+            "Old 0"
+        ]
+    );
+    assert_eq!(pages[0]["total"], 5);
+    assert_eq!(pages[0]["more_remain"], true);
+    assert_eq!(pages[2]["more_remain"], false);
+    assert_eq!(
+        pages[0]["recent_user_choices"][0]["note"],
+        "Note for Newest from lead"
+    );
+}
