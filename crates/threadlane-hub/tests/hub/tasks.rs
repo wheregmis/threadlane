@@ -166,9 +166,16 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
     .await
     .unwrap();
     assert_eq!(status["review_status"], "in_progress", "{status}");
-    // The reviewer reads the task's memory but cannot change it (#610).
-    assert!(review.tools.iter().any(|tool| tool.name == MEMORY_VIEW));
-    assert!(!review.tools.iter().any(|tool| tool.name == MEMORY_CREATE));
+    // The reviewer has the task lane's memory tools (#610, #623).
+    for tool in [
+        MEMORY_VIEW,
+        MEMORY_CREATE,
+        MEMORY_EDIT,
+        MEMORY_DELETE,
+        MEMORY_RENAME,
+    ] {
+        assert!(review.tools.iter().any(|offered| offered.name == tool));
+    }
     let progress = format!("project/tasks/{id}.md");
     let viewed = call(
         &hub,
@@ -197,26 +204,40 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
             .unwrap()
             .contains(&json!(progress))
     );
-    for (tool, arguments) in [
-        (
+    // It writes project notes and the reviewed task's progress file, and no
+    // other task's.
+    call(
+        &hub,
+        &lease,
+        &review,
+        "note",
+        MEMORY_CREATE,
+        json!({"path": "project/notes/review.md", "content": "# Review\nWhat the review found.\n"}),
+    )
+    .await
+    .unwrap();
+    call(
+        &hub,
+        &lease,
+        &review,
+        "edit",
+        MEMORY_EDIT,
+        json!({"path": progress, "old_text": "Done.", "new_text": "Done. Reviewed."}),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        call(
+            &hub,
+            &lease,
+            &review,
+            "other",
             MEMORY_CREATE,
-            json!({"path": "project/notes/x.md", "content": "x"}),
-        ),
-        (
-            MEMORY_EDIT,
-            json!({"path": progress, "old_text": "Done.", "new_text": "No."}),
-        ),
-        (MEMORY_DELETE, json!({"path": progress})),
-        (
-            MEMORY_RENAME,
-            json!({"from": progress, "to": "project/tasks/y.md"}),
-        ),
-    ] {
-        assert!(matches!(
-            call(&hub, &lease, &review, tool, tool, arguments).await,
-            Err(ToolError::Blocked(_))
-        ));
-    }
+            json!({"path": "project/tasks/T-9999.md", "content": "# T-9999\nx\n"}),
+        )
+        .await,
+        Err(ToolError::InvalidArguments(_))
+    ));
     // A verdict must say whether the checks were rerun or taken from the submission.
     for checks in [json!(null), json!("trusted")] {
         assert!(

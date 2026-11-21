@@ -52,14 +52,11 @@ pub const PR_REVIEW_STATUS: &str = "pr_review_status";
 pub use threadlane_core::link::FINISH_TASK;
 pub(crate) const FINISH_REVIEW: &str = "finish_review";
 
-/// A review run may read the reviewed project's memory, to check progress
-/// files and notes, and re-query a PR's approval state (#682), but changes
-/// nothing (#610).
+/// A review run has the memory tools of the reviewed task's lane: it reads
+/// the project's memory and changes its notes and that task's progress file
+/// (#610, #623). It may also re-query a PR's approval state (#682).
 pub(crate) fn offered_for_review(tool: &str) -> bool {
-    matches!(
-        tool,
-        FINISH_REVIEW | crate::memory::MEMORY_VIEW | PR_REVIEW_STATUS
-    )
+    tool == FINISH_REVIEW || tool == PR_REVIEW_STATUS || crate::memory::is_memory(tool)
 }
 /// Asks you a question with options; your answer resumes the session
 /// (Plan.md §9.4, kind `input`).
