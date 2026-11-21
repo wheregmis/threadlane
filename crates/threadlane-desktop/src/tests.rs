@@ -1829,7 +1829,7 @@ async fn a_mode_change_shows_in_the_project_at_once() {
     *work.bindings.lock().expect("lock") = vec![BindingSummary {
         agent: "Engineer".to_owned(),
         role: "engineer".to_owned(),
-        mode: Mode::OnRequest,
+        mode: Some(Mode::OnRequest),
         is_lead: false,
         max_parallel: 1,
         overrides: Default::default(),
@@ -1839,7 +1839,7 @@ async fn a_mode_change_shows_in_the_project_at_once() {
     state.apply_project(load_project(&core, "work", "api").await);
 
     let binding = core
-        .set_mode(Some("work"), Some("api"), "Engineer", Mode::Assisted)
+        .set_mode(Some("work"), Some("api"), "Engineer", Some(Mode::Assisted))
         .await
         .expect("set mode");
     state.mode_set("work", "api", binding);
@@ -1851,7 +1851,7 @@ async fn a_mode_change_shows_in_the_project_at_once() {
         .iter()
         .map(|binding| (binding.agent.as_str(), binding.mode))
         .collect();
-    assert_eq!(modes, [("Engineer", Mode::Assisted)]);
+    assert_eq!(modes, [("Engineer", Some(Mode::Assisted))]);
 }
 
 #[test]
@@ -2145,7 +2145,7 @@ async fn the_modes_grid_has_a_row_per_project_and_a_cell_per_agent() {
     *work.bindings.lock().expect("lock") = vec![BindingSummary {
         agent: "Engineer".to_owned(),
         role: "engineer".to_owned(),
-        mode: Mode::Assisted,
+        mode: Some(Mode::Assisted),
         is_lead: false,
         max_parallel: 1,
         overrides: Default::default(),
@@ -2181,7 +2181,7 @@ async fn the_modes_grid_has_a_row_per_project_and_a_cell_per_agent() {
     ];
     state.apply_modes(load_modes(&core, projects).await);
     let binding = core
-        .set_mode(Some("work"), Some("api"), "Reviewer", Mode::OnRequest)
+        .set_mode(Some("work"), Some("api"), "Reviewer", Some(Mode::OnRequest))
         .await
         .expect("set mode");
     state.mode_set("work", "api", binding);
@@ -2921,7 +2921,7 @@ fn binding(agent: &str, mode: Mode) -> BindingSummary {
     BindingSummary {
         agent: agent.to_owned(),
         role: "engineer".to_owned(),
-        mode,
+        mode: Some(mode),
         is_lead: agent == "Lead",
         max_parallel: 1,
         overrides: Default::default(),
@@ -2955,7 +2955,7 @@ async fn a_new_agent_is_listed_with_unbound_cells_that_bind_it() {
     assert_eq!(grid.agents, ["Reviewer"]);
     assert_eq!(grid.rows[0].modes, Ok(vec![None]), "a — cell");
     let bound = core
-        .set_mode(Some("work"), Some("api"), "Reviewer", Mode::OnRequest)
+        .set_mode(Some("work"), Some("api"), "Reviewer", Some(Mode::OnRequest))
         .await
         .expect("bound");
     state.mode_set("work", "api", bound);
@@ -3680,6 +3680,51 @@ fn the_matrix_is_the_plans_table() {
 }
 
 #[tokio::test]
+async fn an_agent_follows_the_project_mode_until_it_is_given_its_own() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.bindings.lock().expect("lock") = vec![
+        BindingSummary {
+            mode: None,
+            ..binding("Lead", Mode::OnRequest)
+        },
+        binding("Engineer", Mode::Off),
+    ];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    // The lead follows the project's mode, Assisted, with no control shown.
+    let rows = state.agent_rows("work", "api");
+    assert_eq!((rows[0].own, rows[0].own_open), (None, false));
+    assert_eq!(state.lead_mode("work", "api"), Some(Mode::Assisted));
+    // An Off agent is off, and gets no task.
+    assert_eq!(rows[1].own, Some(Mode::Off));
+    assert_eq!(state.task_agents("work", "api"), ["Lead"]);
+
+    // Lowered, the project takes the follower down with it.
+    state.ceiling_set("work", "api", Mode::OnRequest);
+    assert_eq!(state.lead_mode("work", "api"), Some(Mode::OnRequest));
+
+    // "Set own mode…" shows the control; setting one hides the request.
+    state.toggle_own_mode("work", "api", "Lead");
+    assert!(state.agent_rows("work", "api")[0].own_open);
+    let own = core
+        .set_mode(Some("work"), Some("api"), "Lead", Some(Mode::Off))
+        .await
+        .expect("set");
+    state.mode_set("work", "api", own);
+    let lead = &state.agent_rows("work", "api")[0];
+    assert_eq!((lead.own, lead.own_open), (Some(Mode::Off), false));
+    let follows = core
+        .set_mode(Some("work"), Some("api"), "Lead", None)
+        .await
+        .expect("set");
+    state.mode_set("work", "api", follows);
+    assert_eq!(state.agent_rows("work", "api")[0].own, None);
+}
+
+#[tokio::test]
 async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
     let work = FakeHub::new("Work", Vec::new());
     *work.bindings.lock().expect("lock") = vec![
@@ -3705,7 +3750,7 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
     let card = state.ceiling_card("work", "api");
     assert_eq!(
         card.note,
-        "No agent in this project can go above this. Inherited from work."
+        "The mode every agent here follows. Inherited from work."
     );
     let locked: Vec<_> = card
         .choices
@@ -3739,7 +3784,7 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
         .iter()
         .map(|choice| (choice.selected, choice.locked.clone()))
         .collect();
-    let above = Some("Above this project's ceiling, On request".to_owned());
+    let above = Some("Above this project's mode, On request".to_owned());
     assert_eq!(
         modes,
         [
@@ -3750,6 +3795,8 @@ async fn the_agents_tab_locks_what_is_above_a_ceiling_and_states_the_matrix() {
         ],
         "its stored mode stays selected, and shows locked"
     );
+    assert_eq!(engineer.own, Some(Mode::Assisted));
+    assert!(engineer.own_open, "an own mode shows its control");
 
     // Expanded: the matrix as the gate applies it, at the ceiling.
     assert!(!engineer.open);
@@ -4707,7 +4754,7 @@ async fn stage_b_lead_mode_obeys_the_ceiling_and_agent_placement_uses_backend_pr
     work.bindings.lock().unwrap().push(BindingSummary {
         agent: "Lead".to_owned(),
         role: "lead".to_owned(),
-        mode: Mode::Autonomous,
+        mode: Some(Mode::Autonomous),
         is_lead: true,
         max_parallel: 1,
         overrides: Default::default(),
@@ -6216,7 +6263,7 @@ async fn irreversible_commands_confirm_and_only_a_ceiling_that_caps_work_asks() 
     *work.bindings.lock().unwrap() = vec![BindingSummary {
         agent: "Engineer".to_owned(),
         role: "engineer".to_owned(),
-        mode: Mode::Assisted,
+        mode: Some(Mode::Assisted),
         is_lead: false,
         max_parallel: 1,
         overrides: BTreeMap::new(),
@@ -6893,7 +6940,7 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
     *work.bindings.lock().expect("lock") = vec![BindingSummary {
         agent: "Lead".to_owned(),
         role: "lead".to_owned(),
-        mode: Mode::OnRequest,
+        mode: Some(Mode::OnRequest),
         is_lead: true,
         max_parallel: 1,
         overrides: Default::default(),
@@ -6906,7 +6953,7 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
     ];
     state.apply_modes(load_modes(&core, projects).await);
     let binding = core
-        .set_mode(Some("work"), Some("api"), "Reviewer", Mode::Assisted)
+        .set_mode(Some("work"), Some("api"), "Reviewer", Some(Mode::Assisted))
         .await
         .expect("bound");
     state.mode_set("work", "api", binding);
@@ -6925,7 +6972,7 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
         .into_iter()
         .map(|bound| (bound.project, bound.binding.mode))
         .collect();
-    assert_eq!(bound[0], ("api".to_owned(), Mode::Assisted));
+    assert_eq!(bound[0], ("api".to_owned(), Some(Mode::Assisted)));
     assert!(state.offers_agent_delete("work", "Reviewer"));
     assert!(!state.offers_agent_delete("work", "Lead"), "never the lead");
 

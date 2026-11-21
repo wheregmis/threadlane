@@ -408,16 +408,17 @@ impl LocalLink {
             event.source == threadlane_store::TASK_REVIEW_SOURCE
                 && event.payload.get("submission").is_some()
         });
+        let ceiling = gate::ceiling(space.mode_ceiling, project.mode_ceiling);
         let mode = binding.map_or(
             if review { Mode::OnRequest } else { Mode::Off },
-            |binding| binding.mode,
+            |binding| binding.effective_mode(ceiling),
         );
         let new_work = if definition.name == CREATE_TASK
             && !timers::run_requested(db, run.id, lane.task_id)
                 .await
                 .map_err(tool_error)?
         {
-            // The assignee's mode; a name not bound here is refused before
+            // The assignee's effective mode; a name not bound here is refused before
             // any ask or effect, so the lead's own stands in for it.
             let assignee = match arguments.get("agent").and_then(Json::as_str) {
                 Some(name) => db
@@ -433,7 +434,7 @@ impl LocalLink {
                 bindings
                     .iter()
                     .find(|binding| Some(binding.agent_id) == assignee)
-                    .map_or(mode, |binding| binding.mode),
+                    .map_or(mode, |binding| binding.effective_mode(ceiling)),
             )
         } else {
             None

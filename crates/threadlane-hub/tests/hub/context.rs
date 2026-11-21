@@ -251,7 +251,7 @@ async fn project_instructions_stay_in_their_project_and_space_instructions_reach
         .bind(&NewBinding {
             project_id: alpha.id,
             agent_id: lead.agent_id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: true,
             max_parallel: 1,
         })
@@ -312,7 +312,7 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
         .bind(&NewBinding {
             project_id: hub.general().await.id,
             agent_id: engineer.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })

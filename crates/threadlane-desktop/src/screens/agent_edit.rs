@@ -625,7 +625,8 @@ impl Desktop {
         }
         for row in bindings {
             let lead = if row.binding.is_lead { " · lead" } else { "" };
-            let mode = format!("{}{lead}", mode_name(row.binding.mode));
+            let ceiling = self.state.project_ceiling(&edit.space, &row.project);
+            let mode = format!("{}{lead}", mode_name(row.binding.effective_mode(ceiling)));
             let (space, project) = (edit.space.clone(), row.project);
             bound = bound.child(
                 h_flex()

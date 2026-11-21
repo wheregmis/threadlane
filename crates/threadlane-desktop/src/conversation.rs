@@ -175,7 +175,7 @@ impl AppState {
             .bindings
             .iter()
             .find(|binding| binding.is_lead)?;
-        Some(binding.mode.stricter(self.project_ceiling(space, project)))
+        Some(binding.effective_mode(self.project_ceiling(space, project)))
     }
 
     /// The digest disclosure for a delivered item, if it has original results.

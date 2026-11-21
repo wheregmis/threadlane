@@ -26,7 +26,7 @@ async fn hub_with_reviewer() -> TestHub {
         OrgRequest::SetMode {
             project: None,
             agent: "Reviewer".into(),
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
         },
         OrgRequest::AddRepository {
             project: None,
@@ -141,7 +141,7 @@ async fn a_task_needs_a_bound_agent_that_is_on_and_what_the_project_has() {
         .org(OrgRequest::SetMode {
             project: None,
             agent: "Reviewer".into(),
-            mode: Mode::Off,
+            mode: Some(Mode::Off),
         })
         .await
         .unwrap();

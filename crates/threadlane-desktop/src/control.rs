@@ -418,11 +418,12 @@ impl AppState {
     /// bound there and not Off.
     #[must_use]
     pub fn task_agents(&self, space: &str, project: &str) -> Vec<String> {
+        let ceiling = self.project_ceiling(space, project);
         self.project(space, project)
             .map(|view| {
                 view.bindings
                     .iter()
-                    .filter(|binding| binding.mode != Mode::Off)
+                    .filter(|binding| binding.effective_mode(ceiling) != Mode::Off)
                     .map(|binding| binding.agent.clone())
                     .collect()
             })

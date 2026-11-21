@@ -43,7 +43,7 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                     ))
                 })?;
             let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
-            if binding.mode.stricter(ceiling) == Mode::Off {
+            if binding.effective_mode(ceiling) == Mode::Off {
                 return Err(ApiError::Invalid(format!(
                     "{} is off in project {:?}",
                     agent.name, project.name

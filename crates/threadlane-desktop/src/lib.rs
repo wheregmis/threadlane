@@ -1364,6 +1364,9 @@ pub struct AppState {
     /// The agent row expanded on a project's Team tab: space, project,
     /// agent.
     open_agent: Option<(String, String, String)>,
+    /// The agent row whose own-mode control is shown though it follows
+    /// the project: space, project, agent.
+    own_mode_agent: Option<(String, String, String)>,
     /// The standing rule you asked to revoke, until you confirm or keep it.
     revoking: Option<InSpace<threadlane_core::ids::StandingRuleId>>,
     /// The decisions whose "Always allow" is ticked.
@@ -2198,6 +2201,13 @@ impl AppState {
         {
             self.open_agent = None;
         }
+        if self
+            .own_mode_agent
+            .as_ref()
+            .is_some_and(|(space, ..)| space == name)
+        {
+            self.own_mode_agent = None;
+        }
         let here = |at: Option<&String>| at.is_some_and(|space| space == name);
         if here(self.revoking.as_ref().map(|(space, _)| space)) {
             self.revoking = None;
@@ -2999,13 +3009,14 @@ impl AppState {
                             .project(space, &project.name)
                             .map(|view| view.bindings.as_slice())
                             .unwrap_or_default();
+                        let ceiling = self.project_ceiling(space, &project.name);
                         Ok(agents
                             .iter()
                             .map(|agent| {
                                 bindings
                                     .iter()
                                     .find(|binding| binding.agent == *agent)
-                                    .map(|binding| binding.mode)
+                                    .map(|binding| binding.effective_mode(ceiling))
                             })
                             .collect())
                     }
@@ -3021,6 +3032,7 @@ impl AppState {
 
     /// Takes a mode its hub set: the project's binding shows it at once.
     pub fn mode_set(&mut self, space: &str, project: &str, binding: BindingSummary) {
+        self.own_mode_agent = None;
         let view = self
             .projects
             .entry((space.to_owned(), project.to_owned()))

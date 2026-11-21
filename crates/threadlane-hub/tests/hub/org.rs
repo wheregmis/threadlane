@@ -31,11 +31,11 @@ fn set_mode(project: Option<&str>, agent: &str, mode: Mode) -> OrgRequest {
     OrgRequest::SetMode {
         project: project.map(str::to_owned),
         agent: agent.to_owned(),
-        mode,
+        mode: Some(mode),
     }
 }
 
-fn lead(mode: Mode) -> BindingSummary {
+fn lead(mode: Option<Mode>) -> BindingSummary {
     BindingSummary {
         agent: LEAD_NAME.to_owned(),
         role: LEAD_ROLE.to_owned(),
@@ -61,7 +61,7 @@ async fn a_message_to_a_project_whose_lead_is_off_is_refused_and_not_stored() {
     assert_eq!(
         reply,
         Ok(OrgReply::Binding {
-            binding: lead(Mode::Off)
+            binding: lead(Some(Mode::Off))
         })
     );
 
@@ -88,7 +88,7 @@ async fn events_pending_when_the_lead_is_turned_off_are_skipped_without_a_run() 
     let inserted = hub.insert(|_| {}).await;
     let binding = hub.db.lead_binding(hub.general().await.id).await.unwrap();
     hub.db
-        .set_binding_mode(binding.unwrap().id, Mode::Off)
+        .set_binding_mode(binding.unwrap().id, Some(Mode::Off))
         .await
         .unwrap();
 
@@ -112,12 +112,12 @@ async fn a_project_ceiling_of_off_stops_its_lead_too() {
         })
         .await
         .unwrap();
-    // The lead binding comes at start; its own mode stays On request.
+    // The lead binding comes at start, following the project.
     let hub = hub.restart(Arc::new(NoHooks)).await;
     hub.hello().await;
     assert_eq!(
         hub.db.lead_binding(quiet.id).await.unwrap().unwrap().mode,
-        Mode::OnRequest
+        None
     );
 
     let refused = hub.api.send_message(&message(Some("Quiet"), "m-1")).await;
@@ -163,7 +163,7 @@ async fn a_project_created_through_the_api_has_a_lead_and_runs_at_once() {
         )
         .await,
         Ok(OrgReply::Bindings {
-            bindings: vec![lead(Mode::OnRequest)]
+            bindings: vec![lead(None)]
         })
     );
 
@@ -274,7 +274,7 @@ async fn set_mode_changes_a_binding_or_creates_one() {
     assert_eq!(
         org(&hub, set_mode(None, "Reviewer", Mode::Autonomous)).await,
         Ok(OrgReply::Binding {
-            binding: reviewer(Mode::Autonomous)
+            binding: reviewer(Some(Mode::Autonomous))
         })
     );
     let general = hub.general().await;
@@ -289,7 +289,7 @@ async fn set_mode_changes_a_binding_or_creates_one() {
     assert_eq!(
         org(&hub, OrgRequest::Bindings { project: None }).await,
         Ok(OrgReply::Bindings {
-            bindings: vec![lead(Mode::OnRequest), reviewer(Mode::Off)]
+            bindings: vec![lead(None), reviewer(Some(Mode::Off))]
         })
     );
 

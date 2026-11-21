@@ -363,7 +363,7 @@ async fn organization_rules_are_enforced() {
     let bind = |agent: &Agent, is_lead: bool| NewBinding {
         project_id: project.id,
         agent_id: agent.id,
-        mode: Mode::OnRequest,
+        mode: Some(Mode::OnRequest),
         is_lead,
         max_parallel: 2,
     };
@@ -398,27 +398,34 @@ async fn a_binding_s_mode_can_be_changed() {
         .bind(&NewBinding {
             project_id: general.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: true,
             max_parallel: 1,
         })
         .await
         .unwrap();
 
-    let off = hub.set_binding_mode(bound.id, Mode::Off).await.unwrap();
+    let off = hub
+        .set_binding_mode(bound.id, Some(Mode::Off))
+        .await
+        .unwrap();
     assert_eq!(
         off,
         Binding {
-            mode: Mode::Off,
+            mode: Some(Mode::Off),
             ..bound.clone()
         }
     );
     assert_eq!(hub.lead_binding(general.id).await.unwrap(), Some(off));
+    // No mode of its own: it follows the project.
+    let follows = hub.set_binding_mode(bound.id, None).await.unwrap();
+    assert_eq!(follows.mode, None);
+    assert_eq!(follows.effective_mode(Mode::Assisted), Mode::Assisted);
 
     let missing = hub
         .set_binding_mode(
             threadlane_core::ids::BindingId(bound.id.get() + 1),
-            Mode::Off,
+            Some(Mode::Off),
         )
         .await;
     assert!(
@@ -1096,7 +1103,7 @@ async fn engineer(hub: &HubDb, project: &Project, max_parallel: u32) -> AgentId 
     hub.bind(&NewBinding {
         project_id: project.id,
         agent_id: agent.id,
-        mode: Mode::OnRequest,
+        mode: Some(Mode::OnRequest),
         is_lead: false,
         max_parallel,
     })
@@ -3201,7 +3208,7 @@ async fn no_lane_is_granted_while_every_account_its_agent_can_use_cools_down() {
     hub.bind(&NewBinding {
         project_id: general.id,
         agent_id: lead.id,
-        mode: Mode::OnRequest,
+        mode: Some(Mode::OnRequest),
         is_lead: true,
         max_parallel: 1,
     })
@@ -3548,7 +3555,7 @@ async fn deleting_an_agent_waits_for_its_tasks_and_keeps_its_history() {
     hub.bind(&NewBinding {
         project_id: general.id,
         agent_id: lead.id,
-        mode: Mode::OnRequest,
+        mode: Some(Mode::OnRequest),
         is_lead: true,
         max_parallel: 1,
     })

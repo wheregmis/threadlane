@@ -104,7 +104,7 @@ async fn project_leads_report_limitations_upstream_with_approval_as_needed() {
         space.mode_ceiling = Mode::Assisted;
         w.db.update_space(&space).await.unwrap();
         let binding = w.db.lead_binding(project.id).await.unwrap().unwrap();
-        w.db.set_binding_mode(binding.id, Mode::Assisted)
+        w.db.set_binding_mode(binding.id, Some(Mode::Assisted))
             .await
             .unwrap();
         if let Some(verdict) = review {

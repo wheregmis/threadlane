@@ -45,7 +45,7 @@ pub(super) async fn engineer_in(world: &World, mode: Mode) {
         .into_iter()
         .find(|binding| binding.agent_id == engineer.id)
         .unwrap();
-    db.set_binding_mode(binding.id, mode).await.unwrap();
+    db.set_binding_mode(binding.id, Some(mode)).await.unwrap();
 }
 
 /// Turns off the default that opens draft pull requests and pushes the task

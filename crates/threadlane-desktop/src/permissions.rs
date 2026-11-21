@@ -118,10 +118,10 @@ pub struct ModeChoice {
     pub locked: Option<String>,
 }
 
-/// The "Project ceiling" card.
+/// The "Project mode" card: the project's ceiling, which its agents follow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CeilingCard {
-    /// `No agent in this project can go above this. Inherited from Work.`
+    /// `The mode every agent here follows. Inherited from Work.`
     pub note: String,
     pub choices: Vec<ModeChoice>,
 }
@@ -132,7 +132,14 @@ pub struct AgentRow {
     pub agent: String,
     pub role: String,
     pub is_lead: bool,
+    /// Its own mode; `None` follows the project.
+    pub own: Option<Mode>,
+    /// The control that sets an own mode, the modes above the project's
+    /// mode locked.
     pub choices: Vec<ModeChoice>,
+    /// Whether that control is shown: it has an own mode other than Off,
+    /// or you asked to set one.
+    pub own_open: bool,
     /// Whether its "may do here" part is expanded.
     pub open: bool,
 }
@@ -256,16 +263,14 @@ impl AppState {
         let current = ceiling(space_ceiling, own);
         let note = match own {
             Some(own) if own > space_ceiling => format!(
-                "No agent in this project can go above this. Its own ceiling is {}, but \
-                 {space} allows only {}.",
+                "The mode every agent here follows. Its own is {}, but {space} allows \
+                 only {}.",
                 mode_label(own),
                 mode_label(space_ceiling)
             ),
-            Some(_) => {
-                "No agent in this project can go above this. Set for this project.".to_owned()
-            }
+            Some(_) => "The mode every agent here follows. Set for this project.".to_owned(),
             None => {
-                format!("No agent in this project can go above this. Inherited from {space}.")
+                format!("The mode every agent here follows. Inherited from {space}.")
             }
         };
         CeilingCard {
@@ -316,25 +321,40 @@ impl AppState {
             .unwrap_or_default();
         bindings
             .iter()
-            .map(|binding| AgentRow {
-                agent: binding.agent.clone(),
-                role: binding.role.clone(),
-                is_lead: binding.is_lead,
-                choices: MODES
-                    .iter()
-                    .map(|&(mode, label)| ModeChoice {
-                        mode,
-                        label,
-                        selected: mode == binding.mode,
-                        locked: (mode > ceiling).then(|| {
-                            format!("Above this project's ceiling, {}", mode_label(ceiling))
-                        }),
-                    })
-                    .collect(),
-                open: self.open_agent.as_ref()
-                    == Some(&(space.to_owned(), project.to_owned(), binding.agent.clone())),
+            .map(|binding| {
+                let key = (space.to_owned(), project.to_owned(), binding.agent.clone());
+                AgentRow {
+                    agent: binding.agent.clone(),
+                    role: binding.role.clone(),
+                    is_lead: binding.is_lead,
+                    own: binding.mode,
+                    choices: MODES
+                        .iter()
+                        .map(|&(mode, label)| ModeChoice {
+                            mode,
+                            label,
+                            selected: Some(mode) == binding.mode,
+                            locked: (mode > ceiling).then(|| {
+                                format!("Above this project's mode, {}", mode_label(ceiling))
+                            }),
+                        })
+                        .collect(),
+                    own_open: binding.mode.is_some_and(|mode| mode != Mode::Off)
+                        || self.own_mode_agent.as_ref() == Some(&key),
+                    open: self.open_agent.as_ref() == Some(&key),
+                }
             })
             .collect()
+    }
+
+    /// Shows the own-mode control on `agent`'s row, or hides it.
+    pub fn toggle_own_mode(&mut self, space: &str, project: &str, agent: &str) {
+        let key = (space.to_owned(), project.to_owned(), agent.to_owned());
+        self.own_mode_agent = if self.own_mode_agent.as_ref() == Some(&key) {
+            None
+        } else {
+            Some(key)
+        };
     }
 
     /// Expands the "may do here" part of `agent`'s row, or collapses it.
@@ -360,7 +380,7 @@ impl AppState {
     pub fn may_do(&self, space: &str, project: &str, agent: &str) -> Option<MayDo> {
         let binding = self.binding(space, project, agent)?;
         let ceiling = self.project_ceiling(space, project);
-        let mode = binding.mode.stricter(ceiling);
+        let mode = binding.effective_mode(ceiling);
         let initiative = match mode {
             Mode::Off => "Never runs here",
             Mode::OnRequest => "Recorded, not acted on",
@@ -375,7 +395,7 @@ impl AppState {
             choices: Vec::new(),
         }];
         for (tier, what, examples) in TIERS {
-            let cell = applied(tier, binding.mode, ceiling, &binding.overrides);
+            let cell = applied(tier, mode, ceiling, &binding.overrides);
             let set = binding.overrides.get(&tier).copied();
             let changeable = tier != Tier::Forbidden && mode != Mode::Off;
             let mut choices = Vec::new();

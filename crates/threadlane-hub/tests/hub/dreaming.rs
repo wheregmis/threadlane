@@ -1471,7 +1471,7 @@ async fn reviewed_choices_page_newest_first_across_lead_and_task_runs() {
         .bind(&threadlane_core::model::NewBinding {
             project_id: project.id,
             agent_id: agent.id,
-            mode: threadlane_core::model::Mode::OnRequest,
+            mode: Some(threadlane_core::model::Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })

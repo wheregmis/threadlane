@@ -121,8 +121,8 @@ pub trait OrgStore: Send + Sync {
     /// Binds an agent to a project. At most one binding per pair and one lead
     /// per project.
     async fn bind(&self, binding: &NewBinding) -> StoreResult<Binding>;
-    /// Changes a binding's mode.
-    async fn set_binding_mode(&self, id: BindingId, mode: Mode) -> StoreResult<Binding>;
+    /// Changes a binding's mode; `None` makes it follow the project.
+    async fn set_binding_mode(&self, id: BindingId, mode: Option<Mode>) -> StoreResult<Binding>;
     async fn bindings(&self, project_id: ProjectId) -> StoreResult<Vec<Binding>>;
     async fn lead_binding(&self, project_id: ProjectId) -> StoreResult<Option<Binding>>;
     /// Sets or clears a project's own ceiling, which the space's ceiling

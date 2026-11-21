@@ -906,7 +906,13 @@ impl Desktop {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let cap = this.state.project_ceiling(&s, &p);
                                 if choice <= cap {
-                                    this.set_mode(s.clone(), p.clone(), a.clone(), choice, cx);
+                                    this.set_mode(
+                                        s.clone(),
+                                        p.clone(),
+                                        a.clone(),
+                                        Some(choice),
+                                        cx,
+                                    );
                                 }
                             }))
                     });

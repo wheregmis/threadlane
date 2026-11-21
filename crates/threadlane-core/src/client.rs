@@ -138,7 +138,10 @@ pub struct BindingSummary {
     /// The agent's name.
     pub agent: String,
     pub role: String,
-    pub mode: Mode,
+    /// Its own mode; `None` follows the project. Read it through
+    /// [`BindingSummary::effective_mode`].
+    #[serde(default)]
+    pub mode: Option<Mode>,
     pub is_lead: bool,
     /// How many of its tasks may run at once in the project; 0 means no
     /// limit.
@@ -147,6 +150,14 @@ pub struct BindingSummary {
     /// The cell each overridden tier is set to (Plan.md §2.3 "Overrides").
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<Tier, Cell>,
+}
+
+impl BindingSummary {
+    /// The mode it acts in under the project's effective `ceiling`.
+    #[must_use]
+    pub fn effective_mode(&self, ceiling: Mode) -> Mode {
+        Mode::effective(self.mode, ceiling)
+    }
 }
 
 /// The Organization capability (Plan.md §11.2): projects, repositories,
@@ -200,11 +211,12 @@ pub enum OrgRequest {
     /// The bindings of a project. `None` means the General project.
     Bindings { project: Option<String> },
     /// Sets the agent's mode in a project, binding it there if it is not yet.
-    /// `None` means the General project.
+    /// `None` means the General project; a `None` mode follows the project.
     SetMode {
         project: Option<String>,
         agent: String,
-        mode: Mode,
+        #[serde(default)]
+        mode: Option<Mode>,
     },
     /// Pauses a project, or resumes it with `paused: false`: a paused
     /// project's lanes are not granted. `None` means the General project.

@@ -464,3 +464,75 @@ async fn existing_version_22_routines_retain_their_missed_run_policy() -> StoreR
     assert_eq!(version, crate::SCHEMA_VERSION);
     Ok(())
 }
+
+#[tokio::test]
+async fn bindings_at_their_project_mode_follow_it_and_no_other_changes() -> StoreResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prior.db");
+    let before = MIGRATIONS.len() - 1;
+    {
+        let sqlite = rusqlite::Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..before] {
+            sqlite.execute_batch(sql).unwrap();
+        }
+        // The space allows Assisted: a project's effective ceiling is its
+        // own, stricter with the space's.
+        sqlite
+            .execute_batch(&format!(
+                "PRAGMA user_version = {before};
+                 INSERT INTO space (id, name, mode_ceiling, channels)
+                   VALUES (1, 'Work', 'assisted', '[]');
+                 INSERT INTO projects (id, name, mode_ceiling, max_parallel_tasks, created_at) VALUES
+                   (1, 'Inherits', NULL, 1, 0),
+                   (2, 'Above', 'autonomous', 1, 0),
+                   (3, 'Below', 'on_request', 1, 0),
+                   (4, 'Shut', 'off', 1, 0);
+                 INSERT INTO agents (id, name, role) VALUES
+                   (1, 'Lead', 'lead'), (2, 'Engineer', 'engineer'), (3, 'Reviewer', 'reviewer');
+                 INSERT INTO bindings (id, project_id, agent_id, mode, is_lead, max_parallel) VALUES
+                   (1, 1, 1, 'assisted', 1, 1),
+                   (2, 1, 2, 'on_request', 0, 1),
+                   (3, 1, 3, 'off', 0, 1),
+                   (4, 2, 1, 'assisted', 1, 1),
+                   (5, 2, 2, 'autonomous', 0, 1),
+                   (6, 3, 1, 'on_request', 1, 1),
+                   (7, 4, 1, 'off', 1, 1);"
+            ))
+            .unwrap();
+    }
+    let db = Db::open(DbLocation::File(&path)).await?;
+    let conn = db.reader()?;
+    let mut rows = conn
+        .query("SELECT id, mode FROM bindings ORDER BY id", ())
+        .await
+        .map_err(db_err)?;
+    let mut modes = Vec::new();
+    while let Some(row) = rows.next().await.map_err(db_err)? {
+        let row = Cols(&row);
+        modes.push((row.i64(0)?, row.opt_text(1)?));
+    }
+    let own = |mode: &str| Some(mode.to_owned());
+    assert_eq!(
+        modes,
+        [
+            (1, None),
+            (2, own("on_request")),
+            (3, own("off")),
+            (4, None),
+            (5, own("autonomous")),
+            (6, None),
+            (7, own("off")),
+        ]
+    );
+    // The one-lead index came back with the table.
+    let second_lead = conn
+        .execute(
+            "INSERT INTO bindings (project_id, agent_id, is_lead, max_parallel) VALUES (3, 2, 1, 1)",
+            (),
+        )
+        .await;
+    assert!(second_lead.is_err());
+    let version = query_one(&conn, "PRAGMA user_version", (), |row| Cols(row).i64(0)).await?;
+    assert_eq!(version, crate::SCHEMA_VERSION);
+    Ok(())
+}

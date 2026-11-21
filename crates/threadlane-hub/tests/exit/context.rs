@@ -100,7 +100,7 @@ async fn add_alpha(sim: &Sim) {
         .bind(&NewBinding {
             project_id: alpha.id,
             agent_id: lead.agent_id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: true,
             max_parallel: 1,
         })

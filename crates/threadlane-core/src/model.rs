@@ -93,6 +93,13 @@ impl Mode {
         self.min(other)
     }
 
+    /// The mode an agent acts in under `ceiling`: its own, or with `None`
+    /// the project's mode (the ceiling), and never above the ceiling.
+    #[must_use]
+    pub fn effective(own: Option<Self>, ceiling: Self) -> Self {
+        own.unwrap_or(ceiling).stricter(ceiling)
+    }
+
     /// One mode lower, to a minimum of On request (Plan.md §9.1, tainted runs).
     #[must_use]
     pub fn stepped_down(self) -> Self {
@@ -542,7 +549,9 @@ pub struct Binding {
     pub id: BindingId,
     pub project_id: ProjectId,
     pub agent_id: AgentId,
-    pub mode: Mode,
+    /// Its own mode; `None` follows the project. Read it through
+    /// [`Binding::effective_mode`].
+    pub mode: Option<Mode>,
     pub is_lead: bool,
     pub models: Json,
     /// How many of this agent's tasks in the project may run at once; 0
@@ -551,12 +560,21 @@ pub struct Binding {
     pub overrides: Json,
 }
 
+impl Binding {
+    /// The mode it acts in under the project's effective `ceiling`.
+    #[must_use]
+    pub fn effective_mode(&self, ceiling: Mode) -> Mode {
+        Mode::effective(self.mode, ceiling)
+    }
+}
+
 /// Input for [`crate::store::OrgStore::bind`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewBinding {
     pub project_id: ProjectId,
     pub agent_id: AgentId,
-    pub mode: Mode,
+    /// `None` follows the project.
+    pub mode: Option<Mode>,
     pub is_lead: bool,
     pub max_parallel: u32,
 }

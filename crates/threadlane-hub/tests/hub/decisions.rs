@@ -63,7 +63,7 @@ async fn task_run_with(hook: Arc<dyn StepHook>) -> (TestHub, Lease, RunAssignmen
         .bind(&NewBinding {
             project_id: general.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })

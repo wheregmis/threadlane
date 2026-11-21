@@ -178,7 +178,7 @@ The full matrix:
 
 **Decisions:**
 
-- **Project ceiling.** Each project has a maximum mode, inherited from its space. No binding can exceed it. A work project capped at Assisted cannot have an autonomous agent by accident.
+- **Project mode.** Each project has one mode, its ceiling, inherited from its space unless set for the project. Every agent bound in the project follows it: by default a binding has no mode of its own and acts in the project's mode. Lowering the project's mode lowers every agent that follows it. Per agent you can turn it Off, or, rarely, give it its own mode, which still cannot exceed the project's. A work project at Assisted cannot have an autonomous agent by accident.
 - **Standing rules.** When you answer a decision you can also say "always allow this here". That creates a rule scoped to one project, one tool, and one argument pattern: it covers every agent bound in the project, and the agent it was created from is kept for audit. Tier 2 rules work in any mode. Tier 3 rules take effect only in Autonomous. Rules are listed in the project's settings and can be revoked. **From Noop:** it starts cautious and takes over more as it proves it decides like you.
 - **A requested task's own work.** Own work is the task's own branch, or the branch of another requested task in the project. In a task you requested, the steps that carry it out are allowed in every mode above Off: pushing the task branch, opening its draft pull request, and marking ready, editing or merging a pull request whose head, in the same repository, is the branch of this task or of another requested task of the project that works in that repository, as the hub reads it from GitHub. Such a call is recorded as a decision allowed by default. When the run is tainted by outside content it goes to classifier review instead. A merge also needs its checks to pass: the pull request merges cleanly, it has checks and every one succeeded, and the head task's latest review approved exactly its head commit; otherwise it asks. An override only makes these stricter. In any other task, and when GitHub cannot be read, opening a draft pull request and pushing the task's own branch are still allowed by default in every mode above Off, unless the run is tainted or the binding has an override for tier 2; everything else follows the matrix.
 - **Overrides.** Any cell of the matrix can be made stricter per binding. It can be made looser only up to what the ceiling's column allows.
@@ -233,7 +233,7 @@ Every table below exists once per hub. No table has a space column.
 | Field | Notes |
 |---|---|
 | `project_id`, `agent_id` | Unique together |
-| `mode` | `off`, `on_request`, `assisted`, `autonomous` |
+| `mode` | `off`, `on_request`, `assisted`, `autonomous`, or null to follow the project's mode |
 | `is_lead` | Exactly one per project |
 | `models` | Override, per backend |
 | `max_parallel` | Legacy binding value, ignored for scheduling |
@@ -1149,7 +1149,7 @@ A run holds your access and operates unattended. This is where the most risk sit
 Each tool declares its tier (section 2.3). The gate evaluates in order, and the first rule that applies wins:
 
 1. **Forbidden list.** Built-in, then space, then project. Result: block.
-2. **Effective mode.** The lower of the binding's mode and the project ceiling. If the run is tainted by external content, one step lower again, to a minimum of On request.
+2. **Effective mode.** The binding's own mode, or the project's mode when it follows it, never above the project ceiling. If the run is tainted by external content, one step lower again, to a minimum of On request.
 3. **Binding overrides and standing rules**, within what the effective mode permits.
 4. **The default for a task's own work** (section 2.3): a draft pull request or a push of the task's own branch, in an untainted run with no tier 2 override, is allowed where the matrix would ask or review.
 5. **The mode matrix** (section 2.3): allow, classifier review, or ask.

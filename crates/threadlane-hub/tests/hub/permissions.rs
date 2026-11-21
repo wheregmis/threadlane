@@ -220,7 +220,7 @@ async fn bind_on_request(hub: &TestHub, project: ProjectId, agent: AgentId) {
         .bind(&NewBinding {
             project_id: project,
             agent_id: agent,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 3,
         })
@@ -414,8 +414,9 @@ async fn always_is_refused_where_no_rule_could_apply() {
     assert!(rules(&hub).await.is_empty());
 }
 
-#[tokio::test]
-async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
+/// A hub whose space allows Autonomous, with a fake tier 3 `release` tool
+/// and a reviewer with no answer queued, so unavailable.
+async fn release_hub() -> (TestHub, FakeTools, ScriptedBackend) {
     let base = TestHub::start().await;
     autonomous_space(&base).await;
     let fake = FakeTools::new();
@@ -440,7 +441,49 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
         base.clock.clone(),
     )
     .await;
+    (hub, fake, reviewer)
+}
+
+#[tokio::test]
+async fn an_agent_following_the_project_acts_in_its_mode_and_drops_with_it() {
+    let (hub, _fake, _reviewer) = release_hub().await;
     hub.hello().await;
+    let general = hub.general().await;
+    let lead = hub.db.lead_binding(general.id).await.unwrap().unwrap();
+    assert_eq!(lead.mode, None, "the lead follows the project");
+    hub.send("m-1", "merge it").await;
+    let (lease, run) = begin(&*hub.link).await;
+    let merge = json!({ "repository": "app" });
+
+    // The project inherits Autonomous: asked, with a tier 3 rule offered.
+    assert_eq!(
+        call(&hub, &lease, &run, "c-1", "release", &merge).await,
+        Err(ToolError::WaitingOnYou)
+    );
+    assert!(decision(&hub, 1).await.offers_standing_rule);
+    // The project lowered to Assisted: the lead drops with it.
+    org(
+        &hub,
+        OrgRequest::SetCeiling {
+            project: None,
+            mode: Mode::Assisted,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        call(&hub, &lease, &run, "c-2", "release", &merge).await,
+        Err(ToolError::WaitingOnYou)
+    );
+    assert!(!decision(&hub, 2).await.offers_standing_rule);
+}
+
+#[tokio::test]
+async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
+    let (hub, fake, reviewer) = release_hub().await;
+    hub.hello().await;
+    // Its own mode, below the project's.
+    org(&hub, set_mode(Mode::OnRequest)).await.unwrap();
     hub.send("m-1", "merge it").await;
     let (lease, run) = begin(&*hub.link).await;
     let merge = json!({ "repository": "app" });
@@ -456,7 +499,7 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
         .org(OrgRequest::SetMode {
             project: None,
             agent: LEAD_NAME.into(),
-            mode: Mode::Autonomous,
+            mode: Some(Mode::Autonomous),
         })
         .await
         .unwrap();
@@ -487,7 +530,7 @@ async fn a_tier_three_rule_has_no_effect_outside_autonomous() {
             .org(OrgRequest::SetMode {
                 project: None,
                 agent: LEAD_NAME.into(),
-                mode,
+                mode: Some(mode),
             })
             .await
             .unwrap();
@@ -665,7 +708,7 @@ fn set_mode(mode: Mode) -> OrgRequest {
     OrgRequest::SetMode {
         project: None,
         agent: LEAD_NAME.into(),
-        mode,
+        mode: Some(mode),
     }
 }
 
@@ -712,7 +755,7 @@ async fn a_mode_above_the_ceiling_is_refused_with_the_ceiling_named() {
     // The binding keeps its stored mode and acts at the ceiling; a new one
     // above it is refused.
     let lead = hub.db.lead_binding(hub.general().await.id).await.unwrap();
-    assert_eq!(lead.unwrap().mode, Mode::Autonomous);
+    assert_eq!(lead.unwrap().mode, Some(Mode::Autonomous));
     let message = refused(org(&hub, set_mode(Mode::Autonomous)).await);
     assert!(
         message.contains("\"General\"") && message.contains("assisted"),
@@ -873,7 +916,7 @@ async fn widgets_in(
         .bind(&NewBinding {
             project_id: project,
             agent_id: engineer,
-            mode: Mode::Assisted,
+            mode: Some(Mode::Assisted),
             is_lead: false,
             max_parallel: 1,
         })

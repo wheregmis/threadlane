@@ -241,7 +241,7 @@ impl AppState {
                     self.project_ceiling(space, project) > *mode
                         && (self.project_gap(space, project, Part::Bindings).is_some()
                             || self.project(space, project).is_some_and(|view| view.bindings.iter()
-                                .any(|binding| binding.mode > *mode)))
+                                .any(|binding| binding.effective_mode(self.project_ceiling(space, project)) > *mode)))
                 };
                 let affects = if let Some(project) = project {
                     caps(project)

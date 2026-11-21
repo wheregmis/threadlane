@@ -45,7 +45,7 @@ async fn the_owner_asks_general_for_a_projects_goal_its_lead_does_it_and_general
         .bind(&NewBinding {
             project_id: project.id,
             agent_id: engineer.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })

@@ -187,6 +187,13 @@ assignee's effective mode, so it follows the project too.
 **Tests.** The store migration test, the gate with an inherited mode, the
 desktop snapshot for the agents tab, and the client CLI round trip.
 
+**As built.** The agent row's On / Off is a switch, and "Set own mode…" is a
+small button beside "Follows project" rather than an overflow menu. New
+bindings follow the project: the lead a project gets at start, an agent added
+from the Team tab, and `threadlane mode <agent> follow` (also `project`). The
+migration keeps a mode above the ceiling as it is; it still acts at the
+ceiling.
+
 ### Stage D: taint limits reach, not routine
 
 - In `gate.rs`, the built-in default for `publish_branch` (own branch)

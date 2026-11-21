@@ -124,7 +124,7 @@ impl LocalLink {
                     .effective_ceiling(lane.project_id)
                     .await
                     .map_err(link_error)?;
-                binding.mode.stricter(ceiling)
+                binding.effective_mode(ceiling)
             }
             None if review.is_some() => Mode::OnRequest.stricter(
                 db.effective_ceiling(lane.project_id)
@@ -321,10 +321,11 @@ impl LocalLink {
         if !dreaming && (lane.kind == LaneKind::Lead || scan) {
             let bindings = db.bindings(project.id).await.map_err(link_error)?;
             let agents = db.agents().await.map_err(link_error)?;
+            let ceiling = db.effective_ceiling(project.id).await.map_err(link_error)?;
             let mut enabled = agents.iter().filter_map(|member| {
                 let binding = bindings
                     .iter()
-                    .find(|b| b.agent_id == member.id && b.mode != Mode::Off)?;
+                    .find(|b| b.agent_id == member.id && b.effective_mode(ceiling) != Mode::Off)?;
                 Some((member, binding))
             });
             if lane.kind == LaneKind::Lead {
@@ -918,7 +919,7 @@ mod tests {
             id: BindingId(1),
             project_id: ProjectId(1),
             agent_id: AgentId(1),
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: true,
             models,
             max_parallel: 1,

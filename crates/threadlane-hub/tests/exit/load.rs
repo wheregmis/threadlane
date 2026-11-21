@@ -186,7 +186,7 @@ async fn scenario(seed: u64, project_count: usize, rounds: usize) {
             .bind(&NewBinding {
                 project_id: project.id,
                 agent_id: engineer.id,
-                mode: Mode::OnRequest,
+                mode: Some(Mode::OnRequest),
                 is_lead: false,
                 max_parallel: 2,
             })

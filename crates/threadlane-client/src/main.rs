@@ -90,8 +90,10 @@ enum Command {
         project: Option<String>,
         /// The agent's name.
         agent: String,
-        /// off, on_request, assisted, or autonomous.
-        mode: Mode,
+        /// off, on_request, assisted, autonomous, or follow (the project's
+        /// mode).
+        #[arg(value_parser = own_mode)]
+        mode: OwnMode,
     },
     /// Send a message to a project's lead, or to a task, and wait for the
     /// reply.
@@ -877,7 +879,9 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 let lead = if binding.is_lead { ", lead" } else { "" };
                 println!(
                     "{} ({}{lead}): {}",
-                    binding.agent, binding.role, binding.mode
+                    binding.agent,
+                    binding.role,
+                    binding.mode.map_or("follows the project", Mode::as_str)
                 );
             }
         }
@@ -890,7 +894,10 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
             let binding = core
                 .set_mode(space.as_deref(), project.as_deref(), &agent, mode)
                 .await?;
-            println!("{} is now {}", binding.agent, binding.mode);
+            match binding.mode {
+                Some(mode) => println!("{} is now {mode}", binding.agent),
+                None => println!("{} now follows the project", binding.agent),
+            }
         }
         Command::Send {
             space,
@@ -1249,6 +1256,20 @@ fn timer_line(timer: &Timer) -> String {
         "{} {what}, {next}{paused}{by}{policy}: {}",
         timer.id, timer.instruction
     )
+}
+
+/// An agent's own mode, or `None` to follow the project. An alias so clap
+/// takes the value as required rather than the argument as optional.
+type OwnMode = Option<Mode>;
+
+/// A mode, or `follow` for the project's.
+fn own_mode(text: &str) -> Result<OwnMode, String> {
+    match text {
+        "follow" | "project" => Ok(None),
+        mode => mode.parse().map(Some).map_err(|_| {
+            format!("{text:?} is not off, on_request, assisted, autonomous, or follow")
+        }),
+    }
 }
 
 /// `HH:MM`, a local time of day.

@@ -214,7 +214,7 @@ async fn lowering_the_mode_mid_run_changes_the_next_tool_call_and_next_run() {
         .org(OrgRequest::SetMode {
             project: None,
             agent: lead,
-            mode: Mode::Off,
+            mode: Some(Mode::Off),
         })
         .await
         .unwrap();

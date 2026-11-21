@@ -39,7 +39,7 @@ async fn world() -> World {
         .bind(&NewBinding {
             project_id: world.db.general_project().await.unwrap().id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })

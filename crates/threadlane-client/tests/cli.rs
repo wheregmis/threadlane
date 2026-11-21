@@ -251,7 +251,7 @@ impl HubApi for FakeHub {
                 bindings: vec![BindingSummary {
                     agent: "Lead".to_owned(),
                     role: "lead".to_owned(),
-                    mode: Mode::OnRequest,
+                    mode: Some(Mode::OnRequest),
                     is_lead: true,
                     max_parallel: 1,
                     overrides: Default::default(),
@@ -307,7 +307,7 @@ impl HubApi for FakeHub {
                 binding: BindingSummary {
                     agent,
                     role: "reviewer".to_owned(),
-                    mode: Mode::OnRequest,
+                    mode: Some(Mode::OnRequest),
                     is_lead: false,
                     max_parallel,
                     overrides: Default::default(),
@@ -871,6 +871,12 @@ async fn the_cli_manages_projects_agents_and_modes() {
         "Reviewer is now off\n",
     )
     .await;
+    expect_success(
+        client_dir,
+        &["mode", "Reviewer", "follow", "-p", "web"],
+        "Reviewer now follows the project\n",
+    )
+    .await;
     let output = threadlane(client_dir, &["mode", "Reviewer", "sleepy"]).await;
     assert!(!output.status.success(), "an unknown mode is refused");
 
@@ -899,7 +905,12 @@ async fn the_cli_manages_projects_agents_and_modes() {
             OrgRequest::SetMode {
                 project: Some("web".to_owned()),
                 agent: "Reviewer".to_owned(),
-                mode: Mode::Off,
+                mode: Some(Mode::Off),
+            },
+            OrgRequest::SetMode {
+                project: Some("web".to_owned()),
+                agent: "Reviewer".to_owned(),
+                mode: None,
             },
         ]
     );

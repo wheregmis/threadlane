@@ -95,7 +95,7 @@ impl ClientApi {
         let db = &self.core.inner.db;
         if let Some(lead) = db.lead_binding(project.id).await.map_err(api_error)? {
             let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
-            if lead.mode.stricter(ceiling) == Mode::Off {
+            if lead.effective_mode(ceiling) == Mode::Off {
                 return Err(ApiError::Invalid(format!(
                     "the lead of project {:?} is off",
                     project.name
@@ -771,7 +771,7 @@ impl HubApi for ClientApi {
                     .into_iter()
                     .find(|binding| binding.agent_id == agent.id);
                 let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
-                if mode > ceiling {
+                if let Some(mode) = mode.filter(|&mode| mode > ceiling) {
                     return Err(ApiError::Invalid(format!(
                         "{mode} is above the ceiling of project {:?}, {ceiling}",
                         project.name

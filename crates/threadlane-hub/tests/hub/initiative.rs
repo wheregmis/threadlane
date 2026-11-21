@@ -44,7 +44,7 @@ async fn hub_with(hook: Arc<dyn StepHook>, lead: Mode, engineer: Mode) -> TestHu
     db.update_space(&space).await.unwrap();
     let general = hub.general().await;
     let binding = db.lead_binding(general.id).await.unwrap().unwrap();
-    db.set_binding_mode(binding.id, lead).await.unwrap();
+    db.set_binding_mode(binding.id, Some(lead)).await.unwrap();
     let agent = db
         .create_agent(&NewAgent::named(ENGINEER, "engineer"))
         .await
@@ -53,13 +53,13 @@ async fn hub_with(hook: Arc<dyn StepHook>, lead: Mode, engineer: Mode) -> TestHu
         .bind(&NewBinding {
             project_id: general.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
         .await
         .unwrap();
-    db.set_binding_mode(bound.id, engineer).await.unwrap();
+    db.set_binding_mode(bound.id, Some(engineer)).await.unwrap();
     hub
 }
 
@@ -183,15 +183,23 @@ async fn each_mode_against_an_unrequested_external_event() {
 #[tokio::test]
 async fn a_task_from_unrequested_work_follows_the_stricter_of_the_two_agents() {
     let cases = [
-        // (lead, assignee, created without asking)
-        (Mode::Assisted, Mode::Assisted, false),
-        (Mode::Autonomous, Mode::Autonomous, true),
-        (Mode::Autonomous, Mode::OnRequest, false),
-        (Mode::Assisted, Mode::Autonomous, false),
+        // (lead, assignee's own mode, created without asking); an assignee
+        // with none follows the project, here Autonomous.
+        (Mode::Assisted, Some(Mode::Assisted), false),
+        (Mode::Autonomous, Some(Mode::Autonomous), true),
+        (Mode::Autonomous, Some(Mode::OnRequest), false),
+        (Mode::Assisted, Some(Mode::Autonomous), false),
+        (Mode::Autonomous, None, true),
+        (Mode::Assisted, None, false),
     ];
     for (lead, assignee, created) in cases {
-        let what = format!("lead {lead}, assignee {assignee}");
-        let hub = hub(lead, assignee).await;
+        let what = format!("lead {lead}, assignee {assignee:?}");
+        let hub = hub(lead, assignee.unwrap_or(Mode::OnRequest)).await;
+        if assignee.is_none() {
+            let bindings = hub.db.bindings(hub.general().await.id).await.unwrap();
+            let engineer = bindings.iter().find(|b| !b.is_lead).unwrap();
+            hub.db.set_binding_mode(engineer.id, None).await.unwrap();
+        }
         outside(&hub).await;
         let (lease, run) = begin(&*hub.link).await;
         let result = call(&hub, &lease, &run, "c-1", CREATE_TASK, &fix_the_build()).await;

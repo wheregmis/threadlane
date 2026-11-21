@@ -56,7 +56,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         .find(|binding| binding.agent_id == engineer)
         .unwrap();
     hub.db
-        .set_binding_mode(engineer_binding.id, Mode::Assisted)
+        .set_binding_mode(engineer_binding.id, Some(Mode::Assisted))
         .await
         .unwrap();
     let widgets = hub
@@ -530,7 +530,7 @@ async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
         .bind(&NewBinding {
             project_id: project.id,
             agent_id: reviewer.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
@@ -630,7 +630,7 @@ async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
         .bind(&NewBinding {
             project_id: project.id,
             agent_id: auditor.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
@@ -798,7 +798,7 @@ async fn the_reviewers_own_task_finishes_without_a_review_round() {
         .bind(&NewBinding {
             project_id: project.id,
             agent_id: reviewer.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
@@ -867,7 +867,7 @@ async fn review_handoffs_share_machine_slots() {
         .bind(&NewBinding {
             project_id: project.id,
             agent_id: reviewer.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
@@ -956,7 +956,7 @@ async fn engineer(hub: &TestHub, max_parallel: u32) -> AgentId {
         .bind(&NewBinding {
             project_id: hub.general().await.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel,
         })
@@ -1133,7 +1133,7 @@ async fn scans_share_one_pr_review_per_head_and_reuse_its_committed_verdict() {
         .bind(&NewBinding {
             project_id: project.id,
             agent_id: reviewer.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
@@ -1969,7 +1969,7 @@ async fn a_task_nobody_asked_for_does_not_start_and_an_agent_set_to_off_never_ru
         .org(threadlane_core::client::OrgRequest::SetMode {
             project: None,
             agent: ENGINEER.into(),
-            mode: Mode::Off,
+            mode: Some(Mode::Off),
         })
         .await
         .unwrap();
@@ -2369,7 +2369,7 @@ async fn an_attachment_during_review_applies_to_the_next_implementation_run() {
             project_id: general.id,
             agent_id: reviewer.id,
             is_lead: false,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             max_parallel: 1,
         })
         .await

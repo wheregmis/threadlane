@@ -27,7 +27,7 @@ async fn a_fresh_hub_has_a_lead_a_binding_and_a_machine_and_new_is_idempotent() 
     let general = hub.general().await;
     let binding = hub.db.lead_binding(general.id).await.unwrap().unwrap();
     assert_eq!(binding.agent_id, agents[0].id);
-    assert_eq!(binding.mode, Mode::OnRequest);
+    assert_eq!(binding.mode, None);
     assert!(binding.is_lead);
 
     let machines = hub.db.machines().await.unwrap();
@@ -52,7 +52,7 @@ async fn a_fresh_hub_has_a_lead_a_binding_and_a_machine_and_new_is_idempotent() 
     assert_eq!(again.db.bindings(general.id).await.unwrap(), vec![binding]);
     let alpha_lead = again.db.lead_binding(alpha.id).await.unwrap().unwrap();
     assert_eq!(alpha_lead.agent_id, agents[0].id);
-    assert_eq!(alpha_lead.mode, Mode::OnRequest);
+    assert_eq!(alpha_lead.mode, None);
     let third = again.restart(Arc::new(NoHooks)).await;
     assert_eq!(third.db.bindings(alpha.id).await.unwrap().len(), 1);
 }
