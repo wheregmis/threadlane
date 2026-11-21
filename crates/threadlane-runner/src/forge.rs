@@ -636,6 +636,16 @@ impl Forge for GitForge {
                 args(&["pr", "merge", &number.to_string(), "--merge"])
             }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
+            RepositoryAction::EditPullRequest {
+                number,
+                title,
+                body,
+            } => {
+                let mut argv = args(&["pr", "edit", &number.to_string()]);
+                argv.extend(title.iter().map(|title| format!("--title={title}").into()));
+                argv.extend(body.iter().map(|body| format!("--body={body}").into()));
+                argv
+            }
             RepositoryAction::LabelIssue {
                 number,
                 add,

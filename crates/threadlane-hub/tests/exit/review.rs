@@ -14,8 +14,8 @@ use threadlane_core::runtime::steps::perform;
 use threadlane_core::store::{InboxStore, OrgStore};
 use threadlane_core::time::Clock;
 use threadlane_hub::{
-    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, LABEL_ISSUE, MARK_READY, MERGE,
-    OPEN_PULL_REQUEST,
+    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST, LABEL_ISSUE,
+    MARK_READY, MERGE, OPEN_PULL_REQUEST,
 };
 use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::{CrashPlan, Script};
@@ -26,7 +26,7 @@ use crate::operations::follow_up;
 use crate::permissions::engineer_in;
 use crate::publish::{drive, publish_world};
 
-pub(super) fn actions() -> [(&'static str, Json); 6] {
+pub(super) fn actions() -> [(&'static str, Json); 7] {
     [
         (
             COMMENT,
@@ -45,6 +45,10 @@ pub(super) fn actions() -> [(&'static str, Json); 6] {
         (
             CLOSE_PULL_REQUEST,
             json!({"repository":"app","number":12,"expected_head":HEAD,"delete_branch":true}),
+        ),
+        (
+            EDIT_PULL_REQUEST,
+            json!({"repository":"app","number":12,"body":"Head is now 0123456."}),
         ),
     ]
 }

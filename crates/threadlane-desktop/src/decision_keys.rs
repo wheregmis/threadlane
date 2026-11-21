@@ -308,6 +308,7 @@ fn confirms_number(decision: &Decision) -> bool {
             | CREATE_ISSUE
             | MARK_READY
             | threadlane_core::forge::LABEL_ISSUE
+            | threadlane_core::forge::EDIT_PULL_REQUEST
             | ASSIGN_ISSUE
             | OPEN_PULL_REQUEST
             | PUBLISH_BRANCH

@@ -50,6 +50,8 @@ pub const GITHUB_CLI: &str = "github_cli";
 
 /// Assign a registered repository's issue to the logged-in user.
 pub const ASSIGN_ISSUE: &str = "assign_issue";
+/// Replace the title and/or body of a registered repository's pull request.
+pub const EDIT_PULL_REQUEST: &str = "edit_pull_request";
 
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -66,6 +68,12 @@ pub enum RepositoryAction {
     Merge { number: std::num::NonZeroU64 },
     /// Mark the numbered draft pull request ready for review.
     MarkReady { number: std::num::NonZeroU64 },
+    /// Replace the numbered pull request's title and/or body; `None` keeps it.
+    EditPullRequest {
+        number: std::num::NonZeroU64,
+        title: Option<String>,
+        body: Option<String>,
+    },
     /// Add and remove labels on the numbered issue. Labels the repository
     /// does not have are reported, never created.
     LabelIssue {

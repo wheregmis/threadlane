@@ -396,6 +396,22 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
         .apply(remote, &RepositoryAction::MarkReady { number })
         .await
         .unwrap();
+    for (title, body) in [
+        (Some("New title"), Some("Head is now abc")),
+        (None, Some("-x")),
+    ] {
+        forge
+            .apply(
+                remote,
+                &RepositoryAction::EditPullRequest {
+                    number,
+                    title: title.map(str::to_owned),
+                    body: body.map(str::to_owned),
+                },
+            )
+            .await
+            .unwrap();
+    }
     forge
         .apply(
             remote,
@@ -426,6 +442,15 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
             ],
             vec!["pr", "merge", "12", "--merge", repo],
             vec!["pr", "ready", "12", repo],
+            vec![
+                "pr",
+                "edit",
+                "12",
+                "--title=New title",
+                "--body=Head is now abc",
+                repo
+            ],
+            vec!["pr", "edit", "12", "--body=-x", repo],
             vec!["issue", "edit", "12", "--add-label=bug", repo],
             vec!["issue", "edit", "12", "--add-assignee=@me", repo],
         ]
