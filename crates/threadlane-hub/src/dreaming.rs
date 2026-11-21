@@ -6,9 +6,12 @@ use serde_json::{Value as Json, json};
 use threadlane_core::client::{ApiError, DreamingStatus};
 use threadlane_core::forge::REPORT_LIMITATION;
 use threadlane_core::ids::ProjectId;
-use threadlane_core::model::{Event, EventKind, MemoryAuthor, Project, Recurrence, Rule, Trust};
+use threadlane_core::model::{
+    Event, EventKind, MemoryAuthor, Project, Recurrence, Rule, Task, Trust,
+};
 use threadlane_core::runtime::steps::dreaming;
-use threadlane_core::store::{MemoryStore, OrgStore, StoreResult};
+use threadlane_core::store::{MemoryStore, OrgStore, StoreResult, TaskStore};
+use threadlane_core::time::Timestamp;
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError};
 use threadlane_store::{HubDb, TIMER_SOURCE};
 
@@ -80,15 +83,18 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
     tools.push(ToolDefinition {
         name: PROJECT_SESSIONS.to_owned(),
         description: "Read this project's run outcomes, rationales, delivered replies and owner chat \
-                      from unreviewed runs, project tasks with review evidence, and previous Threadlane reports. \
-                      Runs then tasks come in pages, long texts cut; a cut page gives the \
-                      offset of the next one."
+                      from unreviewed runs, project tasks with review evidence and last activity, and \
+                      previous Threadlane reports (first page only). Runs then tasks come in pages, \
+                      long texts cut; a cut page gives the offset of the next one. Pass task_id for \
+                      one task's full record, or updated_after to list only tasks active since then."
             .to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "offset": { "type": "integer", "minimum": 0 },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+                "task_id": { "type": "string", "description": "Show this one task in full instead of listing." },
+                "updated_after": { "type": "string", "description": "List only tasks with activity after this time, like 2026-05-01T09:00:00Z." }
             },
             "additionalProperties": false
         }),
@@ -106,6 +112,51 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
     });
     tools.push(report_definition());
     tools
+}
+
+/// A task as `project_sessions` lists it: in full, with a one-line summary of
+/// its result and its last activity.
+fn task_record(task: &Task, times: &BTreeMap<i64, Timestamp>) -> Json {
+    let mut record = crate::tools::task_json(task);
+    record["summary"] = crate::tools::task_line(task)["result"].clone();
+    record["updated_at"] = json!(
+        times
+            .get(&task.id.get())
+            .map(|at| crate::context::format_time(*at))
+    );
+    record
+}
+
+/// How to read a cut task record in full.
+fn detail(record: &Json) -> Json {
+    json!(format!(
+        "This record is cut. Call {PROJECT_SESSIONS} with task_id {} for all of it.",
+        record["task_id"].as_str().unwrap_or_default()
+    ))
+}
+
+/// One project task in full, with its latest review, for a record cut from a page.
+async fn session_task(db: &HubDb, project: ProjectId, reference: &Json) -> Result<Json, ToolError> {
+    let err = crate::error::tool_error;
+    let id = crate::tools::task_ref(reference)?;
+    let task = db
+        .task(id)
+        .await
+        .map_err(err)?
+        .filter(|task| task.project_id == project)
+        .ok_or_else(|| invalid(&format!("no task {id} in this project")))?;
+    let ids = [id.get()];
+    let times = db.dream_task_times(project, &ids).await.map_err(err)?;
+    let mut record = task_record(&task, &times);
+    if let Some(review) = db
+        .dream_reviews(project, &ids)
+        .await
+        .map_err(err)?
+        .remove(&id.get())
+    {
+        record["latest_review"] = review;
+    }
+    Ok(record)
 }
 
 pub(crate) fn report_definition() -> ToolDefinition {
@@ -412,13 +463,32 @@ impl HubCore {
         let inner = &self.inner;
         let project = context.project_id;
         if matches!(tool, PROJECT_DECISIONS | PROJECT_SESSIONS) {
-            let (offset, limit) =
-                page::offset_limit(fields(arguments, &["offset", "limit"])?, 50, 200)?;
+            let allowed: &[&str] = if tool == PROJECT_SESSIONS {
+                &["offset", "limit", "task_id", "updated_after"]
+            } else {
+                &["offset", "limit"]
+            };
+            let object = fields(arguments, allowed)?;
+            let (offset, limit) = page::offset_limit(object, 50, 200)?;
             let db = &inner.db;
             let err = crate::error::tool_error;
+            if let Some(reference) = object.get("task_id") {
+                return session_task(db, project, reference).await;
+            }
+            let updated_after = match object.get("updated_after") {
+                None => None,
+                Some(at) => Some(
+                    at.as_str()
+                        .and_then(|at| at.trim().parse::<jiff::Timestamp>().ok())
+                        .map(|at| Timestamp::from_millis(at.as_millisecond()))
+                        .ok_or_else(|| {
+                            invalid("updated_after must be a time like 2026-05-01T09:00:00Z")
+                        })?,
+                ),
+            };
             if tool == PROJECT_DECISIONS {
                 let (total, ids) = db
-                    .dream_ids(project, "choice", offset, limit)
+                    .dream_ids(project, "choice", None, offset, limit)
                     .await
                     .map_err(err)?;
                 let mut records = db.choice_records(project, &ids).await.map_err(err)?;
@@ -444,13 +514,14 @@ impl HubCore {
                 return Ok(result);
             }
             let (total_runs, runs) = db
-                .dream_ids(project, "run", offset, limit)
+                .dream_ids(project, "run", None, offset, limit)
                 .await
                 .map_err(err)?;
             let (total_tasks, tasks) = db
                 .dream_ids(
                     project,
                     "task",
+                    updated_after,
                     offset.saturating_sub(total_runs),
                     limit - runs.len(),
                 )
@@ -475,17 +546,38 @@ impl HubCore {
             let mut listed = db.dream_tasks(project, &tasks).await.map_err(err)?;
             listed.sort_by_key(|t| tasks.iter().position(|id| *id == t.id.get()));
             let mut reviews = db.dream_reviews(project, &tasks).await.map_err(err)?;
+            let times = db.dream_task_times(project, &tasks).await.map_err(err)?;
+            items.iter_mut().for_each(page::clip_fields);
             for task in &listed {
-                let mut record = crate::tools::task_json(task);
+                let mut record = task_record(task, &times);
                 if let Some(review) = reviews.remove(&task.id.get()) {
                     record["latest_review"] = review;
                 }
+                let full = record.clone();
+                page::clip_fields(&mut record);
+                if record != full {
+                    record["detail"] = detail(&full);
+                }
                 items.push(record);
             }
-            items.iter_mut().for_each(page::clip_fields);
             let (mut items, _) = page::take(&items, 0, limit);
             let end = offset.saturating_add(items.len());
-            let task_items = items.split_off(runs.len().min(items.len()));
+            let mut task_items = items.split_off(runs.len().min(items.len()));
+            // A record too large for the page keeps its structured head (#633).
+            for (item, task) in task_items.iter_mut().zip(&listed) {
+                if let Some(clipped) = item.get("clipped").cloned() {
+                    let full = task_record(task, &times);
+                    *item = json!({
+                        "task_id": full["task_id"],
+                        "status": full["status"],
+                        "waiting_reason": full["waiting_reason"],
+                        "summary": full["summary"],
+                        "updated_at": full["updated_at"],
+                        "clipped": clipped,
+                        "detail": detail(&full),
+                    });
+                }
+            }
             db.seen_dream_page(
                 project,
                 event.id,
@@ -506,13 +598,17 @@ impl HubCore {
             )
             .await
             .map_err(err)?;
-            let mut previous = db
-                .previous_dream_reports(project, context.lease.lane_id)
-                .await
-                .map_err(err)?;
-            previous.iter_mut().for_each(page::clip_fields);
-            let (previous, _) = page::take(&previous, 0, previous.len());
-            let mut result = json!({"runs":items,"tasks":task_items,"previous_reports":previous,"total_runs":total_runs});
+            let mut result = json!({"runs":items,"tasks":task_items,"total_runs":total_runs});
+            // The reports are the same on every page, so only the first carries them (#635).
+            if offset == 0 {
+                let mut previous = db
+                    .previous_dream_reports(project, context.lease.lane_id)
+                    .await
+                    .map_err(err)?;
+                previous.iter_mut().for_each(page::clip_fields);
+                let (previous, _) = page::take(&previous, 0, previous.len());
+                result["previous_reports"] = json!(previous);
+            }
             let total = total_runs + total_tasks;
             page::mark(&mut result, tool, total, (end < total).then_some(end));
             return Ok(result);

@@ -1291,3 +1291,133 @@ async fn dream_freezes_membership_and_pages_more_than_twenty_decisions() {
     .unwrap();
     assert_eq!(later["tasks"][0]["title"], "Arrived during review");
 }
+
+#[tokio::test]
+async fn sessions_keep_cut_tasks_structured_and_can_list_only_recent_ones() {
+    use threadlane_core::model::{NewTask, TaskOrigin, TaskStatus};
+
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    set(&hub, None).await;
+    let project = hub.general().await;
+    let agent = hub.db.bindings(project.id).await.unwrap()[0].agent_id;
+    let new_task = |title: &str, status| NewTask {
+        project_id: project.id,
+        agent_id: agent,
+        title: title.into(),
+        goal: "Reviewed by the dream".into(),
+        repositories: vec![],
+        parent_task_id: None,
+        depends_on: vec![],
+        origin: TaskOrigin::User,
+        status,
+        priority: 0,
+        created_by_call: None,
+        created_at: hub.clock.now(),
+    };
+    let big = hub
+        .db
+        .create_task(None, &new_task("Big", TaskStatus::Queued))
+        .await
+        .unwrap();
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.task_id, Some(big.id));
+    call(
+        &*hub.link,
+        &lease,
+        &run,
+        MEMORY_CREATE,
+        json!({"path": format!("project/tasks/{}.md", big.id), "content": "# Big\nDone."}),
+    )
+    .await
+    .unwrap();
+    let summary = format!("Shipped the big change.\n{}", "x".repeat(30_000));
+    call(
+        &*hub.link,
+        &lease,
+        &run,
+        "finish_task",
+        json!({"summary": summary}),
+    )
+    .await
+    .unwrap();
+    complete(&hub, &lease, &run).await;
+    // The lead hears the result first.
+    let (lease, lead) = begin(&*hub.link).await;
+    assert_eq!(lead.task_id, None);
+    complete(&hub, &lease, &lead).await;
+
+    hub.clock.advance(Duration::from_secs(60));
+    let cutoff = threadlane_hub::format_time(hub.clock.now());
+    hub.clock.advance(Duration::from_secs(60));
+    hub.db
+        .create_task(None, &new_task("Recent", TaskStatus::Proposed))
+        .await
+        .unwrap();
+
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let all = call(&*hub.link, &lease, &dream, SESSIONS, json!({}))
+        .await
+        .unwrap();
+    assert!(all.get("previous_reports").is_some(), "{all}");
+    let tasks = all["tasks"].as_array().unwrap();
+    let cut = tasks.iter().find(|t| t["task_id"] == "T-0001").unwrap();
+    assert_eq!(cut["status"], "done");
+    assert_eq!(cut["waiting_reason"], Json::Null);
+    let line = cut["summary"].as_str().unwrap();
+    assert!(
+        line.starts_with("Shipped the big change. xxx") && line.len() < 300,
+        "{line}"
+    );
+    assert!(cut["updated_at"].as_str().unwrap() < cutoff.as_str());
+    assert!(cut["detail"].as_str().unwrap().contains("task_id T-0001"));
+
+    let full = call(
+        &*hub.link,
+        &lease,
+        &dream,
+        SESSIONS,
+        json!({"task_id": "T-0001"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(full["result"]["summary"], summary);
+    assert_eq!(full["summary"], cut["summary"]);
+    assert!(full.get("detail").is_none());
+
+    let recent = call(
+        &*hub.link,
+        &lease,
+        &dream,
+        SESSIONS,
+        json!({"updated_after": cutoff, "offset": 0}),
+    )
+    .await
+    .unwrap();
+    let titles: Vec<&Json> = recent["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| &t["title"])
+        .collect();
+    assert_eq!(titles, [&json!("Recent")]);
+    assert!(recent["tasks"][0]["updated_at"].as_str().unwrap() > cutoff.as_str());
+
+    let later = call(&*hub.link, &lease, &dream, SESSIONS, json!({"offset": 1}))
+        .await
+        .unwrap();
+    assert!(later.get("previous_reports").is_none(), "{later}");
+    for bad in [
+        json!({"updated_after": "yesterday"}),
+        json!({"task_id": "T-0099"}),
+    ] {
+        assert!(matches!(
+            call(&*hub.link, &lease, &dream, SESSIONS, bad).await,
+            Err(ToolError::InvalidArguments(_))
+        ));
+    }
+    complete(&hub, &lease, &dream).await;
+}
