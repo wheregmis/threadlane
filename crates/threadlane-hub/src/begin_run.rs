@@ -352,7 +352,7 @@ impl LocalLink {
                         )
                     })
                     .collect();
-                prompt.push_str("\nWhen delegating in this project, choose the enabled agent whose role fits the goal. Pass its exact name to create_task. Split work across specialties when useful and record dependencies. If no specialist fits, keep the task yourself or ask for the missing capability. Each agent lists the backends it runs on, first choice first, with each one's model. An agent marked refused has a backend that rejected that model: delegate to an agent with a different backend or model, or ask the user to change it. Retry a task that failed on configuration with retry_task, optionally on another agent; the tasks waiting for it stay blocked until then.\nEnabled project agents: ");
+                prompt.push_str("\nWhen delegating in this project, choose the enabled agent whose role fits the goal. Pass its exact name to create_task. Split work across specialties when useful and record dependencies. If no specialist fits, keep the task yourself or ask for the missing capability. Each agent lists the backends it runs on, first choice first, with each one's model. An agent marked refused has a backend that rejected that model: delegate to an agent with a different backend or model, or ask the user to change it. Retry a task that failed on configuration with retry_task, optionally on another agent; the tasks waiting for it stay blocked until then. A task in review whose Reviewer failed on configuration is retried the same way, which queues its review again, optionally on another Reviewer.\nEnabled project agents: ");
                 prompt.push_str(&Json::Array(roster).to_string());
             }
             if scan {
