@@ -257,6 +257,17 @@ impl SessionStore for HubDb {
         let conn = tx.conn();
         check_lease(conn, lease).await?;
         check_running(conn, lease).await?;
+        // A pause committed after the lane was granted: roll back, leaving the events pending.
+        if query_one(
+            conn,
+            "SELECT paused != 0 FROM space WHERE id = 1",
+            (),
+            |row| Cols(row).bool(0),
+        )
+        .await?
+        {
+            return Err(StoreError::Stopped);
+        }
 
         let session_id: SessionId = match start.session {
             SessionChoice::New => query_one(
