@@ -15,7 +15,7 @@ use crate::db::{exec, query_all, query_one, query_opt};
 use crate::row::{Cols, opt_ts, params};
 use crate::timer::insert_timer_in;
 
-/// Maximum records of each kind reviewed per occurrence. Unread rows sort first next time.
+/// Maximum unread runs reviewed per occurrence. Unread rows sort first next time.
 const REVIEW_LIMIT: usize = 200;
 
 /// The last activity of task row `t`: its creation, the latest event or run in
@@ -435,15 +435,16 @@ impl HubDb {
                 (SELECT t.id FROM tasks t WHERE t.project_id=?1 AND {} > ?3))",
             task_updated_at()
         );
-        // Choices page newest first with no cap, so the latest answers stay reachable (#621).
-        let (cap, order, limit) = if kind == "choice" {
-            (String::new(), "last_review!=0,item_id DESC", limit)
-        } else {
-            (
+        // Choices page newest first and tasks page in full, with no cap, so none
+        // is dropped silently (#621, #665). Unread runs left past the cap come next time.
+        let (cap, order, limit) = match kind {
+            "choice" => (String::new(), "last_review!=0,item_id DESC", limit),
+            "task" => (String::new(), "last_review,item_id", limit),
+            _ => (
                 format!(" LIMIT {REVIEW_LIMIT}"),
                 "last_review,item_id",
                 limit.min(REVIEW_LIMIT.saturating_sub(offset)),
-            )
+            ),
         };
         let count = query_one(
             &conn,
