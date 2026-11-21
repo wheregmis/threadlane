@@ -419,7 +419,7 @@ async fn another_tasks_lane_sees_a_task_review_approval_under_any_registration_o
         &review,
         "approval",
         "finish_review",
-        json!({"verdict":"approved","feedback":"Looks right"}),
+        json!({"verdict":"approved","feedback":"Looks right","checks":"rerun"}),
     )
     .await
     .unwrap();
@@ -455,7 +455,10 @@ async fn another_tasks_lane_sees_a_task_review_approval_under_any_registration_o
         .unwrap();
         assert_eq!(status["review_status"], "approved", "{name}: {status}");
         assert_eq!(status["task_id"], a.id.to_string());
-        assert_eq!(status["feedback"], "Looks right");
+        assert_eq!(
+            status["feedback"],
+            "Checks: rerun independently in the review checkout.\n\nLooks right"
+        );
         assert_eq!(
             status["pull_request"],
             "https://github.com/acme/widgets/pull/42"
