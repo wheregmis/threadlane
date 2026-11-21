@@ -199,8 +199,8 @@ pub(crate) fn own_work_tool(tool: &str, arguments: &Json) -> bool {
 ///    has a tier 3 call reviewed in Autonomous;
 /// 4. otherwise, a call the cell would ask about or review is allowed by
 ///    default when it opens a draft pull request or pushes the task's own
-///    branch, the run is untainted, and the binding sets no override for the
-///    tier;
+///    branch and the binding sets no override for the tier; if the run is
+///    tainted, it is reviewed instead;
 /// 5. otherwise the matrix's cell for the row and the effective mode. A
 ///    requested task's own step is on the own-work row, whose allow is
 ///    recorded as allowed by default; an override only makes it stricter.
@@ -280,11 +280,14 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
     }
     if matches!(verdict, Cell::Ask | Cell::Review)
         && row == Row::Tier(input.tier)
-        && !input.tainted
         && !input.overrides.contains_key(&input.tier)
         && allowed_by_default(input.tool, input.arguments)
     {
-        return Verdict::AllowByDefault;
+        if !input.tainted {
+            return Verdict::AllowByDefault;
+        }
+        // Taint limits reach, not routine: the run's own draft is reviewed.
+        verdict = Cell::Review;
     }
     // A tier 3 rule applies only where the agent acts in Autonomous.
     let offers_rule = ruled && (input.tier < Tier::SharedHardToUndo || mode == Mode::Autonomous);
@@ -558,9 +561,24 @@ mod tests {
             pushed(case("the task branch on request", T2, ON, Default)),
             pushed(case("the task branch assisted", T2, AS, Default)),
             pushed(case("the task branch autonomous", T2, AU, Default)),
-            tainted(drafted(case("a tainted draft asks", T2, ON, AskOffer))),
-            tainted(drafted(case("a tainted draft is reviewed", T2, AU, Review))),
-            tainted(pushed(case("a tainted push asks", T2, AS, AskOffer))),
+            tainted(drafted(case("a tainted draft on request", T2, ON, Review))),
+            tainted(drafted(case("a tainted draft assisted", T2, AS, Review))),
+            tainted(drafted(case("a tainted draft autonomous", T2, AU, Review))),
+            tainted(pushed(case("a tainted push on request", T2, ON, Review))),
+            tainted(pushed(case("a tainted push assisted", T2, AS, Review))),
+            tainted(pushed(case("a tainted push autonomous", T2, AU, Review))),
+            tainted(drafted(Case {
+                overrides: &[(T2, Cell::Ask)],
+                ..case("an override decides a tainted draft", T2, AU, AskOffer)
+            })),
+            tainted(pushed(Case {
+                overrides: &[(T2, Cell::Ask)],
+                ..case("an override decides a tainted push", T2, ON, AskOffer)
+            })),
+            tainted(Case {
+                tool: "comment",
+                ..case("a tainted comment asks", T2, AS, AskOffer)
+            }),
             drafted(Case {
                 overrides: &[(T2, Cell::Ask)],
                 ..case("an override decides a draft", T2, AU, AskOffer)
@@ -998,7 +1016,7 @@ mod tests {
             !own_work_tool("publish_branch", &onto),
             "a push onto another task is not own work"
         );
-        let verdict = gate(&GateInput {
+        let input = GateInput {
             tool: "publish_branch",
             tier: T2,
             arguments: &onto,
@@ -1011,11 +1029,22 @@ mod tests {
             requested: true,
             new_work: None,
             own_work: Some(OwnWork { checks_pass: true }),
-        });
+        };
+        let verdict = gate(&input);
         assert_eq!(
             short(&verdict),
             V::AskOffer,
             "a push onto another task asks"
+        );
+        let tainted = gate(&GateInput {
+            mode: AS,
+            tainted: true,
+            ..input
+        });
+        assert_eq!(
+            short(&tainted),
+            V::AskOffer,
+            "a tainted push onto another task still asks"
         );
     }
 
