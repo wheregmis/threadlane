@@ -1305,8 +1305,9 @@ pub enum TaskRequest {
     /// on the task branch. Only a failed task can be retried.
     Retry { task: TaskId },
     /// Attaches registered repositories, by name, to a task that has not
-    /// ended, so it can publish. Its earlier work and session are kept; a
-    /// message in its lane tells its agent, and the next run gets worktrees.
+    /// ended, so it can publish, and clears its publication blocker. Its
+    /// earlier work and session are kept. No run is queued: its next run,
+    /// whenever something wakes it, gets worktrees.
     AttachRepositories {
         task: TaskId,
         repositories: Vec<String>,

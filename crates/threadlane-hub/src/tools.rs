@@ -951,6 +951,7 @@ pub(crate) fn task_json(task: &Task) -> Json {
         "depends_on": task.depends_on.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "parent_task_id": task.parent_task_id.map(|id| id.to_string()),
         "waiting_reason": task.waiting_reason,
+        "publication_blocker": task.publication_blocker,
         "result": task.result,
     })
 }
@@ -981,6 +982,7 @@ fn task_line(task: &Task) -> Json {
         "depends_on": task.depends_on.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "parent_task_id": task.parent_task_id.map(|id| id.to_string()),
         "waiting_reason": task.waiting_reason.as_deref().map(line),
+        "publication_blocker": task.publication_blocker.as_deref().map(line),
         "result": result,
     })
 }
@@ -1505,6 +1507,7 @@ mod tests {
             waiting_reason: None,
             result: Some(json!({ "summary": summary, "review": { "feedback": "x" } })),
             created_at: threadlane_core::time::Timestamp::from_millis(0),
+            publication_blocker: None,
         };
         let line = task_line(&task);
         let result = line["result"].as_str().unwrap();

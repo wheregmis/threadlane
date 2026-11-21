@@ -470,6 +470,7 @@ impl HubApi for FakeHub {
                     waiting_reason: None,
                     result: None,
                     created_at: Timestamp::from_millis(1_000),
+                    publication_blocker: None,
                 },
             }),
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),

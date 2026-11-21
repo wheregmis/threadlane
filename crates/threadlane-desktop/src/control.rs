@@ -138,6 +138,9 @@ pub struct Publication {
     pub line: String,
     /// Registered repositories it lacks, while it has not ended.
     pub attachable: Vec<String>,
+    /// Whether a publish call already failed for want of a repository: the
+    /// line is then the hub's blocker, shown until one is attached.
+    pub blocked: bool,
 }
 
 /// What the task screen offers to stop a task.
@@ -526,14 +529,18 @@ impl AppState {
             }
         } else if ended {
             "Cannot publish: no repository was attached before it ended".to_owned()
+        } else if let Some(blocker) = &task.publication_blocker {
+            blocker.clone()
         } else if known && registered.is_empty() {
             "Cannot publish: no repository is attached, and its project has none registered"
                 .to_owned()
         } else {
             "Cannot publish: no repository is attached".to_owned()
         };
+        let blocked = !ended && task.repositories.is_empty() && task.publication_blocker.is_some();
         Some(Publication {
             line,
+            blocked,
             attachable: if ended {
                 Vec::new()
             } else {

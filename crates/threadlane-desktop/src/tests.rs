@@ -1076,6 +1076,7 @@ fn task(id: i64, status: TaskStatus, waiting_reason: Option<&str>) -> TaskSummar
             waiting_reason: waiting_reason.map(str::to_owned),
             result: None,
             created_at: Timestamp::from_millis(1_000),
+            publication_blocker: None,
         },
         project: "api".to_owned(),
         agent: "Engineer".to_owned(),
@@ -3282,6 +3283,7 @@ async fn a_task_without_a_repository_says_it_cannot_publish_until_one_is_attache
         Publication {
             line: "Cannot publish: no repository is attached".into(),
             attachable: vec!["app".into(), "docs".into()],
+            blocked: false,
         }
     );
     assert_eq!(
@@ -3289,8 +3291,22 @@ async fn a_task_without_a_repository_says_it_cannot_publish_until_one_is_attache
         Publication {
             line: "Cannot publish: no repository was attached before it ended".into(),
             attachable: Vec::new(),
+            blocked: false,
         },
         "an ended task cannot take one"
+    );
+
+    let blocker = "Cannot publish: no repository is attached. Attach app or docs from the task screen, or the lead can attach it with update_task.";
+    work.tasks.lock().expect("lock")[0].task.publication_blocker = Some(blocker.into());
+    state.apply_task(load_task(&core, "work", TaskId(1)).await);
+    assert_eq!(
+        line(&state, 1),
+        Publication {
+            line: blocker.into(),
+            blocked: true,
+            attachable: vec!["app".into(), "docs".into()],
+        },
+        "the hub's blocker stays until a repository is attached"
     );
 
     let attached = core
@@ -3304,6 +3320,7 @@ async fn a_task_without_a_repository_says_it_cannot_publish_until_one_is_attache
         Publication {
             line: "Can publish to app".into(),
             attachable: vec!["docs".into()],
+            blocked: false,
         }
     );
 }

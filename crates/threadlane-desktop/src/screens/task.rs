@@ -134,7 +134,14 @@ impl Desktop {
             .p(SM)
             .child(self.copyable("copy-branch", change.branch, cx))
             .child(change.state)
-            .children(publication.as_ref().map(|p| meta(p.line.clone(), cx)))
+            .children(publication.as_ref().map(|p| {
+                let line = meta(p.line.clone(), cx);
+                if p.blocked {
+                    line.text_color(cx.theme().danger)
+                } else {
+                    line
+                }
+            }))
             .children(
                 publication
                     .into_iter()

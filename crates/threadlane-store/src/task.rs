@@ -54,7 +54,7 @@ const TERMINAL: &str = "'done', 'failed', 'cancelled'";
 
 const TASK_FIELDS: &str = "id, project_id, lane_id, agent_id, title, goal, repositories,
     parent_task_id, origin, status, priority, created_by_call, last_machine_id, waiting_reason,
-    result, created_at";
+    result, created_at, publication_blocker";
 
 fn decode_task(row: &Row, depends_on: Vec<TaskId>) -> StoreResult<Task> {
     let c = Cols(row);
@@ -76,6 +76,7 @@ fn decode_task(row: &Row, depends_on: Vec<TaskId>) -> StoreResult<Task> {
         waiting_reason: c.opt_text(13)?,
         result: c.opt_json(14)?,
         created_at: c.ts(15)?,
+        publication_blocker: c.opt_text(16)?,
     })
 }
 
@@ -1027,7 +1028,7 @@ impl HubDb {
         while let Some(row) = rows.next().await.map_err(crate::db::db_err)? {
             let cols = Cols(&row);
             let id: TaskId = cols.id(0)?;
-            let dependency = cols.opt_id(16)?;
+            let dependency = cols.opt_id(17)?;
             if let Some(task) = tasks.last_mut().filter(|task| task.id == id) {
                 task.depends_on.extend(dependency);
             } else {
@@ -1112,12 +1113,12 @@ impl HubDb {
         };
         while let Some(row) = rows.next().await.map_err(crate::db::db_err)? {
             let cols = Cols(&row);
-            result.total = usize::try_from(cols.i64(17)?).unwrap_or(usize::MAX);
-            result.hidden_finished = usize::try_from(cols.i64(18)?).unwrap_or(usize::MAX);
+            result.total = usize::try_from(cols.i64(18)?).unwrap_or(usize::MAX);
+            result.hidden_finished = usize::try_from(cols.i64(19)?).unwrap_or(usize::MAX);
             let Some(id): Option<TaskId> = cols.opt_id(0)? else {
                 break;
             };
-            let dependency = cols.opt_id(16)?;
+            let dependency = cols.opt_id(17)?;
             if let Some(task) = result.tasks.last_mut().filter(|task| task.id == id) {
                 task.depends_on.extend(dependency);
             } else {
@@ -1225,7 +1226,9 @@ impl TaskStore for HubDb {
         }
         exec(
             conn,
-            "UPDATE tasks SET title = ?1, goal = ?2, priority = ?3, repositories = ?4 WHERE id = ?5",
+            "UPDATE tasks SET title = ?1, goal = ?2, priority = ?3, repositories = ?4,
+                publication_blocker = CASE WHEN ?4 = '[]' THEN publication_blocker END
+             WHERE id = ?5",
             params![
                 update.title.unwrap_or(&task.title),
                 update.goal.unwrap_or(&task.goal),
@@ -1437,6 +1440,17 @@ impl TaskStore for HubDb {
         if task.status == TaskStatus::Proposed && status == TaskStatus::Queued {
             insert_start_event(conn, &task).await?;
         }
+        tx.commit().await
+    }
+
+    async fn block_publication(&self, id: TaskId, reason: &str) -> StoreResult<()> {
+        let tx = self.db.begin().await?;
+        exec(
+            tx.conn(),
+            "UPDATE tasks SET publication_blocker = ?1 WHERE id = ?2 AND repositories = '[]'",
+            params![reason, id.get()],
+        )
+        .await?;
         tx.commit().await
     }
 }

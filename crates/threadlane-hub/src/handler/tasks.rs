@@ -5,7 +5,7 @@
 use threadlane_core::client::{ApiError, TaskReply, TaskRequest};
 use threadlane_core::model::{Mode, NewTask, TaskOrigin, TaskStatus};
 use threadlane_core::runtime::{WakeTarget, Waker as _};
-use threadlane_core::store::{OrgStore, TaskStore, TaskUpdate, TaskWake};
+use threadlane_core::store::{OrgStore, TaskStore, TaskUpdate};
 
 use super::{ClientApi, active_project, project_error, required};
 use crate::error::api_error;
@@ -175,18 +175,9 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                     "task {id} already has every repository named"
                 )));
             }
-            let names = added
-                .iter()
-                .map(|repository| repository.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let instruction = format!(
-                "The user attached {names} to this task so its work can be published. \
-                 Your progress file is kept, and so is your earlier working directory: \
-                 your next run starts in a worktree of the attached repository and is told \
-                 where the earlier work is. Bring your completed work into the worktree, \
-                 then publish as the task asks."
-            );
+            // Attaching queues no run: a sleeping or waiting task stays put
+            // until something else wakes it, and its next run is given the
+            // worktree and told where its earlier work is.
             let ids: Vec<_> = added.iter().map(|repository| repository.id).collect();
             let updated = db
                 .update_task(
@@ -194,24 +185,11 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                     id,
                     TaskUpdate {
                         repositories: &ids,
-                        wake: Some(TaskWake {
-                            call_key: format!(
-                                "attach:{}",
-                                ids.iter()
-                                    .map(ToString::to_string)
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            ),
-                            instruction: &instruction,
-                            requested: true,
-                            at: inner.clock.now(),
-                        }),
                         ..TaskUpdate::default()
                     },
                 )
                 .await
                 .map_err(api_error)?;
-            inner.wake.wake(WakeTarget::Lane(updated.lane_id));
             Ok(TaskReply::Task { task: updated })
         }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
