@@ -187,14 +187,12 @@ impl Runner {
 
     /// Asks for lanes until the hub has none or `max_parallel` are running.
     async fn claim(&self, lanes: &mut JoinSet<Result<(), Killed>>) -> Result<(), RunnerError> {
-        let limit = self
-            .inner
-            .link
-            .max_parallel()
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(self.inner.config.max_parallel);
+        let limit = match self.inner.link.max_parallel().await {
+            Ok(Some(limit)) => limit,
+            Ok(None) => self.inner.config.max_parallel,
+            Err(LinkError::Killed(killed)) => return Err(killed.into()),
+            Err(_) => self.inner.config.max_parallel,
+        };
         let max_parallel = usize::try_from(limit).unwrap_or(usize::MAX);
         while lanes.len() < max_parallel {
             match self.inner.link.request_work().await {

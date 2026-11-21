@@ -50,6 +50,10 @@ impl HubCore {
     ///
     /// A store error, or [`HubError::Killed`] at an injected crash.
     pub async fn dispatch_once(&self) -> Result<u32, HubError> {
+        Ok(self.dispatch_pass().await?.0)
+    }
+
+    pub(crate) async fn dispatch_pass(&self) -> Result<(u32, bool), HubError> {
         let inner = &self.inner;
         let _dispatch = inner.dispatch.lock().await;
         let pacing = inner.db.pacing().await?;
@@ -68,8 +72,9 @@ impl HubCore {
         };
         let messages = inner.db.dispatchable(now, limit).await?;
         if messages.is_empty() {
-            return Ok(0);
+            return Ok((0, false));
         }
+        let full_batch = u32::try_from(messages.len()).unwrap_or(u32::MAX) >= limit;
         inner.hook.reach(step::AFTER_READ)?;
         let quiet_end = |at| {
             quiet
@@ -227,7 +232,7 @@ impl HubCore {
             inner.hook.reach(step::AFTER_MARK_SENT)?;
             sent += 1;
         }
-        Ok(sent)
+        Ok((sent, full_batch))
     }
 
     async fn rate_hold(

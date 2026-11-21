@@ -624,7 +624,7 @@ impl HubTools {
 
     async fn list_tasks(&self, context: &ToolContext, arguments: &Json) -> Result<Json, ToolError> {
         let object = fields(arguments, &["task_id", "all", "offset", "limit"])?;
-        let agents: std::collections::HashMap<_, _> = self
+        let agents: HashMap<_, _> = self
             .db
             .all_agents()
             .await

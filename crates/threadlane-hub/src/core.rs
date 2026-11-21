@@ -290,6 +290,23 @@ impl HubCore {
                 continue;
             }
             let _removal = inner.project_removal.lock().await;
+            let Some(task) = inner.db.task(id).await? else {
+                continue;
+            };
+            if !task.status.is_terminal() {
+                continue;
+            }
+            let last_run = inner
+                .db
+                .lane_runs(task.lane_id)
+                .await?
+                .iter()
+                .map(|run| run.ended_at.unwrap_or(run.started_at))
+                .max()
+                .unwrap_or(task.created_at);
+            if now.saturating_since(last_run) < idle {
+                continue;
+            }
             let repositories: Vec<_> = inner
                 .db
                 .repositories(task.project_id)
@@ -410,11 +427,13 @@ impl HubCore {
     async fn dispatch_loop(&self) -> Result<(), HubError> {
         loop {
             let started_at = self.inner.clock.now();
-            match self.dispatch_once().await {
-                Ok(0) => {}
-                Ok(sent) => {
-                    tracing::debug!(sent, "dispatched messages");
-                    if sent >= crate::dispatcher::BATCH {
+            match self.dispatch_pass().await {
+                Ok((0, false)) => {}
+                Ok((sent, full_batch)) => {
+                    if sent > 0 {
+                        tracing::debug!(sent, "dispatched messages");
+                    }
+                    if full_batch {
                         continue;
                     }
                 }

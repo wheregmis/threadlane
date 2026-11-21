@@ -132,10 +132,7 @@ impl Desktop {
                     .children(self.machine_limit_saving.then(|| meta("Saving…", cx))),
             );
         if detail.runner_slots > 0 {
-            capacity = capacity.child(meta(
-                "Tasks and lead conversations share these slots.",
-                cx,
-            ));
+            capacity = capacity.child(meta("Tasks and lead conversations share these slots.", cx));
         }
         if let Some(reason) = if detail.status == MachineStatus::Revoked {
             Some("This machine's access has been revoked.")

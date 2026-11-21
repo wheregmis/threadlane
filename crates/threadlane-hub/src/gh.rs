@@ -143,7 +143,10 @@ impl GhSource {
         let mut latest: Option<GithubItem> = None;
         while let Some(path) = next {
             if visited.len() >= MAX_PAGES * 5 {
-                break;
+                return Err(GithubError(format!(
+                    "GitHub pagination exceeded {} pages: {path}",
+                    MAX_PAGES * 5
+                )));
             }
             if !visited.insert(path.clone()) {
                 return Err(GithubError(format!("repeated GitHub page: {path}")));

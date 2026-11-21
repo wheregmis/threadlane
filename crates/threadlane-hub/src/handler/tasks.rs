@@ -124,6 +124,7 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
             Ok(TaskReply::Task { task: cancelled })
         }
         TaskRequest::Retry { task: id } => {
+            let _removal = inner.project_removal.lock().await;
             let task = db
                 .task(id)
                 .await

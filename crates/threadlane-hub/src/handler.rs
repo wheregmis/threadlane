@@ -742,11 +742,8 @@ impl HubApi for ClientApi {
             }
             OrgRequest::Bindings { project } => {
                 let project = self.project_named(project.as_deref()).await?;
-                let (raw_bindings, all_agents) = tokio::try_join!(
-                    db.bindings(project.id),
-                    db.all_agents(),
-                )
-                .map_err(api_error)?;
+                let raw_bindings = db.bindings(project.id).await.map_err(api_error)?;
+                let all_agents = db.all_agents().await.map_err(api_error)?;
                 let agents: HashMap<_, _> = all_agents
                     .into_iter()
                     .map(|agent| (agent.id, agent))
@@ -887,6 +884,7 @@ impl HubApi for ClientApi {
                     .into(),
             )),
             OrgRequest::SetSpaceCeiling { mode } => {
+                let _dispatch = self.core.inner.dispatch.lock().await;
                 let mut space = db.space().await.map_err(api_error)?;
                 space.mode_ceiling = mode;
                 db.update_space(&space).await.map_err(api_error)?;
@@ -1040,20 +1038,13 @@ impl HubApi for ClientApi {
                     Some(name) => Some(self.project_named(Some(&name)).await?.id),
                     None => None,
                 };
-                let (raw_rules, all_projects, all_agents) = tokio::try_join!(
-                    db.standing_rules(project),
-                    db.projects(),
-                    db.all_agents(),
-                )
-                .map_err(api_error)?;
-                let projects: HashMap<_, _> = all_projects
-                    .into_iter()
-                    .map(|p| (p.id, p.name))
-                    .collect();
-                let agents: HashMap<_, _> = all_agents
-                    .into_iter()
-                    .map(|a| (a.id, a.name))
-                    .collect();
+                let raw_rules = db.standing_rules(project).await.map_err(api_error)?;
+                let (all_projects, all_agents) =
+                    tokio::try_join!(db.projects(), db.all_agents()).map_err(api_error)?;
+                let projects: HashMap<_, _> =
+                    all_projects.into_iter().map(|p| (p.id, p.name)).collect();
+                let agents: HashMap<_, _> =
+                    all_agents.into_iter().map(|a| (a.id, a.name)).collect();
                 let rules = raw_rules
                     .into_iter()
                     .map(|rule| {
