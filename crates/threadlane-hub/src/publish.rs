@@ -5,7 +5,7 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EXPECTED_HEAD,
+    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST, EXPECTED_HEAD,
     FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, LABEL_ISSUE, MARK_READY, MAX_LABELS, MERGE, ONTO_TASK,
     OPEN_PULL_REQUEST, PUBLISH_BRANCH, valid_label_name,
 };
@@ -198,6 +198,22 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 "required":["repository","number"],"additionalProperties":false
             }),
         ),
+        define(
+            EDIT_PULL_REQUEST,
+            "Replace the title and/or body of an open pull request in a registered project \
+             repository, such as a description that names an old head commit. Give at least one \
+             of title and body; the one you leave out stays as it is. End your turn if the call \
+             waits for approval.",
+            json!({
+                "type":"object","properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "title":{"type":"string","description":"The new title, one line."},
+                    "body":{"type":"string","description":"The new body, replacing the whole description."}
+                },
+                "required":["repository","number"],"additionalProperties":false
+            }),
+        ),
     ]
 }
 
@@ -232,6 +248,15 @@ fn gh_args(a: &Json) -> Result<Vec<String>, ToolError> {
         ("pr", "create") => Some(OPEN_PULL_REQUEST),
         ("pr", "merge") => Some(MERGE),
         ("pr", "ready") => Some(MARK_READY),
+        ("pr", "edit")
+            if args.iter().any(|arg| {
+                ["--title", "--body", "-t", "-b"]
+                    .iter()
+                    .any(|flag| arg.starts_with(flag))
+            }) =>
+        {
+            Some(EDIT_PULL_REQUEST)
+        }
         ("pr", "close") => Some(CLOSE_PULL_REQUEST),
         ("pr" | "issue", "comment") => Some(COMMENT),
         ("issue", "create" | "new") => Some(CREATE_ISSUE),
@@ -461,6 +486,25 @@ pub(crate) fn repository_action(
             fields(a, &["repository", "number"])?;
             Ok(RepositoryAction::AssignIssue { number: number()? })
         }
+        EDIT_PULL_REQUEST => {
+            fields(a, &["repository", "number", "title", "body"])?;
+            let title = match a.get("title") {
+                None | Some(Json::Null) => None,
+                Some(_) => Some(issue_title(a)?),
+            };
+            let body = match a.get("body") {
+                None | Some(Json::Null) => None,
+                Some(_) => Some(body()?),
+            };
+            if title.is_none() && body.is_none() {
+                return Err(invalid("give a new title, a new body, or both"));
+            }
+            Ok(RepositoryAction::EditPullRequest {
+                number: number()?,
+                title,
+                body,
+            })
+        }
         _ => Err(invalid("unknown repository action")),
     }
 }
@@ -525,6 +569,7 @@ pub(crate) async fn proposal(
             | CLOSE_PULL_REQUEST
             | GITHUB_CLI
             | ASSIGN_ISSUE
+            | EDIT_PULL_REQUEST
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -592,6 +637,7 @@ pub(crate) async fn proposal(
             | LABEL_ISSUE
             | CLOSE_PULL_REQUEST
             | ASSIGN_ISSUE
+            | EDIT_PULL_REQUEST
     ) {
         let action = repository_action(tool, arguments)?;
         if tool == ASSIGN_ISSUE && github_repository(&repository.remote_url).is_none() {
@@ -612,6 +658,19 @@ pub(crate) async fn proposal(
                     " and delete its head branch"
                 } else {
                     ""
+                }
+            ),
+            threadlane_core::forge::RepositoryAction::EditPullRequest {
+                number,
+                title,
+                body,
+                ..
+            } => format!(
+                "Edit pull request {slug}#{number} in {name}: {}?",
+                match (title, body) {
+                    (Some(title), Some(_)) => format!("new title {title:?} and new body"),
+                    (Some(title), None) => format!("new title {title:?}"),
+                    _ => "new body".to_owned(),
                 }
             ),
             threadlane_core::forge::RepositoryAction::LabelIssue {
@@ -833,6 +892,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn edit_pull_request_replaces_a_title_or_body_and_needs_one() {
+        use threadlane_core::forge::RepositoryAction;
+        let edit = |extra: Json| {
+            let mut a = json!({"repository":"app","number":12});
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            repository_action(EDIT_PULL_REQUEST, &a)
+        };
+        let number = std::num::NonZeroU64::new(12).unwrap();
+        assert_eq!(
+            edit(json!({"body":"Head is now abc.\n\nCloses #1"})),
+            Ok(RepositoryAction::EditPullRequest {
+                number,
+                title: None,
+                body: Some("Head is now abc.\n\nCloses #1".into()),
+            })
+        );
+        assert_eq!(
+            edit(json!({"title":"  Better title "})),
+            Ok(RepositoryAction::EditPullRequest {
+                number,
+                title: Some("Better title".into()),
+                body: None,
+            })
+        );
+        for bad in [
+            json!({}),
+            json!({"title":"--help"}),
+            json!({"title":"two\nlines"}),
+            json!({"body":"bell\u{7}"}),
+            json!({"body":7}),
+            json!({"head":"x","body":"ok"}),
+        ] {
+            assert!(edit(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn label_issue_needs_valid_distinct_labels() {
         let parse = |a: Json| repository_action(LABEL_ISSUE, &a);
         assert_eq!(
@@ -884,6 +982,8 @@ mod tests {
             json!(["pr", "view", "1", "--web"]),
             json!(["pr", "merge", "1"]),
             json!(["pr", "close", "1"]),
+            json!(["pr", "edit", "1", "--body=stale"]),
+            json!(["pr", "edit", "1", "-t", "New"]),
             json!(["issue", "comment", "1"]),
             json!(["issue", "edit", "1", "--add-label=bug"]),
             json!(["issue", "edit", "1", "--add-assignee=@me"]),

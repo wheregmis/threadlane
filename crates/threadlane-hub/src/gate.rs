@@ -93,7 +93,10 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
     // A standing rule for these covers one pull request or issue, not the whole repository.
     if matches!(
         tool,
-        crate::FAST_FORWARD_PULL_REQUEST | crate::LABEL_ISSUE | crate::CLOSE_PULL_REQUEST
+        crate::FAST_FORWARD_PULL_REQUEST
+            | crate::LABEL_ISSUE
+            | crate::CLOSE_PULL_REQUEST
+            | crate::EDIT_PULL_REQUEST
     ) && let Some(number) = arguments["number"].as_u64()
     {
         targets.insert("number".into(), number.into());
