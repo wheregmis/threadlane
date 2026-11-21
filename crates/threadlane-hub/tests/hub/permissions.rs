@@ -10,12 +10,12 @@ use threadlane_core::client::{
     ApiError, DecisionReply, DecisionRequest, OrgReply, OrgRequest, StandingRuleSummary,
 };
 use threadlane_core::github::PullRequestState;
-use threadlane_core::ids::{DecisionId, StandingRuleId};
+use threadlane_core::ids::{AgentId, DecisionId, ProjectId, RepositoryId, StandingRuleId};
 use threadlane_core::link::Begin;
 use threadlane_core::link::RunAssignment;
 use threadlane_core::model::{
     Cell, Decision, DecisionStatus, EventKind, Lease, Mode, NewAgent, NewBinding, NewRepository,
-    NewTask, OutboxKind, TaskOrigin, TaskStatus, Trust,
+    NewTask, OutboxKind, Task, TaskOrigin, TaskStatus, Trust,
 };
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::runtime::steps::scheduler;
@@ -648,6 +648,9 @@ async fn an_override_is_stricter_freely_and_looser_only_to_the_ceiling() {
     assert!(listed.is_ok(), "{listed:?}");
 }
 
+/// `acme/widgets` on GitHub.
+const WIDGETS: &str = "https://github.com/acme/widgets.git";
+
 /// The head the Reviewer approved in [`own_merge`].
 fn approved_head() -> String {
     "a".repeat(40)
@@ -666,15 +669,9 @@ fn widgets_pull(branch: &str, head: &str, check: &str) -> PullRequestState {
     }
 }
 
-/// A task of `origin` in `widgets` on GitHub, worked by an Assisted
-/// Engineer, whose submission at [`approved_head`] the Reviewer approved
-/// while you asked for more, so the Engineer runs again. GitHub answers
-/// `pull` for pull request 42. Returns the hub, GitHub, and the Engineer's
-/// lease and run after the approval.
-async fn own_merge(
-    origin: TaskOrigin,
-    pull: PullRequestState,
-) -> (TestHub, FakeGithub, Lease, RunAssignment) {
+/// A hub with a Reviewer and the fake GitHub, and an Engineer not yet
+/// bound anywhere.
+async fn reviewing_hub() -> (TestHub, FakeGithub, AgentId) {
     let github = FakeGithub::default();
     let clock = FakeClock::at_default_start();
     let db = HubDb::open_in_memory(&Bootstrap::default(), Arc::new(clock.clone()))
@@ -695,16 +692,30 @@ async fn own_merge(
     let hub = TestHub::around(core, clock).await;
     hub.hello().await;
     autonomous_space(&hub).await;
-    let project = hub.general().await;
     let engineer = hub
         .db
         .create_agent(&NewAgent::named("Engineer", "engineer"))
         .await
         .unwrap();
     hub.db
+        .create_agent(&NewAgent::named("Reviewer", "reviewer"))
+        .await
+        .unwrap();
+    (hub, github, engineer.id)
+}
+
+/// Binds the Engineer to `project` in Assisted and registers `widgets`
+/// there, as `acme/widgets` on GitHub under `remote`.
+async fn widgets_in(
+    hub: &TestHub,
+    project: ProjectId,
+    engineer: AgentId,
+    remote: &str,
+) -> RepositoryId {
+    hub.db
         .bind(&NewBinding {
-            project_id: project.id,
-            agent_id: engineer.id,
+            project_id: project,
+            agent_id: engineer,
             mode: Mode::Assisted,
             is_lead: false,
             max_parallel: 1,
@@ -712,30 +723,34 @@ async fn own_merge(
         .await
         .unwrap();
     hub.db
-        .create_agent(&NewAgent::named("Reviewer", "reviewer"))
-        .await
-        .unwrap();
-    let widgets = hub
-        .db
         .create_repository(&NewRepository {
-            project_id: project.id,
+            project_id: project,
             name: "widgets".into(),
-            remote_url: "https://github.com/acme/widgets.git".into(),
+            remote_url: remote.into(),
             default_branch: "main".into(),
             protected_branches: vec![],
         })
         .await
-        .unwrap();
-    let task = hub
-        .db
+        .unwrap()
+        .id
+}
+
+async fn widgets_task(
+    hub: &TestHub,
+    project: ProjectId,
+    engineer: AgentId,
+    widgets: RepositoryId,
+    origin: TaskOrigin,
+) -> Task {
+    hub.db
         .create_task(
             None,
             &NewTask {
-                project_id: project.id,
-                agent_id: engineer.id,
+                project_id: project,
+                agent_id: engineer,
                 title: "Fix widgets".into(),
                 goal: "Fix the widgets and merge them".into(),
-                repositories: vec![widgets.id],
+                repositories: vec![widgets],
                 parent_task_id: None,
                 depends_on: vec![],
                 origin,
@@ -746,12 +761,18 @@ async fn own_merge(
             },
         )
         .await
-        .unwrap();
-    github.set_pull_request("acme/widgets", 42, Ok(pull));
+        .unwrap()
+}
 
+/// Runs `task`, the only lane with work, to a submission at
+/// [`approved_head`] that the Reviewer approves. With `more`, you asked for
+/// more meanwhile, so the approval sends the task back and its next run is
+/// returned; without, the task ends and the lane is released.
+async fn approve(hub: &TestHub, task: &Task, more: bool) -> (Lease, Option<RunAssignment>) {
     let (lease, implementation) = begin(&*hub.link).await;
+    assert_eq!(implementation.task_id, Some(task.id));
     call(
-        &hub,
+        hub,
         &lease,
         &implementation,
         "progress",
@@ -761,7 +782,7 @@ async fn own_merge(
     .await
     .unwrap();
     call(
-        &hub,
+        hub,
         &lease,
         &implementation,
         "submit",
@@ -778,7 +799,7 @@ async fn own_merge(
         panic!("the review never started")
     };
     call(
-        &hub,
+        hub,
         &lease,
         &review,
         "approval",
@@ -787,23 +808,142 @@ async fn own_merge(
     )
     .await
     .unwrap();
-    // You asked for more meanwhile, so the approval sends the task back.
-    hub.insert(|event| {
-        event.lane_id = task.lane_id;
-        event.kind = EventKind::UserMessage;
-        event.trust = Trust::User;
-        event.payload = json!({ "text": "Merge it once it is approved" });
-    })
-    .await;
+    if more {
+        hub.insert(|event| {
+            event.project_id = task.project_id;
+            event.lane_id = task.lane_id;
+            event.kind = EventKind::UserMessage;
+            event.trust = Trust::User;
+            event.payload = json!({ "text": "Merge it once it is approved" });
+        })
+        .await;
+    }
     hub.link
         .complete(&lease, review.run_id, None)
         .await
         .unwrap();
+    if !more {
+        hub.link.release(&lease).await.unwrap();
+        return (lease, None);
+    }
     let Begin::Run(run) = hub.link.begin_run(&lease).await.unwrap() else {
         panic!("the Engineer never ran again")
     };
     assert_eq!(run.task_id, Some(task.id));
-    (hub, github, lease, *run)
+    (lease, Some(*run))
+}
+
+/// A task of `origin` in `widgets` on GitHub, worked by an Assisted
+/// Engineer, whose submission at [`approved_head`] the Reviewer approved
+/// while you asked for more, so the Engineer runs again. GitHub answers
+/// `pull` for pull request 42. Returns the hub, GitHub, and the Engineer's
+/// lease and run after the approval.
+async fn own_merge(
+    origin: TaskOrigin,
+    pull: PullRequestState,
+) -> (TestHub, FakeGithub, Lease, RunAssignment) {
+    let (hub, github, engineer) = reviewing_hub().await;
+    let project = hub.general().await.id;
+    let widgets = widgets_in(&hub, project, engineer, WIDGETS).await;
+    let task = widgets_task(&hub, project, engineer, widgets, origin).await;
+    github.set_pull_request("acme/widgets", 42, Ok(pull));
+    let (lease, run) = approve(&hub, &task, true).await;
+    (hub, github, lease, run.unwrap())
+}
+
+/// A merge task you requested in General, merging pull request 42, whose
+/// head is the branch of an earlier task of `origin`, approved and green,
+/// in General or, with `elsewhere`, in another project. Says whether
+/// anything reached you.
+async fn sibling_merge(origin: TaskOrigin, elsewhere: bool) -> bool {
+    let (hub, github, engineer) = reviewing_hub().await;
+    let general = hub.general().await.id;
+    let widgets = widgets_in(&hub, general, engineer, WIDGETS).await;
+    let (project, repository) = if elsewhere {
+        let Ok(OrgReply::Project { project }) = org(
+            &hub,
+            OrgRequest::CreateProject {
+                name: "Gadgets".into(),
+                description: String::new(),
+            },
+        )
+        .await
+        else {
+            panic!("no project")
+        };
+        let other = project.id;
+        (
+            other,
+            widgets_in(&hub, other, engineer, "git@github.com:acme/widgets.git").await,
+        )
+    } else {
+        (general, widgets)
+    };
+    let fixed = widgets_task(&hub, project, engineer, repository, origin).await;
+    approve(&hub, &fixed, false).await;
+    assert_eq!(
+        hub.db.task(fixed.id).await.unwrap().unwrap().status,
+        TaskStatus::Done
+    );
+    github.set_pull_request(
+        "acme/widgets",
+        42,
+        Ok(widgets_pull(
+            &threadlane_core::workspace::task_branch(fixed.id),
+            &approved_head(),
+            "success",
+        )),
+    );
+    let merger = widgets_task(&hub, general, engineer, widgets, TaskOrigin::User).await;
+    // The lead lane may be granted first, for the earlier task's result.
+    let (lease, run) = loop {
+        let lease = hub.link.request_work().await.unwrap().expect("granted");
+        match hub.link.begin_run(&lease).await.unwrap() {
+            Begin::Run(run) if run.task_id == Some(merger.id) => break (lease, *run),
+            Begin::Run(run) => {
+                hub.link.complete(&lease, run.run_id, None).await.unwrap();
+            }
+            Begin::Idle => {}
+        }
+        hub.link.release(&lease).await.unwrap();
+    };
+    let cards_before = cards(&hub).await;
+    let merged = call(
+        &hub,
+        &lease,
+        &run,
+        "merge",
+        threadlane_hub::MERGE,
+        &json!({"repository": "widgets", "number": 42}),
+    )
+    .await;
+    assert_eq!(pull_reads(&github), 1);
+    let asked = cards(&hub).await > cards_before;
+    assert_eq!(
+        merged,
+        if asked {
+            Err(ToolError::WaitingOnYou)
+        } else {
+            Err(ToolError::AuthorizedAndQueued)
+        }
+    );
+    asked
+}
+
+#[tokio::test]
+async fn a_merge_task_merges_a_sibling_requested_tasks_approved_green_pull_request() {
+    assert!(
+        !sibling_merge(TaskOrigin::User, false).await,
+        "allowed by default"
+    );
+    assert!(
+        sibling_merge(TaskOrigin::Agent, false).await,
+        "work you did not request asks"
+    );
+    assert!(
+        sibling_merge(TaskOrigin::User, true).await,
+        "another project's task asks"
+    );
 }
 
 /// How many times GitHub was asked for a pull request's state.

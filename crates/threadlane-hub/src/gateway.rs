@@ -16,7 +16,7 @@ use threadlane_core::runtime::steps::{perform, tool_call as step};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{DecisionStore, OrgStore, SessionStore, TaskStore};
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, Verdict};
-use threadlane_core::workspace::task_branch;
+use threadlane_core::workspace::branch_task;
 
 use crate::context::format_time;
 use crate::dreaming;
@@ -267,12 +267,12 @@ impl LocalLink {
         Ok(decisions.iter().any(|d| d.run_id == Some(run.id)))
     }
 
-    /// Whether the call is a step of the lane's own task on its own branch
-    /// or pull request, and the task is work you requested
-    /// (docs/autonomy-rework.md §3 stage A). A pull request counts when its
-    /// head is the task's branch in the same repository, one of the task's;
-    /// for `merge`, its checks pass when it is green on GitHub and the task's
-    /// latest review approved exactly its head. `None` for anything else,
+    /// Whether the call is a step of work you requested on its own branch or
+    /// pull request (docs/autonomy-rework.md §3 stage A): the lane's task is
+    /// requested, and a pull request's head, in the same repository, is the
+    /// branch of that task or of another requested task of the project that
+    /// works in the repository. For `merge`, its checks pass when it is green
+    /// on GitHub and the head task's latest review approved exactly its head. `None` for anything else,
     /// and when GitHub cannot say, so the matrix decides as before.
     async fn own_work(
         &self,
@@ -307,9 +307,7 @@ impl LocalLink {
             .await
             .map_err(tool_error)?
             .into_iter()
-            .find(|repository| {
-                repository.name == name && task.repositories.contains(&repository.id)
-            })
+            .find(|repository| repository.name == name)
             .and_then(|repository| {
                 let full_name = crate::publish::github_repository(&repository.remote_url)?;
                 Some((repository, full_name))
@@ -323,15 +321,27 @@ impl LocalLink {
         let Ok(pull) = github.pull_request_state(&full_name, number).await else {
             return Ok(None);
         };
-        if pull.head_ref != task_branch(task.id)
-            || !pull.head_repository.eq_ignore_ascii_case(&full_name)
-        {
+        if !pull.head_repository.eq_ignore_ascii_case(&full_name) {
             return Ok(None);
         }
+        // The head's task: this one, or another requested task of the project
+        // working in this repository.
+        let head = match branch_task(&pull.head_ref) {
+            Some(id) if id == task.id => Some(task),
+            Some(id) => db.task(id).await.map_err(tool_error)?,
+            None => None,
+        };
+        let Some(head) = head.filter(|head| {
+            head.project_id == lane.project_id
+                && head.origin.is_requested()
+                && head.repositories.contains(&repository.id)
+        }) else {
+            return Ok(None);
+        };
         let checks_pass = tool != crate::MERGE
             || (pull.green()
                 && db
-                    .task_reviews(task.id)
+                    .task_reviews(head.id)
                     .await
                     .map_err(tool_error)?
                     .last()

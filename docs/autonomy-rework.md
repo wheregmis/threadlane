@@ -39,7 +39,8 @@ bindings are Autonomous, and a ceiling only caps.
 ## 2. Principles
 
 1. **Approve intent once.** A task you requested authorizes the steps that
-   carry it out on its own branch and its own pull request.
+   carry it out on its own work: the task's own branch, or the branch of
+   another requested task in the project, and their pull requests.
 2. **Machine checks over clicks.** A merge is guarded by facts the hub can
    check: the PR is the task's own, the reviewer approved this head, CI is
    green, and there are no conflicts. A human answering after 12 minutes
@@ -63,8 +64,9 @@ classifier: a full agent, more context, more exposure to prompt injection.
 **Gate input.** Add to `GateInput` (`gate.rs`):
 
 ```rust
-/// The call acts on the run's own task branch or pull request, checked
-/// by the hub, and the task is work you requested (TaskOrigin::is_requested).
+/// The run's task is work you requested (TaskOrigin::is_requested), and the
+/// call acts on own work, checked by the hub: the task's own branch, or the
+/// pull request of its own or another requested task's branch in the project.
 pub own_work: Option<OwnWork>,
 
 pub struct OwnWork {
@@ -73,6 +75,11 @@ pub struct OwnWork {
     pub checks_pass: bool,
 }
 ```
+
+**Own work** is the task's own branch, or the branch of another requested
+task in the project. A separate task you requested, such as "Merge PR #557
+after recheck", may ready, edit and merge another requested task's pull
+request; a task an agent started, or one in another project, may not.
 
 **New row.** `Row::OwnWork` applies to `publish_branch` (no `onto_task`),
 `open_pull_request`, `mark_ready`, `edit_pull_request`, and `merge`, when
@@ -95,8 +102,11 @@ first.
   (already used by `timers::run_requested`).
 - For `publish_branch`/`open_pull_request`: the branch is
   `task_branch(task)` (`threadlane-core/src/workspace.rs:214`).
-- For `mark_ready`/`edit_pull_request`/`merge`: the PR's head ref is
-  `task_branch(task)`. Add to `GithubSource`
+- For `mark_ready`/`edit_pull_request`/`merge`: the PR's head, in the same
+  repository (not a fork), is `task_branch(t)` for a task `t` of the same
+  project that works in the repository and is itself requested; `t` may be
+  the calling task. `branch_task` (next to `task_branch`) reads `t` from the
+  head ref. Add to `GithubSource`
   (`threadlane-core/src/github.rs`):
 
   ```rust
@@ -112,8 +122,8 @@ first.
   Read it the way `publish::issue_claim` is read: once, after the call is
   recorded, so a replay doesn't read GitHub again.
 - `checks_pass` for `merge`: `mergeStateStatus == CLEAN`, every required
-  check succeeded, and the task's latest `task_reviews` row has verdict
-  approved with a revision equal to `headRefOid`.
+  check succeeded, and `t`'s latest `task_reviews` row has verdict
+  approved with a revision for the repository equal to `headRefOid`.
 - Any read error means `own_work = None`, so the call falls back to
   today's matrix (fail closed).
 
@@ -125,7 +135,9 @@ the decision is stored answered `by_default`. The card in Activity says
 Off and Forbidden. A hub test in `crates/threadlane-hub/tests/hub/permissions.rs`:
 a user task merges its own PR with checks green and no decision is shown.
 The same PR with a failing check asks you. A PR whose head is another
-branch asks you.
+branch asks you. A requested merge task merging a sibling requested task's
+approved, green PR is allowed with no decision shown; the same with a sibling
+an agent started, or in another project, asks you.
 
 **Plan.md.** Add the row to the §2.3 matrix. Replace "Default for a
 task's own work" with the own-work rule.

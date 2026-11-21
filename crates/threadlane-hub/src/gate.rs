@@ -41,13 +41,14 @@ pub struct GateInput<'a> {
     /// mode in the project. The call starts new work, so the initiative row
     /// decides it, at the stricter of the two agents' modes (Plan.md §2.3).
     pub new_work: Option<Mode>,
-    /// Set when the call acts on the run's own task branch or pull request,
-    /// as the hub checked it, and the task is work you requested
+    /// Set when the run's task is work you requested and the call acts on
+    /// its own branch, or on the pull request of its own or another
+    /// requested task's branch in the project, as the hub checked it
     /// (docs/autonomy-rework.md §3 stage A).
     pub own_work: Option<OwnWork>,
 }
 
-/// A call on a requested task's own branch or pull request.
+/// A call on requested work's own branch or pull request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OwnWork {
     /// For `merge`: the reviewer approved the pull request's current head,
@@ -68,8 +69,8 @@ enum Row {
     /// proposal), or an agent's routine, whose events are never requested
     /// (Plan.md §7.3). Asks below Autonomous.
     Initiative,
-    /// A requested task's own step: publishing its branch, opening, readying,
-    /// editing or merging its own pull request. Allowed in every mode but
+    /// A requested task's own step: publishing its branch, opening its draft,
+    /// readying, editing or merging the pull request of requested work. Allowed in every mode but
     /// Off, reviewed when the run read outside content, and asked when a
     /// merge's checks do not pass.
     OwnWork { tainted: bool, checks_pass: bool },
