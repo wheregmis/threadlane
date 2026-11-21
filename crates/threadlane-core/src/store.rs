@@ -440,6 +440,9 @@ pub trait TaskStore: Send + Sync {
         status: TaskStatus,
         waiting_reason: Option<&str>,
     ) -> StoreResult<()>;
+    /// Records why task `id` cannot publish, kept until a repository is
+    /// attached; a task that has one already is left alone.
+    async fn block_publication(&self, id: TaskId, reason: &str) -> StoreResult<()>;
 }
 
 /// Joined machines and model accounts (Plan.md §5.3).

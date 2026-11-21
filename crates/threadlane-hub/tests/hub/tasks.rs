@@ -1805,10 +1805,31 @@ async fn the_user_can_attach_a_repository_to_a_task_that_has_not_ended() {
     finish_run(&hub, &lease, &lead_run).await;
     let (lease, run) = begin(&*hub.link).await;
     assert!(run.repositories.is_empty());
+    // Publishing with no repository leaves a blocker that outlasts the run (#625).
+    let refused = call(
+        &hub,
+        &lease,
+        &run,
+        "publish",
+        PUBLISH_BRANCH,
+        json!({"repository": "app"}),
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(ToolError::Blocked(why)) if why.contains("Attach app")),
+        "{refused:?}"
+    );
     write_progress(&hub, &lease, &run, "T-0001").await;
     finish_run(&hub, &lease, &run).await;
     let sleeping = task(&hub, "T-0001").await;
     assert_eq!(sleeping.status, TaskStatus::Sleeping);
+    let blocker = sleeping.publication_blocker.as_deref().unwrap();
+    assert!(blocker.starts_with("Cannot publish: no repository is attached"));
+    while let Some(lane) = hub.db.ready_lanes(hub.clock.now()).await.unwrap().first() {
+        assert_ne!(*lane, sleeping.lane_id);
+        let (lease, run) = begin(&*hub.link).await;
+        finish_run(&hub, &lease, &run).await;
+    }
 
     let attach = |names: &[&str]| TaskRequest::AttachRepositories {
         task: sleeping.id,
@@ -1824,42 +1845,38 @@ async fn the_user_can_attach_a_repository_to_a_task_that_has_not_ended() {
         panic!("a task");
     };
     assert_eq!(attached.repositories, [app.id]);
+    assert_eq!(attached.publication_blocker, None);
     let again = hub.api.tasks(attach(&["app"])).await;
     assert!(
         matches!(&again, Err(ApiError::Invalid(why)) if why.contains("already")),
         "{again:?}"
     );
 
-    let (lease, resumed) = loop {
-        let (lease, run) = begin(&*hub.link).await;
-        if run.lane_kind == LaneKind::Task {
-            break (lease, run);
-        }
-        finish_run(&hub, &lease, &run).await;
-    };
-    assert_eq!(resumed.task_id, Some(sleeping.id));
-    assert_eq!(resumed.repositories, [app]);
+    // Attaching queues no run: the paused task stays as it was (#625).
+    let paused = task(&hub, "T-0001").await;
+    assert_eq!(paused.status, TaskStatus::Sleeping);
     assert!(
-        resumed.prompt.contains("The user attached app"),
-        "{}",
-        resumed.prompt
+        hub.db
+            .pending_events(paused.lane_id)
+            .await
+            .unwrap()
+            .is_empty()
     );
-    let ask = hub.event(resumed.events[0]).await;
-    assert!(ask.requested);
-    call(
-        &hub,
-        &lease,
-        &resumed,
-        "done",
-        FINISH_TASK,
-        json!({"summary": "Published"}),
-    )
-    .await
-    .unwrap();
-    finish_run(&hub, &lease, &resumed).await;
+    assert!(
+        hub.db
+            .ready_lanes(hub.clock.now())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    hub.api
+        .tasks(TaskRequest::Cancel { task: sleeping.id })
+        .await
+        .unwrap();
     let ended = hub.api.tasks(attach(&["app"])).await;
     assert!(
-        matches!(&ended, Err(ApiError::Invalid(why)) if why.contains("is done")),
+        matches!(&ended, Err(ApiError::Invalid(why)) if why.contains("is cancelled")),
         "{ended:?}"
     );
 }

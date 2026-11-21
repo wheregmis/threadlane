@@ -774,6 +774,10 @@ pub struct Task {
     pub waiting_reason: Option<String>,
     pub result: Option<Json>,
     pub created_at: Timestamp,
+    /// Why its work cannot be published, kept across runs until a
+    /// repository is attached: set when a publish call finds none.
+    #[serde(default)]
+    pub publication_blocker: Option<String>,
 }
 
 /// Input for [`crate::store::TaskStore::create_task`].

@@ -488,6 +488,22 @@ fn labels(a: &Json, key: &str) -> Result<Vec<String>, ToolError> {
     }
 }
 
+/// The blocker of a task that tried to publish with no repository attached,
+/// with how to clear it.
+fn missing_repository(registered: &[threadlane_core::model::Repository]) -> String {
+    if registered.is_empty() {
+        return "Cannot publish: no repository is attached, and the project has none \
+                registered. Register one, then attach it to the task."
+            .to_owned();
+    }
+    let names: Vec<_> = registered.iter().map(|r| r.name.as_str()).collect();
+    format!(
+        "Cannot publish: no repository is attached. Attach {} from the task screen, \
+         or the lead can attach it with update_task.",
+        names.join(" or ")
+    )
+}
+
 /// Validates the arguments and repository before any human or backend is asked.
 /// Publishing also needs a worktree belonging to this task.
 pub(crate) async fn proposal(
@@ -540,6 +556,20 @@ pub(crate) async fn proposal(
         .map_err(tool_error)?
         .ok_or_else(|| ToolError::Failed(format!("task {task_id} not found")))?;
     let registered = db.repositories(lane.project_id).await.map_err(tool_error)?;
+    if task.repositories.is_empty()
+        && matches!(
+            tool,
+            PUBLISH_BRANCH | OPEN_PULL_REQUEST | FAST_FORWARD_PULL_REQUEST
+        )
+    {
+        let blocker = missing_repository(&registered);
+        db.block_publication(task.id, &blocker)
+            .await
+            .map_err(tool_error)?;
+        return Err(ToolError::Blocked(format!(
+            "{blocker} Do not retry; the blocker stays on the task until a repository is attached."
+        )));
+    }
     // Says which names would have worked: agents often give the forge's
     // owner/name, or another repository of the project.
     let names = |of_task: bool| {
