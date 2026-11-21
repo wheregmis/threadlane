@@ -14,8 +14,8 @@ use threadlane_core::runtime::steps::perform;
 use threadlane_core::store::{InboxStore, OrgStore};
 use threadlane_core::time::Clock;
 use threadlane_hub::{
-    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, LABEL_ISSUE, MARK_READY, MERGE,
-    OPEN_PULL_REQUEST,
+    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST, LABEL_ISSUE,
+    MARK_READY, MERGE, OPEN_PULL_REQUEST, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD,
 };
 use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::{CrashPlan, Script};
@@ -26,7 +26,7 @@ use crate::operations::follow_up;
 use crate::permissions::engineer_in;
 use crate::publish::{drive, publish_world};
 
-pub(super) fn actions() -> [(&'static str, Json); 6] {
+pub(super) fn actions() -> [(&'static str, Json); 9] {
     [
         (
             COMMENT,
@@ -45,6 +45,18 @@ pub(super) fn actions() -> [(&'static str, Json); 6] {
         (
             CLOSE_PULL_REQUEST,
             json!({"repository":"app","number":12,"expected_head":HEAD,"delete_branch":true}),
+        ),
+        (
+            EDIT_PULL_REQUEST,
+            json!({"repository":"app","number":12,"body":"Head is now 0123456."}),
+        ),
+        (
+            RESOLVE_REVIEW_THREAD,
+            json!({"repository":"app","number":12,"expected_head":HEAD,"thread_id":"PRRT_kw1","fixed_by":HEAD,"body":"Guarded the null case."}),
+        ),
+        (
+            REQUEST_REVIEW,
+            json!({"repository":"app","number":12,"expected_head":HEAD,"reviewers":["octocat"],"comment":"@coderabbitai review"}),
         ),
     ]
 }
@@ -182,7 +194,14 @@ async fn each_tool_uses_its_matrix_cell_and_reviews_record_the_reason() {
             let sim = w.boot(CrashPlan::new()).await;
             sim.send("m", "Finish the page").await;
             work(&sim).await;
-            let reviewed = mode != Mode::OnRequest && ![MERGE, CLOSE_PULL_REQUEST].contains(&tool);
+            let reviewed = mode != Mode::OnRequest
+                && ![
+                    MERGE,
+                    CLOSE_PULL_REQUEST,
+                    RESOLVE_REVIEW_THREAD,
+                    REQUEST_REVIEW,
+                ]
+                .contains(&tool);
             let decisions = sim.decisions().await;
             assert_eq!(decisions.len(), 1, "{mode} {tool}");
             assert_eq!(decisions[0].arguments, args);

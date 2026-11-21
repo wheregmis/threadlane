@@ -144,6 +144,173 @@ impl GitForge {
             .clone()
     }
 
+    /// PR `number` of `repo` (`host/owner/name`), or an error unless its head is
+    /// still `expected_head`: an approval given for an older head performs nothing.
+    async fn pull_at_head(
+        &self,
+        repo: &str,
+        number: std::num::NonZeroU64,
+        expected_head: &str,
+    ) -> Result<Json, ForgeError> {
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let output = self
+            .gh(
+                Path::new("."),
+                args(&[
+                    "api",
+                    &format!("--hostname={host}"),
+                    "--method=GET",
+                    &format!("repos/{name}/pulls/{number}"),
+                ]),
+            )
+            .await?;
+        let pull: Json = serde_json::from_str(&output)
+            .map_err(|error| ForgeError(format!("invalid pull request response: {error}")))?;
+        if pull["head"]["sha"].as_str() != Some(expected_head) {
+            return Err(ForgeError(format!(
+                "PR #{number} no longer has expected head {expected_head}. Inspect its current head before retrying."
+            )));
+        }
+        Ok(pull)
+    }
+
+    /// Replies on and resolves review thread `thread_id` of PR `number`, only
+    /// while the PR head is `expected_head` and contains `fixed_by`, and only a
+    /// thread of that PR. An already resolved thread is left alone, so a retry finishes.
+    async fn resolve_review_thread(
+        &self,
+        repo: &str,
+        number: std::num::NonZeroU64,
+        expected_head: &str,
+        thread_id: &str,
+        fixed_by: &str,
+        body: &str,
+    ) -> Result<String, ForgeError> {
+        self.pull_at_head(repo, number, expected_head).await?;
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let hostname = format!("--hostname={host}");
+        let here = Path::new(".");
+        let compare = self
+            .gh(
+                here,
+                args(&[
+                    "api",
+                    &hostname,
+                    "--method=GET",
+                    &format!("repos/{name}/compare/{fixed_by}...{expected_head}"),
+                ]),
+            )
+            .await?;
+        let compare: Json = serde_json::from_str(&compare)
+            .map_err(|error| ForgeError(format!("invalid compare response: {error}")))?;
+        if !matches!(compare["status"].as_str(), Some("ahead" | "identical")) {
+            return Err(ForgeError(format!(
+                "PR #{number}'s head {expected_head} does not contain {fixed_by}."
+            )));
+        }
+        let id = format!("id={thread_id}");
+        let thread = self
+            .gh(
+                here,
+                args(&[
+                    "api",
+                    &hostname,
+                    "graphql",
+                    "-f",
+                    "query=query($id:ID!){node(id:$id){... on PullRequestReviewThread{isResolved pullRequest{number repository{nameWithOwner}}}}}",
+                    "-f",
+                    &id,
+                ]),
+            )
+            .await?;
+        let thread: Json = serde_json::from_str(&thread)
+            .map_err(|error| ForgeError(format!("invalid review thread response: {error}")))?;
+        let node = &thread["data"]["node"];
+        let on_this_pull = node["pullRequest"]["number"].as_u64() == Some(number.get())
+            && node["pullRequest"]["repository"]["nameWithOwner"]
+                .as_str()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(name));
+        if !on_this_pull {
+            return Err(ForgeError(format!(
+                "{thread_id} is not a review thread of PR #{number}."
+            )));
+        }
+        if node["isResolved"] == true {
+            return Ok(format!("Review thread {thread_id} was already resolved."));
+        }
+        // GraphQL runs the two mutations in order, so the reply lands before the resolve.
+        self.gh(
+            here,
+            args(&[
+                "api",
+                &hostname,
+                "graphql",
+                "-f",
+                "query=mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){clientMutationId} resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}",
+                "-f",
+                &id,
+                "-f",
+                &format!("body={}\n\nFixed in {fixed_by}.", body.trim_end()),
+            ]),
+        )
+        .await?;
+        Ok(format!(
+            "Resolved review thread {thread_id} on PR #{number}, fixed in {fixed_by}."
+        ))
+    }
+
+    /// Re-requests `reviewers` on PR `number` and posts `comment`, only while
+    /// its head is `expected_head`.
+    async fn request_review(
+        &self,
+        repo: &str,
+        number: std::num::NonZeroU64,
+        expected_head: &str,
+        reviewers: &[String],
+        comment: Option<&str>,
+    ) -> Result<String, ForgeError> {
+        self.pull_at_head(repo, number, expected_head).await?;
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let hostname = format!("--hostname={host}");
+        let here = Path::new(".");
+        if !reviewers.is_empty() {
+            let mut argv = args(&[
+                "api",
+                &hostname,
+                "--method=POST",
+                &format!("repos/{name}/pulls/{number}/requested_reviewers"),
+            ]);
+            for reviewer in reviewers {
+                argv.push("-f".into());
+                argv.push(format!("reviewers[]={reviewer}").into());
+            }
+            self.gh(here, argv).await?;
+        }
+        if let Some(comment) = comment {
+            self.gh(
+                here,
+                args(&[
+                    "api",
+                    &hostname,
+                    "--method=POST",
+                    &format!("repos/{name}/issues/{number}/comments"),
+                    "-f",
+                    &format!("body={comment}"),
+                ]),
+            )
+            .await?;
+        }
+        Ok(format!(
+            "Requested a fresh review of PR #{number} at {expected_head}."
+        ))
+    }
+
     /// Closes PR `number` of `repo` (`host/owner/name`) only while its head
     /// is `expected_head`, then deletes its head branch if asked. A PR that is
     /// already closed at that head is not closed again, so a retry finishes.
@@ -161,16 +328,7 @@ impl GitForge {
         let hostname = format!("--hostname={host}");
         let endpoint = format!("repos/{name}/pulls/{number}");
         let here = Path::new(".");
-        let output = self
-            .gh(here, args(&["api", &hostname, "--method=GET", &endpoint]))
-            .await?;
-        let pull: Json = serde_json::from_str(&output)
-            .map_err(|error| ForgeError(format!("invalid pull request response: {error}")))?;
-        if pull["head"]["sha"].as_str() != Some(expected_head) {
-            return Err(ForgeError(format!(
-                "PR #{number} no longer has expected head {expected_head}. Inspect its current head before retrying."
-            )));
-        }
+        let pull = self.pull_at_head(repo, number, expected_head).await?;
         let branch = match delete_branch {
             // GitHub nulls the head repository once the head branch is gone.
             true if pull["head"]["repo"].is_null() => None,
@@ -612,6 +770,30 @@ impl Forge for GitForge {
                 .close_pull_request(remote, &repo, *number, expected_head, *delete_branch)
                 .await;
         }
+        match action {
+            RepositoryAction::ResolveReviewThread {
+                number,
+                expected_head,
+                thread_id,
+                fixed_by,
+                body,
+            } => {
+                return self
+                    .resolve_review_thread(&repo, *number, expected_head, thread_id, fixed_by, body)
+                    .await;
+            }
+            RepositoryAction::RequestReview {
+                number,
+                expected_head,
+                reviewers,
+                comment,
+            } => {
+                return self
+                    .request_review(&repo, *number, expected_head, reviewers, comment.as_deref())
+                    .await;
+            }
+            _ => {}
+        }
         let mut argv = match action {
             RepositoryAction::Comment {
                 target,
@@ -636,12 +818,24 @@ impl Forge for GitForge {
                 args(&["pr", "merge", &number.to_string(), "--merge"])
             }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
+            RepositoryAction::EditPullRequest {
+                number,
+                title,
+                body,
+            } => {
+                let mut argv = args(&["pr", "edit", &number.to_string()]);
+                argv.extend(title.iter().map(|title| format!("--title={title}").into()));
+                argv.extend(body.iter().map(|body| format!("--body={body}").into()));
+                argv
+            }
             RepositoryAction::LabelIssue {
                 number,
                 add,
                 remove,
             } => return self.label_issue(&repo, *number, add, remove).await,
-            RepositoryAction::ClosePullRequest { .. } => unreachable!("handled above"),
+            RepositoryAction::ClosePullRequest { .. }
+            | RepositoryAction::ResolveReviewThread { .. }
+            | RepositoryAction::RequestReview { .. } => unreachable!("handled above"),
             RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
             RepositoryAction::AssignIssue { number } => {
                 args(&["issue", "edit", &number.to_string(), "--add-assignee=@me"])
