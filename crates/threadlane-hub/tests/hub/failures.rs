@@ -292,3 +292,154 @@ async fn a_rejected_model_dies_on_the_first_attempt() {
         "{reason}"
     );
 }
+
+#[tokio::test]
+async fn a_refused_model_is_a_configuration_failure_the_lead_can_see_and_reassign() {
+    use serde_json::json;
+    use threadlane_core::model::{Mode, NewAgent, NewBinding, TaskStatus};
+    use threadlane_core::store::{OrgStore, TaskStore};
+    use threadlane_hub::{CREATE_TASK, RETRY_TASK};
+
+    let hub = TestHub::with(
+        HubSettings {
+            default_models: [(BackendKind::Claude, "sonnet".to_owned())].into(),
+            ..HubSettings::default()
+        },
+        Arc::new(NoHooks),
+    )
+    .await;
+    hub.hello().await;
+    let general = hub.general().await;
+    for (name, models, mode) in [
+        ("Iris", json!({ "claude": "gpt-x" }), Mode::OnRequest),
+        ("Mia", json!({}), Mode::OnRequest),
+        ("Ola", json!({}), Mode::Off),
+    ] {
+        let agent = hub
+            .db
+            .create_agent(&NewAgent {
+                backends: vec![BackendKind::Claude],
+                models,
+                ..NewAgent::named(name, "engineer")
+            })
+            .await
+            .unwrap();
+        hub.db
+            .bind(&NewBinding {
+                project_id: general.id,
+                agent_id: agent.id,
+                mode,
+                is_lead: false,
+                max_parallel: 1,
+            })
+            .await
+            .unwrap();
+    }
+    hub.send("m-1", "Build it").await;
+
+    // The lead sees each agent's backend and model, the hub default included.
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(
+        lead.prompt
+            .contains(r#""backends":[{"backend":"claude","model":"gpt-x"}]"#),
+        "{}",
+        lead.prompt
+    );
+    assert!(
+        lead.prompt
+            .contains(r#""backends":[{"backend":"claude","model":"sonnet"}]"#)
+    );
+    for (n, arguments) in [
+        json!({ "title": "schema", "goal": "g", "agent": "Iris" }),
+        json!({ "title": "rollout", "goal": "g", "agent": "Mia", "depends_on": ["T-0001"] }),
+    ]
+    .iter()
+    .enumerate()
+    {
+        hub.link
+            .call_tool(
+                &lease,
+                lead.run_id,
+                Some(&format!("c{n}")),
+                CREATE_TASK,
+                arguments,
+            )
+            .await
+            .unwrap();
+    }
+    hub.link.complete(&lease, lead.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+
+    // Iris's backend refuses its model: the task records why, and what
+    // waits for it is blocked, not cancelled.
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.agent_name, "Iris");
+    assert_eq!(run.model.as_deref(), Some("gpt-x"));
+    let rejected = RunFailure::Rejected {
+        message: "The 'gpt-x' model is not supported".into(),
+    };
+    hub.link.fail(&lease, run.run_id, &rejected).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+    let schema = hub.db.task(run.task_id.unwrap()).await.unwrap().unwrap();
+    assert_eq!(schema.status, TaskStatus::Failed);
+    let result = schema.result.clone().unwrap();
+    assert_eq!(result["configuration_failure"], true);
+    assert_eq!(result["model"], "gpt-x");
+    assert!(result["error"].as_str().unwrap().contains("not supported"));
+    let tasks = hub.db.tasks(general.id).await.unwrap();
+    let rollout = tasks.iter().find(|t| t.title == "rollout").unwrap();
+    assert_eq!(rollout.status, TaskStatus::Queued);
+
+    // The lead is told, cannot give Iris more work, and reassigns the task.
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(
+        lead.prompt
+            .contains(r#""refused":"T-0001 failed on this backend and model"#)
+    );
+    let refused = hub
+        .link
+        .call_tool(
+            &lease,
+            lead.run_id,
+            Some("again"),
+            CREATE_TASK,
+            &json!({ "title": "more", "goal": "g", "agent": "Iris" }),
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(threadlane_core::tools::ToolError::Failed(why)) if why.contains("would fail to start")),
+        "{refused:?}"
+    );
+    // An agent set to off would never run it.
+    let off = hub
+        .link
+        .call_tool(
+            &lease,
+            lead.run_id,
+            Some("retry-off"),
+            RETRY_TASK,
+            &json!({ "task_id": "T-0001", "agent": "Ola" }),
+        )
+        .await;
+    assert!(
+        matches!(&off, Err(threadlane_core::tools::ToolError::InvalidArguments(why)) if why.contains("is off")),
+        "{off:?}"
+    );
+    let retried = hub
+        .link
+        .call_tool(
+            &lease,
+            lead.run_id,
+            Some("retry"),
+            RETRY_TASK,
+            &json!({ "task_id": "T-0001", "agent": "Mia" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried["status"], "queued", "{retried}");
+    hub.link.complete(&lease, lead.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+    let (_, run) = begin(&*hub.link).await;
+    assert_eq!(run.agent_name, "Mia");
+    assert_eq!(run.model.as_deref(), Some("sonnet"));
+}

@@ -46,7 +46,7 @@ pub(crate) fn decode_session(row: &Row) -> StoreResult<Session> {
 
 pub(crate) const RUN_FIELDS: &str =
     "id, lane_id, session_id, machine_id, lease_epoch, agent_id, backend,
-    status, outcome, rationale, error, started_at, ended_at, trace_id";
+    status, outcome, rationale, error, started_at, ended_at, trace_id, model";
 
 pub(crate) fn decode_run(row: &Row) -> StoreResult<Run> {
     let c = Cols(row);
@@ -65,6 +65,7 @@ pub(crate) fn decode_run(row: &Row) -> StoreResult<Run> {
         started_at: c.ts(11)?,
         ended_at: c.opt_ts(12)?,
         trace_id: c.text(13)?,
+        model: c.opt_text(14)?,
     })
 }
 
@@ -294,8 +295,8 @@ impl SessionStore for HubDb {
 
         let run_id: RunId = query_one(
             conn,
-            concat!("INSERT INTO runs (id, lane_id, session_id, machine_id, lease_epoch, agent_id, backend, status, started_at)
-             VALUES (", crate::db::next_id_sql!("runs"), ", ?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7) RETURNING id"),
+            concat!("INSERT INTO runs (id, lane_id, session_id, machine_id, lease_epoch, agent_id, backend, status, started_at, model)
+             VALUES (", crate::db::next_id_sql!("runs"), ", ?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8) RETURNING id"),
             params![
                 lease.lane_id.get(),
                 session_id.get(),
@@ -304,6 +305,7 @@ impl SessionStore for HubDb {
                 opt_raw(start.agent_id, |id| id.get()),
                 start.backend.map(|backend| backend.as_str()),
                 now,
+                start.model.as_deref(),
             ],
             |row| Cols(row).id(0),
         )
@@ -479,11 +481,13 @@ impl SessionStore for HubDb {
             params![retry.backoff_until.as_millis(), lease.lane_id.get()],
         )
         .await?;
+        let configuration = retry.configuration.then_some(&run);
         task::on_run_failed(
             conn,
             lease.lane_id,
             !failed.dead.is_empty(),
             error,
+            configuration,
             ended_at,
         )
         .await?;

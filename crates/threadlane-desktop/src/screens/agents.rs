@@ -210,7 +210,7 @@ impl Desktop {
             });
         let mut agents = v_flex();
         for agent in &space.agents {
-            let (backends, full_backends) = backend_summary(agent);
+            let (backends, full_backends) = backend_summary(agent, space.default_models());
             let projects = assignments_loaded.then(|| {
                 // General is the space lead's own project and is not listed.
                 let general = space.active_projects().find(|project| project.is_general);

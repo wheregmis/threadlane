@@ -1,5 +1,6 @@
 //! The system's tools (Plan.md §4.6, §5.1, docs/milestone-1.md §9).
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -14,8 +15,8 @@ use threadlane_core::forge::{
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::model::{
-    Decision, DecisionOption, LaneKind, MemoryAuthor, Mode, NewOutboxMessage, NewTask, OutboxKind,
-    Run, Task, TaskOrigin, TaskReviewVerdict, TaskStatus, Urgency,
+    BackendKind, Decision, DecisionOption, LaneKind, MemoryAuthor, Mode, NewOutboxMessage, NewTask,
+    OutboxKind, Run, Task, TaskOrigin, TaskReviewVerdict, TaskStatus, Urgency,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{
@@ -42,6 +43,8 @@ pub const CREATE_TASK: &str = "create_task";
 pub const UPDATE_TASK: &str = "update_task";
 /// The lead cancels a task.
 pub const CANCEL_TASK: &str = "cancel_task";
+/// The lead retries a task that failed on its agent's configuration.
+pub const RETRY_TASK: &str = "retry_task";
 /// The lead lists the project's tasks.
 pub const LIST_TASKS: &str = "list_tasks";
 pub const PR_REVIEW_STATUS: &str = "pr_review_status";
@@ -76,6 +79,7 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | STAY_SILENT
         | UPDATE_TASK
         | CANCEL_TASK
+        | RETRY_TASK
         | LIST_TASKS
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
         FINISH_TASK
@@ -156,6 +160,8 @@ pub struct HubTools {
     clock: Arc<dyn Clock>,
     waker: Arc<dyn Waker>,
     reviewer: Option<String>,
+    /// [`crate::HubSettings::default_models`], for what the lead is told.
+    default_models: HashMap<BackendKind, String>,
 }
 
 impl HubTools {
@@ -172,7 +178,15 @@ impl HubTools {
             clock,
             waker,
             reviewer,
+            default_models: HashMap::new(),
         }
+    }
+
+    /// The same tools, telling the lead each backend's default model.
+    #[must_use]
+    pub fn with_default_models(mut self, models: HashMap<BackendKind, String>) -> Self {
+        self.default_models = models;
+        self
     }
 
     fn send_message_definition() -> ToolDefinition {
@@ -336,6 +350,7 @@ impl HubTools {
                 .agent_id
                 .ok_or_else(|| ToolError::Failed(format!("run {} has no agent", run.id)))?,
         };
+        self.check_setup(context.project_id, agent_id).await?;
         let named = named_repositories(&self.db, context.project_id, object).await?;
         // A subtask inherits its parent's origin, and its repositories if it
         // names none; a lead's task comes from you if the run works on
@@ -483,6 +498,85 @@ impl HubTools {
             self.waker.wake(WakeTarget::Lane(updated.lane_id));
         }
         Ok(task_json(&updated))
+    }
+
+    /// Refuses a task for an agent whose first backend refused its model on
+    /// an earlier task that nobody has retried (#650): it would fail the same way.
+    async fn check_setup(&self, project: ProjectId, agent_id: AgentId) -> Result<(), ToolError> {
+        let failures = self
+            .db
+            .configuration_failures(project)
+            .await
+            .map_err(tool_error)?;
+        if failures.is_empty() {
+            return Ok(());
+        }
+        let agents = self.db.agents().await.map_err(tool_error)?;
+        let Some(agent) = agents.iter().find(|agent| agent.id == agent_id) else {
+            return Ok(());
+        };
+        let bindings = self.db.bindings(project).await.map_err(tool_error)?;
+        let binding = bindings.iter().find(|binding| binding.agent_id == agent_id);
+        let setup = crate::begin_run::agent_setup(agent, binding, &self.default_models, &failures);
+        match setup["refused"].as_str() {
+            Some(refused) => Err(ToolError::Failed(format!(
+                "agent {:?} would fail to start: {refused}. Delegate to an agent with another \
+                 backend or model, or ask the user to change this agent's model; once it is \
+                 fixed, retry the failed task with {RETRY_TASK}",
+                agent.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// The lead retries a task that failed on its agent's configuration,
+    /// on another agent if it names one.
+    async fn retry_task(&self, context: &ToolContext, arguments: &Json) -> Result<Json, ToolError> {
+        let object = fields(arguments, &["task_id", "agent"])?;
+        let task = self
+            .project_task(
+                context,
+                object.get("task_id").ok_or_else(|| missing("task_id"))?,
+            )
+            .await?;
+        let agent = match text_field(object, "agent")? {
+            Some(name) => {
+                let agent = bound_agent(&self.db, context.project_id, name).await?;
+                let bindings = self
+                    .db
+                    .bindings(context.project_id)
+                    .await
+                    .map_err(tool_error)?;
+                // An agent set to off never runs: the task and what waits for it would stall.
+                if bindings
+                    .iter()
+                    .any(|binding| binding.agent_id == agent && binding.mode == Mode::Off)
+                {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "agent {name:?} is off in this project, so it would never run {}; \
+                         name an enabled agent",
+                        task.id
+                    )));
+                }
+                self.check_setup(context.project_id, agent).await?;
+                Some(agent)
+            }
+            None => None,
+        };
+        let run = self.run(context).await?;
+        let retried = self
+            .db
+            .lead_retry_task(
+                &context.lease,
+                task.id,
+                agent,
+                &effect_key(context, &run, RETRY_TASK, arguments),
+                self.clock.now(),
+            )
+            .await
+            .map_err(tool_error)?;
+        self.waker.wake(WakeTarget::Lane(retried.lane_id));
+        Ok(task_json(&retried))
     }
 
     async fn cancel_task(
@@ -1197,6 +1291,25 @@ fn task_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         define(
+            RETRY_TASK,
+            "Retry a task that failed because its backend refused the agent's setup, such as \
+             its model. Name another agent to reassign it, or none once the agent is fixed. \
+             The tasks waiting for it stay blocked until it is done.",
+            Tier::Local,
+            json!({
+                "type": "object",
+                "properties": {
+                    "task_id": task_id.clone(),
+                    "agent": {
+                        "type": "string",
+                        "description": "Exact name of an enabled project agent to run it instead."
+                    }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+        ),
+        define(
             CANCEL_TASK,
             "Cancel a task that has not ended.",
             Tier::Local,
@@ -1351,6 +1464,7 @@ impl ToolRegistry for HubTools {
             CREATE_TASK => self.create_task(context, &arguments).await,
             UPDATE_TASK => self.update_task(context, &arguments).await,
             CANCEL_TASK => self.cancel_task(context, &arguments).await,
+            RETRY_TASK => self.retry_task(context, &arguments).await,
             LIST_TASKS => self.list_tasks(context, &arguments).await,
             PR_REVIEW_STATUS => {
                 let target = review_head(&self.db, context.project_id, &arguments).await?;
@@ -1591,6 +1705,7 @@ mod tests {
                     SEND_MESSAGE,
                     CREATE_TASK,
                     UPDATE_TASK,
+                    RETRY_TASK,
                     CANCEL_TASK,
                     LIST_TASKS,
                     PR_REVIEW_STATUS

@@ -305,6 +305,14 @@ impl HubApi for ClientApi {
                 .updates
                 .as_ref()
                 .map(|_| env!("CARGO_PKG_VERSION").to_owned()),
+            default_models: self
+                .core
+                .inner
+                .settings
+                .default_models
+                .iter()
+                .map(|(backend, model)| (*backend, model.clone()))
+                .collect(),
         })
     }
 
