@@ -411,7 +411,9 @@ impl HubTools {
                 .await
                 .map_err(tool_error)?
             {
-                PrReviewAssignment::Existing(found) => return Ok(review_json(Some(found))),
+                PrReviewAssignment::Existing(found) => {
+                    return Ok(review_json(&target, Some(found)));
+                }
                 PrReviewAssignment::Created(task) => *task,
             }
         } else {
@@ -862,13 +864,17 @@ pub(crate) async fn review_head(
     PrReviewHead::new(&repository, number, head).map_err(tool_error)
 }
 
-fn review_json(found: Option<PrReviewStatus>) -> Json {
-    match found {
+/// Names the canonical PR and head it looked up, so a mismatch can be diagnosed (#664).
+fn review_json(target: &PrReviewHead, found: Option<PrReviewStatus>) -> Json {
+    let mut json = match found {
         Some(review) => {
             json!({"review_status": review.state, "task_id": review.task.to_string(), "feedback": review.feedback})
         }
         None => json!({"review_status": "unreviewed"}),
-    }
+    };
+    json["pull_request"] = json!(target.url);
+    json["head"] = json!(target.head);
+    json
 }
 
 /// The agent bound in `project` with this name.
@@ -1355,6 +1361,7 @@ impl ToolRegistry for HubTools {
             PR_REVIEW_STATUS => {
                 let target = review_head(&self.db, context.project_id, &arguments).await?;
                 Ok(review_json(
+                    &target,
                     self.db
                         .pr_review_status(context.project_id, &target)
                         .await
