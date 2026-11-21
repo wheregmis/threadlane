@@ -300,6 +300,7 @@ impl HubApi for ClientApi {
         Ok(HubInfo {
             space: space.name,
             mode_ceiling: space.mode_ceiling,
+            paused: space.paused,
             schema_version: db.schema_version().await.map_err(api_error)?,
             update_version: self
                 .updates
@@ -891,6 +892,17 @@ impl HubApi for ClientApi {
                 space.mode_ceiling = mode;
                 db.update_space(&space).await.map_err(api_error)?;
                 Ok(OrgReply::SpaceCeiling { ceiling: mode })
+            }
+            OrgRequest::SetSpacePaused { paused } => {
+                let _dispatch = self.core.inner.dispatch.lock().await;
+                let mut space = db.space().await.map_err(api_error)?;
+                space.paused = paused;
+                db.update_space(&space).await.map_err(api_error)?;
+                if !paused {
+                    // The queued lanes may be granted again.
+                    self.core.inner.wake.wake(WakeTarget::Runners);
+                }
+                Ok(OrgReply::SpacePaused { paused })
             }
             OrgRequest::Pacing => Ok(OrgReply::Pacing {
                 pacing: db.pacing().await.map_err(api_error)?,

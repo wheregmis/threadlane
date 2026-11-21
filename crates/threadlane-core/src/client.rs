@@ -30,6 +30,9 @@ pub struct HubInfo {
     /// The space's name, for example `Work`.
     pub space: String,
     pub mode_ceiling: Mode,
+    /// Whether the space is paused: no new run starts until it is resumed.
+    #[serde(default)]
+    pub paused: bool,
     pub schema_version: i64,
     /// Running release version when the hub supports in-app updates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,6 +241,11 @@ pub enum OrgRequest {
     /// §2.3): lowering it lowers what every binding acts at, and raising it
     /// lets projects without a stricter ceiling of their own go higher.
     SetSpaceCeiling { mode: Mode },
+    /// Pauses the whole space, or resumes it with `paused: false`: no new
+    /// run starts while it is paused, runs already going finish, and
+    /// events, routines and timers queue until it is resumed. Answered
+    /// with [`OrgReply::SpacePaused`].
+    SetSpacePaused { paused: bool },
     /// Reads the space's delivery pacing.
     Pacing,
     /// Replaces delivery pacing for the space.
@@ -458,6 +466,10 @@ pub enum OrgReply {
     /// The space's ceiling after [`OrgRequest::SetSpaceCeiling`].
     SpaceCeiling {
         ceiling: Mode,
+    },
+    /// Whether the space is paused after [`OrgRequest::SetSpacePaused`].
+    SpacePaused {
+        paused: bool,
     },
     /// The current pacing settings.
     Pacing {

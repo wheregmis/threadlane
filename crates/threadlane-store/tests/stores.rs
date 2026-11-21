@@ -467,6 +467,67 @@ async fn events_deduplicate_and_must_match_their_lane() {
 }
 
 #[tokio::test]
+async fn a_paused_space_grants_no_lane_but_lets_a_running_one_finish_and_survives_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.db");
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    {
+        let hub = HubDb::open(&path, &Bootstrap::default(), clock.clone())
+            .await
+            .unwrap();
+        let general = hub.general_project().await.unwrap();
+        let other = hub
+            .create_project(&NewProject {
+                name: "API".into(),
+                max_parallel_tasks: 1,
+                ..NewProject::default()
+            })
+            .await
+            .unwrap();
+        let a = machine(&hub, "a").await;
+        hub.insert_event(&message(&general, "m1")).await.unwrap();
+        let running = hub
+            .grant_lease(general.lead_lane_id, a, T0, LEASE_TTL)
+            .await
+            .unwrap()
+            .unwrap();
+        let space = hub.space().await.unwrap();
+        hub.update_space(&SpaceSettings {
+            paused: true,
+            ..space
+        })
+        .await
+        .unwrap();
+        hub.insert_event(&message(&other, "m2")).await.unwrap();
+        assert!(hub.ready_lanes(T0).await.unwrap().is_empty());
+        assert_eq!(
+            hub.grant_lease(other.lead_lane_id, a, T0, LEASE_TTL)
+                .await
+                .unwrap(),
+            None
+        );
+        // The run already going keeps its lease.
+        hub.renew_lease(&running, T0, LEASE_TTL).await.unwrap();
+    }
+    let hub = HubDb::open(&path, &Bootstrap::default(), clock)
+        .await
+        .unwrap();
+    let space = hub.space().await.unwrap();
+    assert!(space.paused, "the pause survives a reopen");
+    hub.update_space(&SpaceSettings {
+        paused: false,
+        ..space
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        hub.ready_lanes(T0).await.unwrap().len(),
+        1,
+        "queued work is ready"
+    );
+}
+
+#[tokio::test]
 async fn one_lease_per_lane_with_fencing() {
     let hub = hub().await;
     let general = hub.general_project().await.unwrap();

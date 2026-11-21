@@ -601,6 +601,39 @@ impl Desktop {
         cx.notify();
     }
 
+    /// Pauses the whole of `space`, or resumes it.
+    pub(crate) fn set_space_paused(&mut self, space: String, paused: bool, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        let doing = if paused { "Pausing" } else { "Resuming" };
+        self.state
+            .report(Activity::Working(format!("{doing} {space}…")));
+        self.run(
+            async move {
+                let set = core
+                    .read()
+                    .await
+                    .set_space_paused(Some(&space), paused)
+                    .await;
+                (space, set)
+            },
+            |this, (space, set), _| match set {
+                Ok(paused) => {
+                    let done = if paused {
+                        "Paused; no new run starts until you resume it. Runs already going finish."
+                    } else {
+                        "Resumed; queued work starts."
+                    };
+                    this.state
+                        .report(Activity::Done(format!("{space}: {done}")));
+                    this.state.space_paused_set(&space, paused);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
     /// Sets the ceiling of `space` itself once you confirmed.
     pub(crate) fn set_space_ceiling(&mut self, space: String, mode: Mode, cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
