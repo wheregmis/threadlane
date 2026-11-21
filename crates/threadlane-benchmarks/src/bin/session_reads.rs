@@ -83,6 +83,7 @@ async fn benchmark() {
                 session: SessionChoice::New,
                 agent_id: None,
                 backend: None,
+                model: None,
                 native_session_id: None,
                 events: vec![inserted.id()],
                 started_at: NOW,

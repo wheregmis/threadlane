@@ -55,6 +55,9 @@ impl AppState {
             }
             return Some(reason.clone());
         }
+        if self.is_space_paused(space) {
+            return Some("the space is paused".to_owned());
+        }
         if self.is_paused(space, project) {
             return Some("the project is paused".to_owned());
         }

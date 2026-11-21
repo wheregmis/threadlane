@@ -579,6 +579,7 @@ async fn requested_comes_from_the_creator() {
                 session: SessionChoice::New,
                 agent_id: Some(lead.agent_id),
                 backend: Some(BackendKind::Claude),
+                model: None,
                 native_session_id: None,
                 events: vec![event],
                 started_at: hub.clock.now(),

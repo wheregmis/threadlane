@@ -193,6 +193,26 @@ impl ClientCore {
         }
     }
 
+    /// Pauses the whole space, or resumes it with `paused: false`, and
+    /// returns whether it is now paused.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn set_space_paused(
+        &self,
+        space: Option<&str>,
+        paused: bool,
+    ) -> Result<bool, ClientError> {
+        match self
+            .org(space, OrgRequest::SetSpacePaused { paused })
+            .await?
+        {
+            (_, OrgReply::SpacePaused { paused }) => Ok(paused),
+            (space, _) => Err(wrong_reply(&space, "pause space")),
+        }
+    }
+
     /// Claims the one reminder for decision `decision`: `true` only the
     /// first time, across restarts of the hub or this client.
     ///

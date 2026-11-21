@@ -728,7 +728,12 @@ impl Inner {
             {
                 self.fold_in(lane, assignment, run).await?;
             }
-            if lane.deferred().is_some() && matches!(event, BackendEvent::ToolUse { .. }) {
+            // Further hub calls of the turn, as in a parallel batch, are the
+            // hub's to answer; any other tool means the agent went on working.
+            if lane.deferred().is_some()
+                && let BackendEvent::ToolUse { name, .. } = &event
+                && !assignment.tools.iter().any(|tool| &tool.name == name)
+            {
                 return Ok(Ended::Deferred);
             }
         }

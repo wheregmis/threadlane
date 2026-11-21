@@ -73,6 +73,7 @@ async fn a_message_produces_exactly_one_reply() {
             STAY_SILENT,
             CREATE_TASK,
             UPDATE_TASK,
+            threadlane_hub::RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
             threadlane_hub::PR_REVIEW_STATUS,

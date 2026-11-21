@@ -565,6 +565,7 @@ impl Workspaces for GitWorkspaces {
                     ],
                 )
                 .await?;
+                link_dependencies(&self.worktree(task, repository), &path).await;
                 tokio::fs::write(&marker, b"").await.map_err(|error| {
                     io_error("marking the review worktree ready", &marker, &error)
                 })?;
@@ -882,6 +883,42 @@ async fn remove_worktree_set(
         }
     }
     remove_dir(dir).await
+}
+
+/// Links the ignored directories of the task's own worktree (installed
+/// dependencies and build caches such as `node_modules` or `target`) into a
+/// review checkout, so the Reviewer can rerun the build and tests the
+/// submitter set up. Best effort: a checkout without them is still reviewable.
+async fn link_dependencies(source: &Path, review: &Path) {
+    let Ok(ignored) = git(
+        Some(source),
+        [
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+    for entry in ignored.split('\0').map(|entry| entry.trim_end_matches('/')) {
+        let (from, to) = (source.join(entry), review.join(entry));
+        // shortcut: symlinks are Unix-only; Windows reviewers get no dependencies.
+        #[cfg(unix)]
+        if !entry.is_empty()
+            && from.is_dir()
+            && to.parent().is_some_and(Path::is_dir)
+            && tokio::fs::symlink_metadata(&to).await.is_err()
+        {
+            let _ = tokio::fs::symlink(&from, &to).await;
+        }
+        #[cfg(not(unix))]
+        let _ = (from, to);
+    }
 }
 
 /// Refuses a repository whose name or default branch `git` could misread.

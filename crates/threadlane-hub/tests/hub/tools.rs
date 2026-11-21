@@ -201,6 +201,7 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
             STAY_SILENT,
             CREATE_TASK,
             UPDATE_TASK,
+            threadlane_hub::RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
             threadlane_hub::PR_REVIEW_STATUS,
@@ -221,6 +222,20 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
             "delete_repository"
         ]
     );
+
+    let allowed = hub
+        .link
+        .call_tool(
+            &lease,
+            run.run_id,
+            Some("toolu_2"),
+            "read_notes",
+            &json!({}),
+        )
+        .await;
+    assert_eq!(allowed, Ok(json!({ "notes": [] })));
+    assert_eq!(fake.calls().len(), 1);
+    assert_eq!(fake.calls()[0].call_id.as_deref(), Some("toolu_2"));
 
     // The lead is On request: a shared, reversible call asks.
     let asked = hub
@@ -246,24 +261,25 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
         )
         .await;
     assert!(matches!(blocked, Err(ToolError::Blocked(_))), "{blocked:?}");
-    assert!(
-        fake.calls().is_empty(),
+    assert_eq!(
+        fake.calls().len(),
+        1,
         "neither an asked nor a blocked call is executed"
     );
 
-    let allowed = hub
+    // Once a call waits on you, the run's ungated calls are refused (#675).
+    let after = hub
         .link
         .call_tool(
             &lease,
             run.run_id,
-            Some("toolu_2"),
+            Some("toolu_3"),
             "read_notes",
             &json!({}),
         )
         .await;
-    assert_eq!(allowed, Ok(json!({ "notes": [] })));
+    assert!(matches!(after, Err(ToolError::Blocked(_))), "{after:?}");
     assert_eq!(fake.calls().len(), 1);
-    assert_eq!(fake.calls()[0].call_id.as_deref(), Some("toolu_2"));
     assert_eq!(
         ToolRegistry::definition(&*hub.core.tools(), "merge_pull_request").map(|d| d.tier),
         Some(Tier::SharedReversible)

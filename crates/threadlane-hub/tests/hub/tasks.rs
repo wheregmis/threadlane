@@ -100,7 +100,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
             &implementation,
             "self-review",
             "finish_review",
-            json!({"verdict":"approved","feedback":"Self-approved"})
+            json!({"verdict":"approved","feedback":"Self-approved","checks":"rerun"})
         )
         .await
         .is_err()
@@ -205,13 +205,28 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
             Err(ToolError::Blocked(_))
         ));
     }
+    // A verdict must say whether the checks were rerun or taken from the submission.
+    for checks in [json!(null), json!("trusted")] {
+        assert!(
+            call(
+                &hub,
+                &lease,
+                &review,
+                &format!("no-checks-{checks}"),
+                "finish_review",
+                json!({"verdict":"approved","feedback":"Fine","checks":checks}),
+            )
+            .await
+            .is_err()
+        );
+    }
     call(
         &hub,
         &lease,
         &review,
         "feedback",
         "finish_review",
-        json!({"verdict":"changes_requested","feedback":"Include the totals"}),
+        json!({"verdict":"changes_requested","feedback":"Include the totals","checks":"from_submission"}),
     )
     .await
     .unwrap();
@@ -249,7 +264,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         &final_review,
         "approval",
         "finish_review",
-        json!({"verdict":"approved","feedback":"Totals match"}),
+        json!({"verdict":"approved","feedback":"Totals match","checks":"rerun"}),
     )
     .await
     .unwrap();
@@ -263,14 +278,22 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
     assert_eq!(completed[0].status, TaskStatus::Done);
     assert_eq!(
         completed[0].result.as_ref().unwrap()["review"]["feedback"],
-        "Totals match"
+        "Checks: rerun independently in the review checkout.\n\nTotals match"
     );
     assert_eq!(task_results(&hub).await.len(), 1);
     let deliveries = hub.db.pending_github_reviews().await.unwrap();
     assert_eq!(deliveries.len(), 2);
     for (delivery, (sha, verdict, feedback)) in deliveries.iter().zip([
-        ("a", "Changes requested", "Include the totals"),
-        ("b", "Approved", "Totals match"),
+        (
+            "a",
+            "Changes requested",
+            "Checks: not rerun; taken from the submission.\n\nInclude the totals",
+        ),
+        (
+            "b",
+            "Approved",
+            "Checks: rerun independently in the review checkout.\n\nTotals match",
+        ),
     ]) {
         assert_eq!(delivery.pull_url, "https://github.com/acme/widgets/pull/42");
         assert_eq!(delivery.revision, sha.repeat(40));
@@ -305,8 +328,158 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
     let history = hub.db.task_reviews(id).await.unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].reviewer, reviewer.id);
-    assert_eq!(history[0].feedback.as_deref(), Some("Include the totals"));
-    assert_eq!(history[1].feedback.as_deref(), Some("Totals match"));
+    assert_eq!(
+        history[0].feedback.as_deref(),
+        Some("Checks: not rerun; taken from the submission.\n\nInclude the totals")
+    );
+    assert_eq!(
+        history[1].feedback.as_deref(),
+        Some("Checks: rerun independently in the review checkout.\n\nTotals match")
+    );
+}
+
+#[tokio::test]
+async fn another_tasks_lane_sees_a_task_review_approval_under_any_registration_of_the_remote() {
+    // #664, #666: two registrations of one GitHub repository must resolve to the same verdict.
+    let hub = TestHub::with(
+        threadlane_hub::HubSettings {
+            reviewer: Some("Reviewer".into()),
+            ..Default::default()
+        },
+        std::sync::Arc::new(NoHooks),
+    )
+    .await;
+    hub.hello().await;
+    let engineer = engineer(&hub, 1).await;
+    hub.db
+        .create_agent(&NewAgent::named("Reviewer", "reviewer"))
+        .await
+        .unwrap();
+    let project = hub.general().await;
+    let register = |name: &str, remote: &str| threadlane_core::model::NewRepository {
+        project_id: project.id,
+        name: name.into(),
+        remote_url: remote.into(),
+        default_branch: "main".into(),
+        protected_branches: vec![],
+    };
+    let widgets = hub
+        .db
+        .create_repository(&register("widgets", "https://github.com/acme/widgets.git"))
+        .await
+        .unwrap();
+    let mirror = hub
+        .db
+        .create_repository(&register("widgets-main", "git@github.com:Acme/Widgets.git"))
+        .await
+        .unwrap();
+    let new_task = |title: &str, repository| NewTask {
+        project_id: project.id,
+        agent_id: engineer,
+        title: title.into(),
+        goal: title.into(),
+        repositories: vec![repository],
+        parent_task_id: None,
+        depends_on: vec![],
+        origin: TaskOrigin::User,
+        status: TaskStatus::Queued,
+        priority: 0,
+        created_by_call: None,
+        created_at: hub.clock.now(),
+    };
+    let a = hub
+        .db
+        .create_task(None, &new_task("Fix widgets", widgets.id))
+        .await
+        .unwrap();
+    let head = "a".repeat(40);
+    let (lease, implementation) = begin(&*hub.link).await;
+    super::github::record_updated_pull_request(&hub, &a, &lease).await;
+    write_progress(&hub, &lease, &implementation, &a.id.to_string()).await;
+    call(
+        &hub,
+        &lease,
+        &implementation,
+        "submit",
+        FINISH_TASK,
+        json!({"summary":"Fixed","merge":[{"repository":"widgets","branch":"main","base":"main","conflicts":[],"revision":head}]}),
+    )
+    .await
+    .unwrap();
+    hub.link
+        .complete(&lease, implementation.run_id, None)
+        .await
+        .unwrap();
+    let Begin::Run(review) = hub.link.begin_run(&lease).await.unwrap() else {
+        panic!("review never started")
+    };
+    call(
+        &hub,
+        &lease,
+        &review,
+        "approval",
+        "finish_review",
+        json!({"verdict":"approved","feedback":"Looks right","checks":"rerun"}),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &review).await;
+    assert_eq!(task(&hub, &a.id.to_string()).await.status, TaskStatus::Done);
+
+    let b = hub
+        .db
+        .create_task(None, &new_task("Merge widgets", mirror.id))
+        .await
+        .unwrap();
+    // The lead lane may be granted first, for A's result.
+    let (lease, merge) = loop {
+        let lease = hub.link.request_work().await.unwrap().expect("granted");
+        match hub.link.begin_run(&lease).await.unwrap() {
+            Begin::Run(run) if run.task_id == Some(b.id) => break (lease, *run),
+            Begin::Run(run) => {
+                finish_run(&hub, &lease, &run).await;
+            }
+            Begin::Idle => hub.link.release(&lease).await.unwrap(),
+        }
+    };
+    for name in ["widgets-main", "widgets"] {
+        let status = call(
+            &hub,
+            &lease,
+            &merge,
+            name,
+            threadlane_hub::PR_REVIEW_STATUS,
+            json!({"repository":name,"number":42,"head":head}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status["review_status"], "approved", "{name}: {status}");
+        assert_eq!(status["task_id"], a.id.to_string());
+        assert_eq!(
+            status["feedback"],
+            "Checks: rerun independently in the review checkout.\n\nLooks right"
+        );
+        assert_eq!(
+            status["pull_request"],
+            "https://github.com/acme/widgets/pull/42"
+        );
+        assert_eq!(status["head"], head.as_str());
+    }
+    let unreviewed = call(
+        &hub,
+        &lease,
+        &merge,
+        "other-head",
+        threadlane_hub::PR_REVIEW_STATUS,
+        json!({"repository":"widgets-main","number":42,"head":"b".repeat(40)}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unreviewed["review_status"], "unreviewed");
+    assert_eq!(
+        unreviewed["pull_request"],
+        "https://github.com/acme/widgets/pull/42"
+    );
 }
 
 #[tokio::test]
@@ -373,9 +546,29 @@ async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
         "{submitted}"
     );
     hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
     assert_eq!(
         task(&hub, &report.id.to_string()).await.status,
         TaskStatus::InReview
+    );
+
+    // The reviewer's backend refuses its setup: the task names that, keeping its result.
+    let (lease, review) = begin(&*hub.link).await;
+    assert_eq!(review.agent_name, "Checker");
+    let rejected = RunFailure::Rejected {
+        message: "The 'gpt-x' model is not supported".into(),
+    };
+    hub.link
+        .fail(&lease, review.run_id, &rejected)
+        .await
+        .unwrap();
+    let reviewed = task(&hub, &report.id.to_string()).await;
+    assert_eq!(reviewed.status, TaskStatus::InReview);
+    let reason = reviewed.waiting_reason.unwrap();
+    assert!(
+        reason.starts_with("Reviewer failed on its configuration (agent ")
+            && reason.contains("not supported"),
+        "{reason}"
     );
 }
 
@@ -621,7 +814,7 @@ async fn review_handoffs_share_machine_slots() {
         &review,
         "approval",
         "finish_review",
-        json!({"verdict":"approved","feedback":"Ready"}),
+        json!({"verdict":"approved","feedback":"Ready","checks":"rerun"}),
     )
     .await
     .unwrap();
@@ -996,6 +1189,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             STAY_SILENT,
             CREATE_TASK,
             UPDATE_TASK,
+            threadlane_hub::RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
             threadlane_hub::PR_REVIEW_STATUS,
@@ -2139,7 +2333,7 @@ async fn an_attachment_during_review_applies_to_the_next_implementation_run() {
         "verdict",
         "finish_review",
         json!({
-            "verdict": "approved", "feedback": "The local fix is correct."
+            "verdict": "approved", "feedback": "The local fix is correct.", "checks": "rerun"
         }),
     )
     .await

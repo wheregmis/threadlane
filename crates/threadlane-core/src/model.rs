@@ -260,6 +260,7 @@ str_enum! {
 
 str_enum! {
     /// The command-line agent that executes runs (Plan.md §5.7).
+    #[derive(PartialOrd, Ord)]
     pub enum BackendKind {
         Claude => "claude",
         Codex => "codex",
@@ -397,6 +398,10 @@ pub struct SpaceSettings {
     pub quiet_hours: Option<QuietHours>,
     /// Channel names messages are delivered on, in order of preference.
     pub channels: Vec<String>,
+    /// A paused space starts no run; runs already going finish, and events
+    /// queue until it is resumed.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl Default for SpaceSettings {
@@ -406,6 +411,7 @@ impl Default for SpaceSettings {
             mode_ceiling: Mode::OnRequest,
             quiet_hours: None,
             channels: vec!["client".to_owned()],
+            paused: false,
         }
     }
 }
@@ -674,6 +680,8 @@ pub struct StartRun {
     pub session: SessionChoice,
     pub agent_id: Option<AgentId>,
     pub backend: Option<BackendKind>,
+    /// The model the run asks the backend for; `None` is the backend's own default.
+    pub model: Option<String>,
     /// With [`SessionChoice::New`]: the backend session id chosen up front
     /// for the new session, recorded with it. Ignored when resuming.
     pub native_session_id: Option<String>,
@@ -702,6 +710,9 @@ pub struct Run {
     pub lease_epoch: i64,
     pub agent_id: Option<AgentId>,
     pub backend: Option<BackendKind>,
+    /// The model it asked for; `None` is the backend's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub status: RunStatus,
     pub outcome: Option<RunOutcome>,
     /// The final free text, never delivered (Plan.md §4.5).
@@ -724,6 +735,10 @@ pub struct RetryPolicy {
     pub max_attempts: u32,
     /// No run starts on the lane before this time.
     pub backoff_until: Timestamp,
+    /// The backend refused the agent's setup, such as its model: a task
+    /// that dies of it records a configuration failure as its result, and
+    /// the tasks waiting for it are blocked, not cancelled.
+    pub configuration: bool,
 }
 
 /// What [`crate::store::SessionStore::fail_run`] did with the run's events.

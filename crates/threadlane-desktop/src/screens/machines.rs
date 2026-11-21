@@ -645,6 +645,12 @@ impl Desktop {
                     )
                     .into_any_element()
             })
+            .children(self.join_error.as_ref().map(|error| {
+                div()
+                    .text_size(TYPE_BODY)
+                    .text_color(cx.theme().danger)
+                    .child(error.clone())
+            }))
             .child(
                 button("connect-space")
                     .primary()

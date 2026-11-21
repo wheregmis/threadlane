@@ -20,15 +20,14 @@ mod prose;
 
 use crate::icons::AppIcon;
 use crate::tokens::{
-    BADGE_RADIUS, BAR_HEIGHT, BUTTON_RADIUS, COMPOSER_RADIUS, CONTROL_HEIGHT, DOT_SIZE,
-    FIELD_RADIUS, ICON_BUTTON_RADIUS, MD, ROW_HEIGHT, ROW_RADIUS, SCROLLBAR_GUTTER, SM,
-    SMALL_CONTROL_HEIGHT, Status, TABULAR, TYPE_BODY, TYPE_META, TYPE_SECTION, TYPE_TITLE, XS, XXL,
-    XXS,
+    BADGE_RADIUS, BAR_HEIGHT, COMPOSER_RADIUS, CONTROL_HEIGHT, DOT_SIZE, ICON_BUTTON_RADIUS, MD,
+    ROW_HEIGHT, SCROLLBAR_GUTTER, SM, SMALL_CONTROL_HEIGHT, Status, TABULAR, TYPE_BODY, TYPE_META,
+    TYPE_SECTION, TYPE_TITLE, XS, XXL, XXS,
 };
 
-/// Standard push button. The kit's medium and small heights match our scale.
+/// Standard push button. Inherits the active theme's corner radius.
 pub(super) fn button(id: impl Into<ElementId>) -> Button {
-    Button::new(id).rounded(BUTTON_RADIUS)
+    Button::new(id)
 }
 
 /// A named and tooltip-labelled icon-only command.
@@ -43,9 +42,9 @@ pub(super) fn icon_button(id: impl Into<ElementId>, icon: AppIcon, name: String)
         .tooltip(name)
 }
 
-/// Standard single-line field.
+/// Standard single-line field. Inherits the active theme's corner radius.
 pub(super) fn field(state: &Entity<InputState>) -> Input {
-    Input::new(state).rounded(FIELD_RADIUS).text_size(TYPE_BODY)
+    Input::new(state).text_size(TYPE_BODY)
 }
 
 /// Shared composer surface.
@@ -108,11 +107,7 @@ pub(super) fn status_badge(label: impl Into<SharedString>, status: Status, cx: &
         .text_size(TYPE_META)
         .gap(XS)
         .font_features(TABULAR.clone())
-        .child(
-            Icon::new(status_icon(status))
-                .size(TYPE_META)
-                .text_color(ink),
-        )
+        .child(Icon::new(status_icon(status)).xsmall().text_color(ink))
         .child(label.into())
 }
 
@@ -184,7 +179,7 @@ pub(super) fn row(
         .active(cx.theme().sidebar_accent);
     button(id)
         .custom(style)
-        .rounded(ROW_RADIUS)
+        .rounded(cx.theme().radius)
         .w_full()
         .h(ROW_HEIGHT)
         .selected(selected)
@@ -195,7 +190,7 @@ pub(super) fn row(
                 .w_full()
                 .min_w_0()
                 .gap(SM)
-                .child(Icon::new(icon).size(TYPE_SECTION))
+                .child(Icon::new(icon).small())
                 .child(div().flex_1().min_w_0().truncate().child(label))
                 .children(running.then(|| status_dot(Status::Running, cx)))
                 .children(trailing.map(|value| count_badge(value, cx))),
@@ -233,7 +228,7 @@ pub(super) fn live_step(step: threadlane_desktop::LatestStep, cx: &App) -> Div {
 pub(super) fn card(cx: &App) -> GroupBox {
     GroupBox::new()
         .min_w_0()
-        .rounded(ROW_RADIUS)
+        .rounded(cx.theme().radius)
         .border_1()
         .border_color(cx.theme().border)
         .bg(cx.theme().group_box)
@@ -338,7 +333,7 @@ pub(super) fn decision_surface(proposal: bool, cx: &App) -> Div {
         .w_full()
         .min_w_0()
         .flex_none()
-        .rounded(ROW_RADIUS)
+        .rounded(cx.theme().radius)
         .border_1()
         .border_color(cx.theme().border)
         .when(proposal, |surface| surface.border_dashed())
@@ -353,7 +348,7 @@ pub(super) fn decision_ring(surface: Div, current: bool, cx: &App) -> Div {
         .w_full()
         .flex_none()
         .p(XXS)
-        .rounded(ROW_RADIUS + XXS)
+        .rounded(cx.theme().radius + XXS)
         .border_1()
         .border_color(if current {
             cx.theme().ring
@@ -415,7 +410,7 @@ pub(super) fn decision_option(
                 .when(dimmed, |row| row.opacity(crate::tokens::UNCHOSEN_OPACITY))
                 .when(chosen, |row| row.text_color(cx.theme().foreground))
                 .when(chosen, |row| {
-                    row.child(Icon::new(AppIcon::Check).size(TYPE_BODY).flex_none())
+                    row.child(Icon::new(AppIcon::Check).small().flex_none())
                 })
                 .child(
                     h_flex()

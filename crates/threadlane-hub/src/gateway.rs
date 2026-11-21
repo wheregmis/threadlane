@@ -157,6 +157,20 @@ impl LocalLink {
             ToolCallBegin::OutcomeUnknown => return Err(ToolError::OutcomeUnknown),
             ToolCallBegin::Perform => {}
         }
+        // A run that waits on you does nothing more (Plan.md §9.4), but each
+        // further gated call of its turn still gets its own card (#675).
+        if asked.is_none() && self.run_waits(&lane, &run).await? {
+            let refused = ToolError::Blocked(format!(
+                "{tool} did not run: another call of this run is waiting on you, so nothing \
+                 more runs in this turn. End your turn; call it again when you are resumed."
+            ));
+            if let Some(record) = error_record(&refused) {
+                db.finish_tool_call(lease, &key, &record, inner.clock.now())
+                    .await
+                    .map_err(tool_error)?;
+            }
+            return Err(refused);
+        }
         inner.hook.reach(step::AFTER_BEGIN)?;
 
         let context = ToolContext {
@@ -190,6 +204,18 @@ impl LocalLink {
             .map_err(tool_error)?;
         inner.hook.reach(step::AFTER_FINISH)?;
         outcome
+    }
+
+    /// Whether a call of this run already opened a decision.
+    async fn run_waits(&self, lane: &Lane, run: &Run) -> Result<bool, ToolError> {
+        let decisions = self
+            .core
+            .inner
+            .db
+            .lane_decisions(lane.id)
+            .await
+            .map_err(tool_error)?;
+        Ok(decisions.iter().any(|d| d.run_id == Some(run.id)))
     }
 
     /// Gathers what governs the call and asks the gate (Plan.md §9.1).
@@ -689,7 +715,8 @@ impl LocalLink {
             Arc::clone(&inner.clock),
             Arc::clone(&inner.wake) as Arc<dyn Waker>,
             None,
-        );
+        )
+        .with_default_models(inner.settings.default_models.clone());
         let context = ToolContext {
             lease: *lease,
             run_id,
