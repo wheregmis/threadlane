@@ -302,6 +302,7 @@ impl LocalLink {
                 recent: &recent,
                 decisions: &decisions,
                 events: &events,
+                hub_started: inner.started_at,
             })
         };
         let scan = !dreaming
