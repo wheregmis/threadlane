@@ -8099,3 +8099,11 @@ fn quiet_update_detector_flags_internal_no_op_messages_only() {
         "I've queued T-0069 for the Backend Developer."
     ));
 }
+
+#[test]
+fn a_label_rule_reads_as_labelling_issues_in_the_repository() {
+    assert_eq!(
+        allows("label_issue", &json!({ "repository": "app" })),
+        "label issues in app"
+    );
+}

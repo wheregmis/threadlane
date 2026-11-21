@@ -91,10 +91,10 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
         })
         .collect();
     // A standing rule for these covers one pull request or issue, not the whole repository.
+    // label_issue is left out: its rule covers label edits on the whole repository (#653).
     if matches!(
         tool,
         crate::FAST_FORWARD_PULL_REQUEST
-            | crate::LABEL_ISSUE
             | crate::CLOSE_PULL_REQUEST
             | crate::EDIT_PULL_REQUEST
             | crate::RESOLVE_REVIEW_THREAD
@@ -656,6 +656,42 @@ mod tests {
     }
 
     #[test]
+    fn a_label_rule_covers_labelling_any_issue_in_its_repository_only() {
+        let first = json!({"repository":"app","number":7,"add":["bug"]});
+        let rules = vec![rule(
+            crate::LABEL_ISSUE,
+            rule_pattern(crate::LABEL_ISSUE, &first),
+            false,
+        )];
+        let overrides = Overrides::new();
+        let decide = |tool: &str, arguments: Json| {
+            short(&gate(&GateInput {
+                tool,
+                tier: T2,
+                arguments: &arguments,
+                mode: ON,
+                space_ceiling: AU,
+                project_ceiling: None,
+                overrides: &overrides,
+                rules: &rules,
+                tainted: false,
+                requested: true,
+                new_work: None,
+            }))
+        };
+        let other_issue = json!({"repository":"app","number":8,"remove":["question"]});
+        assert_eq!(decide(crate::LABEL_ISSUE, other_issue.clone()), V::Rule);
+        assert_eq!(
+            decide(
+                crate::LABEL_ISSUE,
+                json!({"repository":"web","number":8,"add":["bug"]})
+            ),
+            V::AskOffer
+        );
+        assert_eq!(decide(crate::COMMENT, other_issue), V::AskOffer);
+    }
+
+    #[test]
     fn work_you_did_not_request_starts_in_assisted_and_autonomous_only() {
         for (mode, ceiling, starts) in [
             (Mode::Off, AU, false),
@@ -703,7 +739,7 @@ mod tests {
                 crate::LABEL_ISSUE,
                 &json!({"repository":"app","number":7,"add":["bug"]})
             ),
-            json!({"repository":"app","number":7})
+            json!({"repository":"app"})
         );
         let head = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(
