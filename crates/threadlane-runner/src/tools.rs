@@ -160,10 +160,8 @@ impl ToolEndpoint for LaneTools {
             Some(Stop::User) => return Err(ToolError::Blocked("stopped by the user".to_owned())),
             Some(Stop::Shutdown) | None => {}
         }
-        // Nothing more happens in a run that waits on you (Plan.md §9.4).
-        if let Some(error) = self.lane.deferred() {
-            return Err(error);
-        }
+        // A run that waits on you does nothing more (Plan.md §9.4); the hub
+        // refuses its ungated calls and gives each gated one its own card.
         let arguments = if name == FINISH_TASK {
             self.with_merge_checks(arguments).await
         } else if matches!(
@@ -191,7 +189,10 @@ impl ToolEndpoint for LaneTools {
             Err(ToolError::Killed(killed)) => self.lane.signal(Stop::Killed(*killed)),
             Err(ToolError::LeaseLost) => self.lane.signal(Stop::LeaseLost),
             Err(error @ (ToolError::WaitingOnYou | ToolError::AuthorizedAndQueued)) => {
-                self.lane.set_deferred(Some(error.clone()));
+                // A card waiting on you outweighs a queued call.
+                if self.lane.deferred() != Some(ToolError::WaitingOnYou) {
+                    self.lane.set_deferred(Some(error.clone()));
+                }
             }
             Ok(output) if output.get(PROGRESS_WRITTEN) == Some(&Json::Bool(true)) => {
                 self.lane.set_progress_written(true);

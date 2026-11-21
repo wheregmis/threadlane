@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value as Json, json};
+use threadlane_core::backend::BackendEvent;
 use threadlane_core::client::{DecisionReply, DecisionRequest};
 use threadlane_core::ids::TaskId;
 use threadlane_core::link::PUBLISH_REVISION;
@@ -24,13 +25,13 @@ use threadlane_core::store::{DecisionStore, OrgStore, SessionStore};
 use threadlane_core::time::Clock;
 use threadlane_core::workspace::Workspaces;
 use threadlane_hub::{
-    FAST_FORWARD_PULL_REQUEST, FINISH_TASK, HubError, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    ASK_USER, FAST_FORWARD_PULL_REQUEST, FINISH_TASK, HubError, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
     derived_call_key,
 };
 use threadlane_runner::{GitWorkspaces, RunnerError};
 use threadlane_testkit::fakes::ForgeCall;
 use threadlane_testkit::git::git;
-use threadlane_testkit::{CrashPlan, Script};
+use threadlane_testkit::{CrashPlan, Script, ScriptStep};
 
 use crate::harness::{
     REPLY, Sim, TASK_SUMMARY, World, add_engineer, finish_after, merged_cleanly, plan_tasks_in,
@@ -579,6 +580,11 @@ async fn the_runner_stops_a_backend_that_keeps_working_after_it_asked() {
         .call("toolu_pr", OPEN_PULL_REQUEST, pull_request())
         .text("Meanwhile, I will just finish.")
         .call("toolu_f", FINISH_TASK, json!({ "summary": "Sneaked out." }))
+        .then(ScriptStep::Emit(BackendEvent::ToolUse {
+            call_id: Some("toolu_bash".to_owned()),
+            name: "Bash".to_owned(),
+            input: json!({ "command": "ls" }),
+        }))
         .finish("Done anyway.");
     let world = publish_world(World::new().await, keeps_going).await;
     asks_before_sharing(&world).await;
@@ -614,6 +620,53 @@ async fn the_runner_stops_a_backend_that_keeps_working_after_it_asked() {
     );
     assert_invariants(&sim, "keeps going").await;
     assert_quiet(&sim, "keeps going").await;
+}
+
+/// Several gated calls in one turn, as a parallel batch makes them, each
+/// open their own card and the run ends on its own text, not stopped (#675).
+#[tokio::test]
+async fn parallel_gated_calls_each_wait_on_their_own_card() {
+    let batch = Script::new()
+        .call("toolu_pr", OPEN_PULL_REQUEST, pull_request())
+        .call(
+            "toolu_ask",
+            ASK_USER,
+            json!({ "question": "Which title?", "options": ["Page", "Docs"] }),
+        )
+        .call("toolu_f", FINISH_TASK, json!({ "summary": "Too soon." }))
+        .finish("Waiting on both answers.");
+    let world = publish_world(World::new().await, batch).await;
+    asks_before_sharing(&world).await;
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Put the page up").await;
+    live(&sim).await.unwrap();
+
+    let task = sim.task("T-0001").await;
+    assert_eq!(task.status, TaskStatus::WaitingOnYou);
+    assert_eq!(task.result, None, "the ungated call was refused");
+    let decisions = sim.decisions().await;
+    let tools: Vec<_> = decisions.iter().map(|d| d.tool.as_str()).collect();
+    assert_eq!(
+        tools,
+        [OPEN_PULL_REQUEST, ASK_USER],
+        "one card per gated call"
+    );
+    assert!(
+        decisions
+            .iter()
+            .all(|d| d.status == DecisionStatus::Pending)
+    );
+    assert_eq!(decisions[0].run_id, decisions[1].run_id);
+    let run = sim
+        .runs()
+        .await
+        .into_iter()
+        .find(|run| Some(run.id) == decisions[0].run_id)
+        .unwrap();
+    assert_eq!(run.status, RunStatus::Committed);
+    assert_eq!(run.outcome, Some(RunOutcome::Deferred));
+    assert_eq!(run.rationale.as_deref(), Some("Waiting on both answers."));
+    assert_invariants(&sim, "parallel gated").await;
 }
 
 /// Captured log output.
