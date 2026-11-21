@@ -134,7 +134,12 @@ fn task_record(task: &Task, times: &BTreeMap<i64, Timestamp>) -> Json {
 /// A listed task without its diff patches or its review feedback twice (#680):
 /// file stats stay, and `task_id` still shows the full record.
 fn compact(record: &mut Json) {
-    if let Some(checks) = record["result"][threadlane_core::link::MERGE_CHECKS].as_array_mut() {
+    // get_mut, not IndexMut: indexing would insert keys into a null `result`.
+    let result = record.get_mut("result");
+    if let Some(checks) = result
+        .and_then(|r| r.get_mut(threadlane_core::link::MERGE_CHECKS))
+        .and_then(Json::as_array_mut)
+    {
         for diff in checks.iter_mut().filter_map(|check| check.get_mut("diff")) {
             if let Some(diff) = diff.as_object_mut()
                 && diff.remove("patch").is_some()
@@ -144,7 +149,10 @@ fn compact(record: &mut Json) {
         }
     }
     if record.get("latest_review").is_some()
-        && let Some(review) = record["result"]["review"].as_object_mut()
+        && let Some(review) = record
+            .get_mut("result")
+            .and_then(|r| r.get_mut("review"))
+            .and_then(Json::as_object_mut)
     {
         review.remove("feedback");
     }
@@ -691,5 +699,12 @@ mod tests {
         assert!(record["result"]["review"].get("feedback").is_none());
         assert_eq!(record["result"]["review"]["run"], 7);
         assert_eq!(record["latest_review"]["feedback"], "Looks good");
+
+        let mut open = json!({"result": null, "latest_review": {"verdict": "approved"}});
+        compact(&mut open);
+        assert_eq!(
+            open,
+            json!({"result": null, "latest_review": {"verdict": "approved"}})
+        );
     }
 }
