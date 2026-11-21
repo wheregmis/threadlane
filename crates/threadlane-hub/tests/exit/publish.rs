@@ -709,3 +709,49 @@ async fn no_table_or_log_line_holds_a_token() {
     // That the real forge sets no credential and runs only `git` and `gh` is
     // the runner's forge tests.
 }
+
+/// A named base is asked about and opened against; a bad one is refused
+/// before anything is asked or pushed.
+#[tokio::test]
+async fn a_pull_request_opens_against_the_base_it_names() {
+    let mut arguments = pull_request();
+    arguments["base"] = json!("release/1.0");
+    let script = Script::new()
+        .call("toolu_pr", OPEN_PULL_REQUEST, arguments)
+        .finish("Waiting on the user.");
+    let world = publish_world(World::new().await, script).await;
+    asks_before_sharing(&world).await;
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Open a pull request against the release")
+        .await;
+    drive(&sim, "approve", None).await.unwrap();
+    let decision = sim.decisions().await.remove(0);
+    assert!(
+        decision.question.contains("into release/1.0 of app"),
+        "{}",
+        decision.question
+    );
+    let bases: Vec<_> = sim
+        .world
+        .forge
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            ForgeCall::Open { base, .. } => Some(base),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bases, ["release/1.0"]);
+
+    let mut arguments = pull_request();
+    arguments["base"] = json!("--force");
+    let script = Script::new()
+        .call("toolu_pr", OPEN_PULL_REQUEST, arguments)
+        .finish("Waiting on the user.");
+    let world = publish_world(World::new().await, script).await;
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Open a pull request").await;
+    drive(&sim, "approve", None).await.unwrap();
+    assert!(sim.decisions().await.is_empty(), "nothing asked");
+    assert!(sim.world.forge.calls().is_empty(), "nothing pushed");
+}

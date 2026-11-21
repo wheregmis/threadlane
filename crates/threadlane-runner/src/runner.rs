@@ -1060,7 +1060,10 @@ impl Inner {
                         .open_draft_pull_request(
                             worktree,
                             approved,
-                            &assignment.repositories[index].default_branch,
+                            match text("base") {
+                                "" => &assignment.repositories[index].default_branch,
+                                base => base,
+                            },
                             text("title").trim(),
                             text("body"),
                             &format!("{}, {task}", assignment.agent_name),
