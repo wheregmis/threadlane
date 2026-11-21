@@ -100,7 +100,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
             &implementation,
             "self-review",
             "finish_review",
-            json!({"verdict":"approved","feedback":"Self-approved"})
+            json!({"verdict":"approved","feedback":"Self-approved","checks":"rerun"})
         )
         .await
         .is_err()
@@ -205,13 +205,28 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
             Err(ToolError::Blocked(_))
         ));
     }
+    // A verdict must say whether the checks were rerun or taken from the submission.
+    for checks in [json!(null), json!("trusted")] {
+        assert!(
+            call(
+                &hub,
+                &lease,
+                &review,
+                &format!("no-checks-{checks}"),
+                "finish_review",
+                json!({"verdict":"approved","feedback":"Fine","checks":checks}),
+            )
+            .await
+            .is_err()
+        );
+    }
     call(
         &hub,
         &lease,
         &review,
         "feedback",
         "finish_review",
-        json!({"verdict":"changes_requested","feedback":"Include the totals"}),
+        json!({"verdict":"changes_requested","feedback":"Include the totals","checks":"from_submission"}),
     )
     .await
     .unwrap();
@@ -249,7 +264,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         &final_review,
         "approval",
         "finish_review",
-        json!({"verdict":"approved","feedback":"Totals match"}),
+        json!({"verdict":"approved","feedback":"Totals match","checks":"rerun"}),
     )
     .await
     .unwrap();
@@ -263,14 +278,22 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
     assert_eq!(completed[0].status, TaskStatus::Done);
     assert_eq!(
         completed[0].result.as_ref().unwrap()["review"]["feedback"],
-        "Totals match"
+        "Checks: rerun independently in the review checkout.\n\nTotals match"
     );
     assert_eq!(task_results(&hub).await.len(), 1);
     let deliveries = hub.db.pending_github_reviews().await.unwrap();
     assert_eq!(deliveries.len(), 2);
     for (delivery, (sha, verdict, feedback)) in deliveries.iter().zip([
-        ("a", "Changes requested", "Include the totals"),
-        ("b", "Approved", "Totals match"),
+        (
+            "a",
+            "Changes requested",
+            "Checks: not rerun; taken from the submission.\n\nInclude the totals",
+        ),
+        (
+            "b",
+            "Approved",
+            "Checks: rerun independently in the review checkout.\n\nTotals match",
+        ),
     ]) {
         assert_eq!(delivery.pull_url, "https://github.com/acme/widgets/pull/42");
         assert_eq!(delivery.revision, sha.repeat(40));
@@ -305,8 +328,14 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
     let history = hub.db.task_reviews(id).await.unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].reviewer, reviewer.id);
-    assert_eq!(history[0].feedback.as_deref(), Some("Include the totals"));
-    assert_eq!(history[1].feedback.as_deref(), Some("Totals match"));
+    assert_eq!(
+        history[0].feedback.as_deref(),
+        Some("Checks: not rerun; taken from the submission.\n\nInclude the totals")
+    );
+    assert_eq!(
+        history[1].feedback.as_deref(),
+        Some("Checks: rerun independently in the review checkout.\n\nTotals match")
+    );
 }
 
 #[tokio::test]
@@ -621,7 +650,7 @@ async fn review_handoffs_share_machine_slots() {
         &review,
         "approval",
         "finish_review",
-        json!({"verdict":"approved","feedback":"Ready"}),
+        json!({"verdict":"approved","feedback":"Ready","checks":"rerun"}),
     )
     .await
     .unwrap();
@@ -2139,7 +2168,7 @@ async fn an_attachment_during_review_applies_to_the_next_implementation_run() {
         "verdict",
         "finish_review",
         json!({
-            "verdict": "approved", "feedback": "The local fix is correct."
+            "verdict": "approved", "feedback": "The local fix is correct.", "checks": "rerun"
         }),
     )
     .await

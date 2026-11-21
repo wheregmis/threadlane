@@ -754,14 +754,25 @@ impl HubTools {
         context: &ToolContext,
         arguments: &Json,
     ) -> Result<Json, ToolError> {
-        let object = fields(arguments, &["verdict", "feedback"])?;
+        let object = fields(arguments, &["verdict", "feedback", "checks"])?;
         let verdict = text_field(object, "verdict")?
             .ok_or_else(|| missing("verdict"))?
             .parse::<TaskReviewVerdict>()
             .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+        // Tells the lead a verified approval from one that relied on the submitter's logs.
+        let checks = match text_field(object, "checks")?.ok_or_else(|| missing("checks"))? {
+            "rerun" => "Checks: rerun independently in the review checkout.",
+            "from_submission" => "Checks: not rerun; taken from the submission.",
+            other => {
+                return Err(ToolError::InvalidArguments(format!(
+                    "checks must be rerun or from_submission, not {other:?}"
+                )));
+            }
+        };
         let feedback = text_field(object, "feedback")?.ok_or_else(|| missing("feedback"))?;
+        let feedback = format!("{checks}\n\n{feedback}");
         self.db
-            .store_task_review_verdict(&context.lease, context.run_id, verdict, feedback)
+            .store_task_review_verdict(&context.lease, context.run_id, verdict, &feedback)
             .await
             .map_err(tool_error)?;
         Ok(json!({"verdict": verdict, "next": "End your turn to record the review."}))
@@ -1267,8 +1278,13 @@ fn task_definitions() -> Vec<ToolDefinition> {
             Tier::Local,
             json!({ "type": "object", "properties": {
                 "verdict": {"type": "string", "enum": ["approved", "changes_requested"]},
-                "feedback": {"type": "string"}
-            }, "required": ["verdict", "feedback"], "additionalProperties": false }),
+                "feedback": {"type": "string"},
+                "checks": {
+                    "type": "string",
+                    "enum": ["rerun", "from_submission"],
+                    "description": "rerun: you ran the build and tests yourself in the review checkout; from_submission: you relied on the submitter's results."
+                }
+            }, "required": ["verdict", "feedback", "checks"], "additionalProperties": false }),
         ),
     ]
 }

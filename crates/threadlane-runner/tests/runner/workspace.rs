@@ -453,6 +453,9 @@ async fn a_review_uses_the_submitted_commit_after_the_implementation_branch_move
     s.workspaces = GitWorkspaces::new(h.config.lanes_dir.parent().unwrap().join("workspaces"));
     let implementation = s.prepare(T1).await;
     std::fs::write(implementation.join("work.txt"), "submitted").unwrap();
+    std::fs::write(implementation.join(".gitignore"), "node_modules/\n").unwrap();
+    std::fs::create_dir(implementation.join("node_modules")).unwrap();
+    std::fs::write(implementation.join("node_modules/dep.js"), "installed").unwrap();
     s.checkpoint(T1).await;
     let checked = s.check_merge(T1).await;
     let submitted = checked.revision.clone().unwrap();
@@ -509,6 +512,19 @@ async fn a_review_uses_the_submitted_commit_after_the_implementation_branch_move
         std::fs::read_to_string(implementation.join("work.txt")).unwrap(),
         "later edit"
     );
+    // The submitter's installed dependencies are reused, not left out of the checkout.
+    #[cfg(unix)]
+    {
+        assert!(
+            std::fs::symlink_metadata(review.join("node_modules"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(review.join("node_modules/dep.js")).unwrap(),
+            "installed"
+        );
+    }
     assert_eq!(
         s.workspaces
             .prepare_review(
