@@ -107,7 +107,7 @@ pub(crate) async fn task_by_call(conn: &Connection, call: &str) -> StoreResult<O
     task_in(conn, "created_by_call = ?1", call.into()).await
 }
 
-async fn existing_task(conn: &Connection, id: TaskId) -> StoreResult<Task> {
+pub(crate) async fn existing_task(conn: &Connection, id: TaskId) -> StoreResult<Task> {
     task_in(conn, "id = ?1", id.get().into())
         .await?
         .ok_or_else(|| StoreError::not_found("task", id))
@@ -488,7 +488,8 @@ struct LeadRetry<'a> {
 
 /// Queues failed task `id` again: the user's retry when `lead` is `None`,
 /// else the lead's, which only a configuration failure allows, on the agent
-/// it names or the same one.
+/// it names or the same one. The lead's retry of a task in review whose
+/// Reviewer failed on its configuration queues that review round again.
 async fn retry_in(
     conn: &Connection,
     id: TaskId,
@@ -512,9 +513,15 @@ async fn retry_in(
             return Ok(task);
         }
     }
+    if let Some(lead) = &lead
+        && task.status == TaskStatus::InReview
+    {
+        return task_review::retry_review(conn, &task, lead.agent, lead.call_key, now).await;
+    }
     if task.status != TaskStatus::Failed {
         return Err(StoreError::Conflict(format!(
-            "task {id} is {}; only a failed task can be retried",
+            "task {id} is {}; only a failed task, or a review that failed on its Reviewer's \
+             configuration, can be retried",
             task.status
         )));
     }
@@ -761,15 +768,33 @@ pub(crate) async fn on_run_failed(
         return Ok(());
     };
     if task.status == TaskStatus::InReview && died {
-        // The result stays the implementer's; a refused setup is named in the reason.
-        // shortcut: the lead cannot retry the review itself; add a review retry if this recurs.
+        // The result stays the implementer's; a refused setup is kept on the
+        // round, where the lead's retry_task finds it, and named in the reason.
         let reason = match configuration {
-            Some(run) => format!(
-                "Reviewer failed on its configuration (agent {}, backend {}, model {}): {error}",
-                run.agent_id.map_or("none".to_owned(), |id| id.to_string()),
-                run.backend.map_or("none", |backend| backend.as_str()),
-                run.model.as_deref().unwrap_or("default"),
-            ),
+            Some(run) => {
+                let failure = json!({
+                    "configuration_failure": true,
+                    "error": error,
+                    "agent_id": run.agent_id,
+                    "backend": run.backend,
+                    "model": run.model,
+                });
+                exec(
+                    conn,
+                    "UPDATE task_reviews SET configuration_failure = ?2
+                     WHERE task_id = ?1 AND state = 'pending'",
+                    params![task.id.get(), json_text(&failure)?],
+                )
+                .await?;
+                format!(
+                    "Reviewer failed on its configuration (agent {}, backend {}, model {}): \
+                     {error}. Once the setup is fixed, the lead can retry the review with \
+                     retry_task, optionally on another Reviewer",
+                    run.agent_id.map_or("none".to_owned(), |id| id.to_string()),
+                    run.backend.map_or("none", |backend| backend.as_str()),
+                    run.model.as_deref().unwrap_or("default"),
+                )
+            }
             None => format!("Reviewer failed: {error}"),
         };
         exec(
@@ -1189,7 +1214,8 @@ pub(crate) async fn insert_task_in(
 
 impl HubDb {
     /// The lead retries task `id`, which failed on its agent's
-    /// configuration, on `agent` or, with `None`, on the same agent.
+    /// configuration, on `agent` or, with `None`, on the same agent; for a
+    /// task in review whose Reviewer failed so, `agent` is the Reviewer.
     /// The run's `lease` must be current in the task's project; repeating
     /// the call `call_key` retries once and returns the task as it is.
     pub async fn lead_retry_task(
@@ -1211,11 +1237,31 @@ impl HubDb {
         Ok(retried)
     }
 
-    /// Failed tasks in `project` whose backend refused their agent's setup
-    /// and that nobody has retried yet; newest first. Scoped to one project
-    /// because only that project's lead can retry them.
+    /// Tasks in `project` whose backend refused their agent's setup and that
+    /// nobody has retried yet: failed ones, and ones in review whose
+    /// Reviewer's was refused, listed with that failure as their result;
+    /// newest first. Scoped to one project because only that project's lead
+    /// can retry them.
     pub async fn configuration_failures(&self, project: ProjectId) -> StoreResult<Vec<Task>> {
         let conn = self.db.reader()?;
+        let reviews: Vec<(TaskId, Json)> = query_all(
+            &conn,
+            "SELECT t.id, r.configuration_failure FROM tasks t
+             JOIN task_reviews r ON r.task_id = t.id AND r.state = 'pending'
+             WHERE t.project_id = ?1 AND t.status = 'in_review'
+             AND r.configuration_failure IS NOT NULL",
+            params![project.get()],
+            |row| Ok((Cols(row).id(0)?, Cols(row).json(1)?)),
+        )
+        .await?;
+        let mut tasks = Vec::new();
+        for (id, failure) in reviews {
+            let task = existing_task(&conn, id).await?;
+            tasks.push(Task {
+                result: Some(failure),
+                ..task
+            });
+        }
         // shortcut: matches the compact JSON this module writes; a JSON query if results ever get rewritten.
         let ids: Vec<TaskId> = query_all(
             &conn,
@@ -1225,13 +1271,13 @@ impl HubDb {
             |row| Cols(row).id(0),
         )
         .await?;
-        let mut tasks = Vec::new();
         for id in ids {
             let task = existing_task(&conn, id).await?;
             if is_configuration_failure(&task) {
                 tasks.push(task);
             }
         }
+        tasks.sort_by_key(|task| std::cmp::Reverse(task.id));
         Ok(tasks)
     }
 

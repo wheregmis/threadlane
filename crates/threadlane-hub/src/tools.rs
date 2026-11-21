@@ -531,8 +531,9 @@ impl HubTools {
         }
     }
 
-    /// The lead retries a task that failed on its agent's configuration,
-    /// on another agent if it names one.
+    /// The lead retries a task that failed on its agent's configuration, or
+    /// the review round whose Reviewer failed so, on another agent if it
+    /// names one.
     async fn retry_task(&self, context: &ToolContext, arguments: &Json) -> Result<Json, ToolError> {
         let object = fields(arguments, &["task_id", "agent"])?;
         let task = self
@@ -548,9 +549,19 @@ impl HubTools {
                 name.to_owned(),
             ),
             None => {
+                // A review round retries on its Reviewer, other work on its assignee.
+                let current = match self
+                    .db
+                    .pending_task_review(task.id)
+                    .await
+                    .map_err(tool_error)?
+                {
+                    Some(review) if task.status == TaskStatus::InReview => review.reviewer,
+                    _ => task.agent_id,
+                };
                 let agent = self
                     .db
-                    .agent(task.agent_id)
+                    .agent(current)
                     .await
                     .map_err(tool_error)?
                     .ok_or_else(|| ToolError::Failed(format!("{} has no agent", task.id)))?;
@@ -1331,8 +1342,9 @@ fn task_definitions() -> Vec<ToolDefinition> {
         define(
             RETRY_TASK,
             "Retry a task that failed because its backend refused the agent's setup, such as \
-             its model. Name another agent to reassign it, or none once the agent is fixed. \
-             The tasks waiting for it stay blocked until it is done.",
+             its model, or a task in review whose Reviewer failed that way, which queues the \
+             review again. Name another agent to reassign the task or the review, or none once \
+             the agent is fixed. The tasks waiting for it stay blocked until it is done.",
             Tier::Local,
             json!({
                 "type": "object",
@@ -1340,7 +1352,7 @@ fn task_definitions() -> Vec<ToolDefinition> {
                     "task_id": task_id.clone(),
                     "agent": {
                         "type": "string",
-                        "description": "Exact name of an enabled project agent to run it instead."
+                        "description": "Exact name of an enabled project agent to run it, or review it, instead."
                     }
                 },
                 "required": ["task_id"],
