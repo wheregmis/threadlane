@@ -685,7 +685,8 @@ impl LocalLink {
             Arc::clone(&inner.clock),
             Arc::clone(&inner.wake) as Arc<dyn Waker>,
             None,
-        );
+        )
+        .with_default_models(inner.settings.default_models.clone());
         let context = ToolContext {
             lease: *lease,
             run_id,

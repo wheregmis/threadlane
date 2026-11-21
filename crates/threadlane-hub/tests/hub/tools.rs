@@ -201,6 +201,7 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
             STAY_SILENT,
             CREATE_TASK,
             UPDATE_TASK,
+            threadlane_hub::RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
             threadlane_hub::PR_REVIEW_STATUS,
