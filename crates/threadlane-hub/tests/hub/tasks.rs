@@ -154,6 +154,18 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
             .await
             .is_err()
     );
+    // The reviewer sees the approval state the task acted on (#682).
+    let status = call(
+        &hub,
+        &lease,
+        &review,
+        "status",
+        threadlane_hub::PR_REVIEW_STATUS,
+        json!({"repository": "widgets", "number": 42, "head": "a".repeat(40)}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["review_status"], "in_progress", "{status}");
     // The reviewer has the task lane's memory tools (#610, #623).
     for tool in [
         MEMORY_VIEW,
