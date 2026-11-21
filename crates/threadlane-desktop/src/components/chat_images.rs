@@ -152,7 +152,9 @@ fn open_preview(image: ImageAttachment, window: &mut Window, cx: &mut App) {
     .detach();
 
     window.open_dialog(cx, move |dialog, window, cx| {
-        let dialog = dialog.title(name.clone()).width(READING_WIDTH);
+        let dialog = dialog
+            .title(name.clone())
+            .width(READING_WIDTH.to_pixels(window.rem_size()));
         let image = match result.read(cx) {
             None => return dialog.child(meta("Loading image…", cx)),
             Some(Err(_)) => return dialog.child(meta("Could not preview this image.", cx)),

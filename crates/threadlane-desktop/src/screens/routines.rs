@@ -595,6 +595,11 @@ impl Desktop {
                 "Work started by this routine counts as work you requested.",
                 cx,
             ))
+            .children(
+                self.routine_error
+                    .as_ref()
+                    .map(|error| div().text_color(cx.theme().danger).child(error.clone())),
+            )
             .child(
                 h_flex()
                     .gap(SM)
@@ -619,6 +624,7 @@ impl Desktop {
                             .disabled(self.routine_adding)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.routine_form_mut().open_for = None;
+                                this.routine_error = None;
                                 cx.notify();
                             })),
                     ),

@@ -24,6 +24,9 @@ actions!(
         LightAppearance,
         DarkAppearance,
         FocusComposer,
+        OpenPalette,
+        NavigateBack,
+        NavigateForward,
         GoHome,
         JumpToLatest,
         ToggleSidebar,
@@ -74,6 +77,21 @@ fn shortcuts() -> Vec<Shortcut> {
     let single =
         |key: &str, command| KeyBinding::new(key, DecisionShortcut(command), Some(OUTSIDE_INPUT));
     vec![
+        shortcut(
+            "Navigate",
+            "Quick switcher",
+            [KeyBinding::new("cmd-p", OpenPalette, None)],
+        ),
+        shortcut(
+            "Navigate",
+            "Back",
+            [KeyBinding::new("cmd-[", NavigateBack, None)],
+        ),
+        shortcut(
+            "Navigate",
+            "Forward",
+            [KeyBinding::new("cmd-]", NavigateForward, None)],
+        ),
         shortcut(
             "Navigate",
             "Focus composer",
@@ -267,6 +285,19 @@ pub(crate) fn install(
     desktop_action(cx, &desktop, |this, _: &FocusComposer, window, cx| {
         this.focus_composer(window, cx);
     });
+    desktop_action(cx, &desktop, |this, _: &OpenPalette, window, cx| {
+        this.open_palette(window, cx);
+    });
+    desktop_action(cx, &desktop, |this, _: &NavigateBack, window, cx| {
+        if !window.has_active_dialog(cx) {
+            this.go_back(cx);
+        }
+    });
+    desktop_action(cx, &desktop, |this, _: &NavigateForward, window, cx| {
+        if !window.has_active_dialog(cx) {
+            this.go_forward(cx);
+        }
+    });
     desktop_action(cx, &desktop, |this, _: &JumpToLatest, window, cx| {
         if !window.has_focused_input(cx) && !window.has_active_dialog(cx) {
             this.jump_to_latest(cx);
@@ -291,8 +322,7 @@ pub(crate) fn install(
     );
     desktop_action(cx, &desktop, |this, _: &ToggleSidebar, window, cx| {
         if !window.has_active_dialog(cx) {
-            this.sidebar_collapsed = !this.sidebar_collapsed;
-            cx.notify();
+            this.toggle_sidebar(cx);
         }
     });
     desktop_action(cx, &desktop, |this, _: &OpenSettings, window, cx| {
@@ -422,6 +452,10 @@ pub(crate) fn set(full_screen: bool, appearance: Appearance, cx: &App) {
             MenuItem::action(full_screen, ToggleFullScreen),
             MenuItem::separator(),
             MenuItem::action("Reload", Reload),
+            MenuItem::action("Quick Switcher…", OpenPalette),
+            MenuItem::action("Back", NavigateBack),
+            MenuItem::action("Forward", NavigateForward),
+            MenuItem::separator(),
             MenuItem::action("Go to Inbox", GoHome),
             MenuItem::action("Focus Composer", FocusComposer),
             MenuItem::action("Toggle Sidebar", ToggleSidebar),

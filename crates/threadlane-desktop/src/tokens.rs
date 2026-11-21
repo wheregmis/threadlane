@@ -3,7 +3,7 @@
 use std::sync::{Arc, LazyLock};
 
 use gpui_kit::component::{Theme, scroll::Scrollbar};
-use gpui_kit::{FontFeatures, Hsla, Pixels, px};
+use gpui_kit::{FontFeatures, Hsla, Pixels, Rems, px, rems};
 use threadlane_core::model::MachineStatus;
 
 /// Xxs in logical pixels.
@@ -33,8 +33,6 @@ pub(super) const COMPOSER_MAX_ROWS: usize = 8;
 pub(super) const COMPOSER_RADIUS: Pixels = px(24.);
 /// Field radius in logical pixels.
 pub(super) const FIELD_RADIUS: Pixels = px(10.);
-/// Button radius in logical pixels.
-pub(super) const BUTTON_RADIUS: Pixels = px(8.);
 /// Row radius in logical pixels.
 pub(super) const ROW_RADIUS: Pixels = px(8.);
 /// Icon button radius in logical pixels.
@@ -44,59 +42,71 @@ pub(super) const BADGE_RADIUS: Pixels = px(5.);
 /// Key radius in logical pixels.
 pub(super) const KEY_RADIUS: Pixels = px(4.);
 
-/// Type meta in logical pixels.
-pub(super) const TYPE_META: Pixels = px(12.);
-/// Type body in logical pixels.
-pub(super) const TYPE_BODY: Pixels = px(14.);
-/// Type section in logical pixels.
-pub(super) const TYPE_SECTION: Pixels = px(16.);
-/// Type emphasis in logical pixels.
-pub(super) const TYPE_EMPHASIS: Pixels = px(17.);
-/// Type title in logical pixels.
-pub(super) const TYPE_TITLE: Pixels = px(20.);
+/// Type meta in rems (12px at 16px base).
+pub(super) const TYPE_META: Rems = rems(0.75);
+/// Type body in rems (14px at 16px base).
+pub(super) const TYPE_BODY: Rems = rems(0.875);
+/// Type section in rems (16px at 16px base).
+pub(super) const TYPE_SECTION: Rems = rems(1.0);
+/// Type emphasis in rems (17px at 16px base).
+pub(super) const TYPE_EMPHASIS: Rems = rems(1.0625);
+/// Type title in rems (20px at 16px base).
+pub(super) const TYPE_TITLE: Rems = rems(1.25);
 
 /// Control height in logical pixels.
 pub(super) const CONTROL_HEIGHT: Pixels = px(32.);
 /// Small control height in logical pixels.
 pub(super) const SMALL_CONTROL_HEIGHT: Pixels = px(24.);
-/// Row height in logical pixels.
-pub(super) const ROW_HEIGHT: Pixels = px(34.);
-/// Bar height in logical pixels.
-pub(super) const BAR_HEIGHT: Pixels = px(52.);
-/// Reading width in logical pixels.
-pub(super) const READING_WIDTH: Pixels = px(880.);
+/// Row height in rems.
+pub(super) const ROW_HEIGHT: Rems = rems(2.125);
+/// Bar height in rems.
+pub(super) const BAR_HEIGHT: Rems = rems(3.25);
+/// Reading width in rems.
+pub(super) const READING_WIDTH: Rems = rems(55.);
 
-/// Sidebar width in logical pixels.
+/// Sidebar default width in logical pixels.
 pub(super) const SIDEBAR_WIDTH: Pixels = px(220.);
+/// Sidebar minimum width in logical pixels.
+pub(super) const SIDEBAR_MIN_WIDTH: Pixels = px(180.);
+/// Sidebar maximum width in logical pixels.
+pub(super) const SIDEBAR_MAX_WIDTH: Pixels = px(420.);
+/// Minimum window width in logical pixels.
+pub(super) const WINDOW_MIN_WIDTH: Pixels = px(720.);
+/// Minimum window height in logical pixels.
+pub(super) const WINDOW_MIN_HEIGHT: Pixels = px(520.);
+/// Default window width in logical pixels.
+pub(super) const WINDOW_DEFAULT_WIDTH: Pixels = px(1180.);
+/// Default window height in logical pixels.
+pub(super) const WINDOW_DEFAULT_HEIGHT: Pixels = px(780.);
 /// Maximum height of a scrolling list inside a sidebar.
-pub(super) const SIDEBAR_SECTION_MAX_HEIGHT: Pixels = px(280.);
-/// Panel width in logical pixels.
-pub(super) const PANEL_WIDTH: Pixels = px(250.);
+pub(super) const SIDEBAR_SECTION_MAX_HEIGHT: Rems = rems(17.5);
+/// Panel width in rems.
+pub(super) const PANEL_WIDTH: Rems = rems(15.625);
 /// Board column min in logical pixels.
 pub(super) const BOARD_COLUMN_MIN: Pixels = px(152.);
-/// Timestamp width in logical pixels.
-pub(super) const TIMESTAMP_WIDTH: Pixels = px(110.);
-/// Form width in logical pixels.
+/// Timestamp width in rems.
+pub(super) const TIMESTAMP_WIDTH: Rems = rems(6.875);
+/// Form width in logical pixels (passed to Dialog::width).
 pub(super) const FORM_WIDTH: Pixels = px(560.);
-/// Compact form width in logical pixels.
-pub(super) const COMPACT_FORM_WIDTH: Pixels = px(420.);
-/// Rules width in logical pixels.
-pub(super) const RULES_WIDTH: Pixels = px(320.);
-/// Memory list width in logical pixels.
-pub(super) const MEMORY_LIST_WIDTH: Pixels = px(300.);
-/// Label width in logical pixels.
-pub(super) const LABEL_WIDTH: Pixels = px(160.);
-/// Short label width in logical pixels.
-pub(super) const SHORT_LABEL_WIDTH: Pixels = px(100.);
-/// Short field width in logical pixels.
-pub(super) const SHORT_FIELD_WIDTH: Pixels = px(90.);
-/// Zone width in logical pixels.
-pub(super) const ZONE_WIDTH: Pixels = px(260.);
-/// Space name width in logical pixels.
-pub(super) const SPACE_NAME_WIDTH: Pixels = px(240.);
+/// Compact form width in rems.
+pub(super) const COMPACT_FORM_WIDTH: Rems = rems(26.25);
+/// Rules width in rems.
+pub(super) const RULES_WIDTH: Rems = rems(20.);
+/// Memory list width in rems.
+pub(super) const MEMORY_LIST_WIDTH: Rems = rems(18.75);
+/// Label width in rems.
+pub(super) const LABEL_WIDTH: Rems = rems(10.);
+/// Short label width in rems.
+pub(super) const SHORT_LABEL_WIDTH: Rems = rems(6.25);
+/// Short field width in rems.
+pub(super) const SHORT_FIELD_WIDTH: Rems = rems(5.625);
+/// Zone width in rems.
+pub(super) const ZONE_WIDTH: Rems = rems(16.25);
+/// Space name width in rems.
+pub(super) const SPACE_NAME_WIDTH: Rems = rems(15.);
 
 /// Width at which the task timeline can sit beside its supporting panel.
-pub(super) const TASK_TIMELINE_BASIS: Pixels = px(300.);
+pub(super) const TASK_TIMELINE_BASIS: Rems = rems(18.75);
 
 /// Requests fixed-width digits in the active kit font.
 pub(super) static TABULAR: LazyLock<FontFeatures> =
