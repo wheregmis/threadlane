@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.56](https://github.com/wheregmis/threadlane/compare/v0.1.55...v0.1.56) (2026-11-21)
+
+
+### Bug Fixes
+
+* **hub:** give review runs the task lane's memory tools ([#623](https://github.com/wheregmis/threadlane/issues/623)) ([c657f0d](https://github.com/wheregmis/threadlane/commit/c657f0dcb7ad088a18dd41238ff9c235fb6822fd))
+* **hub:** offer pr_review_status to review runs ([#682](https://github.com/wheregmis/threadlane/issues/682)) ([2cca5c8](https://github.com/wheregmis/threadlane/commit/2cca5c82ee4f058fb2fb2740357ee8f01474dba1))
+* **hub:** omit diff patches and repeated review feedback from listed session tasks ([a4a335d](https://github.com/wheregmis/threadlane/commit/a4a335d450837507962c3926c81e1df699e5191a))
+* **hub:** retry a limitation report that failed to file ([7bbd258](https://github.com/wheregmis/threadlane/commit/7bbd2583657679e6f33883962d1437764c0d598f))
+
 ## [0.1.55](https://github.com/wheregmis/threadlane/compare/v0.1.54...v0.1.55) (2026-11-21)
 
 
