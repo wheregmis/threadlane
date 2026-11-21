@@ -1349,7 +1349,8 @@ async fn sessions_keep_cut_tasks_structured_and_can_list_only_recent_ones() {
 
     hub.clock.advance(Duration::from_secs(60));
     let cutoff = threadlane_hub::format_time(hub.clock.now());
-    hub.clock.advance(Duration::from_secs(60));
+    // Off a whole second, so a truncated updated_at would repeat below.
+    hub.clock.advance(Duration::from_millis(60_500));
     hub.db
         .create_task(None, &new_task("Recent", TaskStatus::Proposed))
         .await
@@ -1404,7 +1405,18 @@ async fn sessions_keep_cut_tasks_structured_and_can_list_only_recent_ones() {
         .map(|t| &t["title"])
         .collect();
     assert_eq!(titles, [&json!("Recent")]);
-    assert!(recent["tasks"][0]["updated_at"].as_str().unwrap() > cutoff.as_str());
+    let stamp = recent["tasks"][0]["updated_at"].as_str().unwrap();
+    assert!(stamp.ends_with(".500Z"), "{stamp}");
+    let after = call(
+        &*hub.link,
+        &lease,
+        &dream,
+        SESSIONS,
+        json!({"updated_after": stamp, "offset": 0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after["tasks"], json!([]), "{after}");
 
     let later = call(&*hub.link, &lease, &dream, SESSIONS, json!({"offset": 1}))
         .await

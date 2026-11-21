@@ -122,7 +122,9 @@ fn task_record(task: &Task, times: &BTreeMap<i64, Timestamp>) -> Json {
     record["updated_at"] = json!(
         times
             .get(&task.id.get())
-            .map(|at| crate::context::format_time(*at))
+            // Millisecond precision, so an updated_at passed back as updated_after neither repeats nor skips.
+            .and_then(|at| jiff::Timestamp::from_millisecond(at.as_millis()).ok())
+            .map(|at| format!("{at:.3}"))
     );
     record
 }
