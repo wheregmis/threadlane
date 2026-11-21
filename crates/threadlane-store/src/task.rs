@@ -1187,16 +1187,17 @@ impl HubDb {
         Ok(retried)
     }
 
-    /// Failed tasks, in every project, whose backend refused their agent's
-    /// setup and that nobody has retried yet; newest first.
-    pub async fn configuration_failures(&self) -> StoreResult<Vec<Task>> {
+    /// Failed tasks in `project` whose backend refused their agent's setup
+    /// and that nobody has retried yet; newest first. Scoped to one project
+    /// because only that project's lead can retry them.
+    pub async fn configuration_failures(&self, project: ProjectId) -> StoreResult<Vec<Task>> {
         let conn = self.db.reader()?;
         // shortcut: matches the compact JSON this module writes; a JSON query if results ever get rewritten.
         let ids: Vec<TaskId> = query_all(
             &conn,
-            "SELECT id FROM tasks WHERE status = 'failed'
+            "SELECT id FROM tasks WHERE project_id = ?1 AND status = 'failed'
              AND result LIKE '%\"configuration_failure\":true%' ORDER BY id DESC",
-            (),
+            params![project.get()],
             |row| Cols(row).id(0),
         )
         .await?;

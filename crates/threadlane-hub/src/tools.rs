@@ -499,7 +499,11 @@ impl HubTools {
     /// Refuses a task for an agent whose first backend refused its model on
     /// an earlier task that nobody has retried (#650): it would fail the same way.
     async fn check_setup(&self, project: ProjectId, agent_id: AgentId) -> Result<(), ToolError> {
-        let failures = self.db.configuration_failures().await.map_err(tool_error)?;
+        let failures = self
+            .db
+            .configuration_failures(project)
+            .await
+            .map_err(tool_error)?;
         if failures.is_empty() {
             return Ok(());
         }

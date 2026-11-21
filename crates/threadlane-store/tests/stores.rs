@@ -2964,13 +2964,28 @@ async fn a_configuration_failure_records_its_setup_and_blocks_what_waits_for_it(
     assert_eq!(result["backend"], "codex");
     assert_eq!(result["model"], "gpt-x");
     assert_eq!(
-        hub.configuration_failures()
+        hub.configuration_failures(general.id)
             .await
             .unwrap()
             .iter()
             .map(|t| t.id)
             .collect::<Vec<_>>(),
         [schema.id]
+    );
+    // Another project's lead can't retry it, so it doesn't count there.
+    let payments = hub
+        .create_project(&NewProject {
+            name: "Payments API".into(),
+            max_parallel_tasks: 3,
+            ..NewProject::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        hub.configuration_failures(payments.id)
+            .await
+            .unwrap()
+            .is_empty()
     );
 
     // What waits for it is blocked, not cancelled, and so is a task added later.
@@ -3026,7 +3041,12 @@ async fn a_configuration_failure_records_its_setup_and_blocks_what_waits_for_it(
     assert_eq!(again, retried);
     assert_eq!(retried.agent_id, other.id);
     assert_eq!(retried.result, None);
-    assert!(hub.configuration_failures().await.unwrap().is_empty());
+    assert!(
+        hub.configuration_failures(general.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let retry_event = hub
         .pending_events(schema.lane_id)
         .await

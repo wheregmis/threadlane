@@ -336,7 +336,10 @@ impl LocalLink {
                     prompt.push_str(&preferences.to_string());
                     prompt.push('\n');
                 }
-                let failures = db.configuration_failures().await.map_err(link_error)?;
+                let failures = db
+                    .configuration_failures(project.id)
+                    .await
+                    .map_err(link_error)?;
                 let roster: Vec<_> = enabled
                     .clone()
                     .filter(|(_, binding)| !binding.is_lead)
