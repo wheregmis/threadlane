@@ -414,6 +414,14 @@ impl Inner {
         let mut performed = self.perform(lane, assignment).await?;
         performed.push_str(&self.bring_in_base(assignment).await);
         performed.push_str(&self.earlier_work(lane, assignment, &working_dir).await);
+        if assignment.review.is_none()
+            && let Some(task) = assignment.task_id
+        {
+            let notes = self
+                .workspaces
+                .take_checkpoint_notes(task, &assignment.repositories);
+            performed.push_str(&notes.await);
+        }
         lane.check()?;
         self.link.check_running(&lane.lease()).await?;
 

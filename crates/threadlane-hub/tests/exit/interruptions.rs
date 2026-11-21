@@ -57,6 +57,7 @@ async fn stop_interrupts_the_task_preserves_its_work_and_waits_for_user_input() 
     let run = sim.spawn_work_once();
     waiting(&sim, 2, 1).await;
     let worktree = sim.backend().received()[1].working_dir.clone();
+    std::fs::write(worktree.join("README.md"), "# app, half done\n").unwrap();
     std::fs::write(worktree.join("page.txt"), "work in progress\n").unwrap();
     let now = sim.clock().now();
     assert_eq!(
@@ -83,8 +84,14 @@ async fn stop_interrupts_the_task_preserves_its_work_and_waits_for_user_input() 
             .any(|event| event.kind == EventKind::Stop && event.status == EventStatus::Done)
     );
     assert_eq!(
-        git(&worktree, &["show", "HEAD:page.txt"]),
-        "work in progress\n"
+        git(&worktree, &["show", "HEAD:README.md"]),
+        "# app, half done\n",
+        "the tracked change is committed"
+    );
+    assert_eq!(
+        git(&worktree, &["status", "--porcelain"]),
+        "?? page.txt\n",
+        "the new file stays in the worktree, uncommitted (#691)"
     );
     assert!(
         !sim.work_once().await.unwrap(),
@@ -106,6 +113,11 @@ async fn stop_interrupts_the_task_preserves_its_work_and_waits_for_user_input() 
         sim.work_until_idle().await.unwrap(),
         2,
         "the task resumes and the lead reports"
+    );
+    let resumed = sim.backend().received()[2].prompt.clone();
+    assert!(
+        resumed.contains("README.md") && resumed.contains("page.txt"),
+        "the resumed run is told what was committed and left out: {resumed}"
     );
     assert_eq!(sim.event(events[0].id).await.status, EventStatus::Done);
     assert_eq!(sim.event(events[0].id).await.attempts, 0);
