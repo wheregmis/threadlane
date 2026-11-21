@@ -135,7 +135,12 @@ pub(crate) struct PromptParts<'a> {
     pub decisions: &'a [Decision],
     /// The events this run consumes, oldest first.
     pub events: &'a [Event],
+    /// When the running hub started.
+    pub hub_started: Timestamp,
 }
+
+/// The commit the hub was built from, or `unknown` outside a git checkout.
+pub const BUILD_COMMIT: &str = env!("THREADLANE_BUILD_COMMIT");
 
 /// Told to a task run that takes over events an earlier run failed on.
 const RETRY_NOTE: &str = "\nAn earlier run on these events did not finish: it failed or hit its \
@@ -148,6 +153,12 @@ pub(crate) fn render_prompt(parts: &PromptParts<'_>) -> String {
     let mut out = String::new();
     // Writing to a String cannot fail, here and below.
     let _ = writeln!(out, "Project: {}", parts.project.name);
+    let _ = writeln!(
+        out,
+        "Hub: built from commit {BUILD_COMMIT}, started {}. A tool merged after that commit \
+         is not offered until the hub restarts on a newer build.",
+        format_time(parts.hub_started)
+    );
     if let Some(task) = parts.task {
         let _ = writeln!(out, "\nYour task, {}: {}", task.id, task.title);
         let _ = writeln!(out, "Done when: {}", task.goal);

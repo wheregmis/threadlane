@@ -477,16 +477,40 @@ async fn cancel_dependents(
     Ok(())
 }
 
+/// A lead's retry: its run's lease, the agent it names, if another, and
+/// the tool call's key, so that repeating the call retries once.
+struct LeadRetry<'a> {
+    lease: &'a Lease,
+    agent: Option<AgentId>,
+    call_key: &'a str,
+}
+
 /// Queues failed task `id` again: the user's retry when `lead` is `None`,
 /// else the lead's, which only a configuration failure allows, on the agent
 /// it names or the same one.
 async fn retry_in(
     conn: &Connection,
     id: TaskId,
-    lead: Option<Option<AgentId>>,
+    lead: Option<LeadRetry<'_>>,
     now: Timestamp,
 ) -> StoreResult<Task> {
     let task = existing_task(conn, id).await?;
+    if let Some(lead) = &lead {
+        check_run_lease(conn, Some(lead.lease), task.project_id).await?;
+        let earlier: Vec<Json> = query_all(
+            conn,
+            "SELECT payload FROM events WHERE source = ?1 AND source_event_id LIKE ?2",
+            params![TASK_SOURCE, format!("retry:{}:%", id.get())],
+            |row| Cols(row).json(0),
+        )
+        .await?;
+        if earlier
+            .iter()
+            .any(|payload| payload["call_key"] == lead.call_key)
+        {
+            return Ok(task);
+        }
+    }
     if task.status != TaskStatus::Failed {
         return Err(StoreError::Conflict(format!(
             "task {id} is {}; only a failed task can be retried",
@@ -524,7 +548,7 @@ async fn retry_in(
         params![task.lane_id.get()],
     )
     .await?;
-    if let Some(Some(agent)) = lead {
+    if let Some(agent) = lead.as_ref().and_then(|lead| lead.agent) {
         exec(
             conn,
             "UPDATE tasks SET agent_id = ?1 WHERE id = ?2",
@@ -561,7 +585,7 @@ async fn retry_in(
             source: TASK_SOURCE.to_owned(),
             source_event_id: format!("retry:{}:{attempt}", id.get()),
             kind,
-            payload: json!({ "text": text }),
+            payload: json!({ "text": text, "call_key": lead.as_ref().map(|lead| lead.call_key) }),
             trust,
             requested: true,
             session_ref: None,
@@ -1142,14 +1166,23 @@ pub(crate) async fn insert_task_in(
 impl HubDb {
     /// The lead retries task `id`, which failed on its agent's
     /// configuration, on `agent` or, with `None`, on the same agent.
+    /// The run's `lease` must be current in the task's project; repeating
+    /// the call `call_key` retries once and returns the task as it is.
     pub async fn lead_retry_task(
         &self,
+        lease: &Lease,
         id: TaskId,
         agent: Option<AgentId>,
+        call_key: &str,
         now: Timestamp,
     ) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
-        let retried = retry_in(tx.conn(), id, Some(agent), now).await?;
+        let lead = LeadRetry {
+            lease,
+            agent,
+            call_key,
+        };
+        let retried = retry_in(tx.conn(), id, Some(lead), now).await?;
         tx.commit().await?;
         Ok(retried)
     }

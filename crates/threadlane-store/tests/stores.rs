@@ -2997,11 +2997,33 @@ async fn a_configuration_failure_records_its_setup_and_blocks_what_waits_for_it(
         .create_agent(&NewAgent::named("Claude engineer", "engineer"))
         .await
         .unwrap();
+    let lead = hub
+        .grant_lease(general.lead_lane_id, a, T0, LEASE_TTL)
+        .await
+        .unwrap()
+        .expect("lead lane is free");
+    let stale = Lease {
+        epoch: lead.epoch + 1,
+        ..lead
+    };
+    assert!(
+        hub.lead_retry_task(&stale, schema.id, Some(other.id), "c1", T0)
+            .await
+            .is_err(),
+        "a retry outside the lead's current lease is refused"
+    );
+    assert_eq!(task(&hub, schema.id).await.status, TaskStatus::Failed);
     let retried = hub
-        .lead_retry_task(schema.id, Some(other.id), T0)
+        .lead_retry_task(&lead, schema.id, Some(other.id), "c1", T0)
         .await
         .unwrap();
     assert_eq!(retried.status, TaskStatus::Queued);
+    // Repeating the same call retries once.
+    let again = hub
+        .lead_retry_task(&lead, schema.id, Some(other.id), "c1", T0)
+        .await
+        .unwrap();
+    assert_eq!(again, retried);
     assert_eq!(retried.agent_id, other.id);
     assert_eq!(retried.result, None);
     assert!(hub.configuration_failures().await.unwrap().is_empty());
@@ -3010,9 +3032,10 @@ async fn a_configuration_failure_records_its_setup_and_blocks_what_waits_for_it(
         .await
         .unwrap()
         .into_iter()
-        .find(|e| e.source_event_id.starts_with("retry:"))
-        .expect("retry event");
-    assert_eq!(retry_event.trust, Trust::System);
+        .filter(|e| e.source_event_id.starts_with("retry:"))
+        .collect::<Vec<_>>();
+    assert_eq!(retry_event.len(), 1, "one retry for a repeated call");
+    assert_eq!(retry_event[0].trust, Trust::System);
 
     let (lease, run) = run_pending(&hub, schema.lane_id, a, T0).await;
     hub.fail_run(&lease, run.id, "boom", retry(true, 1), T0)
@@ -3020,7 +3043,9 @@ async fn a_configuration_failure_records_its_setup_and_blocks_what_waits_for_it(
         .unwrap();
     assert_eq!(task(&hub, migration.id).await.status, TaskStatus::Cancelled);
     assert!(
-        hub.lead_retry_task(schema.id, None, T0).await.is_err(),
+        hub.lead_retry_task(&lead, schema.id, None, "c2", T0)
+            .await
+            .is_err(),
         "only the user retries an ordinary failure"
     );
 }

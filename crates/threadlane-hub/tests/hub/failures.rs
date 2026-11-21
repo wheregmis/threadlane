@@ -310,7 +310,11 @@ async fn a_refused_model_is_a_configuration_failure_the_lead_can_see_and_reassig
     .await;
     hub.hello().await;
     let general = hub.general().await;
-    for (name, models) in [("Iris", json!({ "claude": "gpt-x" })), ("Mia", json!({}))] {
+    for (name, models, mode) in [
+        ("Iris", json!({ "claude": "gpt-x" }), Mode::OnRequest),
+        ("Mia", json!({}), Mode::OnRequest),
+        ("Ola", json!({}), Mode::Off),
+    ] {
         let agent = hub
             .db
             .create_agent(&NewAgent {
@@ -324,7 +328,7 @@ async fn a_refused_model_is_a_configuration_failure_the_lead_can_see_and_reassig
             .bind(&NewBinding {
                 project_id: general.id,
                 agent_id: agent.id,
-                mode: Mode::OnRequest,
+                mode,
                 is_lead: false,
                 max_parallel: 1,
             })
@@ -405,6 +409,21 @@ async fn a_refused_model_is_a_configuration_failure_the_lead_can_see_and_reassig
     assert!(
         matches!(&refused, Err(threadlane_core::tools::ToolError::Failed(why)) if why.contains("would fail to start")),
         "{refused:?}"
+    );
+    // An agent set to off would never run it.
+    let off = hub
+        .link
+        .call_tool(
+            &lease,
+            lead.run_id,
+            Some("retry-off"),
+            RETRY_TASK,
+            &json!({ "task_id": "T-0001", "agent": "Ola" }),
+        )
+        .await;
+    assert!(
+        matches!(&off, Err(threadlane_core::tools::ToolError::InvalidArguments(why)) if why.contains("is off")),
+        "{off:?}"
     );
     let retried = hub
         .link

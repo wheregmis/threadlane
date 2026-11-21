@@ -9,7 +9,11 @@ use threadlane_core::model::{
     EventKind, LaneKind, Lease, Mode, NewAgent, NewBinding, NewProject, Trust,
 };
 use threadlane_core::store::{OrgStore, SessionStore, TaskStore};
-use threadlane_hub::{CREATE_TASK, LEAD_INSTRUCTIONS, LEAD_RULES, MEMORY_CREATE, TASK_RULES};
+use threadlane_core::time::Clock;
+use threadlane_hub::{
+    BUILD_COMMIT, CREATE_TASK, LEAD_INSTRUCTIONS, LEAD_RULES, MEMORY_CREATE, TASK_RULES,
+    format_time,
+};
 
 use crate::common::{Reply, TestHub, begin, play};
 
@@ -83,6 +87,23 @@ async fn appended_instructions_are_byte_identical_between_runs() {
     ] {
         assert!(first.contains(rule), "the lead rules say {rule:?}");
     }
+}
+
+#[tokio::test]
+async fn every_run_is_shown_the_hub_build_and_start_time() {
+    let hub = TestHub::start().await;
+    let started = hub.clock.now();
+    hub.clock.advance(Duration::from_secs(60));
+    hub.hello().await;
+    hub.send("m-1", "first").await;
+    let run = play(&*hub.link, Reply::Silent).await.unwrap();
+    let run = run.only_run();
+    assert!(!BUILD_COMMIT.is_empty());
+    let line = format!(
+        "Hub: built from commit {BUILD_COMMIT}, started {}.",
+        format_time(started)
+    );
+    assert!(run.prompt.contains(&line), "{}", run.prompt);
 }
 
 #[tokio::test]

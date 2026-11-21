@@ -50,6 +50,8 @@ pub(crate) struct Inner {
     pub(crate) workspaces: Option<PathBuf>,
     pub(crate) workspace_files: Option<Arc<dyn Workspaces>>,
     pub(crate) project_removal: Arc<tokio::sync::Mutex<()>>,
+    /// When this hub process started, shown to every run (#652).
+    pub(crate) started_at: Timestamp,
 }
 
 /// The hub of one space: handler, placement, begin-run, tool gateway,
@@ -87,8 +89,10 @@ impl HubCore {
             )
             .with_default_models(settings.default_models.clone()),
         );
+        let started_at = clock.now();
         let core = Self {
             inner: Arc::new(Inner {
+                started_at,
                 db,
                 clock,
                 hook,

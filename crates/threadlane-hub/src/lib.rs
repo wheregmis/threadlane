@@ -50,7 +50,7 @@ use tracing_subscriber::EnvFilter;
 use crate::config::{DataDir, LogConfig, LogFormat};
 
 pub use crate::begin_run::{ENDED_REASON, OFF_REASON, SKIP_REASON};
-pub use crate::context::{LEAD_RULES, TASK_RULES, format_time};
+pub use crate::context::{BUILD_COMMIT, LEAD_RULES, TASK_RULES, format_time};
 pub use crate::core::HubCore;
 pub use crate::defaults::{
     HUB_ENDPOINT, HUB_MACHINE_NAME, LEAD_INSTRUCTIONS, LEAD_NAME, LEAD_ROLE,
