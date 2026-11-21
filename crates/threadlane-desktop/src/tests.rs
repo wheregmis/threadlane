@@ -119,6 +119,7 @@ impl HubApi for FakeHub {
         Ok(HubInfo {
             space: self.space.clone(),
             mode_ceiling: self.ceiling.lock().expect("lock").unwrap_or(Mode::Assisted),
+            paused: false,
             schema_version: 1,
             update_version: None,
         })
@@ -427,6 +428,7 @@ impl HubApi for FakeHub {
                     leftovers: vec!["workspaces/clones/1".into()],
                 })
             }
+            OrgRequest::SetSpacePaused { paused } => Ok(OrgReply::SpacePaused { paused }),
             OrgRequest::SetSpaceCeiling { mode } => {
                 *self.ceiling.lock().expect("lock") = Some(mode);
                 Ok(OrgReply::SpaceCeiling { ceiling: mode })
@@ -3344,6 +3346,36 @@ async fn pausing_a_project_shows_it_paused_until_resumed() {
         .expect("resumed");
     state.project_updated("work", resumed);
     assert!(!state.is_paused("work", "api"));
+}
+
+#[tokio::test]
+async fn pausing_a_space_shows_it_paused_and_its_queued_tasks_say_why() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    let summary = task(7, TaskStatus::Queued, None);
+    assert!(!state.is_space_paused("work"));
+    let paused = core
+        .set_space_paused(Some("work"), true)
+        .await
+        .expect("paused");
+    state.space_paused_set("work", paused);
+    assert!(state.is_space_paused("work"));
+    assert_eq!(
+        state.queued_reason("work", "api", &summary).as_deref(),
+        Some("the space is paused")
+    );
+    let resumed = core
+        .set_space_paused(Some("work"), false)
+        .await
+        .expect("resumed");
+    state.space_paused_set("work", resumed);
+    assert!(!state.is_space_paused("work"));
+    assert_ne!(
+        state.queued_reason("work", "api", &summary).as_deref(),
+        Some("the space is paused")
+    );
 }
 
 fn recorded_event(id: i64, text: &str) -> RecordedEvent {
