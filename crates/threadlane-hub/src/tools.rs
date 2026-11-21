@@ -635,12 +635,18 @@ impl HubTools {
 
     async fn list_tasks(&self, context: &ToolContext, arguments: &Json) -> Result<Json, ToolError> {
         let object = fields(arguments, &["task_id", "all", "offset", "limit"])?;
-        let agents = self.db.all_agents().await.map_err(tool_error)?;
+        let agents: HashMap<_, _> = self
+            .db
+            .all_agents()
+            .await
+            .map_err(tool_error)?
+            .into_iter()
+            .map(|agent| (agent.id, agent.name))
+            .collect();
         let agent = |task: &Task| {
             agents
-                .iter()
-                .find(|agent| agent.id == task.agent_id)
-                .map_or(Json::Null, |agent| json!(agent.name))
+                .get(&task.agent_id)
+                .map_or(Json::Null, |name| json!(name))
         };
         if let Some(reference) = object.get("task_id") {
             let task = self.project_task(context, reference).await?;
@@ -1473,12 +1479,12 @@ fn parse_send_message(arguments: &Json) -> Result<(String, Urgency), ToolError> 
     Ok((text.to_owned(), urgency))
 }
 
-#[async_trait]
-impl ToolRegistry for HubTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
+fn cached_definitions() -> &'static [ToolDefinition] {
+    static DEFINITIONS: std::sync::OnceLock<Vec<ToolDefinition>> = std::sync::OnceLock::new();
+    DEFINITIONS.get_or_init(|| {
         let mut definitions = vec![
-            Self::send_message_definition(),
-            Self::stay_silent_definition(),
+            HubTools::send_message_definition(),
+            HubTools::stay_silent_definition(),
         ];
         definitions.extend(task_definitions());
         definitions.extend(crate::publish::definitions());
@@ -1488,12 +1494,20 @@ impl ToolRegistry for HubTools {
         definitions.push(crate::space_lead::definition());
         definitions.push(crate::dreaming::report_definition());
         definitions
+    })
+}
+
+#[async_trait]
+impl ToolRegistry for HubTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        cached_definitions().to_vec()
     }
 
     fn definition(&self, name: &str) -> Option<ToolDefinition> {
-        self.definitions()
-            .into_iter()
+        cached_definitions()
+            .iter()
             .find(|definition| definition.name == name)
+            .cloned()
     }
 
     async fn execute(
@@ -1619,8 +1633,9 @@ impl ToolRegistry for CombinedTools {
     }
 
     fn definition(&self, name: &str) -> Option<ToolDefinition> {
-        self.owner(name)
-            .and_then(|registry| registry.definition(name))
+        self.registries
+            .iter()
+            .find_map(|registry| registry.definition(name))
     }
 
     async fn execute(

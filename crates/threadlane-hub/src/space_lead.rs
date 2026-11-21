@@ -66,6 +66,7 @@ pub(crate) fn definition() -> ToolDefinition {
 /// Byte-identical while none of these change.
 pub(crate) async fn summary(db: &HubDb) -> Result<String, threadlane_core::store::StoreError> {
     let mut out = HEADING.to_owned();
+    let all_open = db.open_tasks().await?;
     for project in db.projects().await? {
         if project.is_general {
             continue;
@@ -79,10 +80,9 @@ pub(crate) async fn summary(db: &HubDb) -> Result<String, threadlane_core::store
         } else if project.paused {
             out.push_str(" (paused)");
         }
-        let tasks = db.tasks(project.id).await?;
-        let open: Vec<_> = tasks
+        let open: Vec<_> = all_open
             .iter()
-            .filter(|task| !task.status.is_terminal())
+            .filter(|task| task.project_id == project.id)
             .collect();
         if open.is_empty() {
             out.push_str("\n  No open tasks.");

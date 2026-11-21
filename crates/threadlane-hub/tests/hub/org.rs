@@ -444,6 +444,36 @@ async fn legacy_agent_limit_points_to_machine_configuration() {
 }
 
 #[tokio::test]
+async fn set_machine_slots_raises_and_lowers_max_parallel_from_ui() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    assert_eq!(
+        org(
+            &hub,
+            OrgRequest::SetMachineSlots {
+                machine: hub.machine,
+                slots: 5,
+            },
+        )
+        .await,
+        Ok(OrgReply::MachineSlotsSet)
+    );
+    assert_eq!(hub.link.max_parallel().await.unwrap(), Some(5));
+    assert_eq!(
+        org(
+            &hub,
+            OrgRequest::SetMachineSlots {
+                machine: hub.machine,
+                slots: 1,
+            },
+        )
+        .await,
+        Ok(OrgReply::MachineSlotsSet)
+    );
+    assert_eq!(hub.link.max_parallel().await.unwrap(), Some(1));
+}
+
+#[tokio::test]
 async fn set_space_ceiling_raises_and_lowers_what_every_project_allows() {
     let hub = TestHub::start().await;
     let general = hub.general().await;

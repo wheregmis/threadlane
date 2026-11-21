@@ -113,27 +113,38 @@ impl Hub {
         .context("starting the hub's roles")
     }
 
-    async fn deliver_reviews(&self) -> anyhow::Result<()> {
+    async fn deliver_reviews(&self, core: &HubCore) -> anyhow::Result<()> {
         let forge = GitForge::with_gh(&self.config.github.gh);
         loop {
-            let reviews = self.db.pending_github_reviews().await?;
-            for review in reviews {
-                if forge
-                    .publish_review(
-                        &review.pull_url,
-                        &review.revision,
-                        &review.body,
-                        &review.delivery_key,
-                    )
-                    .await
-                    .is_ok()
-                {
-                    self.db.delivered_github_review(&review).await?;
-                } else {
-                    tracing::warn!(url = %review.pull_url, submission = %review.submission, "GitHub review delivery failed; will retry");
+            match self.db.pending_github_reviews().await {
+                Ok(reviews) => {
+                    for review in reviews {
+                        if forge
+                            .publish_review(
+                                &review.pull_url,
+                                &review.revision,
+                                &review.body,
+                                &review.delivery_key,
+                            )
+                            .await
+                            .is_ok()
+                        {
+                            if let Err(error) = self.db.delivered_github_review(&review).await {
+                                tracing::error!(%error, submission = %review.submission, "could not record delivered GitHub review");
+                            }
+                        } else {
+                            tracing::warn!(url = %review.pull_url, submission = %review.submission, "GitHub review delivery failed; will retry");
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "could not read pending GitHub reviews");
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tokio::select! {
+                () = core.inner.wake.reviews_woken() => {}
+                () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+            }
         }
     }
 
@@ -209,7 +220,7 @@ impl Hub {
             tokio::try_join!(
                 async {
                     tokio::select! {
-                        result = self.deliver_reviews() => result,
+                        result = self.deliver_reviews(&core) => result,
                         () = until_stopped(stopped.clone()) => anyhow::Ok(()),
                     }
                 },

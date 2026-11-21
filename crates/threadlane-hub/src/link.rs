@@ -36,16 +36,21 @@ impl LocalLink {
         }
     }
 
-    /// The lane, if `lease` is its current lease and was granted to this
-    /// link's machine. Writes check again inside their own transaction; this
-    /// check keeps reads and unfenced writes from acting on a stale lease.
-    pub(crate) async fn check_lease(&self, lease: &Lease) -> Result<Lane, LinkError> {
+    pub(crate) fn check_machine(&self, lease: &Lease) -> Result<(), LinkError> {
         if lease.machine_id != self.machine {
             return Err(LinkError::Rejected(format!(
                 "lease on lane {} belongs to machine {}, not {}",
                 lease.lane_id, lease.machine_id, self.machine
             )));
         }
+        Ok(())
+    }
+
+    /// The lane, if `lease` is its current lease and was granted to this
+    /// link's machine. Writes check again inside their own transaction; this
+    /// check keeps reads and unfenced writes from acting on a stale lease.
+    pub(crate) async fn check_lease(&self, lease: &Lease) -> Result<Lane, LinkError> {
+        self.check_machine(lease)?;
         let lane = self
             .core
             .inner
@@ -107,6 +112,17 @@ impl HubLink for LocalLink {
         self.place().await
     }
 
+    async fn max_parallel(&self) -> Result<Option<u32>, LinkError> {
+        Ok(self
+            .core
+            .inner
+            .db
+            .machine(self.machine)
+            .await
+            .map_err(link_error)?
+            .map(|machine| machine.max_parallel))
+    }
+
     async fn pending(&self, lease: &Lease) -> Result<Vec<Event>, LinkError> {
         self.check_lease(lease).await?;
         self.core
@@ -132,7 +148,7 @@ impl HubLink for LocalLink {
     }
 
     async fn check_running(&self, lease: &Lease) -> Result<(), LinkError> {
-        self.check_lease(lease).await?;
+        self.check_machine(lease)?;
         self.core
             .inner
             .db
@@ -147,7 +163,7 @@ impl HubLink for LocalLink {
         run_id: RunId,
         events: &[EventId],
     ) -> Result<(), LinkError> {
-        self.check_lease(lease).await?;
+        self.check_machine(lease)?;
         self.core
             .inner
             .db
@@ -162,7 +178,7 @@ impl HubLink for LocalLink {
         session_id: SessionId,
         native_session_id: &str,
     ) -> Result<(), LinkError> {
-        self.check_lease(lease).await?;
+        self.check_machine(lease)?;
         self.core
             .inner
             .db
@@ -172,7 +188,7 @@ impl HubLink for LocalLink {
     }
 
     async fn append(&self, lease: &Lease, entries: &[JournalEntry]) -> Result<(), LinkError> {
-        self.check_lease(lease).await?;
+        self.check_machine(lease)?;
         self.core
             .inner
             .db
@@ -241,22 +257,16 @@ impl HubLink for LocalLink {
     }
 
     async fn release(&self, lease: &Lease) -> Result<(), LinkError> {
-        if lease.machine_id != self.machine {
-            return Err(LinkError::Rejected(format!(
-                "lease on lane {} belongs to machine {}, not {}",
-                lease.lane_id, lease.machine_id, self.machine
-            )));
-        }
+        self.check_machine(lease)?;
         let inner = &self.core.inner;
         inner.db.release_lease(lease).await.map_err(link_error)?;
         // Events that arrived after the last begin_run would otherwise wait
         // for the runners' next poll.
-        if !inner
+        if inner
             .db
-            .pending_events(lease.lane_id)
+            .has_pending_events(lease.lane_id)
             .await
             .map_err(link_error)?
-            .is_empty()
         {
             inner.wake.wake(WakeTarget::Lane(lease.lane_id));
         }

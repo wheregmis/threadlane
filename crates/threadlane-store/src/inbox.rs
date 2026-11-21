@@ -350,8 +350,44 @@ impl HubDb {
     /// Checks that the lease is still current and has not been interrupted.
     pub async fn check_running(&self, lease: &Lease) -> StoreResult<()> {
         let conn = self.db.reader()?;
-        check_lease(&conn, lease).await?;
-        check_running(&conn, lease).await
+        let current = query_opt(
+            &conn,
+            "SELECT lease_epoch, lease_owner, cancelled_epoch FROM lanes WHERE id = ?1",
+            params![lease.lane_id.get()],
+            |row| {
+                let c = Cols(row);
+                Ok((c.i64(0)?, c.opt_id::<MachineId>(1)?, c.opt_i64(2)?))
+            },
+        )
+        .await?
+        .ok_or_else(|| StoreError::not_found("lane", lease.lane_id))?;
+        match current {
+            (epoch, Some(owner), cancelled)
+                if epoch == lease.epoch && owner == lease.machine_id =>
+            {
+                if cancelled == Some(lease.epoch) {
+                    return Err(StoreError::Stopped);
+                }
+                Ok(())
+            }
+            (epoch, _, _) => Err(StoreError::StaleLease {
+                lane_id: lease.lane_id,
+                held: lease.epoch,
+                current: epoch,
+            }),
+        }
+    }
+
+    /// Whether `lane_id` has at least one pending event without loading payloads.
+    pub async fn has_pending_events(&self, lane_id: LaneId) -> StoreResult<bool> {
+        let conn = self.db.reader()?;
+        query_one(
+            &conn,
+            "SELECT EXISTS(SELECT 1 FROM events WHERE lane_id = ?1 AND status = 'pending')",
+            params![lane_id.get()],
+            |row| Cols(row).bool(0),
+        )
+        .await
     }
 }
 
@@ -501,22 +537,33 @@ impl InboxStore for HubDb {
         )
         .await?;
         if live || unavailable {
+            tx.rollback().await?;
             return Ok(None);
         }
-        if !task::check_eligible(tx.conn(), lane_id, machine_id, now).await? {
-            tx.commit().await?;
+        let (eligible, reason_changed) =
+            task::check_eligible(tx.conn(), lane_id, machine_id, now).await?;
+        if !eligible {
+            if reason_changed {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
             return Ok(None);
         }
         let full = query_one(
             tx.conn(),
             "SELECT (SELECT COUNT(*) FROM lanes WHERE lease_owner = ?1 AND lease_expires_at > ?2)
-                >= MIN(max_parallel, COALESCE(slot_limit, max_parallel)) FROM machines WHERE id = ?1",
+                >= COALESCE(slot_limit, max_parallel) FROM machines WHERE id = ?1",
             params![machine_id.get(), now.as_millis()],
             |row| Cols(row).bool(0),
         )
         .await?;
         if full {
-            tx.commit().await?;
+            if reason_changed {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
             return Ok(None);
         }
         if lane.lease_owner.is_some() {
@@ -581,6 +628,16 @@ impl InboxStore for HubDb {
     }
 
     async fn expire_leases(&self, now: Timestamp) -> StoreResult<Vec<LaneId>> {
+        let has_expired = query_one(
+            &self.db.reader()?,
+            "SELECT EXISTS(SELECT 1 FROM lanes WHERE lease_owner IS NOT NULL AND lease_expires_at <= ?1)",
+            params![now.as_millis()],
+            |row| Cols(row).bool(0),
+        )
+        .await?;
+        if !has_expired {
+            return Ok(Vec::new());
+        }
         let tx = self.db.begin().await?;
         let expired: Vec<LaneId> = query_all(
             tx.conn(),
@@ -589,6 +646,10 @@ impl InboxStore for HubDb {
             |row| Cols(row).id(0),
         )
         .await?;
+        if expired.is_empty() {
+            tx.rollback().await?;
+            return Ok(expired);
+        }
         for lane_id in &expired {
             reclaim_lane(tx.conn(), *lane_id, now).await?;
             exec(
@@ -599,9 +660,7 @@ impl InboxStore for HubDb {
             .await?;
         }
         tx.commit().await?;
-        if !expired.is_empty() {
-            tracing::info!(count = expired.len(), "expired lane leases");
-        }
+        tracing::info!(count = expired.len(), "expired lane leases");
         Ok(expired)
     }
 

@@ -127,27 +127,17 @@ impl Desktop {
                     .child(step(
                         "Increase task limit",
                         AppIcon::Plus,
-                        (detail.slots < detail.runner_slots).then(|| detail.slots + 1),
+                        detail.slots.checked_add(1),
                     ))
                     .children(self.machine_limit_saving.then(|| meta("Saving…", cx))),
             );
         if detail.runner_slots > 0 {
-            capacity = capacity.child(meta(
-                format!(
-                    "Tasks and lead conversations share these slots. Runner maximum: {}.",
-                    detail.runner_slots
-                ),
-                cx,
-            ));
+            capacity = capacity.child(meta("Tasks and lead conversations share these slots.", cx));
         }
         if let Some(reason) = if detail.status == MachineStatus::Revoked {
             Some("This machine's access has been revoked.")
         } else if !detail.limit_writable {
             Some("Current capacity is unavailable. Reconnect to the space to edit the limit.")
-        } else if detail.slots == detail.runner_slots {
-            Some(
-                "To raise the runner maximum, change runner.max_parallel on this machine and restart its runner.",
-            )
         } else {
             None
         } {

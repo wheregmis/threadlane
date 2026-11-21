@@ -258,15 +258,38 @@ impl HubCore {
         let Ok(mut entries) = tokio::fs::read_dir(root.join("worktrees")).await else {
             return Ok(());
         };
-        let _removal = inner.project_removal.lock().await;
+        let mut candidate_ids = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
             let name = entry.file_name();
-            let Some(id) = name
+            if let Some(id) = name
                 .to_str()
-                .and_then(|name| task_ref(&serde_json::json!(name)))
-            else {
+                .and_then(|name| task_ref(&serde_json::Value::String(name.to_owned())))
+            {
+                candidate_ids.push(id);
+            }
+        }
+        if candidate_ids.is_empty() {
+            return Ok(());
+        }
+        for id in candidate_ids {
+            let Some(task) = inner.db.task(id).await? else {
                 continue;
             };
+            if !task.status.is_terminal() {
+                continue;
+            }
+            let last_run = inner
+                .db
+                .lane_runs(task.lane_id)
+                .await?
+                .iter()
+                .map(|run| run.ended_at.unwrap_or(run.started_at))
+                .max()
+                .unwrap_or(task.created_at);
+            if now.saturating_since(last_run) < idle {
+                continue;
+            }
+            let _removal = inner.project_removal.lock().await;
             let Some(task) = inner.db.task(id).await? else {
                 continue;
             };
@@ -326,20 +349,21 @@ impl HubCore {
     pub async fn sweep_once(&self) -> Result<Vec<LaneId>, HubError> {
         let now = self.inner.clock.now();
         let expired = self.inner.db.expire_leases(now).await?;
-        // Keep the lease sweep independent of GitHub polling when there is no cleanup.
-        if !self.inner.db.project_cleanups().await?.is_empty() {
-            let _removal = self.inner.project_removal.lock().await;
-            for (id, removal) in self.inner.db.project_cleanups().await? {
-                self.cleanup_project(id, &removal).await;
-            }
-        }
-        self.remove_idle_worktrees(now).await?;
         // A cooldown may have ended, or the space may have run out of
         // accounts without a notice yet (a crash in between).
         self.notice_accounts().await?;
         if !expired.is_empty() || !self.inner.db.ready_lanes(now).await?.is_empty() {
             self.inner.wake.wake(WakeTarget::Runners);
         }
+        // Keep the lease sweep independent of GitHub polling when there is no cleanup.
+        let cleanups = self.inner.db.project_cleanups().await?;
+        if !cleanups.is_empty() {
+            let _removal = self.inner.project_removal.lock().await;
+            for (id, removal) in cleanups {
+                self.cleanup_project(id, &removal).await;
+            }
+        }
+        self.remove_idle_worktrees(now).await?;
         Ok(expired)
     }
 
@@ -403,9 +427,16 @@ impl HubCore {
     async fn dispatch_loop(&self) -> Result<(), HubError> {
         loop {
             let started_at = self.inner.clock.now();
-            match self.dispatch_once().await {
-                Ok(0) => {}
-                Ok(sent) => tracing::debug!(sent, "dispatched messages"),
+            match self.dispatch_pass().await {
+                Ok((0, false)) => {}
+                Ok((sent, full_batch)) => {
+                    if sent > 0 {
+                        tracing::debug!(sent, "dispatched messages");
+                    }
+                    if full_batch {
+                        continue;
+                    }
+                }
                 Err(HubError::Killed(killed)) => return Err(killed.into()),
                 Err(error) => tracing::error!(%error, "dispatcher pass failed"),
             }

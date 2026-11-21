@@ -1,0 +1,14 @@
+CREATE INDEX events_pending_lane ON events (lane_id, id, trust) WHERE status = 'pending';
+CREATE INDEX lanes_active_lease ON lanes (lease_expires_at) WHERE lease_owner IS NOT NULL;
+CREATE INDEX events_lane_kind_time ON events (lane_id, kind, received_at, id);
+CREATE INDEX events_project_kind_time ON events (project_id, kind, received_at);
+CREATE INDEX events_status ON events (status, project_id, id);
+CREATE INDEX outbox_channel_sent ON outbox (channel, status, sent_at, delivery_seq);
+CREATE INDEX runs_started_at ON runs (started_at);
+CREATE INDEX runs_session_id ON runs (session_id);
+CREATE INDEX decisions_status ON decisions (status, id);
+CREATE INDEX decisions_project ON decisions (project_id, id);
+CREATE INDEX tasks_status ON tasks (status);
+CREATE INDEX timers_lane_id ON timers (lane_id, status);
+CREATE INDEX task_dependencies_depends_on ON task_dependencies (depends_on);
+CREATE INDEX task_reviews_task ON task_reviews (task_id, submission_run);

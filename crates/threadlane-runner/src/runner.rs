@@ -90,12 +90,23 @@ impl Runner {
     /// [`RunnerError::Link`] if the hub refuses or cannot be reached, and
     /// [`RunnerError::Killed`] on an injected crash.
     pub async fn hello(&self) -> Result<(), RunnerError> {
-        let mut probes = Vec::with_capacity(self.inner.backends.len());
-        for backend in &self.inner.backends {
-            probes.push((backend.kind(), probe(backend.as_ref()).await));
+        let mut set = JoinSet::new();
+        for (idx, backend) in self.inner.backends.iter().cloned().enumerate() {
+            set.spawn(async move { (idx, backend.kind(), probe(backend.as_ref()).await) });
         }
+        let collect_probes = async move {
+            let mut indexed = Vec::with_capacity(set.len());
+            while let Some(Ok(item)) = set.join_next().await {
+                indexed.push(item);
+            }
+            indexed.sort_by_key(|(idx, _, _)| *idx);
+            indexed
+                .into_iter()
+                .map(|(_, kind, p)| (kind, p))
+                .collect::<Vec<_>>()
+        };
+        let (probes, gh_login) = tokio::join!(collect_probes, self.inner.forge.logged_in());
         *self.inner.probes.lock().expect("probes lock poisoned") = probes;
-        let gh_login = self.inner.forge.logged_in().await;
         self.inner.gh_login.store(gh_login, Ordering::Relaxed);
         let report = self.inner.report(self.inner.load());
         self.inner.link.hello(&report).await?;
@@ -176,7 +187,13 @@ impl Runner {
 
     /// Asks for lanes until the hub has none or `max_parallel` are running.
     async fn claim(&self, lanes: &mut JoinSet<Result<(), Killed>>) -> Result<(), RunnerError> {
-        let max_parallel = usize::try_from(self.inner.config.max_parallel).unwrap_or(usize::MAX);
+        let limit = match self.inner.link.max_parallel().await {
+            Ok(Some(limit)) => limit,
+            Ok(None) => self.inner.config.max_parallel,
+            Err(LinkError::Killed(killed)) => return Err(killed.into()),
+            Err(_) => self.inner.config.max_parallel,
+        };
+        let max_parallel = usize::try_from(limit).unwrap_or(usize::MAX);
         while lanes.len() < max_parallel {
             match self.inner.link.request_work().await {
                 Ok(Some(lease)) => {

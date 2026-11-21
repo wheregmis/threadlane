@@ -664,6 +664,22 @@ impl HubDb {
         tx.commit().await?;
         Ok(changed == 1)
     }
+    /// Decisions with a recorded outcome in non-cancelled task lanes, ordered by `id`.
+    pub async fn decisions_with_outcome(&self) -> StoreResult<Vec<Decision>> {
+        let conn = self.db.reader()?;
+        query_all(
+            &conn,
+            &format!(
+                "SELECT {DECISION_FIELDS} FROM decisions
+                 WHERE outcome IS NOT NULL
+                   AND lane_id IN (SELECT lane_id FROM tasks WHERE status != 'cancelled')
+                 ORDER BY id"
+            ),
+            (),
+            decode_decision,
+        )
+        .await
+    }
 }
 
 #[async_trait]

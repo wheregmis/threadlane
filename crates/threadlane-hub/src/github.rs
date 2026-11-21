@@ -34,9 +34,7 @@ use threadlane_core::runtime::steps::github::{
     AFTER_CURSOR, AFTER_FETCH, AFTER_INSERT, AFTER_WAKE,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{
-    DecisionStore, InboxStore, MachineStore, OrgStore, StoreError, TaskStore,
-};
+use threadlane_core::store::{InboxStore, MachineStore, OrgStore, StoreError, TaskStore};
 use threadlane_store::HubDb;
 
 use crate::core::HubCore;
@@ -143,6 +141,13 @@ impl Routes {
     /// Reads every registered repository and every active task's work.
     async fn read(db: &HubDb) -> Result<Self, StoreError> {
         let mut routes = Self::default();
+        let mut decisions_by_lane: HashMap<LaneId, Vec<_>> = HashMap::new();
+        for decision in db.decisions_with_outcome().await? {
+            decisions_by_lane
+                .entry(decision.lane_id)
+                .or_default()
+                .push(decision);
+        }
         for project in db.projects().await? {
             let repositories = db.repositories(project.id).await?;
             routes
@@ -160,12 +165,15 @@ impl Routes {
                 if task.status == TaskStatus::Cancelled {
                     continue;
                 }
+                let Some(decisions) = decisions_by_lane.get(&task.lane_id) else {
+                    continue;
+                };
                 let (list, lane) = if task.status.is_terminal() {
                     (&mut routes.ended, project.lead_lane_id)
                 } else {
                     (&mut routes.work, task.lane_id)
                 };
-                for decision in db.lane_decisions(task.lane_id).await? {
+                for decision in decisions {
                     let Some(outcome) = decision.outcome.as_ref() else {
                         continue;
                     };
@@ -493,6 +501,9 @@ impl HubCore {
         source: &dyn GithubSource,
         feed: &Feed,
     ) -> Result<HashMap<String, LeadActivity>, HubError> {
+        if feed.items.is_empty() {
+            return Ok(HashMap::new());
+        }
         let inner = &self.inner;
         let routes = Routes::read(&inner.db).await?;
         let mut activity = HashMap::new();

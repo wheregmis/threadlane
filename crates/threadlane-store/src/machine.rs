@@ -15,7 +15,7 @@ use crate::inbox::check_lease;
 use crate::row::{Cols, json_text, opt_ts, params};
 
 const MACHINE_FIELDS: &str = "id, name, endpoint_id, is_hub, trust, status, last_seen,
-    capabilities, backends, gh_login, MIN(max_parallel, COALESCE(slot_limit, max_parallel)), load";
+    capabilities, backends, gh_login, COALESCE(slot_limit, max_parallel), load";
 
 fn decode_machine(row: &Row) -> StoreResult<Machine> {
     let c = Cols(row);
@@ -184,14 +184,12 @@ impl MachineStore for HubDb {
         let tx = self.db.begin().await?;
         let changed = exec(
             tx.conn(),
-            "UPDATE machines SET slot_limit = ?2 WHERE id = ?1 AND ?2 <= max_parallel",
+            "UPDATE machines SET slot_limit = ?2 WHERE id = ?1",
             params![id.get(), i64::from(slots)],
         )
         .await?;
         if changed != 1 {
-            return Err(StoreError::Invalid(format!(
-                "machine {id} is missing or its runner supports fewer than {slots} slots"
-            )));
+            return Err(StoreError::Invalid(format!("machine {id} is missing")));
         }
         tx.commit().await
     }

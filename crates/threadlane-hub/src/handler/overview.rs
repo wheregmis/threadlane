@@ -34,24 +34,34 @@ struct Names {
 
 impl Names {
     async fn of(db: &HubDb) -> Result<Self, ApiError> {
+        let (projects, agents, machines) =
+            tokio::try_join!(Self::projects(db), Self::agents(db), Self::machines(db))?;
         Ok(Self {
-            projects: db
-                .projects()
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .map(|project| (project.id, project.name))
-                .collect(),
-            // Deleted agents too: finished tasks still name them.
-            agents: db
-                .all_agents()
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .map(|agent| (agent.id, agent.name))
-                .collect(),
-            machines: Self::machines(db).await?,
+            projects,
+            agents,
+            machines,
         })
+    }
+
+    async fn projects(db: &HubDb) -> Result<HashMap<ProjectId, String>, ApiError> {
+        Ok(db
+            .projects()
+            .await
+            .map_err(api_error)?
+            .into_iter()
+            .map(|project| (project.id, project.name))
+            .collect())
+    }
+
+    async fn agents(db: &HubDb) -> Result<HashMap<AgentId, String>, ApiError> {
+        // Deleted agents too: finished tasks still name them.
+        Ok(db
+            .all_agents()
+            .await
+            .map_err(api_error)?
+            .into_iter()
+            .map(|agent| (agent.id, agent.name))
+            .collect())
     }
 
     async fn machines(db: &HubDb) -> Result<HashMap<MachineId, String>, ApiError> {
@@ -468,7 +478,7 @@ pub(super) async fn handle(
             let project = api.project_named(project.as_deref()).await?;
             let include_images = limit <= threadlane_core::client::CONVERSATION_PAGE;
             let limit = limit.min(FEED_PAGE);
-            let names = Names::of(db).await?;
+            let project_names = Names::projects(db).await?;
             let mut entries: Vec<(Timestamp, ConversationEntry)> = db
                 .user_messages(project.lead_lane_id, before, limit)
                 .await
@@ -507,7 +517,7 @@ pub(super) async fn handle(
                 .await
                 .map_err(api_error)?
             {
-                let item = feed_item(db, message, &names.projects).await?;
+                let item = feed_item(db, message, &project_names).await?;
                 entries.push((item.delivered_at, ConversationEntry::Delivered { item }));
             }
             for event in db
@@ -533,14 +543,14 @@ pub(super) async fn handle(
             })
         }
         OverviewRequest::Recent { limit } => {
-            let names = Names::of(db).await?;
+            let project_names = Names::projects(db).await?;
             let messages = db
                 .sent_before(CLIENT_CHANNEL, None, None, limit.min(FEED_PAGE))
                 .await
                 .map_err(api_error)?;
             let mut items = Vec::with_capacity(messages.len());
             for message in messages.into_iter().rev() {
-                items.push(feed_item(db, message, &names.projects).await?);
+                items.push(feed_item(db, message, &project_names).await?);
             }
             Ok(OverviewReply::Recent { items })
         }

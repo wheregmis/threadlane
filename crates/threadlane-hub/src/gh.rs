@@ -142,6 +142,12 @@ impl GhSource {
         let mut visited = std::collections::HashSet::new();
         let mut latest: Option<GithubItem> = None;
         while let Some(path) = next {
+            if visited.len() >= MAX_PAGES * 5 {
+                return Err(GithubError(format!(
+                    "GitHub pagination exceeded {} pages: {path}",
+                    MAX_PAGES * 5
+                )));
+            }
             if !visited.insert(path.clone()) {
                 return Err(GithubError(format!("repeated GitHub page: {path}")));
             }

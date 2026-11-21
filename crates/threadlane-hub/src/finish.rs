@@ -152,6 +152,7 @@ impl LocalLink {
             // A finished task's result waits in the lead lane, and its
             // dependents and its parallel slot may now be free.
             inner.wake.wake(WakeTarget::Runners);
+            inner.wake.wake_reviews();
         }
         Ok(outcome)
     }
