@@ -85,8 +85,8 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         description: "Read this project's run outcomes, rationales, delivered replies and owner chat \
                       from unreviewed runs, project tasks with review evidence and last activity, and \
                       previous Threadlane reports (first page only). Runs then tasks come in pages, \
-                      long texts cut; a cut page gives the offset of the next one. Pass task_id for \
-                      one task's full record, or updated_after to list only tasks active since then."
+                      long texts cut; a cut page gives the offset of the next one. Listed tasks omit \
+                      diff patches. Pass task_id for one task's full record with its patches, or updated_after to list only tasks active since then."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -129,6 +129,33 @@ fn task_record(task: &Task, times: &BTreeMap<i64, Timestamp>) -> Json {
             .map(|at| format!("{at:.3}"))
     );
     record
+}
+
+/// A listed task without its diff patches or its review feedback twice (#680):
+/// file stats stay, and `task_id` still shows the full record.
+fn compact(record: &mut Json) {
+    // get_mut, not IndexMut: indexing would insert keys into a null `result`.
+    let result = record.get_mut("result");
+    if let Some(checks) = result
+        .and_then(|r| r.get_mut(threadlane_core::link::MERGE_CHECKS))
+        .and_then(Json::as_array_mut)
+    {
+        for diff in checks.iter_mut().filter_map(|check| check.get_mut("diff")) {
+            if let Some(diff) = diff.as_object_mut()
+                && diff.remove("patch").is_some()
+            {
+                diff.insert("patch_omitted".into(), json!(true));
+            }
+        }
+    }
+    if record.get("latest_review").is_some()
+        && let Some(review) = record
+            .get_mut("result")
+            .and_then(|r| r.get_mut("review"))
+            .and_then(Json::as_object_mut)
+    {
+        review.remove("feedback");
+    }
 }
 
 /// How to read a cut task record in full.
@@ -561,6 +588,7 @@ impl HubCore {
                 if let Some(review) = reviews.remove(&task.id.get()) {
                     record["latest_review"] = review;
                 }
+                compact(&mut record);
                 let full = record.clone();
                 page::clip_fields(&mut record);
                 if record != full {
@@ -646,5 +674,39 @@ impl HubCore {
             at: inner.clock.now(),
         };
         memory::execute(&inner.db, &by, context.project_id, None, tool, &args).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listed_tasks_drop_patches_and_repeated_review_feedback() {
+        let mut record = json!({
+            "result": {
+                "summary": "Done",
+                "merge": [{"repository": "r", "diff": {"files": [{"path": "a.rs", "insertions": 3, "deletions": 1}],
+                    "insertions": 3, "deletions": 1, "patch": "+x".repeat(2000)}}],
+                "review": {"reviewer": "Reviewer", "feedback": "Looks good", "run": 7}
+            },
+            "latest_review": {"verdict": "approved", "feedback": "Looks good"}
+        });
+        compact(&mut record);
+        let diff = &record["result"]["merge"][0]["diff"];
+        assert!(diff.get("patch").is_none());
+        assert_eq!(diff["patch_omitted"], true);
+        assert_eq!(diff["files"][0]["path"], "a.rs");
+        assert_eq!(diff["insertions"], 3);
+        assert!(record["result"]["review"].get("feedback").is_none());
+        assert_eq!(record["result"]["review"]["run"], 7);
+        assert_eq!(record["latest_review"]["feedback"], "Looks good");
+
+        let mut open = json!({"result": null, "latest_review": {"verdict": "approved"}});
+        compact(&mut open);
+        assert_eq!(
+            open,
+            json!({"result": null, "latest_review": {"verdict": "approved"}})
+        );
     }
 }
