@@ -292,8 +292,53 @@ impl GitWorkspaces {
         Ok(files)
     }
 
-    /// Commits what is uncommitted in one worktree on the task branch.
-    async fn commit(&self, path: &Path, task: TaskId, message: &str) -> Result<(), WorkspaceError> {
+    async fn checkpoint_all(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+        message: &str,
+        untracked: bool,
+    ) -> Result<(), WorkspaceError> {
+        for repository in repositories {
+            check(repository)?;
+            let _repo = self.lock_repository(repository.id).await;
+            if !self.is_ready(task, repository) {
+                continue;
+            }
+            let path = self.worktree(task, repository);
+            let committed = self.commit(&path, task, message, untracked).await?;
+            if untracked {
+                continue;
+            }
+            let left = git(Some(&path), ["ls-files", "--others", "--exclude-standard"]).await?;
+            let left: Vec<&str> = left.lines().collect();
+            if committed.is_empty() && left.is_empty() {
+                continue;
+            }
+            let note = checkpoint_note(&repository.name, &committed, &left);
+            std::fs::write(self.checkpoint_marker(task, repository), note).map_err(|error| {
+                WorkspaceError(format!("could not save the checkpoint note: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// What the last unfinished run's checkpoint did, for the next run.
+    fn checkpoint_marker(&self, task: TaskId, repository: &Repository) -> PathBuf {
+        self.task_dir(task)
+            .join(format!(".{}.checkpoint", repository.name))
+    }
+
+    /// Commits what is uncommitted in one worktree on the task branch:
+    /// untracked files too when `untracked`, otherwise tracked files only.
+    /// Returns the files committed.
+    async fn commit(
+        &self,
+        path: &Path,
+        task: TaskId,
+        message: &str,
+        untracked: bool,
+    ) -> Result<Vec<String>, WorkspaceError> {
         let branch = task_branch(task);
         let head = git(Some(path), ["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
         if head.trim() != branch {
@@ -303,17 +348,20 @@ impl GitWorkspaces {
                 head.trim()
             )));
         }
-        git(Some(path), ["add", "--all"]).await?;
-        if git(Some(path), ["diff", "--cached", "--quiet"])
-            .await
-            .is_ok()
-        {
-            return Ok(());
+        git(
+            Some(path),
+            ["add", if untracked { "--all" } else { "--update" }],
+        )
+        .await?;
+        let staged = git(Some(path), ["diff", "--cached", "--name-only"]).await?;
+        let files: Vec<String> = staged.lines().map(str::to_owned).collect();
+        if files.is_empty() {
+            return Ok(files);
         }
         let mut args = COMMITTER.to_vec();
         args.extend(["commit", "--quiet", "--no-verify", "--message", message]);
         git(Some(path), args).await?;
-        Ok(())
+        Ok(files)
     }
 
     /// Computes a bounded diffstat + unified diff preview between `base` and
@@ -581,16 +629,30 @@ impl Workspaces for GitWorkspaces {
         repositories: &[Repository],
         message: &str,
     ) -> Result<(), WorkspaceError> {
+        self.checkpoint_all(task, repositories, message, true).await
+    }
+
+    async fn checkpoint_tracked(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+        message: &str,
+    ) -> Result<(), WorkspaceError> {
+        self.checkpoint_all(task, repositories, message, false)
+            .await
+    }
+    async fn take_checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) -> String {
+        let mut notes = String::new();
         for repository in repositories {
-            check(repository)?;
-            let _repo = self.lock_repository(repository.id).await;
-            if self.is_ready(task, repository) {
-                self.commit(&self.worktree(task, repository), task, message)
-                    .await?;
+            let marker = self.checkpoint_marker(task, repository);
+            if let Ok(note) = std::fs::read_to_string(&marker) {
+                notes.push_str(&note);
+                let _ = std::fs::remove_file(&marker);
             }
         }
-        Ok(())
+        notes
     }
+
     async fn check_merge(
         &self,
         task: TaskId,
@@ -1054,6 +1116,40 @@ async fn remove_file(file: &Path) -> Result<(), WorkspaceError> {
 
 fn io_error(what: &str, path: &Path, error: &io::Error) -> WorkspaceError {
     WorkspaceError(format!("{what} {}: {error}", path.display()))
+}
+
+/// Tells the next run what an unfinished run's checkpoint committed and
+/// what it left out (#691), naming at most a few files of each.
+fn checkpoint_note(repository: &str, committed: &[String], left: &[&str]) -> String {
+    fn list<S: AsRef<str>>(files: &[S]) -> String {
+        const SHOWN: usize = 10;
+        let mut named: Vec<&str> = files.iter().take(SHOWN).map(AsRef::as_ref).collect();
+        let more = files.len().saturating_sub(SHOWN);
+        let more = format!("and {more} more");
+        if files.len() > SHOWN {
+            named.push(&more);
+        }
+        named.join(", ")
+    }
+    let mut note =
+        format!("\nThe last run of this task did not finish. In {repository}, Threadlane ");
+    if committed.is_empty() {
+        note.push_str("committed nothing");
+    } else {
+        note.push_str(&format!(
+            "committed changes to tracked files: {}",
+            list(committed)
+        ));
+    }
+    if left.is_empty() {
+        note.push_str(".\n");
+    } else {
+        note.push_str(&format!(
+            ". It left these untracked files uncommitted in the worktree: {}. Keep or delete them.\n",
+            list(left)
+        ));
+    }
+    note
 }
 
 #[cfg(test)]

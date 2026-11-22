@@ -143,6 +143,24 @@ async fn ending_a_run_commits_uncommitted_work_on_the_task_branch_and_a_clean_tr
 }
 
 #[tokio::test]
+async fn an_unfinished_run_commits_tracked_changes_and_leaves_scratch_files_out() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("README.md"), "# app, changed\n").unwrap();
+    std::fs::write(path.join("scratch.sh"), "sleep 600").unwrap();
+    s.workspaces
+        .checkpoint_tracked(T1, std::slice::from_ref(&s.repository), "Timed out")
+        .await
+        .expect("checkpoint");
+    assert_eq!(commits(&path), 2, "the tracked change is kept");
+    assert_eq!(
+        git(&path, &["status", "--porcelain"]),
+        "?? scratch.sh\n",
+        "the scratch file stays in the worktree, uncommitted"
+    );
+}
+
+#[tokio::test]
 async fn work_on_another_branch_is_not_committed() {
     let s = setup();
     let path = s.prepare(T1).await;
@@ -633,5 +651,50 @@ async fn a_task_given_a_repository_is_told_where_its_earlier_work_is() {
     assert!(
         earlier.join("work.txt").is_file(),
         "the earlier work is kept"
+    );
+}
+
+#[tokio::test]
+async fn the_run_after_an_unfinished_one_is_told_what_its_checkpoint_left_out() {
+    let h = Harness::new();
+    let s = setup();
+    let root = h.config.lanes_dir.parent().unwrap().join("workspaces");
+    let workspaces = GitWorkspaces::new(root);
+    let repositories = std::slice::from_ref(&s.repository);
+    let path = workspaces.prepare(T1, repositories).await.expect("prepare")[0].clone();
+    std::fs::write(path.join("README.md"), "# app, changed\n").unwrap();
+    for n in 0..12 {
+        std::fs::write(path.join(format!("scratch{n:02}.sh")), "sleep 600").unwrap();
+    }
+    workspaces
+        .checkpoint_tracked(T1, repositories, "Timed out")
+        .await
+        .expect("checkpoint");
+
+    let mut assignment = assignment(11);
+    assignment.lane_kind = LaneKind::Task;
+    assignment.task_id = Some(T1);
+    assignment.repositories = vec![s.repository.clone()];
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment)));
+    h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
+    h.backend.scripted.push(
+        Script::new()
+            .call("progress", "memory_create", json!({}))
+            .finish("Resumed"),
+    );
+    h.runner.work_once().await.unwrap();
+    let prompt = &h.backend.scripted.received()[0].prompt;
+    assert!(
+        prompt.contains("committed changes to tracked files: README.md.")
+            && prompt.contains("scratch00.sh")
+            && prompt.contains("and 2 more")
+            && !prompt.contains("scratch11.sh"),
+        "{prompt}"
+    );
+    assert_eq!(
+        workspaces.take_checkpoint_notes(T1, repositories).await,
+        "",
+        "told once"
     );
 }

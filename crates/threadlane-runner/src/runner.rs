@@ -362,7 +362,7 @@ impl Inner {
         match self.attempt(lane, assignment).await {
             Err(LaneExit::UserStopped) => {
                 if assignment.lane_kind == LaneKind::Task {
-                    if let Err(error) = self.checkpoint(assignment).await {
+                    if let Err(error) = self.checkpoint(assignment, false).await {
                         warn!(run = %assignment.run_id, %error, "could not checkpoint the stopped run");
                     }
                     self.reach(AFTER_CHECKPOINT)?;
@@ -414,6 +414,14 @@ impl Inner {
         let mut performed = self.perform(lane, assignment).await?;
         performed.push_str(&self.bring_in_base(assignment).await);
         performed.push_str(&self.earlier_work(lane, assignment, &working_dir).await);
+        if assignment.review.is_none()
+            && let Some(task) = assignment.task_id
+        {
+            let notes = self
+                .workspaces
+                .take_checkpoint_notes(task, &assignment.repositories);
+            performed.push_str(&notes.await);
+        }
         lane.check()?;
         self.link.check_running(&lane.lease()).await?;
 
@@ -562,7 +570,7 @@ impl Inner {
         };
         // Keep what the run did, even though it failed; the next run goes on
         // from it.
-        if let Err(error) = self.checkpoint(assignment).await {
+        if let Err(error) = self.checkpoint(assignment, false).await {
             warn!(run = %assignment.run_id, %error, "could not commit the failed run's work");
         }
         self.fail(lane, assignment.run_id, failure).await
@@ -843,7 +851,7 @@ impl Inner {
         let run_id = assignment.run_id;
         self.reach(AFTER_BACKEND_RUN)?;
         if assignment.lane_kind == LaneKind::Task {
-            if let Err(error) = self.checkpoint(assignment).await {
+            if let Err(error) = self.checkpoint(assignment, true).await {
                 let message = format!("could not commit the run's work: {error}");
                 return self.fail(lane, run_id, RunFailure::Error { message }).await;
             }
@@ -1137,7 +1145,9 @@ impl Inner {
     /// Commits what a task run left uncommitted in its worktrees, on the
     /// task branch. Nothing to do for a lead, or a task without
     /// repositories.
-    async fn checkpoint(&self, assignment: &RunAssignment) -> Result<(), String> {
+    /// A run that did not finish keeps its untracked files out of the
+    /// commit (#691): they may be scratch it meant to delete.
+    async fn checkpoint(&self, assignment: &RunAssignment, finished: bool) -> Result<(), String> {
         if assignment.review.is_some() {
             return Ok(());
         }
@@ -1145,10 +1155,17 @@ impl Inner {
             return Ok(());
         };
         let message = format!("Threadlane: work of {task}, run {}", assignment.run_id);
-        self.workspaces
-            .checkpoint(task, &assignment.repositories, &message)
-            .await
-            .map_err(|error| error.to_string())
+        let repositories = &assignment.repositories;
+        let saved = if finished {
+            self.workspaces
+                .checkpoint(task, repositories, &message)
+                .await
+        } else {
+            self.workspaces
+                .checkpoint_tracked(task, repositories, &message)
+                .await
+        };
+        saved.map_err(|error| error.to_string())
     }
 
     /// Rebases a task's branches onto their default branches where that
