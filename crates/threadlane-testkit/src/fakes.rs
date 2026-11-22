@@ -512,6 +512,8 @@ struct GithubState {
     activity: Vec<(String, Vec<GithubItem>, bool)>,
     /// What [`GithubSource::issue_claim`] answers, by `(repository, number)`.
     claims: Vec<(String, u64, Result<IssueClaim, String>)>,
+    /// What [`GithubSource::issue`] answers, by `(repository, number)`.
+    issues: Vec<(String, u64, serde_json::Value)>,
     /// What [`GithubSource::pull_request_state`] answers, by `(repository, number)`.
     pulls: Vec<(String, u64, Result<PullRequestState, String>)>,
 }
@@ -561,6 +563,14 @@ impl FakeGithub {
         lock(&self.state)
             .claims
             .push((repository.to_owned(), number, claim));
+    }
+
+    /// What [`GithubSource::issue`] answers for `number` of `repository`.
+    /// Unscripted issues fail.
+    pub fn set_issue(&self, repository: &str, number: u64, view: serde_json::Value) {
+        lock(&self.state)
+            .issues
+            .push((repository.to_owned(), number, view));
     }
 
     /// What [`GithubSource::pull_request_state`] answers for pull request
@@ -675,6 +685,16 @@ impl GithubSource for FakeGithub {
                 || Err(GithubError(format!("no claim for {repository}#{number}"))),
                 |(_, _, claim)| claim.clone().map_err(GithubError),
             )
+    }
+
+    async fn issue(&self, repository: &str, number: u64) -> Result<serde_json::Value, GithubError> {
+        lock(&self.state)
+            .issues
+            .iter()
+            .rev()
+            .find(|(r, n, _)| r == repository && *n == number)
+            .map(|(_, _, view)| view.clone())
+            .ok_or_else(|| GithubError(format!("no issue {repository}#{number}")))
     }
 
     async fn pull_request_state(

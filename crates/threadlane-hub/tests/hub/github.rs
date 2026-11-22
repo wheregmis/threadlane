@@ -1331,3 +1331,54 @@ async fn deletion_completes_while_a_notification_activity_is_read() {
         [notified(when).id.as_str()]
     );
 }
+
+#[tokio::test]
+async fn the_lead_reads_an_issue_of_a_registered_repository_without_a_decision() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    github.set_issue(
+        "acme/widgets",
+        7,
+        json!({ "title": "Crash", "comments": [{ "body": "Plan: fix it." }] }),
+    );
+    hub.send("m-1", "Plan issue 7").await;
+    let (lease, run) = crate::common::begin(&*hub.link).await;
+    assert_eq!(run.lane_kind, threadlane_core::model::LaneKind::Lead);
+    let view = |id: &'static str, arguments: serde_json::Value| {
+        let link = Arc::clone(&hub.link);
+        async move {
+            link.call_tool(
+                &lease,
+                run.run_id,
+                Some(id),
+                threadlane_hub::VIEW_ISSUE,
+                &arguments,
+            )
+            .await
+        }
+    };
+    let read = view("v1", json!({ "repository": "widgets", "number": 7 }))
+        .await
+        .unwrap();
+    assert_eq!(read["title"], "Crash");
+    assert_eq!(read["comments"][0]["body"], "Plan: fix it.");
+    assert!(read["trust"].as_str().unwrap().starts_with("external"));
+    let unknown = view("v2", json!({ "repository": "gadgets", "number": 7 })).await;
+    assert!(
+        matches!(
+            unknown,
+            Err(threadlane_core::tools::ToolError::InvalidArguments(_))
+        ),
+        "another project's repository is not named: {unknown:?}"
+    );
+    let missing = view("v3", json!({ "repository": "widgets", "number": 8 })).await;
+    assert!(missing.is_err(), "{missing:?}");
+    assert!(
+        hub.db
+            .lane_decisions(hub.general_lane().await.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "reading asks nothing"
+    );
+}
