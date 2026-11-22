@@ -20,21 +20,23 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
+use threadlane_core::client::{ApiError, PullRequestFiles, TaskCheckRun, TaskPullRequest};
 use threadlane_core::forge::{
     CLOSE_PULL_REQUEST, COMMENT, EDIT_PULL_REQUEST, MARK_READY, MERGE, REQUEST_REVIEW,
     RESOLVE_REVIEW_THREAD,
 };
 use threadlane_core::github::{
-    DEFAULT_POLL_INTERVAL, Feed, GITHUB_SOURCE, GithubItem, GithubKind, GithubSource, PullTarget,
-    normalize_remote, pull_request_number,
+    DEFAULT_POLL_INTERVAL, Feed, GITHUB_SOURCE, GithubItem, GithubKind, GithubSource,
+    PullRequestState, PullTarget, normalize_remote, pull_request_number,
 };
-use threadlane_core::ids::{LaneId, ProjectId};
+use threadlane_core::ids::{LaneId, ProjectId, TaskId};
 use threadlane_core::model::{EventKind, Inserted, NewEvent, TaskStatus, Trust};
 use threadlane_core::runtime::steps::github::{
     AFTER_CURSOR, AFTER_FETCH, AFTER_INSERT, AFTER_WAKE,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{InboxStore, MachineStore, OrgStore, StoreError, TaskStore};
+use threadlane_core::time::Timestamp;
 use threadlane_store::HubDb;
 
 use crate::core::HubCore;
@@ -69,6 +71,7 @@ struct Registered {
 struct Work {
     project: ProjectId,
     lane: LaneId,
+    task: TaskId,
     target: PullTarget,
 }
 
@@ -88,6 +91,33 @@ struct LeadActivity {
     items: Vec<GithubItem>,
     /// Save the observed PR head only after delivering the activity.
     cursor: Option<(String, String)>,
+}
+
+/// What the desktop is told about pull request `number` of `repository`.
+fn task_pull_request(
+    repository: &str,
+    number: u64,
+    state: &PullRequestState,
+    refreshed_at: Timestamp,
+) -> TaskPullRequest {
+    TaskPullRequest {
+        repository: repository.to_owned(),
+        number,
+        url: state.url.clone(),
+        status: state.status(),
+        head_sha: state.head_sha.clone(),
+        checks: state
+            .checks
+            .iter()
+            .map(|check| TaskCheckRun {
+                name: check.name.clone(),
+                status: check.status(),
+            })
+            .collect(),
+        mergeable_state: state.mergeable_state.clone(),
+        conflicted: state.conflicted(),
+        refreshed_at,
+    }
 }
 
 /// The normalized remote of a repository GitHub names `owner/name`.
@@ -222,7 +252,7 @@ impl Routes {
                         continue;
                     };
                     match list.iter_mut().find(|work| {
-                        work.lane == lane
+                        work.task == task.id
                             && work.target.repository == repository
                             && ((!branch.is_empty() && work.target.branch == branch)
                                 || (number.is_some() && work.target.number == number))
@@ -236,6 +266,7 @@ impl Routes {
                         None => list.push(Work {
                             project: project.id,
                             lane,
+                            task: task.id,
                             target: PullTarget {
                                 repository,
                                 branch: branch.to_owned(),
@@ -352,6 +383,7 @@ impl HubCore {
                 .chain(refresh.into_iter().map(|work| (work, true)))
                 .collect::<Vec<_>>()
         };
+        self.refresh_pull_status(source.as_ref(), &followed).await;
         pass.inserted += self
             .refresh_github_work(source.as_ref(), followed, &mut lanes)
             .await?;
@@ -608,6 +640,130 @@ impl HubCore {
             }
             Inserted::Duplicate(_) => 0,
         })
+    }
+
+    /// Reads the state of each followed pull request into the status
+    /// cache, once per pull request however many tasks follow it. A failed
+    /// read keeps what was cached.
+    async fn refresh_pull_status(&self, source: &dyn GithubSource, followed: &[(Work, bool)]) {
+        let mut read: HashMap<(&str, u64), Option<TaskPullRequest>> = HashMap::new();
+        for (work, _) in followed {
+            let Some(number) = work.target.number else {
+                continue;
+            };
+            let repository = work.target.repository.as_str();
+            let pull = match read.get(&(repository, number)) {
+                Some(pull) => pull.clone(),
+                None => {
+                    let pull = match source.pull_request_state(repository, number).await {
+                        Ok(state) => Some(task_pull_request(
+                            repository,
+                            number,
+                            &state,
+                            self.inner.clock.now(),
+                        )),
+                        Err(error) => {
+                            tracing::warn!(%error, repository, number, "could not read a task's pull request state");
+                            None
+                        }
+                    };
+                    read.insert((repository, number), pull.clone());
+                    pull
+                }
+            };
+            let Some(pull) = pull else {
+                continue;
+            };
+            let mut cache = self.inner.pull_status.lock().await;
+            let pulls = cache.entry(work.task).or_default();
+            match pulls
+                .iter_mut()
+                .find(|known| known.repository == pull.repository && known.number == pull.number)
+            {
+                Some(known) => *known = pull,
+                None => pulls.push(pull),
+            }
+        }
+    }
+
+    /// The task's pull requests from the status cache. A task not cached
+    /// yet, such as one that ended before this hub started, is read from
+    /// GitHub once and cached, even when it has none.
+    pub(crate) async fn task_pull_requests(
+        &self,
+        task: TaskId,
+    ) -> Result<Vec<TaskPullRequest>, HubError> {
+        if let Some(pulls) = self.inner.pull_status.lock().await.get(&task) {
+            return Ok(pulls.clone());
+        }
+        if let Some(source) = self.inner.github.as_ref() {
+            let routes = Routes::read(&self.inner.db).await?;
+            let followed: Vec<_> = routes
+                .work
+                .into_iter()
+                .chain(routes.ended)
+                .filter(|work| work.task == task)
+                .map(|work| (work, false))
+                .collect();
+            self.refresh_pull_status(source.as_ref(), &followed).await;
+        }
+        Ok(self
+            .inner
+            .pull_status
+            .lock()
+            .await
+            .entry(task)
+            .or_default()
+            .clone())
+    }
+
+    /// The files each of the task's pull requests changes, read from GitHub
+    /// only when its head moved since the last read.
+    pub(crate) async fn task_pull_files(
+        &self,
+        task: TaskId,
+    ) -> Result<Vec<PullRequestFiles>, ApiError> {
+        let pulls = self
+            .task_pull_requests(task)
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        let mut answer = Vec::with_capacity(pulls.len());
+        for pull in pulls {
+            let key = (pull.repository.clone(), pull.number);
+            let cached = self
+                .inner
+                .pull_files
+                .lock()
+                .await
+                .get(&key)
+                .filter(|(head, _)| *head == pull.head_sha)
+                .map(|(_, files)| files.clone());
+            let files = match cached {
+                Some(files) => files,
+                None => {
+                    let source = self.inner.github.as_ref().ok_or_else(|| {
+                        ApiError::Unreachable("this hub does not read GitHub".to_owned())
+                    })?;
+                    let files = source
+                        .pull_request_files(&pull.repository, pull.number)
+                        .await
+                        .map_err(|error| ApiError::Unreachable(error.to_string()))?;
+                    self.inner
+                        .pull_files
+                        .lock()
+                        .await
+                        .insert(key, (pull.head_sha.clone(), files.clone()));
+                    files
+                }
+            };
+            answer.push(PullRequestFiles {
+                repository: pull.repository,
+                number: pull.number,
+                head_sha: pull.head_sha,
+                files,
+            });
+        }
+        Ok(answer)
     }
 
     pub(crate) async fn github_loop(&self) -> Result<(), HubError> {

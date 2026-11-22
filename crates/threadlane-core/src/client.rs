@@ -818,6 +818,16 @@ pub enum OverviewRequest {
         task: TaskId,
         before: Option<ActivityCursor>,
     },
+    /// The task's pull requests, state, checks and mergeability, as the
+    /// GitHub poller last read them. Cheap: served from the hub's cache.
+    TaskPullRequests {
+        task: TaskId,
+    },
+    /// Every file each of the task's pull requests changes, with its patch.
+    /// Read from GitHub once per pull request head, then cached.
+    TaskPullFiles {
+        task: TaskId,
+    },
     /// Active projects' task and lead summaries.
     Work,
 
@@ -928,6 +938,14 @@ pub enum OverviewReply {
         entries: Vec<TaskActivityEntry>,
         next: Option<ActivityCursor>,
     },
+    /// Each pull request of the task, in the order it was opened.
+    TaskPullRequests {
+        pulls: Vec<TaskPullRequest>,
+    },
+    /// Each pull request's changed files, in the order of `TaskPullRequests`.
+    TaskPullFiles {
+        pulls: Vec<PullRequestFiles>,
+    },
     Tasks {
         tasks: Vec<TaskSummary>,
     },
@@ -974,6 +992,44 @@ pub enum OverviewReply {
         /// Results whose next eligible time is in the future.
         held: Option<HeldResults>,
     },
+}
+
+/// A task's pull request as the hub last read it from GitHub.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskPullRequest {
+    /// `owner/name`.
+    pub repository: String,
+    pub number: u64,
+    pub url: String,
+    pub status: crate::github::PullRequestStatus,
+    /// The head commit's full SHA.
+    pub head_sha: String,
+    /// Each check run on the head commit.
+    pub checks: Vec<TaskCheckRun>,
+    /// GitHub's `mergeable_state`, lowercased: `clean`, `dirty`, `blocked`,
+    /// `behind`, `unstable`, `draft` or `unknown` while GitHub computes it.
+    pub mergeable_state: String,
+    /// It conflicts with its base branch (`mergeable_state` is `dirty`).
+    pub conflicted: bool,
+    /// When the hub read it.
+    pub refreshed_at: Timestamp,
+}
+
+/// One check run on a pull request's head commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskCheckRun {
+    pub name: String,
+    pub status: crate::github::CheckStatus,
+}
+
+/// The files one pull request changes, at `head_sha`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestFiles {
+    /// `owner/name`.
+    pub repository: String,
+    pub number: u64,
+    pub head_sha: String,
+    pub files: Vec<crate::github::PullRequestFile>,
 }
 
 /// A lead run with whether it put an ordinary message in the outbox.
