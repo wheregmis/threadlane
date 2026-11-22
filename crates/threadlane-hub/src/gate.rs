@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value as Json};
-use threadlane_core::forge::{ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
+use threadlane_core::forge::{GITHUB_CLI, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::model::{Cell, Mode, StandingRule};
 use threadlane_core::tools::{Tier, Verdict};
 
@@ -207,7 +207,8 @@ pub(crate) fn own_work_tool(tool: &str, arguments: &Json) -> bool {
 /// 4. otherwise, a call the cell would ask about or review is allowed by
 ///    default when it opens a draft pull request or pushes the task's own
 ///    branch and the binding sets no override for the tier; if the run is
-///    tainted, it is reviewed instead;
+///    tainted, it is reviewed instead; an untainted `github_cli` call that
+///    only reads (a strict allowlist) is allowed by default too;
 /// 5. otherwise the matrix's cell for the row and the effective mode. A
 ///    requested task's own step is on the own-work row, whose allow is
 ///    recorded as allowed by default; an override only makes it stricter.
@@ -304,6 +305,16 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
         }
         // Taint limits reach, not routine: the run's own draft is reviewed.
         verdict = Cell::Review;
+    }
+    // A read-only GitHub check asks nothing of you; a tainted run keeps the cell (#706).
+    if matches!(verdict, Cell::Ask | Cell::Review)
+        && row == Row::Tier(input.tier)
+        && !input.tainted
+        && !input.overrides.contains_key(&input.tier)
+        && input.tool == GITHUB_CLI
+        && crate::publish::read_only_gh(input.arguments)
+    {
+        return Verdict::AllowByDefault;
     }
     // A tier 3 rule applies only where the agent acts in Autonomous.
     let offers_rule = ruled && (input.tier < Tier::SharedHardToUndo || mode == Mode::Autonomous);
@@ -1072,6 +1083,82 @@ mod tests {
                 "{tool}"
             );
         }
+    }
+
+    #[test]
+    fn read_only_gh_checks_need_no_card_and_writes_still_ask() {
+        let call = |args: &[&str]| json!({"repository":"app","args":args,"missing_tool":"x"});
+        let decide = |arguments: &Json, tainted: bool, overrides: &Overrides| {
+            short(&gate(&GateInput {
+                tool: GITHUB_CLI,
+                tier: T3,
+                arguments,
+                mode: ON,
+                space_ceiling: AU,
+                project_ceiling: None,
+                overrides,
+                rules: &[],
+                tainted,
+                requested: true,
+                new_work: None,
+                own_work: None,
+            }))
+        };
+        let none = Overrides::new();
+        for args in [
+            &[
+                "pr",
+                "view",
+                "12",
+                "--json",
+                "headRefOid,mergeable,statusCheckRollup",
+            ][..],
+            &["pr", "checks", "12", "--required"],
+            &["pr", "list", "--state=open", "-L", "5"],
+            &["pr", "diff", "12", "--name-only"],
+            &["run", "view", "123", "--log-failed"],
+            &["run", "list", "--branch", "main", "--limit=3"],
+            &["issue", "view", "706", "--comments"],
+            &["release", "list"],
+            &["workflow", "view", "ci.yml", "--yaml"],
+        ] {
+            assert_eq!(decide(&call(args), false, &none), V::Default, "{args:?}");
+        }
+        for args in [
+            &["pr", "merge", "12"][..],
+            &["pr", "close", "12"],
+            &["pr", "comment", "12", "--body", "hi"],
+            &["pr", "edit", "12", "--add-label", "bug"],
+            &["pr", "checkout", "12"],
+            &["issue", "close", "706"],
+            &["issue", "edit", "706", "--milestone", "v1"],
+            &["run", "rerun", "123"],
+            &["run", "cancel", "123"],
+            &["run", "download", "123"],
+            &["release", "download", "v1"],
+            &["workflow", "run", "ci.yml"],
+            &["label", "create", "x"],
+            &["pr", "view", "12", "--web"],
+            &["pr", "view", "12", "--unknown-flag"],
+            &["pr", "view", "12", "--jq", ".x | .y"],
+            &["pr", "view", "$(touch x)"],
+            &["pr", "view", "12;", "true"],
+            &["api", "repos/{owner}/{repo}/pulls/12"],
+        ] {
+            assert_eq!(decide(&call(args), false, &none), V::Ask, "{args:?}");
+        }
+        let view = call(&["pr", "view", "12"]);
+        assert_eq!(
+            decide(&view, true, &none),
+            V::Ask,
+            "a tainted run still asks"
+        );
+        let stricter: Overrides = [(T3, Cell::Block)].into_iter().collect();
+        assert_eq!(
+            decide(&view, false, &stricter),
+            V::Block,
+            "an override decides"
+        );
     }
 
     #[test]

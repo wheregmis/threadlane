@@ -340,6 +340,90 @@ fn gh_args(a: &Json) -> Result<Vec<String>, ToolError> {
     Ok(args)
 }
 
+/// Whether a `github_cli` call only reads: a valid call whose command is a
+/// read-only subcommand and whose every flag is a known read-only one
+/// (#706). Anything else, and any shell metacharacter, is not.
+pub(crate) fn read_only_gh(arguments: &Json) -> bool {
+    const SUBCOMMANDS: &[(&str, &[&str])] = &[
+        ("pr", &["view", "checks", "list", "diff", "status"]),
+        ("issue", &["view", "list", "status"]),
+        ("run", &["view", "list"]),
+        ("release", &["view", "list"]),
+        ("label", &["list"]),
+        ("workflow", &["view", "list"]),
+    ];
+    // Flags of the subcommands above; none of them writes there.
+    const FLAGS: &[&str] = &[
+        "--json",
+        "--jq",
+        "-q",
+        "--template",
+        "-t",
+        "--comments",
+        "-c",
+        "--limit",
+        "-L",
+        "--state",
+        "-s",
+        "--head",
+        "-H",
+        "--base",
+        "-B",
+        "--author",
+        "-A",
+        "--label",
+        "-l",
+        "--search",
+        "-S",
+        "--assignee",
+        "-a",
+        "--log",
+        "--log-failed",
+        "--job",
+        "-j",
+        "--attempt",
+        "--exit-status",
+        "--required",
+        "--name-only",
+        "--patch",
+        "--color",
+        "--branch",
+        "-b",
+        "--status",
+        "--event",
+        "-e",
+        "--commit",
+        "--user",
+        "-u",
+        "--yaml",
+        "-y",
+        "--ref",
+        "-r",
+        "--verbose",
+        "-v",
+        "--draft",
+        "-d",
+        "--app",
+        "--mention",
+        "--milestone",
+        "-m",
+        "--order",
+        "--sort",
+    ];
+    let Ok(args) = gh_args(arguments) else {
+        return false;
+    };
+    SUBCOMMANDS
+        .iter()
+        .any(|(command, subs)| args[0] == *command && subs.contains(&args[1].as_str()))
+        && args[2..].iter().all(|arg| {
+            !arg.contains([
+                '`', '$', ';', '|', '&', '<', '>', '(', ')', '\\', '\n', '\r',
+            ]) && (!arg.starts_with('-')
+                || FLAGS.contains(&arg.split_once('=').map_or(arg.as_str(), |(f, _)| f)))
+        })
+}
+
 /// `owner/name` of a remote on github.com, the host the GitHub source reads.
 pub(crate) fn github_repository(remote: &str) -> Option<String> {
     threadlane_core::github::normalize_remote(remote)?
