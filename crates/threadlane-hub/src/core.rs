@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use threadlane_core::adapters::ChannelAdapter;
-use threadlane_core::client::HubApi;
-use threadlane_core::github::GithubSource;
+use threadlane_core::client::{HubApi, TaskPullRequest};
+use threadlane_core::github::{GithubSource, PullRequestFile};
 use threadlane_core::ids::{LaneId, MachineId, ProjectId, TaskId};
 use threadlane_core::link::HubLink;
 use threadlane_core::model::RunStatus;
@@ -57,7 +57,14 @@ pub(crate) struct Inner {
     pub(crate) last_pruned: Arc<tokio::sync::Mutex<Option<Timestamp>>>,
     /// When this hub process started, shown to every run (#652).
     pub(crate) started_at: Timestamp,
+    /// Each task's pull requests as GitHub was last read for them.
+    pub(crate) pull_status: Arc<tokio::sync::Mutex<HashMap<TaskId, Vec<TaskPullRequest>>>>,
+    /// Each pull request's changed files, with the head they were read at.
+    pub(crate) pull_files: Arc<tokio::sync::Mutex<PullFiles>>,
 }
+
+/// Changed files by `(owner/name, number)`, with the head they were read at.
+pub(crate) type PullFiles = HashMap<(String, u64), (String, Vec<PullRequestFile>)>;
 
 /// The hub of one space: handler, placement, begin-run, tool gateway,
 /// dispatcher, and lease sweep over one [`HubDb`].
@@ -114,6 +121,8 @@ impl HubCore {
                 project_removal: Arc::default(),
                 kept_worktrees: Arc::default(),
                 last_pruned: Arc::default(),
+                pull_status: Arc::default(),
+                pull_files: Arc::default(),
                 backends: Vec::new(),
             }),
         };

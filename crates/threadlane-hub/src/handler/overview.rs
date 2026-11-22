@@ -468,6 +468,26 @@ pub(super) async fn handle(
                 .collect();
             Ok(OverviewReply::TaskActivity { entries, next })
         }
+        OverviewRequest::TaskPullRequests { task } => {
+            db.task(task)
+                .await
+                .map_err(api_error)?
+                .ok_or_else(|| ApiError::NotFound(format!("task {task}")))?;
+            let pulls = api
+                .core
+                .task_pull_requests(task)
+                .await
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+            Ok(OverviewReply::TaskPullRequests { pulls })
+        }
+        OverviewRequest::TaskPullFiles { task } => {
+            db.task(task)
+                .await
+                .map_err(api_error)?
+                .ok_or_else(|| ApiError::NotFound(format!("task {task}")))?;
+            let pulls = api.core.task_pull_files(task).await?;
+            Ok(OverviewReply::TaskPullFiles { pulls })
+        }
         OverviewRequest::Task { task } => task_detail(db, task, true).await,
         OverviewRequest::TaskOverview { task } => task_detail(db, task, false).await,
         OverviewRequest::Conversation {

@@ -7,9 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use threadlane_core::client::OrgRequest;
+use threadlane_core::client::{
+    ApiError, OrgRequest, OverviewReply, OverviewRequest, PullRequestFiles, TaskCheckRun,
+    TaskPullRequest,
+};
 use threadlane_core::github::{
-    Feed, GITHUB_SOURCE, GithubError, GithubItem, GithubKind, GithubSource, PullTarget,
+    CheckRun, CheckStatus, Feed, GITHUB_SOURCE, GithubError, GithubItem, GithubKind, GithubSource,
+    PullRequestFile, PullRequestState, PullRequestStatus, PullTarget,
 };
 use threadlane_core::ids::EventId;
 use threadlane_core::link::HubMessage;
@@ -444,7 +448,7 @@ async fn items_go_to_their_task_their_lead_or_nowhere() {
         assert_eq!(event.payload["id"], json!(event.source_event_id));
     }
     assert_eq!(
-        github.calls()[1],
+        github.calls()[2],
         GithubCall::PullRequest {
             target: PullTarget {
                 repository: "acme/widgets".into(),
@@ -705,11 +709,16 @@ async fn the_poller_only_reads_and_only_while_gh_is_logged_in() {
         branch: BRANCH.into(),
         number: Some(42),
     };
+    let state = GithubCall::PullRequestState {
+        repository: "acme/widgets".into(),
+        number: 42,
+    };
     // The interface has reads only; nothing in it marks read or writes.
     assert_eq!(
         github.calls(),
         [
             GithubCall::Notifications { cursor: None },
+            state.clone(),
             GithubCall::PullRequest {
                 target: target.clone(),
                 since: None
@@ -717,6 +726,7 @@ async fn the_poller_only_reads_and_only_while_gh_is_logged_in() {
             GithubCall::Notifications {
                 cursor: Some("1".into())
             },
+            state,
             GithubCall::PullRequest {
                 target,
                 since: None
@@ -1381,4 +1391,201 @@ async fn the_lead_reads_an_issue_of_a_registered_repository_without_a_decision()
             .is_empty(),
         "reading asks nothing"
     );
+}
+
+/// Pull request 42 of `acme/widgets` at `head`: a draft that conflicts, one
+/// check failed, one passed and one still running.
+fn conflicted_draft(head: &str) -> PullRequestState {
+    let check = |name: &str, conclusion: Option<&str>| CheckRun {
+        name: name.into(),
+        conclusion: conclusion.map(str::to_owned),
+    };
+    PullRequestState {
+        head_repository: "acme/widgets".into(),
+        head_ref: BRANCH.into(),
+        head_sha: head.into(),
+        draft: true,
+        mergeable_state: "dirty".into(),
+        checks: vec![
+            check("test", Some("failure")),
+            check("lint", Some("success")),
+            check("build", None),
+        ],
+        url: "https://github.com/acme/widgets/pull/42".into(),
+        state: "open".into(),
+        merged: false,
+    }
+}
+
+async fn pull_requests(hub: &TestHub, task: &Task) -> Vec<TaskPullRequest> {
+    match hub
+        .api
+        .overview(OverviewRequest::TaskPullRequests { task: task.id })
+        .await
+        .unwrap()
+    {
+        OverviewReply::TaskPullRequests { pulls } => pulls,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn state_reads(github: &FakeGithub) -> usize {
+    github
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, GithubCall::PullRequestState { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn a_tasks_pull_request_status_is_read_on_the_poll_and_served_from_the_cache() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let task = task_with_pull_request(&hub).await;
+    github.set_pull_request("acme/widgets", 42, Ok(conflicted_draft(&"a".repeat(40))));
+    hub.core.poll_github_once().await.unwrap();
+    assert_eq!(state_reads(&github), 1);
+
+    let read_at = hub.clock.now();
+    let expected = TaskPullRequest {
+        repository: "acme/widgets".into(),
+        number: 42,
+        url: "https://github.com/acme/widgets/pull/42".into(),
+        status: PullRequestStatus::Draft,
+        head_sha: "a".repeat(40),
+        checks: vec![
+            TaskCheckRun {
+                name: "test".into(),
+                status: CheckStatus::Failing,
+            },
+            TaskCheckRun {
+                name: "lint".into(),
+                status: CheckStatus::Passing,
+            },
+            TaskCheckRun {
+                name: "build".into(),
+                status: CheckStatus::Running,
+            },
+        ],
+        mergeable_state: "dirty".into(),
+        conflicted: true,
+        refreshed_at: read_at,
+    };
+    assert_eq!(
+        pull_requests(&hub, &task).await,
+        std::slice::from_ref(&expected)
+    );
+    assert_eq!(
+        pull_requests(&hub, &task).await,
+        std::slice::from_ref(&expected)
+    );
+    assert_eq!(
+        state_reads(&github),
+        1,
+        "asking reads the cache, not GitHub"
+    );
+
+    hub.clock.advance(Duration::from_secs(60));
+    github.set_pull_request("acme/widgets", 42, Err("rate limited".into()));
+    hub.core.poll_github_once().await.unwrap();
+    assert_eq!(
+        pull_requests(&hub, &task).await,
+        [expected],
+        "a failed read keeps what was cached"
+    );
+
+    github.set_pull_request(
+        "acme/widgets",
+        42,
+        Ok(PullRequestState {
+            draft: false,
+            state: "closed".into(),
+            merged: true,
+            mergeable_state: "unknown".into(),
+            ..conflicted_draft(&"a".repeat(40))
+        }),
+    );
+    hub.core.poll_github_once().await.unwrap();
+    let pulls = pull_requests(&hub, &task).await;
+    assert_eq!(
+        pulls.len(),
+        1,
+        "the same pull request is replaced, not added"
+    );
+    assert_eq!(pulls[0].status, PullRequestStatus::Merged);
+    assert!(!pulls[0].conflicted);
+    assert_eq!(pulls[0].refreshed_at, hub.clock.now());
+}
+
+#[tokio::test]
+async fn a_task_not_cached_yet_is_read_once_and_a_task_without_a_pull_request_reads_nothing() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let task = task_with_pull_request(&hub).await;
+    github.set_pull_request("acme/widgets", 42, Ok(conflicted_draft(&"a".repeat(40))));
+    assert_eq!(pull_requests(&hub, &task).await.len(), 1);
+    assert_eq!(pull_requests(&hub, &task).await.len(), 1);
+    assert_eq!(state_reads(&github), 1);
+
+    let (other, lease) = leased_task_for(&hub, &hub.general().await).await;
+    hub.db.release_lease(&lease).await.unwrap();
+    assert!(pull_requests(&hub, &other).await.is_empty());
+    assert_eq!(state_reads(&github), 1);
+
+    let missing = hub
+        .api
+        .overview(OverviewRequest::TaskPullRequests {
+            task: threadlane_core::ids::TaskId(999),
+        })
+        .await;
+    assert!(matches!(missing, Err(ApiError::NotFound(_))), "{missing:?}");
+}
+
+#[tokio::test]
+async fn a_tasks_pull_request_files_are_read_once_per_head() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let task = task_with_pull_request(&hub).await;
+    github.set_pull_request("acme/widgets", 42, Ok(conflicted_draft(&"a".repeat(40))));
+    let file = PullRequestFile {
+        path: "src/page.rs".into(),
+        previous_path: None,
+        status: "added".into(),
+        additions: 2,
+        deletions: 0,
+        patch: Some("@@ -0,0 +1,2 @@\n+fn page() {}\n+".into()),
+    };
+    github.set_pull_request_files("acme/widgets", 42, vec![file.clone()]);
+    let files = || async {
+        match hub
+            .api
+            .overview(OverviewRequest::TaskPullFiles { task: task.id })
+            .await
+            .unwrap()
+        {
+            OverviewReply::TaskPullFiles { pulls } => pulls,
+            other => panic!("{other:?}"),
+        }
+    };
+    let file_reads = || {
+        github
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, GithubCall::PullRequestFiles { .. }))
+            .count()
+    };
+    let expected = PullRequestFiles {
+        repository: "acme/widgets".into(),
+        number: 42,
+        head_sha: "a".repeat(40),
+        files: vec![file],
+    };
+    assert_eq!(files().await, std::slice::from_ref(&expected));
+    assert_eq!(files().await, [expected]);
+    assert_eq!(file_reads(), 1);
+
+    github.set_pull_request("acme/widgets", 42, Ok(conflicted_draft(&"b".repeat(40))));
+    hub.core.poll_github_once().await.unwrap();
+    assert_eq!(files().await[0].head_sha, "b".repeat(40));
+    assert_eq!(file_reads(), 2, "a new head is read again");
 }

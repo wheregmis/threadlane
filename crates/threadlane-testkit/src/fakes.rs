@@ -13,7 +13,8 @@ use threadlane_core::adapters::{
 };
 use threadlane_core::forge::{ApprovedBranch, Forge, ForgeError, PullRequestUpdate};
 use threadlane_core::github::{
-    Feed, GithubError, GithubItem, GithubSource, IssueClaim, PullRequestState, PullTarget,
+    Feed, GithubError, GithubItem, GithubSource, IssueClaim, PullRequestFile, PullRequestState,
+    PullTarget,
 };
 use threadlane_core::model::{OutboxMessage, Repository};
 use threadlane_core::runtime::{WakeTarget, Waker};
@@ -514,6 +515,10 @@ pub enum GithubCall {
         repository: String,
         number: u64,
     },
+    PullRequestFiles {
+        repository: String,
+        number: u64,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -533,6 +538,8 @@ struct GithubState {
     issues: Vec<(String, u64, serde_json::Value)>,
     /// What [`GithubSource::pull_request_state`] answers, by `(repository, number)`.
     pulls: Vec<(String, u64, Result<PullRequestState, String>)>,
+    /// What [`GithubSource::pull_request_files`] answers, by `(repository, number)`.
+    files: Vec<(String, u64, Vec<PullRequestFile>)>,
 }
 
 /// A [`GithubSource`] that touches no network. It records every call, keeps
@@ -602,6 +609,19 @@ impl FakeGithub {
         lock(&self.state)
             .pulls
             .push((repository.to_owned(), number, state));
+    }
+
+    /// What [`GithubSource::pull_request_files`] answers for pull request
+    /// `number` of `repository`. Unscripted ones fail. The latest call wins.
+    pub fn set_pull_request_files(
+        &self,
+        repository: &str,
+        number: u64,
+        files: Vec<PullRequestFile>,
+    ) {
+        lock(&self.state)
+            .files
+            .push((repository.to_owned(), number, files));
     }
 
     /// What the feed answers as the interval it asks for.
@@ -737,5 +757,24 @@ impl GithubSource for FakeGithub {
                 },
                 |(_, _, pull)| pull.clone().map_err(GithubError),
             )
+    }
+
+    async fn pull_request_files(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<Vec<PullRequestFile>, GithubError> {
+        let mut state = lock(&self.state);
+        state.calls.push(GithubCall::PullRequestFiles {
+            repository: repository.to_owned(),
+            number,
+        });
+        state
+            .files
+            .iter()
+            .rev()
+            .find(|(r, n, _)| r == repository && *n == number)
+            .map(|(_, _, files)| files.clone())
+            .ok_or_else(|| GithubError(format!("no files for {repository}#{number}")))
     }
 }

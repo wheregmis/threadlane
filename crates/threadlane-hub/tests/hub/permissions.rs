@@ -9,7 +9,7 @@ use serde_json::{Value as Json, json};
 use threadlane_core::client::{
     ApiError, DecisionReply, DecisionRequest, OrgReply, OrgRequest, StandingRuleSummary,
 };
-use threadlane_core::github::PullRequestState;
+use threadlane_core::github::{CheckRun, PullRequestState};
 use threadlane_core::ids::{AgentId, DecisionId, ProjectId, RepositoryId, StandingRuleId};
 use threadlane_core::link::Begin;
 use threadlane_core::link::RunAssignment;
@@ -866,7 +866,11 @@ fn widgets_pull(branch: &str, head: &str, check: &str) -> PullRequestState {
         head_sha: head.into(),
         draft: false,
         mergeable_state: "clean".into(),
-        checks: vec![Some(check.into())],
+        checks: vec![CheckRun {
+            name: "ci".into(),
+            conclusion: Some(check.into()),
+        }],
+        ..PullRequestState::default()
     }
 }
 
