@@ -141,17 +141,12 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         ),
         define(
             MERGE,
-            "Merge a pull request in a registered project repository. Give its current full head \
-             SHA as expected_head to merge only that commit: the merge fails if the head has \
-             moved. A merge of your requested task's own pull request needs it to go through \
-             without asking.",
+            "Merge a pull request in a registered project repository, only if its head is still \
+             expected_head, its current full head SHA.",
             json!({
-                "type":"object","properties":{
-                    "repository":repository,
-                    "number":{"type":"integer","minimum":1},
-                    "expected_head":{"type":"string","description":"The current full commit SHA of the PR head."}
-                },
-                "required":["repository","number"],"additionalProperties":false
+                "type":"object","properties":{"repository":repository,"number":{"type":"integer","minimum":1},
+                    "expected_head":{"type":"string","description":"The pull request's current full head SHA."}},
+                "required":["repository","number","expected_head"],"additionalProperties":false
             }),
         ),
         define(
@@ -494,13 +489,9 @@ pub(crate) fn repository_action(
         }
         MERGE => {
             fields(a, &["repository", "number", EXPECTED_HEAD])?;
-            let expected_head = match a.get(EXPECTED_HEAD) {
-                None | Some(Json::Null) => None,
-                Some(_) => Some(commit(EXPECTED_HEAD)?),
-            };
             Ok(RepositoryAction::Merge {
                 number: number()?,
-                expected_head,
+                expected_head: commit(EXPECTED_HEAD)?,
             })
         }
         MARK_READY => {
@@ -913,12 +904,9 @@ pub(crate) async fn proposal(
                     arguments["number"]
                 ),
                 MERGE => format!(
-                    "Merge pull request {slug}#{} in {name}{}?",
+                    "Merge pull request {slug}#{} in {name} at head {}?",
                     arguments["number"],
-                    arguments[EXPECTED_HEAD]
-                        .as_str()
-                        .map(|head| format!(" if its head is still {head}"))
-                        .unwrap_or_default()
+                    arguments[EXPECTED_HEAD].as_str().unwrap_or_default()
                 ),
                 MARK_READY => format!(
                     "Mark draft pull request {slug}#{} in {name} ready for review?",
@@ -1176,40 +1164,6 @@ mod tests {
             json!({"reviewers":["a"],"expected_head":"abc"}),
         ] {
             assert!(request(bad.clone()).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn a_merge_may_pin_a_full_head() {
-        use threadlane_core::forge::RepositoryAction;
-        let head = "0123456789abcdef0123456789abcdef01234567";
-        let number = std::num::NonZeroU64::new(12).unwrap();
-        assert_eq!(
-            repository_action(MERGE, &json!({"repository":"app","number":12})),
-            Ok(RepositoryAction::Merge {
-                number,
-                expected_head: None
-            })
-        );
-        assert_eq!(
-            repository_action(
-                MERGE,
-                &json!({"repository":"app","number":12,"expected_head":head})
-            ),
-            Ok(RepositoryAction::Merge {
-                number,
-                expected_head: Some(head.into())
-            })
-        );
-        for bad in ["0123456", "main", ""] {
-            assert!(
-                repository_action(
-                    MERGE,
-                    &json!({"repository":"app","number":12,"expected_head":bad})
-                )
-                .is_err(),
-                "{bad}"
-            );
         }
     }
 
