@@ -1013,6 +1013,7 @@ mod tests {
                 tainted: false,
                 requested: true,
                 new_work: None,
+                own_work: None,
             });
             assert_eq!(short(&verdict), V::Ask, "{mode}");
         }
