@@ -201,9 +201,10 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
         repositories: &[Repository],
     ) -> Result<Vec<MergeCheck>, WorkspaceError>;
 
-    /// Fetches each repository's default branch and rebases the task branch
-    /// onto it when that rebases cleanly; when it would conflict the branch
-    /// is left as it is. Returns where each set-up worktree stands after.
+    /// Fetches each repository's default branch and brings it into the task
+    /// branch when that is clean: a rebase for a branch no other ref has, a
+    /// merge for one already pushed or shared (#730); when it would conflict
+    /// the branch is left as it is. Returns where each set-up worktree stands after.
     async fn bring_in_base(
         &self,
         task: TaskId,
@@ -228,11 +229,14 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
 
     /// Resolves the task branch and computes its diff against the expected PR
     /// head, or against the default branch when publishing without a PR target.
+    /// Without an expected head it refuses when `target`, the branch pushed
+    /// to, is on the remote at a commit the task branch does not contain.
     async fn preview_publish(
         &self,
         task: TaskId,
         repository: &Repository,
         expected_head: Option<&str>,
+        target: &str,
     ) -> Result<PublishPreview, WorkspaceError>;
 }
 

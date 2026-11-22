@@ -250,7 +250,9 @@ impl GitWorkspaces {
         }
     }
 
-    /// Rebases an unpublished, clean worktree onto `base` when it can.
+    /// Brings `base` into a clean worktree when it can: a rebase for a
+    /// branch only this task has, a merge for one already shared, since
+    /// rewriting pushed commits makes the next push to its PR fail (#730).
     /// Returns the files that conflict.
     async fn rebase(
         &self,
@@ -265,15 +267,16 @@ impl GitWorkspaces {
         {
             return Ok(Vec::new());
         }
-        let remote = format!("refs/remotes/origin/{branch}");
-        let published = git(Some(path), ["show-ref", "--verify", "--quiet", &remote])
-            .await
-            .is_ok();
-        if published || !git(Some(path), ["status", "--porcelain"]).await?.is_empty() {
+        if !git(Some(path), ["status", "--porcelain"]).await?.is_empty() {
             return self.conflicts(repository, base, branch).await;
         }
+        let shared = shared(path, base, branch).await?;
         let mut args = COMMITTER.to_vec();
-        args.extend(["rebase", "--quiet", base]);
+        if shared {
+            args.extend(["merge", "--quiet", "--no-edit", base]);
+        } else {
+            args.extend(["rebase", "--quiet", base]);
+        }
         if git(Some(path), args).await.is_ok() {
             return Ok(Vec::new());
         }
@@ -285,7 +288,8 @@ impl GitWorkspaces {
             .lines()
             .map(str::to_owned)
             .collect();
-        git(Some(path), ["rebase", "--abort"]).await?;
+        let abort = if shared { "merge" } else { "rebase" };
+        git(Some(path), [abort, "--abort"]).await?;
         if files.is_empty() {
             files = self.conflicts(repository, base, branch).await?;
         }
@@ -722,6 +726,7 @@ impl Workspaces for GitWorkspaces {
         task: TaskId,
         repository: &Repository,
         expected_head: Option<&str>,
+        target: &str,
     ) -> Result<PublishPreview, WorkspaceError> {
         check(repository)?;
         let _repo = self.lock_repository(repository.id).await;
@@ -741,6 +746,7 @@ impl Workspaces for GitWorkspaces {
             diff
         } else {
             let base = self.fetch_base(repository).await?;
+            check_extends_remote(&worktree, target, &revision).await?;
             self.compute_diff_preview(repository, &worktree, &base, &revision)
                 .await?
         };
@@ -839,6 +845,62 @@ impl GitWorkspaces {
         }
         leftovers
     }
+}
+
+/// Whether any of the task's own commits (past `base`) is on another
+/// branch or a remote one: it was pushed, under its own name or onto
+/// another task's PR, or another task merged it in.
+async fn shared(path: &Path, base: &str, branch: &str) -> Result<bool, WorkspaceError> {
+    let own = git(Some(path), ["rev-list", "--count", "HEAD", "--not", base]).await?;
+    let exclude = format!("--exclude={branch}");
+    let alone = git(
+        Some(path),
+        [
+            "rev-list",
+            "--count",
+            "HEAD",
+            "--not",
+            base,
+            "--remotes",
+            &exclude,
+            "--branches",
+        ],
+    )
+    .await?;
+    Ok(own.trim() != alone.trim())
+}
+
+/// Refuses a push of `revision` to `target` that could not land: the
+/// remote branch, as just fetched, has a commit `revision` lacks (#730).
+async fn check_extends_remote(
+    worktree: &Path,
+    target: &str,
+    revision: &str,
+) -> Result<(), WorkspaceError> {
+    let remote = format!("refs/remotes/origin/{target}");
+    let Ok(head) = git(
+        Some(worktree),
+        ["rev-parse", "--verify", "--quiet", &remote],
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let head = head.trim();
+    if git(
+        Some(worktree),
+        ["merge-base", "--is-ancestor", head, revision],
+    )
+    .await
+    .is_ok()
+    {
+        return Ok(());
+    }
+    Err(WorkspaceError(format!(
+        "this push would be rejected: {target} on the remote is at {head}, which the task \
+         branch does not contain, so its history was rewritten or the remote moved. Merge it \
+         in (git merge origin/{target}; do not rebase), then publish again."
+    )))
 }
 
 pub(crate) async fn branch_revision(

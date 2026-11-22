@@ -940,13 +940,13 @@ fn merge_refusal(checks: &[MergeCheck]) -> String {
     for check in checks.iter().filter(|check| !check.clean()) {
         let _ = write!(
             message,
-            " In {}, it conflicts with {} at {} in: {}. Rebase onto that commit (git rebase {}, \
-             already fetched as origin/{}), resolve the conflicts, and continue the rebase.",
+            " In {}, it conflicts with {} at {} in: {}. Merge {} in (git merge origin/{}, \
+             already fetched; do not rebase), resolve the conflicts, and commit the merge.",
             check.repository,
             check.branch,
             check.base,
             check.conflicts.join(", "),
-            check.base,
+            check.branch,
             check.branch,
         );
     }
