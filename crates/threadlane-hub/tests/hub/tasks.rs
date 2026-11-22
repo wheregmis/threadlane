@@ -446,18 +446,35 @@ async fn another_tasks_lane_sees_a_task_review_approval_under_any_registration_o
     let Begin::Run(review) = hub.link.begin_run(&lease).await.unwrap() else {
         panic!("review never started")
     };
+    assert!(
+        call(
+            &hub,
+            &lease,
+            &review,
+            "partial-no-note",
+            "finish_review",
+            json!({"verdict":"approved","feedback":"Looks right","checks":"partial"}),
+        )
+        .await
+        .is_err()
+    );
     call(
         &hub,
         &lease,
         &review,
         "approval",
         "finish_review",
-        json!({"verdict":"approved","feedback":"Looks right","checks":"rerun"}),
+        json!({"verdict":"approved","feedback":"Looks right","checks":"not_applicable","checks_note":"Reran the issue query"}),
     )
     .await
     .unwrap();
     finish_run(&hub, &lease, &review).await;
-    assert_eq!(task(&hub, &a.id.to_string()).await.status, TaskStatus::Done);
+    let done = task(&hub, &a.id.to_string()).await;
+    assert_eq!(done.status, TaskStatus::Done);
+    assert_eq!(
+        done.result.as_ref().unwrap()["review"]["feedback"],
+        "Checks: not applicable (no code checks); verified: Reran the issue query\n\nLooks right"
+    );
 
     let b = hub
         .db
@@ -490,7 +507,7 @@ async fn another_tasks_lane_sees_a_task_review_approval_under_any_registration_o
         assert_eq!(status["task_id"], a.id.to_string());
         assert_eq!(
             status["feedback"],
-            "Checks: rerun independently in the review checkout.\n\nLooks right"
+            "Checks: not applicable (no code checks); verified: Reran the issue query\n\nLooks right"
         );
         assert_eq!(
             status["pull_request"],
