@@ -914,7 +914,7 @@ async fn sibling_merge(origin: TaskOrigin, elsewhere: bool) -> bool {
         &run,
         "merge",
         threadlane_hub::MERGE,
-        &json!({"repository": "widgets", "number": 42}),
+        &json!({"repository": "widgets", "number": 42, "expected_head": approved_head()}),
     )
     .await;
     assert_eq!(pull_reads(&github), 1);
@@ -963,7 +963,7 @@ async fn a_requested_task_merges_its_own_green_approved_pull_request_without_ask
         widgets_pull(&branch, &approved_head(), "success"),
     )
     .await;
-    let merge = json!({"repository": "widgets", "number": 42});
+    let merge = json!({"repository": "widgets", "number": 42, "expected_head": approved_head()});
     let merged = call(&hub, &lease, &run, "merge", threadlane_hub::MERGE, &merge).await;
     assert_eq!(merged, Err(ToolError::AuthorizedAndQueued));
     let decision = hub
@@ -982,6 +982,43 @@ async fn a_requested_task_merges_its_own_green_approved_pull_request_without_ask
     let again = call(&hub, &lease, &run, "merge", threadlane_hub::MERGE, &merge).await;
     assert_eq!(again, Err(ToolError::AuthorizedAndQueued));
     assert_eq!(pull_reads(&github), 1);
+    // The merge performed is pinned to the head that was checked.
+    let threadlane_core::link::Perform::Repository {
+        action:
+            threadlane_core::forge::RepositoryAction::Merge {
+                number,
+                expected_head,
+            },
+        ..
+    } = hub
+        .link
+        .begin_perform(&lease, run.run_id, decision.id)
+        .await
+        .unwrap()
+    else {
+        panic!("expected a merge")
+    };
+    assert_eq!(number.get(), 42);
+    assert_eq!(expected_head, Some(approved_head()));
+}
+
+#[tokio::test]
+async fn an_own_merge_not_pinned_to_the_checked_head_asks() {
+    let branch = threadlane_core::workspace::task_branch(threadlane_core::ids::TaskId(1));
+    for merge in [
+        json!({"repository": "widgets", "number": 42}),
+        json!({"repository": "widgets", "number": 42, "expected_head": "c".repeat(40)}),
+    ] {
+        let (hub, github, lease, run) = own_merge(
+            TaskOrigin::User,
+            widgets_pull(&branch, &approved_head(), "success"),
+        )
+        .await;
+        let merged = call(&hub, &lease, &run, "merge", threadlane_hub::MERGE, &merge).await;
+        assert_eq!(merged, Err(ToolError::WaitingOnYou), "{merge}");
+        assert_eq!(cards(&hub).await, 1, "{merge}");
+        assert_eq!(pull_reads(&github), 1, "{merge}");
+    }
 }
 
 #[tokio::test]
@@ -1002,7 +1039,7 @@ async fn an_own_merge_asks_when_a_check_fails_or_another_head_was_approved() {
             &run,
             "merge",
             threadlane_hub::MERGE,
-            &json!({"repository": "widgets", "number": 42}),
+            &json!({"repository": "widgets", "number": 42, "expected_head": pull.head_sha}),
         )
         .await;
         assert_eq!(merged, Err(ToolError::WaitingOnYou), "{pull:?}");
