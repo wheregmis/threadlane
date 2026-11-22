@@ -309,7 +309,10 @@ impl AppState {
                 let mut files: Vec<MemoryRow> = view
                     .files
                     .iter()
-                    .filter(|file| group_of(&file.path) == title)
+                    .filter(|file| {
+                        !threadlane_core::memory::is_skill(&file.path)
+                            && group_of(&file.path) == title
+                    })
                     .map(|file| row(&file.path, title_of(file)))
                     .collect();
                 let unwritten = INSTRUCTIONS.iter().find(|path| {

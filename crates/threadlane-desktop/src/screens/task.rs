@@ -420,6 +420,27 @@ impl Desktop {
                             .rounded(BADGE_RADIUS)
                             .text_size(TYPE_META)
                             .child(chip)
+                    }))
+                    .children(header.playbooks.into_iter().map(|slug| {
+                        let open_space = space.to_owned();
+                        let open_slug = slug.clone();
+                        let label = self
+                            .state
+                            .space_skills(space)
+                            .iter()
+                            .find(|skill| skill.slug == slug)
+                            .map_or_else(|| slug.clone(), |skill| skill.title.clone());
+                        button(SharedString::from(format!("task-skill-{slug}")))
+                            .small()
+                            .outline()
+                            .icon(AppIcon::BookOpen)
+                            .label(label)
+                            .tooltip(format!(
+                                "Active skill: /skill:{slug} — open in Team → Skills"
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_skill(open_space.clone(), Some(open_slug.clone()), cx);
+                            }))
                     })),
             )
             .child(activity)

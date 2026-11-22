@@ -10,7 +10,7 @@
 use serde_json::{Map, Value as Json, json};
 use threadlane_core::ids::{ProjectId, TaskId};
 use threadlane_core::link::PROGRESS_WRITTEN;
-use threadlane_core::memory::progress_path;
+use threadlane_core::memory::{SKILLS_PREFIX, progress_path};
 use threadlane_core::model::{LaneKind, MemoryAuthor, MemoryFile};
 use threadlane_core::store::{MemoryStore, StoreError};
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
@@ -101,12 +101,12 @@ pub(crate) fn scope(project: ProjectId, kind: LaneKind, path: &str) -> Result<St
             project.get(),
             &path["project".len()..]
         )),
-        ["space"] | ["space", "notes", ..] => Ok(path.to_owned()),
+        ["space"] | ["space", "notes", ..] | ["space", "skills", ..] => Ok(path.to_owned()),
         ["space", "instructions.md"] if kind == LaneKind::Lead => Ok(path.to_owned()),
         ["space", "instructions.md"] => {
             refuse("the space's instructions are not available in a task lane")
         }
-        ["space", ..] => refuse("in space/ there are only instructions.md and notes/"),
+        ["space", ..] => refuse("in space/ there are only instructions.md, notes/ and skills/"),
         _ => refuse("memory paths start with space/ or project/"),
     }
 }
@@ -121,15 +121,20 @@ pub(crate) fn visible(project: ProjectId, kind: LaneKind, stored: &str) -> Optio
     (scope(project, kind, &named).ok().as_deref() == Some(stored)).then_some(named)
 }
 
-/// Whether a call changes an instructions file, which only a run you
-/// triggered may do without asking (docs/milestone-5.md §1 decision 6).
+/// Whether a call changes an instructions file or space skill playbook,
+/// which only a run you triggered may do without asking
+/// (docs/milestone-5.md §1 decision 6).
 pub(crate) fn protected(tool: &str, arguments: &Json) -> bool {
     is_change(tool)
         && ["path", "from", "to"].iter().any(|field| {
             arguments
                 .get(field)
                 .and_then(Json::as_str)
-                .is_some_and(|path| PROTECTED.contains(&path))
+                .is_some_and(|path| {
+                    PROTECTED.contains(&path)
+                        || path == "space/skills"
+                        || path.starts_with(SKILLS_PREFIX)
+                })
         })
 }
 
@@ -342,6 +347,7 @@ pub(crate) async fn execute(
                 "space"
                     | "project"
                     | "space/notes"
+                    | "space/skills"
                     | "project/notes"
                     | "project/tasks"
                     | "project/repos"
@@ -446,7 +452,7 @@ pub(crate) fn performed(tool: &str, arguments: &Json) -> String {
 pub(crate) fn definitions() -> Vec<ToolDefinition> {
     let path = json!({
         "type": "string",
-        "description": "A path under space/ (the space's notes/, and for the lead its \
+        "description": "A path under space/ (the space's notes/, skills/, and for the lead its \
                         instructions.md) or project/ (this project's instructions.md, notes/, \
                         repos/, tasks/)."
     });
@@ -558,6 +564,11 @@ mod tests {
                 ("space", "space"),
                 ("space/notes", "space/notes"),
                 ("space/notes/style.md", "space/notes/style.md"),
+                ("space/skills", "space/skills"),
+                (
+                    "space/skills/rust-pr-review.md",
+                    "space/skills/rust-pr-review.md",
+                ),
             ] {
                 assert_eq!(scope(A, kind, named).as_deref(), Ok(stored), "{named}");
             }
@@ -618,6 +629,14 @@ mod tests {
         assert!(!protected(
             MEMORY_VIEW,
             &json!({ "path": "project/instructions.md" })
+        ));
+        assert!(protected(
+            MEMORY_CREATE,
+            &json!({ "path": "space/skills/rust-pr-review.md" })
+        ));
+        assert!(protected(
+            MEMORY_RENAME,
+            &json!({ "from": "project/notes/a.md", "to": "space/skills/rust-pr-review.md" })
         ));
         assert!(!protected(
             MEMORY_CREATE,

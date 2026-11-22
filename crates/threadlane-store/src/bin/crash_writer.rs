@@ -53,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 priority: 0,
                 created_by_call: Some(format!("gate-{n}")),
                 created_at: clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await?;

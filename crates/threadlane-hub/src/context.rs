@@ -94,15 +94,57 @@ pub(crate) fn loaded_memory(project: ProjectId, kind: LaneKind) -> Vec<(&'static
     parts
 }
 
+/// Validates and deduplicates space skill playbook slugs in order of appearance.
+pub(crate) fn normalize_playbooks<'a>(
+    slugs: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for raw in slugs {
+        let slug = raw.trim();
+        if !threadlane_core::memory::is_valid_skill_slug(slug) {
+            return Err(format!("invalid skill slug {raw:?}"));
+        }
+        if !out.iter().any(|seen| seen == slug) {
+            out.push(slug.to_owned());
+        }
+    }
+    Ok(out)
+}
+
+/// Merges an agent's attached playbooks, explicit task playbooks, and any
+/// `/skill:<slug>` mentions in `text`, preserving order without duplicates.
+#[must_use]
+pub(crate) fn merge_playbooks(agent: &[String], requested: &[String], text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut push = |slug: &str| {
+        if threadlane_core::memory::is_valid_skill_slug(slug)
+            && !out.iter().any(|seen| seen == slug)
+        {
+            out.push(slug.to_owned());
+        }
+    };
+    for slug in agent {
+        push(slug);
+    }
+    for slug in requested {
+        push(slug);
+    }
+    for slug in threadlane_core::memory::parse_skill_mentions(text) {
+        push(&slug);
+    }
+    out
+}
+
 /// The appended instructions for a run of `agent` in a lane of `kind`: the
-/// agent's instructions, the fixed rules of the lane kind, then each loaded
-/// memory part under its heading, separated by blank lines. `memory` is
-/// `(heading, content)` in the order of [`loaded_memory`]; an empty part is
-/// left out with no trace.
+/// agent's instructions, the fixed rules of the lane kind, each loaded
+/// memory part under its heading, and each active skill playbook, separated by
+/// blank lines. `memory` is `(heading, content)` in the order of
+/// [`loaded_memory`]; an empty part is left out with no trace.
 pub(crate) fn appended_instructions(
     agent: &Agent,
     kind: LaneKind,
     memory: &[(&str, String)],
+    playbooks: &[(String, String)],
 ) -> String {
     let rules = match kind {
         LaneKind::Lead => LEAD_RULES,
@@ -114,6 +156,18 @@ pub(crate) fn appended_instructions(
             .iter()
             .filter(|(_, content)| !content.trim().is_empty())
             .map(|(heading, content)| format!("{heading}\n{}", content.trim())),
+    );
+    parts.extend(
+        playbooks
+            .iter()
+            .filter(|(_, content)| !content.trim().is_empty())
+            .map(|(slug, content)| {
+                format!(
+                    "Skill playbook, {}:\n{}",
+                    threadlane_core::memory::skill_path(slug),
+                    content.trim()
+                )
+            }),
     );
     parts.retain(|part| !part.is_empty());
     let mut text = parts.join("\n\n");

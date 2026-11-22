@@ -48,6 +48,7 @@ fn create(title: &str, depends_on: Vec<TaskId>, id: &str) -> TaskRequest {
         agent: "Reviewer".into(),
         repositories: vec!["api".into()],
         depends_on,
+        playbooks: Vec::new(),
         client_request_id: id.into(),
     }
 }

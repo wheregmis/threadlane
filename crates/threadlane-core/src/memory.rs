@@ -9,6 +9,16 @@ use crate::ids::{ProjectId, TaskId};
 /// The file name of every index. Only the hub writes one.
 pub const INDEX_FILE: &str = "INDEX.md";
 
+/// Stored path prefix for space-wide composable skill playbooks.
+pub const SKILLS_PREFIX: &str = "space/skills/";
+
+/// The largest a skill playbook may be, in bytes. Attached playbooks are
+/// loaded whole into runs that use them.
+pub const SKILL_BUDGET: usize = 8 * 1024;
+
+/// Maximum byte length of a skill playbook slug.
+pub const MAX_SKILL_SLUG_LEN: usize = 64;
+
 /// The largest an instructions file may be, in bytes. It is loaded whole
 /// into every run of its space or project, so it is paid for on every run.
 pub const INSTRUCTIONS_BUDGET: usize = 8 * 1024;
@@ -36,6 +46,84 @@ fn split_root(path: &str) -> Option<(&str, &str)> {
 #[must_use]
 pub fn progress_path(project: ProjectId, task: TaskId) -> String {
     format!("projects/{}/tasks/{task}.md", project.get())
+}
+
+/// Whether `slug` is a valid composable skill identifier: non-empty, at most
+/// 64 bytes, ASCII lowercase alphanumeric plus `-` and `_`, without leading or
+/// trailing `-`/`_`, and not `"index"`.
+#[must_use]
+pub fn is_valid_skill_slug(slug: &str) -> bool {
+    if slug.is_empty() || slug.len() > MAX_SKILL_SLUG_LEN || slug.eq_ignore_ascii_case("index") {
+        return false;
+    }
+    let bytes = slug.as_bytes();
+    let edge_ok = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    if !edge_ok(bytes[0]) || !edge_ok(bytes[bytes.len() - 1]) {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
+}
+
+/// The stored path of a space skill playbook (`space/skills/<slug>.md`).
+#[must_use]
+pub fn skill_path(slug: &str) -> String {
+    format!("{SKILLS_PREFIX}{slug}.md")
+}
+
+/// Extracts the validated skill slug from a stored `space/skills/<slug>.md` path.
+#[must_use]
+pub fn skill_slug(path: &str) -> Option<&str> {
+    let slug = path.strip_prefix(SKILLS_PREFIX)?.strip_suffix(".md")?;
+    is_valid_skill_slug(slug).then_some(slug)
+}
+
+/// Whether `path` is a space skill playbook file (`space/skills/<slug>.md`).
+#[must_use]
+pub fn is_skill(path: &str) -> bool {
+    skill_slug(path).is_some()
+}
+
+/// Parses `/skill:<slug>` mentions from user text in order of first appearance,
+/// lowercased, validated, and deduplicated.
+#[must_use]
+pub fn parse_skill_mentions(text: &str) -> Vec<String> {
+    const PREFIX: &str = "/skill:";
+    let mut found = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + PREFIX.len() < bytes.len() {
+        if bytes[i] == b'/'
+            && text[i..].len() >= PREFIX.len()
+            && text
+                .get(i..i + PREFIX.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(PREFIX))
+        {
+            let boundary_ok = text[..i].chars().next_back().is_none_or(|prev| {
+                prev.is_whitespace() || matches!(prev, '(' | '[' | '{' | '"' | '\'' | ',' | ';')
+            });
+            if boundary_ok {
+                let start = i + PREFIX.len();
+                let tail = &text[start..];
+                let end_offset = tail
+                    .find(|ch: char| {
+                        ch.is_whitespace() || matches!(ch, ')' | ']' | '}' | '"' | '\'' | ',' | ';')
+                    })
+                    .unwrap_or(tail.len());
+                let raw = tail[..end_offset].trim_end_matches(['.', ':', '!', '?']);
+                let normalized = raw.to_ascii_lowercase();
+                if is_valid_skill_slug(&normalized) && !found.contains(&normalized) {
+                    found.push(normalized);
+                }
+                i = start + end_offset;
+                continue;
+            }
+        }
+        let ch_len = text[i..].chars().next().map_or(1, char::len_utf8);
+        i += ch_len;
+    }
+    found
 }
 
 /// Whether `path` is the space's or a project's `instructions.md`.
@@ -106,6 +194,18 @@ pub fn check(path: &str, content: &str) -> Result<(), String> {
         return Err(format!(
             "{path} would be {size} bytes, over its budget of {INSTRUCTIONS_BUDGET}. It is \
              loaded into every run: trim it, or move detail into notes, which are read on demand"
+        ));
+    }
+    if path.starts_with(SKILLS_PREFIX) && !is_skill(path) {
+        return Err(format!(
+            "{path} must be a direct .md file under {SKILLS_PREFIX} with a lowercase slug \
+             (letters, digits, '-' or '_', max {MAX_SKILL_SLUG_LEN} bytes)"
+        ));
+    }
+    if is_skill(path) && size > SKILL_BUDGET {
+        return Err(format!(
+            "{path} would be {size} bytes, over its budget of {SKILL_BUDGET}. Trim the playbook \
+             so attached runs stay concise"
         ));
     }
     if is_progress(path) && size > PROGRESS_BUDGET {
@@ -232,5 +332,68 @@ mod tests {
         let index = render_index("space/notes/INDEX.md", &files);
         assert_eq!(index, "- [A](a.md): About a.\n- [B](b.md): About b.\n");
         assert_eq!(render_index("space/notes/INDEX.md", &reversed), index);
+    }
+
+    #[test]
+    fn skill_slug_and_path_validation() {
+        assert!(is_valid_skill_slug("rust-pr-review"));
+        assert!(is_valid_skill_slug("a1_b2"));
+        assert!(is_valid_skill_slug("x"));
+        assert!(!is_valid_skill_slug(""));
+        assert!(!is_valid_skill_slug("-leading"));
+        assert!(!is_valid_skill_slug("trailing-"));
+        assert!(!is_valid_skill_slug("_leading"));
+        assert!(!is_valid_skill_slug("trailing_"));
+        assert!(!is_valid_skill_slug("UpperCase"));
+        assert!(!is_valid_skill_slug("has/slash"));
+        assert!(!is_valid_skill_slug("has.dot"));
+        assert!(!is_valid_skill_slug("index"));
+        assert!(!is_valid_skill_slug("INDEX"));
+        assert!(!is_valid_skill_slug(&"a".repeat(MAX_SKILL_SLUG_LEN + 1)));
+        assert!(is_valid_skill_slug(&"a".repeat(MAX_SKILL_SLUG_LEN)));
+
+        assert_eq!(
+            skill_path("rust-pr-review"),
+            "space/skills/rust-pr-review.md"
+        );
+        assert_eq!(
+            skill_slug("space/skills/rust-pr-review.md"),
+            Some("rust-pr-review")
+        );
+        assert_eq!(skill_slug("space/skills/nested/a.md"), None);
+        assert_eq!(skill_slug("space/skills/index.md"), None);
+        assert_eq!(skill_slug("space/notes/rust-pr-review.md"), None);
+        assert!(is_skill("space/skills/rust-pr-review.md"));
+        assert!(!is_skill("space/skills/INDEX.md"));
+        assert_eq!(index_for("space/skills/rust-pr-review.md"), None);
+
+        let over = "x".repeat(SKILL_BUDGET + 1);
+        assert!(
+            check("space/skills/rust-pr-review.md", &over)
+                .unwrap_err()
+                .contains("budget")
+        );
+        assert!(check("space/skills/rust-pr-review.md", &"x".repeat(SKILL_BUDGET)).is_ok());
+    }
+
+    #[test]
+    fn parses_skill_mentions_cleanly() {
+        assert_eq!(
+            parse_skill_mentions("Run /skill:rust-pr-review and (/SKILL:Accessibility-Audit)!"),
+            vec![
+                "rust-pr-review".to_owned(),
+                "accessibility-audit".to_owned(),
+            ]
+        );
+        assert_eq!(
+            parse_skill_mentions(
+                "/skill:release_notes, /skill:release_notes. Also https://x.dev/skill:ignored foo/skill:ignored2 /skill:bad.slug /skill:-bad /skill:index"
+            ),
+            vec!["release_notes".to_owned()]
+        );
+        assert_eq!(
+            parse_skill_mentions("/skill:a;/skill:b"),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
     }
 }

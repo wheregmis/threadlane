@@ -54,6 +54,8 @@ pub struct BoardCard {
     pub options: Vec<String>,
     /// Whether its branch merges into its base, from [`merge_state`].
     pub merge: Option<String>,
+    /// Active space skill playbook slugs on this task.
+    pub playbooks: Vec<String>,
 }
 
 /// An open proposal on the board with the two in-place answers.
@@ -304,6 +306,7 @@ impl AppState {
                             decision,
                             options,
                             merge: merge_state(task.result.as_ref()),
+                            playbooks: task.playbooks.clone(),
                         }
                     })
                     .collect();
@@ -713,6 +716,8 @@ pub struct TaskHeader {
     pub context: Vec<String>,
     /// The current progress or quiet warning.
     pub latest: Option<LatestStep>,
+    /// Active space skill playbook slugs on this task.
+    pub playbooks: Vec<String>,
 }
 
 /// A live line with its warning state.
@@ -798,6 +803,7 @@ pub fn task_header(detail: &TaskDetail, when: &When) -> TaskHeader {
         meta,
         context,
         latest,
+        playbooks: summary.task.playbooks.clone(),
     }
 }
 

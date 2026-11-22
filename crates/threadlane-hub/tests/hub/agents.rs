@@ -39,6 +39,7 @@ struct Changes {
     backends: Option<Vec<String>>,
     models: Option<BTreeMap<String, String>>,
     skills: Option<Vec<threadlane_core::model::SkillBinding>>,
+    playbooks: Option<Vec<String>>,
 }
 
 fn update(agent: &str) -> OrgRequest {
@@ -48,6 +49,7 @@ fn update(agent: &str) -> OrgRequest {
 fn edit(agent: &str, changes: Changes) -> OrgRequest {
     OrgRequest::UpdateAgent {
         skills: changes.skills,
+        playbooks: changes.playbooks,
         agent: agent.into(),
         name: changes.name,
         role: changes.role,
@@ -298,6 +300,7 @@ async fn delete_refuses_the_lead_a_wrong_name_and_open_tasks() {
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await
@@ -494,6 +497,7 @@ async fn a_task_run_falling_back_from_codex_keeps_only_claude_s_skills() {
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await

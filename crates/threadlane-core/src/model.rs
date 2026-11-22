@@ -511,6 +511,9 @@ pub struct Agent {
     pub requirements: Json,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillBinding>,
+    /// Space-wide composable skill playbook slugs attached to this agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub playbooks: Vec<String>,
 }
 
 /// Input for [`crate::store::OrgStore::create_agent`].
@@ -524,6 +527,7 @@ pub struct NewAgent {
     pub tools: Json,
     pub requirements: Json,
     pub skills: Vec<SkillBinding>,
+    pub playbooks: Vec<String>,
 }
 
 impl NewAgent {
@@ -538,6 +542,7 @@ impl NewAgent {
             models: Json::Object(serde_json::Map::new()),
             tools: Json::Object(serde_json::Map::new()),
             skills: Vec::new(),
+            playbooks: Vec::new(),
             requirements: Json::Object(serde_json::Map::new()),
         }
     }
@@ -811,6 +816,9 @@ pub struct Task {
     /// repository is attached: set when a publish call finds none.
     #[serde(default)]
     pub publication_blocker: Option<String>,
+    /// Space-wide composable skill playbook slugs active on this task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub playbooks: Vec<String>,
 }
 
 /// Input for [`crate::store::TaskStore::create_task`].
@@ -830,6 +838,7 @@ pub struct NewTask {
     /// Tool call id; makes creation idempotent.
     pub created_by_call: Option<String>,
     pub created_at: Timestamp,
+    pub playbooks: Vec<String>,
 }
 
 /// A checkpoint record; the bundle lives beside the database (Plan.md §5.5).

@@ -343,7 +343,7 @@ impl HubApi for ClientApi {
         let inner = &self.core.inner;
         // A message to a task goes to its lane; one there declines the
         // decision open in it (Plan.md §9.4, `DecisionStore`).
-        let (project_id, lane_id) = match message.task {
+        let (project_id, lane_id, task_id) = match message.task {
             Some(task) => {
                 let task = inner
                     .db
@@ -360,15 +360,25 @@ impl HubApi for ClientApi {
                         task.id, task.status
                     )));
                 }
-                (task.project_id, task.lane_id)
+                (task.project_id, task.lane_id, Some(task.id))
             }
             None => {
                 let project = self.project_named(message.project.as_deref()).await?;
                 active_project(&project)?;
                 self.lead_is_on(&project).await?;
-                (project.id, project.lead_lane_id)
+                (project.id, project.lead_lane_id, None)
             }
         };
+        if let Some(task_id) = task_id {
+            let mentioned = threadlane_core::memory::parse_skill_mentions(&message.text);
+            if !mentioned.is_empty() {
+                inner
+                    .db
+                    .add_task_playbooks(task_id, &mentioned)
+                    .await
+                    .map_err(api_error)?;
+            }
+        }
         let mut payload = json!({ "text": message.text });
         if !message.images.is_empty() {
             payload["images"] = serde_json::to_value(&message.images)
@@ -581,6 +591,7 @@ impl HubApi for ClientApi {
                     backends,
                     models,
                     skills: Vec::new(),
+                    playbooks: Vec::new(),
                 })
                 .await
             }
@@ -591,8 +602,12 @@ impl HubApi for ClientApi {
                 backends,
                 models,
                 skills,
+                playbooks,
             } => {
                 validate_skills(&self.core.inner.backends, &skills).await?;
+                let playbooks =
+                    crate::context::normalize_playbooks(playbooks.iter().map(String::as_str))
+                        .map_err(ApiError::Invalid)?;
                 let name = required("agent name", &name)?;
                 let role = required("agent role", &role)?;
                 let mut preferred = Vec::with_capacity(backends.len());
@@ -612,6 +627,7 @@ impl HubApi for ClientApi {
                     .create_agent(&NewAgent {
                         models: overrides.into(),
                         skills,
+                        playbooks,
                         instructions,
                         backends: preferred,
                         ..NewAgent::named(name, role)
@@ -622,6 +638,7 @@ impl HubApi for ClientApi {
             }
             OrgRequest::UpdateAgent {
                 skills,
+                playbooks,
                 agent,
                 name,
                 role,
@@ -670,6 +687,13 @@ impl HubApi for ClientApi {
                 if let Some(skills) = &skills {
                     validate_skills(&self.core.inner.backends, skills).await?;
                 }
+                let playbooks = playbooks
+                    .as_ref()
+                    .map(|slugs| {
+                        crate::context::normalize_playbooks(slugs.iter().map(String::as_str))
+                    })
+                    .transpose()
+                    .map_err(ApiError::Invalid)?;
                 let agent_name = agent.trim();
                 let target_name = name.unwrap_or(agent_name);
                 let agent = db
@@ -687,6 +711,9 @@ impl HubApi for ClientApi {
                         }
                         if let Some(skills) = skills {
                             current.skills = skills;
+                        }
+                        if let Some(playbooks) = playbooks {
+                            current.playbooks = playbooks;
                         }
                         if let Some(instructions) = instructions {
                             current.instructions = instructions;

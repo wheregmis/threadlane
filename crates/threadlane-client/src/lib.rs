@@ -991,11 +991,44 @@ impl ClientCore {
         models: BTreeMap<String, String>,
         skills: Vec<threadlane_core::model::SkillBinding>,
     ) -> Result<Agent, ClientError> {
+        self.create_agent_profile_with_playbooks(
+            space,
+            name,
+            role,
+            instructions,
+            backends,
+            models,
+            skills,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Creates a profile with per-provider models, personal skill references,
+    /// and space skill playbooks.
+    ///
+    /// # Errors
+    /// Returns pairing or hub validation errors.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors the existing profile creation API"
+    )]
+    pub async fn create_agent_profile_with_playbooks(
+        &self,
+        space: Option<&str>,
+        name: &str,
+        role: &str,
+        instructions: &str,
+        backends: &[BackendKind],
+        models: BTreeMap<String, String>,
+        skills: Vec<threadlane_core::model::SkillBinding>,
+        playbooks: Vec<String>,
+    ) -> Result<Agent, ClientError> {
         let name = name.to_owned();
         let role = role.to_owned();
         let instructions = instructions.to_owned();
         let backends = backends.to_vec();
-        let request = if !skills.is_empty() {
+        let request = if !skills.is_empty() || !playbooks.is_empty() {
             OrgRequest::CreateAgentWithSkills {
                 name,
                 role,
@@ -1003,6 +1036,7 @@ impl ClientCore {
                 backends,
                 models,
                 skills,
+                playbooks,
             }
         } else if models.is_empty() {
             OrgRequest::CreateAgent {

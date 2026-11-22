@@ -946,3 +946,59 @@ async fn no_memory_request_reaches_another_project() {
         Err(ApiError::NotFound(_))
     ));
 }
+
+#[tokio::test]
+async fn space_skills_support_versioned_crud_and_rollback_and_reject_invalid_paths() {
+    use threadlane_core::client::{OperationsReply, OperationsRequest};
+
+    let hub = TestHub::start().await;
+    let write = |path: &str, content: &str| {
+        hub.api.memory(MemoryRequest::Write {
+            project: None,
+            path: path.into(),
+            content: content.into(),
+        })
+    };
+
+    write("space/skills/rust-pr-review.md", "# Rust PR Review\nv1")
+        .await
+        .unwrap();
+    write("space/skills/rust-pr-review.md", "# Rust PR Review\nv2")
+        .await
+        .unwrap();
+    let listed = paths(
+        hub.api
+            .memory(MemoryRequest::List { project: None })
+            .await
+            .unwrap(),
+    );
+    assert!(listed.contains(&"space/skills/rust-pr-review.md".to_owned()));
+    assert!(!listed.contains(&"space/skills/INDEX.md".to_owned()));
+
+    let OperationsReply::RolledBack { file } = hub
+        .api
+        .operations(OperationsRequest::Rollback {
+            project: None,
+            path: "space/skills/rust-pr-review.md".into(),
+            version: 1,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected RolledBack");
+    };
+    assert_eq!(file.version, 3);
+    assert_eq!(file.content, "# Rust PR Review\nv1");
+
+    // Invalid slug or nested path under space/skills/ is rejected.
+    for bad in [
+        "space/skills/Bad Slug.md",
+        "space/skills/nested/a.md",
+        "space/skills/index.md",
+    ] {
+        assert!(
+            matches!(write(bad, "# Bad\nNope").await, Err(ApiError::Invalid(_))),
+            "{bad}"
+        );
+    }
+}

@@ -8,8 +8,12 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex};
 use gpui_kit::*;
+use threadlane_core::memory::parse_skill_mentions;
 use threadlane_core::time::{Clock as _, SystemClock};
-use threadlane_desktop::{Activity, AppState, Destination, Draft, Outgoing, sends_on_enter};
+use threadlane_desktop::{
+    Activity, AppState, Destination, Draft, Outgoing, remove_skill_mention, sends_on_enter,
+    toggle_skill_mention,
+};
 
 use super::{button, chat_images, composer_surface, icon_button, meta};
 use crate::icons::AppIcon;
@@ -217,6 +221,93 @@ impl Desktop {
         let attach_to = destination.clone().filter(|target| {
             matches!(target, Destination::Lead(space, project) if !self.state.is_archived(space, project))
         });
+        let skill_target = destination.clone().filter(|target| match target {
+            Destination::Lead(space, project) => !self.state.is_archived(space, project),
+            Destination::Task(space, task) => !self.state.task_is_archived(space, *task),
+        });
+        let active_space = skill_target.as_ref().map(|target| match target {
+            Destination::Lead(space, _) | Destination::Task(space, _) => space.clone(),
+        });
+        let draft_text = self.draft_input(draft).read(cx).value();
+        let mentioned_skills = parse_skill_mentions(&draft_text);
+        let active_skill_chips = skill_target
+            .as_ref()
+            .filter(|_| !mentioned_skills.is_empty())
+            .map(|target| {
+                let space_skills = active_space
+                    .as_deref()
+                    .map(|s| self.state.space_skills(s))
+                    .unwrap_or_default();
+                h_flex()
+                    .gap(XS)
+                    .flex_wrap()
+                    .children(mentioned_skills.iter().map(|slug| {
+                        let target = target.clone();
+                        let remove_slug = slug.clone();
+                        let title = space_skills
+                            .iter()
+                            .find(|skill| &skill.slug == slug)
+                            .map_or_else(|| format!("/skill:{slug}"), |skill| skill.title.clone());
+                        button(SharedString::from(format!("composer-active-skill-{slug}")))
+                            .xsmall()
+                            .outline()
+                            .icon(AppIcon::X)
+                            .label(title)
+                            .tooltip(format!("Remove /skill:{slug} from message"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let current = this.state.draft(&target).to_owned();
+                                let next = remove_skill_mention(&current, &remove_slug);
+                                this.state.edit_draft(&target, &next);
+                                this.sync_drafts(window, cx);
+                                cx.notify();
+                            }))
+                    }))
+            });
+        let skill_picker = skill_target.as_ref().and_then(|target| {
+            let space = active_space.as_deref()?;
+            let available = self.state.space_skills(space);
+            if available.is_empty() {
+                return None;
+            }
+            let target = target.clone();
+            let view = cx.entity().downgrade();
+            let items: Vec<(String, String, bool)> = available
+                .iter()
+                .map(|skill| {
+                    let active = mentioned_skills.iter().any(|s| s == &skill.slug);
+                    (skill.slug.clone(), skill.title.clone(), active)
+                })
+                .collect();
+            Some(
+                button("composer-skill-picker")
+                    .ghost()
+                    .small()
+                    .tab_stop(true)
+                    .icon(AppIcon::BookOpen)
+                    .label("Skill")
+                    .dropdown_caret(true)
+                    .tooltip("Attach a space skill playbook (/skill:<slug>)")
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for (slug, title, active) in &items {
+                            let (slug, target, view) = (slug.clone(), target.clone(), view.clone());
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{title}  (/skill:{slug})"))
+                                    .checked(*active)
+                                    .on_click(move |_, window, cx| {
+                                        let _gone = view.update(cx, |this, cx| {
+                                            let current = this.state.draft(&target).to_owned();
+                                            let next = toggle_skill_mention(&current, &slug);
+                                            this.state.edit_draft(&target, &next);
+                                            this.sync_drafts(window, cx);
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+        });
         let paste_to = attach_to.clone();
         let view = cx.weak_entity();
         let surface = cx.theme().muted;
@@ -266,6 +357,7 @@ impl Desktop {
         });
         composer_surface(cx)
             .children(images)
+            .children(active_skill_chips)
             .child(
                 Textarea::new(self.draft_input(draft))
                     .rounded(FIELD_RADIUS)
@@ -294,6 +386,7 @@ impl Desktop {
                                 this.choose_images(target.clone(), window, cx);
                             }))
                     }))
+                    .children(skill_picker)
                     .children(
                         picker.map(|picker| div().min_w_0().max_w(relative(0.55)).child(picker)),
                     )

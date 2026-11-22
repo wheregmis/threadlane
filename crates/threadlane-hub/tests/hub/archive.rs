@@ -62,6 +62,7 @@ fn new_task() -> TaskRequest {
         agent: "Lead".into(),
         repositories: Vec::new(),
         depends_on: Vec::new(),
+        playbooks: Vec::new(),
         client_request_id: "archive-task".into(),
     }
 }

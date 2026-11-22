@@ -9,6 +9,7 @@ use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
@@ -30,9 +31,10 @@ use crate::components::{
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
-    BOARD_COLUMN_MIN, CONTROL_HEIGHT, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, READING_WIDTH,
-    ROW_RADIUS, RULES_WIDTH, SCROLLBAR_GUTTER, SHORT_LABEL_WIDTH, SIDEBAR_SECTION_MAX_HEIGHT,
-    SIDEBAR_WIDTH, SM, Status, TABULAR, TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XL, XS,
+    BADGE_RADIUS, BOARD_COLUMN_MIN, CONTROL_HEIGHT, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH,
+    READING_WIDTH, ROW_RADIUS, RULES_WIDTH, SCROLLBAR_GUTTER, SHORT_LABEL_WIDTH,
+    SIDEBAR_SECTION_MAX_HEIGHT, SIDEBAR_WIDTH, SM, Status, TABULAR, TIMESTAMP_WIDTH, TYPE_BODY,
+    TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -881,6 +883,27 @@ impl Desktop {
                                     })),
                             )
                             .child(meta(task_card.meta, cx))
+                            .children((!task_card.playbooks.is_empty()).then(|| {
+                                let shown = task_card.playbooks.iter().take(2);
+                                let overflow = task_card.playbooks.len().saturating_sub(2);
+                                h_flex()
+                                    .gap(XS)
+                                    .flex_wrap()
+                                    .children(shown.map(|slug| {
+                                        Tag::secondary()
+                                            .small()
+                                            .rounded(BADGE_RADIUS)
+                                            .text_size(TYPE_META)
+                                            .child(slug.clone())
+                                    }))
+                                    .children((overflow > 0).then(|| {
+                                        Tag::secondary()
+                                            .small()
+                                            .rounded(BADGE_RADIUS)
+                                            .text_size(TYPE_META)
+                                            .child(format!("+{overflow}"))
+                                    }))
+                            }))
                             .children(task_card.merge.map(|merge| meta(merge, cx)))
                             .children(answer),
                     )
@@ -1088,6 +1111,27 @@ impl Desktop {
                                             })
                                             .child(task.title.clone()),
                                     )
+                                    .children((!task.playbooks.is_empty()).then(|| {
+                                        let shown = task.playbooks.iter().take(2);
+                                        let overflow = task.playbooks.len().saturating_sub(2);
+                                        h_flex()
+                                            .gap(XS)
+                                            .flex_none()
+                                            .children(shown.map(|slug| {
+                                                Tag::secondary()
+                                                    .small()
+                                                    .rounded(BADGE_RADIUS)
+                                                    .text_size(TYPE_META)
+                                                    .child(slug.clone())
+                                            }))
+                                            .children((overflow > 0).then(|| {
+                                                Tag::secondary()
+                                                    .small()
+                                                    .rounded(BADGE_RADIUS)
+                                                    .text_size(TYPE_META)
+                                                    .child(format!("+{overflow}"))
+                                            }))
+                                    }))
                                     .child(
                                         meta(summary.agent.clone(), cx)
                                             .w(rems(7.))
@@ -2902,6 +2946,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         self.state.open_task_form(space, project, true);
+        self.load_space_skills(space.to_owned(), cx);
         self.task_form_return_focus = window.focused(cx);
         let target = self.screen.clone();
         let view = cx.entity().downgrade();
@@ -3024,6 +3069,59 @@ impl Desktop {
                     })),
             );
         }
+        let inherited_playbooks: Vec<String> = form
+            .agent
+            .as_deref()
+            .and_then(|name| {
+                self.state
+                    .space(space)?
+                    .agents
+                    .iter()
+                    .find(|a| a.name == name)
+                    .map(|a| a.playbooks.clone())
+            })
+            .unwrap_or_default();
+        let space_skills = self.state.space_skills(space);
+        let skills_row = if space_skills.is_empty() && inherited_playbooks.is_empty() {
+            div()
+                .text_size(TYPE_BODY)
+                .text_color(muted)
+                .child("No space skills yet.")
+        } else {
+            let mut row = h_flex().gap(XS).flex_wrap();
+            for slug in &inherited_playbooks {
+                let title = space_skills
+                    .iter()
+                    .find(|s| &s.slug == slug)
+                    .map_or_else(|| slug.clone(), |s| s.title.clone());
+                row = row.child(
+                    Tag::secondary()
+                        .small()
+                        .rounded(BADGE_RADIUS)
+                        .text_size(TYPE_META)
+                        .child(format!("{title} (from agent)")),
+                );
+            }
+            for skill in space_skills {
+                if inherited_playbooks.iter().any(|s| s == &skill.slug) {
+                    continue;
+                }
+                let slug = skill.slug.clone();
+                let picked = form.playbooks.contains(&slug);
+                row = row.child(
+                    button(SharedString::from(format!("task-playbook-{slug}")))
+                        .small()
+                        .label(skill.title.clone())
+                        .selected(picked)
+                        .tooltip(format!("Attach /skill:{slug} to this task"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.task_form_mut().toggle_playbook(&slug);
+                            cx.notify();
+                        })),
+                );
+            }
+            row
+        };
         let (in_space, named) = (space.to_owned(), project.to_owned());
         let (close_space, close_project) = (space.to_owned(), project.to_owned());
         v_flex()
@@ -3060,6 +3158,7 @@ impl Desktop {
                     .child(repositories),
             )
             .child(h_flex().gap(SM).child(label("Waits for")).child(waits))
+            .child(h_flex().gap(SM).child(label("Skills")).child(skills_row))
             .child(
                 h_flex().gap(SM).child(label("When done")).child(
                     button("task-draft-pr")

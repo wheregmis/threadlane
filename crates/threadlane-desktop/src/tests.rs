@@ -302,6 +302,37 @@ impl HubApi for FakeHub {
                     models: json!(models),
                     tools: json!({}),
                     skills: Vec::new(),
+                    playbooks: Vec::new(),
+                    requirements: json!({}),
+                };
+                agents.push(agent.clone());
+                Ok(OrgReply::Agent { agent })
+            }
+            OrgRequest::CreateAgentWithSkills {
+                name,
+                role,
+                instructions,
+                backends,
+                models,
+                skills,
+                playbooks,
+            } => {
+                let mut agents = self.agents.lock().expect("lock");
+                if agents.iter().any(|agent| agent.name == name) {
+                    return Err(ApiError::Invalid(format!(
+                        "an agent named {name:?} already exists"
+                    )));
+                }
+                let agent = Agent {
+                    id: AgentId(i64::try_from(agents.len()).expect("few") + 1),
+                    name,
+                    role,
+                    instructions,
+                    backends,
+                    models: json!(models),
+                    tools: json!({}),
+                    skills,
+                    playbooks,
                     requirements: json!({}),
                 };
                 agents.push(agent.clone());
@@ -309,6 +340,7 @@ impl HubApi for FakeHub {
             }
             OrgRequest::UpdateAgent {
                 skills,
+                playbooks,
                 agent: from,
                 name,
                 role,
@@ -323,6 +355,9 @@ impl HubApi for FakeHub {
                     .ok_or_else(|| ApiError::NotFound(format!("agent {from:?}")))?;
                 if let Some(skills) = skills {
                     agent.skills = skills;
+                }
+                if let Some(playbooks) = playbooks {
+                    agent.playbooks = playbooks;
                 }
                 if let Some(name) = name {
                     agent.name = name;
@@ -822,6 +857,30 @@ impl HubApi for FakeHub {
             } if project == "api" => Ok(OperationsReply::MemoryCheck {
                 findings: self.findings.lock().unwrap().clone(),
             }),
+            OperationsRequest::Rollback {
+                project: None,
+                path,
+                version,
+            } => {
+                let mut files = self.memory.lock().expect("lock");
+                let source = files
+                    .iter()
+                    .find(|file| file.path == path && file.version == version)
+                    .cloned()
+                    .ok_or_else(|| ApiError::NotFound(format!("{path} v{version}")))?;
+                let next_version = files.iter().filter(|file| file.path == path).count() + 1;
+                let restored = MemoryFile {
+                    deleted: false,
+                    ..memory_file(
+                        &path,
+                        &source.content,
+                        i64::try_from(next_version).expect("few"),
+                        None,
+                    )
+                };
+                files.push(restored.clone());
+                Ok(OperationsReply::RolledBack { file: restored })
+            }
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -885,6 +944,7 @@ impl HubApi for FakeHub {
                 goal,
                 agent,
                 depends_on,
+                playbooks,
                 ..
             } => {
                 let mut created = task(
@@ -895,6 +955,7 @@ impl HubApi for FakeHub {
                 created.task.title = title;
                 created.task.goal = goal;
                 created.task.depends_on = depends_on;
+                created.task.playbooks = playbooks;
                 created.agent = agent;
                 tasks.push(created.clone());
                 Ok(TaskReply::Task { task: created.task })
@@ -1087,6 +1148,7 @@ fn task(id: i64, status: TaskStatus, waiting_reason: Option<&str>) -> TaskSummar
             waiting_reason: waiting_reason.map(str::to_owned),
             result: None,
             created_at: Timestamp::from_millis(1_000),
+            playbooks: Vec::new(),
             publication_blocker: None,
         },
         project: "api".to_owned(),
@@ -2166,6 +2228,7 @@ async fn the_modes_grid_has_a_row_per_project_and_a_cell_per_agent() {
             models: json!({}),
             tools: json!({}),
             skills: Vec::new(),
+            playbooks: Vec::new(),
             requirements: json!({}),
         })
         .collect();
@@ -4837,6 +4900,7 @@ async fn stage_b_lead_mode_obeys_the_ceiling_and_agent_placement_uses_backend_pr
         models: json!({}),
         tools: json!({}),
         skills: Vec::new(),
+        playbooks: Vec::new(),
         requirements: json!({}),
     };
     assert_eq!(
@@ -6964,6 +7028,7 @@ async fn agent_save_is_single_flight_and_keeps_edits_after_submit() {
         state.agent_update(&current).unwrap(),
         Some(OrgRequest::UpdateAgent {
             skills: None,
+            playbooks: None,
             agent: "Critic".into(),
             name: None,
             role: None,
@@ -7030,6 +7095,7 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
 
     work.org(OrgRequest::UpdateAgent {
         skills: None,
+        playbooks: None,
         agent: "Reviewer".to_owned(),
         name: None,
         role: None,
@@ -7064,6 +7130,7 @@ async fn an_agent_is_edited_field_by_field_and_deleted_after_its_name_is_typed()
         request,
         OrgRequest::UpdateAgent {
             skills: Some(vec![skill]),
+            playbooks: None,
             agent: "Reviewer".to_owned(),
             name: Some("Critic".to_owned()),
             role: None,
@@ -8114,6 +8181,7 @@ async fn agent_topology_builds_three_tier_org_and_lights_up_active_delegations()
         tools: serde_json::json!([]),
         requirements: Default::default(),
         skills: Vec::new(),
+        playbooks: Vec::new(),
     });
     *hub.tasks.lock().expect("lock") = vec![running];
     let (_dir, core) = core(&[("work", &hub)]);
@@ -8162,6 +8230,7 @@ async fn team_cards_show_each_backend_model_and_cut_long_names() {
         tools: json!([]),
         requirements: Default::default(),
         skills: Vec::new(),
+        playbooks: Vec::new(),
     });
     let (_dir, core) = core(&[("work", &hub)]);
     let mut state = AppState::paired(["work"]);
@@ -8231,6 +8300,7 @@ async fn agent_topology_shows_general_handoffs_and_keeps_queued_lead_edge_pendin
         tools: serde_json::json!([]),
         requirements: Default::default(),
         skills: Vec::new(),
+        playbooks: Vec::new(),
     });
     *hub.tasks.lock().expect("lock") = vec![general_run, queued_api];
     let (_dir, core) = core(&[("work", &hub)]);
@@ -8274,5 +8344,223 @@ fn a_label_rule_reads_as_labelling_issues_in_the_repository() {
     assert_eq!(
         allows("label_issue", &json!({ "repository": "app" })),
         "label issues in app"
+    );
+}
+
+#[tokio::test]
+async fn space_skills_crud_versioning_rollback_and_mentions() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    assert!(state.skills_loading("work"));
+
+    let v1 = save_skill(&core, "work", "rust-review", "# Review v1".into()).await;
+    let (note, content) = state.apply_skill_change(v1).expect("v1 saved");
+    assert!(note.contains("/skill:rust-review (v1)"), "{note}");
+    assert_eq!(content.as_deref(), Some("# Review v1"));
+
+    let v2 = save_skill(&core, "work", "rust-review", "# Review v2".into()).await;
+    state.apply_skill_change(v2).expect("v2 saved");
+
+    let loaded = load_skills(&core, "work", Some("rust-review".to_owned())).await;
+    state.apply_skills(loaded);
+    assert!(!state.skills_loading("work"));
+    assert_eq!(state.space_skills("work").len(), 1);
+    assert_eq!(state.skill_selected_slug("work"), Some("rust-review"));
+    assert_eq!(
+        state.skill_selected("work").expect("selected").content,
+        "# Review v2"
+    );
+
+    let rows = state.skill_version_rows("work", &when());
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].current && rows[0].version == 2);
+    assert!(!rows[1].current && rows[1].version == 1);
+
+    state.inspect_skill_version("work", Some(1));
+    assert_eq!(
+        state
+            .skill_inspected("work")
+            .expect("inspected")
+            .content
+            .as_str(),
+        "# Review v1"
+    );
+
+    let restored = restore_skill_version(&core, "work", "rust-review", 1).await;
+    let (note, next) = state.apply_skill_change(restored).expect("restored");
+    assert!(note.contains("(v3)"), "{note}");
+    assert_eq!(next.as_deref(), Some("# Review v1"));
+    assert_eq!(state.skill_inspected("work"), None);
+
+    let deleted = delete_skill(&core, "work", "rust-review").await;
+    let (note, next) = state.apply_skill_change(deleted).expect("deleted");
+    assert!(note.contains("Deleted skill /skill:rust-review"), "{note}");
+    assert!(next.is_none());
+    assert!(state.space_skills("work").is_empty());
+
+    assert_eq!(
+        append_skill_mention("", "rust-review"),
+        "/skill:rust-review "
+    );
+    assert_eq!(
+        append_skill_mention("Audit this diff", "rust-review"),
+        "Audit this diff /skill:rust-review"
+    );
+    assert_eq!(
+        append_skill_mention("Audit this diff /skill:rust-review", "rust-review"),
+        "Audit this diff /skill:rust-review"
+    );
+    assert_eq!(
+        remove_skill_mention("Audit this /skill:rust-review diff please", "rust-review"),
+        "Audit this diff please"
+    );
+    assert_eq!(
+        toggle_skill_mention("Ship /skill:release-notes now", "release-notes"),
+        "Ship now"
+    );
+    assert_eq!(
+        toggle_skill_mention("Ship now", "release-notes"),
+        "Ship now /skill:release-notes"
+    );
+}
+
+#[tokio::test]
+async fn agent_playbooks_form_edit_and_used_by() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+
+    state.open_agent_form("work");
+    state
+        .agent_form_mut()
+        .playbooks
+        .push("rust-pr-review".to_owned());
+    state
+        .agent_form_mut()
+        .playbooks
+        .push("release-notes".to_owned());
+    state
+        .agent_form_mut()
+        .playbooks
+        .retain(|slug| slug != "release-notes");
+    assert_eq!(state.agent_form().playbooks, vec!["rust-pr-review"]);
+
+    work.org(OrgRequest::CreateAgentWithSkills {
+        name: "Reviewer".into(),
+        role: "reviewer".into(),
+        instructions: "Review.".into(),
+        backends: vec![BackendKind::Claude],
+        models: Default::default(),
+        skills: Vec::new(),
+        playbooks: state.agent_form().playbooks.clone(),
+    })
+    .await
+    .expect("created");
+    state.apply(refresh(&core).await);
+
+    let used_by = state.skill_used_by("work", "rust-pr-review");
+    assert_eq!(used_by.len(), 1);
+    assert_eq!(used_by[0].name, "Reviewer");
+
+    let fields = state.open_agent_edit("work", "Reviewer").expect("open");
+    assert_eq!(
+        state.agent_edit().expect("edit").playbooks,
+        vec!["rust-pr-review"]
+    );
+    assert_eq!(state.agent_update(&fields), Ok(None));
+
+    state
+        .agent_edit_mut()
+        .expect("edit")
+        .playbooks
+        .push("release-notes".to_owned());
+    let request = state
+        .agent_update(&fields)
+        .expect("valid")
+        .expect("changed");
+    assert_eq!(
+        request,
+        OrgRequest::UpdateAgent {
+            agent: "Reviewer".into(),
+            name: None,
+            role: None,
+            instructions: None,
+            backends: None,
+            models: None,
+            skills: None,
+            playbooks: Some(vec!["rust-pr-review".into(), "release-notes".into()]),
+        }
+    );
+    core.update_agent(Some("work"), request)
+        .await
+        .expect("updated");
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.skill_used_by("work", "release-notes")[0].name,
+        "Reviewer"
+    );
+
+    state.open_skill_view("work", "rust-pr-review");
+    assert_eq!(state.team_view_mode, TeamViewMode::Skills);
+    assert_eq!(state.skills_space(), Some("work"));
+}
+
+#[tokio::test]
+async fn task_playbooks_appear_in_spec_board_cards_and_header() {
+    let work = FakeHub::new("Work", Vec::new());
+    work.org(OrgRequest::CreateAgentWithSkills {
+        name: "Reviewer".into(),
+        role: "reviewer".into(),
+        instructions: "Review.".into(),
+        backends: vec![BackendKind::Claude],
+        models: Default::default(),
+        skills: Vec::new(),
+        playbooks: vec!["rust-pr-review".into()],
+    })
+    .await
+    .expect("agent");
+    work.bindings
+        .lock()
+        .expect("lock")
+        .push(binding("Reviewer", Mode::OnRequest));
+
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+
+    state.open_task_form("work", "api", true);
+    state.task_form_mut().agent = Some("Reviewer".into());
+    state.task_form_mut().toggle_playbook("rust-pr-review");
+    state.task_form_mut().toggle_playbook("release-notes");
+    let spec = state
+        .task_spec("work", "api", "Check PR", "Audit diffs")
+        .expect("valid");
+    assert_eq!(
+        spec.playbooks,
+        vec!["rust-pr-review".to_owned(), "release-notes".to_owned()]
+    );
+
+    let created = core.create_task(Some("work"), spec).await.expect("created");
+    assert_eq!(
+        created.playbooks,
+        vec!["rust-pr-review".to_owned(), "release-notes".to_owned()]
+    );
+
+    state.apply_project(load_project(&core, "work", "api").await);
+    let board = state.board("work", "api", &when());
+    assert_eq!(
+        board[0].cards[0].playbooks,
+        vec!["rust-pr-review".to_owned(), "release-notes".to_owned()]
+    );
+
+    state.apply_task(load_task(&core, "work", created.id).await);
+    let header = task_header(state.task("work", created.id).expect("detail"), &when());
+    assert_eq!(
+        header.playbooks,
+        vec!["rust-pr-review".to_owned(), "release-notes".to_owned()]
     );
 }

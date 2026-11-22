@@ -21,11 +21,14 @@ pub struct AgentEdit {
     /// The selected preset, or `BACKENDS.len()` for the saved order.
     pub backends: usize,
     pub skills: Vec<threadlane_core::model::SkillBinding>,
+    /// Space-wide composable skill playbook slugs attached to this agent.
+    pub playbooks: Vec<String>,
     pub installed_skills: Option<Result<crate::control::InstalledSkills, String>>,
     /// The index it opened with: Save sends backends only when it moved.
     opened_with: usize,
     saved_backends: Vec<BackendKind>,
     original_skills: Vec<threadlane_core::model::SkillBinding>,
+    original_playbooks: Vec<String>,
     opened_fields: Arc<AgentFields>,
     /// Whether the instructions show rendered as Markdown.
     pub preview: bool,
@@ -185,6 +188,8 @@ impl AppState {
             saved_backends: known.backends.clone(),
             skills: known.skills.clone(),
             original_skills: known.skills.clone(),
+            playbooks: known.playbooks.clone(),
+            original_playbooks: known.playbooks.clone(),
             installed_skills: None,
             opened_fields: Arc::new(fields.clone()),
             preview: false,
@@ -237,6 +242,8 @@ impl AppState {
         let request = OrgRequest::UpdateAgent {
             skills: (!same_skills(&edit.skills, &edit.original_skills))
                 .then(|| edit.skills.clone()),
+            playbooks: (!same_playbooks(&edit.playbooks, &edit.original_playbooks))
+                .then(|| edit.playbooks.clone()),
             agent: edit.agent.clone(),
             name: changed(name, &opened.name),
             role: changed(role, &opened.role),
@@ -246,6 +253,7 @@ impl AppState {
         };
         let OrgRequest::UpdateAgent {
             skills: None,
+            playbooks: None,
             name: None,
             role: None,
             instructions: None,
@@ -312,7 +320,8 @@ impl AppState {
             Arc::ptr_eq(&edit.opened_fields, &saved_from.opened_fields)
                 && (current != &submitted
                     || edit.backends != saved_from.backends
-                    || !same_skills(&edit.skills, &saved_from.skills))
+                    || !same_skills(&edit.skills, &saved_from.skills)
+                    || !same_playbooks(&edit.playbooks, &saved_from.playbooks))
         });
         if newer_edits {
             // These are the values represented by the completed request. Comparing the next
@@ -326,6 +335,7 @@ impl AppState {
                 edit.opened_fields = Arc::new(submitted);
                 edit.opened_with = saved_from.backends;
                 edit.original_skills.clone_from(&saved_from.skills);
+                edit.original_playbooks.clone_from(&saved_from.playbooks);
             }
         }
         self.agent_updated(saved_from, agent);
@@ -424,6 +434,11 @@ fn same_skills(
     a: &[threadlane_core::model::SkillBinding],
     b: &[threadlane_core::model::SkillBinding],
 ) -> bool {
+    a.len() == b.len() && a.iter().all(|s| b.contains(s)) && b.iter().all(|s| a.contains(s))
+}
+
+/// Space playbook bindings are a set: reordering them is not an edit.
+fn same_playbooks(a: &[String], b: &[String]) -> bool {
     a.len() == b.len() && a.iter().all(|s| b.contains(s)) && b.iter().all(|s| a.contains(s))
 }
 

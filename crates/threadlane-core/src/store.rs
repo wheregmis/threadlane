@@ -397,7 +397,7 @@ pub trait TaskStore: Send + Sync {
     /// `false` for a lead lane.
     async fn left_unwoken(&self, lane_id: LaneId) -> StoreResult<bool>;
     async fn tasks(&self, project_id: ProjectId) -> StoreResult<Vec<Task>>;
-    /// Edits a task and queues its wake instruction in the same transaction.
+    /// Updates a task and queues its wake instruction in the same transaction.
     /// `lease` is the editing run's, `None` when the user edits it.
     async fn update_task(
         &self,
@@ -405,6 +405,9 @@ pub trait TaskStore: Send + Sync {
         id: TaskId,
         update: TaskUpdate<'_>,
     ) -> StoreResult<Task>;
+    /// Merges space skill playbook slugs onto a task without duplicates,
+    /// preserving order.
+    async fn add_task_playbooks(&self, task_id: TaskId, playbooks: &[String]) -> StoreResult<Task>;
     /// Cancels a task that has not ended and reports it to the lead lane.
     /// Cancelling a cancelled task changes nothing. Pending events in its
     /// lane are skipped by the next run cycle.

@@ -87,6 +87,7 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await
@@ -419,6 +420,7 @@ async fn another_tasks_lane_sees_a_task_review_approval_under_any_registration_o
         priority: 0,
         created_by_call: None,
         created_at: hub.clock.now(),
+        playbooks: Vec::new(),
     };
     let a = hub
         .db
@@ -574,6 +576,7 @@ async fn with_no_reviewer_named_the_projects_reviewer_agent_reviews() {
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await
@@ -725,6 +728,7 @@ async fn cancelled_mid_run(hub: &TestHub) -> (Task, Lease, RunAssignment) {
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await
@@ -838,6 +842,7 @@ async fn the_reviewers_own_task_finishes_without_a_review_round() {
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await
@@ -907,6 +912,7 @@ async fn review_handoffs_share_machine_slots() {
                     priority: 0,
                     created_by_call: None,
                     created_at: hub.clock.now(),
+                    playbooks: Vec::new(),
                 },
             )
             .await
@@ -1969,6 +1975,7 @@ async fn a_task_nobody_asked_for_does_not_start_and_an_agent_set_to_off_never_ru
         priority: 0,
         created_by_call: None,
         created_at: hub.clock.now(),
+        playbooks: Vec::new(),
     };
     let unasked = hub
         .db

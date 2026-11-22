@@ -24,6 +24,8 @@ pub struct NewTaskSpec {
     pub repositories: Vec<String>,
     /// Tasks of the project it waits for.
     pub depends_on: Vec<TaskId>,
+    /// Space skill playbook slugs attached to this task.
+    pub playbooks: Vec<String>,
     /// Whether the task's work is kept in a draft pull request.
     pub draft_pr: bool,
 }
@@ -69,6 +71,7 @@ impl ClientCore {
             agent: spec.agent,
             repositories: spec.repositories,
             depends_on: spec.depends_on,
+            playbooks: spec.playbooks,
             client_request_id: uuid::Uuid::new_v4().to_string(),
         };
         self.one_task(space, request).await

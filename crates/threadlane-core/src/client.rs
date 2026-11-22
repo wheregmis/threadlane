@@ -207,6 +207,8 @@ pub enum OrgRequest {
         backends: Vec<BackendKind>,
         models: BTreeMap<String, String>,
         skills: Vec<crate::model::SkillBinding>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        playbooks: Vec<String>,
     },
     /// The bindings of a project. `None` means the General project.
     Bindings { project: Option<String> },
@@ -290,6 +292,8 @@ pub enum OrgRequest {
     UpdateAgent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         skills: Option<Vec<crate::model::SkillBinding>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        playbooks: Option<Vec<String>>,
         agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
@@ -1328,6 +1332,8 @@ pub enum TaskRequest {
         repositories: Vec<String>,
         #[serde(default)]
         depends_on: Vec<TaskId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        playbooks: Vec<String>,
         client_request_id: String,
     },
     /// Cancels a task that has not ended, and the tasks that wait on it;

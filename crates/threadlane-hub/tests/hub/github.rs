@@ -128,6 +128,7 @@ async fn leased_task_for(
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await
