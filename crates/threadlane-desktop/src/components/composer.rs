@@ -3,18 +3,33 @@
 use std::{rc::Rc, sync::Arc, time::Duration};
 
 use gpui_kit::component::button::ButtonVariants as _;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState, Undo};
+use gpui_kit::component::input::{
+    Enter, Escape, IndentInline, InputEvent, MoveDown, MoveUp, Textarea, TextareaState, Undo,
+};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use threadlane_core::time::{Clock as _, SystemClock};
-use threadlane_desktop::{Activity, AppState, Destination, Draft, Outgoing, sends_on_enter};
+use threadlane_desktop::{
+    Activity, AppState, Destination, Draft, MentionItem, MentionKind, MentionQuery, Outgoing,
+    complete_mention, load_modes, mention_at, sends_on_enter, step_selection,
+};
 
-use super::{button, chat_images, composer_surface, icon_button, meta};
+use super::{button, chat_images, composer_surface, icon_button, meta, status_dot};
 use crate::icons::AppIcon;
-use crate::tokens::{COMPOSER_MAX_ROWS, FIELD_RADIUS, SM, TYPE_BODY, XS};
+use crate::tokens::{COMPOSER_MAX_ROWS, FIELD_RADIUS, SM, Status, TYPE_BODY, TYPE_META, XS};
 use crate::{Desktop, Screen, Tab};
+
+/// The open `@`/`#` popover of one composer: the token being typed and the
+/// highlighted row. Esc closes it until the token starts somewhere else.
+#[derive(Debug, Default)]
+pub(crate) struct MentionPopover {
+    open: Option<(Draft, MentionQuery)>,
+    selected: usize,
+    dismissed: Option<(Draft, usize)>,
+}
 
 pub(crate) fn input(
     placeholder: &'static str,
@@ -46,6 +61,7 @@ pub(crate) fn subscribe(
                     && this.composer_shown.as_ref() == Some(&destination)
                 {
                     this.state.edit_draft(&destination, &input.read(cx).value());
+                    this.track_mention(draft, &destination, input, cx);
                     cx.notify();
                 }
             }
@@ -167,6 +183,205 @@ impl Desktop {
             .into_any_element()
     }
 
+    /// Opens, narrows or closes the mention popover after an edit.
+    fn track_mention(
+        &mut self,
+        draft: Draft,
+        destination: &Destination,
+        input: &Entity<TextareaState>,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, cursor) = {
+            let input = input.read(cx);
+            (input.value().to_string(), input.cursor())
+        };
+        let mention = mention_at(&text, cursor)
+            .filter(|mention| self.mention.dismissed != Some((draft, mention.range.start)));
+        let was_open = self.mention.open.is_some();
+        if mention.as_ref().map(|m| &m.query)
+            != self.mention.open.as_ref().map(|(_, open)| &open.query)
+        {
+            self.mention.selected = 0;
+        }
+        if mention.is_none() {
+            self.mention.dismissed = None;
+        }
+        let opened_for_agents = !was_open
+            && mention
+                .as_ref()
+                .is_some_and(|m| m.kind == MentionKind::Agent);
+        self.mention.open = mention.map(|mention| (draft, mention));
+        // Home and the task screen don't load bindings; fetch the project's on open.
+        if opened_for_agents && let Some((space, project)) = self.state.mention_project(destination)
+        {
+            let core = Arc::clone(&self.core);
+            self.run(
+                async move { load_modes(&*core.read().await, vec![(space, project)]).await },
+                |this, loaded, _| this.state.apply_modes(loaded),
+                cx,
+            );
+        }
+    }
+
+    /// The rows the popover shows for `draft` now, if it is open there.
+    fn mention_rows(&self, draft: Draft) -> Option<(MentionQuery, Vec<MentionItem>)> {
+        let (open, mention) = self.mention.open.as_ref()?;
+        let destination = self.composer_destination()?;
+        (*open == draft && destination.draft() == draft).then(|| {
+            (
+                mention.clone(),
+                self.state.mention_items(&destination, mention),
+            )
+        })
+    }
+
+    /// Puts the picked row into the draft in place of the token.
+    fn pick_mention(
+        &mut self,
+        draft: Draft,
+        item: &MentionItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, mention)) = self.mention.open.take() else {
+            return;
+        };
+        let input = self.draft_input(draft).clone();
+        let (text, cursor) = complete_mention(&input.read(cx).value(), &mention, &item.insert());
+        input.update(cx, |input, cx| {
+            input.set_value(text.clone(), window, cx);
+            input.set_selected_range(cursor..cursor, cx);
+        });
+        if let Some(destination) = self.composer_destination() {
+            self.state.edit_draft(&destination, &text);
+            if let MentionItem::Agent(agent) = item {
+                self.state.pick_agent(&destination, &agent.name);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Arrow, Enter, Tab and Esc while the popover is open; anything else,
+    /// or a closed popover, goes on to the field.
+    fn mention_key(
+        &mut self,
+        draft: Draft,
+        key: MentionKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((mention, rows)) = self.mention_rows(draft) else {
+            return false;
+        };
+        if rows.is_empty() && key != MentionKey::Close {
+            return false;
+        }
+        match key {
+            MentionKey::Up | MentionKey::Down => {
+                self.mention.selected =
+                    step_selection(self.mention.selected, rows.len(), key == MentionKey::Down);
+            }
+            MentionKey::Pick => {
+                let item = rows[self.mention.selected.min(rows.len() - 1)].clone();
+                self.pick_mention(draft, &item, window, cx);
+            }
+            MentionKey::Close => {
+                self.mention.open = None;
+                self.mention.dismissed = Some((draft, mention.range.start));
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn mention_popover(&self, draft: Draft, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (mention, rows) = self.mention_rows(draft)?;
+        let empty = match mention.kind {
+            MentionKind::Agent => "No enabled agent matches",
+            MentionKind::Task => "No task matches",
+        };
+        let heading = match mention.kind {
+            MentionKind::Agent => "Dispatch an agent",
+            MentionKind::Task => "Reference a task",
+        };
+        let selected = self.mention.selected.min(rows.len().saturating_sub(1));
+        let list = v_flex()
+            .id("mention-popover")
+            .absolute()
+            .bottom_full()
+            .left_0()
+            .mb(XS)
+            .w(px(320.))
+            .max_w_full()
+            .p(XS)
+            .gap(px(2.))
+            .rounded(FIELD_RADIUS)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_md()
+            .child(
+                div()
+                    .px(SM)
+                    .py(XS)
+                    .text_size(TYPE_META)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(heading),
+            )
+            .children(
+                rows.is_empty()
+                    .then(|| div().px(SM).py(XS).child(meta(empty, cx))),
+            )
+            .children(rows.into_iter().enumerate().map(|(index, item)| {
+                let row = h_flex()
+                    .id(("mention", index))
+                    .gap(SM)
+                    .px(SM)
+                    .py(XS)
+                    .rounded(FIELD_RADIUS)
+                    .min_w_0()
+                    .cursor_pointer()
+                    .when(index == selected, |row| row.bg(cx.theme().muted))
+                    .hover(|row| row.bg(cx.theme().muted));
+                let row = match &item {
+                    MentionItem::Agent(agent) => row
+                        .child(status_dot(
+                            if agent.busy {
+                                Status::Running
+                            } else {
+                                Status::Done
+                            },
+                            cx,
+                        ))
+                        .child(div().flex_none().child(agent.name.clone()))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if agent.busy {
+                                    format!("{} · busy", agent.role)
+                                } else {
+                                    agent.role.clone()
+                                }),
+                        ),
+                    MentionItem::Task(id, title) => row
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(id.to_string()),
+                        )
+                        .child(div().min_w_0().truncate().child(title.clone())),
+                };
+                row.on_click(cx.listener(move |this, _, window, cx| {
+                    this.pick_mention(draft, &item, window, cx);
+                    this.draft_input(draft).focus_handle(cx).focus(window, cx);
+                }))
+            }));
+        Some(deferred(list).into_any_element())
+    }
+
     fn draft_input(&self, draft: Draft) -> &Entity<TextareaState> {
         match draft {
             Draft::Lead => &self.composer,
@@ -264,7 +479,38 @@ impl Desktop {
                     }))
             })
         });
+        let mention_hint = destination
+            .as_ref()
+            .filter(|target| matches!(target, Destination::Lead(..)))
+            .and_then(|target| self.state.mention_hint(target));
         composer_surface(cx)
+            .relative()
+            .capture_action(cx.listener(move |this, _: &MoveUp, window, cx| {
+                if this.mention_key(draft, MentionKey::Up, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(move |this, _: &MoveDown, window, cx| {
+                if this.mention_key(draft, MentionKey::Down, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(move |this, enter: &Enter, window, cx| {
+                if !enter.shift && this.mention_key(draft, MentionKey::Pick, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(move |this, _: &IndentInline, window, cx| {
+                if this.mention_key(draft, MentionKey::Pick, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(move |this, _: &Escape, window, cx| {
+                if this.mention_key(draft, MentionKey::Close, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .children(self.mention_popover(draft, cx))
             .children(images)
             .child(
                 Textarea::new(self.draft_input(draft))
@@ -314,6 +560,7 @@ impl Desktop {
                             })),
                     ),
             )
+            .children(mention_hint.map(|hint| meta(hint, cx)))
             .children(loading_images.then(|| meta("Preparing images…", cx)))
             .children(held.map(|seconds| {
                 h_flex()
@@ -452,6 +699,20 @@ impl Desktop {
     fn deliver_draft(&mut self, outgoing: Outgoing, cx: &mut Context<Self>) {
         self.state.sending(&outgoing);
         let core = Arc::clone(&self.core);
+        if !outgoing.dispatch.is_empty() {
+            self.run(
+                async move {
+                    let (started, result) = outgoing.dispatch(&*core.read().await).await;
+                    (outgoing, started, result)
+                },
+                |this, (outgoing, started, result), cx| {
+                    this.state.finish_dispatch(outgoing, &started, result);
+                    this.load_screen(cx);
+                },
+                cx,
+            );
+            return;
+        }
         self.run(
             async move {
                 let result = outgoing.deliver(&*core.read().await).await;
@@ -532,4 +793,12 @@ impl Desktop {
         }
         cx.notify();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MentionKey {
+    Up,
+    Down,
+    Pick,
+    Close,
 }
