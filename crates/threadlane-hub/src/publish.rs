@@ -146,7 +146,10 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
              expected_head, its current full head SHA. To merge a batch the user asked for on one \
              approval, give pulls instead of number and expected_head: the pull requests in merge \
              order, each with its current full head SHA. Each merges only if its head is still \
-             that SHA; the batch stops at the first that fails.",
+             that SHA; the batch stops at the first that fails. If an approved merge fails only \
+             because the base branch moved, call it again with the same arguments: while the \
+             head is unchanged and the pull request is cleanly mergeable it is retried under \
+             the same approval, up to 3 times.",
             json!({
                 "type":"object","properties":{
                     "repository":repository,
