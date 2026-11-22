@@ -142,6 +142,12 @@ impl FakeGh {
                echo 'https://github.test/me/app/pull/7'\n\
              elif [ \"$1 $2\" = \"pr list\" ] && [ -f {record}/created ]; then\n\
                echo 'https://github.test/me/app/pull/7'\n\
+             elif [ \"$1 $2 $3\" = \"pr merge 13\" ]; then\n\
+               echo 'Head branch was modified. Review and try the merge again. (HTTP 409)' >&2; exit 1\n\
+             elif [ \"$1 $2 $3\" = \"pr view 15\" ]; then\n\
+               echo OPEN\n\
+             elif [ \"$1 $2\" = \"pr view\" ]; then\n\
+               echo MERGED\n\
              elif [ \"$3\" = \"--paginate\" ] && [ -f {record}/reviews ]; then\n\
                cat {record}/reviews\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/ref/; then\n\
@@ -976,4 +982,80 @@ async fn a_base_missing_from_the_remote_is_refused_before_anything_is_pushed() {
         .find(|call| call[1] == "create")
         .unwrap();
     assert_eq!(create[5..7], ["--base", "release"]);
+}
+
+#[tokio::test]
+async fn a_batch_merge_pins_each_head_and_stops_at_the_first_that_moved() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let (a, b, c) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+    let batch = RepositoryAction::MergeBatch {
+        pulls: vec![
+            (12.try_into().unwrap(), a.clone()),
+            (13.try_into().unwrap(), b.clone()),
+            (14.try_into().unwrap(), c),
+        ],
+    };
+    let error = forge
+        .apply("https://github.test/acme/app.git", &batch)
+        .await
+        .unwrap_err();
+    assert!(error.0.contains("stopped at #13"), "{error}");
+    assert!(error.0.contains("merged #12"), "{error}");
+    assert!(error.0.contains("HTTP 409"), "{error}");
+    let repo = "--repo=github.test/acme/app";
+    assert_eq!(
+        gh.invocations(),
+        [
+            vec![
+                "pr".to_owned(),
+                "merge".into(),
+                "12".into(),
+                "--merge".into(),
+                format!("--match-head-commit={a}"),
+                repo.into()
+            ],
+            vec![
+                "pr".to_owned(),
+                "view".into(),
+                "12".into(),
+                "--json=state".into(),
+                "--jq=.state".into(),
+                repo.into()
+            ],
+            vec![
+                "pr".to_owned(),
+                "merge".into(),
+                "13".into(),
+                "--merge".into(),
+                format!("--match-head-commit={b}"),
+                repo.into()
+            ],
+        ],
+        "#14 is not attempted"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_merge_stops_at_a_pull_request_that_was_only_queued() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let batch = RepositoryAction::MergeBatch {
+        pulls: vec![
+            (15.try_into().unwrap(), "a".repeat(40)),
+            (16.try_into().unwrap(), "b".repeat(40)),
+        ],
+    };
+    let error = forge
+        .apply("https://github.test/acme/app.git", &batch)
+        .await
+        .unwrap_err();
+    assert!(error.0.contains("stopped at #15"), "{error}");
+    assert!(error.0.contains("none merged"), "{error}");
+    assert!(error.0.contains("reports it OPEN"), "{error}");
+    let calls = gh.invocations();
+    assert_eq!(calls.len(), 2, "#16 is not attempted: {calls:?}");
+    assert_eq!(calls[1][..3], ["pr", "view", "15"]);
 }

@@ -846,3 +846,83 @@ async fn a_close_without_the_full_head_sha_it_was_shown_is_refused() {
         assert!(w.forge.calls().is_empty(), "{head}");
     }
 }
+
+/// The second PR head of a batch merge.
+const OTHER_HEAD: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+#[tokio::test]
+async fn a_batch_merge_takes_one_approval_for_its_pinned_ordered_list() {
+    let args = json!({"repository":"app","pulls":[
+        {"number":14,"expected_head":HEAD},
+        {"number":12,"expected_head":OTHER_HEAD}
+    ]});
+    for mode in [Mode::OnRequest, Mode::Autonomous] {
+        let w = world(MERGE, args.clone(), mode).await;
+        w.backend.push_answer(answer("allow"));
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Merge #14 then #12").await;
+        work(&sim).await;
+        let decisions = sim.decisions().await;
+        assert_eq!(decisions.len(), 1, "{mode}");
+        let decision = &decisions[0];
+        assert!(!decision.approved(), "{mode}");
+        // No standing rule: the approval covers only this list.
+        assert!(!decision.offers_standing_rule, "{mode}");
+        assert!(w.forge.calls().is_empty(), "{mode}");
+        let first = decision.question.find(&format!("#14 at {HEAD}")).unwrap();
+        let second = decision
+            .question
+            .find(&format!("#12 at {OTHER_HEAD}"))
+            .unwrap();
+        assert!(first < second, "{}", decision.question);
+        assert!(
+            sim.api
+                .decisions(DecisionRequest::AnswerAlways {
+                    decision: decision.id,
+                    option: "approve".into(),
+                    note: None,
+                })
+                .await
+                .is_err()
+        );
+        drive(&sim, "approve", None).await.unwrap();
+        let calls = w.forge.calls();
+        let [ForgeCall::Apply { action, .. }] = calls.as_slice() else {
+            panic!("expected one batch merge, got {calls:?}");
+        };
+        assert_eq!(
+            action,
+            &RepositoryAction::MergeBatch {
+                pulls: vec![
+                    (14.try_into().unwrap(), HEAD.into()),
+                    (12.try_into().unwrap(), OTHER_HEAD.into()),
+                ],
+            }
+        );
+        assert_eq!(sim.decisions().await.len(), 1, "{mode}");
+        assert_invariants(&sim, MERGE).await;
+    }
+}
+
+#[tokio::test]
+async fn a_batch_merge_that_does_not_pin_each_pull_once_is_refused() {
+    for pulls in [
+        json!([]),
+        json!([{"number":12}]),
+        json!([{"number":12,"expected_head":"0123456"}]),
+        json!([{"number":12,"expected_head":HEAD},{"number":12,"expected_head":OTHER_HEAD}]),
+        json!([{"number":12,"expected_head":HEAD,"delete_branch":true}]),
+    ] {
+        let w = world(
+            MERGE,
+            json!({"repository":"app","pulls":pulls}),
+            Mode::Autonomous,
+        )
+        .await;
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Merge them").await;
+        work(&sim).await;
+        assert!(sim.decisions().await.is_empty(), "{pulls}");
+        assert!(w.forge.calls().is_empty(), "{pulls}");
+    }
+}
