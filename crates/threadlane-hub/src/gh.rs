@@ -118,6 +118,18 @@ impl GhSource {
         Ok(pages)
     }
 
+    /// Every page of `path`, or an error when [`MAX_PAGES`] leave one unread:
+    /// for a read that authorizes, where an unseen item must not pass.
+    async fn get_all_pages(&self, path: &str) -> Result<Vec<Answer>, GithubError> {
+        let pages = self.get_pages(&[], path).await?;
+        if pages.len() >= MAX_PAGES && pages.last().is_some_and(|page| page.next.is_some()) {
+            return Err(GithubError(format!(
+                "GitHub pagination exceeded {MAX_PAGES} pages: {path}"
+            )));
+        }
+        Ok(pages)
+    }
+
     async fn get_page(&self, extra: &[String], path: &str) -> Result<Answer, GithubError> {
         let (ok, output) = self.get(extra, path).await?;
         match parse_answer(&output) {
@@ -419,7 +431,7 @@ impl GithubSource for GhSource {
             encode(&head_sha)
         );
         let mut checks = Vec::new();
-        for page in self.get_pages(&[], &path).await? {
+        for page in self.get_all_pages(&path).await? {
             let page = page.json(&path)?;
             let runs = page.get("check_runs").and_then(Json::as_array);
             checks.extend(runs.into_iter().flatten().map(|run| {
@@ -1417,6 +1429,37 @@ case "$last" in
         );
         assert!(source.pull_request_state("acme/../x", 529).await.is_err());
         assert!(source.pull_request_state("acme/widgets", 7).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pull_request_state_with_check_runs_past_the_page_limit_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pull: Json = serde_json::from_str(PULL).unwrap();
+        pull["head"]["repo"] = serde_json::json!({"full_name": "acme/widgets"});
+        let green = r#"{"total_count":2000,"check_runs":[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]}"#;
+        let endless = format!(
+            "HTTP/2.0 200 OK\nContent-Type: application/json\nLink: \
+             <https://api.github.com/repos/acme/widgets/commits/x/check-runs?per_page=100&page=2>; \
+             rel=\"next\"\n\n{green}"
+        );
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                ("*/pulls/529", "pull.http", ok(&pull.to_string())),
+                ("*check-runs*", "check-runs.http", endless),
+            ],
+        ));
+        let error = source
+            .pull_request_state("acme/widgets", 529)
+            .await
+            .unwrap_err();
+        assert!(error.0.contains("pagination exceeded"), "{error}");
+        assert_eq!(
+            calls(dir.path()).len(),
+            1 + MAX_PAGES,
+            "the limit still holds"
+        );
     }
 
     #[cfg(unix)]
