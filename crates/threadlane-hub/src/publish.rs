@@ -141,10 +141,12 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         ),
         define(
             MERGE,
-            "Merge a pull request in a registered project repository.",
+            "Merge a pull request in a registered project repository, only if its head is still \
+             expected_head, its current full head SHA.",
             json!({
-                "type":"object","properties":{"repository":repository,"number":{"type":"integer","minimum":1}},
-                "required":["repository","number"],"additionalProperties":false
+                "type":"object","properties":{"repository":repository,"number":{"type":"integer","minimum":1},
+                    "expected_head":{"type":"string","description":"The pull request's current full head SHA."}},
+                "required":["repository","number","expected_head"],"additionalProperties":false
             }),
         ),
         define(
@@ -486,8 +488,11 @@ pub(crate) fn repository_action(
             })
         }
         MERGE => {
-            fields(a, &["repository", "number"])?;
-            Ok(RepositoryAction::Merge { number: number()? })
+            fields(a, &["repository", "number", EXPECTED_HEAD])?;
+            Ok(RepositoryAction::Merge {
+                number: number()?,
+                expected_head: commit(EXPECTED_HEAD)?,
+            })
         }
         MARK_READY => {
             fields(a, &["repository", "number"])?;
@@ -899,8 +904,9 @@ pub(crate) async fn proposal(
                     arguments["number"]
                 ),
                 MERGE => format!(
-                    "Merge pull request {slug}#{} in {name}?",
-                    arguments["number"]
+                    "Merge pull request {slug}#{} in {name} at head {}?",
+                    arguments["number"],
+                    arguments[EXPECTED_HEAD].as_str().unwrap_or_default()
                 ),
                 MARK_READY => format!(
                     "Mark draft pull request {slug}#{} in {name} ready for review?",

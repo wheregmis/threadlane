@@ -118,6 +118,18 @@ impl GhSource {
         Ok(pages)
     }
 
+    /// Every page of `path`, or an error when [`MAX_PAGES`] leaves some
+    /// unread, for answers that must be complete, such as check state.
+    async fn get_every_page(&self, path: &str) -> Result<Vec<Answer>, GithubError> {
+        let pages = self.get_pages(&[], path).await?;
+        if pages.len() == MAX_PAGES && pages.last().is_some_and(|page| page.next.is_some()) {
+            return Err(GithubError(format!(
+                "gh api {path} has more than {MAX_PAGES} pages; not all were read"
+            )));
+        }
+        Ok(pages)
+    }
+
     async fn get_page(&self, extra: &[String], path: &str) -> Result<Answer, GithubError> {
         let (ok, output) = self.get(extra, path).await?;
         match parse_answer(&output) {
@@ -419,7 +431,7 @@ impl GithubSource for GhSource {
             encode(&head_sha)
         );
         let mut checks = Vec::new();
-        for page in self.get_pages(&[], &path).await? {
+        for page in self.get_every_page(&path).await? {
             let page = page.json(&path)?;
             let runs = page.get("check_runs").and_then(Json::as_array);
             checks.extend(runs.into_iter().flatten().map(|run| {
@@ -1417,6 +1429,29 @@ case "$last" in
         );
         assert!(source.pull_request_state("acme/../x", 529).await.is_err());
         assert!(source.pull_request_state("acme/widgets", 7).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pull_request_state_with_unread_check_pages_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pull: Json = serde_json::from_str(PULL).unwrap();
+        pull["head"]["repo"] = serde_json::json!({"full_name": "acme/widgets"});
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                ("*/pulls/529", "pull.http", ok(&pull.to_string())),
+                ("*check-runs*", "check-runs.http", ENDLESS.to_owned()),
+                // Where the endless fixture's next link points.
+                ("*/comments*", "comments.http", ENDLESS.to_owned()),
+            ],
+        ));
+        let error = source
+            .pull_request_state("acme/widgets", 529)
+            .await
+            .unwrap_err();
+        assert!(error.0.contains("not all were read"), "{error}");
+        assert_eq!(calls(dir.path()).len(), 1 + MAX_PAGES);
     }
 
     #[cfg(unix)]
