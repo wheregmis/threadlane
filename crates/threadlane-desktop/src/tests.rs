@@ -78,6 +78,8 @@ struct FakeHub {
     rules: Mutex<Vec<StandingRuleSummary>>,
     /// The space's ceiling; Assisted until set.
     ceiling: Mutex<Option<Mode>>,
+    /// Agents whose task creation fails.
+    refused_agents: Mutex<Vec<String>>,
     /// The project ceilings set, by project.
     project_ceilings: Mutex<Vec<(Option<String>, Mode)>>,
     /// The decisions answered with "always".
@@ -887,6 +889,9 @@ impl HubApi for FakeHub {
                 depends_on,
                 ..
             } => {
+                if self.refused_agents.lock().expect("lock").contains(&agent) {
+                    return Err(ApiError::Invalid(format!("{agent} is busy")));
+                }
                 let mut created = task(
                     i64::try_from(tasks.len()).expect("few") + 1,
                     TaskStatus::Queued,
@@ -8351,12 +8356,16 @@ async fn an_agent_mention_dispatches_a_task_with_the_thread_and_referenced_tasks
     state.edit_draft(&to, "check it");
     assert_eq!(state.mention_hint(&to), None);
     state.edit_draft(&to, "@Reviewer check #T-0002 please");
+    assert_eq!(state.mention_hint(&to), None, "typed, not picked");
+    state.pick_agent(&to, "Reviewer");
     assert_eq!(
         state.mention_hint(&to).as_deref(),
         Some("Goes to @Reviewer as a new task, not the lead.")
     );
     let task_to = Destination::Task("work".into(), TaskId(1));
     state.edit_draft(&task_to, "@Engineer @Reviewer look");
+    state.pick_agent(&task_to, "Engineer");
+    state.pick_agent(&task_to, "Reviewer");
     assert_eq!(
         state.task_hint("work", TaskId(1)),
         "Goes to @Engineer and @Reviewer as new tasks, not T-0001."
@@ -8372,9 +8381,10 @@ async fn an_agent_mention_dispatches_a_task_with_the_thread_and_referenced_tasks
         0,
         "a dispatch is not shown as a message"
     );
-    let started = send.dispatch(&core).await;
-    state.finish_dispatch(send, started);
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
     assert_eq!(state.draft(&to), "");
+    assert!(state.picked_agents(&to).is_empty());
     let tasks = work.tasks.lock().expect("lock");
     let created = tasks.last().expect("created");
     assert_eq!(created.agent, "Reviewer");
@@ -8384,4 +8394,127 @@ async fn an_agent_mention_dispatches_a_task_with_the_thread_and_referenced_tasks
     assert!(goal.contains("Asked from the api chat."), "{goal}");
     assert!(goal.contains("Referenced T-0002 \"Fix login\""), "{goal}");
     assert!(goal.contains("Make login pass"), "{goal}");
+}
+
+/// A space `work` with Engineer and Reviewer bound in `api`, its lead chat
+/// as the destination, and holds off.
+async fn mention_space() -> (Arc<FakeHub>, TempDir, ClientCore, AppState, Destination) {
+    let work = FakeHub::new("Work", Vec::new());
+    work.bindings.lock().expect("lock").extend([
+        binding("Lead", Mode::OnRequest),
+        binding("Engineer", Mode::Assisted),
+        binding("Reviewer", Mode::Assisted),
+    ]);
+    let (dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.set_client_dir(dir.path().to_owned());
+    state.set_hold_messages(false).unwrap();
+    state.apply(refresh(&core).await);
+    state.apply_modes(load_modes(&core, vec![("work".into(), "api".into())]).await);
+    (
+        work,
+        dir,
+        core,
+        state,
+        Destination::Lead("work".into(), "api".into()),
+    )
+}
+
+#[tokio::test]
+async fn only_a_picked_agent_chip_dispatches() {
+    let (_work, _dir, _core, mut state, to) = mention_space().await;
+    state.edit_draft(&to, "ask @Reviewer later");
+    assert_eq!(state.mention_hint(&to), None);
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    assert!(send.dispatch.is_empty(), "typed text goes to the lead");
+    assert_eq!(state.outgoing().count(), 1);
+
+    let task_to = to;
+    state.edit_draft(&task_to, "@Reviewer @Engineer look");
+    state.pick_agent(&task_to, "Reviewer");
+    assert_eq!(
+        state.mentioned_agents(&task_to, "@Reviewer @Engineer look"),
+        ["Reviewer"]
+    );
+    state.edit_draft(&task_to, "@Reviewe @Engineer look");
+    assert!(state.picked_agents(&task_to).is_empty(), "editing un-picks");
+    state.edit_draft(&task_to, "@Reviewer @Engineer look");
+    assert!(
+        state.picked_agents(&task_to).is_empty(),
+        "retyping does not re-pick"
+    );
+}
+
+#[tokio::test]
+async fn a_dispatch_with_images_is_blocked_and_keeps_the_draft() {
+    let (work, _dir, _core, mut state, to) = mention_space().await;
+    let image = ImageAttachment::new("shot.png".into(), vec![1, 2, 3]);
+    state.edit_draft(&to, "@Reviewer look at this");
+    state.pick_agent(&to, "Reviewer");
+    state.attach_images(&to, Ok(vec![image.clone()]));
+    let request = state.request_send(to.clone(), Timestamp::from_millis(5_000));
+    assert!(request.immediate.is_none() && request.held.is_none());
+    assert!(
+        state
+            .send_error(&to)
+            .is_some_and(|why| why.contains("can't take images")),
+        "{:?}",
+        state.send_error(&to)
+    );
+    assert_eq!(state.draft(&to), "@Reviewer look at this");
+    assert_eq!(state.draft_images(&to), &[image]);
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+    assert!(work.tasks.lock().expect("lock").is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_dispatch_retries_only_the_agents_that_did_not_start() {
+    let (work, _dir, core, mut state, to) = mention_space().await;
+    work.refused_agents
+        .lock()
+        .expect("lock")
+        .push("Reviewer".into());
+    state.edit_draft(&to, "@Engineer @Reviewer look");
+    state.pick_agent(&to, "Engineer");
+    state.pick_agent(&to, "Reviewer");
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    let (started, result) = send.dispatch(&core).await;
+    assert_eq!(started.len(), 1);
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "@Reviewer look");
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+    let why = state.send_error(&to).expect("error");
+    assert!(
+        why.starts_with("Started T-0001 for @Engineer. @Reviewer did not start"),
+        "{why}"
+    );
+
+    work.refused_agents.lock().expect("lock").clear();
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(6_000))
+        .immediate
+        .expect("sent again");
+    let agents: Vec<&str> = send
+        .dispatch
+        .iter()
+        .map(|spec| spec.agent.as_str())
+        .collect();
+    assert_eq!(agents, ["Reviewer"]);
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "");
+    let created: Vec<String> = work
+        .tasks
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|task| task.agent.clone())
+        .collect();
+    assert_eq!(created, ["Engineer", "Reviewer"]);
 }

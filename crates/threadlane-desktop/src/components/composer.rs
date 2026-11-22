@@ -254,6 +254,9 @@ impl Desktop {
         });
         if let Some(destination) = self.composer_destination() {
             self.state.edit_draft(&destination, &text);
+            if let MentionItem::Agent(agent) = item {
+                self.state.pick_agent(&destination, &agent.name);
+            }
         }
         cx.notify();
     }
@@ -699,11 +702,11 @@ impl Desktop {
         if !outgoing.dispatch.is_empty() {
             self.run(
                 async move {
-                    let result = outgoing.dispatch(&*core.read().await).await;
-                    (outgoing, result)
+                    let (started, result) = outgoing.dispatch(&*core.read().await).await;
+                    (outgoing, started, result)
                 },
-                |this, (outgoing, result), cx| {
-                    this.state.finish_dispatch(outgoing, result);
+                |this, (outgoing, started, result), cx| {
+                    this.state.finish_dispatch(outgoing, &started, result);
                     this.load_screen(cx);
                 },
                 cx,
