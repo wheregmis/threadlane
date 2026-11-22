@@ -7,12 +7,14 @@ use async_trait::async_trait;
 use serde_json::json;
 use tempfile::TempDir;
 use threadlane_client::ClientDirs;
+use threadlane_core::client::TaskPullRequest;
 use threadlane_core::client::{
     Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
     MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
     PairingRequest, RecordedEvent, RunStep, RunSummary, RunUsage, StandingRuleSummary, TaskReply,
     TaskRequest, TimerReply, TimerRequest, UserMessage,
 };
+use threadlane_core::github::{CheckStatus, PullRequestStatus};
 use threadlane_core::ids::{
     AgentId, LaneId, MachineId, OutboxId, RepositoryId, RunId, SessionId, TimerId,
 };
@@ -84,6 +86,11 @@ struct FakeHub {
     always: Mutex<Vec<DecisionId>>,
     /// The hub's default model per backend, as `info` reports it.
     default_models: Mutex<BTreeMap<BackendKind, String>>,
+    /// Each task's pull requests, as `task_pull_requests` answers.
+    pulls: Mutex<BTreeMap<TaskId, Vec<TaskPullRequest>>>,
+    /// Each task's pull request files; a task without any answers like a
+    /// hub from before they could be read.
+    pull_files: Mutex<BTreeMap<TaskId, Vec<threadlane_core::client::PullRequestFiles>>>,
 }
 
 impl FakeHub {
@@ -655,7 +662,7 @@ impl HubApi for FakeHub {
             OverviewRequest::RecordedCount => Ok(OverviewReply::RecordedCount {
                 total: u64::try_from(self.recorded.lock().expect("lock").len()).expect("few"),
             }),
-            OverviewRequest::Task { task } => {
+            OverviewRequest::Task { task } | OverviewRequest::TaskOverview { task } => {
                 let summary = tasks
                     .into_iter()
                     .find(|summary| summary.task.id == task)
@@ -708,6 +715,23 @@ impl HubApi for FakeHub {
                 })
             }
             OverviewRequest::Work => Err(ApiError::Invalid("unknown variant `work`".to_owned())),
+            OverviewRequest::TaskPullRequests { task } => Ok(OverviewReply::TaskPullRequests {
+                pulls: self
+                    .pulls
+                    .lock()
+                    .unwrap()
+                    .get(&task)
+                    .cloned()
+                    .unwrap_or_default(),
+            }),
+            OverviewRequest::TaskPullFiles { task } => self
+                .pull_files
+                .lock()
+                .unwrap()
+                .get(&task)
+                .cloned()
+                .map(|pulls| OverviewReply::TaskPullFiles { pulls })
+                .ok_or_else(|| ApiError::Invalid("unknown variant `task_pull_files`".to_owned())),
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -8322,6 +8346,212 @@ fn a_label_rule_reads_as_labelling_issues_in_the_repository() {
     assert_eq!(
         allows("label_issue", &json!({ "repository": "app" })),
         "label issues in app"
+    );
+}
+
+fn pull(number: u64, status: PullRequestStatus, conflicted: bool) -> TaskPullRequest {
+    use threadlane_core::client::TaskCheckRun;
+    TaskPullRequest {
+        repository: "acme/api".into(),
+        number,
+        url: format!("https://github.com/acme/api/pull/{number}"),
+        status,
+        head_sha: "a".repeat(40),
+        checks: [
+            ("fmt", CheckStatus::Passing),
+            ("test", CheckStatus::Running),
+            ("clippy", CheckStatus::Passing),
+        ]
+        .map(|(name, status)| TaskCheckRun {
+            name: name.into(),
+            status,
+        })
+        .into(),
+        mergeable_state: if conflicted { "dirty" } else { "clean" }.into(),
+        conflicted,
+        refreshed_at: Timestamp::from_millis(0),
+    }
+}
+
+#[tokio::test]
+async fn a_task_and_its_board_show_each_pull_request_with_its_checks() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().unwrap() = vec![
+        task(1, TaskStatus::Done, None),
+        task(2, TaskStatus::Running, None),
+        task(3, TaskStatus::Queued, None),
+    ];
+    work.pulls
+        .lock()
+        .unwrap()
+        .insert(TaskId(2), vec![pull(42, PullRequestStatus::Draft, true)]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+
+    state.apply_task(load_task_overview(&core, "work", TaskId(2)).await);
+    assert!(state.task("work", TaskId(2)).is_some(), "the task loaded");
+    let pulls = state.task_pulls("work", TaskId(2));
+    assert_eq!(pulls.len(), 1);
+    assert_eq!(pull_label(&pulls[0]), "#42 Draft");
+    assert!(pulls[0].conflicted);
+    let pills: Vec<_> = check_counts(&pulls[0].checks)
+        .into_iter()
+        .map(|(status, n)| check_label(status, n))
+        .collect();
+    assert_eq!(pills, ["2 passing", "1 running"]);
+
+    // The board asks for open tasks first, newest first, then ended ones.
+    state.apply_project(load_project(&core, "work", "api").await);
+    let candidates = state.pull_candidates("work", "api");
+    assert_eq!(candidates, [TaskId(3), TaskId(2), TaskId(1)]);
+    work.pulls
+        .lock()
+        .unwrap()
+        .insert(TaskId(1), vec![pull(7, PullRequestStatus::Merged, false)]);
+    state.apply_pulls(load_pulls(&core, "work", candidates).await);
+    assert_eq!(
+        pull_label(&state.task_pulls("work", TaskId(1))[0]),
+        "#7 Merged"
+    );
+    assert!(state.task_pulls("work", TaskId(3)).is_empty());
+
+    // A hub that cannot be reached keeps the strip that was shown.
+    work.down.store(true, Ordering::SeqCst);
+    state.apply_pulls(load_pulls(&core, "work", [TaskId(1)]).await);
+    assert_eq!(state.task_pulls("work", TaskId(1)).len(), 1);
+}
+
+#[tokio::test]
+async fn the_review_walks_a_tasks_files_and_quotes_a_hunk_into_its_draft() {
+    use threadlane_core::github::PullRequestFile;
+    let work = FakeHub::new("Work", Vec::new());
+    let mut done = task(4, TaskStatus::Done, None);
+    // Before its pull request files load, the merge-check preview shows.
+    done.task.result = Some(json!({ "merge": [{
+        "repository": "api",
+        "branch": "main",
+        "base": "b".repeat(40),
+        "conflicts": [],
+        "diff": {
+            "repository": "api",
+            "base_branch": "main",
+            "files": [{ "path": "src/lib.rs", "insertions": 1, "deletions": 1, "binary": false }],
+            "insertions": 1,
+            "deletions": 1,
+            "patch": "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n"
+        }
+    }]}));
+    *work.tasks.lock().unwrap() = vec![done];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_task(load_task(&core, "work", TaskId(4)).await);
+    state.open_review("work", TaskId(4));
+    assert!(state.review("work", TaskId(5)).is_none());
+
+    // An older hub cannot list the files: the preview stays.
+    state.apply_pull_files(load_pull_files(&core, "work", TaskId(4)).await);
+    let files = state.review_files("work", TaskId(4));
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].hunks[0].lines.len(), 3);
+
+    // A hub that lists no files says why.
+    work.pull_files
+        .lock()
+        .unwrap()
+        .insert(TaskId(4), Vec::new());
+    state.apply_pull_files(load_pull_files(&core, "work", TaskId(4)).await);
+    assert_eq!(
+        state.pull_files_note("work", TaskId(4)).as_deref(),
+        Some("This task has no pull request yet.")
+    );
+
+    let file = |path: &str, patch: Option<&str>| PullRequestFile {
+        path: path.into(),
+        previous_path: None,
+        status: "modified".into(),
+        additions: 2,
+        deletions: 1,
+        patch: patch.map(str::to_owned),
+    };
+    work.pull_files.lock().unwrap().insert(
+        TaskId(4),
+        vec![
+            threadlane_core::client::PullRequestFiles {
+                repository: "acme/api".into(),
+                number: 42,
+                head_sha: "a".repeat(40),
+                files: vec![
+                    file("src/lib.rs", Some("@@ -3,2 +3,3 @@ fn a\n x\n-y\n+z\n+w\n")),
+                    file("logo.png", None),
+                ],
+            },
+            threadlane_core::client::PullRequestFiles {
+                repository: "acme/web".into(),
+                number: 9,
+                head_sha: "c".repeat(40),
+                files: vec![file("src/lib.rs", None)],
+            },
+        ],
+    );
+    work.pulls.lock().unwrap().insert(
+        TaskId(4),
+        vec![
+            pull(42, PullRequestStatus::Open, false),
+            TaskPullRequest {
+                repository: "acme/web".into(),
+                head_sha: "c".repeat(40),
+                ..pull(9, PullRequestStatus::Open, false)
+            },
+        ],
+    );
+    state.apply_task(load_task(&core, "work", TaskId(4)).await);
+    state.apply_pull_files(load_pull_files(&core, "work", TaskId(4)).await);
+    assert_eq!(state.pull_files_note("work", TaskId(4)), None);
+    assert!(!state.review_files_stale("work", TaskId(4)));
+    let files = state.review_files("work", TaskId(4));
+    assert_eq!(
+        files
+            .iter()
+            .map(|f| (f.repository.as_str(), f.path.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("acme/api", "src/lib.rs"),
+            ("acme/api", "logo.png"),
+            ("acme/web", "src/lib.rs")
+        ],
+        "one path in two repositories stays two files"
+    );
+    assert!(files[1].hunks.is_empty());
+    assert_eq!(
+        quote(&files[2], None),
+        "In acme/web `src/lib.rs` (+2 -1):\n"
+    );
+
+    // A pull request that moves to a new head makes the files stale.
+    work.pulls.lock().unwrap().get_mut(&TaskId(4)).unwrap()[0].head_sha = "d".repeat(40);
+    state.apply_task(load_task(&core, "work", TaskId(4)).await);
+    assert!(state.review_files_stale("work", TaskId(4)));
+
+    // Per-file navigation stays within the files; the layout toggles.
+    state.select_review_file(9);
+    assert_eq!(state.review("work", TaskId(4)).unwrap().file, 2);
+    state.toggle_review_split();
+    assert!(state.review("work", TaskId(4)).unwrap().split);
+
+    let to = Destination::Task("work".into(), TaskId(4));
+    state.edit_draft(&to, "Please fix:");
+    state.quote_into_draft(&to, &quote(&files[0], Some(&files[0].hunks[0])));
+    assert_eq!(
+        state.draft(&to),
+        "Please fix:\n\nIn acme/api `src/lib.rs` @@ -3,2 +3,3 @@ fn a:\n```diff\n x\n-y\n+z\n+w\n```\n\n"
+    );
+    assert!(state.is_send_enabled(&to));
+
+    state.close_review();
+    assert!(state.review("work", TaskId(4)).is_none());
+    assert!(
+        !state.review_files_stale("work", TaskId(4)),
+        "only an open review reloads"
     );
 }
 

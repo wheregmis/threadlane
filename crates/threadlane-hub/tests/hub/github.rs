@@ -1589,3 +1589,37 @@ async fn a_tasks_pull_request_files_are_read_once_per_head() {
     assert_eq!(files().await[0].head_sha, "b".repeat(40));
     assert_eq!(file_reads(), 2, "a new head is read again");
 }
+
+#[tokio::test]
+async fn a_failed_first_read_of_a_tasks_pull_requests_is_tried_again() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let task = task_with_pull_request(&hub).await;
+    github.set_pull_request("acme/widgets", 42, Err("rate limited".into()));
+    assert!(pull_requests(&hub, &task).await.is_empty());
+    github.set_pull_request("acme/widgets", 42, Ok(conflicted_draft(&"a".repeat(40))));
+    assert_eq!(pull_requests(&hub, &task).await.len(), 1, "read again");
+    assert_eq!(pull_requests(&hub, &task).await.len(), 1);
+    assert_eq!(state_reads(&github), 2, "then cached");
+}
+
+#[tokio::test]
+async fn files_read_while_the_head_moved_are_not_cached_or_returned() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let task = task_with_pull_request(&hub).await;
+    github.set_pull_request("acme/widgets", 42, Ok(conflicted_draft(&"a".repeat(40))));
+    assert_eq!(pull_requests(&hub, &task).await[0].head_sha, "a".repeat(40));
+    github.set_pull_request("acme/widgets", 42, Ok(conflicted_draft(&"b".repeat(40))));
+    github.set_pull_request_files("acme/widgets", 42, Vec::new());
+    let files = || {
+        hub.api
+            .overview(OverviewRequest::TaskPullFiles { task: task.id })
+    };
+    let moved = files().await;
+    assert!(matches!(moved, Err(ApiError::Unreachable(_))), "{moved:?}");
+    match files().await.unwrap() {
+        OverviewReply::TaskPullFiles { pulls } => assert_eq!(pulls[0].head_sha, "b".repeat(40)),
+        other => panic!("{other:?}"),
+    }
+}

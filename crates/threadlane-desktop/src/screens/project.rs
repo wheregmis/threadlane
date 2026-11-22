@@ -940,6 +940,7 @@ impl Desktop {
                                     .font_family(cx.theme().mono_font_family.clone())
                             }))
                             .children(task_card.merge.clone().map(|merge| meta(merge, cx)))
+                            .children(self.pull_strip(space, task_card.id, cx))
                             .children(answer)
                             .children(quick),
                     )
@@ -1171,6 +1172,10 @@ impl Desktop {
                                                 cx.theme().foreground
                                             })
                                             .child(task.title.clone()),
+                                    )
+                                    .children(
+                                        self.pull_strip(space, task.id, cx)
+                                            .map(|strip| strip.flex_none().flex_nowrap()),
                                     )
                                     .child(
                                         meta(summary.agent.clone(), cx)

@@ -6,6 +6,7 @@ use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
 use threadlane_core::ids::TaskId;
@@ -169,9 +170,33 @@ impl Desktop {
                     }),
             )
             .children(change.merge)
-            .children(change.diffs.iter().enumerate().map(|(index, diff)| {
-                self.diff_preview(format!("task-{space}-{task}-{index}"), diff, cx)
-            }));
+            .children(
+                (!change.diffs.is_empty() || !self.state.task_pulls(space, task).is_empty()).then(
+                    || {
+                        let in_space = space.to_owned();
+                        let (insertions, deletions) =
+                            change.diffs.iter().fold((0, 0), |(i, d), diff| {
+                                (i + diff.insertions, d + diff.deletions)
+                            });
+                        let stats = if change.diffs.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (+{insertions} -{deletions})")
+                        };
+                        button("task-review")
+                            .small()
+                            .outline()
+                            .icon(AppIcon::FileText)
+                            .label(format!("Review changes{stats}"))
+                            .accessibility_label(format!(
+                                "Review {task}'s changed files full width"
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_review(in_space.clone(), task, cx);
+                            }))
+                    },
+                ),
+            );
         if let Some(url) = change.pull_request {
             let open = url.clone();
             published = published.child(
@@ -321,7 +346,8 @@ impl Desktop {
                                     ),
                             )
                             .child(heading(summary.task.title.clone()))
-                            .child(meta(header.meta, cx)),
+                            .child(meta(header.meta, cx))
+                            .children(self.pull_strip(space, task, cx)),
                     )
                     .child(actions),
             )
@@ -343,7 +369,15 @@ impl Desktop {
                     })),
             )
             .child(activity)
-            .child(
+            .child(if self.state.review(space, task).is_some() {
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap(LG)
+                    .child(self.review_view(space, task, cx))
+                    .children(decision_cards)
+                    .into_any_element()
+            } else {
                 h_flex()
                     .items_start()
                     .flex_wrap()
@@ -357,8 +391,9 @@ impl Desktop {
                             .child(moments)
                             .children(decision_cards),
                     )
-                    .child(related),
-            );
+                    .child(related)
+                    .into_any_element()
+            });
         let composer = (!archived).then(|| {
             v_flex()
                 .flex_none()
@@ -376,7 +411,10 @@ impl Desktop {
             .flex_1()
             .min_h_0()
             .w_full()
-            .max_w(READING_WIDTH)
+            // The open review uses the window's full width.
+            .when(self.state.review(space, task).is_none(), |view| {
+                view.max_w(READING_WIDTH)
+            })
             .self_center()
             .gap(SM)
             .child(decision_scroller("task", content, &self.decision_scroll))
