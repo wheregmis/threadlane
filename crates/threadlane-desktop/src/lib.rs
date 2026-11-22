@@ -43,6 +43,7 @@ mod edges;
 mod graph;
 mod machines;
 mod memory;
+mod mention;
 mod permissions;
 mod prose;
 mod routines;
@@ -82,6 +83,10 @@ pub use machines::{
 pub use memory::{
     LeadKnows, MemoryChange, MemoryGroup, MemoryLoad, MemoryRow, MemoryVersionRow, change_memory,
     editable, load_memory,
+};
+pub use mention::{
+    MENTION_LIMIT, MentionAgent, MentionItem, MentionKind, MentionQuery, complete_mention,
+    fuzzy_rank, mention_at, step_selection, task_refs,
 };
 pub use permissions::{
     AgentRow, CeilingCard, CellChoice, MODES, MayDo, ModeChoice, RuleRow, Statement, allows,
@@ -1800,6 +1805,10 @@ impl AppState {
     #[must_use]
     pub fn task_hint(&self, space: &str, task: TaskId) -> String {
         let stopped = self.task(space, task).is_some_and(|detail| detail.stopped);
+        let mentions = self.mention_hint(&Destination::Task(space.to_owned(), task));
+        if let Some(mentions) = mentions {
+            return mentions;
+        }
         let destination = if stopped {
             "Send a message to resume this task.".to_owned()
         } else {
