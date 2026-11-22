@@ -1325,6 +1325,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
+            threadlane_hub::VIEW_ISSUE,
             threadlane_hub::PR_REVIEW_STATUS,
             MEMORY_VIEW,
             MEMORY_CREATE,
@@ -1372,6 +1373,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
         names(&run),
         [
             CREATE_TASK,
+            LIST_TASKS,
             threadlane_hub::PR_REVIEW_STATUS,
             FINISH_TASK,
             PUBLISH_BRANCH,
@@ -1405,9 +1407,18 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
         !run.remove_builtin_tools,
         "a task agent keeps its file and shell tools"
     );
+    // A task run reads its project's tasks and their statuses (#712).
+    let listed = call(&hub, &lease, &run, "list-1", LIST_TASKS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["tasks"][0]["task_id"], "T-0001", "{listed}");
+    assert_eq!(listed["tasks"][0]["status"], "running", "{listed}");
     for (tool, arguments) in [
         (SEND_MESSAGE, json!({ "text": "hello" })),
-        (LIST_TASKS, json!({})),
+        (
+            threadlane_hub::VIEW_ISSUE,
+            json!({ "repository": "x", "number": 1 }),
+        ),
         (CANCEL_TASK, json!({ "task_id": "T-0001" })),
         (UPDATE_TASK, json!({ "task_id": "T-0001", "title": "x" })),
     ] {

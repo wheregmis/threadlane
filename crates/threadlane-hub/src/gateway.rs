@@ -236,6 +236,9 @@ impl LocalLink {
         };
         let outcome = match (asked, dream) {
             (None, Some(event)) => self.core.dream_call(event, &context, tool, arguments).await,
+            (None, None) if tool == crate::VIEW_ISSUE => {
+                crate::publish::view_issue(db, inner.github.as_deref(), &lane, arguments).await
+            }
             (None, None) => inner.tools.execute(&context, tool, arguments.clone()).await,
             (Some(asked), _) => {
                 self.ask(lease, &run, &lane, &key, tool, arguments, asked)

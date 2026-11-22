@@ -412,6 +412,50 @@ impl GithubSource for GhSource {
         })
     }
 
+    async fn issue(&self, repository: &str, number: u64) -> Result<Json, GithubError> {
+        if !valid_full_name(repository) {
+            return Err(GithubError(format!(
+                "{repository:?} is not a repository name"
+            )));
+        }
+        let issue = self
+            .get_json(&format!("repos/{repository}/issues/{number}"))
+            .await?;
+        let path = format!("repos/{repository}/issues/{number}/comments?per_page=100");
+        let mut comments = Vec::new();
+        for page in self.get_pages(&[], &path).await? {
+            comments.extend(
+                page.json(&path)?
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|comment| {
+                        serde_json::json!({
+                            "author": text(comment, "/user/login"),
+                            "at": text(comment, "/created_at"),
+                            "body": text(comment, "/body"),
+                        })
+                    }),
+            );
+        }
+        Ok(serde_json::json!({
+            "number": number,
+            "url": text(&issue, "/html_url"),
+            "is_pull_request": !issue["pull_request"].is_null(),
+            "title": text(&issue, "/title"),
+            "state": text(&issue, "/state"),
+            "author": text(&issue, "/user/login"),
+            "labels": issue["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|label| text(label, "/name"))
+                .collect::<Vec<_>>(),
+            "body": text(&issue, "/body"),
+            "comments": comments,
+        }))
+    }
+
     async fn pull_request_state(
         &self,
         repository: &str,
@@ -1387,6 +1431,56 @@ case "$last" in
             "a bad name never reaches gh"
         );
         assert_eq!(calls(dir.path()).len(), 4);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_issue_view_reads_the_issue_and_its_comments_with_gets_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                (
+                    "repos/acme/widgets/issues/7",
+                    "issue.http",
+                    ok(r#"{"title":"Crash","state":"open","body":"It breaks.",
+                        "html_url":"https://github.com/acme/widgets/pull/7","pull_request":{},
+                        "user":{"login":"alice"},"labels":[{"name":"bug"}]}"#),
+                ),
+                (
+                    "*/comments*",
+                    "comments.http",
+                    ok(
+                        r#"[{"user":{"login":"bob"},"created_at":"2026-11-22T00:00:00Z",
+                        "body":"Plan: fix it."}]"#,
+                    ),
+                ),
+            ],
+        ));
+        let view = source.issue("acme/widgets", 7).await.unwrap();
+        assert_eq!(
+            view,
+            serde_json::json!({
+                "number": 7,
+                "url": "https://github.com/acme/widgets/pull/7",
+                "is_pull_request": true,
+                "title": "Crash",
+                "state": "open",
+                "author": "alice",
+                "labels": ["bug"],
+                "body": "It breaks.",
+                "comments": [
+                    {"author": "bob", "at": "2026-11-22T00:00:00Z", "body": "Plan: fix it."}
+                ],
+            })
+        );
+        for call in calls(dir.path()) {
+            assert!(
+                call.starts_with("api --method GET --include -H Accept: "),
+                "{call}"
+            );
+        }
+        assert!(source.issue("acme/../x", 7).await.is_err());
     }
 
     #[cfg(unix)]

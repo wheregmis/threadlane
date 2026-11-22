@@ -202,6 +202,13 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
         Err(GithubError("this source cannot read issues".to_owned()))
     }
 
+    /// Issue or pull request `number` of `repository` (`owner/name`) for
+    /// reading: its title, state, author, labels, body and comments, as JSON.
+    async fn issue(&self, repository: &str, number: u64) -> Result<serde_json::Value, GithubError> {
+        let _ = (repository, number);
+        Err(GithubError("this source cannot read issues".to_owned()))
+    }
+
     /// Head, draft flag, mergeability and check runs of pull request
     /// `number` of `repository` (`owner/name`).
     async fn pull_request_state(

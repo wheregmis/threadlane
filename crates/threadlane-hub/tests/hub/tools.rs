@@ -204,6 +204,7 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
             threadlane_hub::RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
+            threadlane_hub::VIEW_ISSUE,
             threadlane_hub::PR_REVIEW_STATUS,
             MEMORY_VIEW,
             MEMORY_CREATE,

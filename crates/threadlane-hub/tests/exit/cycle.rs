@@ -76,6 +76,7 @@ async fn a_message_produces_exactly_one_reply() {
             threadlane_hub::RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
+            threadlane_hub::VIEW_ISSUE,
             threadlane_hub::PR_REVIEW_STATUS,
             MEMORY_VIEW,
             MEMORY_CREATE,
