@@ -486,7 +486,7 @@ async fn finish(hub: &TestHub, task: &Task) {
 }
 
 #[tokio::test]
-async fn an_ended_tasks_worktrees_are_removed_after_three_days_without_a_run() {
+async fn an_ended_tasks_worktrees_are_removed_when_it_ends_unless_they_hold_work() {
     let dir = tempfile::tempdir().unwrap();
     let clock = FakeClock::at_default_start();
     let db = HubDb::open_in_memory(&Bootstrap::default(), Arc::new(clock.clone()))
@@ -516,13 +516,19 @@ async fn an_ended_tasks_worktrees_are_removed_after_three_days_without_a_run() {
     hub.core.sweep_once().await.unwrap();
     assert!(ended.exists(), "a running task keeps its worktrees");
     finish(&hub, &task).await;
-    clock.advance(Duration::from_secs(2 * 24 * 60 * 60));
     hub.core.sweep_once().await.unwrap();
-    assert!(ended.exists(), "kept while the task ended recently");
-    clock.advance(Duration::from_secs(24 * 60 * 60 + 1));
+    assert!(
+        ended.join("widgets").exists(),
+        "a directory that is not a git worktree may hold work: kept"
+    );
+    std::fs::remove_dir(ended.join("widgets")).unwrap();
     hub.core.sweep_once().await.unwrap();
-    assert!(!ended.exists(), "removed after three idle days");
+    assert!(ended.exists(), "a kept task is not checked again at once");
+    clock.advance(Duration::from_secs(3 * 24 * 60 * 60));
+    hub.core.sweep_once().await.unwrap();
+    assert!(!ended.exists(), "removed once nothing in it would be lost");
     assert!(unknown.exists());
+    hub.core.sweep_once().await.unwrap();
 }
 
 #[tokio::test]
