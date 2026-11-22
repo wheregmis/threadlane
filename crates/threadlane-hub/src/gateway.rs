@@ -6,7 +6,7 @@ use std::sync::Arc;
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
 use threadlane_core::ids::{DecisionId, RunId, StandingRuleId};
-use threadlane_core::link::{LinkError, Perform};
+use threadlane_core::link::{FINISH_TASK, LinkError, Perform};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     Decision, DecisionKind, DecisionOption, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run,
@@ -27,7 +27,8 @@ use crate::memory;
 use crate::publish::approval_options;
 use crate::timers;
 use crate::tools::{
-    ASK_USER, CREATE_TASK, HubTools, derived_call_key, offered_for_review, offered_in, question,
+    ASK_USER, CREATE_TASK, FINISH_REVIEW, HubTools, derived_call_key, offered_for_review,
+    offered_in, question,
 };
 
 /// Key of the envelope a failed call's error is recorded in, so a repeated
@@ -210,12 +211,16 @@ impl LocalLink {
                 }
             };
         }
-        // A run that waits on you does nothing more (Plan.md §9.4), but each
-        // further gated call of its turn still gets its own card (#675).
-        if asked.is_none() && self.run_waits(&lane, &run).await? {
+        // A run that waits on you can't finish its work (Plan.md §9.4). Each
+        // further gated call gets its own card (#675), and ungated calls such
+        // as a message or a timer still run (#718).
+        if asked.is_none()
+            && (tool == FINISH_TASK || tool == FINISH_REVIEW)
+            && self.run_waits(&lane, &run).await?
+        {
             let refused = ToolError::Blocked(format!(
-                "{tool} did not run: another call of this run is waiting on you, so nothing \
-                 more runs in this turn. End your turn; call it again when you are resumed."
+                "{tool} did not run: another call of this run is waiting on you. End your \
+                 turn; call it again when you are resumed."
             ));
             if let Some(record) = error_record(&refused) {
                 db.finish_tool_call(lease, &key, &record, inner.clock.now())
