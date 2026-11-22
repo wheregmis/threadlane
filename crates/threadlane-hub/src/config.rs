@@ -159,6 +159,14 @@ pub struct RunsConfig {
     /// lost; ones kept for uncommitted or unpushed work are checked again
     /// after this many days. The task branch stays. `0` keeps them all.
     pub worktree_cleanup_days: u32,
+    /// Terminal tasks older than this many days have heavy artifacts compacted.
+    /// `0` disables compaction.
+    pub task_compaction_days: u32,
+    /// Terminal tasks older than this many days are pruned. `0` disables
+    /// age-based pruning.
+    pub task_pruning_days: u32,
+    /// Maximum terminal tasks retained per project. `0` disables the cap.
+    pub max_terminal_tasks_per_project: u32,
 }
 
 impl Default for RunsConfig {
@@ -172,6 +180,9 @@ impl Default for RunsConfig {
             max_turns: 150,
             recent_messages: 5,
             worktree_cleanup_days: 3,
+            task_compaction_days: 14,
+            task_pruning_days: 90,
+            max_terminal_tasks_per_project: 500,
         }
     }
 }
@@ -515,6 +526,14 @@ impl HubConfig {
             recent_messages: runs.recent_messages,
             worktree_cleanup: (runs.worktree_cleanup_days > 0)
                 .then(|| Duration::from_secs(u64::from(runs.worktree_cleanup_days) * 24 * 60 * 60)),
+            task_compaction: (runs.task_compaction_days > 0)
+                .then(|| Duration::from_secs(u64::from(runs.task_compaction_days) * 24 * 60 * 60)),
+            task_pruning: (runs.task_pruning_days > 0)
+                .then(|| Duration::from_secs(u64::from(runs.task_pruning_days) * 24 * 60 * 60)),
+            max_terminal_tasks_per_project: (runs.max_terminal_tasks_per_project > 0)
+                .then_some(runs.max_terminal_tasks_per_project as usize),
+            pruning_interval: HubSettings::default().pruning_interval,
+            pruning_batch_size: HubSettings::default().pruning_batch_size,
             usage_limit_fallback: Duration::from_secs(timing.usage_limit_fallback_secs),
             scheduler: Duration::from_secs(timing.scheduler_secs),
             decision_expiry: Duration::from_secs(timing.decision_expiry_secs),
