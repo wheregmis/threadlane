@@ -85,8 +85,9 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         description: "Read this project's run outcomes, rationales, delivered replies and owner chat \
                       from unreviewed runs, project tasks with review evidence and last activity, and \
                       previous Threadlane reports (first page only). Runs then tasks come in pages, \
-                      long texts cut; a cut page gives the offset of the next one. Listed tasks omit \
-                      diff patches. Pass task_id for one task's full record with its patches, or updated_after to list only tasks active since then."
+                      long texts cut; a cut page gives the offset of the next one. Listed tasks are compact: \
+                      title, one-line summary, latest verdict and diff totals, no goal. Pass task_id \
+                      for one task's full record with its review and patches, or updated_after to list only tasks active since then."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -131,42 +132,57 @@ fn task_record(task: &Task, times: &BTreeMap<i64, Timestamp>) -> Json {
     record
 }
 
-/// A listed task without its diff patches or its review feedback twice (#680):
-/// file stats stay, and `task_id` still shows the full record.
-fn compact(record: &mut Json) {
-    // get_mut, not IndexMut: indexing would insert keys into a null `result`.
-    let result = record.get_mut("result");
-    if let Some(checks) = result
-        .and_then(|r| r.get_mut(threadlane_core::link::MERGE_CHECKS))
-        .and_then(Json::as_array_mut)
-    {
-        for diff in checks.iter_mut().filter_map(|check| check.get_mut("diff")) {
-            if let Some(diff) = diff.as_object_mut()
-                && diff.remove("patch").is_some()
-            {
-                diff.insert("patch_omitted".into(), json!(true));
+/// The longest one-line text a listed task keeps, so a page holds 50 or more.
+const LISTED_CHARS: usize = 80;
+
+/// A task as a `project_sessions` page lists it (#680, #703): no goal, its
+/// result in one line, its latest verdict and diff totals over every
+/// repository. `task_id` shows the full record.
+fn compact(full: &Json, review: Option<&Json>) -> Json {
+    // A bare ellipsis: the clip note's character count would cost a page more than it tells.
+    let line = |key: &str| {
+        full[key].as_str().map(|text| {
+            let text = page::one_line(text, usize::MAX);
+            match text.char_indices().nth(LISTED_CHARS) {
+                Some((end, _)) => format!("{}…", &text[..end]),
+                None => text,
             }
-        }
+        })
+    };
+    let diffs: Vec<&Json> = full["result"]
+        .get(threadlane_core::link::MERGE_CHECKS)
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|check| check.get("diff"))
+        .collect();
+    let total = |key: &str| {
+        diffs
+            .iter()
+            .filter_map(|diff| diff[key].as_u64())
+            .sum::<u64>()
+    };
+    let mut record = json!({
+        "task_id": full["task_id"],
+        "title": line("title"),
+        "status": full["status"],
+        "waiting_reason": line("waiting_reason"),
+        "summary": line("summary"),
+        "verdict": review.map(|review| &review["verdict"]),
+        "updated_at": full["updated_at"],
+    });
+    if !diffs.is_empty() {
+        let files: usize = diffs
+            .iter()
+            .filter_map(|diff| diff["files"].as_array())
+            .map(Vec::len)
+            .sum();
+        record["changes"] = json!({"files": files, "insertions": total("insertions"), "deletions": total("deletions")});
     }
-    if record.get("latest_review").is_some()
-        && let Some(review) = record
-            .get_mut("result")
-            .and_then(|r| r.get_mut("review"))
-            .and_then(Json::as_object_mut)
-    {
-        review.remove("feedback");
-    }
+    record
 }
 
-/// How to read a cut task record in full.
-fn detail(record: &Json) -> Json {
-    json!(format!(
-        "This record is cut. Call {PROJECT_SESSIONS} with task_id {} for all of it.",
-        record["task_id"].as_str().unwrap_or_default()
-    ))
-}
-
-/// One project task in full, with its latest review, for a record cut from a page.
+/// One project task in full, with its latest review, for a task a page lists compactly.
 async fn session_task(db: &HubDb, project: ProjectId, reference: &Json) -> Result<Json, ToolError> {
     let err = crate::error::tool_error;
     let id = crate::tools::task_ref(reference)?;
@@ -584,36 +600,12 @@ impl HubCore {
             let mut reviews = db.dream_reviews(project, &tasks).await.map_err(err)?;
             items.iter_mut().for_each(page::clip_fields);
             for task in &listed {
-                let mut record = task_record(task, &times);
-                if let Some(review) = reviews.remove(&task.id.get()) {
-                    record["latest_review"] = review;
-                }
-                compact(&mut record);
-                let full = record.clone();
-                page::clip_fields(&mut record);
-                if record != full {
-                    record["detail"] = detail(&full);
-                }
-                items.push(record);
+                let review = reviews.remove(&task.id.get());
+                items.push(compact(&task_record(task, &times), review.as_ref()));
             }
             let (mut items, _) = page::take(&items, 0, limit);
             let end = offset.saturating_add(items.len());
-            let mut task_items = items.split_off(runs.len().min(items.len()));
-            // A record too large for the page keeps its structured head (#633).
-            for (item, task) in task_items.iter_mut().zip(&listed) {
-                if let Some(clipped) = item.get("clipped").cloned() {
-                    let full = task_record(task, &times);
-                    *item = json!({
-                        "task_id": full["task_id"],
-                        "status": full["status"],
-                        "waiting_reason": full["waiting_reason"],
-                        "summary": full["summary"],
-                        "updated_at": full["updated_at"],
-                        "clipped": clipped,
-                        "detail": detail(&full),
-                    });
-                }
-            }
+            let task_items = items.split_off(runs.len().min(items.len()));
             db.seen_dream_page(
                 project,
                 event.id,
@@ -682,31 +674,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn listed_tasks_drop_patches_and_repeated_review_feedback() {
-        let mut record = json!({
-            "result": {
-                "summary": "Done",
-                "merge": [{"repository": "r", "diff": {"files": [{"path": "a.rs", "insertions": 3, "deletions": 1}],
-                    "insertions": 3, "deletions": 1, "patch": "+x".repeat(2000)}}],
-                "review": {"reviewer": "Reviewer", "feedback": "Looks good", "run": 7}
-            },
-            "latest_review": {"verdict": "approved", "feedback": "Looks good"}
+    fn a_page_lists_fifty_large_tasks_compactly() {
+        let files: Vec<Json> = (0..40)
+            .map(|i| json!({"path": format!("crates/some/long/path/file_{i}.rs"), "insertions": 3, "deletions": 1}))
+            .collect();
+        let diff =
+            json!({"files": files, "insertions": 120, "deletions": 40, "patch": "+x".repeat(2000)});
+        let full = json!({
+            "task_id": "T-0001", "title": "t".repeat(90), "goal": "g".repeat(1500), "status": "done",
+            "waiting_reason": null, "summary": "s".repeat(200), "updated_at": "2026-11-21T12:00:00.000Z",
+            "result": {"summary": "s".repeat(5000), "merge": [
+                {"repository": "a", "conflicts": [], "diff": diff},
+                {"repository": "b", "conflicts": [], "diff": diff},
+            ]}
         });
-        compact(&mut record);
-        let diff = &record["result"]["merge"][0]["diff"];
-        assert!(diff.get("patch").is_none());
-        assert_eq!(diff["patch_omitted"], true);
-        assert_eq!(diff["files"][0]["path"], "a.rs");
-        assert_eq!(diff["insertions"], 3);
-        assert!(record["result"]["review"].get("feedback").is_none());
-        assert_eq!(record["result"]["review"]["run"], 7);
-        assert_eq!(record["latest_review"]["feedback"], "Looks good");
-
-        let mut open = json!({"result": null, "latest_review": {"verdict": "approved"}});
-        compact(&mut open);
+        let review = json!({"verdict": "changes_requested", "feedback": "f".repeat(3000)});
+        let record = compact(&full, Some(&review));
+        assert_eq!(record["verdict"], "changes_requested");
+        assert_eq!(record["title"], format!("{}…", "t".repeat(LISTED_CHARS)));
         assert_eq!(
-            open,
-            json!({"result": null, "latest_review": {"verdict": "approved"}})
+            record["changes"],
+            json!({"files": 80, "insertions": 240, "deletions": 80})
         );
+        for gone in ["goal", "result", "latest_review"] {
+            assert!(record.get(gone).is_none(), "{record}");
+        }
+        let (page, _) = page::take(&vec![record; 200], 0, 200);
+        assert!(page.len() >= 50, "{} tasks: {}", page.len(), page[0]);
+
+        let open = compact(&json!({"task_id": "T-0002", "result": null}), None);
+        assert!(open.get("changes").is_none());
+        assert_eq!(open["verdict"], Json::Null);
     }
 }
