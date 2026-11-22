@@ -68,8 +68,13 @@ pub enum RepositoryAction {
     },
     /// Create an issue with this title and body.
     CreateIssue { title: String, body: String },
-    /// Merge the numbered pull request.
-    Merge { number: std::num::NonZeroU64 },
+    /// Merge the numbered pull request; with `expected_head`, only if its
+    /// head is still that commit.
+    Merge {
+        number: std::num::NonZeroU64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_head: Option<String>,
+    },
     /// Mark the numbered draft pull request ready for review.
     MarkReady { number: std::num::NonZeroU64 },
     /// Replace the numbered pull request's title and/or body; `None` keeps it.
