@@ -1016,6 +1016,7 @@ fn decision(id: i64, created_at: i64) -> Decision {
         created_at: Timestamp::from_millis(created_at),
         outcome: None,
         proposed_by: None,
+        urgent: true,
     }
 }
 
@@ -3489,6 +3490,57 @@ async fn a_decision_waiting_ten_minutes_is_reminded_about_once() {
         state.reminders(at(30 * minute)).is_empty(),
         "an answered decision gets none"
     );
+}
+
+#[tokio::test]
+async fn a_decision_that_is_not_urgent_never_notifies_and_waits_under_later() {
+    let minute = 60_000;
+    let later = Decision {
+        urgent: false,
+        kind: DecisionKind::Proposal,
+        ..decision(1, 0)
+    };
+    let work = FakeHub::new("Work", vec![later, decision(2, minute)]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply(refresh(&core).await);
+
+    let queued: Vec<&Queued> = state.needs_you().collect();
+    let ids: Vec<DecisionId> = queued.iter().map(|q| q.decision.id).collect();
+    assert_eq!(
+        ids,
+        [DecisionId(2), DecisionId(1)],
+        "urgent first, though newer"
+    );
+    let starts: Vec<bool> = (0..queued.len())
+        .map(|index| AppState::later_starts(&queued, index))
+        .collect();
+    assert_eq!(starts, [false, true], "Later heads the proposal");
+
+    let card = |seq, id: &str, urgent: Option<bool>| {
+        let mut body = json!({
+            "text": format!("{id}: Start a task?"),
+            "decision": id,
+            "question": "Start a task?",
+            "options": ["start", "not now"],
+        });
+        if let Some(urgent) = urgent {
+            body["urgent"] = json!(urgent);
+        }
+        item("work", seq, OutboxKind::Decision, body)
+    };
+    assert_eq!(state.receive(card(1, "D-0001", Some(false))), None);
+    assert!(state.receive(card(2, "D-0002", Some(true))).is_some());
+    assert!(
+        state.receive(card(3, "D-0003", None)).is_some(),
+        "an older hub's card notifies"
+    );
+    let reminded: Vec<String> = state
+        .reminders(Timestamp::from_millis(30 * minute))
+        .iter()
+        .map(Alert::tag)
+        .collect();
+    assert_eq!(reminded, ["work/D-0002"], "no reminder for Later either");
 }
 
 #[test]

@@ -10,7 +10,7 @@ use threadlane_core::forge::{ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH};
 use threadlane_core::model::{Cell, Mode, StandingRule};
 use threadlane_core::tools::{Tier, Verdict};
 
-use crate::tools::ASK_USER;
+use crate::tools::{ASK_USER, CREATE_TASK};
 
 /// A binding's overrides: the cell each tier is set to (Plan.md §2.3).
 pub type Overrides = BTreeMap<Tier, Cell>;
@@ -118,6 +118,12 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
                 .then(|| ((*field).to_owned(), value.clone()))
         })
         .collect();
+    // A rule for a task names its assignee: "always start this kind here".
+    if tool == CREATE_TASK
+        && let Some(agent) = arguments.get("agent").filter(|agent| agent.is_string())
+    {
+        targets.insert("agent".into(), agent.clone());
+    }
     // A standing rule for these covers one pull request or issue, not the whole repository.
     // label_issue is left out: its rule covers label edits on the whole repository (#653).
     if matches!(
@@ -196,7 +202,8 @@ pub(crate) fn own_work_tool(tool: &str, arguments: &Json) -> bool {
 /// 3. the binding's override for the tier makes the cell stricter, or looser
 ///    up to the ceiling's column (stepped down too if tainted); a standing
 ///    rule matching the call then allows a tier 0 to 2 call in any mode, and
-///    has a tier 3 call reviewed in Autonomous;
+///    has a tier 3 call reviewed in Autonomous; a rule for a task's assignee
+///    allows an untainted proposal where both agents act in Assisted;
 /// 4. otherwise, a call the cell would ask about or review is allowed by
 ///    default when it opens a draft pull request or pushes the task's own
 ///    branch and the binding sets no override for the tier; if the run is
@@ -258,6 +265,15 @@ pub fn gate(input: &GateInput<'_>) -> Verdict {
         Row::Tier(Tier::SharedReversible | Tier::SharedHardToUndo)
         | Row::Instructions
         | Row::OwnWork { .. } => pattern.as_object().is_some_and(|p| !p.is_empty()),
+        // A task for an assignee you said to always start: only where both
+        // agents start unrequested work, so never Off or On request, and not
+        // from a run that read outside content, whose task would be yours.
+        Row::Initiative => {
+            input.new_work.is_some()
+                && !input.tainted
+                && row_mode == Mode::Assisted
+                && pattern.as_object().is_some_and(|p| !p.is_empty())
+        }
         _ => false,
     };
     let mut reviewed_by = None;
@@ -646,12 +662,15 @@ mod tests {
                 project: Some(AS),
                 ..case("a ceiling makes a routine ask", T1, AU, Ask)
             },
-            proposal(case("a proposal in assisted", T1, AS, Ask), AS),
+            proposal(case("a proposal in assisted", T1, AS, AskOffer), AS),
             proposal(case("a task in autonomous", T1, AU, Allow), AU),
             proposal(case("an on request assignee is asked for", T1, AU, Ask), ON),
-            proposal(case("an assisted assignee is asked for", T1, AU, Ask), AS),
             proposal(
-                case("an autonomous assignee under assisted", T1, AS, Ask),
+                case("an assisted assignee is asked for", T1, AU, AskOffer),
+                AS,
+            ),
+            proposal(
+                case("an autonomous assignee under assisted", T1, AS, AskOffer),
                 AU,
             ),
             proposal(case("an off assignee blocks", T1, AU, Block), Mode::Off),
@@ -661,18 +680,61 @@ mod tests {
             )),
             Case {
                 project: Some(AS),
-                ..proposal(case("a ceiling caps both agents", T1, AU, Ask), AU)
+                ..proposal(case("a ceiling caps both agents", T1, AU, AskOffer), AU)
             },
             Case {
                 overrides: &[(T1, Cell::Allow)],
                 ..proposal(
-                    case("an override cannot loosen a proposal", T1, AS, Ask),
+                    case("an override cannot loosen a proposal", T1, AS, AskOffer),
                     AS,
                 )
             },
             Case {
                 overrides: &[(T1, Cell::Ask)],
                 ..proposal(case("an override makes a task ask", T1, AU, Ask), AU)
+            },
+            // "Always start this kind here": a rule for the assignee starts
+            // it where both agents act in Assisted, and nowhere else.
+            Case {
+                rule: Some("assignee"),
+                ..proposal(case("an assignee's rule starts it", T1, AS, Rule), AS)
+            },
+            Case {
+                rule: Some("assignee"),
+                ..proposal(case("an assignee's rule under assisted", T1, AU, Rule), AS)
+            },
+            Case {
+                rule: Some("other assignee"),
+                ..proposal(case("a rule for another assignee", T1, AS, AskOffer), AS)
+            },
+            Case {
+                rule: Some("revoked assignee"),
+                ..proposal(case("a revoked assignee's rule", T1, AS, AskOffer), AS)
+            },
+            Case {
+                rule: Some("assignee"),
+                ..proposal(case("no rule starts on request work", T1, AS, Ask), ON)
+            },
+            Case {
+                rule: Some("assignee"),
+                ..proposal(case("nor an on request lead's", T1, ON, Ask), AS)
+            },
+            Case {
+                rule: Some("assignee"),
+                ..proposal(case("nor an off assignee's", T1, AS, Block), Mode::Off)
+            },
+            Case {
+                rule: Some("assignee"),
+                ..proposal(case("autonomous needs no rule", T1, AU, Allow), AU)
+            },
+            tainted(Case {
+                rule: Some("assignee"),
+                ..proposal(case("nor a tainted run's", T1, AU, Ask), AU)
+            }),
+            Case {
+                rule: Some("assignee"),
+                overrides: &[(T1, Cell::Block)],
+                ..proposal(case("a blocking override beats it", T1, AS, Block), AS)
             },
             Case {
                 tool: CREATE_TASK,
@@ -841,6 +903,8 @@ mod tests {
         for row in &table {
             let arguments = if row.tool == MEMORY_EDIT {
                 json!({ "path": "space/instructions.md", "old_text": "a", "new_text": "b" })
+            } else if row.tool == CREATE_TASK {
+                json!({ "agent": "Reviewer", "title": "Free text is ignored", "goal": "g" })
             } else {
                 json!({ "repository": "app", "title": "Free text is ignored" })
             };
@@ -853,6 +917,13 @@ mod tests {
                 )],
                 Some("revoked") => vec![rule("comment", json!({ "repository": "app" }), true)],
                 Some("merge") => vec![rule(crate::MERGE, json!({ "repository": "app" }), false)],
+                Some("assignee") => vec![rule(CREATE_TASK, json!({ "agent": "Reviewer" }), false)],
+                Some("other assignee") => {
+                    vec![rule(CREATE_TASK, json!({ "agent": "Writer" }), false)]
+                }
+                Some("revoked assignee") => {
+                    vec![rule(CREATE_TASK, json!({ "agent": "Reviewer" }), true)]
+                }
                 Some(name) => vec![rule("comment", json!({ "repository": name }), false)],
             };
             let overrides: Overrides = row.overrides.iter().copied().collect();
@@ -948,6 +1019,25 @@ mod tests {
         );
         assert_eq!(
             rule_pattern(MEMORY_EDIT, &json!({ "content": "z" })),
+            json!({})
+        );
+        assert_eq!(
+            rule_pattern(
+                CREATE_TASK,
+                &json!({ "agent": "Reviewer", "title": "x", "goal": "y" })
+            ),
+            json!({ "agent": "Reviewer" })
+        );
+        assert_eq!(
+            rule_pattern(
+                "create_issue",
+                &json!({ "repository": "app", "agent": "x" })
+            ),
+            json!({ "repository": "app" }),
+            "agent is a target of create_task only"
+        );
+        assert_eq!(
+            rule_pattern(CREATE_TASK, &json!({ "title": "x" })),
             json!({})
         );
         assert_eq!(

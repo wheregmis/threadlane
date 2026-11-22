@@ -29,7 +29,7 @@ pub const NO_RESPONSE: &str = "no response";
 
 pub(crate) const DECISION_FIELDS: &str = "id, project_id, lane_id, task_id, session_id, run_id,
     tool_call_id, tool, arguments, arguments_hash, kind, question, context, options,
-    recommended, offers_standing_rule, status, answer, expires_at, created_at, outcome, trace_id";
+    recommended, offers_standing_rule, status, answer, expires_at, created_at, outcome, trace_id, urgent";
 
 pub(crate) fn decode_decision(row: &Row) -> StoreResult<Decision> {
     let c = Cols(row);
@@ -57,6 +57,7 @@ pub(crate) fn decode_decision(row: &Row) -> StoreResult<Decision> {
         outcome: c.opt_json(20)?,
         proposed_by: None,
         trace_id: c.opt_text(21)?,
+        urgent: c.bool(22)?,
     })
 }
 
@@ -96,6 +97,7 @@ fn card(decision: &Decision) -> Json {
         "options": labels,
         "recommended": recommended,
         "kind": decision.kind,
+        "urgent": decision.urgent,
     })
 }
 
@@ -469,9 +471,9 @@ pub(crate) async fn insert_decision_in(
         &format!(
             "INSERT INTO decisions (id, project_id, lane_id, task_id, session_id, run_id,
                  tool_call_id, tool, arguments, arguments_hash, kind, question, context,
-                 options, recommended, offers_standing_rule, status, expires_at, created_at, trace_id)
+                 options, recommended, offers_standing_rule, status, expires_at, created_at, trace_id, urgent)
              VALUES ({}, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                 'pending', ?16, ?17, (SELECT trace_id FROM runs WHERE id = ?5))
+                 'pending', ?16, ?17, (SELECT trace_id FROM runs WHERE id = ?5), ?18)
              RETURNING {DECISION_FIELDS}", crate::db::next_id_sql!("decisions")
         ),
         params![
@@ -492,6 +494,7 @@ pub(crate) async fn insert_decision_in(
             decision.offers_standing_rule,
             opt_ts(decision.expires_at),
             decision.created_at.as_millis(),
+            decision.urgent,
         ],
         decode_decision,
     )

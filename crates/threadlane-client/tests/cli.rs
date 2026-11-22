@@ -582,6 +582,7 @@ fn pending_decision() -> Decision {
         created_at: Timestamp::from_millis(1_000),
         outcome: None,
         proposed_by: None,
+        urgent: true,
     }
 }
 

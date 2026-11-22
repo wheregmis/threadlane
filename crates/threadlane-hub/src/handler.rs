@@ -145,6 +145,7 @@ impl ClientApi {
                 ))
             })?;
         let now = inner.clock.now();
+        let always = always || crate::proposal::always(&current, index);
         let rule = if always {
             Some(self.rule_from(&current, index, now).await?)
         } else {
@@ -191,7 +192,7 @@ impl ClientApi {
         now: Timestamp,
     ) -> Result<NewStandingRule, ApiError> {
         let inner = &self.core.inner;
-        if !decision.offers_standing_rule {
+        if !decision.offers_standing_rule && !crate::proposal::always(decision, index) {
             return Err(ApiError::Invalid(format!(
                 "{} offers no standing rule; answer it without always",
                 decision.id

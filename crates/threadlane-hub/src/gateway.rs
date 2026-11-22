@@ -133,14 +133,18 @@ impl LocalLink {
             .await?;
         let mut asked = match verdict {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
-            _ if tool == REPORT_LIMITATION
-                && (dream.is_some() || arguments["require_approval"] == true) =>
-            {
+            _ if tool == REPORT_LIMITATION && arguments["require_approval"] == true => {
                 Some(Asked::You {
                     offers_rule: false,
                     proposal: false,
                 })
             }
+            // A dream's report is reviewed; no classifier answer opens its card.
+            _ if tool == REPORT_LIMITATION && dream.is_some() => Some(Asked::Review {
+                offers_rule: false,
+                proposal: false,
+                rule: None,
+            }),
             _ if dream.is_some() && memory::protected(tool, arguments) => Some(Asked::Dream),
             Verdict::Allow { rule: None } if dream.is_some() => None,
             _ if dream.is_some() && tool != REPORT_LIMITATION => {
@@ -389,7 +393,8 @@ impl LocalLink {
         let needs_rules = matches!(
             definition.tier,
             Tier::SharedReversible | Tier::SharedHardToUndo
-        ) || memory::protected(&definition.name, arguments);
+        ) || memory::protected(&definition.name, arguments)
+            || definition.name == CREATE_TASK;
         // A rule covers every agent bound in its project, whichever it was
         // created from.
         let rules: Vec<StandingRule> = match binding.filter(|_| needs_rules) {
@@ -538,6 +543,16 @@ impl LocalLink {
                 .map_or("", |(_, details)| details);
             proposal.context = format!("You can apply a suggested change in Project instructions on the Memory tab.\n\n{details}").trim_end().to_owned();
         }
+        let offers_rule = matches!(
+            asked,
+            Asked::You {
+                offers_rule: true,
+                ..
+            } | Asked::Review {
+                offers_rule: true,
+                ..
+            }
+        );
         let (kind, options, recommended) = if tool == ASK_USER {
             (DecisionKind::Input, question(arguments)?.1, None)
         } else if matches!(asked, Asked::Dream) {
@@ -553,7 +568,11 @@ impl LocalLink {
             asked,
             Asked::You { proposal: true, .. } | Asked::Review { proposal: true, .. }
         ) {
-            (DecisionKind::Proposal, crate::proposal::options(), Some(0))
+            (
+                DecisionKind::Proposal,
+                crate::proposal::options(offers_rule),
+                Some(0),
+            )
         } else {
             (DecisionKind::Approval, approval_options(), Some(0))
         };
@@ -573,19 +592,12 @@ impl LocalLink {
             context: proposal.context,
             options,
             recommended,
-            offers_standing_rule: matches!(
-                asked,
-                Asked::You {
-                    offers_rule: true,
-                    ..
-                } | Asked::Review {
-                    offers_rule: true,
-                    ..
-                }
-            ),
+            // A proposal offers its rule as an option of its own.
+            offers_standing_rule: offers_rule && kind != DecisionKind::Proposal,
             expires_at: (!matches!(asked, Asked::Rule(_) | Asked::Default))
                 .then(|| now + inner.settings.decision_expiry),
             created_at: now,
+            urgent: kind != DecisionKind::Proposal && tool != REPORT_LIMITATION,
         };
         let authorized = match asked {
             Asked::Review { rule, .. } => {

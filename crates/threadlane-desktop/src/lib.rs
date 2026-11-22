@@ -1609,6 +1609,18 @@ impl AppState {
         self.queue.iter().filter(|queued| self.shown(&queued.space))
     }
 
+    /// Whether the Inbox's Later group starts at `index` of `queued`, a list
+    /// in [`Self::needs_you`] order: its first decision that does not notify.
+    #[must_use]
+    pub fn later_starts(queued: &[&Queued], index: usize) -> bool {
+        queued
+            .get(index)
+            .is_some_and(|queued| !queued.decision.urgent)
+            && index
+                .checked_sub(1)
+                .is_none_or(|before| queued[before].decision.urgent)
+    }
+
     /// Whether the Inbox's Needs you tab has nothing to show: no decisions,
     /// blockers or running tasks in the spaces shown, and no gaps in either.
     #[must_use]
@@ -1726,7 +1738,8 @@ impl AppState {
             .iter()
             .filter(|queued| {
                 let key = DecisionKey::from(*queued);
-                now.saturating_since(queued.decision.created_at) >= REMIND_AFTER
+                queued.decision.urgent
+                    && now.saturating_since(queued.decision.created_at) >= REMIND_AFTER
                     && !self.answering.contains(&key)
                     && !self.reminded.contains(&key)
             })
@@ -2503,12 +2516,20 @@ impl AppState {
                         })
                 }));
         }
+        // Urgent first; the rest are the Inbox's Later group.
         self.queue.sort_by(|a, b| {
-            (a.decision.created_at, &a.space, a.decision.id).cmp(&(
-                b.decision.created_at,
-                &b.space,
-                b.decision.id,
-            ))
+            (
+                !a.decision.urgent,
+                a.decision.created_at,
+                &a.space,
+                a.decision.id,
+            )
+                .cmp(&(
+                    !b.decision.urgent,
+                    b.decision.created_at,
+                    &b.space,
+                    b.decision.id,
+                ))
         });
     }
 
@@ -3219,6 +3240,8 @@ impl AppState {
                 self.new_home_replies.insert(item.space.clone());
                 None
             }
+            // A proposal or a limitation report waits under Later, silently.
+            OutboxKind::Decision if item.item.message.body["urgent"] == false => None,
             OutboxKind::Decision => Card::of(&item).map(|mut card| {
                 if card.kind.is_none() {
                     card.kind = self

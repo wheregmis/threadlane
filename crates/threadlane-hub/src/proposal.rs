@@ -2,7 +2,8 @@
 //! 7): a paused `create_task` from work you did not request. Starting it
 //! creates the task in the hub ([`crate::gateway`]); declining resumes the
 //! lead with your note; "do not propose this kind again" also writes a line
-//! to a project note for the lead, not a rule in the gate.
+//! to a project note for the lead, not a rule in the gate. "Always start this
+//! kind here" starts it and makes a project rule for its assignee.
 
 use serde_json::{Value as Json, json};
 use threadlane_core::ids::DecisionId;
@@ -20,9 +21,15 @@ use crate::tools::{TaskCall, bound_agent, named_repositories};
 /// The option effect that also records the kind as not to propose again.
 const NEVER_AGAIN: &str = "never_again";
 
-/// The options of every proposal; the first, start, is recommended.
-pub(crate) fn options() -> Vec<DecisionOption> {
-    vec![
+/// The option effect that also makes the standing rule that starts work
+/// for the same assignee in this project without asking.
+const ALWAYS: &str = "always";
+
+/// The options of every proposal; the first, start, is recommended. With
+/// `offers_rule`, where a rule would apply, a fourth starts it and every
+/// later one for the same assignee here.
+pub(crate) fn options(offers_rule: bool) -> Vec<DecisionOption> {
+    let mut options = vec![
         DecisionOption {
             label: "start".to_owned(),
             effect: json!({ "approve": true }),
@@ -35,7 +42,23 @@ pub(crate) fn options() -> Vec<DecisionOption> {
             label: "do not propose this kind again".to_owned(),
             effect: json!({ "approve": false, NEVER_AGAIN: true }),
         },
-    ]
+    ];
+    if offers_rule {
+        options.push(DecisionOption {
+            label: "always start this kind here".to_owned(),
+            effect: json!({ "approve": true, ALWAYS: true }),
+        });
+    }
+    options
+}
+
+/// Whether option `index` of `decision` is "always start this kind here".
+pub(crate) fn always(decision: &Decision, index: usize) -> bool {
+    decision.kind == DecisionKind::Proposal
+        && decision
+            .options
+            .get(index)
+            .is_some_and(|option| option.effect.get(ALWAYS) == Some(&Json::Bool(true)))
 }
 
 /// Checks a proposed `create_task` call as creating it would, so a call

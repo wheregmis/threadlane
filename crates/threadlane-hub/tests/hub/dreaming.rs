@@ -712,6 +712,119 @@ async fn dream_reports_go_to_upstream_once_after_approval() {
 }
 
 #[tokio::test]
+async fn a_dream_report_is_reviewed_and_one_the_classifier_allows_is_filed_without_a_card() {
+    use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
+    use threadlane_core::link::Perform;
+    use threadlane_core::model::BackendKind;
+    use threadlane_core::store::OutboxStore;
+    use threadlane_testkit::ScriptedBackend;
+
+    let base = TestHub::start().await;
+    let reviewer = ScriptedBackend::new(BackendKind::Claude, Arc::new(base.clock.clone()));
+    let hub = TestHub::around(
+        base.core
+            .clone()
+            .with_backends(vec![Arc::new(reviewer.clone())]),
+        base.clock.clone(),
+    )
+    .await;
+    hub.hello().await;
+    hub.general().await;
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let report = |title: &str| json!({"title": title, "situation": "A blocked task gave no reason.", "suggestion": "Show the blocking dependency."});
+
+    // Asking you first still asks, without the classifier; with no
+    // classifier answer, a report falls back to its card.
+    let mut asking = report("Ask before filing");
+    asking["require_approval"] = json!(true);
+    assert_eq!(
+        call(&*hub.link, &lease, &dream, REPORT_LIMITATION, asking).await,
+        Err(ToolError::WaitingOnYou)
+    );
+    assert_eq!(
+        call(
+            &*hub.link,
+            &lease,
+            &dream,
+            REPORT_LIMITATION,
+            report("No answer")
+        )
+        .await,
+        Err(ToolError::WaitingOnYou)
+    );
+    // The classifier allows the next: answered, and no card.
+    reviewer.push_answer(Ok(
+        json!({"verdict":"allow","reason":"A concrete Threadlane limitation."}),
+    ));
+    assert_eq!(
+        call(
+            &*hub.link,
+            &lease,
+            &dream,
+            REPORT_LIMITATION,
+            report("Explain blocked tasks")
+        )
+        .await,
+        Err(ToolError::WaitingOnYou)
+    );
+    complete(&hub, &lease, &dream).await;
+    let DecisionReply::Pending { decisions } =
+        hub.api.decisions(DecisionRequest::Pending).await.unwrap()
+    else {
+        panic!("expected pending reports")
+    };
+    let titles: Vec<&str> = decisions
+        .iter()
+        .map(|d| d.arguments["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Ask before filing", "No answer"]);
+    assert!(
+        decisions.iter().all(|d| !d.urgent),
+        "reports wait under Later"
+    );
+    let cards = hub
+        .db
+        .deliverable(hub.clock.now(), 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.kind == OutboxKind::Decision)
+        .count();
+    assert_eq!(cards, 2, "the allowed report has no card");
+    let allowed = hub
+        .db
+        .lane_decisions(decisions[0].lane_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|d| d.arguments["title"] == "Explain blocked tasks")
+        .unwrap();
+    assert!(allowed.approved());
+    assert!(!allowed.urgent);
+
+    // Filed the way a report you approved is: by the run that follows.
+    let (lease, followup) = begin(&*hub.link).await;
+    assert!(!followup.dreaming);
+    assert_eq!(followup.perform, [allowed.id]);
+    let Perform::Repository {
+        remote,
+        action: RepositoryAction::CreateIssue { title, .. },
+    } = hub
+        .link
+        .begin_perform(&lease, followup.run_id, allowed.id)
+        .await
+        .unwrap()
+    else {
+        panic!("expected an issue")
+    };
+    assert_eq!(remote, "https://github.com/wheregmis/threadlane");
+    assert_eq!(title, "Explain blocked tasks");
+}
+
+#[tokio::test]
 async fn a_report_that_failed_to_file_is_retried_by_id_under_its_approval() {
     use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
     use threadlane_core::link::Perform;

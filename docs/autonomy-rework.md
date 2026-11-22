@@ -220,6 +220,16 @@ ceiling.
   limitation reports. The desktop doesn't notify for non-urgent
   decisions; they collect in an Inbox "Later" group. Expiry is unchanged.
 
+**As built.** The fourth option is offered, and its rule applies, only where
+both agents act in Assisted and the run is not tainted: Autonomous already
+starts the task, On request and Off never start one, and a tainted run's task
+would become work you accepted. The option is the proposal's own rule offer,
+so the card shows no "Always allow" box beside it. A rule-started task is
+`accepted`, as one you started by hand. A dream's report the classifier
+allows is filed by the lead run that follows, as an approved one is. A
+dream's advisory instruction change is a proposal too, so it is not urgent
+either.
+
 ### Stage F: keep measuring
 
 Add `threadlane decisions stats [--days N]` to the client CLI. Per

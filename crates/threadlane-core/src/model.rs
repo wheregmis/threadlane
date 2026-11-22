@@ -1116,6 +1116,14 @@ pub struct Decision {
     /// The asking run’s trace, when a run opened this decision.
     #[serde(default)]
     pub trace_id: Option<String>,
+    /// Whether it notifies you; a proposal or a limitation report waits in
+    /// the Inbox's Later group instead. True from hubs that do not say.
+    #[serde(default = "urgent_by_default")]
+    pub urgent: bool,
+}
+
+fn urgent_by_default() -> bool {
+    true
 }
 
 impl Decision {
@@ -1165,6 +1173,8 @@ pub struct NewDecision {
     pub offers_standing_rule: bool,
     pub expires_at: Option<Timestamp>,
     pub created_at: Timestamp,
+    /// See [`Decision::urgent`].
+    pub urgent: bool,
 }
 
 /// Your answer to a decision.

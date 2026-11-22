@@ -469,7 +469,11 @@ async fn existing_version_22_routines_retain_their_missed_run_policy() -> StoreR
 async fn bindings_at_their_project_mode_follow_it_and_no_other_changes() -> StoreResult<()> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prior.db");
-    let before = MIGRATIONS.len() - 1;
+    // Just before the project-mode migration, which rebuilds bindings.
+    let before = MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE bindings_new"))
+        .unwrap();
     {
         let sqlite = rusqlite::Connection::open(&path).unwrap();
         for sql in &MIGRATIONS[..before] {

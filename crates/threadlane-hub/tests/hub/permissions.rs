@@ -109,6 +109,7 @@ async fn a_rule_removes_the_next_identical_ask_but_not_another_target_and_a_revo
     .await;
     assert_eq!(first, Err(ToolError::WaitingOnYou));
     assert!(decision(&hub, 1).await.offers_standing_rule);
+    assert!(decision(&hub, 1).await.urgent, "an approval notifies");
     let answered = decide(
         &hub,
         DecisionRequest::AnswerAlways {

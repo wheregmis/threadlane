@@ -211,6 +211,7 @@ async fn a_decision_reminder_is_claimed_once_across_a_restart() {
                     offers_standing_rule: false,
                     expires_at: None,
                     created_at: T0,
+                    urgent: true,
                 },
             )
             .await
@@ -247,6 +248,7 @@ async fn a_decision_reminder_is_claimed_once_across_a_restart() {
                 offers_standing_rule: false,
                 expires_at: None,
                 created_at: T0,
+                urgent: true,
             },
         )
         .await
@@ -1562,6 +1564,7 @@ async fn a_task_has_something_to_wake_it_with_a_timer_event_decision_or_result()
             offers_standing_rule: false,
             expires_at: None,
             created_at: T0,
+            urgent: true,
         },
     )
     .await
@@ -2409,6 +2412,7 @@ async fn decisions_are_answered_once_and_wake_their_lane() {
                 offers_standing_rule: true,
                 expires_at: None,
                 created_at: T0,
+                urgent: true,
             },
         )
         .await
@@ -2478,6 +2482,7 @@ async fn opening_a_decision_queues_one_card_and_a_repeat_opens_nothing() {
         offers_standing_rule: false,
         expires_at: None,
         created_at: T0,
+        urgent: true,
     };
     let first = hub.open_decision(None, &new).await.unwrap();
     let again = hub.open_decision(None, &new).await.unwrap();
@@ -3485,6 +3490,7 @@ async fn the_client_history_queries_page_from_the_newest() {
         offers_standing_rule: false,
         expires_at: None,
         created_at: at(104),
+        urgent: true,
     };
     let asked = hub.open_decision(None, &decision("one")).await.unwrap();
     hub.answer(

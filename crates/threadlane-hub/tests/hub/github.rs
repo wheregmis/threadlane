@@ -229,6 +229,7 @@ async fn record_performed(
                 offers_standing_rule: false,
                 expires_at: None,
                 created_at: hub.clock.now(),
+                urgent: true,
             },
         )
         .await
