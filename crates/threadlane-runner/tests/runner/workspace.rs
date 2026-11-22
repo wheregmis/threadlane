@@ -385,6 +385,54 @@ async fn the_merge_check_names_the_base_and_the_conflicting_files_and_touches_no
 }
 
 #[tokio::test]
+async fn a_pr_review_whose_base_fetch_fails_is_not_pointed_at_origin_base() {
+    let h = Harness::new();
+    let mut s = setup();
+    s.workspaces = GitWorkspaces::new(h.config.lanes_dir.parent().unwrap().join("workspaces"));
+    s.prepare(T1).await;
+    let seed = s.dir.path().join("remotes/app-seed");
+    git(&seed, &["commit", "--allow-empty", "-m", "PR-only commit"]);
+    git(
+        &seed,
+        &["push", &s.repository.remote_url, "HEAD:refs/pull/42/head"],
+    );
+    let head = git(&seed, &["rev-parse", "HEAD"]).trim().to_owned();
+    // The remote has no `gone` branch, so fetching the base fails.
+    h.forge.set_pull_base("gone");
+
+    let mut assignment = assignment(11);
+    assignment.lane_kind = LaneKind::Task;
+    assignment.task_id = Some(T1);
+    assignment.pr_review = Some(PullRequestReview {
+        number: 42,
+        revision: ReviewRevision {
+            repository: s.repository.id,
+            commit: head.clone(),
+        },
+    });
+    assignment.repositories.push(s.repository.clone());
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment)));
+    h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
+    h.link.push_tool(Ok(json!({"finished": true})));
+    h.backend.scripted.push(
+        Script::new()
+            .call("progress", "memory_create", json!({}))
+            .call(
+                "verdict",
+                "finish_task",
+                json!({"reviewed_head":head,"pr_verdict":"approved","summary":"Reviewed"}),
+            )
+            .finish("Reviewed"),
+    );
+    h.runner.work_once().await.unwrap();
+    let prompt = &h.backend.scripted.received()[0].prompt;
+    assert!(prompt.contains("fetching that branch failed"), "{prompt}");
+    assert!(prompt.contains("gh pr view 42"), "{prompt}");
+    assert!(!prompt.contains("git diff origin/gone"), "{prompt}");
+}
+
+#[tokio::test]
 async fn a_standalone_pr_review_fetches_its_head_and_completes_from_a_detached_checkout() {
     let h = Harness::new();
     let mut s = setup();

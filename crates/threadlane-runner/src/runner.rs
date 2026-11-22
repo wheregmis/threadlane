@@ -1236,15 +1236,27 @@ impl Inner {
             }
         };
         let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
-        if let Err(error) =
-            crate::workspace::git(Some(checkout), ["fetch", "--quiet", "origin", &refspec]).await
+        let mut note = match crate::workspace::git(
+            Some(checkout),
+            ["fetch", "--quiet", "origin", &refspec],
+        )
+        .await
         {
-            warn!(%error, %base, "could not fetch the PR's base branch");
-        }
-        let mut note = format!(
-            "\n\nPR #{number} merges into `{base}`. Review its diff against that base: \
-             `git diff origin/{base}...HEAD`. Name `{base}` as the base you compared against in your result."
-        );
+            Ok(_) => format!(
+                "\n\nPR #{number} merges into `{base}`. Review its diff against that base: \
+                 `git diff origin/{base}...HEAD`. Name `{base}` as the base you compared against in your result."
+            ),
+            Err(error) => {
+                warn!(%error, %base, "could not fetch the PR's base branch");
+                // origin/<base> may be missing or stale, so don't point the reviewer at it.
+                format!(
+                    "\n\nPR #{number} merges into `{base}`, but fetching that branch failed ({error}), \
+                     so `origin/{base}` may be missing or stale. Fetch the base yourself \
+                     (`git fetch origin {base}`, or find it with `gh pr view {number} --json baseRefName`) \
+                     before diffing against it. Name the base you compared against in your result."
+                )
+            }
+        };
         if base != repository.default_branch {
             note.push_str(&format!(
                 " The registration {} tracks `{}`, not this PR's base: do not diff against it.",
