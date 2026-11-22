@@ -1621,7 +1621,7 @@ async fn sessions_keep_cut_tasks_structured_and_can_list_only_recent_ones() {
         "{line}"
     );
     assert!(cut["updated_at"].as_str().unwrap() < cutoff.as_str());
-    assert!(cut["detail"].as_str().unwrap().contains("task_id T-0001"));
+    assert!(cut.get("result").is_none(), "{cut}");
 
     let full = call(
         &*hub.link,
@@ -1633,8 +1633,13 @@ async fn sessions_keep_cut_tasks_structured_and_can_list_only_recent_ones() {
     .await
     .unwrap();
     assert_eq!(full["result"]["summary"], summary);
-    assert_eq!(full["summary"], cut["summary"]);
-    assert!(full.get("detail").is_none());
+    assert!(
+        full["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with(line.trim_end_matches('…'))
+    );
+    assert!(full.get("goal").is_some() && cut.get("goal").is_none());
 
     let recent = call(
         &*hub.link,
