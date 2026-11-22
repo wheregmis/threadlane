@@ -390,5 +390,8 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
     let lead_appended = without_space(&lead);
     assert!(!lead_appended.contains("tasks/INDEX.md"), "{lead_appended}");
     assert!(!lead_appended.contains("T-0001.md"), "{lead_appended}");
-    assert!(lead_appended.contains("project/tasks/<task id>.md"), "{lead_appended}");
+    assert!(
+        lead_appended.contains("project/tasks/<task id>.md"),
+        "{lead_appended}"
+    );
 }
