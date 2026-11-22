@@ -486,7 +486,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         define(
             MEMORY_CREATE,
             &format!(
-                "Create a memory file, or replace its content. A file in notes/ or tasks/ \
+                "Create a memory file, or replace its content. A file in notes/ \
                  starts with a title line and a one-line description, which become its line \
                  in that directory's INDEX.md; the system writes the index.{protected}"
             ),

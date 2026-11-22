@@ -83,11 +83,13 @@ impl LeadKnows {
             "No instructions for this project"
         };
         let notes = count_form(self.notes, "note", "notes");
-        let files = count_form(self.progress, "task progress file", "task progress files");
-        [
-            instructions.to_owned(),
-            format!("{} {notes} · {} {files}", self.notes, self.progress),
-        ]
+        let summary = if self.progress == 0 {
+            format!("{} {notes}", self.notes)
+        } else {
+            let files = count_form(self.progress, "task progress file", "task progress files");
+            format!("{} {notes} · {} {files}", self.notes, self.progress)
+        };
+        [instructions.to_owned(), summary]
     }
 }
 

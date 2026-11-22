@@ -2361,6 +2361,18 @@ async fn the_memory_tab_groups_the_files_the_lead_sees_and_you_change_them_as_yo
             "2 notes · 1 task progress file".to_owned()
         ]
     );
+    assert_eq!(
+        LeadKnows {
+            instructions: true,
+            notes: 2,
+            progress: 0,
+        }
+        .lines(),
+        [
+            "Instructions for this project".to_owned(),
+            "2 notes".to_owned()
+        ]
+    );
 
     // An index is shown, never edited.
     state.select_memory("work", "api", "project/notes/INDEX.md");

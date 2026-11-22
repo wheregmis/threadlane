@@ -2351,7 +2351,7 @@ async fn indexes_are_rewritten_with_every_change_and_their_bytes_depend_only_on_
         "- [About you](about.md): You work on payments.\n\
          - [Style](writing.md): Short sentences.\n"
     );
-    // A progress file has its own index, in its project's tasks directory.
+    // A progress file is read on demand by task ID and is not auto-indexed.
     hub.write(
         &keyed(&by, "p1"),
         "projects/1/tasks/T-0001.md",
@@ -2359,14 +2359,7 @@ async fn indexes_are_rewritten_with_every_change_and_their_bytes_depend_only_on_
     )
     .await
     .unwrap();
-    assert_eq!(
-        hub.read("projects/1/tasks/INDEX.md")
-            .await
-            .unwrap()
-            .unwrap()
-            .content,
-        "- [T-0001: the page](T-0001.md): The form is done; tests are left.\n"
-    );
+    assert_eq!(hub.read("projects/1/tasks/INDEX.md").await.unwrap(), None);
     // The last note gone, its index goes too.
     hub.delete(&keyed(&by, "d1"), "space/notes/about.md")
         .await
@@ -2376,6 +2369,53 @@ async fn indexes_are_rewritten_with_every_change_and_their_bytes_depend_only_on_
         .unwrap();
     assert_eq!(hub.read(index).await.unwrap(), None);
     assert!(hub.history(index).await.unwrap().last().unwrap().deleted);
+}
+
+#[tokio::test]
+async fn list_active_project_memory_excludes_terminal_tasks() {
+    let hub = hub().await;
+    let project = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &project, 2).await;
+    let active = hub
+        .create_task(None, &new_task(&project, agent, "Active", vec![]))
+        .await
+        .unwrap();
+    let cancelled = hub
+        .create_task(None, &new_task(&project, agent, "Cancelled", vec![]))
+        .await
+        .unwrap();
+    hub.cancel_task(None, cancelled.id, T0).await.unwrap();
+
+    let note_path = format!("projects/{}/notes/build.md", project.id.get());
+    let active_path = threadlane_core::memory::progress_path(project.id, active.id);
+    let cancelled_path = threadlane_core::memory::progress_path(project.id, cancelled.id);
+    hub.write_by_owner(&note_path, "# Build\nHow to build.", T0)
+        .await
+        .unwrap();
+    hub.write_by_owner(&active_path, "# Active\nIn progress.", T0)
+        .await
+        .unwrap();
+    hub.write_by_owner(&cancelled_path, "# Cancelled\nStopped.", T0)
+        .await
+        .unwrap();
+
+    let listed: Vec<String> = hub
+        .list_active_project_memory(project.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|file| file.path)
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            format!("projects/{}/notes/INDEX.md", project.id.get()),
+            note_path,
+            active_path,
+        ]
+    );
+    // The finished task's progress file is still readable directly on demand.
+    assert!(hub.read(&cancelled_path).await.unwrap().is_some());
 }
 
 #[tokio::test]
