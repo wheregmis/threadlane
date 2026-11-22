@@ -420,7 +420,7 @@ impl Desktop {
         .detach();
     }
 
-    fn submit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn submit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(destination) = self.composer_destination() else {
             return;
         };
@@ -488,6 +488,30 @@ impl Desktop {
             .focus(window, cx);
         cx.notify();
         true
+    }
+
+    /// Adds a review reference to the end of the task draft and focuses it.
+    pub(crate) fn quote_to_composer(
+        &mut self,
+        reference: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(destination) = self.composer_destination() else {
+            return;
+        };
+        self.state.quote_into_draft(&destination, reference);
+        self.sync_drafts(window, cx);
+        self.draft_input(destination.draft())
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    /// Whether the task's draft can be sent now.
+    pub(crate) fn task_draft_ready(&self, space: &str, task: threadlane_core::ids::TaskId) -> bool {
+        self.state
+            .is_send_enabled(&Destination::Task(space.to_owned(), task))
     }
 
     pub(crate) fn reply_to(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {

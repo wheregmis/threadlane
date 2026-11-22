@@ -45,6 +45,7 @@ mod machines;
 mod memory;
 mod permissions;
 mod prose;
+mod review;
 mod routines;
 mod settings;
 mod tasks;
@@ -90,6 +91,10 @@ pub use permissions::{
 pub use prose::{
     ProseLimit, Reference, Segment, github_pull_url, github_repository, markdown_source,
     markdown_source_for, markdown_source_with_time, segments,
+};
+pub use review::{
+    DiffLine, Hunk, LineKind, PullFilesLoad, PullsLoad, Review, ReviewFile, check_counts,
+    check_label, load_pull_files, load_pulls, parse_hunks, pull_label, quote, side_by_side,
 };
 pub use routines::{
     Cadence, RoutineForm, RoutineGroup, RoutineRow, RoutineText, RoutinesLoad, load_routines,
@@ -1105,23 +1110,35 @@ pub struct TaskLoad {
     space: String,
     task: TaskId,
     detail: Result<TaskDetail, ClientError>,
+    pulls: Result<Vec<threadlane_core::client::TaskPullRequest>, ClientError>,
 }
 
 /// Asks the hub of `space` for task `task` in full.
 pub async fn load_task(core: &ClientCore, space: &str, task: TaskId) -> TaskLoad {
+    let id = task.to_string();
+    let (detail, pulls) = tokio::join!(
+        core.task(Some(space), &id),
+        core.task_pull_requests(space, task)
+    );
     TaskLoad {
         space: space.to_owned(),
         task,
-        detail: core.task(Some(space), &task.to_string()).await,
+        detail,
+        pulls,
     }
 }
 
 /// Asks the hub for the task screen's initial details.
 pub async fn load_task_overview(core: &ClientCore, space: &str, task: TaskId) -> TaskLoad {
+    let (detail, pulls) = tokio::join!(
+        core.task_overview(space, task),
+        core.task_pull_requests(space, task)
+    );
     TaskLoad {
         space: space.to_owned(),
         task,
-        detail: core.task_overview(space, task).await,
+        detail,
+        pulls,
     }
 }
 
@@ -1281,6 +1298,13 @@ pub struct AppState {
     /// Why a task could not be shown, by space and id.
     task_failures: HashMap<InSpace<TaskId>, String>,
     task_activity: HashSet<InSpace<TaskId>>,
+    /// Each task's pull requests as last read.
+    pulls: HashMap<InSpace<TaskId>, Vec<threadlane_core::client::TaskPullRequest>>,
+    /// Each reviewed task's pull request files, or why they could not be read.
+    pull_files:
+        HashMap<InSpace<TaskId>, Result<Vec<threadlane_core::client::PullRequestFiles>, String>>,
+    /// The full-width review open on the task screen.
+    review: Option<Review>,
     /// The Home results shown in full, by space and feed position.
     expanded: HashSet<InSpace<i64>>,
     /// The space Home shows; `None` for all.
@@ -2187,6 +2211,8 @@ impl AppState {
         self.metrics.remove(name);
         self.machine_history.remove(name);
         self.task_activity.retain(|(space, _)| space != name);
+        self.pulls.retain(|(space, _), _| space != name);
+        self.pull_files.retain(|(space, _), _| space != name);
         self.routines.retain(|(space, _), _| space != name);
         if self
             .cancelling
@@ -2904,6 +2930,9 @@ impl AppState {
     /// Takes a task in full, or why its hub could not show it.
     pub fn apply_task(&mut self, load: TaskLoad) {
         let key = (load.space, load.task);
+        if let Ok(pulls) = load.pulls {
+            self.pulls.insert(key.clone(), pulls);
+        }
         match load.detail {
             Ok(detail) => {
                 let records: Vec<_> = detail

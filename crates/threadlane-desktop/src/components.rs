@@ -17,6 +17,7 @@ pub(crate) mod composer;
 mod diff;
 pub(crate) mod graph_canvas;
 mod prose;
+mod review;
 
 use crate::icons::AppIcon;
 use crate::tokens::{

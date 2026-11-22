@@ -240,6 +240,17 @@ impl AppState {
         self.edit_draft(destination, &draft);
     }
 
+    /// Adds a reference to the end of the draft, on its own paragraph.
+    pub fn quote_into_draft(&mut self, destination: &Destination, reference: &str) {
+        let draft = self.draft(destination).trim_end();
+        let draft = if draft.is_empty() {
+            reference.to_owned()
+        } else {
+            format!("{draft}\n\n{reference}")
+        };
+        self.edit_draft(destination, &format!("{draft}\n"));
+    }
+
     /// The failure associated with the draft, if any.
     #[must_use]
     pub fn send_error(&self, destination: &Destination) -> Option<&str> {

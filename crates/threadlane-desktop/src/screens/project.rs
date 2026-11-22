@@ -882,6 +882,7 @@ impl Desktop {
                             )
                             .child(meta(task_card.meta, cx))
                             .children(task_card.merge.map(|merge| meta(merge, cx)))
+                            .children(self.pull_strip(space, task_card.id, cx))
                             .children(answer),
                     )
                     .context_menu(move |menu, _, _| {
@@ -1087,6 +1088,10 @@ impl Desktop {
                                                 cx.theme().foreground
                                             })
                                             .child(task.title.clone()),
+                                    )
+                                    .children(
+                                        self.pull_strip(space, task.id, cx)
+                                            .map(|strip| strip.flex_none().flex_nowrap()),
                                     )
                                     .child(
                                         meta(summary.agent.clone(), cx)

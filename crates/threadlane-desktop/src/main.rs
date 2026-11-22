@@ -1019,6 +1019,7 @@ impl Desktop {
                         cx,
                     );
                 }
+                let pulls_for = (tab == Tab::Tasks).then(|| (space.clone(), project.clone()));
                 let job = self.tokio.spawn(async move {
                     load_project_tab(
                         &*core.read().await,
@@ -1040,6 +1041,9 @@ impl Desktop {
                                 loaded.keep_refreshed_parts(pending.refreshed);
                             }
                             this.state.apply_project(loaded);
+                            if let Some((space, project)) = pulls_for {
+                                this.load_task_pulls(space, &project, cx);
+                            }
                             cx.notify();
                         }
                         if let Some(pending) = pending {
@@ -1165,6 +1169,20 @@ impl Desktop {
         self.run(
             async move { load_routines(&*core.read().await, projects).await },
             |this, loaded, _| this.state.apply_routines(loaded),
+            cx,
+        );
+    }
+
+    /// Reads the pull request strip of a project's board and list cards.
+    fn load_task_pulls(&mut self, space: String, project: &str, cx: &mut Context<Self>) {
+        let tasks = self.state.pull_candidates(&space, project);
+        if tasks.is_empty() {
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move { threadlane_desktop::load_pulls(&*core.read().await, &space, tasks).await },
+            |this, loaded, _| this.state.apply_pulls(loaded),
             cx,
         );
     }
