@@ -3866,3 +3866,36 @@ async fn decision_stats_leave_out_cancelled_decisions() {
     hub.cancel_task(None, task.id, T0).await.unwrap();
     assert_eq!(hub.decision_stats(T0).await.unwrap(), Vec::new());
 }
+
+#[tokio::test]
+async fn a_task_ended_after_the_grant_refuses_the_run() {
+    // Worktree cleanup checks an ended task for active runs once; a run opened
+    // after that could write into a worktree being removed.
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let a = machine(&hub, "a").await;
+    let agent = engineer(&hub, &general, 2).await;
+    let task = hub
+        .create_task(None, &new_task(&general, agent, "ended", vec![]))
+        .await
+        .unwrap();
+    let lease = hub
+        .grant_lease(task.lane_id, a, T0, LEASE_TTL)
+        .await
+        .unwrap()
+        .unwrap();
+    let events: Vec<EventId> = hub
+        .pending_events(task.lane_id)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.id)
+        .collect();
+    assert!(!events.is_empty());
+    hub.cancel_task(None, task.id, T0).await.unwrap();
+    assert!(matches!(
+        hub.start_run(&lease, &new_run(events, T0)).await,
+        Err(StoreError::Stopped)
+    ));
+    assert!(hub.lane_runs(task.lane_id).await.unwrap().is_empty());
+}

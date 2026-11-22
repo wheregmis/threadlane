@@ -947,10 +947,16 @@ async fn unsaved_work(
             if !known || !is_dir || !path.join(".git").is_file() {
                 return Ok(Some(format!("{} is not a known worktree", path.display())));
             }
-            // Explicit, so `status.showUntrackedFiles=no` cannot hide untracked files.
+            // Explicit, so `status.showUntrackedFiles=no` or a submodule's
+            // `ignore = all` cannot hide changes.
             if !git(
                 Some(&path),
-                ["status", "--porcelain", "--untracked-files=all"],
+                [
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ],
             )
             .await?
             .trim()

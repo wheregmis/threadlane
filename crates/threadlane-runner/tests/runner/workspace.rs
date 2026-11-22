@@ -768,6 +768,36 @@ async fn an_ended_tasks_worktrees_go_only_once_nothing_in_them_would_be_lost() {
     );
     std::fs::remove_file(path.join("hidden.txt")).unwrap();
 
+    let lib = bare_repository(&s.dir.path().join("remotes"), "lib");
+    git(
+        &path,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            lib.to_str().unwrap(),
+            "lib",
+        ],
+    );
+    git(
+        &path,
+        &["commit", "--quiet", "--no-verify", "-m", "Add lib"],
+    );
+    git(&path, &["push", "--quiet", "origin", "threadlane/T-0001"]);
+    git(&path, &["config", "submodule.lib.ignore", "all"]);
+    std::fs::write(path.join("lib/README.md"), "changed in the submodule").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    git(&path.join("lib"), &["checkout", "--quiet", "README.md"]);
+    let commit = git(&path, &["rev-parse", "HEAD"]).trim().to_owned();
+
     std::fs::write(task_dir.join(".handoff-notes"), "not a marker").unwrap();
     kept(
         s.workspaces
