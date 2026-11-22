@@ -782,7 +782,7 @@ async fn a_review_thread_is_resolved_only_at_the_approved_head_on_its_own_pull_r
         number: 12.try_into().unwrap(),
         expected_head: PR_HEAD.into(),
         thread_id: "PRRT_kw1".into(),
-        fixed_by: fixed_by.into(),
+        fixed_by: Some(fixed_by.into()),
         body: "Guarded the null case.".into(),
     };
     let thread = |number: u64, owner: &str, resolved: bool| {
@@ -859,6 +859,27 @@ async fn a_review_thread_is_resolved_only_at_the_approved_head_on_its_own_pull_r
     assert_eq!(
         mutation[8],
         format!("body=Guarded the null case.\n\nFixed in {fixed_by}.")
+    );
+
+    // A declined finding skips the compare and says it was declined (#713).
+    let declined = RepositoryAction::ResolveReviewThread {
+        number: 12.try_into().unwrap(),
+        expected_head: PR_HEAD.into(),
+        thread_id: "PRRT_kw1".into(),
+        fixed_by: None,
+        body: "Out of scope for this PR.".into(),
+    };
+    let gh = setup(PR_HEAD, "diverged", thread(12, "acme", false));
+    let done = GitForge::with_gh(gh.program())
+        .apply(remote, &declined)
+        .await
+        .unwrap();
+    assert!(done.contains("as declined"), "{done}");
+    let calls = gh.invocations();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls[2][8],
+        "body=Out of scope for this PR.\n\nDeclined: not changed."
     );
 }
 

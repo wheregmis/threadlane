@@ -244,9 +244,10 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         define(
             RESOLVE_REVIEW_THREAD,
             "Reply to one review thread of a pull request in a registered project repository and \
-             resolve it, once a commit on the PR fixes what it raised. The user always decides it. \
-             It is refused if the PR head is no longer expected_head or does not contain fixed_by. \
-             End your turn when it waits on the user.",
+             resolve it, once a commit on the PR fixes what it raised, or with declined set to \
+             true, to answer a finding you decline with the reason in body. Pass exactly one of \
+             fixed_by and declined. The user always decides it. It is refused if the PR head is \
+             no longer expected_head or does not contain fixed_by. End your turn when it waits on the user.",
             json!({
                 "type":"object","properties":{
                     "repository":repository,
@@ -254,9 +255,10 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                     "expected_head":{"type":"string","description":"The current full commit SHA of the PR head."},
                     "thread_id":{"type":"string","description":"The thread's GraphQL node ID, as PRRT_kwDO..."},
                     "fixed_by":{"type":"string","description":"The full SHA of the commit that fixes the thread."},
-                    "body":{"type":"string","description":"The reply: how the commit fixes it. A line naming fixed_by is added."}
+                    "declined":{"type":"boolean","description":"True when the finding is declined, not fixed. A line saying so is added."},
+                    "body":{"type":"string","description":"The reply: how the commit fixes it, or why the finding is declined. A line naming fixed_by is added."}
                 },
-                "required":["repository","number","expected_head","thread_id","fixed_by","body"],
+                "required":["repository","number","expected_head","thread_id","body"],
                 "additionalProperties":false
             }),
         ),
@@ -740,6 +742,7 @@ pub(crate) fn repository_action(
                     EXPECTED_HEAD,
                     "thread_id",
                     "fixed_by",
+                    "declined",
                     "body",
                 ],
             )?;
@@ -753,15 +756,32 @@ pub(crate) fn repository_action(
                 })
                 .ok_or_else(|| invalid("thread_id must be a review thread's GraphQL node ID"))?
                 .to_owned();
+            let declined = match a.get("declined") {
+                None | Some(Json::Null | Json::Bool(false)) => false,
+                Some(Json::Bool(true)) => true,
+                Some(_) => return Err(invalid("declined must be true or false")),
+            };
+            let fixed_by = match (a.get("fixed_by"), declined) {
+                (None | Some(Json::Null), true) => None,
+                (None | Some(Json::Null), false) => {
+                    return Err(invalid(
+                        "name the fixing commit in fixed_by, or set declined",
+                    ));
+                }
+                (Some(_), true) => return Err(invalid("pass fixed_by or declined, not both")),
+                (Some(_), false) => Some(commit("fixed_by")?),
+            };
             let body = body()?;
             if body.trim().is_empty() {
-                return Err(invalid("say how the commit fixes the thread in body"));
+                return Err(invalid(
+                    "say how the commit fixes the thread, or why it is declined, in body",
+                ));
             }
             Ok(RepositoryAction::ResolveReviewThread {
                 number: number()?,
                 expected_head: commit(EXPECTED_HEAD)?,
                 thread_id,
-                fixed_by: commit("fixed_by")?,
+                fixed_by,
                 body,
             })
         }
@@ -1026,11 +1046,17 @@ pub(crate) async fn proposal(
                 expected_head,
                 thread_id,
                 fixed_by,
-                ..
-            } => format!(
-                "Resolve review thread {thread_id} on pull request {slug}#{number} in {name} as \
-                 fixed by {fixed_by}, if its head is still {expected_head}?"
-            ),
+                body,
+            } => match fixed_by {
+                Some(fixed_by) => format!(
+                    "Resolve review thread {thread_id} on pull request {slug}#{number} in {name} as \
+                     fixed by {fixed_by}, if its head is still {expected_head}?"
+                ),
+                None => format!(
+                    "Reply to review thread {thread_id} on pull request {slug}#{number} in {name} \
+                     declining it, and resolve it, if its head is still {expected_head}? Reply: {body}"
+                ),
+            },
             threadlane_core::forge::RepositoryAction::RequestReview {
                 number,
                 expected_head,
@@ -1310,13 +1336,26 @@ mod tests {
                 number,
                 expected_head: head.into(),
                 thread_id: "PRRT_kw-1".into(),
-                fixed_by: head.into(),
+                fixed_by: Some(head.into()),
                 body: "Fixed the guard.".into(),
+            })
+        );
+        assert_eq!(
+            resolve(json!({"fixed_by":null,"declined":true,"body":"Out of scope."})),
+            Ok(RepositoryAction::ResolveReviewThread {
+                number,
+                expected_head: head.into(),
+                thread_id: "PRRT_kw-1".into(),
+                fixed_by: None,
+                body: "Out of scope.".into(),
             })
         );
         for bad in [
             json!({"expected_head":"0123456"}),
             json!({"fixed_by":"main"}),
+            json!({"fixed_by":null}),
+            json!({"declined":true}),
+            json!({"declined":"yes"}),
             json!({"thread_id":""}),
             json!({"thread_id":"PRRT x"}),
             json!({"body":"  "}),

@@ -414,6 +414,7 @@ impl Inner {
         let mut performed = self.perform(lane, assignment).await?;
         performed.push_str(&self.bring_in_base(assignment).await);
         performed.push_str(&self.earlier_work(lane, assignment, &working_dir).await);
+        performed.push_str(&self.review_base(assignment, &working_dir).await);
         let noted = assignment.task_id.filter(|_| assignment.review.is_none());
         if let Some(task) = noted {
             let notes = self
@@ -1198,6 +1199,72 @@ impl Inner {
                 String::new()
             }
         }
+    }
+
+    /// For a PR review, the branch the PR merges into as the forge reports it,
+    /// fetched into the checkout, so the reviewer diffs against the real base
+    /// rather than the registration's tracked branch (#715).
+    async fn review_base(&self, assignment: &RunAssignment, checkout: &Path) -> String {
+        let Some(review) = &assignment.pr_review else {
+            return String::new();
+        };
+        let Some(repository) = assignment
+            .repositories
+            .iter()
+            .find(|repo| repo.id == review.revision.repository)
+        else {
+            return String::new();
+        };
+        let number = review.number;
+        let base = match std::num::NonZeroU64::new(number) {
+            Some(n) => {
+                self.forge
+                    .pull_request_base(&repository.remote_url, n)
+                    .await
+            }
+            None => return String::new(),
+        };
+        let base = match base {
+            Ok(base) => base,
+            Err(error) => {
+                return format!(
+                    "\n\nCould not read PR #{number}'s base branch ({error}). Find it with \
+                     `gh pr view {number} --json baseRefName` and diff against it, not against \
+                     {}'s tracked branch {}. Name the base you compared against in your result.\n",
+                    repository.name, repository.default_branch
+                );
+            }
+        };
+        let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
+        let mut note = match crate::workspace::git(
+            Some(checkout),
+            ["fetch", "--quiet", "origin", &refspec],
+        )
+        .await
+        {
+            Ok(_) => format!(
+                "\n\nPR #{number} merges into `{base}`. Review its diff against that base: \
+                 `git diff origin/{base}...HEAD`. Name `{base}` as the base you compared against in your result."
+            ),
+            Err(error) => {
+                warn!(%error, %base, "could not fetch the PR's base branch");
+                // origin/<base> may be missing or stale, so don't point the reviewer at it.
+                format!(
+                    "\n\nPR #{number} merges into `{base}`, but fetching that branch failed ({error}), \
+                     so `origin/{base}` may be missing or stale. Fetch the base yourself \
+                     (`git fetch origin {base}`, or find it with `gh pr view {number} --json baseRefName`) \
+                     before diffing against it. Name the base you compared against in your result."
+                )
+            }
+        };
+        if base != repository.default_branch {
+            note.push_str(&format!(
+                " The registration {} tracks `{}`, not this PR's base: do not diff against it.",
+                repository.name, repository.default_branch
+            ));
+        }
+        note.push('\n');
+        note
     }
 
     /// Reports the usage limit to the hub, which cools the account down.

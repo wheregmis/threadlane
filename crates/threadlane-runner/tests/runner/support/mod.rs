@@ -249,6 +249,7 @@ pub struct Harness {
     pub plan: CrashPlan,
     pub runner: Arc<Runner>,
     pub config: RunnerConfig,
+    pub forge: FakeForge,
     // Keeps the lanes directory alive for the test.
     _dir: tempfile::TempDir,
 }
@@ -300,11 +301,12 @@ impl Harness {
         };
         configure(&mut config);
         let hook = hook.unwrap_or_else(|| Arc::new(plan.clone()));
+        let forge = FakeForge::default();
         let runner = Runner::new(
             Arc::clone(&link) as Arc<_>,
             vec![Arc::new(backend.clone())],
             Arc::new(GitWorkspaces::new(dir.path().join("workspaces"))),
-            Arc::new(FakeForge::default()),
+            Arc::new(forge.clone()),
             Arc::new(clock.clone()),
             hook,
             config.clone(),
@@ -316,6 +318,7 @@ impl Harness {
             plan,
             runner: Arc::new(runner),
             config,
+            forge,
             _dir: dir,
         }
     }

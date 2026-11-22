@@ -361,9 +361,16 @@ pub struct FakeForge {
     opened: Arc<Mutex<Vec<(String, String)>>>,
     /// Reported by [`Forge::logged_in`] inverted, so the default is logged in.
     logged_out: Arc<std::sync::atomic::AtomicBool>,
+    /// Reported by [`Forge::pull_request_base`]; `main` until set.
+    pull_base: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeForge {
+    /// Sets the base branch [`Forge::pull_request_base`] reports.
+    pub fn set_pull_base(&self, base: &str) {
+        *lock(&self.pull_base) = Some(base.to_owned());
+    }
+
     /// Sets what [`Forge::logged_in`] reports; logged in until set.
     pub fn set_logged_in(&self, logged_in: bool) {
         self.logged_out
@@ -475,6 +482,16 @@ impl Forge for FakeForge {
             .iter()
             .find(|(head, _)| head == branch)
             .map(|(_, url)| url.clone()))
+    }
+
+    async fn pull_request_base(
+        &self,
+        _remote: &str,
+        _number: std::num::NonZeroU64,
+    ) -> Result<String, ForgeError> {
+        Ok(lock(&self.pull_base)
+            .clone()
+            .unwrap_or_else(|| "main".into()))
     }
 }
 
