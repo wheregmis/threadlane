@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 
-use threadlane_client::{ClientCore, ClientError, Sent};
+use threadlane_client::{ClientCore, ClientError, NewTaskSpec, Sent};
 use threadlane_core::attachment::{ImageAttachment, check_image_budget};
+use threadlane_core::model::Task;
 use threadlane_core::{ids::TaskId, time::Timestamp};
 
 use crate::{Activity, AppState, describe};
@@ -66,6 +67,9 @@ pub struct Outgoing {
     pub images: Vec<ImageAttachment>,
     /// When the owner submitted it.
     pub at: Timestamp,
+    /// The tasks its `@agent` mentions start, delivered instead of the
+    /// message when not empty.
+    pub dispatch: Vec<NewTaskSpec>,
 }
 
 impl Outgoing {
@@ -85,6 +89,24 @@ impl Outgoing {
                     .await
             }
         }
+    }
+}
+
+impl Outgoing {
+    /// Starts the tasks its mentions dispatch, in its destination's space.
+    ///
+    /// # Errors
+    ///
+    /// The first failure; the tasks started before it stay started.
+    pub async fn dispatch(&self, core: &ClientCore) -> Result<Vec<Task>, ClientError> {
+        let space = match &self.destination {
+            Destination::Lead(space, _) | Destination::Task(space, _) => space,
+        };
+        let mut started = Vec::with_capacity(self.dispatch.len());
+        for spec in &self.dispatch {
+            started.push(core.create_task(Some(space), spec.clone()).await?);
+        }
+        Ok(started)
     }
 }
 
@@ -295,6 +317,11 @@ impl AppState {
         draft.error = None;
         let text = draft.text.clone();
         let images = draft.images.clone();
+        let when = crate::When {
+            now: at,
+            offset_minutes: 0,
+        };
+        let dispatch = self.dispatch_specs(&destination, &text, &when);
         let flushed = self
             .composer
             .held
@@ -317,6 +344,7 @@ impl AppState {
             text,
             images,
             at,
+            dispatch,
         };
         if self.hold_messages() {
             request.held = Some(send.id);
@@ -409,18 +437,61 @@ impl AppState {
 
     /// Reports when the requested message starts going to its recipient.
     pub fn sending(&mut self, send: &Outgoing) {
+        if !send.dispatch.is_empty() {
+            let who: Vec<String> = send
+                .dispatch
+                .iter()
+                .map(|spec| format!("@{}", spec.agent))
+                .collect();
+            self.report(Activity::Working(format!(
+                "Starting a task for {}…",
+                who.join(" and ")
+            )));
+            return;
+        }
         self.report(Activity::Working(format!(
             "Sending to {}…",
             send.destination.label()
         )));
     }
 
-    /// The local messages that have yet to be confirmed by the hub.
+    /// The local messages that have yet to be confirmed by the hub. A
+    /// dispatch never shows in the thread, so it is left out.
     pub fn outgoing(&self) -> impl Iterator<Item = &Outgoing> {
         self.composer
             .sending
             .iter()
             .chain(self.composer.held.iter().map(|(send, _)| send))
+            .filter(|send| send.dispatch.is_empty())
+    }
+
+    /// Settles a dispatch: the draft clears once its tasks started, else
+    /// it comes back with the error.
+    pub fn finish_dispatch(&mut self, send: Outgoing, result: Result<Vec<Task>, ClientError>) {
+        self.composer
+            .sending
+            .retain(|pending| pending.id != send.id);
+        let destination = &send.destination;
+        match result {
+            Ok(started) => {
+                if let Some(draft) = self.composer.drafts.get_mut(destination)
+                    && draft.text == send.text
+                {
+                    draft.text.clear();
+                }
+                let started = started
+                    .iter()
+                    .zip(&send.dispatch)
+                    .map(|(task, spec)| format!("{} for @{}", task.id, spec.agent))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.report(Activity::Done(format!("Started {started}.")));
+            }
+            Err(error) => {
+                self.preserve_draft(destination, &send.text);
+                self.fail_send(destination, describe(&error));
+            }
+        }
     }
 
     /// Shows a submission failure beside the draft and in the status line.

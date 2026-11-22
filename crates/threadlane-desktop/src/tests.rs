@@ -8304,3 +8304,84 @@ fn a_label_rule_reads_as_labelling_issues_in_the_repository() {
         "label issues in app"
     );
 }
+
+#[tokio::test]
+async fn an_agent_mention_dispatches_a_task_with_the_thread_and_referenced_tasks() {
+    let work = FakeHub::new("Work", Vec::new());
+    {
+        let mut tasks = work.tasks.lock().expect("lock");
+        tasks.push(task(1, TaskStatus::Running, None));
+        let mut done = task(2, TaskStatus::Done, None);
+        done.task.title = "Fix login".to_owned();
+        done.task.goal = "Make login pass".to_owned();
+        tasks.push(done);
+    }
+    work.bindings.lock().expect("lock").extend([
+        binding("Lead", Mode::OnRequest),
+        binding("Engineer", Mode::Assisted),
+        binding("Reviewer", Mode::Assisted),
+        binding("Idle", Mode::Off),
+    ]);
+    let (dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.set_client_dir(dir.path().to_owned());
+    state.set_hold_messages(false).unwrap();
+    state.apply(refresh(&core).await);
+    state.apply_modes(load_modes(&core, vec![("work".into(), "api".into())]).await);
+    let to = Destination::Lead("work".into(), "api".into());
+
+    let agents = state.mention_agents(&to);
+    let named: Vec<(&str, bool)> = agents.iter().map(|a| (a.name.as_str(), a.busy)).collect();
+    assert_eq!(
+        named,
+        [("Engineer", true), ("Reviewer", false)],
+        "lead and Off left out"
+    );
+    let query = mention_at("@rev", 4).expect("mention");
+    assert!(matches!(
+        state.mention_items(&to, &query).first(),
+        Some(MentionItem::Agent(agent)) if agent.name == "Reviewer"
+    ));
+    let query = mention_at("#login", 6).expect("mention");
+    assert_eq!(
+        state.mention_items(&to, &query),
+        [MentionItem::Task(TaskId(2), "Fix login".to_owned())]
+    );
+
+    state.edit_draft(&to, "check it");
+    assert_eq!(state.mention_hint(&to), None);
+    state.edit_draft(&to, "@Reviewer check #T-0002 please");
+    assert_eq!(
+        state.mention_hint(&to).as_deref(),
+        Some("Goes to @Reviewer as a new task, not the lead.")
+    );
+    let task_to = Destination::Task("work".into(), TaskId(1));
+    state.edit_draft(&task_to, "@Engineer @Reviewer look");
+    assert_eq!(
+        state.task_hint("work", TaskId(1)),
+        "Goes to @Engineer and @Reviewer as new tasks, not T-0001."
+    );
+
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    assert_eq!(send.dispatch.len(), 1);
+    assert_eq!(
+        state.outgoing().count(),
+        0,
+        "a dispatch is not shown as a message"
+    );
+    let started = send.dispatch(&core).await;
+    state.finish_dispatch(send, started);
+    assert_eq!(state.draft(&to), "");
+    let tasks = work.tasks.lock().expect("lock");
+    let created = tasks.last().expect("created");
+    assert_eq!(created.agent, "Reviewer");
+    assert_eq!(created.task.title, "check #T-0002 please");
+    let goal = &created.task.goal;
+    assert!(goal.starts_with("@Reviewer check #T-0002 please"), "{goal}");
+    assert!(goal.contains("Asked from the api chat."), "{goal}");
+    assert!(goal.contains("Referenced T-0002 \"Fix login\""), "{goal}");
+    assert!(goal.contains("Make login pass"), "{goal}");
+}
