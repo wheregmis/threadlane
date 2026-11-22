@@ -115,7 +115,7 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
 
     let latest = tasks[0].latest_step.as_ref().unwrap();
     assert_eq!(latest.kind, "tool_use");
-    assert_eq!(latest.description, "Called Bash");
+    assert_eq!(latest.description, "Called Bash · do work");
     assert_eq!(latest.at, step_at);
 
     let OverviewReply::Tasks { tasks: running } = overview(&hub, OverviewRequest::Running).await

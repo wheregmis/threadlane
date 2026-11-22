@@ -214,16 +214,6 @@ pub(super) fn work_label(title: String, elapsed: Option<String>, status: Status,
         )
 }
 
-/// The active task's latest step or quiet warning.
-pub(super) fn live_step(step: threadlane_desktop::LatestStep, cx: &App) -> Div {
-    let line = meta(step.text, cx);
-    if step.quiet {
-        line.text_color(Status::Waiting.colors(cx.theme()).0)
-    } else {
-        line
-    }
-}
-
 /// The shared bordered surface for groups and cards.
 pub(super) fn card(cx: &App) -> GroupBox {
     GroupBox::new()

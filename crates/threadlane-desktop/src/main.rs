@@ -604,7 +604,7 @@ impl Desktop {
         let repository_remote = field("Clone URL or path on the hub", cx);
         let repository_branch = field("Default branch (main)", cx);
         let task_title = field("Title", cx);
-        let task_goal = field("Goal: what done looks like", cx);
+        let task_goal = field("What should the agent do?", cx);
         let subscriptions = vec![
             cx.subscribe_in(&space_name, window, |this, input, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -1051,9 +1051,8 @@ impl Desktop {
                 }));
             }
             Screen::Task { space, task } => {
-                if self.state.activity_open(&space, task) {
-                    self.load_task_activity(space.clone(), task, None, cx);
-                }
+                // The feed runs live and summarizes a finished task, so its newest page always loads.
+                self.load_task_activity(space.clone(), task, None, cx);
                 let for_repos = Arc::clone(&core);
                 self.run(
                     async move { load_task_overview(&*core.read().await, &space, task).await },
