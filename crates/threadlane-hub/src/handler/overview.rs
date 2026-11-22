@@ -97,12 +97,54 @@ fn one_line(text: &str) -> String {
     line
 }
 
+/// What a tool worked on, for the live feed: the files it changed or the
+/// command it ran.
+/// shortcut: a command keeps only its first four words so most arguments
+/// stay out, but an inline secret among them still shows; upgrade to a
+/// redacting parser if one leaks.
+fn target(input: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    if let Some(path) = ["file_path", "path", "notebook_path"]
+        .iter()
+        .find_map(|key| input[key].as_str())
+    {
+        return Some(one_line(path));
+    }
+    if let Some(changes) = input["changes"].as_array() {
+        let paths: Vec<_> = changes
+            .iter()
+            .filter_map(|change| change["path"].as_str())
+            .collect();
+        return (!paths.is_empty()).then(|| one_line(&paths.join(", ")));
+    }
+    let command = match &input["command"] {
+        Value::String(command) => command.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => return None,
+    };
+    // Codex wraps each command as `/bin/zsh -lc '…'`.
+    let command = command
+        .split_once(" -lc ")
+        .map_or(command.as_str(), |(_, inner)| inner)
+        .trim_matches(['\'', '"']);
+    let line = one_line(command);
+    let words: Vec<_> = line.split_whitespace().take(4).collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
 fn step(entry: &JournalEntry) -> Option<RunStep> {
     let kind = entry.entry["type"].as_str()?;
     let description = match kind {
         "tool_use" => entry.entry["name"].as_str().map_or_else(
             || "Called a tool".to_owned(),
-            |name| format!("Called {}", one_line(name)),
+            |name| match target(&entry.entry["input"]) {
+                Some(target) => format!("Called {} · {target}", one_line(name)),
+                None => format!("Called {}", one_line(name)),
+            },
         ),
         "text" => {
             let text = one_line(entry.entry["text"].as_str().unwrap_or_default());
@@ -764,6 +806,43 @@ mod tests {
         assert_eq!(
             step.description,
             "codex skill \"gpui\" was skipped for this run: it is not installed on this runner."
+        );
+    }
+
+    #[test]
+    fn a_tool_step_names_the_files_or_the_first_words_of_its_command() {
+        let called = |entry| {
+            step(&JournalEntry {
+                run_id: 1.into(),
+                seq: 1,
+                at: Timestamp::from_millis(0),
+                entry,
+            })
+            .expect("a step")
+            .description
+        };
+        use serde_json::json;
+        assert_eq!(
+            called(
+                json!({"type": "tool_use", "name": "Edit", "input": {"file_path": "src/lib.rs", "old_string": "x"}})
+            ),
+            "Called Edit · src/lib.rs"
+        );
+        assert_eq!(
+            called(
+                json!({"type": "tool_use", "name": "command_execution", "input": {"command": "/bin/zsh -lc 'cargo test -p threadlane-hub --test hub secret'"}})
+            ),
+            "Called command_execution · cargo test -p threadlane-hub"
+        );
+        assert_eq!(
+            called(
+                json!({"type": "tool_use", "name": "file_change", "input": {"changes": [{"path": "a.rs"}, {"path": "b.rs"}]}})
+            ),
+            "Called file_change · a.rs, b.rs"
+        );
+        assert_eq!(
+            called(json!({"type": "tool_use", "name": "send_message", "input": {"text": "hi"}})),
+            "Called send_message"
         );
     }
 }

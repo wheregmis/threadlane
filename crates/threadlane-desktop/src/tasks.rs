@@ -2,7 +2,7 @@
 //! §11.1).
 
 use serde_json::Value as Json;
-use threadlane_core::client::{ConversationEntry, TaskDetail, TaskSummary};
+use threadlane_core::client::{ConversationEntry, RunStep, TaskDetail, TaskSummary};
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
 use threadlane_core::model::{
@@ -54,6 +54,47 @@ pub struct BoardCard {
     pub options: Vec<String>,
     /// Whether its branch merges into its base, from [`merge_state`].
     pub merge: Option<String>,
+    /// The agent doing it, for its badge.
+    pub agent: String,
+    /// What its active run did last, while it runs.
+    pub step: Option<String>,
+    /// Its pull request, which the card offers to open for review.
+    pub review: Option<String>,
+    /// The other agents a queued task can go to instead.
+    pub reassign: Vec<String>,
+}
+
+/// The hub change a card dropped on another board column stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardMove {
+    /// Dropped where it was.
+    Stay,
+    /// Cancel it, once you confirm.
+    Cancel,
+    /// Queue the failed task again.
+    Retry,
+}
+
+/// What dropping a card from column `from` on column `to` asks the hub to
+/// do. Only Cancel and Retry are status changes you can make: the hub moves
+/// a task through the other columns itself.
+///
+/// # Errors
+///
+/// Why the hub has no such change, in a sentence.
+pub fn board_move(from: &str, to: &str) -> Result<BoardMove, String> {
+    match (from, to) {
+        _ if from == to => Ok(BoardMove::Stay),
+        ("Failed", "Queued") => Ok(BoardMove::Retry),
+        ("Done" | "Failed" | "Cancelled", _) => Err(format!(
+            "A {} task has ended; only a failed one can go back to Queued.",
+            from.to_lowercase()
+        )),
+        (_, "Cancelled") => Ok(BoardMove::Cancel),
+        _ => Err(format!(
+            "Tasks can't be moved to {to}: the hub moves them there as the work goes. Drop on Cancelled to cancel one."
+        )),
+    }
 }
 
 /// An open proposal on the board with the two in-place answers.
@@ -304,6 +345,29 @@ impl AppState {
                             decision,
                             options,
                             merge: merge_state(task.result.as_ref()),
+                            agent: summary.agent.clone(),
+                            step: matches!(task.status, TaskStatus::Running | TaskStatus::InReview)
+                                .then(|| {
+                                    summary
+                                        .latest_step
+                                        .as_ref()
+                                        .map(|step| step.description.clone())
+                                })
+                                .flatten(),
+                            review: task
+                                .result
+                                .as_ref()
+                                .and_then(|result| result.get("pull_request"))
+                                .and_then(Json::as_str)
+                                .map(str::to_owned),
+                            reassign: if task.status == TaskStatus::Queued {
+                                self.task_agents(space, project)
+                                    .into_iter()
+                                    .filter(|agent| *agent != summary.agent)
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            },
                         }
                     })
                     .collect();
@@ -785,7 +849,7 @@ pub fn task_header(detail: &TaskDetail, when: &When) -> TaskHeader {
         let text = match (quiet, step, since) {
             (true, _, Some(at)) => format!("Quiet for {}", when.since(at)),
             (_, Some(step), _) => {
-                format!("Latest: {} · {} ago", step.description, when.since(step.at))
+                format!("{} · {} ago", step.description, when.since(step.at))
             }
             _ => "Waiting for the first step.".to_owned(),
         };
@@ -799,6 +863,144 @@ pub fn task_header(detail: &TaskDetail, when: &When) -> TaskHeader {
         context,
         latest,
     }
+}
+
+/// What a live feed row reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MilestoneKind {
+    /// A file the agent changed.
+    File,
+    /// A command it ran.
+    Command,
+    /// A test command that returned.
+    TestsPassed,
+    /// A test command that failed.
+    TestsFailed,
+    /// A command or the run that failed.
+    Failed,
+}
+
+/// One row of the task's live feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Milestone {
+    pub kind: MilestoneKind,
+    /// The file, the command, or what failed.
+    pub text: String,
+    pub at: Timestamp,
+}
+
+/// Tools that change files, by the names each backend reports.
+const FILE_TOOLS: [&str; 6] = [
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "file_change",
+    "apply_patch",
+];
+
+/// Tools that run a shell command.
+const COMMAND_TOOLS: [&str; 4] = ["Bash", "command_execution", "shell", "exec_command"];
+
+/// The milestones among a run's steps, oldest first: files touched,
+/// commands run, and whether test commands passed. Reading, thinking and
+/// messages are left to the timeline.
+#[must_use]
+pub fn milestones<'a>(steps: impl IntoIterator<Item = &'a RunStep>) -> Vec<Milestone> {
+    let mut rows = Vec::new();
+    // The command the next tool result answers.
+    // shortcut: pairs a result with the command just before it; upgrade to
+    // call ids if parallel tool calls interleave their results.
+    let mut pending: Option<String> = None;
+    for step in steps {
+        let row = |kind, text: &str| Milestone {
+            kind,
+            text: text.to_owned(),
+            at: step.at,
+        };
+        match step.kind.as_str() {
+            "tool_use" => {
+                pending = None;
+                let called = step.description.strip_prefix("Called ").unwrap_or_default();
+                let (tool, target) = called.split_once(" · ").unwrap_or((called, ""));
+                let target = if target.is_empty() { tool } else { target };
+                if FILE_TOOLS.contains(&tool) {
+                    rows.push(row(MilestoneKind::File, target));
+                } else if COMMAND_TOOLS.contains(&tool) {
+                    rows.push(row(MilestoneKind::Command, target));
+                    pending = Some(target.to_owned());
+                }
+            }
+            "tool_result" => {
+                if let Some(command) = pending.take() {
+                    let failed = step.description == "Tool failed";
+                    let kind = match (is_test(&command), failed) {
+                        (true, false) => MilestoneKind::TestsPassed,
+                        (true, true) => MilestoneKind::TestsFailed,
+                        (false, true) => MilestoneKind::Failed,
+                        (false, false) => continue,
+                    };
+                    rows.push(row(kind, &command));
+                }
+            }
+            "failed" => rows.push(row(MilestoneKind::Failed, &step.description)),
+            _ => {}
+        }
+    }
+    rows
+}
+
+fn is_test(command: &str) -> bool {
+    command.split_whitespace().any(|word| {
+        matches!(
+            word,
+            "test" | "tests" | "pytest" | "nextest" | "vitest" | "jest"
+        )
+    })
+}
+
+/// The feed as one line once the task has finished: `3 files · 5 commands
+/// · tests passing`.
+#[must_use]
+pub fn milestone_summary(rows: &[Milestone]) -> String {
+    let mut files: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == MilestoneKind::File)
+        .map(|row| row.text.as_str())
+        .collect();
+    files.sort_unstable();
+    files.dedup();
+    let commands = rows
+        .iter()
+        .filter(|row| row.kind == MilestoneKind::Command)
+        .count();
+    let mut parts = vec![
+        format!(
+            "{} {}",
+            files.len(),
+            count_form(files.len(), "file touched", "files touched")
+        ),
+        format!(
+            "{commands} {}",
+            count_form(commands, "command run", "commands run")
+        ),
+    ];
+    if let Some(last) = rows.iter().rev().find(|row| {
+        matches!(
+            row.kind,
+            MilestoneKind::TestsPassed | MilestoneKind::TestsFailed
+        )
+    }) {
+        parts.push(
+            if last.kind == MilestoneKind::TestsPassed {
+                "tests passing"
+            } else {
+                "tests failing"
+            }
+            .to_owned(),
+        );
+    }
+    parts.join(" · ")
 }
 
 /// Rows of the task's journal, grouped newest run first.

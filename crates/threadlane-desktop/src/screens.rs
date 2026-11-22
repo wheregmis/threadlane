@@ -48,7 +48,7 @@ fn empty(region: EmptyRegion, cx: &App) -> Div {
 
 fn menu_item(
     view: &WeakEntity<Desktop>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     action: impl Fn(&mut Desktop, &mut Window, &mut Context<Desktop>) + 'static,
 ) -> PopupMenuItem {
     let view = view.clone();
@@ -58,7 +58,12 @@ fn menu_item(
 }
 
 impl Desktop {
-    fn confirm_action(&mut self, action: Consequence, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_action(
+        &mut self,
+        action: Consequence,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if window.has_active_dialog(cx) {
             return;
         }

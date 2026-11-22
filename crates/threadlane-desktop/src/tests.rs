@@ -922,6 +922,19 @@ impl HubApi for FakeHub {
                     task: summary.task.clone(),
                 })
             }
+            TaskRequest::Reassign { task: id, agent } => {
+                let summary = tasks
+                    .iter_mut()
+                    .find(|summary| summary.task.id == id)
+                    .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+                if summary.task.status != TaskStatus::Queued {
+                    return Err(ApiError::Invalid(format!("task {id} has started")));
+                }
+                summary.agent = agent;
+                Ok(TaskReply::Task {
+                    task: summary.task.clone(),
+                })
+            }
             // The fake numbers repositories by name: `app` is 1.
             TaskRequest::AttachRepositories {
                 task: id,
@@ -3192,9 +3205,16 @@ async fn a_new_task_goes_to_an_agent_that_is_on_and_waits_for_open_tasks() {
     state.task_form_mut().toggle_dependency(TaskId(1));
     state.task_form_mut().draft_pr = true;
     assert_eq!(
-        state.task_spec("work", "api", "  ", "Make it pass"),
-        Err("Give the task a title and a goal.".to_owned())
+        state.task_spec("work", "api", "Fix it", "  "),
+        Err("Say what the task should do.".to_owned())
     );
+    // Quick create sends only a prompt: its first line, cut short, is the title.
+    let long = format!("{}\nand the rest", "word ".repeat(20));
+    let quick = state
+        .task_spec("work", "api", "  ", &long)
+        .expect("a prompt");
+    assert_eq!(quick.title, format!("{}…", &"word ".repeat(20)[..72]));
+    assert_eq!(quick.goal, long.trim());
     let spec = state
         .task_spec("work", "api", " Fix it ", "Make it pass")
         .expect("complete");
@@ -6139,7 +6159,7 @@ async fn task_header_and_activity_use_journal_clock_and_finished_usage() {
     assert_eq!(
         header.latest.unwrap(),
         LatestStep {
-            text: "Latest: Called Bash · 2 min ago".to_owned(),
+            text: "Called Bash · 2 min ago".to_owned(),
             quiet: false
         }
     );
@@ -8303,4 +8323,197 @@ fn a_label_rule_reads_as_labelling_issues_in_the_repository() {
         allows("label_issue", &json!({ "repository": "app" })),
         "label issues in app"
     );
+}
+
+#[tokio::test]
+async fn the_live_feed_keeps_files_commands_and_test_results_and_sums_them_up() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(1, TaskStatus::Running, None);
+    let at = |secs: i64| Timestamp::from_millis(secs * 1_000);
+    let step = |kind: &str, description: &str, secs| RunStep {
+        kind: kind.to_owned(),
+        description: description.to_owned(),
+        at: at(secs),
+    };
+    let steps = vec![
+        step("text", "Checking the build.", 1),
+        step("tool_use", "Called Read · src/lib.rs", 2),
+        step("tool_use", "Called Edit · src/lib.rs", 3),
+        step("tool_use", "Called Edit · src/lib.rs", 4),
+        step("tool_use", "Called Bash · cargo test -p app", 5),
+        step("tool_result", "Tool failed", 6),
+        step("tool_use", "Called file_change · src/main.rs", 7),
+        step(
+            "tool_use",
+            "Called command_execution · cargo test -p app",
+            8,
+        ),
+        step("tool_result", "Tool returned", 9),
+        step("tool_use", "Called Bash · git status", 10),
+        step("tool_result", "Tool returned", 11),
+    ];
+    running.latest_step = steps.last().cloned();
+    *work.tasks.lock().unwrap() = vec![running.clone()];
+    *work.task_runs.lock().unwrap() = vec![RunSummary {
+        steps,
+        usage: None,
+        machine: "macbook".to_owned(),
+        run: Run {
+            trace_id: String::new(),
+            id: RunId(1),
+            lane_id: running.task.lane_id,
+            session_id: SessionId(1),
+            machine_id: MachineId(1),
+            lease_epoch: 1,
+            agent_id: Some(running.task.agent_id),
+            backend: Some(BackendKind::Claude),
+            model: None,
+            status: RunStatus::Active,
+            outcome: None,
+            rationale: None,
+            error: None,
+            started_at: at(0),
+            ended_at: None,
+        },
+    }];
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::default();
+    state.apply_task(load_task(&core, "dev", TaskId(1)).await);
+    let detail = state.task("dev", TaskId(1)).unwrap();
+    let rows = milestones(detail.runs.iter().flat_map(|run| &run.steps));
+    let shown: Vec<_> = rows
+        .iter()
+        .map(|row| (row.kind, row.text.as_str()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (MilestoneKind::File, "src/lib.rs"),
+            (MilestoneKind::File, "src/lib.rs"),
+            (MilestoneKind::Command, "cargo test -p app"),
+            (MilestoneKind::TestsFailed, "cargo test -p app"),
+            (MilestoneKind::File, "src/main.rs"),
+            (MilestoneKind::Command, "cargo test -p app"),
+            (MilestoneKind::TestsPassed, "cargo test -p app"),
+            (MilestoneKind::Command, "git status"),
+        ]
+    );
+    assert_eq!(
+        milestone_summary(&rows),
+        "2 files touched · 3 commands run · tests passing"
+    );
+    assert_eq!(milestone_summary(&[]), "0 files touched · 0 commands run");
+
+    // The pulse line goes amber once the run is quiet for ten minutes.
+    work.now.store(11_000 + 60_000, Ordering::SeqCst);
+    let live = task_header(detail, &work.when()).latest.unwrap();
+    assert_eq!(live.text, "Tool returned · 1 min ago");
+    assert!(!live.quiet);
+    work.now.store(11_000 + 600_000, Ordering::SeqCst);
+    assert!(task_header(detail, &work.when()).latest.unwrap().quiet);
+}
+
+#[tokio::test]
+async fn board_cards_show_the_live_step_and_offer_only_changes_the_hub_makes() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(2, TaskStatus::Running, None);
+    running.latest_step = Some(RunStep {
+        kind: "tool_use".to_owned(),
+        description: "Called Bash · cargo test".to_owned(),
+        at: Timestamp::from_millis(0),
+    });
+    let mut reviewed = task(3, TaskStatus::Done, None);
+    reviewed.task.result = Some(json!({"pull_request": "https://github.com/o/r/pull/7"}));
+    *work.tasks.lock().expect("lock") = vec![
+        task(1, TaskStatus::Queued, None),
+        running,
+        reviewed,
+        task(4, TaskStatus::Failed, None),
+    ];
+    work.bindings.lock().expect("lock").extend([
+        binding("Lead", Mode::OnRequest),
+        binding("Engineer", Mode::Assisted),
+        binding("Idle", Mode::Off),
+    ]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    let cards: BTreeMap<_, _> = state
+        .board("work", "api", &when())
+        .into_iter()
+        .flat_map(|column| {
+            column
+                .cards
+                .into_iter()
+                .map(move |card| (card.id, (column.title, card)))
+        })
+        .collect();
+    let (_, queued) = &cards[&TaskId(1)];
+    assert_eq!(queued.agent, "Engineer");
+    assert_eq!(queued.reassign, ["Lead"]);
+    assert_eq!(queued.step, None);
+    let (_, running) = &cards[&TaskId(2)];
+    assert_eq!(running.step.as_deref(), Some("Called Bash · cargo test"));
+    assert!(
+        running.reassign.is_empty(),
+        "a started task keeps its agent"
+    );
+    assert_eq!(running.elapsed.as_deref(), Some("12 min"));
+    let (_, done) = &cards[&TaskId(3)];
+    assert_eq!(
+        done.review.as_deref(),
+        Some("https://github.com/o/r/pull/7")
+    );
+    assert!(!done.can_cancel && !done.can_retry);
+
+    assert_eq!(board_move("Failed", "Queued"), Ok(BoardMove::Retry));
+    assert_eq!(board_move("Running", "Cancelled"), Ok(BoardMove::Cancel));
+    assert_eq!(board_move("Queued", "Queued"), Ok(BoardMove::Stay));
+    for (from, to) in [
+        ("Queued", "Running"),
+        ("Running", "Done"),
+        ("Done", "Queued"),
+        ("Failed", "Cancelled"),
+    ] {
+        assert!(board_move(from, to).is_err(), "{from} → {to}");
+    }
+
+    core.reassign_task(Some("work"), "T-0001", "Lead")
+        .await
+        .expect("reassigned");
+    state.apply_project(load_project(&core, "work", "api").await);
+    let queued = state
+        .board("work", "api", &when())
+        .into_iter()
+        .find(|column| column.title == "Queued")
+        .unwrap();
+    assert_eq!(queued.cards[0].agent, "Lead");
+    assert_eq!(queued.cards[0].reassign, ["Engineer"]);
+    assert!(
+        core.reassign_task(Some("work"), "T-0002", "Lead")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn quick_create_opens_where_you_are_or_in_the_space_chat_project() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.quick_create_target(Some(("work", "api"))),
+        Some(("work".to_owned(), "api".to_owned()))
+    );
+    let fallback = state.quick_create_target(None).expect("a project");
+    assert_eq!(fallback.0, "work");
+    assert_eq!(
+        Some(fallback.1.as_str()),
+        state
+            .space("work")
+            .and_then(|space| space.main_chat_project())
+    );
+    assert_eq!(AppState::default().quick_create_target(None), None);
 }
