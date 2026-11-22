@@ -80,7 +80,7 @@ pub(super) async fn handle(
         MemoryRequest::List { .. } => {
             let mut files = db.list("space/").await.map_err(api_error)?;
             files.extend(
-                db.list(&format!("projects/{}/", id.get()))
+                db.list_active_project_memory(id)
                     .await
                     .map_err(api_error)?,
             );

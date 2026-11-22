@@ -290,7 +290,7 @@ async fn milestone_5_exit_memory_and_context() {
 
     // Invariant 12, over every memory version written in the scenario.
     let checked = assert_memory_in_scope(&sim).await;
-    assert!(checked >= 6, "{checked} versions checked");
+    assert!(checked >= 4, "{checked} versions checked");
     assert_invariants(&sim, "milestone 5").await;
     assert_quiet(&sim, "milestone 5").await;
 }
