@@ -919,8 +919,13 @@ async fn unsaved_work(
                 .await
                 .map_err(|error| io_error("checking", &path, &error))?
                 .is_dir();
-            if !is_dir && name.to_string_lossy().starts_with('.') {
-                continue; // a ready marker
+            let marker = |suffix: &str| {
+                repositories
+                    .iter()
+                    .any(|repository| name == format!(".{}.{suffix}", repository.name).as_str())
+            };
+            if !is_dir && (marker("ready") || marker("checkpoint")) {
+                continue;
             }
             if index == 1 && name == ".reviews" && is_dir {
                 let mut rounds = tokio::fs::read_dir(&path)
@@ -942,10 +947,14 @@ async fn unsaved_work(
             if !known || !is_dir || !path.join(".git").is_file() {
                 return Ok(Some(format!("{} is not a known worktree", path.display())));
             }
-            if !git(Some(&path), ["status", "--porcelain"])
-                .await?
-                .trim()
-                .is_empty()
+            // Explicit, so `status.showUntrackedFiles=no` cannot hide untracked files.
+            if !git(
+                Some(&path),
+                ["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await?
+            .trim()
+            .is_empty()
             {
                 return Ok(Some(format!("{} has uncommitted changes", path.display())));
             }

@@ -757,6 +757,27 @@ async fn an_ended_tasks_worktrees_go_only_once_nothing_in_them_would_be_lost() {
     );
     std::fs::remove_file(review.join("notes.txt")).unwrap();
 
+    git(&path, &["config", "status.showUntrackedFiles", "no"]);
+    std::fs::write(path.join("hidden.txt"), "untracked").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    std::fs::remove_file(path.join("hidden.txt")).unwrap();
+
+    std::fs::write(task_dir.join(".handoff-notes"), "not a marker").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "not a known worktree",
+    );
+    std::fs::remove_file(task_dir.join(".handoff-notes")).unwrap();
+
     assert_eq!(
         s.workspaces
             .remove_finished(T1, repositories)
