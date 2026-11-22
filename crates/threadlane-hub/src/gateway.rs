@@ -326,13 +326,6 @@ impl LocalLink {
         if !pull.head_repository.eq_ignore_ascii_case(&full_name) {
             return Ok(None);
         }
-        // The merge performs the call's arguments, so only a merge pinned to
-        // the head checked here is own work; the forge refuses a moved head.
-        if tool == crate::MERGE
-            && arguments[threadlane_core::forge::EXPECTED_HEAD].as_str() != Some(&pull.head_sha)
-        {
-            return Ok(None);
-        }
         // The head's task: this one, or another requested task of the project
         // working in this repository.
         let head = match branch_task(&pull.head_ref) {

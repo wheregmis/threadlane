@@ -827,17 +827,8 @@ impl Forge for GitForge {
                 &format!("--title={title}"),
                 &format!("--body={body}"),
             ]),
-            RepositoryAction::Merge {
-                number,
-                expected_head,
-            } => {
-                let mut argv = args(&["pr", "merge", &number.to_string(), "--merge"]);
-                argv.extend(
-                    expected_head
-                        .iter()
-                        .map(|head| format!("--match-head-commit={head}").into()),
-                );
-                argv
+            RepositoryAction::Merge { number } => {
+                args(&["pr", "merge", &number.to_string(), "--merge"])
             }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
             RepositoryAction::EditPullRequest {

@@ -407,19 +407,10 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
         )
         .await
         .unwrap();
-    let head = "0123456789abcdef0123456789abcdef01234567";
-    for expected_head in [None, Some(head.to_owned())] {
-        forge
-            .apply(
-                remote,
-                &RepositoryAction::Merge {
-                    number,
-                    expected_head,
-                },
-            )
-            .await
-            .unwrap();
-    }
+    forge
+        .apply(remote, &RepositoryAction::Merge { number })
+        .await
+        .unwrap();
     forge
         .apply(remote, &RepositoryAction::MarkReady { number })
         .await
@@ -469,14 +460,6 @@ async fn repository_actions_use_the_registered_remote_and_bind_text_to_flags() {
                 repo
             ],
             vec!["pr", "merge", "12", "--merge", repo],
-            vec![
-                "pr",
-                "merge",
-                "12",
-                "--merge",
-                "--match-head-commit=0123456789abcdef0123456789abcdef01234567",
-                repo
-            ],
             vec!["pr", "ready", "12", repo],
             vec![
                 "pr",
