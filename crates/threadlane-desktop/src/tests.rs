@@ -1391,6 +1391,22 @@ fn decisions_and_notices_raise_one_notification_and_messages_none() {
     );
 }
 
+#[test]
+fn a_quiet_decision_raises_no_alert_but_is_new_until_taken() {
+    let mut state = AppState::default();
+    let quiet = item(
+        "work",
+        4,
+        OutboxKind::Decision,
+        json!({ "text": "D-0004: Propose a task?", "decision": "D-0004", "urgent": false }),
+    );
+    assert!(state.is_new_decision(&quiet), "the queue is fetched again");
+    assert_eq!(state.receive(quiet.clone()), None, "no alert");
+    assert!(!state.is_new_decision(&quiet), "a replay fetches nothing");
+    let message = item("work", 5, OutboxKind::Message, json!({ "text": "hi" }));
+    assert!(!state.is_new_decision(&message));
+}
+
 fn said(lines: &[Line]) -> Vec<String> {
     lines
         .iter()

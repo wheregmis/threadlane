@@ -414,12 +414,11 @@ impl Inner {
         let mut performed = self.perform(lane, assignment).await?;
         performed.push_str(&self.bring_in_base(assignment).await);
         performed.push_str(&self.earlier_work(lane, assignment, &working_dir).await);
-        if assignment.review.is_none()
-            && let Some(task) = assignment.task_id
-        {
+        let noted = assignment.task_id.filter(|_| assignment.review.is_none());
+        if let Some(task) = noted {
             let notes = self
                 .workspaces
-                .take_checkpoint_notes(task, &assignment.repositories);
+                .checkpoint_notes(task, &assignment.repositories);
             performed.push_str(&notes.await);
         }
         lane.check()?;
@@ -439,6 +438,12 @@ impl Inner {
                 return self.fail(lane, run_id, RunFailure::Error { message }).await;
             }
         };
+        // Told once, and only to a run that started: a failed start keeps them.
+        if let Some(task) = noted {
+            self.workspaces
+                .clear_checkpoint_notes(task, &assignment.repositories)
+                .await;
+        }
         self.reach(AFTER_BACKEND_START)?;
 
         let result = self

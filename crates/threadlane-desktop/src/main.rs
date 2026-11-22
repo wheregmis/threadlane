@@ -1222,15 +1222,16 @@ impl Desktop {
             )),
             _ => None,
         };
-        if let Some(alert) = self.state.receive(item) {
-            let decision = matches!(alert, threadlane_desktop::Alert::Decision { .. });
-            if self.state.notifies(&alert) {
-                self.notify(&alert, cx);
-            }
-            // The card carries no creation time or context: ask its hub.
-            if decision && !back {
-                self.refresh(cx);
-            }
+        // The card carries no creation time or context: ask its hub, also
+        // for a decision that waits under Later without an alert.
+        let decision = self.state.is_new_decision(&item);
+        if let Some(alert) = self.state.receive(item)
+            && self.state.notifies(&alert)
+        {
+            self.notify(&alert, cx);
+        }
+        if decision && !back {
+            self.refresh(cx);
         }
         if back {
             self.refresh(cx);

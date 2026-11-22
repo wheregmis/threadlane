@@ -641,16 +641,19 @@ impl Workspaces for GitWorkspaces {
         self.checkpoint_all(task, repositories, message, false)
             .await
     }
-    async fn take_checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) -> String {
-        let mut notes = String::new();
+    async fn checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) -> String {
+        repositories
+            .iter()
+            .filter_map(|repository| {
+                std::fs::read_to_string(self.checkpoint_marker(task, repository)).ok()
+            })
+            .collect()
+    }
+
+    async fn clear_checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) {
         for repository in repositories {
-            let marker = self.checkpoint_marker(task, repository);
-            if let Ok(note) = std::fs::read_to_string(&marker) {
-                notes.push_str(&note);
-                let _ = std::fs::remove_file(&marker);
-            }
+            let _ = std::fs::remove_file(self.checkpoint_marker(task, repository));
         }
-        notes
     }
 
     async fn check_merge(
