@@ -103,6 +103,25 @@ impl ClientCore {
         self.one_task(space, TaskRequest::Retry { task: id }).await
     }
 
+    /// Gives queued task `task` (`T-0142`) of one space, which has never
+    /// run, to `agent`. `None` means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, an id that is not a
+    /// task's, or the hub's error, for example a task that has started.
+    pub async fn reassign_task(
+        &self,
+        space: Option<&str>,
+        task: &str,
+        agent: &str,
+    ) -> Result<Task, ClientError> {
+        let id = self.task_id(space, task)?;
+        let agent = agent.to_owned();
+        self.one_task(space, TaskRequest::Reassign { task: id, agent })
+            .await
+    }
+
     /// Attaches registered `repositories` of its project to task `task`
     /// (`T-0142`) so it can publish. `None` means the only paired hub.
     ///

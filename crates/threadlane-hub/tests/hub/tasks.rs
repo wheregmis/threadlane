@@ -2781,3 +2781,70 @@ async fn a_long_memory_file_is_viewed_in_pages_and_its_writer_is_warned() {
     assert_eq!(listed["files"].as_array().unwrap().len(), 1);
     assert_eq!(listed["next_offset"], 1);
 }
+
+#[tokio::test]
+async fn a_queued_task_that_never_ran_can_go_to_another_working_agent() {
+    let (hub, lease, run) = lead_run(2).await;
+    call(
+        &hub,
+        &lease,
+        &run,
+        "toolu_1",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &run).await;
+    let queued = task(&hub, "T-0001").await;
+    let writer = hub
+        .db
+        .create_agent(&NewAgent::named("Writer", "writer"))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: hub.general().await.id,
+            agent_id: writer.id,
+            mode: Some(Mode::OnRequest),
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    hub.db
+        .create_agent(&NewAgent::named("Loner", "loner"))
+        .await
+        .unwrap();
+    let reassign = |agent: &str| TaskRequest::Reassign {
+        task: queued.id,
+        agent: agent.to_owned(),
+    };
+
+    let unbound = hub.api.tasks(reassign("Loner")).await;
+    assert!(
+        matches!(&unbound, Err(ApiError::Invalid(why)) if why.contains("not bound")),
+        "{unbound:?}"
+    );
+    let TaskReply::Task { task: moved } = hub.api.tasks(reassign("Writer")).await.unwrap() else {
+        panic!("a task");
+    };
+    assert_eq!(moved.agent_id, writer.id);
+    assert_eq!(moved.status, TaskStatus::Queued);
+
+    // Once it has run, its session stays with the agent that started it.
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.task_id, Some(queued.id));
+    let failure = RunFailure::Error {
+        message: "the build broke".into(),
+    };
+    hub.link.fail(&lease, run.run_id, &failure).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+    assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Queued);
+    let started = hub.api.tasks(reassign(ENGINEER)).await;
+    assert!(
+        matches!(&started, Err(why) if why.to_string().contains("already started")),
+        "{started:?}"
+    );
+    assert_eq!(task(&hub, "T-0001").await.agent_id, writer.id);
+}

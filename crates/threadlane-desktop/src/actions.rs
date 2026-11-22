@@ -369,6 +369,42 @@ impl Desktop {
         cx.notify();
     }
 
+    /// Gives queued task `task` of `space` to `agent`.
+    pub(crate) fn reassign_task(
+        &mut self,
+        space: String,
+        task: TaskId,
+        agent: String,
+        cx: &mut Context<Self>,
+    ) {
+        let core = Arc::clone(&self.core);
+        self.state.report(Activity::Working(format!(
+            "Giving {space} / {task} to {agent}…"
+        )));
+        self.run(
+            async move {
+                let moved = core
+                    .read()
+                    .await
+                    .reassign_task(Some(&space), &task.to_string(), &agent)
+                    .await;
+                (space, agent, moved)
+            },
+            |this, (space, agent, moved), cx| match moved {
+                Ok(task) => {
+                    this.state.report(Activity::Done(format!(
+                        "Gave {space} / {} to {agent}.",
+                        task.id
+                    )));
+                    this.load_screen(cx);
+                }
+                Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
     /// Attaches registered `repository` to task `task` of `space` so it can
     /// publish; the hub tells its agent and keeps its earlier work.
     pub(crate) fn attach_repository(

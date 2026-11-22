@@ -99,10 +99,11 @@ pub use settings::{
     parse_pacing,
 };
 pub use tasks::{
-    BoardCard, Changes, Column, InProgress, LatestStep, Moment, SpaceTaskFilter, SpaceTasksView,
-    TaskGroup, TaskHeader, TaskTriageRow, TaskTriageSection, WorkRow, activity_runs, changes,
-    chips, merge_state, running_elapsed, status_label, task_header, timeline, usage, work_elapsed,
-    work_started,
+    BoardCard, BoardMove, Changes, Column, InProgress, LatestStep, Milestone, MilestoneKind,
+    Moment, SpaceTaskFilter, SpaceTasksView, TaskGroup, TaskHeader, TaskTriageRow,
+    TaskTriageSection, WorkRow, activity_runs, board_move, changes, chips, merge_state,
+    milestone_summary, milestones, running_elapsed, status_label, task_header, timeline, usage,
+    work_elapsed, work_started,
 };
 pub use timeline::{
     Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, is_quiet_update, load_timeline,
