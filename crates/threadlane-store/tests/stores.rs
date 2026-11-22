@@ -3810,6 +3810,7 @@ async fn decision_stats_group_by_who_answered() {
         answered_by,
         count,
         declined,
+        questions: u32::from(tool == "ask_user"),
         median_wait_secs,
     };
     assert_eq!(
@@ -3822,4 +3823,46 @@ async fn decision_stats_group_by_who_answered() {
             stat("publish_branch", AnsweredBy::Default, 1, 0, None),
         ]
     );
+}
+
+#[tokio::test]
+async fn decision_stats_leave_out_cancelled_decisions() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = engineer(&hub, &general, 2).await;
+    let task = hub
+        .create_task(None, &new_task(&general, agent, "drop", vec![]))
+        .await
+        .unwrap();
+    hub.open_decision(
+        None,
+        &NewDecision {
+            project_id: general.id,
+            lane_id: task.lane_id,
+            task_id: Some(task.id),
+            session_id: None,
+            run_id: None,
+            tool_call_id: Some("call-1".into()),
+            tool: "publish_branch".into(),
+            arguments: json!({}),
+            arguments_hash: "hash-1".into(),
+            kind: DecisionKind::Approval,
+            question: "Go?".into(),
+            context: String::new(),
+            options: vec![DecisionOption {
+                label: "approve".into(),
+                effect: json!({ "approve": true }),
+            }],
+            recommended: None,
+            offers_standing_rule: true,
+            expires_at: None,
+            created_at: T0,
+            urgent: true,
+        },
+    )
+    .await
+    .unwrap();
+    // Ending the task cancels its pending decision: nobody answered or declined it.
+    hub.cancel_task(None, task.id, T0).await.unwrap();
+    assert_eq!(hub.decision_stats(T0).await.unwrap(), Vec::new());
 }

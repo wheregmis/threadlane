@@ -702,7 +702,7 @@ impl HubDb {
             "SELECT p.name, d.tool, d.kind, d.options, d.answer, d.status,
                     d.answered_at - d.created_at
              FROM decisions d JOIN projects p ON p.id = d.project_id
-             WHERE d.status != 'pending' AND d.created_at >= ?1",
+             WHERE d.status NOT IN ('pending', 'cancelled') AND d.created_at >= ?1",
             params![since.as_millis()],
             |row| {
                 let c = Cols(row);
@@ -728,21 +728,23 @@ impl HubDb {
                 let wait = (by == AnsweredBy::You && status == DecisionStatus::Answered)
                     .then(|| c.i64(6))
                     .transpose()?;
-                Ok(((c.text(0)?, c.text(1)?, by), declined, wait))
+                let question = kind == DecisionKind::Input;
+                Ok(((c.text(0)?, c.text(1)?, by), declined, question, wait))
             },
         )
         .await?;
-        let mut groups: BTreeMap<_, (u32, u32, Vec<i64>)> = BTreeMap::new();
-        for (key, declined, wait) in closed {
+        let mut groups: BTreeMap<_, (u32, u32, u32, Vec<i64>)> = BTreeMap::new();
+        for (key, declined, question, wait) in closed {
             let group = groups.entry(key).or_default();
             group.0 += 1;
             group.1 += u32::from(declined);
-            group.2.extend(wait);
+            group.2 += u32::from(question);
+            group.3.extend(wait);
         }
         let mut rows: Vec<DecisionStat> = groups
             .into_iter()
             .map(
-                |((project, tool, answered_by), (count, declined, mut waits))| {
+                |((project, tool, answered_by), (count, declined, questions, mut waits))| {
                     waits.sort_unstable();
                     let n = waits.len();
                     let median_wait_secs = (n > 0).then(|| {
@@ -755,6 +757,7 @@ impl HubDb {
                         answered_by,
                         count,
                         declined,
+                        questions,
                         median_wait_secs,
                     }
                 },

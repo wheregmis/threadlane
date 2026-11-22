@@ -1210,6 +1210,9 @@ pub struct DecisionStat {
     pub count: u32,
     /// Answered with an option that does not approve, or expired.
     pub declined: u32,
+    /// Input-kind questions among `count`: an answer to one approves nothing.
+    #[serde(default)]
+    pub questions: u32,
     /// Median seconds from asking to your answer; `None` unless you answered.
     pub median_wait_secs: Option<u64>,
 }
