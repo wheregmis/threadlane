@@ -985,12 +985,14 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 let wait = row
                     .median_wait_secs
                     .map_or_else(|| "-".to_owned(), |secs| format!("{secs}s"));
-                let hint =
-                    if row.answered_by == AnsweredBy::You && row.declined == 0 && row.count >= 10 {
-                        "  always approved: consider a rule"
-                    } else {
-                        ""
-                    };
+                let hint = if row.answered_by == AnsweredBy::You
+                    && row.declined == 0
+                    && row.count - row.questions >= 10
+                {
+                    "  always approved: consider a rule"
+                } else {
+                    ""
+                };
                 println!(
                     "{:project$}  {:tool$}  {:10}  {:>5}  {:>8}  {wait:>9}{hint}",
                     row.project,

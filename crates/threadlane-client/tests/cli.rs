@@ -402,7 +402,18 @@ impl HubApi for FakeHub {
                         answered_by: AnsweredBy::You,
                         count: 12,
                         declined: 0,
+                        questions: 0,
                         median_wait_secs: Some(40),
+                    },
+                    // Answered questions approve nothing, so they get no hint.
+                    DecisionStat {
+                        project: "General".into(),
+                        tool: "ask_user".into(),
+                        answered_by: AnsweredBy::You,
+                        count: 10,
+                        declined: 0,
+                        questions: 10,
+                        median_wait_secs: Some(60),
                     },
                     DecisionStat {
                         project: "General".into(),
@@ -410,6 +421,7 @@ impl HubApi for FakeHub {
                         answered_by: AnsweredBy::You,
                         count: 3,
                         declined: 1,
+                        questions: 0,
                         median_wait_secs: Some(95),
                     },
                     DecisionStat {
@@ -418,6 +430,7 @@ impl HubApi for FakeHub {
                         answered_by: AnsweredBy::Rule,
                         count: 20,
                         declined: 0,
+                        questions: 0,
                         median_wait_secs: None,
                     },
                 ],
@@ -1160,9 +1173,10 @@ async fn the_cli_sets_a_ceiling_answers_always_and_lists_and_revokes_rules() {
         &["decisions", "stats"],
         "PROJECT  TOOL            BY          COUNT  DECLINED       WAIT\n\
          General  publish_branch  you            12         0        40s  always approved: consider a rule\n\
+         General  ask_user        you            10         0        60s\n\
          General  send_message    you             3         1        95s\n\
          General  publish_branch  rule           20         0          -\n\
-         total                                   35         1\n",
+         total                                   45         1\n",
     )
     .await;
     expect_success(
