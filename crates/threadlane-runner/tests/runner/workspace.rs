@@ -398,6 +398,16 @@ async fn a_standalone_pr_review_fetches_its_head_and_completes_from_a_detached_c
         &["push", &s.repository.remote_url, "HEAD:refs/pull/42/head"],
     );
     let head = git(&seed, &["rev-parse", "HEAD"]).trim().to_owned();
+    // The PR merges into `release`, not the registration's tracked `main` (#715).
+    git(
+        &seed,
+        &[
+            "push",
+            &s.repository.remote_url,
+            "HEAD~1:refs/heads/release",
+        ],
+    );
+    h.forge.set_pull_base("release");
 
     let mut assignment = assignment(11);
     assignment.lane_kind = LaneKind::Task;
@@ -428,6 +438,13 @@ async fn a_standalone_pr_review_fetches_its_head_and_completes_from_a_detached_c
     let runs = h.backend.scripted.received();
     let checkout = &runs[0].working_dir;
     assert_ne!(checkout, &task_tree);
+    let prompt = &runs[0].prompt;
+    assert!(prompt.contains("merges into `release`"), "{prompt}");
+    assert!(prompt.contains("tracks `main`"), "{prompt}");
+    assert_eq!(
+        git(checkout, &["rev-parse", "origin/release"]).trim(),
+        git(&seed, &["rev-parse", "HEAD~1"]).trim()
+    );
     assert_eq!(git(checkout, &["rev-parse", "HEAD"]).trim(), head);
     assert_eq!(
         git(checkout, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
