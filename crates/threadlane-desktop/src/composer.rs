@@ -95,18 +95,20 @@ impl Outgoing {
 impl Outgoing {
     /// Starts the tasks its mentions dispatch, in its destination's space.
     ///
-    /// # Errors
-    ///
-    /// The first failure; the tasks started before it stay started.
-    pub async fn dispatch(&self, core: &ClientCore) -> Result<Vec<Task>, ClientError> {
+    /// It stops at the first failure and returns it with the tasks started
+    /// before it, which stay started.
+    pub async fn dispatch(&self, core: &ClientCore) -> (Vec<Task>, Result<(), ClientError>) {
         let space = match &self.destination {
             Destination::Lead(space, _) | Destination::Task(space, _) => space,
         };
         let mut started = Vec::with_capacity(self.dispatch.len());
         for spec in &self.dispatch {
-            started.push(core.create_task(Some(space), spec.clone()).await?);
+            match core.create_task(Some(space), spec.clone()).await {
+                Ok(task) => started.push(task),
+                Err(error) => return (started, Err(error)),
+            }
         }
-        Ok(started)
+        (started, Ok(()))
     }
 }
 
@@ -127,6 +129,8 @@ struct DraftState {
     images: Vec<ImageAttachment>,
     loading_images: usize,
     error: Option<String>,
+    /// Agents picked from the `@` popover whose chip is still in `text`.
+    picked: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -221,7 +225,33 @@ impl AppState {
             let draft = self.composer.drafts.entry(destination.clone()).or_default();
             text.clone_into(&mut draft.text);
             draft.error = None;
+            draft
+                .picked
+                .retain(|agent| crate::mention::has_chip(text, agent));
         }
+    }
+
+    /// Records that `agent` was picked from the `@` popover, so its chip in
+    /// the draft dispatches. Typed `@Name` text never does.
+    pub fn pick_agent(&mut self, destination: &Destination, agent: &str) {
+        let picked = &mut self
+            .composer
+            .drafts
+            .entry(destination.clone())
+            .or_default()
+            .picked;
+        if !picked.iter().any(|name| name == agent) {
+            picked.push(agent.to_owned());
+        }
+    }
+
+    /// The agents picked into this destination's draft.
+    #[must_use]
+    pub fn picked_agents(&self, destination: &Destination) -> &[String] {
+        self.composer
+            .drafts
+            .get(destination)
+            .map_or(&[], |draft| &draft.picked)
     }
 
     /// Carries the text and images typed for `from` over to `to`, so
@@ -235,8 +265,12 @@ impl AppState {
         };
         let text = std::mem::take(&mut draft.text);
         let images = std::mem::take(&mut draft.images);
+        let picked = std::mem::take(&mut draft.picked);
         if !text.trim().is_empty() {
             self.preserve_draft(to, &text);
+            for agent in picked {
+                self.pick_agent(to, &agent);
+            }
         }
         if !images.is_empty() {
             self.restore_images(to, images);
@@ -322,6 +356,14 @@ impl AppState {
             offset_minutes: 0,
         };
         let dispatch = self.dispatch_specs(&destination, &text, &when);
+        // shortcut: create_task carries no images; pass them once NewTaskSpec can.
+        if !dispatch.is_empty() && !images.is_empty() {
+            self.fail_send(
+                &destination,
+                "A task for a picked @agent can't take images yet. Remove the images or the @agent, then send again.".to_owned(),
+            );
+            return SendRequest::default();
+        }
         let flushed = self
             .composer
             .held
@@ -465,31 +507,62 @@ impl AppState {
             .filter(|send| send.dispatch.is_empty())
     }
 
-    /// Settles a dispatch: the draft clears once its tasks started, else
-    /// it comes back with the error.
-    pub fn finish_dispatch(&mut self, send: Outgoing, result: Result<Vec<Task>, ClientError>) {
+    /// Settles a dispatch: the draft clears once all its tasks started.
+    /// After a failure it comes back without the agents that did start, so
+    /// sending again starts only the rest.
+    pub fn finish_dispatch(
+        &mut self,
+        send: Outgoing,
+        started: &[Task],
+        result: Result<(), ClientError>,
+    ) {
         self.composer
             .sending
             .retain(|pending| pending.id != send.id);
         let destination = &send.destination;
+        let done: Vec<&str> = send
+            .dispatch
+            .iter()
+            .take(started.len())
+            .map(|spec| spec.agent.as_str())
+            .collect();
+        let started = started
+            .iter()
+            .zip(&done)
+            .map(|(task, agent)| format!("{} for @{agent}", task.id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let draft = self.composer.drafts.entry(destination.clone()).or_default();
+        draft.picked.retain(|agent| !done.contains(&agent.as_str()));
         match result {
-            Ok(started) => {
-                if let Some(draft) = self.composer.drafts.get_mut(destination)
-                    && draft.text == send.text
-                {
+            Ok(()) => {
+                if draft.text == send.text {
                     draft.text.clear();
                 }
-                let started = started
-                    .iter()
-                    .zip(&send.dispatch)
-                    .map(|(task, spec)| format!("{} for @{}", task.id, spec.agent))
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 self.report(Activity::Done(format!("Started {started}.")));
             }
             Err(error) => {
-                self.preserve_draft(destination, &send.text);
-                self.fail_send(destination, describe(&error));
+                let rest = crate::mention::drop_chips(&send.text, &done);
+                if draft.text == send.text {
+                    draft.text = rest;
+                } else {
+                    self.preserve_draft(destination, &rest);
+                }
+                let why = if done.is_empty() {
+                    describe(&error)
+                } else {
+                    let left: Vec<String> = send.dispatch[done.len()..]
+                        .iter()
+                        .map(|spec| format!("@{}", spec.agent))
+                        .collect();
+                    format!(
+                        "Started {started}. {} did not start: {}. Send again to start only {}.",
+                        left[0],
+                        describe(&error),
+                        left.join(" and ")
+                    )
+                };
+                self.fail_send(destination, why);
             }
         }
     }

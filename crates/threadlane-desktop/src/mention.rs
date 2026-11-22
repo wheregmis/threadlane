@@ -224,7 +224,12 @@ impl AppState {
                         Some((rank, MentionItem::Task(task.id, task.title.clone())))
                     })
                     .collect();
-                tasks.dedup_by(|a, b| a.1 == b.1);
+                let mut seen = Vec::new();
+                tasks.retain(|(_, item)| {
+                    let new = !seen.contains(item);
+                    seen.push(item.clone());
+                    new
+                });
                 tasks
             }
         };
@@ -236,15 +241,16 @@ impl AppState {
             .collect()
     }
 
-    /// The agents `text` mentions as `@Name` that a draft for
-    /// `destination` can dispatch, in order.
+    /// The picked `@Name` chips in `text` that a draft for `destination`
+    /// can dispatch, in order. Typed, unpicked `@Name` text is left out.
     #[must_use]
     pub fn mentioned_agents(&self, destination: &Destination, text: &str) -> Vec<String> {
         let agents = self.mention_agents(destination);
+        let picked = self.picked_agents(destination);
         let mut named = Vec::new();
         for word in text.split_whitespace() {
-            let word = word.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
-            if let Some(name) = word.strip_prefix('@')
+            if let Some(name) = chip_name(word)
+                && picked.iter().any(|agent| agent == name)
                 && let Some(agent) = agents.iter().find(|agent| agent.name == name)
                 && !named.contains(&agent.name)
             {
@@ -388,6 +394,25 @@ impl AppState {
     }
 }
 
+/// The agent a `@Name` word names, trailing punctuation dropped.
+fn chip_name(word: &str) -> Option<&str> {
+    word.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')
+        .strip_prefix('@')
+}
+
+/// Whether `text` still holds the chip `@agent` as a whole word.
+pub(crate) fn has_chip(text: &str, agent: &str) -> bool {
+    text.split_whitespace()
+        .any(|word| chip_name(word) == Some(agent))
+}
+
+/// `text` without the chips of `agents`.
+pub(crate) fn drop_chips(text: &str, agents: &[&str]) -> String {
+    text.split_inclusive(char::is_whitespace)
+        .filter(|piece| chip_name(piece.trim_end()).is_none_or(|name| !agents.contains(&name)))
+        .collect()
+}
+
 /// The first line of `text` without mentions, cut to a title's length.
 fn dispatch_title(text: &str) -> String {
     let line = text
@@ -466,6 +491,17 @@ mod tests {
         assert_eq!(
             task_refs("see #T-0196, and #T-0002. Also #T-0196 #nope T-0003"),
             vec![id("T-0196"), id("T-0002")]
+        );
+    }
+
+    #[test]
+    fn chips_are_whole_words() {
+        assert!(has_chip("ask @Reviewer, then", "Reviewer"));
+        assert!(!has_chip("ask @Reviewe then", "Reviewer"));
+        assert!(!has_chip("ask @Reviewerx", "Reviewer"));
+        assert_eq!(
+            drop_chips("@A @B look\nat @A, now", &["A"]),
+            "@B look\nat now"
         );
     }
 
