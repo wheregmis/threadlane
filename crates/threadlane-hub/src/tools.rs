@@ -14,6 +14,7 @@ use threadlane_core::forge::{
 };
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
 use threadlane_core::link::MERGE_CHECKS;
+use threadlane_core::model::Repository;
 use threadlane_core::model::{
     BackendKind, Decision, DecisionOption, LaneKind, MemoryAuthor, Mode, NewOutboxMessage, NewTask,
     OutboxKind, Run, Task, TaskOrigin, TaskReviewVerdict, TaskStatus, Urgency,
@@ -988,18 +989,60 @@ pub(crate) async fn review_head(
 ) -> Result<PrReviewHead, ToolError> {
     let object = fields(args, &["repository", "number", "head"])?;
     let name = text_field(object, "repository")?.ok_or_else(|| missing("repository"))?;
-    let number = args["number"]
-        .as_u64()
-        .ok_or_else(|| invalid("number must be a positive PR number"))?;
+    let from_url = threadlane_core::github::pull_request_number(name);
+    let number = match (args.get("number").map(Json::as_u64), from_url) {
+        (Some(Some(n)), Some(u)) if n != u => {
+            return Err(invalid("number does not match the PR URL in repository"));
+        }
+        (Some(Some(n)), _) | (None, Some(n)) => n,
+        _ => return Err(invalid("number must be a positive PR number")),
+    };
     let head = text_field(object, "head")?.ok_or_else(|| missing("head"))?;
-    let repository = db
-        .repositories(project)
-        .await
-        .map_err(tool_error)?
-        .into_iter()
-        .find(|r| r.name == name)
-        .ok_or_else(|| invalid("unknown review repository in this project"))?;
-    PrReviewHead::new(&repository, number, head).map_err(tool_error)
+    let repositories = db.repositories(project).await.map_err(tool_error)?;
+    let repository = resolve_review_repository(&repositories, name)?;
+    PrReviewHead::new(repository, number, head).map_err(tool_error)
+}
+
+/// The registration `name` names: its registration name, or its GitHub
+/// `owner/name`, remote address or PR URL when one registration has that remote.
+fn resolve_review_repository<'r>(
+    repositories: &'r [Repository],
+    name: &str,
+) -> Result<&'r Repository, ToolError> {
+    use threadlane_core::github::normalize_remote;
+    if let Some(found) = repositories.iter().find(|r| r.name == name) {
+        return Ok(found);
+    }
+    let trimmed = name.trim().trim_end_matches('/');
+    let repo_part = match trimmed.rsplit_once("/pull/") {
+        Some((repo, number)) if number.parse::<u64>().is_ok() => repo,
+        _ => trimmed,
+    };
+    let remote = normalize_remote(repo_part)
+        .or_else(|| normalize_remote(&format!("https://{repo_part}")))
+        .or_else(|| normalize_remote(&format!("https://github.com/{repo_part}")));
+    let matching: Vec<&Repository> = repositories
+        .iter()
+        .filter(|r| remote.is_some() && normalize_remote(&r.remote_url) == remote)
+        .collect();
+    let names = |list: &[&Repository]| {
+        list.iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match matching.as_slice() {
+        [one] => Ok(one),
+        [] => Err(invalid(&format!(
+            "unknown review repository {name:?} in this project; registered repositories: {}",
+            names(&repositories.iter().collect::<Vec<_>>())
+        ))),
+        several => Err(invalid(&format!(
+            "repository {name:?} matches several registrations ({}); pass one of those names. \
+             Review verdicts are stored by PR URL and head, so each returns the same status",
+            names(several)
+        ))),
+    }
 }
 
 /// Names the canonical PR and head it looked up, so a mismatch can be diagnosed (#664).
@@ -1273,10 +1316,10 @@ fn task_definitions() -> Vec<ToolDefinition> {
     };
     let review_target = json!({
         "type":"object", "properties": {
-            "repository": {"type":"string","description":"Registered repository name."},
-            "number": {"type":"integer","minimum":1},
+            "repository": {"type":"string","description":"Registered repository name, GitHub owner/name, or the PR URL."},
+            "number": {"type":"integer","minimum":1,"description":"PR number; optional when repository is the PR URL."},
             "head": {"type":"string","description":"Full current GitHub PR head SHA."}
-        }, "required":["repository","number","head"],"additionalProperties":false
+        }, "required":["repository","head"],"additionalProperties":false
     });
     vec![
         define(
@@ -1655,6 +1698,51 @@ impl ToolRegistry for CombinedTools {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_repository_resolves_owner_name_urls_and_lists_names_when_unknown() {
+        let repo = |id, name: &str, remote: &str| Repository {
+            id: RepositoryId(id),
+            project_id: ProjectId(1),
+            name: name.to_owned(),
+            remote_url: remote.to_owned(),
+            default_branch: "main".to_owned(),
+            protected_branches: vec![],
+        };
+        let repos = [
+            repo(1, "app-main", "git@github.com:Acme/App.git"),
+            repo(2, "docs", "https://github.com/acme/docs"),
+        ];
+        let resolve = |name| resolve_review_repository(&repos, name).map(|r| r.id.0);
+        for name in [
+            "app-main",
+            "acme/app",
+            "github.com/acme/app",
+            "https://github.com/Acme/App",
+            "https://github.com/acme/app/pull/7",
+            "git@github.com:acme/app.git",
+        ] {
+            assert_eq!(resolve(name).ok(), Some(1), "{name}");
+        }
+        let err = resolve("acme/other").unwrap_err().to_string();
+        assert!(err.contains("app-main, docs"), "{err}");
+
+        let shared = [
+            repos[0].clone(),
+            repo(3, "app-v2", "https://github.com/acme/app"),
+        ];
+        let err = resolve_review_repository(&shared, "acme/app")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("app-main, app-v2") && err.contains("same status"),
+            "{err}"
+        );
+        assert_eq!(
+            resolve_review_repository(&shared, "app-v2").unwrap().id.0,
+            3
+        );
+    }
 
     #[test]
     fn derived_keys_ignore_key_order_and_whitespace() {
