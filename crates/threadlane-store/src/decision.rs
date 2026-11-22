@@ -1,12 +1,15 @@
 //! [`DecisionStore`] on the hub database (Plan.md §9.4).
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use serde_json::{Value as Json, json};
 use threadlane_core::ids::{DecisionId, LaneId, ProjectId, StandingRuleId};
 use threadlane_core::model::{
-    Answered, Decision, DecisionAnswer, DecisionKind, DecisionStatus, EventKind, Inserted, Lease,
-    NewDecision, NewEvent, NewOutboxMessage, NewStandingRule, NewTimer, OutboxKind, StandingRule,
-    TimerCategory, TimerCreator, ToolCallBegin, Trust, Urgency,
+    Answered, AnsweredBy, Decision, DecisionAnswer, DecisionKind, DecisionOption, DecisionStat,
+    DecisionStatus, EventKind, Inserted, Lease, NewDecision, NewEvent, NewOutboxMessage,
+    NewStandingRule, NewTimer, OutboxKind, StandingRule, TimerCategory, TimerCreator,
+    ToolCallBegin, Trust, Urgency,
 };
 use threadlane_core::store::{DecisionStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
@@ -240,14 +243,21 @@ async fn answer_in(
     {
         text.push_str(&format!(" Note from the user: {note}"));
     }
+    let answered_at = answer.answered_at;
+    let mut answer =
+        serde_json::to_value(answer).map_err(|error| StoreError::Invalid(error.to_string()))?;
+    if let Some(rule) = rule {
+        // Marks a rule's answer for `decisions stats`.
+        answer["rule"] = json!(rule);
+    }
     close_in(
         conn,
         decision,
         DecisionStatus::Answered,
-        &serde_json::to_value(answer).map_err(|error| StoreError::Invalid(error.to_string()))?,
+        &answer,
         text,
         Trust::User,
-        answer.answered_at,
+        answered_at,
     )
     .await
 }
@@ -683,6 +693,84 @@ impl HubDb {
         tx.commit().await?;
         Ok(changed == 1)
     }
+    /// Closed decisions created at or after `since`, one row per project,
+    /// tool, and who answered, sorted you first and then by count.
+    pub async fn decision_stats(&self, since: Timestamp) -> StoreResult<Vec<DecisionStat>> {
+        let conn = self.db.reader()?;
+        let closed = query_all(
+            &conn,
+            "SELECT p.name, d.tool, d.kind, d.options, d.answer, d.status,
+                    d.answered_at - d.created_at
+             FROM decisions d JOIN projects p ON p.id = d.project_id
+             WHERE d.status != 'pending' AND d.created_at >= ?1",
+            params![since.as_millis()],
+            |row| {
+                let c = Cols(row);
+                let kind: DecisionKind = c.parse(2)?;
+                let options: Vec<DecisionOption> = c.de(3)?;
+                let answer = c.opt_json(4)?.unwrap_or(Json::Null);
+                let status: DecisionStatus = c.parse(5)?;
+                let by = if answer.get("classifier").is_some() {
+                    AnsweredBy::Classifier
+                } else if answer["by_default"] == true {
+                    AnsweredBy::Default
+                } else if answer.get("rule").is_some() {
+                    AnsweredBy::Rule
+                } else {
+                    AnsweredBy::You
+                };
+                let chosen = answer["option"]
+                    .as_u64()
+                    .and_then(|option| options.get(usize::try_from(option).ok()?));
+                let declined =
+                    kind != DecisionKind::Input && chosen.is_some_and(|option| !option.approves());
+                // An expiry is no answer, so it does not count as a wait.
+                let wait = (by == AnsweredBy::You && status == DecisionStatus::Answered)
+                    .then(|| c.i64(6))
+                    .transpose()?;
+                Ok(((c.text(0)?, c.text(1)?, by), declined, wait))
+            },
+        )
+        .await?;
+        let mut groups: BTreeMap<_, (u32, u32, Vec<i64>)> = BTreeMap::new();
+        for (key, declined, wait) in closed {
+            let group = groups.entry(key).or_default();
+            group.0 += 1;
+            group.1 += u32::from(declined);
+            group.2.extend(wait);
+        }
+        let mut rows: Vec<DecisionStat> = groups
+            .into_iter()
+            .map(
+                |((project, tool, answered_by), (count, declined, mut waits))| {
+                    waits.sort_unstable();
+                    let n = waits.len();
+                    let median_wait_secs = (n > 0).then(|| {
+                        let millis = (waits[(n - 1) / 2] + waits[n / 2]) / 2;
+                        u64::try_from(millis / 1000).unwrap_or(0)
+                    });
+                    DecisionStat {
+                        project,
+                        tool,
+                        answered_by,
+                        count,
+                        declined,
+                        median_wait_secs,
+                    }
+                },
+            )
+            .collect();
+        rows.sort_by(|a, b| {
+            (a.answered_by, b.count, &a.project, &a.tool).cmp(&(
+                b.answered_by,
+                a.count,
+                &b.project,
+                &b.tool,
+            ))
+        });
+        Ok(rows)
+    }
+
     /// Decisions with a recorded outcome in non-cancelled task lanes, ordered by `id`.
     pub async fn decisions_with_outcome(&self) -> StoreResult<Vec<Decision>> {
         let conn = self.db.reader()?;

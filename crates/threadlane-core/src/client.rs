@@ -18,8 +18,8 @@ use crate::ids::{
     DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, StandingRuleId, TaskId, TimerId,
 };
 use crate::model::{
-    Account, Agent, BackendKind, Cell, Decision, EventKind, Machine, MemoryFile, Mode,
-    OutboxMessage, Recurrence, Repository, Run, StandingRule, Task, Timer,
+    Account, Agent, BackendKind, Cell, Decision, DecisionStat, EventKind, Machine, MemoryFile,
+    Mode, OutboxMessage, Recurrence, Repository, Run, StandingRule, Task, Timer,
 };
 use crate::time::Timestamp;
 use crate::tools::Tier;
@@ -541,6 +541,9 @@ pub enum DecisionRequest {
     /// Claims the one reminder for a decision still waiting. Answered with
     /// [`DecisionReply::Reminder`], `first` only for the first claim.
     Remind { decision: DecisionId },
+    /// Closed decisions created in the last `days` days, grouped by project,
+    /// tool, and who answered. Answered with [`DecisionReply::Stats`].
+    Stats { days: u32 },
 }
 
 /// A standing rule as a client lists it.
@@ -577,6 +580,9 @@ pub enum DecisionReply {
     /// Whether this was the first claim of the decision's reminder.
     Reminder {
         first: bool,
+    },
+    Stats {
+        rows: Vec<DecisionStat>,
     },
 }
 

@@ -3670,3 +3670,156 @@ async fn skipped_routine_receipt_and_cursor_survive_a_database_reopen() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].status, "skipped");
 }
+
+#[tokio::test]
+async fn decision_stats_group_by_who_answered() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent = hub
+        .create_agent(&NewAgent::named("Reviewer", "review"))
+        .await
+        .unwrap()
+        .id;
+    let mac = machine(&hub, "mac").await;
+    hub.insert_event(&message(&general, "m1")).await.unwrap();
+    let (lease, run) = run_pending(&hub, general.lead_lane_id, mac, T0).await;
+    let minute = Duration::from_secs(60);
+    let mut calls = 0;
+    let mut new = |tool: &str, kind: DecisionKind, created_at: Timestamp| {
+        calls += 1;
+        NewDecision {
+            project_id: general.id,
+            lane_id: general.lead_lane_id,
+            task_id: None,
+            session_id: None,
+            run_id: Some(run.id),
+            tool_call_id: Some(format!("call-{calls}")),
+            tool: tool.into(),
+            arguments: json!({}),
+            arguments_hash: format!("hash-{calls}"),
+            kind,
+            question: "Go?".into(),
+            context: String::new(),
+            options: vec![
+                DecisionOption {
+                    label: "approve".into(),
+                    effect: json!({ "approve": true }),
+                },
+                DecisionOption {
+                    label: "decline".into(),
+                    effect: json!({ "approve": false }),
+                },
+            ],
+            recommended: None,
+            offers_standing_rule: true,
+            expires_at: None,
+            created_at,
+            urgent: true,
+        }
+    };
+    let answer = |option, answered_at| DecisionAnswer {
+        option,
+        note: None,
+        standing_rule: false,
+        answered_at,
+    };
+    // You: approved after 1 and 3 minutes (one of them makes a rule), declined after 10.
+    let mut rule = None;
+    for (option, wait) in [(0, 1), (0, 3), (1, 10)] {
+        let decision = hub
+            .open_decision(
+                Some(&lease),
+                &new("publish_branch", DecisionKind::Approval, T0),
+            )
+            .await
+            .unwrap();
+        let answer = answer(option, T0 + minute * wait);
+        if rule.is_none() {
+            hub.answer_with_rule(
+                decision.id,
+                &answer,
+                Some(&NewStandingRule {
+                    project_id: general.id,
+                    agent_id: agent,
+                    tool: "publish_branch".into(),
+                    pattern: json!({}),
+                    tier: threadlane_core::tools::Tier::SharedReversible,
+                    created_at: T0,
+                }),
+            )
+            .await
+            .unwrap();
+            rule = hub
+                .standing_rules(None)
+                .await
+                .unwrap()
+                .first()
+                .map(|r| r.id);
+        } else {
+            hub.answer(decision.id, &answer).await.unwrap();
+        }
+    }
+    // An answered question is never declined.
+    let question = hub
+        .open_decision(Some(&lease), &new("ask_user", DecisionKind::Input, T0))
+        .await
+        .unwrap();
+    hub.answer(question.id, &answer(1, T0 + minute))
+        .await
+        .unwrap();
+    // A rule, a default, and the classifier.
+    hub.allow_by_rule(
+        &lease,
+        &new("publish_branch", DecisionKind::Approval, T0),
+        rule.unwrap(),
+    )
+    .await
+    .unwrap();
+    hub.allow_by_default(&lease, &new("publish_branch", DecisionKind::Approval, T0))
+        .await
+        .unwrap();
+    hub.claim_question(&lease, "q", &json!({})).await.unwrap();
+    hub.reviewed_decision(
+        &lease,
+        "q",
+        &new("publish_branch", DecisionKind::Approval, T0),
+        Some("routine"),
+        None,
+    )
+    .await
+    .unwrap();
+    // Outside the window, and still pending: neither counts.
+    let old = hub
+        .open_decision(
+            Some(&lease),
+            &new("publish_branch", DecisionKind::Approval, T0 - minute),
+        )
+        .await
+        .unwrap();
+    hub.answer(old.id, &answer(0, T0)).await.unwrap();
+    hub.open_decision(
+        Some(&lease),
+        &new("publish_branch", DecisionKind::Approval, T0),
+    )
+    .await
+    .unwrap();
+
+    let stat = |tool: &str, answered_by, count, declined, median_wait_secs| DecisionStat {
+        project: general.name.clone(),
+        tool: tool.into(),
+        answered_by,
+        count,
+        declined,
+        median_wait_secs,
+    };
+    assert_eq!(
+        hub.decision_stats(T0).await.unwrap(),
+        vec![
+            stat("publish_branch", AnsweredBy::You, 3, 1, Some(180)),
+            stat("ask_user", AnsweredBy::You, 1, 0, Some(60)),
+            stat("publish_branch", AnsweredBy::Rule, 1, 0, None),
+            stat("publish_branch", AnsweredBy::Classifier, 1, 0, None),
+            stat("publish_branch", AnsweredBy::Default, 1, 0, None),
+        ]
+    );
+}

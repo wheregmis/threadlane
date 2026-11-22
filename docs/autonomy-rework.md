@@ -233,11 +233,14 @@ either.
 ### Stage F: keep measuring
 
 Add `threadlane decisions stats [--days N]` to the client CLI. Per
-(project, tool, who answered) it shows counts, decline rate and median
-wait, using the query this doc's §1 table came from. It's the acceptance
-check for every stage, and the signal for the next one: any (tool,
-pattern) you approved 10 times in a row without declining is offered as a
-project rule on the next card.
+(project, tool, who answered) it shows counts, declines and median wait,
+using the query this doc's §1 table came from. "Who answered" is the
+classifier, a built-in default, a standing rule (marked by `rule` in the
+answer), or you; an expired decision counts as yours and declined, but
+not toward the wait. It's the acceptance check for every stage, and the
+signal for the next one: a row of yours with 10 or more decisions and no
+decline is marked "always approved: consider a rule". Offering that rule
+automatically on the next card is deferred.
 
 ## 4. Order and acceptance
 

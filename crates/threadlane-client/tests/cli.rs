@@ -24,11 +24,11 @@ use threadlane_core::ids::TimerId;
 use threadlane_core::ids::{
     AgentId, DecisionId, EventId, LaneId, OutboxId, ProjectId, RepositoryId,
 };
-use threadlane_core::model::StandingRule;
 use threadlane_core::model::{
     Agent, BackendKind, Decision, DecisionKind, DecisionOption, DecisionStatus, Repository, Task,
     TaskOrigin, TaskStatus,
 };
+use threadlane_core::model::{AnsweredBy, DecisionStat, StandingRule};
 use threadlane_core::model::{Mode, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
 use threadlane_core::model::{
     Recurrence, Rule, Timer, TimerCategory, TimerCreator, TimerStatus, Weekday,
@@ -392,6 +392,35 @@ impl HubApi for FakeHub {
                 rule: StandingRuleId(1),
             } => Ok(DecisionReply::StandingRule {
                 rule: standing_rule(true),
+            }),
+            DecisionRequest::Stats { days: 30 } => Ok(DecisionReply::Stats { rows: Vec::new() }),
+            DecisionRequest::Stats { days: 7 } => Ok(DecisionReply::Stats {
+                rows: vec![
+                    DecisionStat {
+                        project: "General".into(),
+                        tool: "publish_branch".into(),
+                        answered_by: AnsweredBy::You,
+                        count: 12,
+                        declined: 0,
+                        median_wait_secs: Some(40),
+                    },
+                    DecisionStat {
+                        project: "General".into(),
+                        tool: "send_message".into(),
+                        answered_by: AnsweredBy::You,
+                        count: 3,
+                        declined: 1,
+                        median_wait_secs: Some(95),
+                    },
+                    DecisionStat {
+                        project: "General".into(),
+                        tool: "publish_branch".into(),
+                        answered_by: AnsweredBy::Rule,
+                        count: 20,
+                        declined: 0,
+                        median_wait_secs: None,
+                    },
+                ],
             }),
             other => Err(ApiError::NotFound(format!("{other:?}"))),
         }
@@ -1126,6 +1155,22 @@ async fn the_cli_sets_a_ceiling_answers_always_and_lists_and_revokes_rules() {
     )
     .await;
     expect_success(client_dir, &["rules", "-p", "api"], "no standing rules\n").await;
+    expect_success(
+        client_dir,
+        &["decisions", "stats"],
+        "PROJECT  TOOL            BY          COUNT  DECLINED       WAIT\n\
+         General  publish_branch  you            12         0        40s  always approved: consider a rule\n\
+         General  send_message    you             3         1        95s\n\
+         General  publish_branch  rule           20         0          -\n\
+         total                                   35         1\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["decisions", "stats", "--days", "30"],
+        "no decisions in the last 30 days\n",
+    )
+    .await;
     expect_success(client_dir, &["rule", "revoke", "1"], "revoked rule 1\n").await;
     let output = threadlane(client_dir, &["rule", "revoke", "one"]).await;
     assert!(!output.status.success(), "not a rule number");

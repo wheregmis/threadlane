@@ -1189,6 +1189,32 @@ pub struct DecisionAnswer {
 }
 
 str_enum! {
+    /// Who answered a decision, as `threadlane decisions stats` groups them.
+    /// Ordered so you come first.
+    #[derive(PartialOrd, Ord)]
+    pub enum AnsweredBy {
+        You => "you",
+        Rule => "rule",
+        Classifier => "classifier",
+        Default => "default",
+    }
+}
+
+/// One row of decision stats: the closed decisions of one project and tool
+/// that one kind of answerer settled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionStat {
+    pub project: String,
+    pub tool: String,
+    pub answered_by: AnsweredBy,
+    pub count: u32,
+    /// Answered with an option that does not approve, or expired.
+    pub declined: u32,
+    /// Median seconds from asking to your answer; `None` unless you answered.
+    pub median_wait_secs: Option<u64>,
+}
+
+str_enum! {
     /// One cell of the mode matrix (Plan.md §2.3), and what a binding's
     /// override sets a tier's cell to.
     ///

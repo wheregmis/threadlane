@@ -1086,6 +1086,12 @@ impl HubApi for ClientApi {
                     .await
                     .map_err(api_error)?,
             }),
+            DecisionRequest::Stats { days } => {
+                let since = inner.clock.now() - Duration::from_secs(u64::from(days) * 86_400);
+                Ok(DecisionReply::Stats {
+                    rows: db.decision_stats(since).await.map_err(api_error)?,
+                })
+            }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
     }

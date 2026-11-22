@@ -11,7 +11,7 @@ use anyhow::Context as _;
 use clap::{ArgGroup, Parser, Subcommand};
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
 use threadlane_core::client::{ApiError, OperationsRequest, OrgRequest};
-use threadlane_core::model::{BackendKind, Mode, OutboxKind};
+use threadlane_core::model::{AnsweredBy, BackendKind, Mode, OutboxKind};
 use threadlane_core::model::{Recurrence, Rule, Timer, TimerCreator, TimerStatus, Weekday};
 use threadlane_core::time::{Clock as _, SystemClock};
 
@@ -119,10 +119,13 @@ enum Command {
         text: Vec<String>,
     },
     /// List the decisions waiting on you, in every paired space or in one.
+    #[command(args_conflicts_with_subcommands = true)]
     Decisions {
         /// Only this space (paired hub name).
         #[arg(short, long)]
         space: Option<String>,
+        #[command(subcommand)]
+        command: Option<DecisionsCommand>,
     },
     /// Answer a decision with one of its options.
     Answer {
@@ -319,6 +322,19 @@ enum TaskCommand {
         space: Option<String>,
         /// The task, for example T-0001.
         task: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DecisionsCommand {
+    /// Count closed decisions by project, tool, and who answered.
+    Stats {
+        /// The space (paired hub name); may be left out if only one is paired.
+        #[arg(short, long)]
+        space: Option<String>,
+        /// How many days back to count.
+        #[arg(long, default_value_t = 7)]
+        days: u32,
     },
 }
 
@@ -942,7 +958,57 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     .await?;
             }
         }
-        Command::Decisions { space } => return decisions(&core, space.as_deref()).await,
+        Command::Decisions {
+            command: Some(DecisionsCommand::Stats { space, days }),
+            ..
+        } => {
+            let rows = core.decision_stats(space.as_deref(), days).await?;
+            if rows.is_empty() {
+                println!("no decisions in the last {days} days");
+                return Ok(ExitCode::SUCCESS);
+            }
+            let project = rows
+                .iter()
+                .map(|r| r.project.len())
+                .max()
+                .unwrap_or(0)
+                .max(7);
+            let tool = rows.iter().map(|r| r.tool.len()).max().unwrap_or(0).max(4);
+            println!(
+                "{:project$}  {:tool$}  {:10}  {:>5}  {:>8}  {:>9}",
+                "PROJECT", "TOOL", "BY", "COUNT", "DECLINED", "WAIT"
+            );
+            let (mut count, mut declined) = (0, 0);
+            for row in &rows {
+                count += row.count;
+                declined += row.declined;
+                let wait = row
+                    .median_wait_secs
+                    .map_or_else(|| "-".to_owned(), |secs| format!("{secs}s"));
+                let hint =
+                    if row.answered_by == AnsweredBy::You && row.declined == 0 && row.count >= 10 {
+                        "  always approved: consider a rule"
+                    } else {
+                        ""
+                    };
+                println!(
+                    "{:project$}  {:tool$}  {:10}  {:>5}  {:>8}  {wait:>9}{hint}",
+                    row.project,
+                    row.tool,
+                    row.answered_by.as_str(),
+                    row.count,
+                    row.declined
+                );
+            }
+            println!(
+                "{:project$}  {:tool$}  {:10}  {count:>5}  {declined:>8}",
+                "total", "", ""
+            );
+        }
+        Command::Decisions {
+            space,
+            command: None,
+        } => return decisions(&core, space.as_deref()).await,
         Command::Answer {
             space,
             note,
