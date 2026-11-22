@@ -1071,7 +1071,7 @@ async fn sibling_merge(origin: TaskOrigin, elsewhere: bool) -> bool {
         &run,
         "merge",
         threadlane_hub::MERGE,
-        &json!({"repository": "widgets", "number": 42}),
+        &json!({"repository": "widgets", "number": 42, "expected_head": approved_head()}),
     )
     .await;
     assert_eq!(pull_reads(&github), 1);
@@ -1120,7 +1120,7 @@ async fn a_requested_task_merges_its_own_green_approved_pull_request_without_ask
         widgets_pull(&branch, &approved_head(), "success"),
     )
     .await;
-    let merge = json!({"repository": "widgets", "number": 42});
+    let merge = json!({"repository": "widgets", "number": 42, "expected_head": approved_head()});
     let merged = call(&hub, &lease, &run, "merge", threadlane_hub::MERGE, &merge).await;
     assert_eq!(merged, Err(ToolError::AuthorizedAndQueued));
     let decision = hub
@@ -1159,13 +1159,30 @@ async fn an_own_merge_asks_when_a_check_fails_or_another_head_was_approved() {
             &run,
             "merge",
             threadlane_hub::MERGE,
-            &json!({"repository": "widgets", "number": 42}),
+            &json!({"repository": "widgets", "number": 42, "expected_head": approved_head()}),
         )
         .await;
         assert_eq!(merged, Err(ToolError::WaitingOnYou), "{pull:?}");
         assert_eq!(cards(&hub).await, 1, "{pull:?}");
         assert_eq!(pull_reads(&github), 1, "{pull:?}");
     }
+    // The merge would be pinned to a head nobody approved.
+    let (hub, _github, lease, run) = own_merge(
+        TaskOrigin::User,
+        widgets_pull(&branch, &approved_head(), "success"),
+    )
+    .await;
+    let merged = call(
+        &hub,
+        &lease,
+        &run,
+        "merge",
+        threadlane_hub::MERGE,
+        &json!({"repository": "widgets", "number": 42, "expected_head": "b".repeat(40)}),
+    )
+    .await;
+    assert_eq!(merged, Err(ToolError::WaitingOnYou));
+    assert_eq!(cards(&hub).await, 1);
 }
 
 #[tokio::test]
@@ -1195,7 +1212,7 @@ async fn another_branchs_pull_request_or_work_you_did_not_request_asks_as_before
             &run,
             "merge",
             threadlane_hub::MERGE,
-            &json!({"repository": "widgets", "number": 42}),
+            &json!({"repository": "widgets", "number": 42, "expected_head": approved_head()}),
         )
         .await;
         assert_eq!(merged, Err(ToolError::WaitingOnYou), "{origin:?} {pull:?}");
@@ -1214,7 +1231,7 @@ async fn an_unreadable_pull_request_asks_as_before() {
         &run,
         "merge",
         threadlane_hub::MERGE,
-        &json!({"repository": "widgets", "number": 42}),
+        &json!({"repository": "widgets", "number": 42, "expected_head": approved_head()}),
     )
     .await;
     assert_eq!(merged, Err(ToolError::WaitingOnYou));

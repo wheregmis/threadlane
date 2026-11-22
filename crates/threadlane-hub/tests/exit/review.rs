@@ -36,7 +36,10 @@ pub(super) fn actions() -> [(&'static str, Json); 9] {
             CREATE_ISSUE,
             json!({"repository":"app","title":"Fix the footer","body":"The link is broken."}),
         ),
-        (MERGE, json!({"repository":"app","number":12})),
+        (
+            MERGE,
+            json!({"repository":"app","number":12,"expected_head":HEAD}),
+        ),
         (MARK_READY, json!({"repository":"app","number":12})),
         (
             LABEL_ISSUE,

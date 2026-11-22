@@ -340,8 +340,11 @@ impl LocalLink {
         }) else {
             return Ok(None);
         };
+        // The merge is pinned to this head, so the approval must be for it too.
         let checks_pass = tool != crate::MERGE
             || (pull.green()
+                && arguments[threadlane_core::forge::EXPECTED_HEAD].as_str()
+                    == Some(pull.head_sha.as_str())
                 && db
                     .task_reviews(head.id)
                     .await
