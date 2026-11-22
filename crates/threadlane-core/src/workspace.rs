@@ -185,9 +185,12 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
         message: &str,
     ) -> Result<(), WorkspaceError>;
 
-    /// Returns, once, what [`Self::checkpoint_tracked`] committed and left
-    /// out for each repository, to tell the task's next run.
-    async fn take_checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) -> String;
+    /// Returns what [`Self::checkpoint_tracked`] committed and left out for
+    /// each repository, to tell the task's next run.
+    async fn checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) -> String;
+
+    /// Forgets the notes once a run that was told them has started.
+    async fn clear_checkpoint_notes(&self, task: TaskId, repositories: &[Repository]);
 
     /// Fetches each repository's default branch and checks whether the task
     /// branch merges into it cleanly, touching no worktree. A worktree never

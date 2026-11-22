@@ -3225,6 +3225,14 @@ impl AppState {
             .retain(|space| filter.is_some_and(|only| only != space));
     }
 
+    /// Whether `item` is a decision not yet taken, urgent or not: the
+    /// decision queue must be fetched again for it.
+    pub fn is_new_decision(&self, item: &SpaceFeedItem) -> bool {
+        item.kind() == OutboxKind::Decision
+            && !self.forgotten.contains(&item.space)
+            && !self.notified.contains(&(item.space.clone(), item.item.seq))
+    }
+
     /// Takes one item from the feed. Returns what it should raise a system
     /// notification for: a decision or a system notice seen for the first
     /// time. An ordinary message, or an item already taken (a feed replayed

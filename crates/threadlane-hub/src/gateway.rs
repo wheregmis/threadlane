@@ -188,28 +188,26 @@ impl LocalLink {
         // A requested task's own step is decided again on its own-work row.
         // Read here, once the call is recorded, so a repeated call replays
         // this outcome instead of reading GitHub again.
-        if dream.is_none()
-            && matches!(asked, Some(Asked::You { .. } | Asked::Review { .. }))
-            && let Some(own) = self.own_work(&lane, tool, arguments).await?
-        {
-            let (verdict, _) = self
-                .gate(&run, &lane, &definition, arguments, &events, Some(own))
-                .await?;
-            asked = match verdict {
-                Verdict::AllowByDefault => Some(Asked::Default),
-                Verdict::Allow { rule: Some(rule) } => Some(Asked::Rule(rule)),
-                Verdict::Review { offers_rule, rule } => Some(Asked::Review {
-                    offers_rule,
-                    proposal: false,
-                    rule,
-                }),
-                Verdict::Ask { offers_rule } => Some(Asked::You {
-                    offers_rule,
-                    proposal: false,
-                }),
-                // The row never allows without a record, nor blocks what the
-                // matrix let through; keep the matrix's answer.
-                Verdict::Allow { rule: None } | Verdict::Block { .. } => asked,
+        if dream.is_none() && matches!(asked, Some(Asked::You { .. } | Asked::Review { .. })) {
+            let regated = match self.own_work(&lane, tool, arguments).await {
+                Ok(Some(own)) => self
+                    .gate(&run, &lane, &definition, arguments, &events, Some(own))
+                    .await
+                    .and_then(|(verdict, _)| own_work_asked(asked, verdict)),
+                Ok(None) => Ok(asked),
+                Err(error) => Err(error),
+            };
+            // The call is recorded: a refusal here finishes it, as a refused run does.
+            asked = match regated {
+                Ok(asked) => asked,
+                Err(refused) => {
+                    if let Some(record) = error_record(&refused) {
+                        db.finish_tool_call(lease, &key, &record, inner.clock.now())
+                            .await
+                            .map_err(tool_error)?;
+                    }
+                    return Err(refused);
+                }
             };
         }
         // A run that waits on you does nothing more (Plan.md §9.4), but each
@@ -970,6 +968,26 @@ enum Asked {
     Default,
 }
 
+/// What the own-work row's verdict makes of a call the matrix asked about.
+fn own_work_asked(asked: Option<Asked>, verdict: Verdict) -> Result<Option<Asked>, ToolError> {
+    Ok(match verdict {
+        Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
+        Verdict::AllowByDefault => Some(Asked::Default),
+        Verdict::Allow { rule: Some(rule) } => Some(Asked::Rule(rule)),
+        Verdict::Review { offers_rule, rule } => Some(Asked::Review {
+            offers_rule,
+            proposal: false,
+            rule,
+        }),
+        Verdict::Ask { offers_rule } => Some(Asked::You {
+            offers_rule,
+            proposal: false,
+        }),
+        // The row never allows without a record; keep the matrix's answer.
+        Verdict::Allow { rule: None } => asked,
+    })
+}
+
 /// An approved limitation report whose filing failed, with its text as approved.
 fn failed_report(d: &Decision) -> bool {
     d.tool == REPORT_LIMITATION
@@ -1032,5 +1050,25 @@ mod tests {
         }
         assert!(error_record(&ToolError::LeaseLost).is_none());
         assert_eq!(replay(json!({"outbox_id": 3})), Ok(json!({"outbox_id": 3})));
+    }
+
+    #[test]
+    fn an_own_work_block_refuses_instead_of_asking() {
+        let asked = Some(Asked::You {
+            offers_rule: false,
+            proposal: false,
+        });
+        assert!(matches!(
+            own_work_asked(asked, Verdict::Block { reason: "off".into() }),
+            Err(ToolError::Blocked(reason)) if reason == "off"
+        ));
+        assert!(matches!(
+            own_work_asked(asked, Verdict::Allow { rule: None }),
+            Ok(Some(Asked::You { .. }))
+        ));
+        assert!(matches!(
+            own_work_asked(asked, Verdict::AllowByDefault),
+            Ok(Some(Asked::Default))
+        ));
     }
 }

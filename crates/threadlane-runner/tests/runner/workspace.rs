@@ -675,6 +675,15 @@ async fn the_run_after_an_unfinished_one_is_told_what_its_checkpoint_left_out() 
     assignment.lane_kind = LaneKind::Task;
     assignment.task_id = Some(T1);
     assignment.repositories = vec![s.repository.clone()];
+    // A run whose backend cannot start (no script) is not told: the next one is.
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment.clone())));
+    h.runner.work_once().await.unwrap();
+    assert_ne!(
+        workspaces.checkpoint_notes(T1, repositories).await,
+        "",
+        "kept after a failed start"
+    );
     h.link.grant(lease(LANE));
     h.link.push_begin(Ok(run(assignment)));
     h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
@@ -693,7 +702,7 @@ async fn the_run_after_an_unfinished_one_is_told_what_its_checkpoint_left_out() 
         "{prompt}"
     );
     assert_eq!(
-        workspaces.take_checkpoint_notes(T1, repositories).await,
+        workspaces.checkpoint_notes(T1, repositories).await,
         "",
         "told once"
     );
