@@ -124,8 +124,14 @@ first.
 - `checks_pass` for `merge`: `mergeStateStatus == CLEAN`, every required
   check succeeded, and `t`'s latest `task_reviews` row has verdict
   approved with a revision for the repository equal to `headRefOid`.
+- A `merge` is own work only when its `expected_head` argument equals the
+  head read here. The merge performs the stored arguments, and the forge
+  runs `gh pr merge --match-head-commit`, so a head that moved after the
+  check fails the merge instead of merging unchecked commits. A merge
+  without `expected_head` follows today's matrix.
 - Any read error means `own_work = None`, so the call falls back to
-  today's matrix (fail closed).
+  today's matrix (fail closed). Reading the check runs is complete or an
+  error: a page limit that leaves a page unread is an error.
 
 **Recorded as.** `Verdict::AllowByDefault` exists already, so reuse it:
 the decision is stored answered `by_default`. The card in Activity says
