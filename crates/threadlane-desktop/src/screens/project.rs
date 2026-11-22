@@ -9,6 +9,7 @@ use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
@@ -30,9 +31,10 @@ use crate::components::{
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
-    BOARD_COLUMN_MIN, CONTROL_HEIGHT, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH, READING_WIDTH,
-    ROW_RADIUS, RULES_WIDTH, SCROLLBAR_GUTTER, SHORT_LABEL_WIDTH, SIDEBAR_SECTION_MAX_HEIGHT,
-    SIDEBAR_WIDTH, SM, Status, TABULAR, TIMESTAMP_WIDTH, TYPE_BODY, TYPE_META, XL, XS,
+    BADGE_RADIUS, BOARD_COLUMN_MIN, CONTROL_HEIGHT, FIELD_RADIUS, LG, MD, MEMORY_LIST_WIDTH,
+    READING_WIDTH, ROW_RADIUS, RULES_WIDTH, SCROLLBAR_GUTTER, SHORT_LABEL_WIDTH,
+    SIDEBAR_SECTION_MAX_HEIGHT, SIDEBAR_WIDTH, SM, Status, TABULAR, TIMESTAMP_WIDTH, TYPE_BODY,
+    TYPE_META, XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -771,7 +773,22 @@ impl Desktop {
         let muted = cx.theme().muted_foreground;
         let view = cx.entity().downgrade();
         let archived = self.state.is_archived(space, project);
-        let board_columns = self.state.board(space, project, when);
+        let mut board_columns = self.state.board(space, project, when);
+        // A dragged card can always be dropped on Cancelled, even before any task is there.
+        if cx.has_active_drag()
+            && !archived
+            && !board_columns
+                .iter()
+                .any(|column| column.title == "Cancelled")
+        {
+            board_columns.push(threadlane_desktop::Column {
+                title: "Cancelled",
+                cards: Vec::new(),
+                count: 0,
+                more: None,
+                proposals: Vec::new(),
+            });
+        }
         let is_empty = self
             .state
             .project_gap(space, project, Part::Tasks)
@@ -780,6 +797,7 @@ impl Desktop {
         let columns = board_columns.into_iter().map(|column| {
             let blank = column.cards.is_empty() && column.proposals.is_empty();
             let status = Status::task(column.title);
+            let column_title = column.title;
             let proposals = column.proposals.into_iter().map(|proposal| {
                 let id = proposal.id;
                 let button = |label, option: Option<String>| {
@@ -855,8 +873,27 @@ impl Desktop {
                 let id = task_card.id;
                 let menu_space = space.to_owned();
                 let menu_view = view.clone();
+                let group = SharedString::from(format!("board-card-{id}"));
+                let quick = (!archived).then(|| self.card_actions(space, &task_card, &group, cx));
+                let detail = task_card
+                    .meta
+                    .strip_prefix(task_card.agent.as_str())
+                    .map_or(task_card.meta.as_str(), |rest| {
+                        rest.trim_start_matches(" · ")
+                    })
+                    .to_owned();
+                let drag = BoardDrag {
+                    space: space.to_owned(),
+                    id,
+                    title: format!("{id} {}", task_card.title),
+                    from: column_title,
+                };
                 div()
                     .id(SharedString::from(format!("board-menu-{id}")))
+                    .group(group)
+                    .when(!archived, |this| {
+                        this.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                    })
                     .child(
                         card(cx)
                             .p(SM)
@@ -880,10 +917,32 @@ impl Desktop {
                                         this.go(screen.clone(), cx)
                                     })),
                             )
-                            .child(meta(task_card.meta, cx))
-                            .children(task_card.merge.map(|merge| meta(merge, cx)))
+                            .child(
+                                h_flex()
+                                    .gap(XS)
+                                    .min_w_0()
+                                    .flex_wrap()
+                                    .child(
+                                        Tag::secondary()
+                                            .small()
+                                            .rounded(BADGE_RADIUS)
+                                            .text_size(TYPE_META)
+                                            .child(task_card.agent.clone()),
+                                    )
+                                    .children(
+                                        (!detail.is_empty()).then(|| meta(detail, cx).min_w_0()),
+                                    ),
+                            )
+                            .children(task_card.step.clone().map(|step| {
+                                meta(step, cx)
+                                    .w_full()
+                                    .truncate()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                            }))
+                            .children(task_card.merge.clone().map(|merge| meta(merge, cx)))
                             .children(self.pull_strip(space, task_card.id, cx))
-                            .children(answer),
+                            .children(answer)
+                            .children(quick),
                     )
                     .context_menu(move |menu, _, _| {
                         let open = context_screen.clone();
@@ -914,6 +973,22 @@ impl Desktop {
                                 this.retry_task(space.clone(), id, cx);
                             }));
                         }
+                        if let Some(url) = task_card.review.clone() {
+                            menu =
+                                menu.item(menu_item(&menu_view, "Open review", move |_, _, cx| {
+                                    cx.open_url(&url)
+                                }));
+                        }
+                        for agent in task_card.reassign.iter().filter(|_| !archived) {
+                            let (space, agent) = (menu_space.clone(), agent.clone());
+                            menu = menu.item(menu_item(
+                                &menu_view,
+                                format!("Reassign to {agent}"),
+                                move |this, _, cx| {
+                                    this.reassign_task(space.clone(), id, agent.clone(), cx);
+                                },
+                            ));
+                        }
                         menu
                     })
             });
@@ -923,6 +998,15 @@ impl Desktop {
                 .p(SM)
                 .bg(cx.theme().muted)
                 .rounded(ROW_RADIUS)
+                .drag_over::<BoardDrag>(|style, _, _, cx| {
+                    style
+                        .bg(cx.theme().accent)
+                        .border_1()
+                        .border_color(cx.theme().ring)
+                })
+                .on_drop(cx.listener(move |this, drag: &BoardDrag, window, cx| {
+                    this.drop_card(drag, column_title, window, cx);
+                }))
                 .child(
                     h_flex()
                         .justify_between()
@@ -2917,11 +3001,43 @@ impl Desktop {
                     && this.state.task_form(&space, &project).is_some()
                     && !this.state.is_archived(&space, &project)
                 {
-                    this.task_title.focus_handle(cx).focus(window, cx);
+                    this.task_goal.focus_handle(cx).focus(window, cx);
                 }
             });
         });
         cx.notify();
+    }
+
+    /// Quick create (`C`, or "New task…" in the palette): the new task
+    /// form of the project you are in, or of the space's chat project.
+    pub(crate) fn quick_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let here = match &self.screen {
+            Screen::Project { space, project, .. } => Some((space.clone(), project.clone())),
+            Screen::Task { space, task } => self
+                .state
+                .task(space, *task)
+                .map(|detail| (space.clone(), detail.summary.project.clone())),
+            _ => None,
+        };
+        let target = self
+            .state
+            .quick_create_target(here.as_ref().map(|(s, p)| (s.as_str(), p.as_str())));
+        let Some((space, project)) = target else {
+            self.state.report(threadlane_desktop::Activity::Failed(
+                "Pair a space before creating a task.".to_owned(),
+            ));
+            cx.notify();
+            return;
+        };
+        self.go(
+            Screen::Project {
+                space: space.clone(),
+                project: project.clone(),
+                tab: Tab::Tasks,
+            },
+            cx,
+        );
+        self.show_new_task_form(&space, &project, window, cx);
     }
 
     fn hide_new_task_form(
@@ -3029,6 +3145,37 @@ impl Desktop {
                     })),
             );
         }
+        let mut projects = h_flex().gap(XS).flex_wrap();
+        for name in self
+            .state
+            .space(space)
+            .map(|known| {
+                known
+                    .active_projects()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        {
+            let (in_space, other) = (space.to_owned(), name.clone());
+            projects = projects.child(
+                button(SharedString::from(format!("task-project-{name}")))
+                    .small()
+                    .label(name.clone())
+                    .selected(name == project)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.go(
+                            Screen::Project {
+                                space: in_space.clone(),
+                                project: other.clone(),
+                                tab: Tab::Tasks,
+                            },
+                            cx,
+                        );
+                        this.show_new_task_form(&in_space, &other, window, cx);
+                    })),
+            );
+        }
         let (in_space, named) = (space.to_owned(), project.to_owned());
         let (close_space, close_project) = (space.to_owned(), project.to_owned());
         v_flex()
@@ -3040,17 +3187,18 @@ impl Desktop {
             .border_color(cx.theme().border)
             .rounded(ROW_RADIUS)
             .child(section("New task"))
+            .child(h_flex().gap(SM).child(label("Project")).child(projects))
             .child(
                 v_flex()
                     .gap(XS)
-                    .child(meta("Title", cx))
-                    .child(field(&self.task_title).aria_label("Title")),
+                    .child(meta("Prompt", cx))
+                    .child(field(&self.task_goal).aria_label("Prompt: what the task should do")),
             )
             .child(
                 v_flex()
                     .gap(XS)
-                    .child(meta("Goal", cx))
-                    .child(field(&self.task_goal).aria_label("Goal")),
+                    .child(meta("Title (optional, from the prompt's first line)", cx))
+                    .child(field(&self.task_title).aria_label("Title")),
             )
             .child(
                 h_flex()
@@ -3290,5 +3438,136 @@ mod chat_details_tests {
         assert!(!chat_details_in_sheet(px(760.), px(16.), true));
         assert!(!chat_details_in_sheet(px(1024.), px(16.), false));
         assert!(chat_details_in_sheet(px(1024.), px(24.), false));
+    }
+}
+
+/// A board card on its way to another column.
+#[derive(Clone)]
+pub(crate) struct BoardDrag {
+    space: String,
+    id: threadlane_core::ids::TaskId,
+    title: String,
+    from: &'static str,
+}
+
+impl Render for BoardDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(BOARD_COLUMN_MIN)
+            .p(SM)
+            .rounded(ROW_RADIUS)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_md()
+            .text_size(TYPE_BODY)
+            .truncate()
+            .child(self.title.clone())
+    }
+}
+
+impl Desktop {
+    /// The card's quick actions, shown while the pointer is over it; its
+    /// context menu offers the same ones from the keyboard.
+    fn card_actions(
+        &self,
+        space: &str,
+        card: &threadlane_desktop::BoardCard,
+        group: &SharedString,
+        cx: &Context<Self>,
+    ) -> Div {
+        let id = card.id;
+        let small = |key: &str, label: &str| {
+            button(SharedString::from(format!("card-{key}-{id}")))
+                .small()
+                .ghost()
+                .tab_stop(false)
+                .label(label.to_owned())
+        };
+        let mut row = h_flex()
+            .gap(XS)
+            .flex_wrap()
+            .opacity(0.)
+            .group_hover(group.clone(), |style| style.opacity(1.));
+        if let Some(url) = card.review.clone() {
+            row = row.child(
+                small("review", "Open review")
+                    .icon(AppIcon::ExternalLink)
+                    .accessibility_label(format!("Open the pull request of {id}"))
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            );
+        }
+        if card.can_retry {
+            let space = space.to_owned();
+            row = row.child(
+                small("retry", "Retry")
+                    .accessibility_label(format!("Retry {id}"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.retry_task(space.clone(), id, cx);
+                    })),
+            );
+        }
+        if card.can_cancel {
+            let space = space.to_owned();
+            row = row.child(
+                small("cancel", "Cancel…")
+                    .accessibility_label(format!("Cancel {id}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_action(Consequence::CancelTask(space.clone(), id), window, cx);
+                    })),
+            );
+        }
+        if !card.reassign.is_empty() {
+            let (space, agents, view) = (
+                space.to_owned(),
+                card.reassign.clone(),
+                cx.entity().downgrade(),
+            );
+            row = row.child(
+                small("reassign", "Reassign")
+                    .dropdown_caret(true)
+                    .accessibility_label(format!("Give {id} to another agent"))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for agent in &agents {
+                            let (space, agent, view) = (space.clone(), agent.clone(), view.clone());
+                            menu = menu.item(PopupMenuItem::new(agent.clone()).on_click(
+                                move |_, _, cx| {
+                                    let _gone = view.update(cx, |this, cx| {
+                                        this.reassign_task(space.clone(), id, agent.clone(), cx);
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    }),
+            );
+        }
+        row
+    }
+
+    /// Makes the status change a card dropped on column `to` stands for, or
+    /// says why the hub has none.
+    fn drop_card(
+        &mut self,
+        drag: &BoardDrag,
+        to: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match threadlane_desktop::board_move(drag.from, to) {
+            Ok(threadlane_desktop::BoardMove::Stay) => {}
+            Ok(threadlane_desktop::BoardMove::Retry) => {
+                self.retry_task(drag.space.clone(), drag.id, cx);
+            }
+            Ok(threadlane_desktop::BoardMove::Cancel) => self.confirm_action(
+                Consequence::CancelTask(drag.space.clone(), drag.id),
+                window,
+                cx,
+            ),
+            Err(why) => {
+                self.state.report(threadlane_desktop::Activity::Failed(why));
+                cx.notify();
+            }
+        }
     }
 }

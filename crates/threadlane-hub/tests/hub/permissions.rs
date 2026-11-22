@@ -1285,3 +1285,141 @@ async fn an_unreadable_pull_request_asks_as_before() {
     assert_eq!(merged, Err(ToolError::WaitingOnYou));
     assert_eq!(cards(&hub).await, 1);
 }
+
+/// GitHub's refusal when the base branch moved under a merge (#724).
+const BASE_MOVED: &str = "gh: GraphQL: Base branch was modified. Review and try the merge again. \
+                          (mergePullRequest)";
+
+/// Calls the merge of pull request 42 at the approved head as `id`, and,
+/// when it waits on you, approves it. Says whether it reached you.
+async fn merge_call(hub: &TestHub, lease: &Lease, run: &RunAssignment, id: &str) -> bool {
+    let merge = json!({"repository": "widgets", "number": 42, "expected_head": approved_head()});
+    let merged = call(hub, lease, run, id, threadlane_hub::MERGE, &merge).await;
+    if merged == Err(ToolError::WaitingOnYou) {
+        let asked = hub
+            .db
+            .lane_decisions(lease.lane_id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        decide(
+            hub,
+            DecisionRequest::Answer {
+                decision: asked.id,
+                option: "approve".into(),
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+        return true;
+    }
+    assert_eq!(merged, Err(ToolError::AuthorizedAndQueued));
+    false
+}
+
+/// Performs the lane's latest approved merge as failed with `error`.
+async fn merge_fails(hub: &TestHub, lease: &Lease, run: &RunAssignment, error: &str) -> Decision {
+    let attempt = hub
+        .db
+        .lane_decisions(lease.lane_id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(attempt.approved());
+    let begun = hub
+        .link
+        .begin_perform(lease, run.run_id, attempt.id)
+        .await
+        .unwrap();
+    assert!(
+        matches!(begun, threadlane_core::link::Perform::Repository { .. }),
+        "{begun:?}"
+    );
+    hub.link
+        .finish_perform(
+            lease,
+            run.run_id,
+            attempt.id,
+            &json!({"performed": false, "error": error}),
+        )
+        .await
+        .unwrap();
+    attempt
+}
+
+#[tokio::test]
+async fn a_merge_refused_only_because_the_base_moved_is_retried_under_its_approval() {
+    let branch = threadlane_core::workspace::task_branch(threadlane_core::ids::TaskId(1));
+    // Work you did not request, so the first merge asks.
+    let (hub, _github, lease, run) = own_merge(
+        TaskOrigin::Agent,
+        widgets_pull(&branch, &approved_head(), "success"),
+    )
+    .await;
+    assert!(
+        merge_call(&hub, &lease, &run, "m0").await,
+        "the first merge asks"
+    );
+    let approved = merge_fails(&hub, &lease, &run, BASE_MOVED).await;
+    let cards_before = cards(&hub).await;
+    for retry in 1..=3 {
+        assert!(
+            !merge_call(&hub, &lease, &run, &format!("m{retry}")).await,
+            "retry {retry} reuses the approval"
+        );
+        let attempt = merge_fails(&hub, &lease, &run, BASE_MOVED).await;
+        assert_eq!(attempt.answer.as_ref().unwrap()["by_default"], true);
+        assert!(
+            attempt.context.starts_with(&format!(
+                "Retry {retry} of 3 of {}, approved at head {}",
+                approved.id,
+                approved_head()
+            )),
+            "{}",
+            attempt.context
+        );
+    }
+    assert_eq!(cards(&hub).await, cards_before, "no retry reaches you");
+    assert!(
+        merge_call(&hub, &lease, &run, "m4").await,
+        "after three retries it asks again"
+    );
+}
+
+#[tokio::test]
+async fn a_merge_that_failed_otherwise_or_whose_head_moved_asks_again() {
+    let branch = threadlane_core::workspace::task_branch(threadlane_core::ids::TaskId(1));
+    for (error, pull) in [
+        (
+            "gh: Pull request is not mergeable",
+            widgets_pull(&branch, &approved_head(), "success"),
+        ),
+        (
+            BASE_MOVED,
+            widgets_pull(&branch, &"b".repeat(40), "success"),
+        ),
+        (
+            BASE_MOVED,
+            PullRequestState {
+                mergeable_state: "dirty".into(),
+                ..widgets_pull(&branch, &approved_head(), "success")
+            },
+        ),
+    ] {
+        let (hub, github, lease, run) = own_merge(
+            TaskOrigin::Agent,
+            widgets_pull(&branch, &approved_head(), "success"),
+        )
+        .await;
+        assert!(merge_call(&hub, &lease, &run, "m0").await);
+        merge_fails(&hub, &lease, &run, error).await;
+        github.set_pull_request("acme/widgets", 42, Ok(pull.clone()));
+        assert!(
+            merge_call(&hub, &lease, &run, "m1").await,
+            "{error} {pull:?}"
+        );
+    }
+}

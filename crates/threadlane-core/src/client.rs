@@ -1394,6 +1394,9 @@ pub enum TaskRequest {
     /// last error and asking the agent to continue from the work already
     /// on the task branch. Only a failed task can be retried.
     Retry { task: TaskId },
+    /// Gives a queued task that has never run to another agent, which
+    /// must be bound in its project and not Off.
+    Reassign { task: TaskId, agent: String },
     /// Attaches registered repositories, by name, to a task that has not
     /// ended, so it can publish, and clears its publication blocker. Its
     /// earlier work and session are kept. No run is queued: its next run,

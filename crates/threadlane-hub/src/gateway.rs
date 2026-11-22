@@ -370,6 +370,69 @@ impl LocalLink {
         Ok(Some(OwnWork { checks_pass }))
     }
 
+    /// A note for the record when this exact merge was approved and its
+    /// latest attempt failed only because the base branch moved, and GitHub
+    /// still shows the pull request cleanly mergeable at the approved head
+    /// (#724): it is retried under that approval, at most
+    /// [`BASE_MOVED_RETRIES`] times. `None` otherwise, so it is asked again.
+    async fn base_moved_retry(
+        &self,
+        lane: &Lane,
+        arguments: &Json,
+    ) -> Result<Option<String>, ToolError> {
+        let inner = &self.core.inner;
+        let hash = derived_call_key(crate::MERGE, arguments);
+        let attempts: Vec<Decision> = inner
+            .db
+            .lane_decisions(lane.id)
+            .await
+            .map_err(tool_error)?
+            .into_iter()
+            .filter(|d| d.tool == crate::MERGE && d.arguments_hash == hash && d.approved())
+            .collect();
+        let moved = attempts.iter().rev().take_while(|d| base_moved(d)).count();
+        if moved == 0 || moved > BASE_MOVED_RETRIES {
+            return Ok(None);
+        }
+        let (Some(name), Some(number), Some(head)) = (
+            arguments["repository"].as_str(),
+            arguments["number"].as_u64(),
+            arguments[threadlane_core::forge::EXPECTED_HEAD].as_str(),
+        ) else {
+            return Ok(None);
+        };
+        let Some(full_name) = inner
+            .db
+            .repositories(lane.project_id)
+            .await
+            .map_err(tool_error)?
+            .into_iter()
+            .find(|repository| repository.name == name)
+            .and_then(|repository| crate::publish::github_repository(&repository.remote_url))
+        else {
+            return Ok(None);
+        };
+        let Some(github) = inner.github.as_deref() else {
+            return Ok(None);
+        };
+        let Ok(pull) = github.pull_request_state(&full_name, number).await else {
+            return Ok(None);
+        };
+        if pull.head_sha != head || pull.mergeable_state != "clean" {
+            return Ok(None);
+        }
+        let approved = attempts
+            .iter()
+            .rev()
+            .nth(moved - 1)
+            .map_or_else(String::new, |d| d.id.to_string());
+        Ok(Some(format!(
+            "Retry {moved} of {BASE_MOVED_RETRIES} of {approved}, approved at head {head}: \
+             GitHub refused it only because the base branch moved, and the pull request is \
+             still cleanly mergeable at that head."
+        )))
+    }
+
     /// Gathers what governs the call and asks the gate (Plan.md §9.1).
     /// Also says whether the call starts work you did not request, which
     /// makes asking about it a proposal.
@@ -529,6 +592,13 @@ impl LocalLink {
         };
         // Read here, once the call is recorded, so a repeated call replays
         // this outcome instead of reading GitHub again.
+        if tool == crate::MERGE
+            && matches!(asked, Asked::You { .. } | Asked::Review { .. })
+            && let Some(note) = self.base_moved_retry(lane, arguments).await?
+        {
+            proposal.context = format!("{note}\n{}", proposal.context);
+            asked = Asked::Default;
+        }
         if tool == crate::ASSIGN_ISSUE && !matches!(asked, Asked::Dream) {
             match crate::publish::issue_claim(&inner.db, inner.github.as_deref(), lane, arguments)
                 .await?
@@ -993,6 +1063,19 @@ fn own_work_asked(asked: Option<Asked>, verdict: Verdict) -> Result<Option<Asked
         }),
         // The row never allows without a record; keep the matrix's answer.
         Verdict::Allow { rule: None } => asked,
+    })
+}
+
+/// Retries of one approved merge refused only because its base branch moved.
+const BASE_MOVED_RETRIES: usize = 3;
+
+/// An approved merge that GitHub refused only because the base branch moved.
+fn base_moved(d: &Decision) -> bool {
+    d.outcome.as_ref().is_some_and(|o| {
+        o["performed"] == false
+            && o["error"]
+                .as_str()
+                .is_some_and(|e| e.to_ascii_lowercase().contains("base branch was modified"))
     })
 }
 

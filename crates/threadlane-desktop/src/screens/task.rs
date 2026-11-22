@@ -7,13 +7,19 @@ use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
+use std::time::Duration;
 use threadlane_core::ids::TaskId;
+
+use gpui_kit::component::Icon;
 use threadlane_desktop::{
-    Consequence, EmptyRegion, Queued, TaskControl, When, changes, status_label, task_header, usage,
+    Consequence, EmptyRegion, LatestStep, MilestoneKind, Queued, TaskControl, When, changes,
+    milestone_summary, milestones, status_label, task_header, usage,
 };
 
 use super::{empty, gap_line, link, menu_item};
-use crate::components::{button, card, decision_scroller, heading, meta, section, status_badge};
+use crate::components::{
+    button, card, decision_scroller, heading, meta, section, status_badge, status_dot,
+};
 use crate::icons::AppIcon;
 use crate::tokens::{
     BADGE_RADIUS, LG, MD, PANEL_WIDTH, READING_WIDTH, SM, Status, TASK_TIMELINE_BASIS,
@@ -298,89 +304,8 @@ impl Desktop {
                     })),
             ),
         };
-        let header = task_header(detail, when);
-        let in_space = space.to_owned();
-        let expanded = self.state.activity_open(space, task);
-        let mut activity = v_flex().gap(XS).items_start().child(
-            button("task-activity")
-                .small()
-                .ghost()
-                .label(if expanded {
-                    "Hide activity"
-                } else {
-                    "Activity"
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.state.toggle_activity(&in_space, task);
-                    if this.state.activity_open(&in_space, task) {
-                        this.load_task_activity(in_space.clone(), task, None, cx);
-                    }
-                    cx.notify();
-                })),
-        );
-        if expanded {
-            let data = &self.task_activity;
-            if data.loading && !data.loaded {
-                activity = activity.child(meta("Loading activity…", cx));
-            } else if data.is_empty() {
-                activity = activity.child(empty(EmptyRegion::Activity, cx));
-            }
-            if !data.loading && data.newest.is_some() {
-                activity = activity.child(
-                    button("task-activity-newest")
-                        .small()
-                        .ghost()
-                        .label("Show newest activity")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.task_activity.show_newest();
-                            cx.notify();
-                        })),
-                );
-            }
-            for group in data
-                .entries
-                .chunk_by(|a, b| a.position.run == b.position.run)
-            {
-                let run = group[0].position.run;
-                let mut title = format!("Run {run}");
-                if let Some(summary) = detail.runs.iter().find(|summary| summary.run.id == run) {
-                    title.push_str(&format!(" · {}", when.moment(summary.run.started_at)));
-                }
-                activity = activity
-                    .child(section(title))
-                    .children(group.iter().rev().map(|entry| {
-                        meta(
-                            format!(
-                                "{} · {}",
-                                when.moment(entry.step.at),
-                                entry.step.description
-                            ),
-                            cx,
-                        )
-                    }));
-            }
-            if let Some((_, error)) = &data.error {
-                activity = activity.child(meta(error.clone(), cx));
-            }
-            if !data.loading && (data.next.is_some() || data.error.is_some()) {
-                let in_space = space.to_owned();
-                let before = data.error.as_ref().map_or(data.next, |(before, _)| *before);
-                activity = activity.child(
-                    button("task-activity-earlier")
-                        .small()
-                        .ghost()
-                        .label(if data.error.is_some() {
-                            "Retry"
-                        } else {
-                            "Load earlier activity"
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.load_task_activity(in_space.clone(), task, before, cx);
-                            cx.notify();
-                        })),
-                );
-            }
-        }
+        let mut header = task_header(detail, when);
+        let activity = self.live_feed(space, task, header.latest.take(), cx);
         let actions = h_flex()
             .gap(SM)
             .flex_wrap()
@@ -424,11 +349,6 @@ impl Desktop {
                             .children(self.pull_strip(space, task, cx)),
                     )
                     .child(actions),
-            )
-            .children(
-                header
-                    .latest
-                    .map(|latest| crate::components::live_step(latest, cx)),
             )
             .children(
                 self.state
@@ -496,5 +416,159 @@ impl Desktop {
             .child(decision_scroller("task", content, &self.decision_scroll))
             .children(composer)
             .into_any_element()
+    }
+}
+
+/// How many milestones the live feed shows before "Load earlier".
+const FEED_ROWS: usize = 12;
+
+impl Desktop {
+    /// The Activity feed: while the task runs, its files, commands and tests
+    /// as they happen under a live pulse, amber once the run goes quiet;
+    /// afterwards one summary line that opens the same feed.
+    fn live_feed(
+        &self,
+        space: &str,
+        task: TaskId,
+        live: Option<LatestStep>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let data = &self.task_activity;
+        let rows = milestones(data.entries.iter().rev().map(|entry| &entry.step));
+        let expanded = live.is_some() || self.state.activity_open(space, task);
+        let heading = h_flex()
+            .gap(SM)
+            .items_center()
+            .flex_wrap()
+            .child(section("Activity"));
+        let heading = match &live {
+            Some(latest) => {
+                let status = if latest.quiet {
+                    Status::Waiting
+                } else {
+                    Status::Running
+                };
+                let dot = status_dot(status, cx);
+                let dot = if latest.quiet {
+                    dot.into_any_element()
+                } else {
+                    dot.with_animation(
+                        "task-feed-pulse",
+                        Animation::new(Duration::from_millis(1600))
+                            .repeat()
+                            .with_easing(pulsating_between(0.35, 1.0)),
+                        |dot, delta| dot.opacity(delta),
+                    )
+                    .into_any_element()
+                };
+                let line = meta(latest.text.clone(), cx);
+                heading
+                    .child(dot)
+                    .child(if latest.quiet {
+                        line.text_color(Status::Waiting.colors(cx.theme()).0)
+                    } else {
+                        line
+                    })
+                    .into_any_element()
+            }
+            None => {
+                let in_space = space.to_owned();
+                heading
+                    .children(data.loaded.then(|| meta(milestone_summary(&rows), cx)))
+                    .child(
+                        button("task-activity")
+                            .small()
+                            .ghost()
+                            .label(if expanded { "Hide steps" } else { "Show steps" })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.toggle_activity(&in_space, task);
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            }
+        };
+        let mut feed = v_flex().gap(XS).items_start().child(heading);
+        if !expanded {
+            return feed;
+        }
+        if data.loading && !data.loaded {
+            feed = feed.child(meta("Loading activity…", cx));
+        } else if data.is_empty() {
+            feed = feed.child(empty(EmptyRegion::Activity, cx));
+        } else if rows.is_empty() && data.error.is_none() {
+            feed = feed.child(meta("No files or commands yet.", cx));
+        }
+        if !data.loading && data.newest.is_some() {
+            feed = feed.child(
+                button("task-activity-newest")
+                    .small()
+                    .ghost()
+                    .label("Show newest activity")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.task_activity.show_newest();
+                        cx.notify();
+                    })),
+            );
+        }
+        let when = self.when();
+        let mono = cx.theme().mono_font_family.clone();
+        let shown = if live.is_some() {
+            FEED_ROWS
+        } else {
+            rows.len()
+        };
+        feed = feed.children(rows.iter().rev().take(shown).map(|row| {
+            let (icon, status, verb) = match row.kind {
+                MilestoneKind::File => (AppIcon::FileText, Status::Idle, "Changed"),
+                MilestoneKind::Command => (AppIcon::ChevronRight, Status::Idle, "Ran"),
+                MilestoneKind::TestsPassed => (AppIcon::Check, Status::Done, "Tests passed"),
+                MilestoneKind::TestsFailed => (AppIcon::X, Status::Failed, "Tests failed"),
+                MilestoneKind::Failed => (AppIcon::X, Status::Failed, "Failed"),
+            };
+            let ink = status.colors(cx.theme()).0;
+            h_flex()
+                .gap(SM)
+                .items_center()
+                .min_w_0()
+                .child(
+                    meta(when.moment(row.at), cx)
+                        .w(TIMESTAMP_WIDTH)
+                        .flex_none()
+                        .text_right(),
+                )
+                .child(Icon::new(icon).small().text_color(ink).flex_none())
+                .child(meta(verb, cx).flex_none())
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(TYPE_META)
+                        .font_family(mono.clone())
+                        .child(row.text.clone()),
+                )
+        }));
+        if let Some((_, error)) = &data.error {
+            feed = feed.child(meta(error.clone(), cx));
+        }
+        if !data.loading && (data.next.is_some() || data.error.is_some()) {
+            let in_space = space.to_owned();
+            let before = data.error.as_ref().map_or(data.next, |(before, _)| *before);
+            feed = feed.child(
+                button("task-activity-earlier")
+                    .small()
+                    .ghost()
+                    .label(if data.error.is_some() {
+                        "Retry"
+                    } else {
+                        "Load earlier activity"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.load_task_activity(in_space.clone(), task, before, cx);
+                        cx.notify();
+                    })),
+            );
+        }
+        feed
     }
 }
