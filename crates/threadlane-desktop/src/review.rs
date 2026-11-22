@@ -126,6 +126,8 @@ pub struct Hunk {
 /// One changed file as the review view shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewFile {
+    /// The repository the file is in, so one path in two repositories stays two files.
+    pub repository: String,
     pub path: String,
     pub additions: u64,
     pub deletions: u64,
@@ -232,6 +234,7 @@ fn split_patch(patch: &str) -> HashMap<String, String> {
 fn preview_files(diff: &DiffPreview) -> impl Iterator<Item = ReviewFile> + '_ {
     let mut patches = split_patch(&diff.patch);
     diff.files.iter().map(move |file| ReviewFile {
+        repository: diff.repository.clone(),
         path: file.path.clone(),
         additions: file.insertions,
         deletions: file.deletions,
@@ -247,8 +250,8 @@ fn preview_files(diff: &DiffPreview) -> impl Iterator<Item = ReviewFile> + '_ {
 pub fn quote(file: &ReviewFile, hunk: Option<&Hunk>) -> String {
     match hunk {
         None => format!(
-            "In `{}` (+{} -{}):\n",
-            file.path, file.additions, file.deletions
+            "In {} `{}` (+{} -{}):\n",
+            file.repository, file.path, file.additions, file.deletions
         ),
         Some(hunk) => {
             let body: String = hunk
@@ -263,7 +266,10 @@ pub fn quote(file: &ReviewFile, hunk: Option<&Hunk>) -> String {
                     format!("{sign}{}\n", line.text)
                 })
                 .collect();
-            format!("In `{}` {}:\n```diff\n{body}```\n", file.path, hunk.header)
+            format!(
+                "In {} `{}` {}:\n```diff\n{body}```\n",
+                file.repository, file.path, hunk.header
+            )
         }
     }
 }
@@ -317,13 +323,37 @@ impl AppState {
         );
     }
 
-    /// Why the files of a task's pull requests could not be read, if they could not.
+    /// Why the review shows no pull request files, once they were asked for.
     #[must_use]
-    pub fn pull_files_error(&self, space: &str, task: TaskId) -> Option<&str> {
-        match self.pull_files.get(&(space.to_owned(), task)) {
-            Some(Err(why)) => Some(why),
-            _ => None,
+    pub fn pull_files_note(&self, space: &str, task: TaskId) -> Option<String> {
+        match self.pull_files.get(&(space.to_owned(), task))? {
+            Err(why) => Some(format!("Showing the merge-check preview: {why}")),
+            Ok(pulls) if pulls.iter().all(|pull| pull.files.is_empty()) => Some(
+                if pulls.is_empty() {
+                    "This task has no pull request yet."
+                } else {
+                    "Its pull requests change no files yet."
+                }
+                .to_owned(),
+            ),
+            Ok(_) => None,
         }
+    }
+
+    /// The pull request files read for the open review of task `task` are
+    /// for heads its pull requests have since moved from.
+    #[must_use]
+    pub fn review_files_stale(&self, space: &str, task: TaskId) -> bool {
+        let Some(Ok(read)) = self.pull_files.get(&(space.to_owned(), task)) else {
+            return false;
+        };
+        // Both lists come from the hub in the order the pull requests were opened.
+        let current = self
+            .task_pulls(space, task)
+            .iter()
+            .map(|p| (&p.repository, p.number, &p.head_sha));
+        let shown = read.iter().map(|p| (&p.repository, p.number, &p.head_sha));
+        self.review(space, task).is_some() && !current.eq(shown)
     }
 
     /// Every file the review of task `task` shows: from its pull requests
@@ -336,8 +366,9 @@ impl AppState {
         {
             return pulls
                 .iter()
-                .flat_map(|pull| &pull.files)
-                .map(|file| ReviewFile {
+                .flat_map(|pull| pull.files.iter().map(move |file| (&pull.repository, file)))
+                .map(|(repository, file)| ReviewFile {
+                    repository: repository.clone(),
                     path: file.path.clone(),
                     additions: file.additions,
                     deletions: file.deletions,
@@ -457,15 +488,16 @@ diff --git a/b.txt b/b.txt
     fn a_hunk_quotes_as_a_fenced_diff_under_its_file() {
         let hunks = parse_hunks(&split_patch(PATCH)["src/a.rs"]);
         let file = ReviewFile {
+            repository: "api".into(),
             path: "src/a.rs".into(),
             additions: 1,
             deletions: 1,
             hunks,
         };
-        assert_eq!(quote(&file, None), "In `src/a.rs` (+1 -1):\n");
+        assert_eq!(quote(&file, None), "In api `src/a.rs` (+1 -1):\n");
         assert_eq!(
             quote(&file, Some(&file.hunks[0])),
-            "In `src/a.rs` @@ -1,3 +1,3 @@ fn main:\n```diff\n keep\n-old\n+new\n tail\n```\n"
+            "In api `src/a.rs` @@ -1,3 +1,3 @@ fn main:\n```diff\n keep\n-old\n+new\n tail\n```\n"
         );
     }
 }

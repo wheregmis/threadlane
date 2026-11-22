@@ -750,51 +750,54 @@ impl HubCore {
                 .get(&key)
                 .filter(|(head, _)| *head == pull.head_sha)
                 .map(|(_, files)| files.clone());
-            let files = match cached {
-                Some(files) => files,
-                None => {
-                    let source = self.inner.github.as_ref().ok_or_else(|| {
-                        ApiError::Unreachable("this hub does not read GitHub".to_owned())
-                    })?;
-                    let files = source
-                        .pull_request_files(&pull.repository, pull.number)
-                        .await
-                        .map_err(|error| ApiError::Unreachable(error.to_string()))?;
-                    // The files carry no head, so check it did not move while they were read.
-                    let state = source
-                        .pull_request_state(&pull.repository, pull.number)
-                        .await
-                        .map_err(|error| ApiError::Unreachable(error.to_string()))?;
-                    if state.head_sha != pull.head_sha {
-                        let moved = task_pull_request(
-                            &pull.repository,
-                            pull.number,
-                            &state,
-                            self.inner.clock.now(),
-                        );
-                        if let Some(known) =
-                            self.inner.pull_status.lock().await.get_mut(&task).and_then(|pulls| {
-                                pulls.iter_mut().find(|known| {
-                                    known.repository == moved.repository
-                                        && known.number == moved.number
-                                })
-                            })
-                        {
-                            *known = moved;
+            let files =
+                match cached {
+                    Some(files) => files,
+                    None => {
+                        let source = self.inner.github.as_ref().ok_or_else(|| {
+                            ApiError::Unreachable("this hub does not read GitHub".to_owned())
+                        })?;
+                        let files = source
+                            .pull_request_files(&pull.repository, pull.number)
+                            .await
+                            .map_err(|error| ApiError::Unreachable(error.to_string()))?;
+                        // The files carry no head, so check it did not move while they were read.
+                        let state = source
+                            .pull_request_state(&pull.repository, pull.number)
+                            .await
+                            .map_err(|error| ApiError::Unreachable(error.to_string()))?;
+                        if state.head_sha != pull.head_sha {
+                            let moved = task_pull_request(
+                                &pull.repository,
+                                pull.number,
+                                &state,
+                                self.inner.clock.now(),
+                            );
+                            if let Some(known) =
+                                self.inner.pull_status.lock().await.get_mut(&task).and_then(
+                                    |pulls| {
+                                        pulls.iter_mut().find(|known| {
+                                            known.repository == moved.repository
+                                                && known.number == moved.number
+                                        })
+                                    },
+                                )
+                            {
+                                *known = moved;
+                            }
+                            return Err(ApiError::Unreachable(format!(
+                                "{}#{} moved to a new commit while its files were read; try again",
+                                pull.repository, pull.number
+                            )));
                         }
-                        return Err(ApiError::Unreachable(format!(
-                            "{}#{} moved to a new commit while its files were read; try again",
-                            pull.repository, pull.number
-                        )));
+                        self.inner
+                            .pull_files
+                            .lock()
+                            .await
+                            .insert(key, (pull.head_sha.clone(), files.clone()));
+                        files
                     }
-                    self.inner
-                        .pull_files
-                        .lock()
-                        .await
-                        .insert(key, (pull.head_sha.clone(), files.clone()));
-                    files
-                }
-            };
+                };
             answer.push(PullRequestFiles {
                 repository: pull.repository,
                 number: pull.number,

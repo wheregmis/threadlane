@@ -6,6 +6,7 @@ use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
 use threadlane_core::ids::TaskId;
@@ -410,7 +411,10 @@ impl Desktop {
             .flex_1()
             .min_h_0()
             .w_full()
-            .max_w(READING_WIDTH)
+            // The open review uses the window's full width.
+            .when(self.state.review(space, task).is_none(), |view| {
+                view.max_w(READING_WIDTH)
+            })
             .self_center()
             .gap(SM)
             .child(decision_scroller("task", content, &self.decision_scroll))

@@ -662,7 +662,7 @@ impl HubApi for FakeHub {
             OverviewRequest::RecordedCount => Ok(OverviewReply::RecordedCount {
                 total: u64::try_from(self.recorded.lock().expect("lock").len()).expect("few"),
             }),
-            OverviewRequest::Task { task } => {
+            OverviewRequest::Task { task } | OverviewRequest::TaskOverview { task } => {
                 let summary = tasks
                     .into_iter()
                     .find(|summary| summary.task.id == task)
@@ -8389,6 +8389,7 @@ async fn a_task_and_its_board_show_each_pull_request_with_its_checks() {
     let mut state = AppState::default();
 
     state.apply_task(load_task_overview(&core, "work", TaskId(2)).await);
+    assert!(state.task("work", TaskId(2)).is_some(), "the task loaded");
     let pulls = state.task_pulls("work", TaskId(2));
     assert_eq!(pulls.len(), 1);
     assert_eq!(pull_label(&pulls[0]), "#42 Draft");
@@ -8453,6 +8454,17 @@ async fn the_review_walks_a_tasks_files_and_quotes_a_hunk_into_its_draft() {
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].hunks[0].lines.len(), 3);
 
+    // A hub that lists no files says why.
+    work.pull_files
+        .lock()
+        .unwrap()
+        .insert(TaskId(4), Vec::new());
+    state.apply_pull_files(load_pull_files(&core, "work", TaskId(4)).await);
+    assert_eq!(
+        state.pull_files_note("work", TaskId(4)).as_deref(),
+        Some("This task has no pull request yet.")
+    );
+
     let file = |path: &str, patch: Option<&str>| PullRequestFile {
         path: path.into(),
         previous_path: None,
@@ -8463,27 +8475,66 @@ async fn the_review_walks_a_tasks_files_and_quotes_a_hunk_into_its_draft() {
     };
     work.pull_files.lock().unwrap().insert(
         TaskId(4),
-        vec![threadlane_core::client::PullRequestFiles {
-            repository: "acme/api".into(),
-            number: 42,
-            head_sha: "a".repeat(40),
-            files: vec![
-                file("src/lib.rs", Some("@@ -3,2 +3,3 @@ fn a\n x\n-y\n+z\n+w\n")),
-                file("logo.png", None),
-            ],
-        }],
+        vec![
+            threadlane_core::client::PullRequestFiles {
+                repository: "acme/api".into(),
+                number: 42,
+                head_sha: "a".repeat(40),
+                files: vec![
+                    file("src/lib.rs", Some("@@ -3,2 +3,3 @@ fn a\n x\n-y\n+z\n+w\n")),
+                    file("logo.png", None),
+                ],
+            },
+            threadlane_core::client::PullRequestFiles {
+                repository: "acme/web".into(),
+                number: 9,
+                head_sha: "c".repeat(40),
+                files: vec![file("src/lib.rs", None)],
+            },
+        ],
     );
+    work.pulls.lock().unwrap().insert(
+        TaskId(4),
+        vec![
+            pull(42, PullRequestStatus::Open, false),
+            TaskPullRequest {
+                repository: "acme/web".into(),
+                head_sha: "c".repeat(40),
+                ..pull(9, PullRequestStatus::Open, false)
+            },
+        ],
+    );
+    state.apply_task(load_task(&core, "work", TaskId(4)).await);
     state.apply_pull_files(load_pull_files(&core, "work", TaskId(4)).await);
+    assert_eq!(state.pull_files_note("work", TaskId(4)), None);
+    assert!(!state.review_files_stale("work", TaskId(4)));
     let files = state.review_files("work", TaskId(4));
     assert_eq!(
-        files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
-        ["src/lib.rs", "logo.png"]
+        files
+            .iter()
+            .map(|f| (f.repository.as_str(), f.path.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("acme/api", "src/lib.rs"),
+            ("acme/api", "logo.png"),
+            ("acme/web", "src/lib.rs")
+        ],
+        "one path in two repositories stays two files"
     );
     assert!(files[1].hunks.is_empty());
+    assert_eq!(
+        quote(&files[2], None),
+        "In acme/web `src/lib.rs` (+2 -1):\n"
+    );
+
+    // A pull request that moves to a new head makes the files stale.
+    work.pulls.lock().unwrap().get_mut(&TaskId(4)).unwrap()[0].head_sha = "d".repeat(40);
+    state.apply_task(load_task(&core, "work", TaskId(4)).await);
+    assert!(state.review_files_stale("work", TaskId(4)));
 
     // Per-file navigation stays within the files; the layout toggles.
     state.select_review_file(9);
-    assert_eq!(state.review("work", TaskId(4)).unwrap().file, 1);
+    assert_eq!(state.review("work", TaskId(4)).unwrap().file, 2);
     state.toggle_review_split();
     assert!(state.review("work", TaskId(4)).unwrap().split);
 
@@ -8492,12 +8543,16 @@ async fn the_review_walks_a_tasks_files_and_quotes_a_hunk_into_its_draft() {
     state.quote_into_draft(&to, &quote(&files[0], Some(&files[0].hunks[0])));
     assert_eq!(
         state.draft(&to),
-        "Please fix:\n\nIn `src/lib.rs` @@ -3,2 +3,3 @@ fn a:\n```diff\n x\n-y\n+z\n+w\n```\n\n"
+        "Please fix:\n\nIn acme/api `src/lib.rs` @@ -3,2 +3,3 @@ fn a:\n```diff\n x\n-y\n+z\n+w\n```\n\n"
     );
     assert!(state.is_send_enabled(&to));
 
     state.close_review();
     assert!(state.review("work", TaskId(4)).is_none());
+    assert!(
+        !state.review_files_stale("work", TaskId(4)),
+        "only an open review reloads"
+    );
 }
 
 #[tokio::test]

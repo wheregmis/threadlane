@@ -93,13 +93,23 @@ impl Desktop {
     /// requests' files.
     pub(crate) fn open_review(&mut self, space: String, task: TaskId, cx: &mut Context<Self>) {
         self.state.open_review(&space, task);
+        self.load_review_files(space, task, cx);
+        cx.notify();
+    }
+
+    /// Reads the files of task `task`'s pull requests for its review.
+    pub(crate) fn load_review_files(
+        &mut self,
+        space: String,
+        task: TaskId,
+        cx: &mut Context<Self>,
+    ) {
         let core = Arc::clone(&self.core);
         self.run(
             async move { threadlane_desktop::load_pull_files(&*core.read().await, &space, task).await },
             |this, loaded, _| this.state.apply_pull_files(loaded),
             cx,
         );
-        cx.notify();
     }
 
     /// The full-width review: a file list, the chosen file's diff unified
@@ -210,8 +220,8 @@ impl Desktop {
             );
 
         let mut view = v_flex().w_full().min_w_0().gap(SM).child(toolbar);
-        if let Some(why) = self.state.pull_files_error(space, task) {
-            view = view.child(meta(format!("Showing the merge-check preview: {why}"), cx));
+        if let Some(note) = self.state.pull_files_note(space, task) {
+            view = view.child(meta(note, cx));
         }
         if files.is_empty() {
             return view.child(meta("No changed files to show yet.", cx));
@@ -233,8 +243,8 @@ impl Desktop {
                     .w_full()
                     .selected(index == selected)
                     .accessibility_label(format!(
-                        "{}, {} added, {} removed",
-                        file.path, file.additions, file.deletions
+                        "{} in {}, {} added, {} removed",
+                        file.path, file.repository, file.additions, file.deletions
                     ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.select_review_file(index);
@@ -307,7 +317,10 @@ impl Desktop {
                     .w_full()
                     .icon(AppIcon::FileText)
                     .label(file.path.clone())
-                    .accessibility_label(format!("Quote {} into the message", file.path))
+                    .accessibility_label(format!(
+                        "Quote {} in {} into the message",
+                        file.path, file.repository
+                    ))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.quote_to_composer(&quoted, window, cx);
                     })),
@@ -322,18 +335,17 @@ impl Desktop {
         for (index, hunk) in file.hunks.iter().enumerate() {
             let quoted = quote(file, Some(hunk));
             body = body.child(
-                div()
-                    .id(SharedString::from(format!("review-hunk-{index}")))
+                button(SharedString::from(format!("review-hunk-{index}")))
+                    .ghost()
+                    .small()
                     .w_full()
-                    .px(XS)
                     .bg(hunk_tint)
                     .text_color(hunk_ink)
-                    .cursor_pointer()
-                    .hover(|style| style.opacity(0.8))
+                    .label(hunk.header.clone())
+                    .accessibility_label(format!("Quote hunk {} into the message", hunk.header))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.quote_to_composer(&quoted, window, cx);
-                    }))
-                    .child(hunk.header.clone()),
+                    })),
             );
             if split {
                 for (old, new) in side_by_side(hunk) {

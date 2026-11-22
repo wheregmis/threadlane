@@ -1061,6 +1061,11 @@ impl Desktop {
                     move |this, loaded, cx| {
                         this.state.apply_task(loaded);
                         if let Screen::Task { space, task } = &this.screen
+                            && this.state.review_files_stale(space, *task)
+                        {
+                            this.load_review_files(space.clone(), *task, cx);
+                        }
+                        if let Screen::Task { space, task } = &this.screen
                             && let Some(project) = this
                                 .state
                                 .task(space, *task)
@@ -1355,6 +1360,7 @@ impl Desktop {
         if self.screen != screen {
             self.task_form_return_focus = None;
             self.state.clear_memory_inspection();
+            self.state.close_review();
             self.work.leave();
             self.inbox = screens::Inbox::default();
             self.project_load = None;
