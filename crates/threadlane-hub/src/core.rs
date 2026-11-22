@@ -17,7 +17,7 @@ use threadlane_core::time::{Clock, Timestamp};
 use threadlane_core::tools::ToolRegistry;
 use threadlane_core::workspace::{WorkspaceRemoval, Workspaces, task_ref};
 use threadlane_runner::GitWorkspaces;
-use threadlane_store::HubDb;
+use threadlane_store::{HubDb, TaskPruningPolicy, TaskPruningReport};
 use threadlane_transport_iroh::{EndpointAddr, Gate};
 
 use crate::defaults::ensure_defaults;
@@ -54,6 +54,7 @@ pub(crate) struct Inner {
     pub(crate) project_removal: Arc<tokio::sync::Mutex<()>>,
     /// Ended tasks whose worktrees were kept, and when.
     pub(crate) kept_worktrees: Arc<tokio::sync::Mutex<HashMap<TaskId, Timestamp>>>,
+    pub(crate) last_pruned: Arc<tokio::sync::Mutex<Option<Timestamp>>>,
     /// When this hub process started, shown to every run (#652).
     pub(crate) started_at: Timestamp,
 }
@@ -112,6 +113,7 @@ impl HubCore {
                 workspace_files: None,
                 project_removal: Arc::default(),
                 kept_worktrees: Arc::default(),
+                last_pruned: Arc::default(),
                 backends: Vec::new(),
             }),
         };
@@ -320,6 +322,69 @@ impl HubCore {
         Ok(())
     }
 
+    /// Runs one bounded Tier-2 compaction and Tier-3 pruning pass using the
+    /// hub's configured retention settings and cleans up any pruned tasks'
+    /// local worktrees.
+    ///
+    /// # Errors
+    ///
+    /// A store error.
+    pub async fn prune_tasks_once(&self) -> Result<TaskPruningReport, HubError> {
+        let now = self.inner.clock.now();
+        let settings = &self.inner.settings;
+        let policy = TaskPruningPolicy {
+            compact_before: settings.task_compaction.map(|age| now - age),
+            prune_before: settings.task_pruning.map(|age| now - age),
+            max_terminal_per_project: settings.max_terminal_tasks_per_project,
+            batch_size: settings.pruning_batch_size,
+            ignore_dreaming_barrier: false,
+        };
+        let report = self.inner.db.prune_tasks_batch(policy, now).await?;
+        if !report.workspace_removals.is_empty()
+            && let Some(files) = &self.inner.workspace_files
+        {
+            let _removal = self.inner.project_removal.lock().await;
+            for removal in &report.workspace_removals {
+                let leftovers = files.remove(removal).await;
+                if !leftovers.is_empty() {
+                    tracing::warn!(?removal.tasks, ?leftovers, "leftover workspace files after task prune");
+                }
+            }
+        }
+        if report.compacted_tasks > 0 || report.pruned_tasks > 0 {
+            tracing::info!(
+                compacted = report.compacted_tasks,
+                pruned = report.pruned_tasks,
+                removed_journal_rows = report.removed_journal_rows,
+                removed_tool_calls = report.removed_tool_calls,
+                removed_memory_files = report.removed_memory_files,
+                "completed task pruning pass"
+            );
+        }
+        Ok(report)
+    }
+
+    async fn prune_tasks_if_due(&self, now: Timestamp) -> Result<(), HubError> {
+        let settings = &self.inner.settings;
+        if settings.task_compaction.is_none()
+            && settings.task_pruning.is_none()
+            && settings.max_terminal_tasks_per_project.is_none()
+        {
+            return Ok(());
+        }
+        {
+            let mut last = self.inner.last_pruned.lock().await;
+            if let Some(previous) = *last
+                && now.saturating_since(previous) < settings.pruning_interval
+            {
+                return Ok(());
+            }
+            *last = Some(now);
+        }
+        let _ = self.prune_tasks_once().await?;
+        Ok(())
+    }
+
     /// Releases expired leases (their claimed events return to pending),
     /// sends the account notices that are due (Plan.md §5.3), and nudges
     /// runners if any lane is ready. Returns the released lanes.
@@ -345,6 +410,7 @@ impl HubCore {
             }
         }
         self.remove_idle_worktrees(now).await?;
+        self.prune_tasks_if_due(now).await?;
         Ok(expired)
     }
 

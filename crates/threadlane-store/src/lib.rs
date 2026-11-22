@@ -22,6 +22,7 @@ mod org;
 mod pr_review;
 pub use pr_review::{PrReviewAssignment, PrReviewHead, PrReviewStatus};
 mod outbox;
+mod pruning;
 mod row;
 mod session;
 #[cfg(test)]
@@ -43,6 +44,7 @@ use crate::row::{Cols, json_text, params};
 
 pub use crate::decision::NO_RESPONSE;
 pub use crate::migrate::SCHEMA_VERSION;
+pub use crate::pruning::{TaskPruningPolicy, TaskPruningReport};
 pub use crate::task::{BLOCKED_REASON, NO_GH_REASON, TASK_SOURCE, TaskListPage, UNWOKEN_REASON};
 pub use crate::task_review::{GithubReview, TASK_REVIEW_SOURCE, TaskReview};
 pub use crate::timer::TIMER_SOURCE;
