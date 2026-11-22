@@ -644,8 +644,13 @@ impl HubCore {
 
     /// Reads the state of each followed pull request into the status
     /// cache, once per pull request however many tasks follow it. A failed
-    /// read keeps what was cached.
-    async fn refresh_pull_status(&self, source: &dyn GithubSource, followed: &[(Work, bool)]) {
+    /// read keeps what was cached. Answers whether every read succeeded.
+    async fn refresh_pull_status(
+        &self,
+        source: &dyn GithubSource,
+        followed: &[(Work, bool)],
+    ) -> bool {
+        let mut complete = true;
         let mut read: HashMap<(&str, u64), Option<TaskPullRequest>> = HashMap::new();
         for (work, _) in followed {
             let Some(number) = work.target.number else {
@@ -664,6 +669,7 @@ impl HubCore {
                         )),
                         Err(error) => {
                             tracing::warn!(%error, repository, number, "could not read a task's pull request state");
+                            complete = false;
                             None
                         }
                     };
@@ -684,11 +690,13 @@ impl HubCore {
                 None => pulls.push(pull),
             }
         }
+        complete
     }
 
     /// The task's pull requests from the status cache. A task not cached
     /// yet, such as one that ended before this hub started, is read from
-    /// GitHub once and cached, even when it has none.
+    /// GitHub and cached, even when it has none. A read that failed for any
+    /// of its pull requests is not cached, so it is tried again next time.
     pub(crate) async fn task_pull_requests(
         &self,
         task: TaskId,
@@ -705,7 +713,10 @@ impl HubCore {
                 .filter(|work| work.task == task)
                 .map(|work| (work, false))
                 .collect();
-            self.refresh_pull_status(source.as_ref(), &followed).await;
+            if !self.refresh_pull_status(source.as_ref(), &followed).await {
+                let partial = self.inner.pull_status.lock().await.remove(&task);
+                return Ok(partial.unwrap_or_default());
+            }
         }
         Ok(self
             .inner
@@ -718,7 +729,8 @@ impl HubCore {
     }
 
     /// The files each of the task's pull requests changes, read from GitHub
-    /// only when its head moved since the last read.
+    /// only when its head moved since the last read. Files read while the
+    /// head moved are neither cached nor returned.
     pub(crate) async fn task_pull_files(
         &self,
         task: TaskId,
@@ -748,6 +760,33 @@ impl HubCore {
                         .pull_request_files(&pull.repository, pull.number)
                         .await
                         .map_err(|error| ApiError::Unreachable(error.to_string()))?;
+                    // The files carry no head, so check it did not move while they were read.
+                    let state = source
+                        .pull_request_state(&pull.repository, pull.number)
+                        .await
+                        .map_err(|error| ApiError::Unreachable(error.to_string()))?;
+                    if state.head_sha != pull.head_sha {
+                        let moved = task_pull_request(
+                            &pull.repository,
+                            pull.number,
+                            &state,
+                            self.inner.clock.now(),
+                        );
+                        if let Some(known) =
+                            self.inner.pull_status.lock().await.get_mut(&task).and_then(|pulls| {
+                                pulls.iter_mut().find(|known| {
+                                    known.repository == moved.repository
+                                        && known.number == moved.number
+                                })
+                            })
+                        {
+                            *known = moved;
+                        }
+                        return Err(ApiError::Unreachable(format!(
+                            "{}#{} moved to a new commit while its files were read; try again",
+                            pull.repository, pull.number
+                        )));
+                    }
                     self.inner
                         .pull_files
                         .lock()
