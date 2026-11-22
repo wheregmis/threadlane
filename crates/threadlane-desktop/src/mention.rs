@@ -245,16 +245,28 @@ impl AppState {
     /// can dispatch, in order. Typed, unpicked `@Name` text is left out.
     #[must_use]
     pub fn mentioned_agents(&self, destination: &Destination, text: &str) -> Vec<String> {
+        self.picked_chips(destination, text)
+            .into_iter()
+            .map(|pick| pick.agent.clone())
+            .collect()
+    }
+
+    /// The picks whose chip is in `text` and names an agent the draft can
+    /// dispatch: the first chip of each agent, in order.
+    fn picked_chips(&self, destination: &Destination, text: &str) -> Vec<&Pick> {
         let agents = self.mention_agents(destination);
-        let picked = self.picked_agents(destination);
-        let mut named = Vec::new();
-        for word in text.split_whitespace() {
-            if let Some(name) = chip_name(word)
-                && picked.iter().any(|agent| agent == name)
-                && let Some(agent) = agents.iter().find(|agent| agent.name == name)
-                && !named.contains(&agent.name)
-            {
-                named.push(agent.name.clone());
+        let mut picks: Vec<&Pick> = self
+            .draft_picks(destination)
+            .iter()
+            .filter(|pick| {
+                is_chip(text, pick) && agents.iter().any(|agent| agent.name == pick.agent)
+            })
+            .collect();
+        picks.sort_by_key(|pick| pick.at);
+        let mut named: Vec<&Pick> = Vec::new();
+        for pick in picks {
+            if !named.iter().any(|other| other.agent == pick.agent) {
+                named.push(pick);
             }
         }
         named
@@ -295,11 +307,11 @@ impl AppState {
         text: &str,
         when: &When,
     ) -> Vec<NewTaskSpec> {
-        let agents = self.mentioned_agents(destination, text);
+        let picks = self.picked_chips(destination, text);
         let Some((space, project)) = self.mention_project(destination) else {
             return Vec::new();
         };
-        if agents.is_empty() {
+        if picks.is_empty() {
             return Vec::new();
         }
         let goal = format!(
@@ -308,14 +320,15 @@ impl AppState {
             self.thread_context(destination, &project, when),
             self.referenced_context(&space, text)
         );
-        let title = dispatch_title(text);
-        agents
+        let title = dispatch_title(&drop_picks(text, self.draft_picks(destination), |_| true).0);
+        picks
             .into_iter()
-            .map(|agent| NewTaskSpec {
+            .map(|pick| NewTaskSpec {
                 project: Some(project.clone()),
                 title: title.clone(),
                 goal: goal.clone(),
-                agent,
+                agent: pick.agent.clone(),
+                request_id: Some(pick.key.clone()),
                 ..NewTaskSpec::default()
             })
             .collect()
@@ -394,23 +407,100 @@ impl AppState {
     }
 }
 
-/// The agent a `@Name` word names, trailing punctuation dropped.
-fn chip_name(word: &str) -> Option<&str> {
-    word.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')
-        .strip_prefix('@')
+/// An agent picked from the `@` popover: its chip `@agent` at byte `at` of
+/// the draft, and the `create_task` request key every attempt to start it
+/// sends, so a retry after a lost reply can't start it twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Pick {
+    pub(crate) agent: String,
+    pub(crate) at: usize,
+    pub(crate) key: String,
 }
 
-/// Whether `text` still holds the chip `@agent` as a whole word.
-pub(crate) fn has_chip(text: &str, agent: &str) -> bool {
-    text.split_whitespace()
-        .any(|word| chip_name(word) == Some(agent))
+impl Pick {
+    fn end(&self) -> usize {
+        self.at + 1 + self.agent.len()
+    }
 }
 
-/// `text` without the chips of `agents`.
-pub(crate) fn drop_chips(text: &str, agents: &[&str]) -> String {
-    text.split_inclusive(char::is_whitespace)
-        .filter(|piece| chip_name(piece.trim_end()).is_none_or(|name| !agents.contains(&name)))
-        .collect()
+/// Whether `text` holds the chip of `pick` where it says, as a whole word.
+pub(crate) fn is_chip(text: &str, pick: &Pick) -> bool {
+    let starts_word = text
+        .get(..pick.at)
+        .is_some_and(|before| before.is_empty() || before.ends_with(char::is_whitespace));
+    starts_word
+        && text
+            .get(pick.at..)
+            .and_then(|rest| rest.strip_prefix('@'))
+            .and_then(|rest| rest.strip_prefix(pick.agent.as_str()))
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+}
+
+/// Moves `picks` from `old` to `new` across one edit: a chip the edit
+/// touched is dropped, one after it shifts, and only whole chips stay.
+pub(crate) fn remap_picks(old: &str, new: &str, picks: &mut Vec<Pick>) {
+    let prefix = old
+        .bytes()
+        .zip(new.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix = old
+        .bytes()
+        .rev()
+        .zip(new.bytes().rev())
+        .take(old.len().min(new.len()) - prefix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let edited_end = old.len() - suffix;
+    picks.retain_mut(|pick| {
+        if pick.end() <= prefix {
+            true
+        } else if pick.at >= edited_end {
+            pick.at = pick.at + new.len() - old.len();
+            true
+        } else {
+            false
+        }
+    });
+    picks.retain(|pick| is_chip(new, pick));
+}
+
+/// `text` without the chips of the `picks` that `drop` selects, each with
+/// its trailing punctuation and one space, and the other picks moved to match.
+pub(crate) fn drop_picks(
+    text: &str,
+    picks: &[Pick],
+    drop: impl Fn(&Pick) -> bool,
+) -> (String, Vec<Pick>) {
+    let mut sorted: Vec<&Pick> = picks.iter().filter(|pick| is_chip(text, pick)).collect();
+    sorted.sort_by_key(|pick| pick.at);
+    let (mut out, mut kept, mut from) = (String::new(), Vec::new(), 0);
+    for pick in sorted {
+        if pick.at < from {
+            continue;
+        }
+        out.push_str(&text[from..pick.at]);
+        if drop(pick) {
+            let rest = &text[pick.end()..];
+            let rest =
+                rest.trim_start_matches(|c: char| !c.is_whitespace() && !c.is_alphanumeric());
+            let mut chars = rest.chars();
+            let rest = match chars.next() {
+                Some(c) if c.is_whitespace() => chars.as_str(),
+                _ => rest,
+            };
+            from = text.len() - rest.len();
+        } else {
+            kept.push(Pick {
+                at: out.len(),
+                ..pick.clone()
+            });
+            out.push_str(&text[pick.at..pick.end()]);
+            from = pick.end();
+        }
+    }
+    out.push_str(&text[from..]);
+    (out, kept)
 }
 
 /// The first line of `text` without mentions, cut to a title's length.
@@ -494,15 +584,53 @@ mod tests {
         );
     }
 
+    fn pick(agent: &str, at: usize) -> Pick {
+        Pick {
+            agent: agent.to_owned(),
+            at,
+            key: format!("{agent}@{at}"),
+        }
+    }
+
     #[test]
-    fn chips_are_whole_words() {
-        assert!(has_chip("ask @Reviewer, then", "Reviewer"));
-        assert!(!has_chip("ask @Reviewe then", "Reviewer"));
-        assert!(!has_chip("ask @Reviewerx", "Reviewer"));
-        assert_eq!(
-            drop_chips("@A @B look\nat @A, now", &["A"]),
-            "@B look\nat now"
+    fn chips_are_whole_words_where_picked() {
+        assert!(is_chip("ask @Reviewer, then", &pick("Reviewer", 4)));
+        assert!(!is_chip("ask @Reviewe then", &pick("Reviewer", 4)));
+        assert!(!is_chip("ask @Reviewerx", &pick("Reviewer", 4)));
+        assert!(!is_chip("ask x@Reviewer", &pick("Reviewer", 5)));
+        assert!(is_chip("@Chief of Staff look", &pick("Chief of Staff", 0)));
+        let (rest, kept) = drop_picks(
+            "@A @B look\nat @A, now",
+            &[pick("A", 0), pick("B", 3), pick("A", 14)],
+            |pick| pick.agent == "A",
         );
+        assert_eq!(rest, "@B look\nat now");
+        assert_eq!(
+            kept,
+            [Pick {
+                at: 0,
+                ..pick("B", 3)
+            }]
+        );
+    }
+
+    #[test]
+    fn an_edit_keeps_only_the_picks_it_left_whole() {
+        let remap = |old: &str, new: &str, picks: &[Pick]| {
+            let mut picks = picks.to_vec();
+            remap_picks(old, new, &mut picks);
+            picks.iter().map(|pick| pick.at).collect::<Vec<_>>()
+        };
+        let both = [pick("R", 0), pick("R", 7)];
+        assert_eq!(remap("@R and @R", "x @R and @R", &both), [2, 9]);
+        assert_eq!(remap("@R and @R", "@R or @R", &both), [0, 6]);
+        assert_eq!(
+            remap("@R and @R", "and @R", &both[..1]),
+            [0; 0],
+            "the picked one went"
+        );
+        assert!(remap("@R and @R", "@Rx and @R", &both[..1]).is_empty());
+        assert!(remap("@R and @R", "", &both).is_empty());
     }
 
     #[test]

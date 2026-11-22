@@ -8607,15 +8607,15 @@ async fn an_agent_mention_dispatches_a_task_with_the_thread_and_referenced_tasks
     assert_eq!(state.mention_hint(&to), None);
     state.edit_draft(&to, "@Reviewer check #T-0002 please");
     assert_eq!(state.mention_hint(&to), None, "typed, not picked");
-    state.pick_agent(&to, "Reviewer");
+    state.pick_agent(&to, "Reviewer", 0);
     assert_eq!(
         state.mention_hint(&to).as_deref(),
         Some("Goes to @Reviewer as a new task, not the lead.")
     );
     let task_to = Destination::Task("work".into(), TaskId(1));
     state.edit_draft(&task_to, "@Engineer @Reviewer look");
-    state.pick_agent(&task_to, "Engineer");
-    state.pick_agent(&task_to, "Reviewer");
+    state.pick_agent(&task_to, "Engineer", 0);
+    state.pick_agent(&task_to, "Reviewer", 10);
     assert_eq!(
         state.task_hint("work", TaskId(1)),
         "Goes to @Engineer and @Reviewer as new tasks, not T-0001."
@@ -8684,7 +8684,7 @@ async fn only_a_picked_agent_chip_dispatches() {
 
     let task_to = to;
     state.edit_draft(&task_to, "@Reviewer @Engineer look");
-    state.pick_agent(&task_to, "Reviewer");
+    state.pick_agent(&task_to, "Reviewer", 0);
     assert_eq!(
         state.mentioned_agents(&task_to, "@Reviewer @Engineer look"),
         ["Reviewer"]
@@ -8703,7 +8703,7 @@ async fn a_dispatch_with_images_is_blocked_and_keeps_the_draft() {
     let (work, _dir, _core, mut state, to) = mention_space().await;
     let image = ImageAttachment::new("shot.png".into(), vec![1, 2, 3]);
     state.edit_draft(&to, "@Reviewer look at this");
-    state.pick_agent(&to, "Reviewer");
+    state.pick_agent(&to, "Reviewer", 0);
     state.attach_images(&to, Ok(vec![image.clone()]));
     let request = state.request_send(to.clone(), Timestamp::from_millis(5_000));
     assert!(request.immediate.is_none() && request.held.is_none());
@@ -8728,8 +8728,8 @@ async fn a_failed_dispatch_retries_only_the_agents_that_did_not_start() {
         .expect("lock")
         .push("Reviewer".into());
     state.edit_draft(&to, "@Engineer @Reviewer look");
-    state.pick_agent(&to, "Engineer");
-    state.pick_agent(&to, "Reviewer");
+    state.pick_agent(&to, "Engineer", 0);
+    state.pick_agent(&to, "Reviewer", 10);
     let send = state
         .request_send(to.clone(), Timestamp::from_millis(5_000))
         .immediate
@@ -8767,6 +8767,130 @@ async fn a_failed_dispatch_retries_only_the_agents_that_did_not_start() {
         .map(|task| task.agent.clone())
         .collect();
     assert_eq!(created, ["Engineer", "Reviewer"]);
+}
+
+#[tokio::test]
+async fn a_retry_after_an_edit_in_flight_starts_the_rest_under_the_same_key() {
+    let (work, _dir, core, mut state, to) = mention_space().await;
+    work.refused_agents
+        .lock()
+        .expect("lock")
+        .push("Reviewer".into());
+    state.edit_draft(&to, "@Engineer @Reviewer look");
+    state.pick_agent(&to, "Engineer", 0);
+    state.pick_agent(&to, "Reviewer", 10);
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    let first_key = send.dispatch[1].request_id.clone();
+    assert!(first_key.is_some());
+    state.edit_draft(&to, "");
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "@Reviewer look");
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+
+    work.refused_agents.lock().expect("lock").clear();
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(6_000))
+        .immediate
+        .expect("sent again");
+    assert_eq!(send.dispatch.len(), 1);
+    assert_eq!(send.dispatch[0].agent, "Reviewer");
+    assert_eq!(
+        send.dispatch[0].request_id, first_key,
+        "a retry reuses the key"
+    );
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "");
+    let created: Vec<String> = work
+        .tasks
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|task| task.agent.clone())
+        .collect();
+    assert_eq!(created, ["Engineer", "Reviewer"]);
+}
+
+#[tokio::test]
+async fn only_the_picked_occurrence_of_an_agent_dispatches() {
+    let (_work, _dir, _core, mut state, to) = mention_space().await;
+    state.edit_draft(&to, "@Reviewer and @Reviewer");
+    state.pick_agent(&to, "Reviewer", 0);
+    state.edit_draft(&to, "@Reviewer, and @Reviewer");
+    assert_eq!(
+        state.picked_agents(&to),
+        ["Reviewer"],
+        "unrelated edit keeps it"
+    );
+    state.edit_draft(&to, "and @Reviewer");
+    assert!(state.picked_agents(&to).is_empty());
+    assert_eq!(
+        state.mention_hint(&to),
+        None,
+        "the typed one does not dispatch"
+    );
+}
+
+#[tokio::test]
+async fn a_finished_dispatch_keeps_a_later_pick_of_the_same_agent() {
+    let (_work, _dir, core, mut state, to) = mention_space().await;
+    state.edit_draft(&to, "@Reviewer look");
+    state.pick_agent(&to, "Reviewer", 0);
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    state.edit_draft(&to, "");
+    state.edit_draft(&to, "@Reviewer again");
+    state.pick_agent(&to, "Reviewer", 0);
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "@Reviewer again");
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+}
+
+#[tokio::test]
+async fn picking_an_agent_on_a_held_message_starts_a_new_send() {
+    let (_work, _dir, _core, mut state, to) = mention_space().await;
+    state.set_hold_messages(true).unwrap();
+    state.edit_draft(&to, "@Reviewer look");
+    let first = state.request_send(to.clone(), Timestamp::from_millis(5_000));
+    assert!(first.held.is_some());
+    state.pick_agent(&to, "Reviewer", 0);
+    let second = state.request_send(to.clone(), Timestamp::from_millis(5_500));
+    assert!(second.flushed.is_some_and(|send| send.dispatch.is_empty()));
+    assert!(
+        second.held.is_some(),
+        "the dispatch is not dropped as a repeat"
+    );
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+}
+
+#[tokio::test]
+async fn an_agent_name_with_spaces_dispatches_whole() {
+    let (work, _dir, core, mut state, to) = mention_space().await;
+    work.bindings
+        .lock()
+        .expect("lock")
+        .push(binding("Chief of Staff", Mode::Assisted));
+    state.apply_modes(load_modes(&core, vec![("work".into(), "api".into())]).await);
+    state.edit_draft(&to, "@Chief of Staff plan it");
+    state.pick_agent(&to, "Chief of Staff", 0);
+    let dispatch = state.dispatch_specs(
+        &to,
+        "@Chief of Staff plan it",
+        &When {
+            now: Timestamp::from_millis(5_000),
+            offset_minutes: 0,
+        },
+    );
+    assert_eq!(dispatch.len(), 1);
+    assert_eq!(dispatch[0].agent, "Chief of Staff");
+    assert_eq!(dispatch[0].title, "plan it");
 }
 
 #[tokio::test]

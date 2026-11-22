@@ -255,7 +255,8 @@ impl Desktop {
         if let Some(destination) = self.composer_destination() {
             self.state.edit_draft(&destination, &text);
             if let MentionItem::Agent(agent) = item {
-                self.state.pick_agent(&destination, &agent.name);
+                self.state
+                    .pick_agent(&destination, &agent.name, mention.range.start);
             }
         }
         cx.notify();
