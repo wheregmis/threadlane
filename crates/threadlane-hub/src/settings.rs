@@ -46,8 +46,9 @@ pub struct HubSettings {
     /// How long a decision waits on you before it expires as declined with
     /// "no response" (docs/milestone-9.md decision 8).
     pub decision_expiry: Duration,
-    /// An ended task's worktrees are removed once it has had no run for
-    /// this long; `None` keeps them.
+    /// An ended task's worktrees are removed once nothing in them would be
+    /// lost; worktrees kept for uncommitted or unpushed work are checked
+    /// again after this long. `None` keeps them all.
     pub worktree_cleanup: Option<Duration>,
 }
 

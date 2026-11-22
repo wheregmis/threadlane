@@ -707,3 +707,142 @@ async fn the_run_after_an_unfinished_one_is_told_what_its_checkpoint_left_out() 
         "told once"
     );
 }
+
+#[tokio::test]
+async fn an_ended_tasks_worktrees_go_only_once_nothing_in_them_would_be_lost() {
+    let s = setup();
+    let repositories = std::slice::from_ref(&s.repository);
+    let path = s.prepare(T1).await;
+    let task_dir = path.parent().unwrap().to_path_buf();
+    let kept = |reason: Option<String>, what: &str| {
+        let reason = reason.expect("kept");
+        assert!(reason.contains(what), "{reason}");
+    };
+
+    std::fs::write(path.join("work.txt"), "half done").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    s.checkpoint(T1).await;
+    let commit = git(&path, &["rev-parse", "HEAD"]).trim().to_owned();
+    let review = s
+        .workspaces
+        .prepare_review(
+            T1,
+            ReviewCheckout::Submission(RunId(10)),
+            repositories,
+            &[ReviewRevision {
+                repository: s.repository.id,
+                commit: commit.clone(),
+            }],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "no remote branch",
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("work.txt")).unwrap(),
+        "half done"
+    );
+
+    git(&path, &["push", "--quiet", "origin", "threadlane/T-0001"]);
+    std::fs::write(review.join("notes.txt"), "a reviewer's note").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    std::fs::remove_file(review.join("notes.txt")).unwrap();
+
+    git(&path, &["config", "status.showUntrackedFiles", "no"]);
+    std::fs::write(path.join("hidden.txt"), "untracked").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    std::fs::remove_file(path.join("hidden.txt")).unwrap();
+
+    let lib = bare_repository(&s.dir.path().join("remotes"), "lib");
+    git(
+        &path,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            lib.to_str().unwrap(),
+            "lib",
+        ],
+    );
+    git(
+        &path,
+        &["commit", "--quiet", "--no-verify", "-m", "Add lib"],
+    );
+    git(&path, &["push", "--quiet", "origin", "threadlane/T-0001"]);
+    git(&path, &["config", "submodule.lib.ignore", "all"]);
+    std::fs::write(path.join("lib/README.md"), "changed in the submodule").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    git(&path.join("lib"), &["checkout", "--quiet", "README.md"]);
+    let commit = git(&path, &["rev-parse", "HEAD"]).trim().to_owned();
+
+    std::fs::write(task_dir.join(".handoff-notes"), "not a marker").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "not a known worktree",
+    );
+    std::fs::remove_file(task_dir.join(".handoff-notes")).unwrap();
+
+    assert_eq!(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(!task_dir.exists());
+    let clone = s.clones().join(s.repository.id.to_string());
+    assert_eq!(
+        git(&clone, &["rev-parse", "refs/heads/threadlane/T-0001"]).trim(),
+        commit,
+        "the task branch stays"
+    );
+    assert!(
+        !git(&clone, &["worktree", "list", "--porcelain"]).contains("T-0001"),
+        "the worktrees are unregistered"
+    );
+    // Safe to run again, and for a task whose worktree was never set up.
+    for task in [T1, T2] {
+        assert_eq!(
+            s.workspaces
+                .remove_finished(task, repositories)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+}

@@ -216,6 +216,16 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
     /// Removes local worktrees and clones, reporting paths it could not remove.
     async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String>;
 
+    /// Removes an ended task's worktrees, its review rounds included, unless
+    /// one holds uncommitted changes or a commit that no remote branch has.
+    /// The task branch stays. Returns why they were kept, or `None` once they
+    /// are gone (or were never there).
+    async fn remove_finished(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+    ) -> Result<Option<String>, WorkspaceError>;
+
     /// Resolves the task branch and computes its diff against the expected PR
     /// head, or against the default branch when publishing without a PR target.
     async fn preview_publish(

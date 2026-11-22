@@ -155,8 +155,9 @@ pub struct RunsConfig {
     pub max_turns: u32,
     /// How many recent messages a new lead session is shown.
     pub recent_messages: u32,
-    /// An ended task's worktrees are removed after this many days without a
-    /// run; its work stays on its branch. `0` keeps them.
+    /// An ended task's worktrees are removed once nothing in them would be
+    /// lost; ones kept for uncommitted or unpushed work are checked again
+    /// after this many days. The task branch stays. `0` keeps them all.
     pub worktree_cleanup_days: u32,
 }
 

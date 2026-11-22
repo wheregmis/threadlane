@@ -1,5 +1,6 @@
 //! [`HubCore`]: the hub's roles over one database (docs/milestone-1.md §9).
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,8 +8,9 @@ use std::sync::Arc;
 use threadlane_core::adapters::ChannelAdapter;
 use threadlane_core::client::HubApi;
 use threadlane_core::github::GithubSource;
-use threadlane_core::ids::{LaneId, MachineId, ProjectId};
+use threadlane_core::ids::{LaneId, MachineId, ProjectId, TaskId};
 use threadlane_core::link::HubLink;
+use threadlane_core::model::RunStatus;
 use threadlane_core::runtime::{StepHook, WakeTarget, Waker};
 use threadlane_core::store::{InboxStore, MachineStore, OrgStore, SessionStore, TaskStore};
 use threadlane_core::time::{Clock, Timestamp};
@@ -50,6 +52,8 @@ pub(crate) struct Inner {
     pub(crate) workspaces: Option<PathBuf>,
     pub(crate) workspace_files: Option<Arc<dyn Workspaces>>,
     pub(crate) project_removal: Arc<tokio::sync::Mutex<()>>,
+    /// Ended tasks whose worktrees were kept, and when.
+    pub(crate) kept_worktrees: Arc<tokio::sync::Mutex<HashMap<TaskId, Timestamp>>>,
     /// When this hub process started, shown to every run (#652).
     pub(crate) started_at: Timestamp,
 }
@@ -107,6 +111,7 @@ impl HubCore {
                 workspaces: None,
                 workspace_files: None,
                 project_removal: Arc::default(),
+                kept_worktrees: Arc::default(),
                 backends: Vec::new(),
             }),
         };
@@ -243,12 +248,13 @@ impl HubCore {
             .ok_or(HubError::NoHubMachine)
     }
 
-    /// Removes the worktrees of ended tasks that have had no run for
-    /// `worktree_cleanup`. Anything uncommitted is committed on the task's
-    /// branch first, so a retried task rebuilds its worktree from the branch.
+    /// Removes the worktrees of ended tasks with no active run once nothing
+    /// in them would be lost (see [`Workspaces::remove_finished`]). A task
+    /// whose worktrees were kept is checked again after `worktree_cleanup`,
+    /// or sooner when it runs again.
     async fn remove_idle_worktrees(&self, now: Timestamp) -> Result<(), HubError> {
         let inner = &self.inner;
-        let (Some(idle), Some(root), Some(files)) = (
+        let (Some(recheck), Some(root), Some(files)) = (
             inner.settings.worktree_cleanup,
             &inner.workspaces,
             &inner.workspace_files,
@@ -268,27 +274,7 @@ impl HubCore {
                 candidate_ids.push(id);
             }
         }
-        if candidate_ids.is_empty() {
-            return Ok(());
-        }
         for id in candidate_ids {
-            let Some(task) = inner.db.task(id).await? else {
-                continue;
-            };
-            if !task.status.is_terminal() {
-                continue;
-            }
-            let last_run = inner
-                .db
-                .lane_runs(task.lane_id)
-                .await?
-                .iter()
-                .map(|run| run.ended_at.unwrap_or(run.started_at))
-                .max()
-                .unwrap_or(task.created_at);
-            if now.saturating_since(last_run) < idle {
-                continue;
-            }
             let _removal = inner.project_removal.lock().await;
             let Some(task) = inner.db.task(id).await? else {
                 continue;
@@ -296,15 +282,17 @@ impl HubCore {
             if !task.status.is_terminal() {
                 continue;
             }
-            let last_run = inner
-                .db
-                .lane_runs(task.lane_id)
-                .await?
+            let runs = inner.db.lane_runs(task.lane_id).await?;
+            if runs.iter().any(|run| run.status == RunStatus::Active) {
+                continue;
+            }
+            let last_run = runs
                 .iter()
-                .map(|run| run.ended_at.unwrap_or(run.started_at))
+                .filter_map(|run| run.ended_at)
                 .max()
                 .unwrap_or(task.created_at);
-            if now.saturating_since(last_run) < idle {
+            let kept = inner.kept_worktrees.lock().await.get(&id).copied();
+            if kept.is_some_and(|kept| kept >= last_run && now.saturating_since(kept) < recheck) {
                 continue;
             }
             let repositories: Vec<_> = inner
@@ -314,27 +302,20 @@ impl HubCore {
                 .into_iter()
                 .filter(|repository| task.repositories.contains(&repository.id))
                 .collect();
-            if let Err(error) = files
-                .checkpoint(
-                    task.id,
-                    &repositories,
-                    "Threadlane: work kept before cleanup",
-                )
-                .await
-            {
-                tracing::warn!(task = %task.id, %error, "kept a worktree whose work could not be committed");
-                continue;
+            match files.remove_finished(task.id, &repositories).await {
+                Ok(None) => {
+                    inner.kept_worktrees.lock().await.remove(&id);
+                    tracing::info!(task = %task.id, "removed an ended task's worktrees");
+                }
+                Ok(Some(reason)) => {
+                    inner.kept_worktrees.lock().await.insert(id, now);
+                    tracing::info!(task = %task.id, %reason, "kept an ended task's worktrees");
+                }
+                Err(error) => {
+                    inner.kept_worktrees.lock().await.insert(id, now);
+                    tracing::warn!(task = %task.id, %error, "could not remove an ended task's worktrees");
+                }
             }
-            let removal = WorkspaceRemoval {
-                tasks: vec![task.id],
-                repositories: repositories
-                    .iter()
-                    .map(|repository| (repository.id, repository.name.clone()))
-                    .collect(),
-                clones: Vec::new(),
-            };
-            let leftovers = files.remove(&removal).await;
-            tracing::info!(task = %task.id, ?leftovers, "removed an ended task's worktrees");
         }
         Ok(())
     }

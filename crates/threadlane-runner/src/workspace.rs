@@ -779,6 +779,39 @@ impl Workspaces for GitWorkspaces {
 
     async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String> {
         let _repos = self.lock_removal(removal).await;
+        self.remove_locked(removal).await
+    }
+
+    async fn remove_finished(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+    ) -> Result<Option<String>, WorkspaceError> {
+        let removal = WorkspaceRemoval {
+            tasks: vec![task],
+            repositories: repositories
+                .iter()
+                .map(|repository| (repository.id, repository.name.clone()))
+                .collect(),
+            clones: Vec::new(),
+        };
+        let _repos = self.lock_removal(&removal).await;
+        let dir = self.task_dir(task);
+        if let Some(reason) = unsaved_work(&dir, repositories).await? {
+            return Ok(Some(reason));
+        }
+        match self.remove_locked(&removal).await.as_slice() {
+            [] => Ok(None),
+            leftovers => Err(WorkspaceError(format!(
+                "could not remove {}",
+                leftovers.join(", ")
+            ))),
+        }
+    }
+}
+
+impl GitWorkspaces {
+    async fn remove_locked(&self, removal: &WorkspaceRemoval) -> Vec<String> {
         let root = match tokio::fs::canonicalize(&self.root).await {
             Ok(root) => root,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
@@ -859,6 +892,97 @@ async fn checked_dir(root: &Path, path: &Path) -> Result<bool, WorkspaceError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(io_error("checking", path, &error)),
     }
+}
+
+/// What in the task's directory, review rounds included, would be lost if it
+/// were removed: uncommitted changes, a commit on no remote branch, or a
+/// directory that is not one of `repositories`' worktrees.
+async fn unsaved_work(
+    dir: &Path,
+    repositories: &[Repository],
+) -> Result<Option<String>, WorkspaceError> {
+    let mut sets = vec![dir.to_path_buf()];
+    let mut index = 0;
+    while let Some(set) = sets.get(index).cloned() {
+        index += 1;
+        let mut entries = match tokio::fs::read_dir(&set).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error("reading", &set, &error)),
+        };
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| io_error("reading", &set, &error))?
+        {
+            let path = entry.path();
+            let name = entry.file_name();
+            let is_dir = entry
+                .file_type()
+                .await
+                .map_err(|error| io_error("checking", &path, &error))?
+                .is_dir();
+            let marker = |suffix: &str| {
+                repositories
+                    .iter()
+                    .any(|repository| name == format!(".{}.{suffix}", repository.name).as_str())
+            };
+            if !is_dir && (marker("ready") || marker("checkpoint")) {
+                continue;
+            }
+            if index == 1 && name == ".reviews" && is_dir {
+                let mut rounds = tokio::fs::read_dir(&path)
+                    .await
+                    .map_err(|error| io_error("reading", &path, &error))?;
+                while let Some(round) = rounds
+                    .next_entry()
+                    .await
+                    .map_err(|error| io_error("reading", &path, &error))?
+                {
+                    sets.push(round.path());
+                }
+                continue;
+            }
+            let known = repositories
+                .iter()
+                .any(|repository| name == repository.name.as_str());
+            // Without its `.git` file, git would look in a parent directory.
+            if !known || !is_dir || !path.join(".git").is_file() {
+                return Ok(Some(format!("{} is not a known worktree", path.display())));
+            }
+            // Explicit, so `status.showUntrackedFiles=no` or a submodule's
+            // `ignore = all` cannot hide changes.
+            if !git(
+                Some(&path),
+                [
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ],
+            )
+            .await?
+            .trim()
+            .is_empty()
+            {
+                return Ok(Some(format!("{} has uncommitted changes", path.display())));
+            }
+            if !git(
+                Some(&path),
+                ["rev-list", "--max-count=1", "HEAD", "--not", "--remotes"],
+            )
+            .await?
+            .trim()
+            .is_empty()
+            {
+                return Ok(Some(format!(
+                    "{} has commits on no remote branch",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(None)
 }
 
 async fn remove_task_dir(
