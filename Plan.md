@@ -171,17 +171,18 @@ The full matrix:
 | Tier 1: local, reversible | Allow | Allow | Allow |
 | Tier 2: shared, reversible | Ask | Classifier review | Classifier review |
 | Tier 3: shared, hard to undo | Ask | Ask | Ask, unless a standing rule exists; then classifier review |
+| A requested task's own work: push its branch, open its draft, ready, edit or merge the pull request of its own or another requested task's branch in the project | Allow; classifier review if tainted; a merge whose checks fail asks | Same | Same |
 | Forbidden | Block | Block | Block |
 
 **What counts as "work you requested".** A message from you, a routine you created, and any task descended from those. Continuing existing work is always allowed in every mode: a follow-up the agent set inside a requested task, or a build result for a task's own branch. Only *new* work from external events or agent-created routines is subject to the initiative rule.
 
 **Decisions:**
 
-- **Project ceiling.** Each project has a maximum mode, inherited from its space. No binding can exceed it. A work project capped at Assisted cannot have an autonomous agent by accident.
-- **Standing rules.** When you answer a decision you can also say "always allow this here". That creates a rule scoped to one agent, one project, one tool, and one argument pattern. Tier 2 rules work in any mode. Tier 3 rules take effect only in Autonomous. Rules are listed in the project's settings and can be revoked. **From Noop:** it starts cautious and takes over more as it proves it decides like you.
-- **Default for a task's own work.** Opening a draft pull request and pushing the task's own branch are allowed without asking in every mode above Off, unless the run is tainted by outside content or the binding has an override for tier 2; such a call is recorded as a decision allowed by default.
+- **Project mode.** Each project has one mode, its ceiling, inherited from its space unless set for the project. Every agent bound in the project follows it: by default a binding has no mode of its own and acts in the project's mode. Lowering the project's mode lowers every agent that follows it. Per agent you can turn it Off, or, rarely, give it its own mode, which still cannot exceed the project's. A work project at Assisted cannot have an autonomous agent by accident.
+- **Standing rules.** When you answer a decision you can also say "always allow this here". That creates a rule scoped to one project, one tool, and one argument pattern: it covers every agent bound in the project, and the agent it was created from is kept for audit. Tier 2 rules work in any mode. Tier 3 rules take effect only in Autonomous. Rules are listed in the project's settings and can be revoked. A proposal offers its rule as a fourth option, "always start this kind here": it starts the task and makes a project rule on `create_task` for that assignee (pattern `{"agent": …}`). The rule starts the next proposal for the assignee without asking, as work you accepted, where both agents act in Assisted and the run is not tainted; Autonomous needs no rule, and On request and Off are never started by one. **From Noop:** it starts cautious and takes over more as it proves it decides like you.
+- **A requested task's own work.** Own work is the task's own branch, or the branch of another requested task in the project. In a task you requested, the steps that carry it out are allowed in every mode above Off: pushing the task branch, opening its draft pull request, and marking ready, editing or merging a pull request whose head, in the same repository, is the branch of this task or of another requested task of the project that works in that repository, as the hub reads it from GitHub. Such a call is recorded as a decision allowed by default. When the run is tainted by outside content it goes to classifier review instead. A merge also needs its checks to pass: the pull request merges cleanly, it has checks and every one succeeded, and the head task's latest review approved exactly its head commit; the call names that commit as `expected_head`, and the merge is refused if the head has moved; otherwise it asks. An override only makes these stricter. In any other task, and when GitHub cannot be read, opening a draft pull request and pushing the task's own branch are still allowed by default in every mode above Off, unless the binding has an override for tier 2; when the run is tainted they go to classifier review instead of being allowed. Everything else follows the matrix.
 - **Overrides.** Any cell of the matrix can be made stricter per binding. It can be made looser only up to what the ceiling's column allows.
-- **Untrusted input steps the mode down.** A run triggered by external content operates one mode lower than its binding, to a minimum of On request (section 9.1).
+- **Untrusted input steps the mode down.** A run triggered by external content operates one mode lower than its binding, to a minimum of On request (section 9.1). Taint limits reach, not routine: the task's own draft pull request and branch push are reviewed by the classifier rather than asked about; every other call steps down.
 - **Two agents, stricter wins.** When the lead creates a task for another agent from work you did not request, both the lead's and the assignee's modes must permit it.
 - **How this is enforced.** Initiative is enforced by the hub, which decides what runs. Authority is enforced on the system's tools and by deny rules on the direct commands. An agent that goes around both is not stopped, because agents run as you (section 9.2).
 
@@ -232,7 +233,7 @@ Every table below exists once per hub. No table has a space column.
 | Field | Notes |
 |---|---|
 | `project_id`, `agent_id` | Unique together |
-| `mode` | `off`, `on_request`, `assisted`, `autonomous` |
+| `mode` | `off`, `on_request`, `assisted`, `autonomous`, or null to follow the project's mode |
 | `is_lead` | Exactly one per project |
 | `models` | Override, per backend |
 | `max_parallel` | Legacy binding value, ignored for scheduling |
@@ -1148,9 +1149,9 @@ A run holds your access and operates unattended. This is where the most risk sit
 Each tool declares its tier (section 2.3). The gate evaluates in order, and the first rule that applies wins:
 
 1. **Forbidden list.** Built-in, then space, then project. Result: block.
-2. **Effective mode.** The lower of the binding's mode and the project ceiling. If the run is tainted by external content, one step lower again, to a minimum of On request.
+2. **Effective mode.** The binding's own mode, or the project's mode when it follows it, never above the project ceiling. If the run is tainted by external content, one step lower again, to a minimum of On request.
 3. **Binding overrides and standing rules**, within what the effective mode permits.
-4. **The default for a task's own work** (section 2.3): a draft pull request or a push of the task's own branch, in an untainted run with no tier 2 override, is allowed where the matrix would ask or review.
+4. **The default for a task's own work** (section 2.3): a draft pull request or a push of the task's own branch, with no tier 2 override, is allowed where the matrix would ask or review; in a tainted run it is reviewed instead.
 5. **The mode matrix** (section 2.3): allow, classifier review, or ask.
 6. **Classifier**, where the matrix calls for it. It reviews the action in context and either allows or blocks. A block returns to the agent as a tool error so it can find a safer approach. The classifier is a one-shot question to a backend on the hub's computer, with a fixed answer format and no tools (section 5.7).
 
@@ -1246,6 +1247,7 @@ sequenceDiagram
 | `status` | `pending`, `answered`, `expired`, `cancelled` |
 | `answer` | Chosen option and any note |
 | `expires_at` | Backed by a timer |
+| `urgent` | Whether it notifies you; false for proposals and limitation reports, which wait in the Inbox's Later group |
 
 **Decisions:**
 
@@ -1254,6 +1256,7 @@ sequenceDiagram
 - **Approval is bound to exact arguments.** Each option carries one complete call. The runner performs the stored call for the option you chose, verified against `arguments_hash`. The agent takes no part in performing it, so it cannot alter it.
 - **Declining is information, not failure.** The session resumes with your note, and the agent continues.
 - **Every decision expires.** Expiry is treated as declined with reason "no response".
+- **Low-stakes asks wait in a list.** Proposals and limitation reports are not urgent: the client raises no notification or reminder for them and lists them under Later in the Inbox. Expiry is the same. A dream's limitation report goes to classifier review like any other; one that asks for your approval, or that the classifier cannot answer, opens its card.
 - **The runner ends the run if the agent does not.** A backend that keeps working after being told to wait is stopped, so a run never continues past an open decision.
 - **While a decision is open**, what happens to other events depends on the lane:
   - *Lead lane:* the conversation carries on in the same session. The open decision is listed in what each run is given (section 8.5, item 6).

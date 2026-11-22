@@ -115,7 +115,7 @@ async fn an_agent_set_to_off_never_runs() {
         .org(OrgRequest::SetMode {
             project: None,
             agent: LEAD_NAME.into(),
-            mode: Mode::Off,
+            mode: Some(Mode::Off),
         })
         .await
         .unwrap();

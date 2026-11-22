@@ -584,7 +584,6 @@ impl Desktop {
             self.stop_button(space, target, format!("Stop the lead of {project}"), cx)
         });
         let ceiling = self.state.project_ceiling(space, project);
-        let lead_mode = self.state.lead_mode(space, project);
         let body = match tab {
             Tab::Tasks => self.tasks_tab(space, project, when, cx),
             Tab::Conversation => self.conversation_tab(
@@ -728,10 +727,9 @@ impl Desktop {
             .gap(SM)
             .flex_wrap()
             .child(meta(space.to_owned(), cx))
-            .child(meta(format!("Ceiling · {}", mode_name(ceiling)), cx))
+            .child(meta(format!("Mode · {}", mode_name(ceiling)), cx))
             .children(paused.then(|| status_badge("Paused", Status::Waiting, cx)))
             .children(archived.then(|| status_badge("Archived", Status::Idle, cx)))
-            .children(lead_mode.map(|mode| meta(format!("Lead mode · {}", mode_name(mode)), cx)))
             .children(lead.map(|line| meta(line, cx)))
             .children(stop.filter(|_| !archived));
         v_flex()
@@ -2384,7 +2382,8 @@ impl Desktop {
             )
     }
 
-    /// The autonomy ceiling and each assigned agent's mode and permissions.
+    /// The project's mode and each assigned agent's on/off, own mode, and
+    /// permissions.
     fn agents_tab(&self, space: &str, project: &str, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let card = self.state.ceiling_card(space, project);
@@ -2421,7 +2420,7 @@ impl Desktop {
                     .bg(cx.theme().muted)
                     .rounded(ROW_RADIUS)
                     .child(
-                        v_flex().min_w_0().child(section("Autonomy ceiling")).child(
+                        v_flex().min_w_0().child(section("Project mode")).child(
                             div()
                                 .text_size(TYPE_BODY)
                                 .text_color(muted)
@@ -2475,19 +2474,82 @@ impl Desktop {
                 agent.clone(),
                 row.choices.clone(),
             );
-            let control = mode_control(format!("mode-{agent}"), &row.choices).on_click(
+            let own_control = mode_control(format!("mode-{agent}"), &row.choices).on_click(
                 cx.listener(move |this, clicked: &Vec<usize>, _, cx| {
                     if let Some(mode) = unlocked(&choices, clicked) {
                         this.set_mode(
                             in_space.clone(),
                             in_project.clone(),
                             named.clone(),
-                            mode,
+                            Some(mode),
                             cx,
                         );
                     }
                 }),
             );
+            let (in_space, in_project, named) =
+                (space.to_owned(), project.to_owned(), agent.clone());
+            // On follows the project; Off is the agent's own.
+            let on = Switch::new(SharedString::from(format!("on-{agent}")))
+                .label("On")
+                .accessibility_label(format!("{agent} on in this project"))
+                .checked(row.own != Some(Mode::Off))
+                .disabled(archived)
+                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                    let mode = (!*checked).then_some(Mode::Off);
+                    this.set_mode(
+                        in_space.clone(),
+                        in_project.clone(),
+                        named.clone(),
+                        mode,
+                        cx,
+                    );
+                }));
+            let (in_space, in_project, named) =
+                (space.to_owned(), project.to_owned(), agent.clone());
+            let own: Option<AnyElement> = match row.own {
+                Some(Mode::Off) => None,
+                Some(mode) => Some(
+                    h_flex()
+                        .gap(SM)
+                        .child(meta(format!("Own mode · {}", mode_name(mode)), cx))
+                        .child(
+                            button(SharedString::from(format!("follow-{agent}")))
+                                .small()
+                                .ghost()
+                                .label("Follow project")
+                                .disabled(archived)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_mode(
+                                        in_space.clone(),
+                                        in_project.clone(),
+                                        named.clone(),
+                                        None,
+                                        cx,
+                                    );
+                                })),
+                        )
+                        .into_any_element(),
+                ),
+                None => Some(
+                    h_flex()
+                        .gap(SM)
+                        .child(meta("Follows project", cx))
+                        .child(
+                            button(SharedString::from(format!("own-mode-{agent}")))
+                                .small()
+                                .ghost()
+                                .label("Set own mode…")
+                                .selected(row.own_open)
+                                .disabled(archived)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.state.toggle_own_mode(&in_space, &in_project, &named);
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element(),
+                ),
+            };
             let (toggle_space, toggle_project, toggle_agent) =
                 (space.to_owned(), project.to_owned(), agent.clone());
             let expand = button(SharedString::from(format!("expand-{agent}")))
@@ -2540,9 +2602,11 @@ impl Desktop {
                                     )
                                     .children(role.map(|role| meta(role, cx))),
                             )
-                            .child(control.disabled(archived))
+                            .children(own)
+                            .child(on)
                             .child(expand),
                     )
+                    .children(row.own_open.then(|| own_control.disabled(archived)))
                     .children(
                         above_ceiling
                             .then(|| locked_note(&row.choices, muted))
@@ -2578,38 +2642,29 @@ impl Desktop {
         }
         let view = cx.entity().downgrade();
         let (space, project) = (space.to_owned(), project.to_owned());
-        let ceiling = self.state.project_ceiling(&space, &project);
         Some(
             button("project-add-agent")
                 .small()
                 .icon(AppIcon::UserPlus)
                 .label("Add agent")
-                .dropdown_menu(move |mut menu, window, cx| {
+                .dropdown_menu(move |mut menu, _, _| {
+                    // A new agent follows the project's mode.
                     for agent in &available {
                         let (space, project, agent, view) =
                             (space.clone(), project.clone(), agent.clone(), view.clone());
-                        menu = menu.submenu(agent.clone(), window, cx, move |mut menu, _, _| {
-                            for (mode, label) in MODES {
-                                let (space, project, agent, view) =
-                                    (space.clone(), project.clone(), agent.clone(), view.clone());
-                                menu = menu.item(
-                                    PopupMenuItem::new(label).disabled(mode > ceiling).on_click(
-                                        move |_, _, cx| {
-                                            let _ = view.update(cx, |this, cx| {
-                                                this.set_mode(
-                                                    space.clone(),
-                                                    project.clone(),
-                                                    agent.clone(),
-                                                    mode,
-                                                    cx,
-                                                );
-                                            });
-                                        },
-                                    ),
-                                );
-                            }
-                            menu
-                        });
+                        menu = menu.item(PopupMenuItem::new(agent.clone()).on_click(
+                            move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.set_mode(
+                                        space.clone(),
+                                        project.clone(),
+                                        agent.clone(),
+                                        None,
+                                        cx,
+                                    );
+                                });
+                            },
+                        ));
                     }
                     menu
                 })

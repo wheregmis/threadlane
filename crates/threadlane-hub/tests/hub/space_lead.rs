@@ -237,7 +237,7 @@ async fn an_ask_from_unrequested_work_is_not_requested() {
         .unwrap()
         .unwrap();
     hub.db
-        .set_binding_mode(binding.id, Mode::Assisted)
+        .set_binding_mode(binding.id, Some(Mode::Assisted))
         .await
         .unwrap();
     hub.insert(|event| event.requested = false).await;

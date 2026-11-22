@@ -36,7 +36,7 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
         .bind(&NewBinding {
             project_id: general.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 2,
         })

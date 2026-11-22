@@ -95,7 +95,7 @@ impl ClientApi {
         let db = &self.core.inner.db;
         if let Some(lead) = db.lead_binding(project.id).await.map_err(api_error)? {
             let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
-            if lead.mode.stricter(ceiling) == Mode::Off {
+            if lead.effective_mode(ceiling) == Mode::Off {
                 return Err(ApiError::Invalid(format!(
                     "the lead of project {:?} is off",
                     project.name
@@ -145,6 +145,7 @@ impl ClientApi {
                 ))
             })?;
         let now = inner.clock.now();
+        let always = always || crate::proposal::always(&current, index);
         let rule = if always {
             Some(self.rule_from(&current, index, now).await?)
         } else {
@@ -191,7 +192,7 @@ impl ClientApi {
         now: Timestamp,
     ) -> Result<NewStandingRule, ApiError> {
         let inner = &self.core.inner;
-        if !decision.offers_standing_rule {
+        if !decision.offers_standing_rule && !crate::proposal::always(decision, index) {
             return Err(ApiError::Invalid(format!(
                 "{} offers no standing rule; answer it without always",
                 decision.id
@@ -771,7 +772,7 @@ impl HubApi for ClientApi {
                     .into_iter()
                     .find(|binding| binding.agent_id == agent.id);
                 let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
-                if mode > ceiling {
+                if let Some(mode) = mode.filter(|&mode| mode > ceiling) {
                     return Err(ApiError::Invalid(format!(
                         "{mode} is above the ceiling of project {:?}, {ceiling}",
                         project.name
@@ -1085,6 +1086,12 @@ impl HubApi for ClientApi {
                     .await
                     .map_err(api_error)?,
             }),
+            DecisionRequest::Stats { days } => {
+                let since = inner.clock.now() - Duration::from_secs(u64::from(days) * 86_400);
+                Ok(DecisionReply::Stats {
+                    rows: db.decision_stats(since).await.map_err(api_error)?,
+                })
+            }
             other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
         }
     }

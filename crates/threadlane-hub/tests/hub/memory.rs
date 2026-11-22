@@ -79,7 +79,7 @@ async fn task_run(hub: &TestHub) -> Running<'_> {
         .bind(&NewBinding {
             project_id: hub.general().await.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
@@ -475,7 +475,7 @@ async fn a_run_never_reaches_memory_outside_its_project_and_the_spaces_notes() {
         .bind(&NewBinding {
             project_id: alpha.id,
             agent_id: lead.agent_id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: true,
             max_parallel: 1,
         })

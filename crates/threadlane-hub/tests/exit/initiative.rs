@@ -62,7 +62,7 @@ async fn both_at(world: &World, mode: Mode) {
     db.update_space(&space).await.unwrap();
     let general = db.general_project().await.unwrap();
     for binding in db.bindings(general.id).await.unwrap() {
-        db.set_binding_mode(binding.id, mode).await.unwrap();
+        db.set_binding_mode(binding.id, Some(mode)).await.unwrap();
     }
 }
 

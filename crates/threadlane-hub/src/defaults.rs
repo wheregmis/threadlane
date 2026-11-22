@@ -1,6 +1,6 @@
 //! What every hub has from its first start (docs/milestone-1.md §9 "Defaults").
 
-use threadlane_core::model::{MachineTrust, Mode, NewAgent, NewBinding, NewMachine};
+use threadlane_core::model::{MachineTrust, NewAgent, NewBinding, NewMachine};
 use threadlane_core::store::{MachineStore, OrgStore, StoreResult};
 use threadlane_store::HubDb;
 
@@ -44,7 +44,7 @@ pub(crate) async fn ensure_defaults(db: &HubDb) -> StoreResult<()> {
             db.bind(&NewBinding {
                 project_id: project.id,
                 agent_id: lead.id,
-                mode: Mode::OnRequest,
+                mode: None,
                 is_lead: true,
                 max_parallel: 1,
             })

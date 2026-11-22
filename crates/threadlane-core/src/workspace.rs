@@ -229,6 +229,15 @@ pub fn task_branch(task: TaskId) -> String {
     format!("threadlane/{task}")
 }
 
+/// The task whose [`task_branch`] `branch` is, spelled exactly so.
+#[must_use]
+pub fn branch_task(branch: &str) -> Option<TaskId> {
+    let id = task_ref(&serde_json::Value::String(
+        branch.strip_prefix("threadlane/")?.to_owned(),
+    ))?;
+    (task_branch(id) == branch).then_some(id)
+}
+
 /// A task id given as `T-0142`, `142`, or the number 142.
 #[must_use]
 pub fn task_ref(value: &serde_json::Value) -> Option<TaskId> {
@@ -300,5 +309,20 @@ mod tests {
             assert!(!valid_branch_name(bad), "{bad:?}");
         }
         assert_eq!(task_branch(TaskId(7)), "threadlane/T-0007");
+        for id in [1, 7, 142, 12345] {
+            assert_eq!(branch_task(&task_branch(TaskId(id))), Some(TaskId(id)));
+        }
+        for other in [
+            "threadlane/7",
+            "threadlane/t-0007",
+            "threadlane/T-7",
+            "threadlane/T-0000",
+            "threadlane/T-0007x",
+            "other/T-0007",
+            "T-0007",
+            "main",
+        ] {
+            assert_eq!(branch_task(other), None, "{other}");
+        }
     }
 }

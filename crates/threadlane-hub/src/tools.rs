@@ -574,11 +574,15 @@ impl HubTools {
             .bindings(context.project_id)
             .await
             .map_err(tool_error)?;
+        let ceiling = self
+            .db
+            .effective_ceiling(context.project_id)
+            .await
+            .map_err(tool_error)?;
         // An agent set to off never runs: the task and what waits for it would stall.
-        if bindings
-            .iter()
-            .any(|binding| binding.agent_id == agent && binding.mode == Mode::Off)
-        {
+        if bindings.iter().any(|binding| {
+            binding.agent_id == agent && binding.effective_mode(ceiling) == Mode::Off
+        }) {
             return Err(ToolError::InvalidArguments(format!(
                 "agent {name:?} is off in this project, so it would never run {}; \
                  name an enabled agent",
@@ -829,13 +833,18 @@ impl HubTools {
                 });
         }
         let bindings = self.db.bindings(project).await.map_err(tool_error)?;
+        let ceiling = self
+            .db
+            .effective_ceiling(project)
+            .await
+            .map_err(tool_error)?;
         Ok(agents
             .iter()
             .find(|agent| {
                 agent.role.eq_ignore_ascii_case("reviewer")
-                    && bindings
-                        .iter()
-                        .any(|binding| binding.agent_id == agent.id && binding.mode != Mode::Off)
+                    && bindings.iter().any(|binding| {
+                        binding.agent_id == agent.id && binding.effective_mode(ceiling) != Mode::Off
+                    })
             })
             .map(|agent| agent.id))
     }

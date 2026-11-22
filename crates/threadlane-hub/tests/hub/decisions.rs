@@ -63,7 +63,7 @@ async fn task_run_with(hook: Arc<dyn StepHook>) -> (TestHub, Lease, RunAssignmen
         .bind(&NewBinding {
             project_id: general.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
@@ -540,6 +540,7 @@ async fn a_stored_call_that_no_longer_hashes_to_what_you_approved_is_not_handed_
                 offers_standing_rule: false,
                 expires_at: None,
                 created_at: hub.clock.now(),
+                urgent: true,
             },
         )
         .await

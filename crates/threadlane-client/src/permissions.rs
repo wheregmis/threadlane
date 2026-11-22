@@ -8,7 +8,7 @@ use threadlane_core::client::{
     StandingRuleSummary,
 };
 use threadlane_core::ids::{DecisionId, StandingRuleId};
-use threadlane_core::model::{Cell, Mode};
+use threadlane_core::model::{Cell, DecisionStat, Mode};
 use threadlane_core::tools::Tier;
 
 use crate::{ClientCore, ClientError, SpaceAnswer, api_error, wrong_reply};
@@ -230,6 +230,26 @@ impl ClientCore {
         {
             (_, DecisionReply::Reminder { first }) => Ok(first),
             (space, _) => Err(wrong_reply(&space, "remind")),
+        }
+    }
+
+    /// Closed decisions of the last `days` days, by project, tool, and who
+    /// answered.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, or the hub's error.
+    pub async fn decision_stats(
+        &self,
+        space: Option<&str>,
+        days: u32,
+    ) -> Result<Vec<DecisionStat>, ClientError> {
+        match self
+            .decision_request(space, DecisionRequest::Stats { days })
+            .await?
+        {
+            (_, DecisionReply::Stats { rows }) => Ok(rows),
+            (space, _) => Err(wrong_reply(&space, "decision stats")),
         }
     }
 

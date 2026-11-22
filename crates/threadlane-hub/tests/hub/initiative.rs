@@ -44,7 +44,7 @@ async fn hub_with(hook: Arc<dyn StepHook>, lead: Mode, engineer: Mode) -> TestHu
     db.update_space(&space).await.unwrap();
     let general = hub.general().await;
     let binding = db.lead_binding(general.id).await.unwrap().unwrap();
-    db.set_binding_mode(binding.id, lead).await.unwrap();
+    db.set_binding_mode(binding.id, Some(lead)).await.unwrap();
     let agent = db
         .create_agent(&NewAgent::named(ENGINEER, "engineer"))
         .await
@@ -53,13 +53,13 @@ async fn hub_with(hook: Arc<dyn StepHook>, lead: Mode, engineer: Mode) -> TestHu
         .bind(&NewBinding {
             project_id: general.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
         .await
         .unwrap();
-    db.set_binding_mode(bound.id, engineer).await.unwrap();
+    db.set_binding_mode(bound.id, Some(engineer)).await.unwrap();
     hub
 }
 
@@ -183,15 +183,23 @@ async fn each_mode_against_an_unrequested_external_event() {
 #[tokio::test]
 async fn a_task_from_unrequested_work_follows_the_stricter_of_the_two_agents() {
     let cases = [
-        // (lead, assignee, created without asking)
-        (Mode::Assisted, Mode::Assisted, false),
-        (Mode::Autonomous, Mode::Autonomous, true),
-        (Mode::Autonomous, Mode::OnRequest, false),
-        (Mode::Assisted, Mode::Autonomous, false),
+        // (lead, assignee's own mode, created without asking); an assignee
+        // with none follows the project, here Autonomous.
+        (Mode::Assisted, Some(Mode::Assisted), false),
+        (Mode::Autonomous, Some(Mode::Autonomous), true),
+        (Mode::Autonomous, Some(Mode::OnRequest), false),
+        (Mode::Assisted, Some(Mode::Autonomous), false),
+        (Mode::Autonomous, None, true),
+        (Mode::Assisted, None, false),
     ];
     for (lead, assignee, created) in cases {
-        let what = format!("lead {lead}, assignee {assignee}");
-        let hub = hub(lead, assignee).await;
+        let what = format!("lead {lead}, assignee {assignee:?}");
+        let hub = hub(lead, assignee.unwrap_or(Mode::OnRequest)).await;
+        if assignee.is_none() {
+            let bindings = hub.db.bindings(hub.general().await.id).await.unwrap();
+            let engineer = bindings.iter().find(|b| !b.is_lead).unwrap();
+            hub.db.set_binding_mode(engineer.id, None).await.unwrap();
+        }
         outside(&hub).await;
         let (lease, run) = begin(&*hub.link).await;
         let result = call(&hub, &lease, &run, "c-1", CREATE_TASK, &fix_the_build()).await;
@@ -232,10 +240,13 @@ async fn a_task_from_unrequested_work_follows_the_stricter_of_the_two_agents() {
             "Start a task for Engineer: Fix the build?"
         );
         let labels: Vec<&str> = decision.options.iter().map(|o| o.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            ["start", "not now", "do not propose this kind again"]
-        );
+        let mut expected = vec!["start", "not now", "do not propose this kind again"];
+        // A rule for the assignee could start it only where both act in Assisted.
+        if assignee != Some(Mode::OnRequest) {
+            expected.push("always start this kind here");
+        }
+        assert_eq!(labels, expected, "{what}");
+        assert!(!decision.urgent, "{what}: a proposal waits under Later");
         assert_eq!(decision.recommended, Some(0), "start is recommended");
         assert!(!decision.offers_standing_rule, "{what}");
         assert!(decision.expires_at.is_some(), "{what}");
@@ -491,6 +502,7 @@ async fn a_proposal_whose_arguments_no_longer_hash_creates_nothing() {
                 offers_standing_rule: false,
                 expires_at: None,
                 created_at: hub.clock.now(),
+                urgent: true,
             },
         )
         .await
@@ -597,4 +609,216 @@ async fn an_agents_routine_asks_below_autonomous_and_its_events_follow_the_initi
             }
         }
     }
+}
+
+/// Something happened that you did not ask about and that is not from
+/// outside, so the lead's run on it is neither requested nor tainted.
+async fn unrequested(hub: &TestHub, id: &str) {
+    hub.insert(|event| {
+        event.source_event_id = id.to_owned();
+        event.trust = Trust::System;
+        event.requested = false;
+    })
+    .await;
+}
+
+/// Ends every run there is, as a runner with nothing to say would.
+async fn drain(hub: &TestHub) {
+    while let Some(lease) = hub.link.request_work().await.unwrap() {
+        while let Begin::Run(run) = hub.link.begin_run(&lease).await.unwrap() {
+            hub.link.complete(&lease, run.run_id, None).await.unwrap();
+        }
+        hub.link.release(&lease).await.unwrap();
+    }
+}
+
+/// The lead's follow-up run performs decision `id`, which creates its task.
+async fn perform_proposal(hub: &TestHub, id: DecisionId) {
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.perform, [id]);
+    let performed = hub
+        .link
+        .begin_perform(&lease, run.run_id, id)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&performed, Perform::Recorded { outcome } if outcome["performed"] == json!(true)),
+        "{performed:?}"
+    );
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+    drain(hub).await;
+}
+
+async fn pending(hub: &TestHub) -> Vec<threadlane_core::model::Decision> {
+    let DecisionReply::Pending { decisions } =
+        hub.api.decisions(DecisionRequest::Pending).await.unwrap()
+    else {
+        panic!("pending decisions");
+    };
+    decisions
+}
+
+#[tokio::test]
+async fn always_start_this_kind_here_starts_the_assignee_s_next_proposals_until_revoked() {
+    let hub = hub(Mode::Assisted, Mode::Assisted).await;
+    let writer = hub
+        .db
+        .create_agent(&NewAgent::named("Writer", "writer"))
+        .await
+        .unwrap();
+    let general = hub.general().await;
+    hub.db
+        .bind(&NewBinding {
+            project_id: general.id,
+            agent_id: writer.id,
+            mode: Some(Mode::Assisted),
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    let task = |title: &str, agent: &str| json!({ "title": title, "goal": "g", "agent": agent });
+
+    // Asked, with the fourth option; answering with it starts this one and
+    // makes a project rule for the assignee.
+    unrequested(&hub, "e-1").await;
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(
+        call(
+            &hub,
+            &lease,
+            &run,
+            "c-1",
+            CREATE_TASK,
+            &task("Fix the build", ENGINEER)
+        )
+        .await,
+        Err(ToolError::WaitingOnYou)
+    );
+    end(&hub, &lease, &run).await;
+    let [asked] = &pending(&hub).await[..] else {
+        panic!("one proposal");
+    };
+    assert_eq!(
+        asked.options.last().map(|o| o.label.as_str()),
+        Some("always start this kind here")
+    );
+    assert!(
+        !asked.offers_standing_rule,
+        "no Always allow box besides it"
+    );
+    assert!(answer(&hub, 1, "always start this kind here", None).await);
+    let DecisionReply::StandingRules { rules } = hub
+        .api
+        .decisions(DecisionRequest::StandingRules { project: None })
+        .await
+        .unwrap()
+    else {
+        panic!("rules");
+    };
+    let [rule] = &rules[..] else {
+        panic!("one rule: {rules:?}");
+    };
+    assert_eq!(rule.rule.tool, CREATE_TASK);
+    assert_eq!(rule.rule.pattern, json!({ "agent": ENGINEER }));
+    assert_eq!(rule.rule.project_id, general.id);
+    assert_eq!(rule.rule.created_from_decision, Some(DecisionId(1)));
+    perform_proposal(&hub, DecisionId(1)).await;
+
+    // The next one for the same assignee starts with no card; another
+    // assignee is still asked.
+    unrequested(&hub, "e-2").await;
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(
+        call(
+            &hub,
+            &lease,
+            &run,
+            "c-2",
+            CREATE_TASK,
+            &task("Fix the tests", ENGINEER)
+        )
+        .await,
+        Err(ToolError::AuthorizedAndQueued)
+    );
+    let started = hub.db.decision(DecisionId(2)).await.unwrap().unwrap();
+    assert!(started.approved(), "answered by the rule");
+    assert_eq!(
+        call(
+            &hub,
+            &lease,
+            &run,
+            "c-3",
+            CREATE_TASK,
+            &task("Write notes", "Writer")
+        )
+        .await,
+        Err(ToolError::WaitingOnYou)
+    );
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+    let [other] = &pending(&hub).await[..] else {
+        panic!("only the other assignee's proposal waits");
+    };
+    assert_eq!(other.id, DecisionId(3));
+    assert!(answer(&hub, 3, "not now", None).await);
+    perform_proposal(&hub, DecisionId(2)).await;
+    let titles: Vec<String> = hub
+        .db
+        .tasks(general.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|task| task.title)
+        .collect();
+    assert_eq!(titles, ["Fix the build", "Fix the tests"]);
+
+    // Revoked, it asks again.
+    hub.api
+        .decisions(DecisionRequest::RevokeRule { rule: rule.rule.id })
+        .await
+        .unwrap();
+    unrequested(&hub, "e-3").await;
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(
+        call(
+            &hub,
+            &lease,
+            &run,
+            "c-4",
+            CREATE_TASK,
+            &task("Fix the docs", ENGINEER)
+        )
+        .await,
+        Err(ToolError::WaitingOnYou)
+    );
+    end(&hub, &lease, &run).await;
+    assert_eq!(pending(&hub).await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_on_request_assignee_is_never_offered_a_rule_to_start_work() {
+    let hub = hub(Mode::Assisted, Mode::OnRequest).await;
+    unrequested(&hub, "e-4").await;
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(
+        call(&hub, &lease, &run, "c-1", CREATE_TASK, &fix_the_build()).await,
+        Err(ToolError::WaitingOnYou)
+    );
+    end(&hub, &lease, &run).await;
+    let [asked] = &pending(&hub).await[..] else {
+        panic!("one proposal");
+    };
+    assert_eq!(asked.options.len(), 3);
+    assert!(
+        hub.api
+            .decisions(DecisionRequest::Answer {
+                decision: DecisionId(1),
+                option: "always start this kind here".into(),
+                note: None,
+            })
+            .await
+            .is_err()
+    );
 }

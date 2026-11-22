@@ -104,6 +104,7 @@ pub(crate) async fn needs_owner_decision(
         offers_standing_rule: false,
         expires_at: None,
         created_at: now,
+        urgent: true,
     };
     let (decision, created) = crate::decision::insert_decision_in(conn, None, &new).await?;
     if created {

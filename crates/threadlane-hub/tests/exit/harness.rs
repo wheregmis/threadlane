@@ -157,7 +157,7 @@ pub async fn add_engineer(db: &HubDb, max_parallel: u32) {
     db.bind(&NewBinding {
         project_id: db.general_project().await.unwrap().id,
         agent_id: agent.id,
-        mode: Mode::OnRequest,
+        mode: Some(Mode::OnRequest),
         is_lead: false,
         max_parallel,
     })

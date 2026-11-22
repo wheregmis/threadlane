@@ -213,7 +213,7 @@ async fn bind_engineer(hub: &TestHub) -> AgentId {
         .bind(&NewBinding {
             project_id: hub.general().await.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })

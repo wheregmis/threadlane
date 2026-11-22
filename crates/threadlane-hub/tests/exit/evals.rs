@@ -308,7 +308,10 @@ async fn set_lead_mode(sim: &Sim, mode: Mode) {
         .await
         .unwrap()
         .unwrap();
-    sim.db().set_binding_mode(lead.id, mode).await.unwrap();
+    sim.db()
+        .set_binding_mode(lead.id, Some(mode))
+        .await
+        .unwrap();
 }
 
 async fn live_world(mode: Mode) -> (Sim, World) {

@@ -1364,6 +1364,9 @@ pub struct AppState {
     /// The agent row expanded on a project's Team tab: space, project,
     /// agent.
     open_agent: Option<(String, String, String)>,
+    /// The agent row whose own-mode control is shown though it follows
+    /// the project: space, project, agent.
+    own_mode_agent: Option<(String, String, String)>,
     /// The standing rule you asked to revoke, until you confirm or keep it.
     revoking: Option<InSpace<threadlane_core::ids::StandingRuleId>>,
     /// The decisions whose "Always allow" is ticked.
@@ -1606,6 +1609,18 @@ impl AppState {
         self.queue.iter().filter(|queued| self.shown(&queued.space))
     }
 
+    /// Whether the Inbox's Later group starts at `index` of `queued`, a list
+    /// in [`Self::needs_you`] order: its first decision that does not notify.
+    #[must_use]
+    pub fn later_starts(queued: &[&Queued], index: usize) -> bool {
+        queued
+            .get(index)
+            .is_some_and(|queued| !queued.decision.urgent)
+            && index
+                .checked_sub(1)
+                .is_none_or(|before| queued[before].decision.urgent)
+    }
+
     /// Whether the Inbox's Needs you tab has nothing to show: no decisions,
     /// blockers or running tasks in the spaces shown, and no gaps in either.
     #[must_use]
@@ -1723,7 +1738,8 @@ impl AppState {
             .iter()
             .filter(|queued| {
                 let key = DecisionKey::from(*queued);
-                now.saturating_since(queued.decision.created_at) >= REMIND_AFTER
+                queued.decision.urgent
+                    && now.saturating_since(queued.decision.created_at) >= REMIND_AFTER
                     && !self.answering.contains(&key)
                     && !self.reminded.contains(&key)
             })
@@ -2198,6 +2214,13 @@ impl AppState {
         {
             self.open_agent = None;
         }
+        if self
+            .own_mode_agent
+            .as_ref()
+            .is_some_and(|(space, ..)| space == name)
+        {
+            self.own_mode_agent = None;
+        }
         let here = |at: Option<&String>| at.is_some_and(|space| space == name);
         if here(self.revoking.as_ref().map(|(space, _)| space)) {
             self.revoking = None;
@@ -2493,12 +2516,20 @@ impl AppState {
                         })
                 }));
         }
+        // Urgent first; the rest are the Inbox's Later group.
         self.queue.sort_by(|a, b| {
-            (a.decision.created_at, &a.space, a.decision.id).cmp(&(
-                b.decision.created_at,
-                &b.space,
-                b.decision.id,
-            ))
+            (
+                !a.decision.urgent,
+                a.decision.created_at,
+                &a.space,
+                a.decision.id,
+            )
+                .cmp(&(
+                    !b.decision.urgent,
+                    b.decision.created_at,
+                    &b.space,
+                    b.decision.id,
+                ))
         });
     }
 
@@ -2999,13 +3030,14 @@ impl AppState {
                             .project(space, &project.name)
                             .map(|view| view.bindings.as_slice())
                             .unwrap_or_default();
+                        let ceiling = self.project_ceiling(space, &project.name);
                         Ok(agents
                             .iter()
                             .map(|agent| {
                                 bindings
                                     .iter()
                                     .find(|binding| binding.agent == *agent)
-                                    .map(|binding| binding.mode)
+                                    .map(|binding| binding.effective_mode(ceiling))
                             })
                             .collect())
                     }
@@ -3021,6 +3053,7 @@ impl AppState {
 
     /// Takes a mode its hub set: the project's binding shows it at once.
     pub fn mode_set(&mut self, space: &str, project: &str, binding: BindingSummary) {
+        self.own_mode_agent = None;
         let view = self
             .projects
             .entry((space.to_owned(), project.to_owned()))
@@ -3207,6 +3240,8 @@ impl AppState {
                 self.new_home_replies.insert(item.space.clone());
                 None
             }
+            // A proposal or a limitation report waits under Later, silently.
+            OutboxKind::Decision if item.item.message.body["urgent"] == false => None,
             OutboxKind::Decision => Card::of(&item).map(|mut card| {
                 if card.kind.is_none() {
                     card.kind = self

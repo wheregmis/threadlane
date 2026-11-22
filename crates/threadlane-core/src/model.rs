@@ -93,6 +93,13 @@ impl Mode {
         self.min(other)
     }
 
+    /// The mode an agent acts in under `ceiling`: its own, or with `None`
+    /// the project's mode (the ceiling), and never above the ceiling.
+    #[must_use]
+    pub fn effective(own: Option<Self>, ceiling: Self) -> Self {
+        own.unwrap_or(ceiling).stricter(ceiling)
+    }
+
     /// One mode lower, to a minimum of On request (Plan.md §9.1, tainted runs).
     #[must_use]
     pub fn stepped_down(self) -> Self {
@@ -542,7 +549,9 @@ pub struct Binding {
     pub id: BindingId,
     pub project_id: ProjectId,
     pub agent_id: AgentId,
-    pub mode: Mode,
+    /// Its own mode; `None` follows the project. Read it through
+    /// [`Binding::effective_mode`].
+    pub mode: Option<Mode>,
     pub is_lead: bool,
     pub models: Json,
     /// How many of this agent's tasks in the project may run at once; 0
@@ -551,12 +560,21 @@ pub struct Binding {
     pub overrides: Json,
 }
 
+impl Binding {
+    /// The mode it acts in under the project's effective `ceiling`.
+    #[must_use]
+    pub fn effective_mode(&self, ceiling: Mode) -> Mode {
+        Mode::effective(self.mode, ceiling)
+    }
+}
+
 /// Input for [`crate::store::OrgStore::bind`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewBinding {
     pub project_id: ProjectId,
     pub agent_id: AgentId,
-    pub mode: Mode,
+    /// `None` follows the project.
+    pub mode: Option<Mode>,
     pub is_lead: bool,
     pub max_parallel: u32,
 }
@@ -1098,6 +1116,14 @@ pub struct Decision {
     /// The asking run’s trace, when a run opened this decision.
     #[serde(default)]
     pub trace_id: Option<String>,
+    /// Whether it notifies you; a proposal or a limitation report waits in
+    /// the Inbox's Later group instead. True from hubs that do not say.
+    #[serde(default = "urgent_by_default")]
+    pub urgent: bool,
+}
+
+fn urgent_by_default() -> bool {
+    true
 }
 
 impl Decision {
@@ -1147,6 +1173,8 @@ pub struct NewDecision {
     pub offers_standing_rule: bool,
     pub expires_at: Option<Timestamp>,
     pub created_at: Timestamp,
+    /// See [`Decision::urgent`].
+    pub urgent: bool,
 }
 
 /// Your answer to a decision.
@@ -1158,6 +1186,35 @@ pub struct DecisionAnswer {
     /// "Always allow this here".
     pub standing_rule: bool,
     pub answered_at: Timestamp,
+}
+
+str_enum! {
+    /// Who answered a decision, as `threadlane decisions stats` groups them.
+    /// Ordered so you come first.
+    #[derive(PartialOrd, Ord)]
+    pub enum AnsweredBy {
+        You => "you",
+        Rule => "rule",
+        Classifier => "classifier",
+        Default => "default",
+    }
+}
+
+/// One row of decision stats: the closed decisions of one project and tool
+/// that one kind of answerer settled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionStat {
+    pub project: String,
+    pub tool: String,
+    pub answered_by: AnsweredBy,
+    pub count: u32,
+    /// Answered with an option that does not approve, or expired.
+    pub declined: u32,
+    /// Input-kind questions among `count`: an answer to one approves nothing.
+    #[serde(default)]
+    pub questions: u32,
+    /// Median seconds from asking to your answer; `None` unless you answered.
+    pub median_wait_secs: Option<u64>,
 }
 
 str_enum! {

@@ -328,7 +328,7 @@ async fn a_refused_model_is_a_configuration_failure_the_lead_can_see_and_reassig
             .bind(&NewBinding {
                 project_id: general.id,
                 agent_id: agent.id,
-                mode,
+                mode: Some(mode),
                 is_lead: false,
                 max_parallel: 1,
             })
@@ -428,7 +428,10 @@ async fn a_refused_model_is_a_configuration_failure_the_lead_can_see_and_reassig
         "{refused:?}"
     );
     // Retrying on its own agent once that agent is off is refused the same way.
-    hub.db.set_binding_mode(iris.id, Mode::Off).await.unwrap();
+    hub.db
+        .set_binding_mode(iris.id, Some(Mode::Off))
+        .await
+        .unwrap();
     let off = hub
         .link
         .call_tool(
@@ -444,7 +447,7 @@ async fn a_refused_model_is_a_configuration_failure_the_lead_can_see_and_reassig
         "{off:?}"
     );
     hub.db
-        .set_binding_mode(iris.id, Mode::OnRequest)
+        .set_binding_mode(iris.id, Some(Mode::OnRequest))
         .await
         .unwrap();
     // An agent set to off would never run it.

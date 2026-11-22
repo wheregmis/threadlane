@@ -18,8 +18,8 @@ use crate::ids::{
     DecisionId, EventId, LaneId, MachineId, ProjectId, RunId, StandingRuleId, TaskId, TimerId,
 };
 use crate::model::{
-    Account, Agent, BackendKind, Cell, Decision, EventKind, Machine, MemoryFile, Mode,
-    OutboxMessage, Recurrence, Repository, Run, StandingRule, Task, Timer,
+    Account, Agent, BackendKind, Cell, Decision, DecisionStat, EventKind, Machine, MemoryFile,
+    Mode, OutboxMessage, Recurrence, Repository, Run, StandingRule, Task, Timer,
 };
 use crate::time::Timestamp;
 use crate::tools::Tier;
@@ -138,7 +138,10 @@ pub struct BindingSummary {
     /// The agent's name.
     pub agent: String,
     pub role: String,
-    pub mode: Mode,
+    /// Its own mode; `None` follows the project. Read it through
+    /// [`BindingSummary::effective_mode`].
+    #[serde(default)]
+    pub mode: Option<Mode>,
     pub is_lead: bool,
     /// How many of its tasks may run at once in the project; 0 means no
     /// limit.
@@ -147,6 +150,14 @@ pub struct BindingSummary {
     /// The cell each overridden tier is set to (Plan.md §2.3 "Overrides").
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<Tier, Cell>,
+}
+
+impl BindingSummary {
+    /// The mode it acts in under the project's effective `ceiling`.
+    #[must_use]
+    pub fn effective_mode(&self, ceiling: Mode) -> Mode {
+        Mode::effective(self.mode, ceiling)
+    }
 }
 
 /// The Organization capability (Plan.md §11.2): projects, repositories,
@@ -200,11 +211,12 @@ pub enum OrgRequest {
     /// The bindings of a project. `None` means the General project.
     Bindings { project: Option<String> },
     /// Sets the agent's mode in a project, binding it there if it is not yet.
-    /// `None` means the General project.
+    /// `None` means the General project; a `None` mode follows the project.
     SetMode {
         project: Option<String>,
         agent: String,
-        mode: Mode,
+        #[serde(default)]
+        mode: Option<Mode>,
     },
     /// Pauses a project, or resumes it with `paused: false`: a paused
     /// project's lanes are not granted. `None` means the General project.
@@ -529,6 +541,9 @@ pub enum DecisionRequest {
     /// Claims the one reminder for a decision still waiting. Answered with
     /// [`DecisionReply::Reminder`], `first` only for the first claim.
     Remind { decision: DecisionId },
+    /// Closed decisions created in the last `days` days, grouped by project,
+    /// tool, and who answered. Answered with [`DecisionReply::Stats`].
+    Stats { days: u32 },
 }
 
 /// A standing rule as a client lists it.
@@ -565,6 +580,9 @@ pub enum DecisionReply {
     /// Whether this was the first claim of the decision's reminder.
     Reminder {
         first: bool,
+    },
+    Stats {
+        rows: Vec<DecisionStat>,
     },
 }
 

@@ -127,6 +127,41 @@ pub struct IssueClaim {
     pub open_pull_requests: Vec<(u64, String)>,
 }
 
+/// A pull request as the gate checks it before a task's own step on it
+/// (docs/autonomy-rework.md §3 stage A).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PullRequestState {
+    /// `owner/name` of the repository the head branch is in, which differs
+    /// from the pull request's for a fork.
+    pub head_repository: String,
+    pub head_ref: String,
+    /// The head commit's full SHA.
+    pub head_sha: String,
+    pub draft: bool,
+    /// GitHub's `mergeable_state`, lowercased: `clean` merges without
+    /// conflicts and with every status passing.
+    pub mergeable_state: String,
+    /// The conclusion of each check run on the head commit, `None` while
+    /// one has not finished.
+    pub checks: Vec<Option<String>>,
+}
+
+impl PullRequestState {
+    /// It merges cleanly and has checks, each finished as success, neutral
+    /// or skipped. A repository without checks is never green.
+    #[must_use]
+    pub fn green(&self) -> bool {
+        self.mergeable_state == "clean"
+            && !self.checks.is_empty()
+            && self.checks.iter().all(|conclusion| {
+                matches!(
+                    conclusion.as_deref(),
+                    Some("success" | "neutral" | "skipped")
+                )
+            })
+    }
+}
+
 /// Why a call to GitHub failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("github: {0}")]
@@ -165,6 +200,19 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
     async fn issue_claim(&self, repository: &str, number: u64) -> Result<IssueClaim, GithubError> {
         let _ = (repository, number);
         Err(GithubError("this source cannot read issues".to_owned()))
+    }
+
+    /// Head, draft flag, mergeability and check runs of pull request
+    /// `number` of `repository` (`owner/name`).
+    async fn pull_request_state(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<PullRequestState, GithubError> {
+        let _ = (repository, number);
+        Err(GithubError(
+            "this source cannot read pull requests".to_owned(),
+        ))
     }
 }
 
@@ -262,6 +310,39 @@ mod tests {
             "",
         ] {
             assert_eq!(normalize_remote(not_one), None, "{not_one}");
+        }
+    }
+
+    #[test]
+    fn a_pull_request_is_green_only_when_clean_with_every_check_passed() {
+        let green = PullRequestState {
+            mergeable_state: "clean".into(),
+            checks: vec![
+                Some("success".into()),
+                Some("skipped".into()),
+                Some("neutral".into()),
+            ],
+            ..PullRequestState::default()
+        };
+        assert!(green.green());
+        for (state, checks) in [
+            ("unstable", vec![Some("success")]),
+            ("dirty", vec![Some("success")]),
+            ("blocked", vec![Some("success")]),
+            ("unknown", vec![Some("success")]),
+            ("clean", vec![]),
+            ("clean", vec![Some("success"), None]),
+            ("clean", vec![Some("success"), Some("failure")]),
+            ("clean", vec![Some("cancelled")]),
+            ("clean", vec![Some("timed_out")]),
+            ("clean", vec![Some("action_required")]),
+        ] {
+            let pull = PullRequestState {
+                mergeable_state: state.into(),
+                checks: checks.into_iter().map(|c| c.map(str::to_owned)).collect(),
+                ..PullRequestState::default()
+            };
+            assert!(!pull.green(), "{pull:?}");
         }
     }
 

@@ -1450,7 +1450,7 @@ impl Desktop {
         space: String,
         project: String,
         agent: String,
-        mode: Mode,
+        mode: Option<Mode>,
         cx: &mut Context<Self>,
     ) {
         let core = Arc::clone(&self.core);
@@ -1465,11 +1465,17 @@ impl Desktop {
             },
             |this, (space, project, set), _| match set {
                 Ok(binding) => {
-                    this.state.report(Activity::Done(format!(
-                        "{} is now {} in {space} / {project}.",
-                        binding.agent,
-                        mode_label(binding.mode)
-                    )));
+                    this.state.report(Activity::Done(match binding.mode {
+                        Some(mode) => format!(
+                            "{} is now {} in {space} / {project}.",
+                            binding.agent,
+                            mode_label(mode)
+                        ),
+                        None => format!(
+                            "{} now follows the mode of {space} / {project}.",
+                            binding.agent
+                        ),
+                    }));
                     this.state.mode_set(&space, &project, binding);
                 }
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),

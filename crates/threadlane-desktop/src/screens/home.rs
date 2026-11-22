@@ -12,8 +12,8 @@ use gpui_kit::*;
 use threadlane_core::client::TaskSummary;
 use threadlane_core::model::OutboxKind;
 use threadlane_desktop::{
-    Author, DecisionKey, DecisionScope, Draft, Part, Spoken, TimelineEntry, When, count_form,
-    is_quiet_update, question_parts,
+    AppState, Author, DecisionKey, DecisionScope, Draft, Part, Spoken, TimelineEntry, When,
+    count_form, is_quiet_update, question_parts,
 };
 
 use super::{gap_line, menu_item};
@@ -243,7 +243,10 @@ impl Desktop {
         if wide_split && !queued_decisions.is_empty() {
             let mut queue_list = v_flex().w(rems(20.)).flex_none().gap(XS);
             let mut active_card = None;
-            for queued in &queued_decisions {
+            for (index, queued) in queued_decisions.iter().enumerate() {
+                if AppState::later_starts(&queued_decisions, index) {
+                    queue_list = queue_list.child(section("Later"));
+                }
                 let key = DecisionKey::from(*queued);
                 let open = current.as_ref() == Some(&key);
                 let (question, _) = question_parts(&queued.decision.question);
@@ -288,8 +291,11 @@ impl Desktop {
                     .child(v_flex().flex_1().min_w_0().child(detail)),
             );
         }
-        for queued in queued_decisions {
-            let key = DecisionKey::from(queued);
+        for (index, queued) in queued_decisions.iter().enumerate() {
+            if AppState::later_starts(&queued_decisions, index) {
+                needs = needs.child(section("Later"));
+            }
+            let key = DecisionKey::from(*queued);
             let open = current.as_ref() == Some(&key);
             let (question, _) = question_parts(&queued.decision.question);
             let project = state.project_name(&key.space, queued.decision.project_id);

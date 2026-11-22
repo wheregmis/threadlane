@@ -10,17 +10,18 @@ use threadlane_core::link::{LinkError, Perform};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     Decision, DecisionKind, DecisionOption, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run,
-    RunStatus, StandingRule, TaskStatus, ToolCallBegin, ToolCallKey, Trust,
+    RunStatus, StandingRule, TaskReviewVerdict, TaskStatus, ToolCallBegin, ToolCallKey, Trust,
 };
 use threadlane_core::runtime::steps::{perform, tool_call as step};
 use threadlane_core::runtime::{WakeTarget, Waker};
 use threadlane_core::store::{DecisionStore, OrgStore, SessionStore, TaskStore};
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, Verdict};
+use threadlane_core::workspace::branch_task;
 
 use crate::context::format_time;
 use crate::dreaming;
 use crate::error::{link_error, link_to_tool, tool_error};
-use crate::gate::{self, GateInput};
+use crate::gate::{self, GateInput, OwnWork};
 use crate::link::LocalLink;
 use crate::memory;
 use crate::publish::approval_options;
@@ -128,18 +129,22 @@ impl LocalLink {
             _ => arguments,
         };
         let (verdict, new_work) = self
-            .gate(&run, &lane, &definition, arguments, &events)
+            .gate(&run, &lane, &definition, arguments, &events, None)
             .await?;
-        let asked = match verdict {
+        let mut asked = match verdict {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
-            _ if tool == REPORT_LIMITATION
-                && (dream.is_some() || arguments["require_approval"] == true) =>
-            {
+            _ if tool == REPORT_LIMITATION && arguments["require_approval"] == true => {
                 Some(Asked::You {
                     offers_rule: false,
                     proposal: false,
                 })
             }
+            // A dream's report is reviewed; no classifier answer opens its card.
+            _ if tool == REPORT_LIMITATION && dream.is_some() => Some(Asked::Review {
+                offers_rule: false,
+                proposal: false,
+                rule: None,
+            }),
             _ if dream.is_some() && memory::protected(tool, arguments) => Some(Asked::Dream),
             Verdict::Allow { rule: None } if dream.is_some() => None,
             _ if dream.is_some() && tool != REPORT_LIMITATION => {
@@ -149,9 +154,10 @@ impl LocalLink {
             }
             Verdict::Allow { rule } => rule.map(Asked::Rule),
             Verdict::AllowByDefault => Some(Asked::Default),
-            Verdict::Review { offers_rule } => Some(Asked::Review {
+            Verdict::Review { offers_rule, rule } => Some(Asked::Review {
                 offers_rule,
                 proposal: new_work,
+                rule,
             }),
             Verdict::Ask { offers_rule } => Some(Asked::You {
                 offers_rule,
@@ -178,6 +184,33 @@ impl LocalLink {
             ToolCallBegin::Finished(result) => return replay(result),
             ToolCallBegin::OutcomeUnknown => return Err(ToolError::OutcomeUnknown),
             ToolCallBegin::Perform => {}
+        }
+        // A requested task's own step is decided again on its own-work row.
+        // Read here, once the call is recorded, so a repeated call replays
+        // this outcome instead of reading GitHub again.
+        if dream.is_none()
+            && matches!(asked, Some(Asked::You { .. } | Asked::Review { .. }))
+            && let Some(own) = self.own_work(&lane, tool, arguments).await?
+        {
+            let (verdict, _) = self
+                .gate(&run, &lane, &definition, arguments, &events, Some(own))
+                .await?;
+            asked = match verdict {
+                Verdict::AllowByDefault => Some(Asked::Default),
+                Verdict::Allow { rule: Some(rule) } => Some(Asked::Rule(rule)),
+                Verdict::Review { offers_rule, rule } => Some(Asked::Review {
+                    offers_rule,
+                    proposal: false,
+                    rule,
+                }),
+                Verdict::Ask { offers_rule } => Some(Asked::You {
+                    offers_rule,
+                    proposal: false,
+                }),
+                // The row never allows without a record, nor blocks what the
+                // matrix let through; keep the matrix's answer.
+                Verdict::Allow { rule: None } | Verdict::Block { .. } => asked,
+            };
         }
         // A run that waits on you does nothing more (Plan.md §9.4), but each
         // further gated call of its turn still gets its own card (#675).
@@ -240,6 +273,97 @@ impl LocalLink {
         Ok(decisions.iter().any(|d| d.run_id == Some(run.id)))
     }
 
+    /// Whether the call is a step of work you requested on its own branch or
+    /// pull request (docs/autonomy-rework.md §3 stage A): the lane's task is
+    /// requested, and a pull request's head, in the same repository, is the
+    /// branch of that task or of another requested task of the project that
+    /// works in the repository. For `merge`, its checks pass when it is green
+    /// on GitHub and the head task's latest review approved exactly its head. `None` for anything else,
+    /// and when GitHub cannot say, so the matrix decides as before.
+    async fn own_work(
+        &self,
+        lane: &Lane,
+        tool: &str,
+        arguments: &Json,
+    ) -> Result<Option<OwnWork>, ToolError> {
+        let inner = &self.core.inner;
+        let db = &inner.db;
+        if !gate::own_work_tool(tool, arguments) {
+            return Ok(None);
+        }
+        let Some(task) = (match lane.task_id {
+            Some(id) => db.task(id).await.map_err(tool_error)?,
+            None => None,
+        })
+        .filter(|task| task.origin.is_requested()) else {
+            return Ok(None);
+        };
+        // Both push and open the task's own branch: only onto_task names another.
+        if matches!(tool, crate::PUBLISH_BRANCH | crate::OPEN_PULL_REQUEST) {
+            return Ok(Some(OwnWork { checks_pass: true }));
+        }
+        let (Some(name), Some(number)) = (
+            arguments["repository"].as_str(),
+            arguments["number"].as_u64(),
+        ) else {
+            return Ok(None);
+        };
+        let Some((repository, full_name)) = db
+            .repositories(lane.project_id)
+            .await
+            .map_err(tool_error)?
+            .into_iter()
+            .find(|repository| repository.name == name)
+            .and_then(|repository| {
+                let full_name = crate::publish::github_repository(&repository.remote_url)?;
+                Some((repository, full_name))
+            })
+        else {
+            return Ok(None);
+        };
+        let Some(github) = inner.github.as_deref() else {
+            return Ok(None);
+        };
+        let Ok(pull) = github.pull_request_state(&full_name, number).await else {
+            return Ok(None);
+        };
+        if !pull.head_repository.eq_ignore_ascii_case(&full_name) {
+            return Ok(None);
+        }
+        // The head's task: this one, or another requested task of the project
+        // working in this repository.
+        let head = match branch_task(&pull.head_ref) {
+            Some(id) if id == task.id => Some(task),
+            Some(id) => db.task(id).await.map_err(tool_error)?,
+            None => None,
+        };
+        let Some(head) = head.filter(|head| {
+            head.project_id == lane.project_id
+                && head.origin.is_requested()
+                && head.repositories.contains(&repository.id)
+        }) else {
+            return Ok(None);
+        };
+        // The merge is pinned to this head, so the approval must be for it too.
+        let checks_pass = tool != crate::MERGE
+            || (pull.green()
+                && arguments[threadlane_core::forge::EXPECTED_HEAD].as_str()
+                    == Some(pull.head_sha.as_str())
+                && db
+                    .task_reviews(head.id)
+                    .await
+                    .map_err(tool_error)?
+                    .last()
+                    .is_some_and(|review| {
+                        review.verdict == Some(TaskReviewVerdict::Approved)
+                            && review.revisions.iter().any(|revision| {
+                                revision.repository == repository.id
+                                    && revision.commit == pull.head_sha
+                            })
+                    }));
+        Ok(Some(OwnWork { checks_pass }))
+    }
+
     /// Gathers what governs the call and asks the gate (Plan.md §9.1).
     /// Also says whether the call starts work you did not request, which
     /// makes asking about it a proposal.
@@ -250,6 +374,7 @@ impl LocalLink {
         definition: &ToolDefinition,
         arguments: &Json,
         events: &[threadlane_core::model::Event],
+        own_work: Option<OwnWork>,
     ) -> Result<(Verdict, bool), ToolError> {
         let db = &self.core.inner.db;
         let project_id = lane.project_id;
@@ -271,15 +396,15 @@ impl LocalLink {
         let needs_rules = matches!(
             definition.tier,
             Tier::SharedReversible | Tier::SharedHardToUndo
-        ) || memory::protected(&definition.name, arguments);
-        let rules: Vec<StandingRule> = match run.agent_id.filter(|_| needs_rules) {
-            Some(agent) => db
+        ) || memory::protected(&definition.name, arguments)
+            || definition.name == CREATE_TASK;
+        // A rule covers every agent bound in its project, whichever it was
+        // created from.
+        let rules: Vec<StandingRule> = match binding.filter(|_| needs_rules) {
+            Some(_) => db
                 .standing_rules(Some(project_id))
                 .await
-                .map_err(tool_error)?
-                .into_iter()
-                .filter(|rule| rule.agent_id == agent)
-                .collect(),
+                .map_err(tool_error)?,
             None => Vec::new(),
         };
         let tainted = events.iter().any(|e| e.trust == Trust::External)
@@ -291,16 +416,17 @@ impl LocalLink {
             event.source == threadlane_store::TASK_REVIEW_SOURCE
                 && event.payload.get("submission").is_some()
         });
+        let ceiling = gate::ceiling(space.mode_ceiling, project.mode_ceiling);
         let mode = binding.map_or(
             if review { Mode::OnRequest } else { Mode::Off },
-            |binding| binding.mode,
+            |binding| binding.effective_mode(ceiling),
         );
         let new_work = if definition.name == CREATE_TASK
             && !timers::run_requested(db, run.id, lane.task_id)
                 .await
                 .map_err(tool_error)?
         {
-            // The assignee's mode; a name not bound here is refused before
+            // The assignee's effective mode; a name not bound here is refused before
             // any ask or effect, so the lead's own stands in for it.
             let assignee = match arguments.get("agent").and_then(Json::as_str) {
                 Some(name) => db
@@ -316,7 +442,7 @@ impl LocalLink {
                 bindings
                     .iter()
                     .find(|binding| Some(binding.agent_id) == assignee)
-                    .map_or(mode, |binding| binding.mode),
+                    .map_or(mode, |binding| binding.effective_mode(ceiling)),
             )
         } else {
             None
@@ -333,6 +459,7 @@ impl LocalLink {
             tainted,
             requested,
             new_work,
+            own_work,
         });
         Ok((verdict, new_work.is_some()))
     }
@@ -419,6 +546,16 @@ impl LocalLink {
                 .map_or("", |(_, details)| details);
             proposal.context = format!("You can apply a suggested change in Project instructions on the Memory tab.\n\n{details}").trim_end().to_owned();
         }
+        let offers_rule = matches!(
+            asked,
+            Asked::You {
+                offers_rule: true,
+                ..
+            } | Asked::Review {
+                offers_rule: true,
+                ..
+            }
+        );
         let (kind, options, recommended) = if tool == ASK_USER {
             (DecisionKind::Input, question(arguments)?.1, None)
         } else if matches!(asked, Asked::Dream) {
@@ -434,7 +571,11 @@ impl LocalLink {
             asked,
             Asked::You { proposal: true, .. } | Asked::Review { proposal: true, .. }
         ) {
-            (DecisionKind::Proposal, crate::proposal::options(), Some(0))
+            (
+                DecisionKind::Proposal,
+                crate::proposal::options(offers_rule),
+                Some(0),
+            )
         } else {
             (DecisionKind::Approval, approval_options(), Some(0))
         };
@@ -454,22 +595,15 @@ impl LocalLink {
             context: proposal.context,
             options,
             recommended,
-            offers_standing_rule: matches!(
-                asked,
-                Asked::You {
-                    offers_rule: true,
-                    ..
-                } | Asked::Review {
-                    offers_rule: true,
-                    ..
-                }
-            ),
+            // A proposal offers its rule as an option of its own.
+            offers_standing_rule: offers_rule && kind != DecisionKind::Proposal,
             expires_at: (!matches!(asked, Asked::Rule(_) | Asked::Default))
                 .then(|| now + inner.settings.decision_expiry),
             created_at: now,
+            urgent: kind != DecisionKind::Proposal && tool != REPORT_LIMITATION,
         };
         let authorized = match asked {
-            Asked::Review { .. } => {
+            Asked::Review { rule, .. } => {
                 let (id, reason) = self.classify(lease, run, &decision).await?;
                 if reason.is_some() {
                     decision.offers_standing_rule = false;
@@ -477,7 +611,7 @@ impl LocalLink {
                 }
                 inner
                     .db
-                    .reviewed_decision(lease, &id, &decision, reason.as_deref())
+                    .reviewed_decision(lease, &id, &decision, reason.as_deref(), rule)
                     .await
                     .map(|()| false)
             }
@@ -824,6 +958,8 @@ enum Asked {
     Review {
         offers_rule: bool,
         proposal: bool,
+        /// The tier 3 standing rule that had it reviewed instead of asked.
+        rule: Option<StandingRuleId>,
     },
     You {
         offers_rule: bool,

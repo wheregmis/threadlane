@@ -150,7 +150,7 @@ fn decode_binding(row: &Row) -> StoreResult<Binding> {
         id: c.id(0)?,
         project_id: c.id(1)?,
         agent_id: c.id(2)?,
-        mode: c.parse(3)?,
+        mode: c.opt_parse(3)?,
         is_lead: c.bool(4)?,
         models: c.json(5)?,
         max_parallel: c.u32(6)?,
@@ -550,12 +550,12 @@ impl OrgStore for HubDb {
         Ok(created)
     }
 
-    async fn set_binding_mode(&self, id: BindingId, mode: Mode) -> StoreResult<Binding> {
+    async fn set_binding_mode(&self, id: BindingId, mode: Option<Mode>) -> StoreResult<Binding> {
         let tx = self.db.begin().await?;
         exec(
             tx.conn(),
             "UPDATE bindings SET mode = ?2 WHERE id = ?1",
-            params![id.get(), mode.as_str()],
+            params![id.get(), mode.map(Mode::as_str)],
         )
         .await?;
         let updated = query_opt(
@@ -694,7 +694,7 @@ pub(crate) async fn insert_binding_in(
         params![
             binding.project_id.get(),
             binding.agent_id.get(),
-            binding.mode.as_str(),
+            binding.mode.map(Mode::as_str),
             binding.is_lead,
             i64::from(binding.max_parallel),
         ],

@@ -1084,9 +1084,9 @@ impl ClientCore {
         }
     }
 
-    /// Sets an agent's mode in a project, binding it there if needed.
-    /// `space: None` means the only paired hub; `project: None` means the
-    /// General project.
+    /// Sets an agent's mode in a project, binding it there if needed; a
+    /// `None` mode follows the project. `space: None` means the only paired
+    /// hub; `project: None` means the General project.
     ///
     /// # Errors
     ///
@@ -1096,7 +1096,7 @@ impl ClientCore {
         space: Option<&str>,
         project: Option<&str>,
         agent: &str,
-        mode: Mode,
+        mode: Option<Mode>,
     ) -> Result<BindingSummary, ClientError> {
         let request = OrgRequest::SetMode {
             project: project.map(str::to_owned),

@@ -546,6 +546,7 @@ async fn a_stored_call_that_no_longer_matches_its_hash_performs_nothing() {
                     offers_standing_rule: false,
                     expires_at: None,
                     created_at: sim.clock().now(),
+                    urgent: true,
                 },
             )
             .await

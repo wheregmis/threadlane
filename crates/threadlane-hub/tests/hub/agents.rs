@@ -275,7 +275,7 @@ async fn delete_refuses_the_lead_a_wrong_name_and_open_tasks() {
         .bind(&NewBinding {
             project_id: general.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })
@@ -472,7 +472,7 @@ async fn a_task_run_falling_back_from_codex_keeps_only_claude_s_skills() {
         .bind(&NewBinding {
             project_id: general.id,
             agent_id: agent.id,
-            mode: Mode::OnRequest,
+            mode: Some(Mode::OnRequest),
             is_lead: false,
             max_parallel: 1,
         })

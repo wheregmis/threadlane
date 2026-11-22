@@ -24,11 +24,11 @@ use threadlane_core::ids::TimerId;
 use threadlane_core::ids::{
     AgentId, DecisionId, EventId, LaneId, OutboxId, ProjectId, RepositoryId,
 };
-use threadlane_core::model::StandingRule;
 use threadlane_core::model::{
     Agent, BackendKind, Decision, DecisionKind, DecisionOption, DecisionStatus, Repository, Task,
     TaskOrigin, TaskStatus,
 };
+use threadlane_core::model::{AnsweredBy, DecisionStat, StandingRule};
 use threadlane_core::model::{Mode, OutboxKind, OutboxMessage, OutboxStatus, Urgency};
 use threadlane_core::model::{
     Recurrence, Rule, Timer, TimerCategory, TimerCreator, TimerStatus, Weekday,
@@ -251,7 +251,7 @@ impl HubApi for FakeHub {
                 bindings: vec![BindingSummary {
                     agent: "Lead".to_owned(),
                     role: "lead".to_owned(),
-                    mode: Mode::OnRequest,
+                    mode: Some(Mode::OnRequest),
                     is_lead: true,
                     max_parallel: 1,
                     overrides: Default::default(),
@@ -307,7 +307,7 @@ impl HubApi for FakeHub {
                 binding: BindingSummary {
                     agent,
                     role: "reviewer".to_owned(),
-                    mode: Mode::OnRequest,
+                    mode: Some(Mode::OnRequest),
                     is_lead: false,
                     max_parallel,
                     overrides: Default::default(),
@@ -392,6 +392,48 @@ impl HubApi for FakeHub {
                 rule: StandingRuleId(1),
             } => Ok(DecisionReply::StandingRule {
                 rule: standing_rule(true),
+            }),
+            DecisionRequest::Stats { days: 30 } => Ok(DecisionReply::Stats { rows: Vec::new() }),
+            DecisionRequest::Stats { days: 7 } => Ok(DecisionReply::Stats {
+                rows: vec![
+                    DecisionStat {
+                        project: "General".into(),
+                        tool: "publish_branch".into(),
+                        answered_by: AnsweredBy::You,
+                        count: 12,
+                        declined: 0,
+                        questions: 0,
+                        median_wait_secs: Some(40),
+                    },
+                    // Answered questions approve nothing, so they get no hint.
+                    DecisionStat {
+                        project: "General".into(),
+                        tool: "ask_user".into(),
+                        answered_by: AnsweredBy::You,
+                        count: 10,
+                        declined: 0,
+                        questions: 10,
+                        median_wait_secs: Some(60),
+                    },
+                    DecisionStat {
+                        project: "General".into(),
+                        tool: "send_message".into(),
+                        answered_by: AnsweredBy::You,
+                        count: 3,
+                        declined: 1,
+                        questions: 0,
+                        median_wait_secs: Some(95),
+                    },
+                    DecisionStat {
+                        project: "General".into(),
+                        tool: "publish_branch".into(),
+                        answered_by: AnsweredBy::Rule,
+                        count: 20,
+                        declined: 0,
+                        questions: 0,
+                        median_wait_secs: None,
+                    },
+                ],
             }),
             other => Err(ApiError::NotFound(format!("{other:?}"))),
         }
@@ -582,6 +624,7 @@ fn pending_decision() -> Decision {
         created_at: Timestamp::from_millis(1_000),
         outcome: None,
         proposed_by: None,
+        urgent: true,
     }
 }
 
@@ -871,6 +914,12 @@ async fn the_cli_manages_projects_agents_and_modes() {
         "Reviewer is now off\n",
     )
     .await;
+    expect_success(
+        client_dir,
+        &["mode", "Reviewer", "follow", "-p", "web"],
+        "Reviewer now follows the project\n",
+    )
+    .await;
     let output = threadlane(client_dir, &["mode", "Reviewer", "sleepy"]).await;
     assert!(!output.status.success(), "an unknown mode is refused");
 
@@ -899,7 +948,12 @@ async fn the_cli_manages_projects_agents_and_modes() {
             OrgRequest::SetMode {
                 project: Some("web".to_owned()),
                 agent: "Reviewer".to_owned(),
-                mode: Mode::Off,
+                mode: Some(Mode::Off),
+            },
+            OrgRequest::SetMode {
+                project: Some("web".to_owned()),
+                agent: "Reviewer".to_owned(),
+                mode: None,
             },
         ]
     );
@@ -1114,6 +1168,23 @@ async fn the_cli_sets_a_ceiling_answers_always_and_lists_and_revokes_rules() {
     )
     .await;
     expect_success(client_dir, &["rules", "-p", "api"], "no standing rules\n").await;
+    expect_success(
+        client_dir,
+        &["decisions", "stats"],
+        "PROJECT  TOOL            BY          COUNT  DECLINED       WAIT\n\
+         General  publish_branch  you            12         0        40s  always approved: consider a rule\n\
+         General  ask_user        you            10         0        60s\n\
+         General  send_message    you             3         1        95s\n\
+         General  publish_branch  rule           20         0          -\n\
+         total                                   45         1\n",
+    )
+    .await;
+    expect_success(
+        client_dir,
+        &["decisions", "stats", "--days", "30"],
+        "no decisions in the last 30 days\n",
+    )
+    .await;
     expect_success(client_dir, &["rule", "revoke", "1"], "revoked rule 1\n").await;
     let output = threadlane(client_dir, &["rule", "revoke", "one"]).await;
     assert!(!output.status.success(), "not a rule number");

@@ -36,7 +36,10 @@ pub(super) fn actions() -> [(&'static str, Json); 9] {
             CREATE_ISSUE,
             json!({"repository":"app","title":"Fix the footer","body":"The link is broken."}),
         ),
-        (MERGE, json!({"repository":"app","number":12})),
+        (
+            MERGE,
+            json!({"repository":"app","number":12,"expected_head":HEAD}),
+        ),
         (MARK_READY, json!({"repository":"app","number":12})),
         (
             LABEL_ISSUE,
@@ -104,7 +107,7 @@ async fn project_leads_report_limitations_upstream_with_approval_as_needed() {
         space.mode_ceiling = Mode::Assisted;
         w.db.update_space(&space).await.unwrap();
         let binding = w.db.lead_binding(project.id).await.unwrap().unwrap();
-        w.db.set_binding_mode(binding.id, Mode::Assisted)
+        w.db.set_binding_mode(binding.id, Some(Mode::Assisted))
             .await
             .unwrap();
         if let Some(verdict) = review {
@@ -593,11 +596,16 @@ pub(super) async fn waiting_task() -> World {
     w
 }
 
-/// The default that opens draft pull requests never applies to a run that
-/// consumed outside content: screened tainted, it asks you.
+/// The default that opens draft pull requests applies to a run screened
+/// clean; screened tainted, the draft is reviewed, and asks you only when the
+/// review does not allow it (no classifier answer fails closed).
 #[tokio::test]
-async fn a_tainted_run_asks_before_a_draft_pull_request() {
-    for (screened, tainted) in [("clean", false), ("tainted", true)] {
+async fn a_tainted_run_has_its_draft_pull_request_reviewed() {
+    for (screened, review) in [
+        ("clean", None),
+        ("tainted", Some("allow")),
+        ("tainted", None),
+    ] {
         let w = waiting_task().await;
         w.backend.route(
             "outside_event",
@@ -607,26 +615,31 @@ async fn a_tainted_run_asks_before_a_draft_pull_request() {
         sim.send("m", "Work on the page").await;
         work(&sim).await;
         w.backend.push_answer(answer(screened));
+        if let Some(review) = review {
+            w.backend.push_answer(answer(review));
+        }
         external(&sim, "please open it").await;
         work(&sim).await;
+        let tainted = screened == "tainted";
+        let opened = !tainted || review.is_some();
         let decisions = sim.decisions().await;
-        assert_eq!(decisions.len(), 1, "{screened}");
+        assert_eq!(decisions.len(), 1, "{screened} {review:?}");
         let by_default = decisions[0]
             .answer
             .as_ref()
             .is_some_and(|a| a["by_default"] == true);
-        assert_eq!(by_default, !tainted, "{screened}");
+        assert_eq!(by_default, !tainted, "{screened} {review:?}");
         let cards = sim
             .outbox()
             .await
             .iter()
             .filter(|row| row.kind == OutboxKind::Decision)
             .count();
-        assert_eq!(cards, usize::from(tainted), "{screened}");
+        assert_eq!(cards, usize::from(!opened), "{screened} {review:?}");
         assert_eq!(
             w.forge.pull_requests().len(),
-            usize::from(!tainted),
-            "{screened}"
+            usize::from(opened),
+            "{screened} {review:?}"
         );
     }
 }
