@@ -312,7 +312,8 @@ impl GitForge {
     }
 
     /// Merges `pulls` in order, each only if GitHub still sees its pinned
-    /// head, and stops at the first that fails, saying which merged.
+    /// head, and stops at the first that fails or that GitHub does not then
+    /// report merged, saying which merged.
     async fn merge_batch(
         &self,
         repo: &str,
@@ -333,6 +334,30 @@ impl GitForge {
                     ]),
                 )
                 .await;
+            // With a merge queue or auto-merge, `gh pr merge` succeeds having only queued the PR.
+            let merge = match merge {
+                Ok(_) => self
+                    .gh(
+                        Path::new("."),
+                        args(&[
+                            "pr",
+                            "view",
+                            &number.to_string(),
+                            "--json=state",
+                            "--jq=.state",
+                            &format!("--repo={repo}"),
+                        ]),
+                    )
+                    .await
+                    .and_then(|state| match state.trim() {
+                        "MERGED" => Ok(()),
+                        state => Err(ForgeError(format!(
+                            "GitHub reports it {state} after the merge, so it was queued \
+                             (merge queue or auto-merge), not merged"
+                        ))),
+                    }),
+                Err(error) => Err(error),
+            };
             if let Err(error) = merge {
                 let done = if merged.is_empty() {
                     "none merged".to_owned()
