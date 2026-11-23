@@ -39,6 +39,8 @@ pub struct GitForge {
     git: PathBuf,
     /// The `gh` user's login, looked up once; `None` if that failed.
     login: Arc<OnceCell<Option<String>>>,
+    /// The wait between polls of an asynchronous merge.
+    merge_poll: Duration,
 }
 
 impl Default for GitForge {
@@ -56,7 +58,15 @@ impl GitForge {
             gh: program.into(),
             git: "git".into(),
             login: Arc::default(),
+            merge_poll: Duration::from_secs(2),
         }
+    }
+
+    /// Polls an asynchronous merge every `interval`.
+    #[must_use]
+    pub fn with_merge_poll(mut self, interval: Duration) -> Self {
+        self.merge_poll = interval;
+        self
     }
 
     /// Deletes branches with `git` from `program`.
@@ -337,11 +347,14 @@ impl GitForge {
     /// Merges PR `number` of `repo` (`host/owner/name`) only at `head`. A PR in a
     /// GitHub stack refuses `gh pr merge`, so it goes through the asynchronous
     /// merge REST API, pinned to the same head, and waits for its result.
+    /// That API also merges the open PRs below it in the stack, so in a
+    /// `batch` it is refused while one is open: those would skip their checks.
     async fn merge_pull(
         &self,
         repo: &str,
         number: std::num::NonZeroU64,
         head: &str,
+        batch: bool,
     ) -> Result<String, ForgeError> {
         let error = match self
             .gh(
@@ -360,6 +373,38 @@ impl GitForge {
             Err(error) if error.0.contains("part of a stack") => error,
             result => return result,
         };
+        if batch {
+            let pr = |argv: &[&str]| self.gh(Path::new("."), args(argv));
+            let repo_flag = format!("--repo={repo}");
+            let base = pr(&[
+                "pr",
+                "view",
+                &number.to_string(),
+                "--json=baseRefName",
+                "--jq=.baseRefName",
+                &repo_flag,
+            ])
+            .await?;
+            let below = pr(&[
+                "pr",
+                "list",
+                &format!("--head={}", base.trim()),
+                "--state=open",
+                "--json=number",
+                "--jq=.[].number",
+                &repo_flag,
+            ])
+            .await?;
+            let below: Vec<_> = below.split_whitespace().map(|n| format!("#{n}")).collect();
+            if !below.is_empty() {
+                return Err(ForgeError(format!(
+                    "{}; the asynchronous merge would also merge open downstack PR {} without \
+                     the batch's head checks, so merge the stack from the bottom",
+                    error.0,
+                    below.join(", ")
+                )));
+            }
+        }
         let (host, name) = repo
             .split_once('/')
             .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
@@ -391,7 +436,7 @@ impl GitForge {
                 ))
             })?;
         // shortcut: polls for about a minute, then reports it still pending; raise if stacks merge slower.
-        for _ in 0..30 {
+        for poll in 0..=30 {
             let result: Json = serde_json::from_str(&output)
                 .map_err(|error| ForgeError(format!("invalid merge response: {error}")))?;
             let message = result["details"]["message"].as_str().unwrap_or_default();
@@ -407,7 +452,10 @@ impl GitForge {
                     let uuid = result["details"]["uuid"].as_str().ok_or_else(|| {
                         ForgeError("the pending merge response has no uuid".into())
                     })?;
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if poll == 30 {
+                        break;
+                    }
+                    tokio::time::sleep(self.merge_poll).await;
                     output = api("GET", &[], format!("{endpoint}/{uuid}")).await?;
                 }
                 status => {
@@ -433,7 +481,7 @@ impl GitForge {
     ) -> Result<String, ForgeError> {
         let mut merged = Vec::new();
         for (number, head) in pulls {
-            let merge = self.merge_pull(repo, *number, head).await;
+            let merge = self.merge_pull(repo, *number, head, true).await;
             // With a merge queue or auto-merge, `gh pr merge` succeeds having only queued the PR.
             let merge = match merge {
                 Ok(_) => self
@@ -1002,7 +1050,7 @@ impl Forge for GitForge {
             RepositoryAction::Merge {
                 number,
                 expected_head,
-            } => return self.merge_pull(&repo, *number, expected_head).await,
+            } => return self.merge_pull(&repo, *number, expected_head, false).await,
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
             RepositoryAction::EditPullRequest {
                 number,

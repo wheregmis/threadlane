@@ -140,6 +140,8 @@ impl FakeGh {
                touch {record}/created\n\
                echo 'Creating draft pull request for threadlane/T-0001 into main'\n\
                echo 'https://github.test/me/app/pull/7'\n\
+             elif [ \"$1 $2\" = \"pr list\" ] && [ -f {record}/downstack ]; then\n\
+               cat {record}/downstack\n\
              elif [ \"$1 $2\" = \"pr list\" ] && [ -f {record}/created ]; then\n\
                echo 'https://github.test/me/app/pull/7'\n\
              elif [ \"$1 $2 $3\" = \"pr merge 13\" ]; then\n\
@@ -159,7 +161,10 @@ impl FakeGh {
              elif [ \"$3\" = graphql ] && [ -f {record}/thread.json ]; then\n\
                cat {record}/thread.json\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /pulls/; then\n\
-               cat {record}/pull.json\n\
+               n=$(cat {record}/polls 2>/dev/null || echo 0); echo $((n + 1)) > {record}/polls\n\
+               if [ \"$n\" -lt \"$(cat {record}/pending_polls 2>/dev/null || echo 0)\" ]; then\n\
+                 echo '{{\"status\":\"pending\",\"details\":{{\"uuid\":\"u1\"}}}}'\n\
+               else cat {record}/pull.json; fi\n\
              elif [ \"$1 $2\" = \"api user\" ]; then\n\
                {api_user}\n\
              elif [ \"$1\" = api ]; then\n\
@@ -1200,5 +1205,67 @@ async fn a_stacked_pull_request_merges_through_the_async_api_at_the_pinned_head(
                 "repos/acme/app/pulls/17/merge-async/u1".into(),
             ],
         ]
+    );
+}
+
+#[tokio::test]
+async fn an_async_merge_reported_merged_on_the_last_poll_is_merged() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program()).with_merge_poll(std::time::Duration::ZERO);
+    std::fs::write(gh.dir.path().join("pending_polls"), "29").unwrap();
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        r#"{"status":"merged","details":{"sha":"m3rg3"}}"#,
+    )
+    .unwrap();
+    let report = forge
+        .apply(
+            "https://github.test/acme/app.git",
+            &RepositoryAction::Merge {
+                number: 17.try_into().unwrap(),
+                expected_head: "a".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(report.contains("merge commit m3rg3"), "{report}");
+    let polls = std::fs::read_to_string(gh.dir.path().join("polls")).unwrap();
+    assert_eq!(
+        polls.trim(),
+        "30",
+        "the merged result came on the final poll"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_refuses_the_async_merge_while_a_downstack_pull_request_is_open() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        r#"{"status":"merged","details":{"sha":"m3rg3"}}"#,
+    )
+    .unwrap();
+    let batch = RepositoryAction::MergeBatch {
+        pulls: vec![(17.try_into().unwrap(), "a".repeat(40))],
+    };
+    let remote = "https://github.test/acme/app.git";
+    let report = forge.apply(remote, &batch).await.unwrap();
+    assert!(
+        report.contains("merged #17"),
+        "with nothing open below: {report}"
+    );
+
+    std::fs::write(gh.dir.path().join("downstack"), "16\n").unwrap();
+    let before = gh.invocations().len();
+    let error = forge.apply(remote, &batch).await.unwrap_err();
+    assert!(error.0.contains("open downstack PR #16"), "{error}");
+    assert!(error.0.contains("none merged"), "{error}");
+    let calls = gh.invocations();
+    assert!(
+        !calls[before..].iter().any(|call| call[0] == "api"),
+        "the asynchronous merge is not attempted: {calls:?}"
     );
 }
