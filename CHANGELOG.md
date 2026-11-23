@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.1.57](https://github.com/wheregmis/threadlane/compare/v0.1.56...v0.1.57) (2026-11-23)
+
+
+### Features
+
+* **client:** add decisions stats ([b63e691](https://github.com/wheregmis/threadlane/commit/b63e6914b427dfc0df12861a64bc547ad9bf3e6f))
+* decline review threads with a reply, and diff PR reviews against the PR's base ([0479807](https://github.com/wheregmis/threadlane/commit/0479807006f0499b3f480d89850839bc6d26deba))
+* **desktop,hub:** live execution feed, quick-create and direct board ([d1a6361](https://github.com/wheregmis/threadlane/commit/d1a6361203985c42b0f3b3962e9c728d2cf494fd))
+* **desktop:** [@agent](https://github.com/agent) dispatch and #task picker in the composer ([a3fe3a3](https://github.com/wheregmis/threadlane/commit/a3fe3a3a571456035c5cfbe34bca9c0ba8a67b29))
+* **desktop:** [@agent](https://github.com/agent) dispatch and #task picker in the composer ([681e352](https://github.com/wheregmis/threadlane/commit/681e352272c8b554864d893f22fc55261382e845))
+* **desktop:** PR/CI strip and full-width in-place review ([72e6a03](https://github.com/wheregmis/threadlane/commit/72e6a03bc517bcb1fde431739bd602db497e3e7c))
+* **gate:** run read-only github_cli checks without an approval card ([c734426](https://github.com/wheregmis/threadlane/commit/c7344267ac8f2b9c1773b0d1d91d1b6e1a338e86))
+* **gate:** run read-only github_cli checks without an approval card ([0b58ba8](https://github.com/wheregmis/threadlane/commit/0b58ba8e3f08a2863883db4fd296af7874a78d02)), closes [#706](https://github.com/wheregmis/threadlane/issues/706)
+* give each project one mode that its agents follow ([ded087c](https://github.com/wheregmis/threadlane/commit/ded087c850ec54fd134daaebc1f3b25676920772))
+* **hub,runner:** attach_image forge tool posts a local screenshot on a PR ([239a333](https://github.com/wheregmis/threadlane/commit/239a3337a2cf731487d889f3fc6a1a7855ab912c))
+* **hub,runner:** attach_image forge tool posts a local screenshot on a PR ([#735](https://github.com/wheregmis/threadlane/issues/735)) ([82ad102](https://github.com/wheregmis/threadlane/commit/82ad102d037eb47e073a6c5e3fd518bfdeb23d32))
+* **hub:** count another requested task's pull request as own work ([d3f34f2](https://github.com/wheregmis/threadlane/commit/d3f34f20f0b7ee672bf0e0a02ecd985dc53b67d8))
+* **hub:** finish_review checks partial / not_applicable with a required note ([a625ee6](https://github.com/wheregmis/threadlane/commit/a625ee6eadbb4f0a354dbd0d8395eb5a1faa7928))
+* **hub:** finish_review checks partial / not_applicable with a required note ([c089553](https://github.com/wheregmis/threadlane/commit/c089553d83c9a2088b691d0d19740e1fad316776)), closes [#690](https://github.com/wheregmis/threadlane/issues/690)
+* **hub:** let a requested task's own steps through the gate ([ab06864](https://github.com/wheregmis/threadlane/commit/ab068645165b9c851fa17ede9a95d3955b3d2432))
+* **hub:** let task runs list tasks and the lead view issues and PRs ([e2cbf00](https://github.com/wheregmis/threadlane/commit/e2cbf002aa1b1fc23a63d1add80866c15238decc)), closes [#712](https://github.com/wheregmis/threadlane/issues/712) [#714](https://github.com/wheregmis/threadlane/issues/714)
+* **hub:** live pull request and CI status for tasks ([f2f2358](https://github.com/wheregmis/threadlane/commit/f2f23583345d85c8745e6827f0cd64a0f6a57bad))
+* **hub:** make standing rules cover the whole project ([30743f2](https://github.com/wheregmis/threadlane/commit/30743f2e2b01952fafddba7bb1e06c9af8453393))
+* **hub:** review a tainted run's own draft instead of asking ([9a8aa8c](https://github.com/wheregmis/threadlane/commit/9a8aa8c781bad5e47d8c68894546f1d239df0a0a))
+* **hub:** task runs list tasks; lead views issues and PRs read-only ([6f72517](https://github.com/wheregmis/threadlane/commit/6f72517d25512ad867e1327ae07f1b09d0b67d0c))
+* one-line installer and README refresh ([666d711](https://github.com/wheregmis/threadlane/commit/666d7112ed87680a890313b3e351e88cb361a0c1))
+* send proposals and limitation reports to a Later list ([1aba834](https://github.com/wheregmis/threadlane/commit/1aba834943da415dfec7ad14f923d91d43606d71))
+* **skills:** add composable space skills library attachable to agents and tasks ([2377090](https://github.com/wheregmis/threadlane/commit/2377090b75aecfb17b5f885da668076bd5218a11))
+* **store,hub:** add tiered task compaction and pruning engine ([de88c1b](https://github.com/wheregmis/threadlane/commit/de88c1b0320846c3ca59820bb8862ea376ae71c1))
+
+
+### Bug Fixes
+
+* **desktop,hub:** address [#729](https://github.com/wheregmis/threadlane/issues/729) review findings ([4fae587](https://github.com/wheregmis/threadlane/commit/4fae587eb46ff76ca2bb868768ebede1fdc13374))
+* **desktop:** dispatch only picked @ chips, block images, retry only unstarted agents ([5c1a715](https://github.com/wheregmis/threadlane/commit/5c1a71530131db7af0db1e4df062e817187c7518))
+* **desktop:** dispatch only picked @ chips, block images, retry only unstarted agents ([ae074ba](https://github.com/wheregmis/threadlane/commit/ae074ba7b830b2625b0a81360e8559bf91a0f2db))
+* **desktop:** tie [@agent](https://github.com/agent) picks to their chip and reuse each dispatch's request key ([70584d6](https://github.com/wheregmis/threadlane/commit/70584d6e6a15fda54a4c0d777f59c4212cf87574))
+* don't point PR reviews at origin/&lt;base&gt; when fetching it failed ([fd96e3e](https://github.com/wheregmis/threadlane/commit/fd96e3e323b0fa09709c2acca546cc6b4b2dda6b))
+* **hub:** attach images a lead message names by path ([#733](https://github.com/wheregmis/threadlane/issues/733)) ([c88321b](https://github.com/wheregmis/threadlane/commit/c88321b9d13e6ba2014b8ff7dbfc4ec7faa44ebf))
+* **hub:** budget, validate and batch lead path images ([#733](https://github.com/wheregmis/threadlane/issues/733)) ([49daa2a](https://github.com/wheregmis/threadlane/commit/49daa2a33b7f19cc4d2fc3d8e293d209bba84c8f))
+* **hub:** keep saving progress while an approval waits ([b307492](https://github.com/wheregmis/threadlane/commit/b307492a7bfa90dbfdce113ea7f0be0c36a02287))
+* **hub:** keep saving progress while an approval waits ([36eea95](https://github.com/wheregmis/threadlane/commit/36eea955acf3e2376d0c4ab72083db3703c2d875)), closes [#736](https://github.com/wheregmis/threadlane/issues/736)
+* **hub:** let Always allow also answer matching cards already waiting ([cc6731f](https://github.com/wheregmis/threadlane/commit/cc6731fb9fe63bf62be9ddd34d3e1cc910304bb7))
+* **hub:** let the lead see images a message names by path ([7473244](https://github.com/wheregmis/threadlane/commit/7473244e696a5bd29a7652ef1f9346f038be0300))
+* **hub:** list project_sessions tasks compactly so a page holds 50+ ([e7b04bf](https://github.com/wheregmis/threadlane/commit/e7b04bf52550d9ea333687c9b9cec70a6215fad8))
+* **hub:** pin own-work merges to the approved head and read every check run ([5d31b68](https://github.com/wheregmis/threadlane/commit/5d31b689a8fb52dd92f06200415f22b440445abd))
+* **hub:** pin own-work merges to the approved head and refuse partial check pages ([cd093f1](https://github.com/wheregmis/threadlane/commit/cd093f14b97c77d8aad0e794b72c8d6ee921781e))
+* **hub:** pr_review_status accepts owner/repo and PR URLs ([#704](https://github.com/wheregmis/threadlane/issues/704)) ([3f332a7](https://github.com/wheregmis/threadlane/commit/3f332a7d8097d360c16bcab4400c7a3342b274e3))
+* **hub:** remove an ended task's worktrees once nothing in them would be lost ([b0ab879](https://github.com/wheregmis/threadlane/commit/b0ab87985a8e3ecfb46392495831d2829332fe7e))
+* **hub:** resolve owner/repo and PR URLs in pr_review targets ([#704](https://github.com/wheregmis/threadlane/issues/704)) ([07764ae](https://github.com/wheregmis/threadlane/commit/07764ae3eccba54c574115bedbae32300bd37131))
+* **hub:** retry an approved merge refused only because the base moved ([9d7cd8e](https://github.com/wheregmis/threadlane/commit/9d7cd8e8257f9abac6d820c3174d25d960dee1b7))
+* **hub:** run ungated calls made after a gated call in the same turn ([96ea105](https://github.com/wheregmis/threadlane/commit/96ea10512ed577c22e34452ade7afe5ede6b9391))
+* **hub:** run ungated calls made after a gated call in the same turn ([66ecbb3](https://github.com/wheregmis/threadlane/commit/66ecbb36bef0e75061ddb86eaa3d3777c536fc5a)), closes [#718](https://github.com/wheregmis/threadlane/issues/718)
+* **memory:** stop preloading and auto-indexing task progress files ([72e3fef](https://github.com/wheregmis/threadlane/commit/72e3fef235c661bca8d22d5c4b32245ff805661b))
+* refuse runs of ended tasks and see changes in ignore=all submodules ([6a62fd1](https://github.com/wheregmis/threadlane/commit/6a62fd1ff05e1dc2f4828553208673c082d2f995))
+* **runner,hub:** merge main into shared task branches instead of rebasing ([#730](https://github.com/wheregmis/threadlane/issues/730)) ([59efc5c](https://github.com/wheregmis/threadlane/commit/59efc5c6b99b6d5ef0f265b54464fec62c7b5da4))
+* **runner:** keep untracked files out of a timed-out run's commit ([8e3ccbe](https://github.com/wheregmis/threadlane/commit/8e3ccbe448ab0cbc62effc1f767ee5b93c192336))
+* **runner:** keep untracked files out of a timed-out run's commit ([6a011e8](https://github.com/wheregmis/threadlane/commit/6a011e82138e9b06e859fb8546f49c014c34411c)), closes [#691](https://github.com/wheregmis/threadlane/issues/691)
+* **runner:** keep worktrees with hidden untracked or stray dot files ([6dc3a8e](https://github.com/wheregmis/threadlane/commit/6dc3a8e3030d333824e53766b6e86d3098760d90))
+* **runner:** merge stacked PRs through the async merge REST API ([5b106ed](https://github.com/wheregmis/threadlane/commit/5b106ed946e61c72a208dc06d8ee4112e09dd944))
+* **runner:** merge stacked PRs through the async merge REST API ([#740](https://github.com/wheregmis/threadlane/issues/740)) ([c0c15aa](https://github.com/wheregmis/threadlane/commit/c0c15aa5d603461ca74926bcbad23455fb42cdcd))
+* **runner:** parse the final merge poll and refuse a batch's async merge over open downstack PRs ([cabc2e5](https://github.com/wheregmis/threadlane/commit/cabc2e598432b573e60ec12c68d968f8c3264663))
+* **runner:** tell the resumed run what an unfinished checkpoint left out ([7f63cee](https://github.com/wheregmis/threadlane/commit/7f63ceea556765db07323bc5627198d4ab642a51)), closes [#691](https://github.com/wheregmis/threadlane/issues/691)
+* **skills:** address CodeRabbit findings on [#732](https://github.com/wheregmis/threadlane/issues/732) ([1d68883](https://github.com/wheregmis/threadlane/commit/1d68883e2e4ce43d016ac7a4f160ea6a9e1c6ac3))
+* **skills:** make task mentions atomic and ignore stale skill loads ([6321bc9](https://github.com/wheregmis/threadlane/commit/6321bc9e3a03d7e206f157cd80f0a63bc9dce158))
+* **store:** leave cancelled decisions out of stats, no rule hint for questions ([60c519f](https://github.com/wheregmis/threadlane/commit/60c519f2d65f9507218d6db3aeefae7fa728832b))
+
 ## [0.1.56](https://github.com/wheregmis/threadlane/compare/v0.1.55...v0.1.56) (2026-11-21)
 
 
