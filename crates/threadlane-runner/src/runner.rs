@@ -1174,10 +1174,10 @@ impl Inner {
         saved.map_err(|error| error.to_string())
     }
 
-    /// Rebases a task's branches onto their default branches where that
-    /// rebases cleanly (docs/merge-help.md decision 3), and returns what to
+    /// Brings the default branches into a task's branches where that is
+    /// clean (a merge once a branch is shared, #730), and returns what to
     /// tell the session about those it left as they were. A failure costs
-    /// only the rebase: the run starts anyway.
+    /// only that: the run starts anyway.
     async fn bring_in_base(&self, assignment: &RunAssignment) -> String {
         if assignment.review.is_some() {
             return String::new();
@@ -1634,8 +1634,8 @@ fn conflict_note(check: &MergeCheck) -> String {
     }
     format!(
         "\n\nThe task branch in {repository} conflicts with {branch} at {base}, in: {files}. \
-         It was not rebased. Rebase it onto {base} (already fetched as origin/{branch}) and \
-         resolve the conflicts during this run.",
+         It was left as it was. Merge {base} into it (git merge origin/{branch}, already \
+         fetched; do not rebase) and resolve the conflicts during this run.",
         repository = check.repository,
         branch = check.branch,
         base = check.base,
@@ -1645,7 +1645,7 @@ fn conflict_note(check: &MergeCheck) -> String {
 
 /// The branch a stored publish call pushes to: the task's own, or for
 /// `publish_branch` with `onto_task` that earlier task's.
-fn publish_target(
+pub(crate) fn publish_target(
     task: threadlane_core::ids::TaskId,
     tool: &str,
     arguments: &Json,

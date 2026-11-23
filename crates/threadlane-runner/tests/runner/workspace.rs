@@ -679,11 +679,80 @@ async fn a_published_task_can_push_again_after_the_base_moves() {
     let check = s.bring_in_base(T1).await;
     assert!(check.clean(), "{check:?}");
     assert_eq!(check.base, landed);
-    assert_eq!(git(&path, &["rev-parse", "HEAD"]), published);
+    // Merged, not rebased: the pushed commit stays in the history (#730).
+    git(
+        &path,
+        &["merge-base", "--is-ancestor", published.trim(), "HEAD"],
+    );
+    git(&path, &["merge-base", "--is-ancestor", &landed, "HEAD"]);
 
     std::fs::write(path.join("work.txt"), "updated").unwrap();
     s.checkpoint(T1).await;
     git(&path, &["push", "origin", "HEAD"]);
+}
+
+#[tokio::test]
+async fn a_branch_pushed_onto_another_tasks_pr_is_merged_not_rebased() {
+    let s = setup();
+    let first = s.prepare(T1).await;
+    std::fs::write(first.join("work.txt"), "work").unwrap();
+    s.checkpoint(T1).await;
+    git(&first, &["push", "origin", "HEAD"]);
+
+    // T2 updates T1's PR in place: it merges T1's branch and pushes onto it.
+    let path = s.prepare(T2).await;
+    git(&path, &["merge", "--quiet", "threadlane/T-0001"]);
+    std::fs::write(path.join("fix.txt"), "fix").unwrap();
+    s.checkpoint(T2).await;
+    git(&path, &["push", "origin", "HEAD:threadlane/T-0001"]);
+    let pushed = git(&path, &["rev-parse", "HEAD"]);
+
+    let landed = s.land_on_main("other.txt", "elsewhere");
+    assert!(s.bring_in_base(T2).await.clean());
+    git(
+        &path,
+        &["merge-base", "--is-ancestor", pushed.trim(), "HEAD"],
+    );
+    git(&path, &["merge-base", "--is-ancestor", &landed, "HEAD"]);
+    let preview = s
+        .workspaces
+        .preview_publish(T2, &s.repository, None, "threadlane/T-0001")
+        .await
+        .expect("the push extends the PR head");
+    assert_eq!(preview.revision, git(&path, &["rev-parse", "HEAD"]).trim());
+}
+
+#[tokio::test]
+async fn a_push_that_would_not_extend_the_remote_branch_is_refused_before_approval() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("work.txt"), "work").unwrap();
+    s.checkpoint(T1).await;
+    git(&path, &["push", "origin", "HEAD"]);
+    let pushed = git(&path, &["rev-parse", "HEAD"]);
+
+    // Rewritten after the push, as a rebase would.
+    git(&path, &["commit", "--quiet", "--amend", "-m", "Rewritten"]);
+    let error = s
+        .workspaces
+        .preview_publish(T1, &s.repository, None, "threadlane/T-0001")
+        .await
+        .expect_err("the push cannot land");
+    assert!(error.0.contains("would be rejected"), "{error}");
+    assert!(error.0.contains(pushed.trim()), "{error}");
+    assert!(
+        error.0.contains("git merge origin/threadlane/T-0001"),
+        "{error}"
+    );
+
+    git(
+        &path,
+        &["merge", "--quiet", "--no-edit", "origin/threadlane/T-0001"],
+    );
+    s.workspaces
+        .preview_publish(T1, &s.repository, None, "threadlane/T-0001")
+        .await
+        .expect("merged back in, the push extends the remote");
 }
 
 #[tokio::test]

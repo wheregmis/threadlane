@@ -130,7 +130,13 @@ impl LaneTools {
             .map_err(|error| ToolError::Failed(error.to_string()))?;
         let preview = self
             .workspaces
-            .preview_publish(*task, repository, expected_head)
+            .preview_publish(
+                *task,
+                repository,
+                expected_head,
+                &crate::runner::publish_target(*task, name, &arguments)
+                    .map_err(ToolError::InvalidArguments)?,
+            )
             .await
             .map_err(|error| ToolError::Failed(error.to_string()))?;
         arguments[PUBLISH_REVISION] = serde_json::json!(preview.revision);
