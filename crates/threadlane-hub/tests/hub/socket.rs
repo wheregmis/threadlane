@@ -249,3 +249,23 @@ async fn project_images_stay_in_order_and_are_available_on_earlier_pages() {
         if *event_id == sent[1] && images.is_empty())
     );
 }
+
+#[tokio::test]
+async fn lead_messages_naming_image_paths_run_in_their_own_turns() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (dir.path().join("a.png"), dir.path().join("b.png"));
+    std::fs::write(&first, test_image().bytes()).unwrap();
+    std::fs::write(&second, test_image().bytes()).unwrap();
+    let one = hub.send("p-1", &format!("see {}", first.display())).await;
+    let two = hub.send("p-2", &format!("and {}", second.display())).await;
+
+    let played = play(&*hub.link, Reply::Silent).await.unwrap();
+    let runs: Vec<_> = played
+        .runs
+        .iter()
+        .map(|(run, _)| (run.events.clone(), run.images.len()))
+        .collect();
+    assert_eq!(runs, [(vec![one.event_id], 1), (vec![two.event_id], 1)]);
+}
