@@ -211,6 +211,51 @@ async fn work_that_does_not_apply_on_the_task_branch_is_kept_aside() {
 }
 
 #[tokio::test]
+async fn commits_on_a_branch_off_another_base_are_kept_and_the_next_run_is_told() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("task.txt"), "task").unwrap();
+    s.checkpoint(T1).await;
+    for (round, name) in [
+        (1, "threadlane/T-0001-switched"),
+        (2, "threadlane/T-0001-switched-2"),
+    ] {
+        git(
+            &path,
+            &["switch", "--quiet", "-c", &format!("off-{round}"), "HEAD~1"],
+        );
+        std::fs::write(path.join("other.txt"), format!("round {round}")).unwrap();
+        git(&path, &["add", "other.txt"]);
+        git(&path, &["commit", "--quiet", "-m", "Off the task branch"]);
+        std::fs::write(path.join("scratch.txt"), "scratch").unwrap();
+        let refused = s
+            .workspaces
+            .checkpoint_tracked(T1, std::slice::from_ref(&s.repository), "x")
+            .await;
+        let error = refused.expect_err("the commit is not on the task branch");
+        assert!(error.to_string().contains(name), "{error}");
+        assert_eq!(branch(&path), "threadlane/T-0001");
+        assert_eq!(
+            git(&path, &["show", &format!("{name}:other.txt")]),
+            format!("round {round}"),
+            "an earlier kept branch is not overwritten"
+        );
+        assert!(
+            git(&path, &["ls-tree", "--name-only", name])
+                .lines()
+                .all(|f| f != "scratch.txt"),
+            "untracked scratch stays out of an unfinished run's commit"
+        );
+        let notes = s
+            .workspaces
+            .checkpoint_notes(T1, std::slice::from_ref(&s.repository))
+            .await;
+        assert!(notes.contains(name), "{notes}");
+        std::fs::remove_file(path.join("scratch.txt")).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn a_half_made_clone_or_worktree_is_made_again() {
     let s = setup();
     // A clone cut short: only its partial directory exists.
