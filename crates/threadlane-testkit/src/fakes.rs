@@ -350,6 +350,14 @@ pub enum ForgeCall {
     Find {
         branch: String,
     },
+    AttachImage {
+        worktree: PathBuf,
+        remote: String,
+        number: u64,
+        image: PathBuf,
+        blob: String,
+        caption: String,
+    },
 }
 
 /// A [`Forge`] that touches no remote: it records every call, and each
@@ -483,6 +491,22 @@ impl Forge for FakeForge {
             .iter()
             .find(|(head, _)| head == branch)
             .map(|(_, url)| url.clone()))
+    }
+
+    async fn attach_image(
+        &self,
+        worktree: &Path,
+        attachment: threadlane_core::forge::PullRequestImage<'_>,
+    ) -> Result<String, ForgeError> {
+        lock(&self.calls).push(ForgeCall::AttachImage {
+            worktree: worktree.to_owned(),
+            remote: attachment.remote.to_owned(),
+            number: attachment.number.get(),
+            image: attachment.image.to_owned(),
+            blob: attachment.blob.to_owned(),
+            caption: attachment.caption.to_owned(),
+        });
+        Ok(format!("https://forge.test/image/{}", attachment.blob))
     }
 
     async fn pull_request_base(

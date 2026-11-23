@@ -154,7 +154,9 @@ pub async fn assert_published(sim: &Sim, scenario: &str) {
     assert_eq!(opened.len(), 1, "{scenario}: exactly one pull request");
     for call in forge.calls() {
         match call {
-            ForgeCall::Apply { .. } | ForgeCall::FastForward { .. } => {
+            ForgeCall::Apply { .. }
+            | ForgeCall::FastForward { .. }
+            | ForgeCall::AttachImage { .. } => {
                 panic!("unexpected repository action")
             }
             ForgeCall::Open {

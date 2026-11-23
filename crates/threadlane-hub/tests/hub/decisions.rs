@@ -11,6 +11,7 @@ use threadlane_core::client::{
     ApiError, ConversationEntry, DecisionReply, DecisionRequest, OverviewReply, OverviewRequest,
     UserMessage,
 };
+use threadlane_core::forge::{ATTACH_IMAGE, IMAGE_BLOB};
 use threadlane_core::ids::{DecisionId, TaskId};
 use threadlane_core::link::{Begin, PUBLISH_REVISION, Perform, RunAssignment};
 use threadlane_core::model::{
@@ -623,6 +624,21 @@ async fn the_gate_refuses_a_call_it_cannot_ask_about_and_opens_nothing() {
             OPEN_PULL_REQUEST,
             json!({ "repository": "app", "title": "ok", "body": "bell\u{7}", PUBLISH_REVISION: "a".repeat(40) }),
         ),
+        // attach_image: no blob from the runner, another repository, a
+        // caption that would break the Markdown, or an extra field.
+        (ATTACH_IMAGE, json!({ "repository": "app", "number": 7, "path": "/s.png" })),
+        (
+            ATTACH_IMAGE,
+            json!({ "repository": "other", "number": 7, "path": "/s.png", IMAGE_BLOB: "a".repeat(40) }),
+        ),
+        (
+            ATTACH_IMAGE,
+            json!({ "repository": "app", "number": 7, "path": "/s.png", "caption": "a](x", IMAGE_BLOB: "a".repeat(40) }),
+        ),
+        (
+            ATTACH_IMAGE,
+            json!({ "repository": "app", "number": 7, "path": "/s.png", "body": "x", IMAGE_BLOB: "a".repeat(40) }),
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -677,4 +693,55 @@ async fn a_decision_reminder_is_claimed_once() {
             .unwrap();
         assert_eq!(reply, DecisionReply::Reminder { first });
     }
+}
+
+#[tokio::test]
+async fn an_image_attachment_is_asked_about_by_file_and_blob_and_handed_to_the_runner() {
+    let (hub, lease, run) = task_run().await;
+    let arguments = json!({
+        "repository": "app",
+        "number": 7,
+        "path": "/work/shot.png",
+        "caption": "Settings page",
+        IMAGE_BLOB: "b".repeat(40),
+    });
+    let asked = hub
+        .link
+        .call_tool(
+            &lease,
+            run.run_id,
+            Some("toolu_img"),
+            ATTACH_IMAGE,
+            &arguments,
+        )
+        .await;
+    assert_eq!(asked, Err(ToolError::WaitingOnYou));
+    let opened = decision(&hub, 1).await;
+    assert_eq!(opened.tool, ATTACH_IMAGE);
+    assert_eq!(
+        opened.question,
+        "Attach image /work/shot.png to pull request #7 in app?"
+    );
+    assert!(
+        opened.context.contains(&"b".repeat(40)) && opened.context.contains("\"Settings page\""),
+        "{}",
+        opened.context
+    );
+    assert_eq!(end(&hub, &lease, &run).await, RunOutcome::Deferred);
+    answer(&hub, 1, "approve", None).await;
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.perform, [DecisionId(1)]);
+    let Perform::Call {
+        tool,
+        arguments: handed,
+        ..
+    } = hub
+        .link
+        .begin_perform(&lease, run.run_id, DecisionId(1))
+        .await
+        .unwrap()
+    else {
+        panic!("the runner performs it in the task's worktree");
+    };
+    assert_eq!((tool.as_str(), handed), (ATTACH_IMAGE, arguments));
 }

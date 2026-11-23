@@ -57,6 +57,48 @@ pub const EDIT_PULL_REQUEST: &str = "edit_pull_request";
 /// Reply to and resolve one review thread of a pull request, naming the fixing commit
 /// or why its finding was declined.
 pub const RESOLVE_REVIEW_THREAD: &str = "resolve_review_thread";
+/// Attach a local image to one of the task's pull requests, as a comment
+/// showing it (#735). The runner performs it in the task's worktree.
+pub const ATTACH_IMAGE: &str = "attach_image";
+/// `attach_image` argument the runner sets: the image's Git blob ID, so the
+/// approval covers those exact bytes.
+pub const IMAGE_BLOB: &str = "image_blob";
+/// The largest image `attach_image` takes, in bytes.
+pub const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// The image's file extension if `head`, its first bytes, is a PNG, JPEG,
+/// GIF or WebP file.
+#[must_use]
+pub fn image_extension(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if head.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+/// What [`Forge::attach_image`] posts: which image, on which pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PullRequestImage<'a> {
+    /// The registered remote URL.
+    pub remote: &'a str,
+    pub number: std::num::NonZeroU64,
+    /// The image file, already checked to be an image.
+    pub image: &'a Path,
+    /// Its file extension, from [`image_extension`].
+    pub extension: &'a str,
+    /// The approved Git blob ID of its bytes.
+    pub blob: &'a str,
+    /// The image's alt text.
+    pub caption: &'a str,
+}
+
 /// Ask reviewers, or a review bot by its trigger comment, to review a pull request again.
 pub const REQUEST_REVIEW: &str = "request_review";
 
@@ -204,6 +246,15 @@ pub trait Forge: Send + Sync + fmt::Debug {
         branch: &str,
     ) -> Result<Option<String>, ForgeError>;
 
+    /// Pushes the image, if its bytes still have the approved blob ID, as a
+    /// one-file commit on its own branch, then comments it on the pull
+    /// request. Returns the image URL and the comment's URL.
+    async fn attach_image(
+        &self,
+        worktree: &Path,
+        attachment: PullRequestImage<'_>,
+    ) -> Result<String, ForgeError>;
+
     /// The branch pull request `number` of the registered `remote` merges into.
     async fn pull_request_base(
         &self,
@@ -214,7 +265,18 @@ pub trait Forge: Send + Sync + fmt::Debug {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_label_name;
+    use super::{image_extension, valid_label_name};
+
+    #[test]
+    fn only_image_signatures_are_images() {
+        assert_eq!(image_extension(b"\x89PNG\r\n\x1a\n...."), Some("png"));
+        assert_eq!(image_extension(&[0xff, 0xd8, 0xff, 0xe0]), Some("jpg"));
+        assert_eq!(image_extension(b"GIF89a.."), Some("gif"));
+        assert_eq!(image_extension(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(image_extension(b"RIFF\0\0\0\0WAVE"), None);
+        assert_eq!(image_extension(b"-----BEGIN OPENSSH"), None);
+        assert_eq!(image_extension(b""), None);
+    }
 
     #[test]
     fn label_names_are_short_plain_text() {

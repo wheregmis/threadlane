@@ -5,10 +5,10 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST, EXPECTED_HEAD,
-    FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, LABEL_ISSUE, MARK_READY, MAX_LABELS, MAX_MERGE_BATCH,
-    MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD,
-    valid_label_name,
+    ASSIGN_ISSUE, ATTACH_IMAGE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST,
+    EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, IMAGE_BLOB, LABEL_ISSUE, MARK_READY,
+    MAX_LABELS, MAX_MERGE_BATCH, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    REQUEST_REVIEW, RESOLVE_REVIEW_THREAD, valid_label_name,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -281,6 +281,23 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                     "comment":{"type":"string","description":"A comment to post, such as a review bot's trigger."}
                 },
                 "required":["repository","number","expected_head"],"additionalProperties":false
+            }),
+        ),
+        define(
+            ATTACH_IMAGE,
+            "Attach a local PNG, JPEG, GIF or WebP image (at most 10 MiB), such as a screenshot, \
+             to a pull request in one of your task's repositories: it is pushed as a one-file \
+             commit on its own threadlane-assets branch and posted as a PR comment showing it. \
+             The result gives the image URL, which you can also put in the PR body with \
+             edit_pull_request. End your turn if the call waits for approval.",
+            json!({
+                "type":"object","properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "path":{"type":"string","description":"The image file: an absolute path, or one relative to the repository's worktree."},
+                    "caption":{"type":"string","description":"One line of alt text, without brackets. Defaults to \"screenshot\"."}
+                },
+                "required":["repository","number","path"],"additionalProperties":false
             }),
         ),
     ]
@@ -925,6 +942,7 @@ pub(crate) async fn proposal(
             | EDIT_PULL_REQUEST
             | RESOLVE_REVIEW_THREAD
             | REQUEST_REVIEW
+            | ATTACH_IMAGE
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -996,6 +1014,9 @@ pub(crate) async fn proposal(
                 repository.remote_url
             ),
         });
+    }
+    if tool == ATTACH_IMAGE {
+        return image_proposal(&task, repository, arguments);
     }
     if matches!(
         tool,
@@ -1256,6 +1277,56 @@ pub(crate) async fn proposal(
         )
         .trim_end()
         .to_owned(),
+    })
+}
+
+/// The card for an `attach_image` call: which file, by the blob ID the
+/// runner set, onto which pull request of one of the task's repositories.
+fn image_proposal(
+    task: &threadlane_core::model::Task,
+    repository: &threadlane_core::model::Repository,
+    arguments: &Json,
+) -> Result<Proposal, ToolError> {
+    fields(
+        arguments,
+        &["repository", "number", "path", "caption", IMAGE_BLOB],
+    )?;
+    if !task.repositories.contains(&repository.id) {
+        return Err(invalid(
+            "attach_image takes one of the repositories this task works in",
+        ));
+    }
+    let number = arguments["number"]
+        .as_u64()
+        .filter(|number| *number > 0)
+        .ok_or_else(|| invalid("number must be a positive integer"))?;
+    let path = arguments["path"]
+        .as_str()
+        .filter(|path| plain_line(path))
+        .ok_or_else(|| invalid("path must name an image file"))?;
+    let blob = arguments[IMAGE_BLOB]
+        .as_str()
+        .filter(|blob| valid_commit_id(blob))
+        .ok_or_else(|| invalid("attach_image requires the image's blob ID from the runner"))?;
+    let caption = match arguments.get("caption") {
+        None | Some(Json::Null) => "screenshot",
+        // Brackets would end the Markdown alt text early.
+        Some(Json::String(caption)) if plain_line(caption) && !caption.contains(['[', ']']) => {
+            caption.trim()
+        }
+        Some(_) => return Err(invalid("caption must be one plain line without brackets")),
+    };
+    let slug = github_repository(&repository.remote_url).unwrap_or_default();
+    Ok(Proposal {
+        question: format!(
+            "Attach image {path} to pull request {slug}#{number} in {}?",
+            repository.name
+        ),
+        context: format!(
+            "Task {}: {}. Image blob: {blob}. It is pushed to its own threadlane-assets branch \
+             of {} and posted on the pull request as a comment captioned {caption:?}.",
+            task.id, task.title, repository.remote_url
+        ),
     })
 }
 

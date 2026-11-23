@@ -5,7 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::forge::{
-    EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
+    ATTACH_IMAGE, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, IMAGE_BLOB, OPEN_PULL_REQUEST,
+    PUBLISH_BRANCH,
 };
 use threadlane_core::ids::{RunId, TaskId};
 use threadlane_core::link::{
@@ -147,6 +148,46 @@ impl LaneTools {
     }
 }
 
+impl LaneTools {
+    /// `attach_image` arguments with the image's absolute path and Git blob
+    /// ID, so the approval card shows which file and covers its bytes.
+    async fn with_image_blob(&self, mut arguments: Json) -> Result<Json, ToolError> {
+        if let Some(object) = arguments.as_object_mut() {
+            object.remove(IMAGE_BLOB);
+        }
+        let Some((task, repositories)) = &self.task else {
+            return Ok(arguments);
+        };
+        let Some(repository) = arguments
+            .get("repository")
+            .and_then(Json::as_str)
+            .and_then(|name| repositories.iter().find(|repo| repo.name == name))
+        else {
+            return Ok(arguments);
+        };
+        let worktrees = self
+            .workspaces
+            .prepare(*task, std::slice::from_ref(repository))
+            .await
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let worktree = worktrees
+            .first()
+            .ok_or_else(|| ToolError::Failed("no worktree was set up".into()))?;
+        let (image, _) = crate::runner::image_file(worktree, &arguments)
+            .await
+            .map_err(ToolError::InvalidArguments)?;
+        let path = image
+            .to_str()
+            .ok_or_else(|| ToolError::InvalidArguments("the image path must be UTF-8".into()))?;
+        let blob = crate::workspace::git(Some(worktree), ["hash-object", "--", path])
+            .await
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        arguments["path"] = serde_json::json!(path);
+        arguments[IMAGE_BLOB] = serde_json::json!(blob.trim());
+        Ok(arguments)
+    }
+}
+
 #[async_trait]
 impl ToolEndpoint for LaneTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
@@ -170,6 +211,8 @@ impl ToolEndpoint for LaneTools {
         // runs its ungated calls and gives each gated one its own card.
         let arguments = if name == FINISH_TASK {
             self.with_merge_checks(arguments).await
+        } else if name == ATTACH_IMAGE {
+            self.with_image_blob(arguments).await?
         } else if matches!(
             name,
             PUBLISH_BRANCH | OPEN_PULL_REQUEST | FAST_FORWARD_PULL_REQUEST
