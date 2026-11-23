@@ -1032,7 +1032,10 @@ async fn a_batch_merge_pins_each_head_and_stops_at_the_first_that_moved() {
         .apply("https://github.test/acme/app.git", &batch)
         .await
         .unwrap_err();
-    assert!(error.0.contains("stopped at #13"), "{error}");
+    assert!(
+        error.0.starts_with("batch stopped at #13"),
+        "the hub reads this prefix (#746): {error}"
+    );
     assert!(error.0.contains("merged #12"), "{error}");
     assert!(error.0.contains("HTTP 409"), "{error}");
     let repo = "--repo=github.test/acme/app";
@@ -1083,7 +1086,10 @@ async fn a_batch_merge_stops_at_a_pull_request_that_was_only_queued() {
         .apply("https://github.test/acme/app.git", &batch)
         .await
         .unwrap_err();
-    assert!(error.0.contains("stopped at #15"), "{error}");
+    assert!(
+        error.0.starts_with("batch stopped at #15"),
+        "the hub reads this prefix (#746): {error}"
+    );
     assert!(error.0.contains("none merged"), "{error}");
     assert!(error.0.contains("reports it OPEN"), "{error}");
     let calls = gh.invocations();
@@ -1288,7 +1294,10 @@ async fn a_batch_mark_ready_goes_in_order_and_stops_at_the_first_that_fails() {
         .apply("https://github.test/acme/app.git", &batch)
         .await
         .unwrap_err();
-    assert!(error.0.contains("stopped at #13"), "{error}");
+    assert!(
+        error.0.starts_with("batch stopped at #13"),
+        "the hub reads this prefix (#746): {error}"
+    );
     assert!(error.0.contains("marked #12 ready"), "{error}");
     let repo = "--repo=github.test/acme/app";
     assert_eq!(

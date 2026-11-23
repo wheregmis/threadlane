@@ -309,6 +309,80 @@ async fn a_pull_request_the_task_commented_on_reaches_its_lane() {
     }));
 }
 
+/// An approved batch merge or mark-ready links each pull request it handled
+/// to the task, as a single call does (#746); one that stopped partway links
+/// only those before the stop.
+#[tokio::test]
+async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    let head = "a".repeat(40);
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MERGE,
+        json!({ "repository": "widgets", "pulls": [
+            { "number": 601, "expected_head": head },
+            { "number": 602, "expected_head": head },
+        ] }),
+        json!({ "performed": true, "summary": "Completed the repository action. merged #601, #602 in order" }),
+    )
+    .await;
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [701, 702, 703] }),
+        json!({ "performed": false, "error": "forge: batch stopped at #702, marked #701 ready, the rest not attempted: boom" }),
+    )
+    .await;
+    hub.db.release_lease(&lease).await.unwrap();
+    let at = "2026-11-17T08:00:00Z";
+    for number in [601, 602, 701, 702, 703] {
+        github.add_to(
+            "acme/widgets",
+            &format!("feature-{number}"),
+            GithubItem {
+                branch: Some(format!("feature-{number}")),
+                ..item(
+                    &format!("check_run:{number}"),
+                    GithubKind::CheckResult,
+                    "acme/widgets",
+                    Some(number),
+                    at,
+                )
+            },
+        );
+    }
+
+    hub.core.poll_github_once().await.unwrap();
+    let events = github_events(&hub).await;
+    let mut routed: Vec<_> = events
+        .iter()
+        .filter(|event| event.lane_id == task.lane_id)
+        .map(|event| event.source_event_id.as_str())
+        .collect();
+    routed.sort();
+    assert_eq!(
+        routed,
+        ["check_run:601", "check_run:602", "check_run:701"],
+        "{events:?}"
+    );
+    for number in [601, 602, 701] {
+        assert!(github.calls().contains(&GithubCall::PullRequest {
+            target: PullTarget {
+                repository: "acme/widgets".into(),
+                branch: String::new(),
+                number: Some(number),
+            },
+            since: None,
+        }));
+    }
+}
+
 fn item(
     id: &str,
     kind: GithubKind,

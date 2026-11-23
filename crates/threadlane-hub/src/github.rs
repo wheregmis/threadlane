@@ -157,6 +157,47 @@ fn needs_attention(item: &GithubItem) -> bool {
             .any(|conclusion| item.title.ends_with(&format!(": {conclusion}")))
 }
 
+/// The pull requests an approved batch `merge` or `mark_ready` handled, in
+/// order: all of them when it completed, else those before the one it
+/// stopped at, as the runner's error names it ("batch stopped at #N").
+/// Empty for any other call.
+fn batch_handled(
+    tool: &str,
+    arguments: &serde_json::Value,
+    outcome: &serde_json::Value,
+) -> Vec<u64> {
+    let listed: Vec<u64> = match tool {
+        MERGE => arguments["pulls"].as_array().map(|pulls| {
+            pulls
+                .iter()
+                .filter_map(|pull| pull["number"].as_u64())
+                .collect()
+        }),
+        MARK_READY => arguments["numbers"].as_array().map(|numbers| {
+            numbers
+                .iter()
+                .filter_map(serde_json::Value::as_u64)
+                .collect()
+        }),
+        _ => None,
+    }
+    .unwrap_or_default();
+    if outcome["performed"] == true {
+        return listed;
+    }
+    let stopped = outcome["error"]
+        .as_str()
+        .and_then(|error| error.split("batch stopped at #").nth(1))
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|number| number.parse::<u64>().ok());
+    match stopped {
+        Some(stopped) if listed.contains(&stopped) => {
+            listed.into_iter().take_while(|n| *n != stopped).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 impl Routes {
     /// The ended task's work `item` is about, unless a running task has
     /// taken that work over.
@@ -207,10 +248,11 @@ impl Routes {
                     let Some(outcome) = decision.outcome.as_ref() else {
                         continue;
                     };
-                    if outcome["performed"] != true {
+                    let arguments = &decision.arguments;
+                    let batch = batch_handled(&decision.tool, arguments, outcome);
+                    if outcome["performed"] != true && batch.is_empty() {
                         continue;
                     }
-                    let arguments = &decision.arguments;
                     let names_pull_request = matches!(
                         decision.tool.as_str(),
                         MERGE
@@ -221,58 +263,65 @@ impl Routes {
                             | REQUEST_REVIEW
                     ) || (decision.tool == COMMENT
                         && arguments["target"] == "pull_request");
-                    let (name, branch, number) =
+                    let name = arguments["repository"].as_str().unwrap_or_default();
+                    let targets: Vec<(&str, &str, Option<u64>)> = if !batch.is_empty() {
+                        batch.into_iter().map(|n| (name, "", Some(n))).collect()
+                    } else {
                         match (outcome["repository"].as_str(), outcome["branch"].as_str()) {
-                            (Some(name), Some(branch)) => (
+                            (Some(name), Some(branch)) => vec![(
                                 name,
                                 branch,
                                 outcome["pull_request"]
                                     .as_str()
                                     .and_then(pull_request_number),
-                            ),
+                            )],
                             _ if names_pull_request => {
-                                let (Some(name), Some(number)) = (
+                                match (
                                     arguments["repository"].as_str(),
                                     arguments["number"].as_u64(),
-                                ) else {
-                                    continue;
-                                };
-                                (name, "", Some(number))
+                                ) {
+                                    (Some(name), Some(number)) => vec![(name, "", Some(number))],
+                                    _ => continue,
+                                }
                             }
                             _ => continue,
-                        };
-                    let Some(repository) = repositories
-                        .iter()
-                        .find(|repository| {
-                            repository.name == name && task.repositories.contains(&repository.id)
-                        })
-                        .and_then(|repository| normalize_remote(&repository.remote_url))
-                        .and_then(|key| key.strip_prefix(GITHUB_HOST).map(str::to_owned))
-                    else {
-                        continue;
-                    };
-                    match list.iter_mut().find(|work| {
-                        work.task == task.id
-                            && work.target.repository == repository
-                            && ((!branch.is_empty() && work.target.branch == branch)
-                                || (number.is_some() && work.target.number == number))
-                    }) {
-                        Some(work) => {
-                            work.target.number = work.target.number.or(number);
-                            if work.target.branch.is_empty() {
-                                branch.clone_into(&mut work.target.branch);
-                            }
                         }
-                        None => list.push(Work {
-                            project: project.id,
-                            lane,
-                            task: task.id,
-                            target: PullTarget {
-                                repository,
-                                branch: branch.to_owned(),
-                                number,
-                            },
-                        }),
+                    };
+                    for (name, branch, number) in targets {
+                        let Some(repository) = repositories
+                            .iter()
+                            .find(|repository| {
+                                repository.name == name
+                                    && task.repositories.contains(&repository.id)
+                            })
+                            .and_then(|repository| normalize_remote(&repository.remote_url))
+                            .and_then(|key| key.strip_prefix(GITHUB_HOST).map(str::to_owned))
+                        else {
+                            continue;
+                        };
+                        match list.iter_mut().find(|work| {
+                            work.task == task.id
+                                && work.target.repository == repository
+                                && ((!branch.is_empty() && work.target.branch == branch)
+                                    || (number.is_some() && work.target.number == number))
+                        }) {
+                            Some(work) => {
+                                work.target.number = work.target.number.or(number);
+                                if work.target.branch.is_empty() {
+                                    branch.clone_into(&mut work.target.branch);
+                                }
+                            }
+                            None => list.push(Work {
+                                project: project.id,
+                                lane,
+                                task: task.id,
+                                target: PullTarget {
+                                    repository,
+                                    branch: branch.to_owned(),
+                                    number,
+                                },
+                            }),
+                        }
                     }
                 }
             }
