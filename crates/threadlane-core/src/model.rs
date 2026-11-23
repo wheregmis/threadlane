@@ -1260,6 +1260,9 @@ pub struct NewStandingRule {
     pub pattern: Json,
     pub tier: Tier,
     pub created_at: Timestamp,
+    /// Other pending decisions the rule covers, answered by it in the same
+    /// transaction so a card raised before you said "always" asks no more.
+    pub answers: Vec<DecisionId>,
 }
 
 /// Result of answering a decision. Answering is idempotent (Plan.md §9.4).

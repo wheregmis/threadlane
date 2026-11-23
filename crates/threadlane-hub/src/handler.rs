@@ -13,7 +13,7 @@ use threadlane_core::client::{
 };
 use threadlane_core::client::{TaskReply, TaskRequest, TimerReply, TimerRequest};
 use threadlane_core::github::normalize_remote;
-use threadlane_core::ids::{DecisionId, ProjectId};
+use threadlane_core::ids::{DecisionId, LaneId, ProjectId};
 use threadlane_core::memory::INSTRUCTIONS_BUDGET;
 use threadlane_core::model::{
     Agent, Answered, BackendKind, Binding, Decision, DecisionAnswer, DecisionOption,
@@ -26,6 +26,7 @@ use threadlane_core::store::{
     TaskStore,
 };
 use threadlane_core::time::Timestamp;
+use threadlane_core::tools::Tier;
 use threadlane_core::workspace::{valid_branch_name, valid_repository_name};
 
 use crate::core::HubCore;
@@ -46,6 +47,12 @@ const DEFAULT_BRANCH: &str = "main";
 
 /// Feed items returned per call.
 const FEED_PAGE: u32 = 200;
+
+/// A standing rule "always" makes, and the lanes of the pending cards it answers too.
+struct Rule {
+    rule: NewStandingRule,
+    covered_lanes: Vec<LaneId>,
+}
 
 /// [`HubApi`] over a [`HubCore`].
 #[derive(Debug, Clone)]
@@ -160,11 +167,14 @@ impl ClientApi {
                     standing_rule: always,
                     answered_at: now,
                 },
-                rule.as_ref(),
+                rule.as_ref().map(|rule| &rule.rule),
             )
             .await
             .map_err(api_error)?;
         let recorded = matches!(answered, Answered::Recorded(_));
+        for lane in rule.iter().flat_map(|rule| &rule.covered_lanes) {
+            inner.wake.wake(WakeTarget::Lane(*lane));
+        }
         let decision = db
             .decision(decision)
             .await
@@ -190,7 +200,7 @@ impl ClientApi {
         decision: &Decision,
         index: usize,
         now: Timestamp,
-    ) -> Result<NewStandingRule, ApiError> {
+    ) -> Result<Rule, ApiError> {
         let inner = &self.core.inner;
         if !decision.offers_standing_rule && !crate::proposal::always(decision, index) {
             return Err(ApiError::Invalid(format!(
@@ -218,13 +228,39 @@ impl ClientApi {
             .definition(&decision.tool)
             .ok_or_else(|| ApiError::Internal(format!("no tool {}", decision.tool)))?
             .tier;
-        Ok(NewStandingRule {
-            project_id: decision.project_id,
-            agent_id,
-            tool: decision.tool.clone(),
-            pattern: gate::rule_pattern(&decision.tool, &decision.arguments),
-            tier,
-            created_at: now,
+        let pattern = gate::rule_pattern(&decision.tool, &decision.arguments);
+        // Cards raised before you said "always" that the rule would have
+        // allowed. shortcut: a tier 3 rule only has calls reviewed, so its
+        // pending cards stay for you; settle them through the classifier if asked.
+        let covered: Vec<Decision> = if tier < Tier::SharedHardToUndo {
+            inner
+                .db
+                .open_decisions()
+                .await
+                .map_err(api_error)?
+                .into_iter()
+                .filter(|other| {
+                    other.id != decision.id
+                        && other.project_id == decision.project_id
+                        && other.tool == decision.tool
+                        && other.offers_standing_rule
+                        && gate::rule_pattern(&other.tool, &other.arguments) == pattern
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Rule {
+            covered_lanes: covered.iter().map(|other| other.lane_id).collect(),
+            rule: NewStandingRule {
+                project_id: decision.project_id,
+                agent_id,
+                tool: decision.tool.clone(),
+                pattern,
+                tier,
+                created_at: now,
+                answers: covered.iter().map(|other| other.id).collect(),
+            },
         })
     }
 
@@ -1223,7 +1259,7 @@ impl ClientApi {
     async fn target_lane(
         &self,
         target: threadlane_core::client::LaneTarget,
-    ) -> Result<threadlane_core::ids::LaneId, ApiError> {
+    ) -> Result<LaneId, ApiError> {
         use threadlane_core::client::LaneTarget;
         match target {
             LaneTarget::Lead { project } => {

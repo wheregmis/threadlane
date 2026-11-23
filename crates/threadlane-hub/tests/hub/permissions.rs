@@ -356,6 +356,83 @@ async fn a_rule_covers_every_agent_of_its_project_and_no_other_project() {
 }
 
 #[tokio::test]
+async fn always_also_answers_a_matching_card_already_waiting_and_the_next_call_asks_nothing() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let (lease, run) = unrequested_run(&hub).await;
+    let instructions = write("project/instructions.md", "A");
+    // Two identical calls asked before you answer either: two cards.
+    for id in ["c-1", "c-2"] {
+        let asked = call(&hub, &lease, &run, id, MEMORY_CREATE, &instructions).await;
+        assert_eq!(asked, Err(ToolError::WaitingOnYou));
+    }
+    // A third, in another agent's lane of the same project.
+    let general = hub.general().await.id;
+    let backend = hub
+        .db
+        .create_agent(&NewAgent::named("Backend", "backend"))
+        .await
+        .unwrap()
+        .id;
+    bind_on_request(&hub, general, backend).await;
+    let (other, other_run) = task_run(&hub, general, backend).await;
+    assert_ne!(other.lane_id, lease.lane_id);
+    let asked = call(
+        &hub,
+        &other,
+        &other_run,
+        "o-1",
+        MEMORY_CREATE,
+        &instructions,
+    )
+    .await;
+    assert_eq!(asked, Err(ToolError::WaitingOnYou));
+    hub.link
+        .complete(&other, other_run.run_id, None)
+        .await
+        .unwrap();
+    hub.link.release(&other).await.unwrap();
+    assert_eq!(cards(&hub).await, 3);
+    decide(
+        &hub,
+        DecisionRequest::AnswerAlways {
+            decision: DecisionId(1),
+            option: "approve".into(),
+            note: None,
+        },
+    )
+    .await
+    .unwrap();
+    // The rule answers the second card too, so it no longer waits on you.
+    let second = decision(&hub, 2).await;
+    assert_eq!(second.status, DecisionStatus::Answered);
+    assert!(second.approved());
+    // The other lane's card is answered too, and its lane is woken to resume.
+    let third = decision(&hub, 3).await;
+    assert_eq!(third.lane_id, other.lane_id);
+    assert!(third.approved(), "{third:?}");
+    assert!(
+        hub.db
+            .pending_events(other.lane_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.decision_ref == Some(DecisionId(3))),
+        "the rule's answer resumes the other lane"
+    );
+    let woken = hub.link.request_work().await.unwrap().expect("granted");
+    assert_eq!(woken.lane_id, other.lane_id, "the covered lane runs again");
+    hub.link.release(&woken).await.unwrap();
+    let listed = rules(&hub).await;
+    assert_eq!(listed.len(), 1, "one rule, not one per card");
+    assert_eq!(listed[0].rule.uses, 2);
+    // A later identical call raises no card.
+    let third = call(&hub, &lease, &run, "c-3", MEMORY_CREATE, &instructions).await;
+    assert_eq!(third, Err(ToolError::AuthorizedAndQueued));
+    assert_eq!(cards(&hub).await, 3, "no new card");
+}
+
+#[tokio::test]
 async fn always_is_refused_where_no_rule_could_apply() {
     let hub = TestHub::start().await;
     hub.hello().await;

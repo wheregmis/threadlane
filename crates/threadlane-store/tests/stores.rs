@@ -3785,6 +3785,7 @@ async fn decision_stats_group_by_who_answered() {
                     pattern: json!({}),
                     tier: threadlane_core::tools::Tier::SharedReversible,
                     created_at: T0,
+                    answers: Vec::new(),
                 }),
             )
             .await
