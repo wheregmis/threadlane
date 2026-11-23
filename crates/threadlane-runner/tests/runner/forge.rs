@@ -144,6 +144,8 @@ impl FakeGh {
                echo 'https://github.test/me/app/pull/7'\n\
              elif [ \"$1 $2 $3\" = \"pr merge 13\" ]; then\n\
                echo 'Head branch was modified. Review and try the merge again. (HTTP 409)' >&2; exit 1\n\
+             elif [ \"$1 $2 $3\" = \"pr merge 17\" ]; then\n\
+               echo 'GraphQL: This pull request is part of a stack and must be merged using the asynchronous merge REST API (mergePullRequest)' >&2; exit 1\n\
              elif [ \"$1 $2 $3\" = \"pr view 15\" ]; then\n\
                echo OPEN\n\
              elif [ \"$1 $2\" = \"pr view\" ]; then\n\
@@ -166,6 +168,7 @@ impl FakeGh {
                  '--method=GET repos/acme/app/issues/12') echo '{{\"number\":12}}' ;;\n\
                  '--method=GET repos/acme/app/issues/13') echo '{{\"pull_request\":{{}}}}' ;;\n\
                  '--method=GET repos/acme/app/labels') printf 'bug\\nNeeds Review\\n' ;;\n\
+                 '--method=PUT repos/acme/app/pulls/17/merge-async') echo '{{\"status\":\"pending\",\"details\":{{\"uuid\":\"u1\",\"message\":\"queued\"}}}}' ;;\n\
                  '--method=DELETE repos/acme/app/issues/12/labels/gone') echo 'Not Found (HTTP 404)' >&2; exit 1 ;;\n\
                esac\n\
              fi\n"
@@ -1079,4 +1082,60 @@ async fn a_batch_merge_stops_at_a_pull_request_that_was_only_queued() {
     let calls = gh.invocations();
     assert_eq!(calls.len(), 2, "#16 is not attempted: {calls:?}");
     assert_eq!(calls[1][..3], ["pr", "view", "15"]);
+}
+
+#[tokio::test]
+async fn a_stacked_pull_request_merges_through_the_async_api_at_the_pinned_head() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let head = "a".repeat(40);
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        r#"{"status":"merged","details":{"message":"done","sha":"m3rg3"}}"#,
+    )
+    .unwrap();
+    let report = forge
+        .apply(
+            "https://github.test/acme/app.git",
+            &RepositoryAction::Merge {
+                number: 17.try_into().unwrap(),
+                expected_head: head.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(report.contains("merge commit m3rg3"), "{report}");
+    let host = "--hostname=github.test";
+    assert_eq!(
+        gh.invocations(),
+        [
+            vec![
+                "pr".to_owned(),
+                "merge".into(),
+                "17".into(),
+                "--merge".into(),
+                format!("--match-head-commit={head}"),
+                "--repo=github.test/acme/app".into(),
+            ],
+            vec![
+                "api".to_owned(),
+                host.into(),
+                "--method=PUT".into(),
+                "-f".into(),
+                format!("sha={head}"),
+                "-f".into(),
+                "merge_method=merge".into(),
+                "-f".into(),
+                "merge_action=direct_merge".into(),
+                "repos/acme/app/pulls/17/merge-async".into(),
+            ],
+            vec![
+                "api".to_owned(),
+                host.into(),
+                "--method=GET".into(),
+                "repos/acme/app/pulls/17/merge-async/u1".into(),
+            ],
+        ]
+    );
 }
