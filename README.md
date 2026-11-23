@@ -1,10 +1,43 @@
 # Threadlane
 
-Threadlane runs command-line coding agents (Claude Code and Codex) on your
-own machines: a hub queues your messages per project, a runner works them through
-the agent, and replies come back through a feed. `Plan.md` is the system
-design, and `docs/milestone-1.md` maps milestone 1 (one lane, one node) onto
-the crates below.
+Threadlane runs command-line coding agents (Claude Code, Codex and Antigravity) on your own machines. You message a project's lead agent; a hub queues the work, runners carry it out in isolated git worktrees, and you stay in control: agents ask before they push a branch or open a pull request, and every decision waits for you. A desktop app and a `threadlane` CLI show what needs you, what runs and what finished, across all your machines.
+
+[![Threadlane overview video](https://img.youtube.com/vi/sXy2axMrHas/hqdefault.jpg)](https://youtu.be/sXy2axMrHas)
+
+## Install and update
+
+macOS (Apple Silicon) and Linux (x86_64, aarch64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wheregmis/threadlane/main/install.sh | sh
+```
+
+This installs `threadlane` and `threadlane-hub` to `~/.local/bin` (plus `threadlane-desktop` on Linux, and `Threadlane.app` to `~/Applications` on macOS). Run the same command again to update to the latest release; your hub data and client config are kept. For a specific version, add `-s -- 0.1.55` after `sh`. Downloads are checked against the release's `SHA256SUMS`. Set `THREADLANE_BIN_DIR` or `THREADLANE_APP_DIR` to install elsewhere.
+
+You also need at least one agent CLI installed and logged in (`claude`, `codex` or `agy`), and `gh` logged in for tasks that work in repositories.
+
+## Quick start
+
+```sh
+threadlane-hub --data-dir ~/threadlane/work run     # start a hub (leave it running)
+threadlane hub add work ~/threadlane/work           # pair this computer with it
+threadlane project add web --description "the website"
+threadlane send -p web "What changed in the build yesterday?"
+```
+
+Then open Threadlane from `~/Applications` (macOS) or run `threadlane-desktop`. Other computers join with `threadlane pair-code` and `threadlane hub join`; see below.
+
+## Screenshots
+
+<!-- Placeholders: replace each .svg with a real .png and update the links. -->
+![Home (placeholder)](docs/images/home.svg)
+![Project task board (placeholder)](docs/images/project-tasks.svg)
+![Task timeline (placeholder)](docs/images/task-timeline.svg)
+![Machines (placeholder)](docs/images/machines.svg)
+
+## Reference
+
+`Plan.md` is the system design.
 
 ## Crates
 
@@ -60,7 +93,7 @@ paired space, use **Space settings → Check for updates** to update its hub,
 including hubs reached over the network. Updating a hub stops its active runs
 and briefly disconnects clients while it restarts.
 
-Install an updater-enabled release manually once to use these controls. The
+The one-line installer above sets up an updater-enabled release. The
 app and hub need write access to their installation directory. Releases sign
 the update manifest with the existing Cargo Packager signing key so both
 components can verify the package before replacing anything.
