@@ -8437,8 +8437,12 @@ async fn space_skills_crud_versioning_rollback_and_mentions() {
     assert!(note.contains("/skill:rust-review (v1)"), "{note}");
     assert_eq!(content.as_deref(), Some("# Review v1"));
 
+    let stale = load_skills(&core, "work", Some("rust-review".to_owned())).await;
     let v2 = save_skill(&core, "work", "rust-review", "# Review v2".into()).await;
     state.apply_skill_change(v2).expect("v2 saved");
+    // A load that read v1 before the save finished must not bring v1 back.
+    state.apply_skills(stale);
+    assert_eq!(state.space_skills("work")[0].content, "# Review v2");
 
     let loaded = load_skills(&core, "work", Some("rust-review".to_owned())).await;
     state.apply_skills(loaded);

@@ -369,39 +369,37 @@ impl HubApi for ClientApi {
                 (project.id, project.lead_lane_id, None)
             }
         };
-        if let Some(task_id) = task_id {
-            let mentioned = threadlane_core::memory::parse_skill_mentions(&message.text);
-            if !mentioned.is_empty() {
-                inner
-                    .db
-                    .add_task_playbooks(task_id, &mentioned)
-                    .await
-                    .map_err(api_error)?;
-            }
-        }
         let mut payload = json!({ "text": message.text });
         if !message.images.is_empty() {
             payload["images"] = serde_json::to_value(&message.images)
                 .map_err(|error| ApiError::Internal(error.to_string()))?;
         }
-        let inserted = inner
-            .db
-            .insert_event(&NewEvent {
-                project_id,
-                lane_id,
-                source: CLIENT_SOURCE.to_owned(),
-                source_event_id: message.client_message_id.clone(),
-                kind: EventKind::UserMessage,
-                payload,
-                trust: Trust::User,
-                requested: true,
-                session_ref: None,
-                decision_ref: None,
-                reply_to_ref: None,
-                received_at: inner.clock.now(),
-            })
-            .await
-            .map_err(project_error)?;
+        let event = NewEvent {
+            project_id,
+            lane_id,
+            source: CLIENT_SOURCE.to_owned(),
+            source_event_id: message.client_message_id.clone(),
+            kind: EventKind::UserMessage,
+            payload,
+            trust: Trust::User,
+            requested: true,
+            session_ref: None,
+            decision_ref: None,
+            reply_to_ref: None,
+            received_at: inner.clock.now(),
+        };
+        let inserted = match task_id {
+            // A task message's /skill: mentions attach with the message, or not at all.
+            Some(task_id) => {
+                let mentioned = threadlane_core::memory::parse_skill_mentions(&message.text);
+                inner
+                    .db
+                    .insert_task_message(&event, task_id, &mentioned)
+                    .await
+            }
+            None => inner.db.insert_event(&event).await,
+        }
+        .map_err(project_error)?;
         match inserted {
             Inserted::New(event_id) => {
                 inner.wake.wake(WakeTarget::Lane(lane_id));

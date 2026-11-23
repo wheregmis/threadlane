@@ -11,7 +11,8 @@ use threadlane_core::ids::{
 };
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
-    BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Run, Task, TaskStatus, Trust,
+    BackendKind, EventKind, Inserted, LaneKind, Lease, NewEvent, NewTask, Run, Task, TaskStatus,
+    Trust,
 };
 use threadlane_core::store::{StoreError, StoreResult, TaskStore, TaskUpdate};
 use threadlane_core::time::Timestamp;
@@ -1571,25 +1572,24 @@ impl TaskStore for HubDb {
 
     async fn add_task_playbooks(&self, task_id: TaskId, playbooks: &[String]) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        let mut task = existing_task(conn, task_id).await?;
-        let mut changed = false;
-        for slug in playbooks {
-            if !task.playbooks.contains(slug) {
-                task.playbooks.push(slug.clone());
-                changed = true;
-            }
-        }
-        if changed {
-            exec(
-                conn,
-                "UPDATE tasks SET playbooks = ?1 WHERE id = ?2",
-                params![json_text(&task.playbooks)?, task_id.get()],
-            )
-            .await?;
-        }
+        let task = add_playbooks_in(tx.conn(), task_id, playbooks).await?;
         tx.commit().await?;
         Ok(task)
+    }
+
+    async fn insert_task_message(
+        &self,
+        event: &NewEvent,
+        task_id: TaskId,
+        playbooks: &[String],
+    ) -> StoreResult<Inserted> {
+        let tx = self.db.begin().await?;
+        let inserted = insert_event_in(tx.conn(), event).await?;
+        if matches!(inserted, Inserted::New(_)) && !playbooks.is_empty() {
+            add_playbooks_in(tx.conn(), task_id, playbooks).await?;
+        }
+        tx.commit().await?;
+        Ok(inserted)
     }
 
     async fn cancel_task(
@@ -1758,4 +1758,30 @@ impl TaskStore for HubDb {
         .await?;
         tx.commit().await
     }
+}
+
+/// Merges `playbooks` onto the task inside the caller's transaction, keeping
+/// order and skipping ones it has.
+async fn add_playbooks_in(
+    conn: &Connection,
+    task_id: TaskId,
+    playbooks: &[String],
+) -> StoreResult<Task> {
+    let mut task = existing_task(conn, task_id).await?;
+    let mut changed = false;
+    for slug in playbooks {
+        if !task.playbooks.contains(slug) {
+            task.playbooks.push(slug.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        exec(
+            conn,
+            "UPDATE tasks SET playbooks = ?1 WHERE id = ?2",
+            params![json_text(&task.playbooks)?, task_id.get()],
+        )
+        .await?;
+    }
+    Ok(task)
 }

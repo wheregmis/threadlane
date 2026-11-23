@@ -3974,6 +3974,32 @@ async fn agent_and_task_playbooks_and_space_skills_persist() {
             .len(),
         2
     );
+
+    // A task message's mentions attach with it; a retried duplicate attaches nothing.
+    let to_task = NewEvent {
+        lane_id: created.lane_id,
+        ..message(&general, "with-mention")
+    };
+    let first = hub
+        .insert_task_message(&to_task, created.id, &["lint".into()])
+        .await
+        .unwrap();
+    assert!(matches!(first, Inserted::New(_)));
+    let retried = hub
+        .insert_task_message(&to_task, created.id, &["other".into()])
+        .await
+        .unwrap();
+    assert!(matches!(retried, Inserted::Duplicate(_)));
+    let task = hub.task(created.id).await.unwrap().unwrap();
+    assert_eq!(
+        task.playbooks,
+        vec![
+            "rust-pr-review",
+            "accessibility-audit",
+            "release-notes",
+            "lint"
+        ]
+    );
 }
 
 #[tokio::test]

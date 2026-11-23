@@ -287,6 +287,19 @@ pub fn remove_skill_mention(text: &str, slug: &str) -> String {
     joined.trim().to_owned()
 }
 
+/// `loaded`, unless the cache holds a newer version of it saved while the load ran.
+fn newer_cached(cached: &[SpaceSkill], loaded: SpaceSkill) -> SpaceSkill {
+    cached
+        .iter()
+        .find(|skill| skill.slug == loaded.slug && skill.version > loaded.version)
+        .cloned()
+        .unwrap_or(loaded)
+}
+
+fn latest(history: &[MemoryFile]) -> i64 {
+    history.iter().map(|file| file.version).max().unwrap_or(0)
+}
+
 /// Toggles `/skill:<slug>` in `text`.
 #[must_use]
 pub fn toggle_skill_mention(text: &str, slug: &str) -> String {
@@ -536,13 +549,18 @@ impl AppState {
             files,
             versions,
         } = load;
+        // Unpaired while it loaded: don't recreate its state.
+        self.space(&space)?;
         let view = self.skills_view_mut(&space);
         let previous = view.selected.clone();
         match files {
             Ok(files) => {
                 view.answers.insert(Part::Memory, Answer::Answered);
-                let mut parsed: Vec<SpaceSkill> =
-                    files.into_iter().filter_map(to_space_skill).collect();
+                let mut parsed: Vec<SpaceSkill> = files
+                    .into_iter()
+                    .filter_map(to_space_skill)
+                    .map(|loaded| newer_cached(&view.skills, loaded))
+                    .collect();
                 parsed.sort_by(|a, b| a.slug.cmp(&b.slug));
                 view.skills = parsed;
                 if let Some(selected) = &view.selected
@@ -563,6 +581,11 @@ impl AppState {
             && view.selected.as_deref() == Some(slug.as_str())
         {
             match listed {
+                // A history read before a save finished is older than the one we hold.
+                Ok(history)
+                    if view.versions.first().map(|f| &f.path)
+                        == history.first().map(|f| &f.path)
+                        && latest(&history) < latest(&view.versions) => {}
                 Ok(history) => {
                     view.answers.insert(Part::MemoryVersions, Answer::Answered);
                     view.versions = history;
@@ -616,6 +639,10 @@ impl AppState {
                     } else {
                         view.skills.push(skill);
                         view.skills.sort_by(|a, b| a.slug.cmp(&b.slug));
+                    }
+                    if view.selected.as_deref() != Some(slug.as_str()) {
+                        // The history shown is another skill's; the reload after this fills it.
+                        view.versions.clear();
                     }
                     view.selected = Some(slug.clone());
                     if !view.versions.iter().any(|v| v.version == file.version) {

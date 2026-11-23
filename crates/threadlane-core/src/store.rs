@@ -408,6 +408,15 @@ pub trait TaskStore: Send + Sync {
     /// Merges space skill playbook slugs onto a task without duplicates,
     /// preserving order.
     async fn add_task_playbooks(&self, task_id: TaskId, playbooks: &[String]) -> StoreResult<Task>;
+    /// Inserts a user message to a task's lane and, only when it is new,
+    /// merges the playbooks it mentions onto the task, in one transaction,
+    /// so a duplicate or failed insert attaches nothing.
+    async fn insert_task_message(
+        &self,
+        event: &NewEvent,
+        task_id: TaskId,
+        playbooks: &[String],
+    ) -> StoreResult<Inserted>;
     /// Cancels a task that has not ended and reports it to the lead lane.
     /// Cancelling a cancelled task changes nothing. Pending events in its
     /// lane are skipped by the next run cycle.
