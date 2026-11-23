@@ -1,10 +1,97 @@
-# Threadlane
+<p align="center">
+  <img src="crates/threadlane-desktop/resources/logo.png" width="72" alt="">
+</p>
 
-Threadlane runs command-line coding agents (Claude Code and Codex) on your
-own machines: a hub queues your messages per project, a runner works them through
-the agent, and replies come back through a feed. `Plan.md` is the system
-design, and `docs/milestone-1.md` maps milestone 1 (one lane, one node) onto
-the crates below.
+<h1 align="center">Threadlane</h1>
+
+<p align="center">
+  <b>Your coding agents. Your machines. You approve what ships.</b><br>
+  Run Claude Code, Codex and Antigravity as a team, on the Macs and Linux boxes you already own.
+</p>
+
+<p align="center">
+  <a href="https://github.com/wheregmis/threadlane/releases/latest"><img src="https://img.shields.io/github/v/release/wheregmis/threadlane?label=release" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platforms-macOS%20(Apple%20Silicon)%20%7C%20Linux-informational" alt="Platforms">
+  <a href="https://youtu.be/sXy2axMrHas"><img src="https://img.shields.io/badge/watch-2½%20min%20tour-red?logo=youtube" alt="Watch the tour"></a>
+</p>
+
+<p align="center">
+  <img src="docs/images/board-flow.gif" width="900" alt="A project's task board: tasks move from queued to running to done, then the dependency graph">
+</p>
+
+You message a project's **lead** agent in plain words. A **hub** queues the work, **runners** on your machines carry it out with the agent CLIs you already use, each task in its own git worktree, and nothing is pushed, merged or released until you say yes. A desktop app and the `threadlane` CLI show what needs you, what runs and what finished, across every machine.
+
+<p align="center">
+  <a href="https://youtu.be/sXy2axMrHas"><img src="https://img.youtube.com/vi/sXy2axMrHas/maxresdefault.jpg" width="640" alt="Watch the 2½-minute tour on YouTube"></a><br>
+  <sub>▶ The full tour: spaces, the lead, repositories, the board, decisions, routines, memory, dreaming and machines</sub>
+</p>
+
+## Why Threadlane
+
+- **Your hardware, your logins.** Runners use the `claude`, `codex` and `agy` you already have, on your accounts. When one account hits its usage limit, work falls back to the next backend or waits and tells you when.
+- **A team, not a chat.** A lead plans and delegates to agents with roles (Engineer, Reviewer, Chief of Staff, …). You choose how much each may do on its own, from *Off* to *Autonomous*, under a ceiling per project.
+- **You approve what ships.** Agents can't push. Publishing a branch, opening a pull request, merging or releasing becomes a decision card you answer with one key.
+- **Real projects, many repositories.** A project can span several repositories; a task gets its own worktree and branch in each one it touches.
+- **Memory that survives.** Instructions, notes and task progress live on the hub, versioned, and follow the work to any machine. Nightly **dreaming** tidies memory and turns repeated choices into learnings that cite their sources.
+- **Private by construction.** Each space (Work, Personal, a client) is its own hub with its own data. Pairing is peer-to-peer over iroh: no relay, no outside lookup.
+
+## A look around
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/decision.gif" alt="Approving a pull request from a decision card"><br><b>Decisions.</b> Anything hard to undo waits for you. Press <kbd>1</kbd> to approve.</td>
+    <td width="50%"><img src="docs/images/chat.png" alt="Conversation with a project's lead"><br><b>The lead.</b> Ask in plain words; it plans, splits the work into tasks and hands them out.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/repos.png" alt="A project with three repositories and a task's branches"><br><b>Many repositories.</b> One task, its own branch in each repository it touches.</td>
+    <td><img src="docs/images/graph.png" alt="Task dependency graph"><br><b>Board and graph.</b> See what runs, what waits on you, and which tasks wait on which.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/team.png" alt="Agents and their autonomy modes"><br><b>Your team.</b> Per-agent modes and exactly what each may do without asking.</td>
+    <td><img src="docs/images/routines.png" alt="Routines and GitHub events"><br><b>Routines and GitHub.</b> Scheduled wake-ups; checks, reviews and comments routed to the right task.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/memory.png" alt="Project memory files and history"><br><b>Memory.</b> Versioned files on the hub, with history and revert.</td>
+    <td><img src="docs/images/dreaming.gif" alt="A nightly dream curating memory"><br><b>Dreaming.</b> A nightly pass that merges duplicates and clears stale notes.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/learnings.png" alt="Learned preferences and procedures"><br><b>Learnings.</b> Preferences after three consistent choices; procedures from fixes that worked.</td>
+    <td><img src="docs/images/machines.png" alt="Machines, run slots and model accounts"><br><b>Machines.</b> One pool of run slots across your computers, with backend fallback.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/spaces.png" alt="Three spaces, each its own hub"><br><b>Spaces.</b> Work, personal and client work never share a hub.</td>
+    <td><img src="docs/images/inbox.png" alt="Inbox across all spaces"><br><b>Inbox.</b> What needs you, across every space, in one place.</td>
+  </tr>
+</table>
+
+<sub>Images are rendered from the tour video and show example data.</sub>
+
+## Install and update
+
+macOS (Apple Silicon) and Linux (x86_64, aarch64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wheregmis/threadlane/main/install.sh | sh
+```
+
+This installs `threadlane` and `threadlane-hub` to `~/.local/bin` (plus `threadlane-desktop` on Linux, and `Threadlane.app` to `~/Applications` on macOS). Run the same command again to update to the latest release; your hub data and client config are kept. For a specific version, add `-s -- 0.1.55` after `sh`. Downloads are checked against the release's `SHA256SUMS`. Set `THREADLANE_BIN_DIR` or `THREADLANE_APP_DIR` to install elsewhere.
+
+You also need at least one agent CLI installed and logged in (`claude`, `codex` or `agy`), and `gh` logged in for tasks that work in repositories.
+
+## Quick start
+
+```sh
+threadlane-hub --data-dir ~/threadlane/work run     # start a hub (leave it running)
+threadlane hub add work ~/threadlane/work           # pair this computer with it
+threadlane project add web --description "the website"
+threadlane send -p web "What changed in the build yesterday?"
+```
+
+Then open Threadlane from `~/Applications` (macOS) or run `threadlane-desktop`. Other computers join with `threadlane pair-code` and `threadlane hub join`; see below.
+
+## Reference
+
+`Plan.md` is the system design.
 
 ## Crates
 
@@ -60,7 +147,7 @@ paired space, use **Space settings → Check for updates** to update its hub,
 including hubs reached over the network. Updating a hub stops its active runs
 and briefly disconnects clients while it restarts.
 
-Install an updater-enabled release manually once to use these controls. The
+The one-line installer above sets up an updater-enabled release. The
 app and hub need write access to their installation directory. Releases sign
 the update manifest with the existing Cargo Packager signing key so both
 components can verify the package before replacing anything.
