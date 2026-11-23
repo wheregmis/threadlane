@@ -161,16 +161,53 @@ async fn an_unfinished_run_commits_tracked_changes_and_leaves_scratch_files_out(
 }
 
 #[tokio::test]
-async fn work_on_another_branch_is_not_committed() {
+async fn work_on_another_branch_comes_back_to_the_task_branch() {
     let s = setup();
     let path = s.prepare(T1).await;
+    let before = commits(&path);
     git(&path, &["switch", "--quiet", "-c", "elsewhere"]);
+    std::fs::write(path.join("made.txt"), "committed").unwrap();
+    git(&path, &["add", "made.txt"]);
+    git(&path, &["commit", "--quiet", "-m", "On the other branch"]);
     std::fs::write(path.join("work.txt"), "done").unwrap();
+    s.checkpoint(T1).await;
+    assert_eq!(branch(&path), "threadlane/T-0001");
+    assert_eq!(
+        commits(&path),
+        before + 2,
+        "both commits are on the task branch"
+    );
+    assert_eq!(git(&path, &["status", "--porcelain"]), "");
+    assert_eq!(git(&path, &["show", "HEAD:work.txt"]), "done");
+}
+
+#[tokio::test]
+async fn work_that_does_not_apply_on_the_task_branch_is_kept_aside() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("task.txt"), "task").unwrap();
+    s.checkpoint(T1).await;
+    git(&path, &["switch", "--quiet", "--detach", "HEAD~1"]);
+    // Untracked here, tracked on the task branch: switching back would overwrite it.
+    std::fs::write(path.join("task.txt"), "mine").unwrap();
     let refused = s
         .workspaces
         .checkpoint(T1, std::slice::from_ref(&s.repository), "x")
         .await;
-    assert!(refused.is_err(), "{refused:?}");
+    let error = refused.expect_err("the work could not go on the task branch");
+    assert!(
+        error.to_string().contains("threadlane/T-0001-switched"),
+        "{error}"
+    );
+    assert_eq!(branch(&path), "threadlane/T-0001");
+    assert_eq!(
+        std::fs::read_to_string(path.join("task.txt")).unwrap(),
+        "task"
+    );
+    assert_eq!(
+        git(&path, &["show", "threadlane/T-0001-switched:task.txt"]),
+        "mine"
+    );
 }
 
 #[tokio::test]
