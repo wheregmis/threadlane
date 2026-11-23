@@ -137,6 +137,7 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
             | crate::EDIT_PULL_REQUEST
             | crate::RESOLVE_REVIEW_THREAD
             | crate::REQUEST_REVIEW
+            | threadlane_core::forge::ATTACH_IMAGE
     ) && let Some(number) = arguments["number"].as_u64()
     {
         targets.insert("number".into(), number.into());

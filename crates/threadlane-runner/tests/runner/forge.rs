@@ -1080,3 +1080,66 @@ async fn a_batch_merge_stops_at_a_pull_request_that_was_only_queued() {
     assert_eq!(calls.len(), 2, "#16 is not attempted: {calls:?}");
     assert_eq!(calls[1][..3], ["pr", "view", "15"]);
 }
+
+#[tokio::test]
+async fn an_approved_image_is_pushed_to_its_own_branch_and_commented_once_approved() {
+    use threadlane_core::forge::PullRequestImage;
+    let dir = tempfile::tempdir().unwrap();
+    let (worktree, remote) = worktree_with_work(dir.path()).await;
+    let image = dir.path().join("shot.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nnot really pixels").unwrap();
+    let blob = git(&worktree, &["hash-object", "--", image.to_str().unwrap()]);
+    let head_before = git(&worktree, &["rev-parse", "HEAD"]);
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let attachment = PullRequestImage {
+        remote: "git@github.test:acme/app.git",
+        number: std::num::NonZeroU64::new(7).unwrap(),
+        image: &image,
+        extension: "png",
+        blob: blob.trim(),
+        caption: "Settings page",
+    };
+    let first = forge.attach_image(&worktree, attachment).await.unwrap();
+    // A retry makes the same commit, so its push is a no-op rather than a rejection.
+    let again = forge.attach_image(&worktree, attachment).await.unwrap();
+    assert_eq!(first, again);
+
+    let branches = git(&remote, &["branch", "--list", "threadlane-assets/*"]);
+    let branch = branches.trim().trim_start_matches("* ");
+    assert!(branch.starts_with("threadlane-assets/"), "{branches}");
+    let commit = git(&remote, &["rev-parse", branch]);
+    let name = format!("{}.png", &blob.trim()[..12]);
+    assert_eq!(
+        git(&remote, &["ls-tree", "--name-only", commit.trim()]).trim(),
+        name,
+        "the commit holds only the image"
+    );
+    assert_eq!(
+        git(&remote, &["rev-list", "--count", commit.trim()]).trim(),
+        "1",
+        "with no history of the repository"
+    );
+    let url = format!("https://github.test/acme/app/raw/{}/{name}", commit.trim());
+    assert!(first.contains(&url), "{first}");
+    assert_eq!(
+        gh.invocations()[0],
+        [
+            "pr",
+            "comment",
+            "7",
+            &format!("--body=![Settings page]({url})"),
+            "--repo=github.test/acme/app",
+        ]
+    );
+    assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), head_before);
+    assert!(
+        git(&worktree, &["status", "--porcelain"]).trim().is_empty(),
+        "the worktree and its index are untouched"
+    );
+
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nother pixels").unwrap();
+    let error = forge.attach_image(&worktree, attachment).await.unwrap_err();
+    assert!(error.0.contains("changed since it was approved"), "{error}");
+    assert_eq!(gh.invocations().len(), 2, "a changed image is not posted");
+}

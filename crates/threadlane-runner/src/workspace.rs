@@ -42,7 +42,7 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Who the system's own checkpoint commits are by, set per command so they
 /// do not depend on this user's `git` configuration. Signing is off because
 /// it may need a key or a prompt.
-const COMMITTER: [&str; 6] = [
+pub(crate) const COMMITTER: [&str; 6] = [
     "-c",
     "user.name=Threadlane",
     "-c",

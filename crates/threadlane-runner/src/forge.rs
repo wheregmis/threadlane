@@ -17,7 +17,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::forge::{
-    ApprovedBranch, CommentTarget, Forge, ForgeError, PullRequestUpdate, RepositoryAction,
+    ApprovedBranch, CommentTarget, Forge, ForgeError, PullRequestImage, PullRequestUpdate,
+    RepositoryAction,
 };
 use threadlane_core::github::{REVIEW_MARKER_PREFIX, normalize_remote};
 use threadlane_core::model::Repository;
@@ -25,7 +26,7 @@ use threadlane_core::workspace::{valid_branch_name, valid_commit_id};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
-use crate::workspace::{check_fast_forward, git, run};
+use crate::workspace::{COMMITTER, check_fast_forward, git, git_command, run};
 
 /// The longest one `gh` command may take.
 const GH_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -997,6 +998,80 @@ impl Forge for GitForge {
             .map(str::trim)
             .find(|line| !line.is_empty())
             .map(str::to_owned))
+    }
+
+    async fn attach_image(
+        &self,
+        worktree: &Path,
+        attachment: PullRequestImage<'_>,
+    ) -> Result<String, ForgeError> {
+        let repo = normalize_remote(attachment.remote)
+            .ok_or_else(|| ForgeError("the registered remote is not a forge repository".into()))?;
+        let git_in = |argv: Vec<OsString>, env: &[(&str, &OsString)]| {
+            let mut command = git_command(Some(worktree), &argv);
+            command.envs(env.iter().copied());
+            async move {
+                run(command, "git", &argv, GH_TIMEOUT)
+                    .await
+                    .map(|out| out.trim().to_owned())
+                    .map_err(ForgeError)
+            }
+        };
+        let mut hash = args(&["hash-object", "-w", "--"]);
+        hash.push(attachment.image.into());
+        let blob = git_in(hash, &[]).await?;
+        if blob != attachment.blob {
+            return Err(ForgeError(
+                "the image changed since it was approved; request approval again".into(),
+            ));
+        }
+        let name = format!("{}.{}", &blob[..12], attachment.extension);
+        // A one-file tree, built in a scratch index so the worktree's own is untouched.
+        let index: OsString = std::env::temp_dir()
+            .join(format!("threadlane-image-{}-{blob}", std::process::id()))
+            .into();
+        let cacheinfo = format!("100644,{blob},{name}");
+        let tree = async {
+            git_in(
+                args(&["update-index", "--add", "--cacheinfo", &cacheinfo]),
+                &[("GIT_INDEX_FILE", &index)],
+            )
+            .await?;
+            git_in(args(&["write-tree"]), &[("GIT_INDEX_FILE", &index)]).await
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&index).await;
+        let tree = tree?;
+        // A fixed date makes the commit, and so its branch, the same on a retry.
+        let epoch = OsString::from("@0 +0000");
+        let message = format!("Threadlane image {name}");
+        let mut commit_tree = args(&COMMITTER);
+        commit_tree.extend(args(&["commit-tree", &tree, "-m", &message]));
+        let commit = git_in(
+            commit_tree,
+            &[("GIT_AUTHOR_DATE", &epoch), ("GIT_COMMITTER_DATE", &epoch)],
+        )
+        .await?;
+        if !valid_commit_id(&commit) {
+            return Err(ForgeError("git commit-tree printed no commit ID".into()));
+        }
+        // shortcut: one branch per image keeps the push non-forced and needs no fetch; move to a shared assets branch if they pile up.
+        let refspec = format!("{commit}:refs/heads/threadlane-assets/{}", &commit[..16]);
+        git_in(args(&["push", "--quiet", "origin", "--", &refspec]), &[]).await?;
+        let url = format!("https://{repo}/raw/{commit}/{name}");
+        let comment = self
+            .gh(
+                worktree,
+                args(&[
+                    "pr",
+                    "comment",
+                    &attachment.number.to_string(),
+                    &format!("--body=![{}]({url})", attachment.caption),
+                    &format!("--repo={repo}"),
+                ]),
+            )
+            .await?;
+        Ok(format!("Image: {url}\nComment: {}", comment.trim()))
     }
 
     async fn pull_request_base(

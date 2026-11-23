@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 use threadlane_core::forge::{
-    ASSIGN_ISSUE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST,
+    ASSIGN_ISSUE, ATTACH_IMAGE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST,
     FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, LABEL_ISSUE, MARK_READY, MERGE, OPEN_PULL_REQUEST,
     PUBLISH_BRANCH, REPORT_LIMITATION, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD,
 };
@@ -100,7 +100,8 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | ASSIGN_ISSUE
         | EDIT_PULL_REQUEST
         | RESOLVE_REVIEW_THREAD
-        | REQUEST_REVIEW => kind == LaneKind::Task,
+        | REQUEST_REVIEW
+        | ATTACH_IMAGE => kind == LaneKind::Task,
         _ => true,
     }
 }
@@ -1668,6 +1669,7 @@ impl ToolRegistry for HubTools {
             | EDIT_PULL_REQUEST
             | RESOLVE_REVIEW_THREAD
             | REQUEST_REVIEW
+            | ATTACH_IMAGE
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
             ))),
@@ -1933,7 +1935,8 @@ mod tests {
                     ASSIGN_ISSUE,
                     EDIT_PULL_REQUEST,
                     RESOLVE_REVIEW_THREAD,
-                    REQUEST_REVIEW
+                    REQUEST_REVIEW,
+                    ATTACH_IMAGE
                 ][..],
                 &memory,
                 &[REPORT_LIMITATION]

@@ -14,8 +14,9 @@ use threadlane_core::backend::{
     encode_backends,
 };
 use threadlane_core::forge::{
-    ApprovedBranch, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, Forge, ONTO_TASK, OPEN_PULL_REQUEST,
-    PUBLISH_BRANCH, PullRequestUpdate,
+    ATTACH_IMAGE, ApprovedBranch, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, Forge, IMAGE_BLOB,
+    MAX_IMAGE_BYTES, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH, PullRequestImage,
+    PullRequestUpdate, image_extension,
 };
 use threadlane_core::ids::{DecisionId, RunId};
 use threadlane_core::link::{
@@ -1002,6 +1003,9 @@ impl Inner {
             .iter()
             .position(|repository| repository.name == name)
             .ok_or_else(|| format!("{name:?} is not one of the task's repositories"))?;
+        if tool == ATTACH_IMAGE {
+            return self.attach_image(assignment, task, index, arguments).await;
+        }
         let revision = arguments
             .get(PUBLISH_REVISION)
             .and_then(Json::as_str)
@@ -1112,6 +1116,50 @@ impl Inner {
             other => return Err(format!("the runner does not perform {other}")),
         }
         Ok(outcome)
+    }
+
+    /// Attaches the approved image to the pull request, if its bytes are
+    /// still the ones approved.
+    async fn attach_image(
+        &self,
+        assignment: &RunAssignment,
+        task: threadlane_core::ids::TaskId,
+        index: usize,
+        arguments: &Json,
+    ) -> Result<Json, String> {
+        let worktrees = self
+            .workspaces
+            .prepare(task, &assignment.repositories)
+            .await
+            .map_err(|error| error.to_string())?;
+        let worktree = worktrees.get(index).ok_or("no worktree was set up")?;
+        let (image, extension) = image_file(worktree, arguments).await?;
+        let number = arguments["number"]
+            .as_u64()
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or("the approved call has no valid PR number")?;
+        let blob = arguments[IMAGE_BLOB]
+            .as_str()
+            .filter(|blob| valid_commit_id(blob))
+            .ok_or("the approval has no image blob ID. Request approval again.")?;
+        let summary = self
+            .forge
+            .attach_image(
+                worktree,
+                PullRequestImage {
+                    remote: &assignment.repositories[index].remote_url,
+                    number,
+                    image: &image,
+                    extension,
+                    blob,
+                    caption: arguments["caption"]
+                        .as_str()
+                        .map_or("screenshot", str::trim),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(json!({ "performed": true, "summary": summary }))
     }
 
     fn request(
@@ -1656,6 +1704,41 @@ pub(crate) fn publish_target(
             .ok_or_else(|| "onto_task is not a task id".to_owned()),
         _ => Ok(task_branch(task)),
     }
+}
+
+/// The image an `attach_image` call names, given absolute or relative to
+/// `worktree`, with its file extension: a PNG, JPEG, GIF or WebP file of at
+/// most [`MAX_IMAGE_BYTES`]. The bytes are checked, not the file name.
+pub(crate) async fn image_file(
+    worktree: &Path,
+    arguments: &Json,
+) -> Result<(PathBuf, &'static str), String> {
+    use tokio::io::AsyncReadExt as _;
+    let path = arguments
+        .get("path")
+        .and_then(Json::as_str)
+        .filter(|path| !path.is_empty())
+        .ok_or("path must name an image file")?;
+    let path = worktree.join(path);
+    let unreadable = |error: std::io::Error| format!("cannot read {}: {error}", path.display());
+    let metadata = tokio::fs::metadata(&path).await.map_err(unreadable)?;
+    if !metadata.is_file() || metadata.len() > MAX_IMAGE_BYTES {
+        return Err(format!(
+            "{} must be a file of at most {} MiB",
+            path.display(),
+            MAX_IMAGE_BYTES >> 20
+        ));
+    }
+    let mut head = [0; 12];
+    let read = tokio::fs::File::open(&path)
+        .await
+        .map_err(unreadable)?
+        .read(&mut head)
+        .await
+        .map_err(unreadable)?;
+    let extension = image_extension(&head[..read])
+        .ok_or_else(|| format!("{} is not a PNG, JPEG, GIF or WebP image", path.display()))?;
+    Ok((path, extension))
 }
 
 /// Whether `dir` holds anything besides review checkouts, which share it.
