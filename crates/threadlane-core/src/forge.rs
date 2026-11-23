@@ -125,6 +125,9 @@ pub enum RepositoryAction {
     },
     /// Mark the numbered draft pull request ready for review.
     MarkReady { number: std::num::NonZeroU64 },
+    /// Mark these draft pull requests ready in this order; stop at the first
+    /// that fails (#692).
+    MarkReadyBatch { numbers: Vec<std::num::NonZeroU64> },
     /// Replace the numbered pull request's title and/or body; `None` keeps it.
     EditPullRequest {
         number: std::num::NonZeroU64,

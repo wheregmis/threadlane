@@ -168,10 +168,17 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         ),
         define(
             MARK_READY,
-            "Mark a draft pull request in a registered project repository ready for review.",
+            "Mark a draft pull request in a registered project repository ready for review. To \
+             mark a batch the user asked for ready on one approval, give numbers instead of \
+             number: the pull requests in order. The batch stops at the first that fails.",
             json!({
-                "type":"object","properties":{"repository":repository,"number":{"type":"integer","minimum":1}},
-                "required":["repository","number"],"additionalProperties":false
+                "type":"object","properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "numbers":{"type":"array","minItems":1,"maxItems":MAX_MERGE_BATCH,"uniqueItems":true,
+                        "items":{"type":"integer","minimum":1}}
+                },
+                "required":["repository"],"additionalProperties":false
             }),
         ),
         define(
@@ -624,6 +631,30 @@ fn merge_batch(pulls: &Json) -> Result<Vec<(std::num::NonZeroU64, String)>, Tool
     Ok(batch)
 }
 
+/// A batch mark-ready's pull requests, in order, each listed once.
+fn ready_batch(numbers: &Json) -> Result<Vec<std::num::NonZeroU64>, ToolError> {
+    let numbers = numbers
+        .as_array()
+        .filter(|numbers| (1..=MAX_MERGE_BATCH).contains(&numbers.len()))
+        .ok_or_else(|| {
+            invalid(&format!(
+                "numbers must list 1 to {MAX_MERGE_BATCH} pull requests"
+            ))
+        })?;
+    let mut batch: Vec<std::num::NonZeroU64> = Vec::with_capacity(numbers.len());
+    for number in numbers {
+        let number = number
+            .as_u64()
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or_else(|| invalid("each number must be a positive integer"))?;
+        if batch.contains(&number) {
+            return Err(invalid(&format!("pull request #{number} is listed twice")));
+        }
+        batch.push(number);
+    }
+    Ok(batch)
+}
+
 /// Parses the arguments again before handing the stored call to the runner.
 pub(crate) fn repository_action(
     tool: &str,
@@ -684,6 +715,12 @@ pub(crate) fn repository_action(
             Ok(RepositoryAction::Merge {
                 number: number()?,
                 expected_head: commit(EXPECTED_HEAD)?,
+            })
+        }
+        MARK_READY if a.get("numbers").is_some() => {
+            fields(a, &["repository", "numbers"])?;
+            Ok(RepositoryAction::MarkReadyBatch {
+                numbers: ready_batch(&a["numbers"])?,
             })
         }
         MARK_READY => {
@@ -1110,6 +1147,19 @@ pub(crate) async fn proposal(
                     "Merge these {} pull requests in {name}, in this order, each only if its \
                      head is still the commit shown? The batch stops at the first that fails.\n{}",
                     pulls.len(),
+                    list.join("\n")
+                )
+            }
+            threadlane_core::forge::RepositoryAction::MarkReadyBatch { numbers } => {
+                let list: Vec<String> = numbers
+                    .iter()
+                    .enumerate()
+                    .map(|(at, number)| format!("{}. {slug}#{number}", at + 1))
+                    .collect();
+                format!(
+                    "Mark these {} draft pull requests in {name} ready for review, in this \
+                     order? The batch stops at the first that fails.\n{}",
+                    numbers.len(),
                     list.join("\n")
                 )
             }

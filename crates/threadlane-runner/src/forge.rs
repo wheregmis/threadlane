@@ -523,6 +523,36 @@ impl GitForge {
         Ok(format!("merged {} in order", merged.join(", ")))
     }
 
+    /// Marks each draft PR ready in order, stopping at the first that fails.
+    async fn mark_ready_batch(
+        &self,
+        repo: &str,
+        numbers: &[std::num::NonZeroU64],
+    ) -> Result<String, ForgeError> {
+        let mut ready = Vec::new();
+        for number in numbers {
+            let call = args(&[
+                "pr",
+                "ready",
+                &number.to_string(),
+                &format!("--repo={repo}"),
+            ]);
+            if let Err(error) = self.gh(Path::new("."), call).await {
+                let done = if ready.is_empty() {
+                    "none marked ready".to_owned()
+                } else {
+                    format!("marked {} ready", ready.join(", "))
+                };
+                return Err(ForgeError(format!(
+                    "batch stopped at #{number}, {done}, the rest not attempted: {}",
+                    error.0
+                )));
+            }
+            ready.push(format!("#{number}"));
+        }
+        Ok(format!("marked {} ready in order", ready.join(", ")))
+    }
+
     /// Closes PR `number` of `repo` (`host/owner/name`) only while its head
     /// is `expected_head`, then deletes its head branch if asked. A PR that is
     /// already closed at that head is not closed again, so a retry finishes.
@@ -1025,6 +1055,9 @@ impl Forge for GitForge {
                     .await;
             }
             RepositoryAction::MergeBatch { pulls } => return self.merge_batch(&repo, pulls).await,
+            RepositoryAction::MarkReadyBatch { numbers } => {
+                return self.mark_ready_batch(&repo, numbers).await;
+            }
             _ => {}
         }
         let mut argv = match action {
@@ -1070,7 +1103,8 @@ impl Forge for GitForge {
             RepositoryAction::ClosePullRequest { .. }
             | RepositoryAction::ResolveReviewThread { .. }
             | RepositoryAction::RequestReview { .. }
-            | RepositoryAction::MergeBatch { .. } => unreachable!("handled above"),
+            | RepositoryAction::MergeBatch { .. }
+            | RepositoryAction::MarkReadyBatch { .. } => unreachable!("handled above"),
             RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
             RepositoryAction::AssignIssue { number } => {
                 args(&["issue", "edit", &number.to_string(), "--add-assignee=@me"])

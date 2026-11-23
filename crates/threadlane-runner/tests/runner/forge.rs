@@ -146,6 +146,8 @@ impl FakeGh {
                echo 'https://github.test/me/app/pull/7'\n\
              elif [ \"$1 $2 $3\" = \"pr merge 13\" ]; then\n\
                echo 'Head branch was modified. Review and try the merge again. (HTTP 409)' >&2; exit 1\n\
+             elif [ \"$1 $2 $3\" = \"pr ready 13\" ]; then\n\
+               echo 'GraphQL: Could not resolve to a PullRequest (HTTP 404)' >&2; exit 1\n\
              elif [ \"$1 $2 $3\" = \"pr merge 17\" ]; then\n\
                echo 'GraphQL: This pull request is part of a stack and must be merged using the asynchronous merge REST API (mergePullRequest)' >&2; exit 1\n\
              elif [ \"$1 $2 $3\" = \"pr view 15\" ]; then\n\
@@ -1268,4 +1270,41 @@ async fn a_batch_refuses_the_async_merge_while_a_downstack_pull_request_is_open(
         !calls[before..].iter().any(|call| call[0] == "api"),
         "the asynchronous merge is not attempted: {calls:?}"
     );
+}
+
+#[tokio::test]
+async fn a_batch_mark_ready_goes_in_order_and_stops_at_the_first_that_fails() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    let batch = RepositoryAction::MarkReadyBatch {
+        numbers: vec![
+            12.try_into().unwrap(),
+            13.try_into().unwrap(),
+            14.try_into().unwrap(),
+        ],
+    };
+    let error = forge
+        .apply("https://github.test/acme/app.git", &batch)
+        .await
+        .unwrap_err();
+    assert!(error.0.contains("stopped at #13"), "{error}");
+    assert!(error.0.contains("marked #12 ready"), "{error}");
+    let repo = "--repo=github.test/acme/app";
+    assert_eq!(
+        gh.invocations(),
+        [
+            vec!["pr".to_owned(), "ready".into(), "12".into(), repo.into()],
+            vec!["pr".to_owned(), "ready".into(), "13".into(), repo.into()],
+        ],
+        "#14 is not attempted"
+    );
+    let done = RepositoryAction::MarkReadyBatch {
+        numbers: vec![14.try_into().unwrap(), 12.try_into().unwrap()],
+    };
+    let out = forge
+        .apply("https://github.test/acme/app.git", &done)
+        .await
+        .unwrap();
+    assert_eq!(out, "marked #14, #12 ready in order");
 }
