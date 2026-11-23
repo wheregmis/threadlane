@@ -529,6 +529,7 @@ impl AppState {
             repositories: form.repositories.clone(),
             depends_on: form.depends_on.clone(),
             draft_pr: form.draft_pr,
+            request_id: None,
         })
     }
 

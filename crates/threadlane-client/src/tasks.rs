@@ -26,6 +26,9 @@ pub struct NewTaskSpec {
     pub depends_on: Vec<TaskId>,
     /// Whether the task's work is kept in a draft pull request.
     pub draft_pr: bool,
+    /// The request key to send; `None` mints a fresh one. A retry that
+    /// reuses it gets the task an earlier attempt created, not a second one.
+    pub request_id: Option<String>,
 }
 
 /// Added to the goal of a task whose work is kept in a draft pull request,
@@ -36,8 +39,8 @@ pull request for it with open_pull_request. Push later changes to it with publis
 leave it a draft. It must be open before you call finish_task.";
 
 impl ClientCore {
-    /// Creates a task of yours in one space, skipping the lead, with a
-    /// fresh request id. `space: None` means the only paired hub.
+    /// Creates a task of yours in one space, skipping the lead, under the
+    /// spec's request id or a fresh one. `space: None` means the only paired hub.
     ///
     /// # Errors
     ///
@@ -69,7 +72,7 @@ impl ClientCore {
             agent: spec.agent,
             repositories: spec.repositories,
             depends_on: spec.depends_on,
-            client_request_id: uuid::Uuid::new_v4().to_string(),
+            client_request_id: spec.request_id.unwrap_or_else(Self::request_id),
         };
         self.one_task(space, request).await
     }

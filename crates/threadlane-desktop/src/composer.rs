@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 
-use threadlane_client::{ClientCore, ClientError, Sent};
+use threadlane_client::{ClientCore, ClientError, NewTaskSpec, Sent};
 use threadlane_core::attachment::{ImageAttachment, check_image_budget};
+use threadlane_core::model::Task;
 use threadlane_core::{ids::TaskId, time::Timestamp};
 
+use crate::mention::{Pick, drop_picks, is_chip, remap_picks};
 use crate::{Activity, AppState, describe};
 
 /// The undo window, in seconds.
@@ -66,6 +68,11 @@ pub struct Outgoing {
     pub images: Vec<ImageAttachment>,
     /// When the owner submitted it.
     pub at: Timestamp,
+    /// The tasks its `@agent` mentions start, delivered instead of the
+    /// message when not empty.
+    pub dispatch: Vec<NewTaskSpec>,
+    /// The draft's picks when it was submitted.
+    pub(crate) picks: Vec<Pick>,
 }
 
 impl Outgoing {
@@ -88,6 +95,26 @@ impl Outgoing {
     }
 }
 
+impl Outgoing {
+    /// Starts the tasks its mentions dispatch, in its destination's space.
+    ///
+    /// It stops at the first failure and returns it with the tasks started
+    /// before it, which stay started.
+    pub async fn dispatch(&self, core: &ClientCore) -> (Vec<Task>, Result<(), ClientError>) {
+        let space = match &self.destination {
+            Destination::Lead(space, _) | Destination::Task(space, _) => space,
+        };
+        let mut started = Vec::with_capacity(self.dispatch.len());
+        for spec in &self.dispatch {
+            match core.create_task(Some(space), spec.clone()).await {
+                Ok(task) => started.push(task),
+                Err(error) => return (started, Err(error)),
+            }
+        }
+        (started, Ok(()))
+    }
+}
+
 /// Work requested by one press of Send.
 #[derive(Debug, Default)]
 pub struct SendRequest {
@@ -105,6 +132,23 @@ struct DraftState {
     images: Vec<ImageAttachment>,
     loading_images: usize,
     error: Option<String>,
+    /// Agents picked from the `@` popover whose chip is still whole in `text`.
+    picks: Vec<Pick>,
+}
+
+impl DraftState {
+    /// Sets the text, keeping the picks whose chip the edit left whole.
+    fn replace(&mut self, text: &str) {
+        remap_picks(&self.text, text, &mut self.picks);
+        text.clone_into(&mut self.text);
+    }
+
+    fn add_pick(&mut self, pick: Pick) {
+        if is_chip(&self.text, &pick) {
+            self.picks.retain(|other| other.at != pick.at);
+            self.picks.push(pick);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -197,9 +241,39 @@ impl AppState {
     pub fn edit_draft(&mut self, destination: &Destination, text: &str) {
         if self.draft(destination) != text {
             let draft = self.composer.drafts.entry(destination.clone()).or_default();
-            text.clone_into(&mut draft.text);
+            draft.replace(text);
             draft.error = None;
         }
+    }
+
+    /// Records that `agent` was picked from the `@` popover into its chip at
+    /// byte `at` of the draft, so that chip dispatches. Typed `@Name` text,
+    /// even a second `@Name` of a picked agent, never does.
+    pub fn pick_agent(&mut self, destination: &Destination, agent: &str, at: usize) {
+        self.composer
+            .drafts
+            .entry(destination.clone())
+            .or_default()
+            .add_pick(Pick {
+                agent: agent.to_owned(),
+                at,
+                key: ClientCore::request_id(),
+            });
+    }
+
+    /// The agents picked into this destination's draft, in chip order.
+    #[must_use]
+    pub fn picked_agents(&self, destination: &Destination) -> Vec<&str> {
+        let mut picks: Vec<&Pick> = self.draft_picks(destination).iter().collect();
+        picks.sort_by_key(|pick| pick.at);
+        picks.into_iter().map(|pick| pick.agent.as_str()).collect()
+    }
+
+    pub(crate) fn draft_picks(&self, destination: &Destination) -> &[Pick] {
+        self.composer
+            .drafts
+            .get(destination)
+            .map_or(&[], |draft| &draft.picks)
     }
 
     /// Carries the text and images typed for `from` over to `to`, so
@@ -213,8 +287,9 @@ impl AppState {
         };
         let text = std::mem::take(&mut draft.text);
         let images = std::mem::take(&mut draft.images);
+        let picks = std::mem::take(&mut draft.picks);
         if !text.trim().is_empty() {
-            self.preserve_draft(to, &text);
+            self.preserve_draft(to, &text, picks);
         }
         if !images.is_empty() {
             self.restore_images(to, images);
@@ -306,6 +381,20 @@ impl AppState {
         draft.error = None;
         let text = draft.text.clone();
         let images = draft.images.clone();
+        let picks = draft.picks.clone();
+        let when = crate::When {
+            now: at,
+            offset_minutes: 0,
+        };
+        let dispatch = self.dispatch_specs(&destination, &text, &when);
+        // shortcut: create_task carries no images; pass them once NewTaskSpec can.
+        if !dispatch.is_empty() && !images.is_empty() {
+            self.fail_send(
+                &destination,
+                "A task for a picked @agent can't take images yet. Remove the images or the @agent, then send again.".to_owned(),
+            );
+            return SendRequest::default();
+        }
         let flushed = self
             .composer
             .held
@@ -317,7 +406,14 @@ impl AppState {
         };
         // A second Enter on the same draft expedites it. Edited text starts a new hold.
         if request.flushed.as_ref().is_some_and(|send| {
-            send.destination == destination && send.text == text && send.images == images
+            send.destination == destination
+                && send.text == text
+                && send.images == images
+                && send
+                    .dispatch
+                    .iter()
+                    .map(|spec| &spec.request_id)
+                    .eq(dispatch.iter().map(|spec| &spec.request_id))
         }) {
             return request;
         }
@@ -328,6 +424,8 @@ impl AppState {
             text,
             images,
             at,
+            dispatch,
+            picks,
         };
         if self.hold_messages() {
             request.held = Some(send.id);
@@ -361,7 +459,7 @@ impl AppState {
             return false;
         }
         if let Some((send, _)) = self.composer.held.take() {
-            self.preserve_draft(destination, &send.text);
+            self.preserve_draft(destination, &send.text, send.picks);
             self.restore_images(destination, send.images);
         }
         true
@@ -378,23 +476,20 @@ impl AppState {
         draft.images = restored;
     }
 
-    fn preserve_draft(&mut self, destination: &Destination, text: &str) {
-        let current = &mut self
-            .composer
-            .drafts
-            .entry(destination.clone())
-            .or_default()
-            .text;
-        if current.as_str() != text {
-            *current = if current.trim().is_empty() {
-                text.to_owned()
-            } else {
-                format!(
-                    "{text}
-
-{current}"
-                )
-            };
+    /// Puts `text` back above the draft, with `picks`, its chips' picks.
+    fn preserve_draft(&mut self, destination: &Destination, text: &str, picks: Vec<Pick>) {
+        let draft = self.composer.drafts.entry(destination.clone()).or_default();
+        if draft.text.trim().is_empty() {
+            draft.picks.clear();
+            text.clone_into(&mut draft.text);
+        } else if draft.text != text {
+            for pick in &mut draft.picks {
+                pick.at += text.len() + 2;
+            }
+            draft.text = format!("{text}\n\n{}", draft.text);
+        }
+        for pick in picks {
+            draft.add_pick(pick);
         }
     }
 
@@ -420,18 +515,97 @@ impl AppState {
 
     /// Reports when the requested message starts going to its recipient.
     pub fn sending(&mut self, send: &Outgoing) {
+        if !send.dispatch.is_empty() {
+            let who: Vec<String> = send
+                .dispatch
+                .iter()
+                .map(|spec| format!("@{}", spec.agent))
+                .collect();
+            self.report(Activity::Working(format!(
+                "Starting a task for {}…",
+                who.join(" and ")
+            )));
+            return;
+        }
         self.report(Activity::Working(format!(
             "Sending to {}…",
             send.destination.label()
         )));
     }
 
-    /// The local messages that have yet to be confirmed by the hub.
+    /// The local messages that have yet to be confirmed by the hub. A
+    /// dispatch never shows in the thread, so it is left out.
     pub fn outgoing(&self) -> impl Iterator<Item = &Outgoing> {
         self.composer
             .sending
             .iter()
             .chain(self.composer.held.iter().map(|(send, _)| send))
+            .filter(|send| send.dispatch.is_empty())
+    }
+
+    /// Settles a dispatch: the draft clears once all its tasks started.
+    /// After a failure it comes back without the agents that did start, so
+    /// sending again starts only the rest.
+    pub fn finish_dispatch(
+        &mut self,
+        send: Outgoing,
+        started: &[Task],
+        result: Result<(), ClientError>,
+    ) {
+        self.composer
+            .sending
+            .retain(|pending| pending.id != send.id);
+        let destination = &send.destination;
+        let done: Vec<&str> = send
+            .dispatch
+            .iter()
+            .take(started.len())
+            .map(|spec| spec.agent.as_str())
+            .collect();
+        let started = started
+            .iter()
+            .zip(&done)
+            .map(|(task, agent)| format!("{} for @{agent}", task.id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let started_pick = |pick: &Pick| done.contains(&pick.agent.as_str());
+        let draft = self.composer.drafts.entry(destination.clone()).or_default();
+        // Only this submission's picks: the same agent picked since stays picked.
+        draft.picks.retain(|pick| {
+            !(started_pick(pick) && send.picks.iter().any(|own| own.key == pick.key))
+        });
+        match result {
+            Ok(()) => {
+                if draft.text == send.text {
+                    draft.replace("");
+                }
+                self.report(Activity::Done(format!("Started {started}.")));
+            }
+            Err(error) => {
+                let (rest, picks) = drop_picks(&send.text, &send.picks, started_pick);
+                if draft.text == send.text {
+                    draft.text = rest;
+                    draft.picks = picks;
+                } else {
+                    self.preserve_draft(destination, &rest, picks);
+                }
+                let why = if done.is_empty() {
+                    describe(&error)
+                } else {
+                    let left: Vec<String> = send.dispatch[done.len()..]
+                        .iter()
+                        .map(|spec| format!("@{}", spec.agent))
+                        .collect();
+                    format!(
+                        "Started {started}. {} did not start: {}. Send again to start only {}.",
+                        left[0],
+                        describe(&error),
+                        left.join(" and ")
+                    )
+                };
+                self.fail_send(destination, why);
+            }
+        }
     }
 
     /// Shows a submission failure beside the draft and in the status line.
@@ -460,7 +634,7 @@ impl AppState {
                     && let Some(draft) = self.composer.drafts.get_mut(destination)
                 {
                     if draft.text == send.text {
-                        draft.text.clear();
+                        draft.replace("");
                     }
                     for image in &send.images {
                         if let Some(index) = draft
@@ -497,7 +671,7 @@ impl AppState {
             }
             Err(error) => {
                 let why = describe(&error);
-                self.preserve_draft(destination, &send.text);
+                self.preserve_draft(destination, &send.text, send.picks);
                 self.restore_images(destination, send.images);
                 self.fail_send(destination, why);
             }
