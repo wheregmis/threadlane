@@ -21,12 +21,12 @@ use threadlane_core::model::{
     TaskStatus,
 };
 use threadlane_core::runtime::Step;
-use threadlane_core::store::{DecisionStore, OrgStore, SessionStore, TimerStore};
+use threadlane_core::store::{DecisionStore, MemoryStore, OrgStore, SessionStore, TimerStore};
 use threadlane_core::time::Clock;
 use threadlane_core::workspace::Workspaces;
 use threadlane_hub::{
-    ASK_USER, FAST_FORWARD_PULL_REQUEST, FINISH_TASK, HubError, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
-    SET_FOLLOW_UP, derived_call_key,
+    ASK_USER, FAST_FORWARD_PULL_REQUEST, FINISH_TASK, HubError, MEMORY_CREATE, OPEN_PULL_REQUEST,
+    PUBLISH_BRANCH, SET_FOLLOW_UP, derived_call_key,
 };
 use threadlane_runner::{GitWorkspaces, RunnerError};
 use threadlane_testkit::fakes::ForgeCall;
@@ -705,6 +705,38 @@ async fn an_ungated_call_after_a_gated_one_still_runs() {
         "the follow-up was set: {timers:?}"
     );
     assert_invariants(&sim, "ungated after gated").await;
+}
+
+/// The task's progress file is saved while its pull request waits on you,
+/// so the state it records is current when the run pauses (#736).
+#[tokio::test]
+async fn progress_is_saved_while_a_gated_call_waits() {
+    let batch = Script::new()
+        .call("toolu_pr", OPEN_PULL_REQUEST, pull_request())
+        .call(
+            "toolu_p",
+            MEMORY_CREATE,
+            json!({ "path": "project/tasks/T-0001.md", "content": "# T-0001\nPR asked for." }),
+        )
+        .finish("Waiting on the pull request.");
+    let world = publish_world(World::new().await, batch).await;
+    asks_before_sharing(&world).await;
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Put the page up").await;
+    live(&sim).await.unwrap();
+
+    assert_eq!(sim.task("T-0001").await.status, TaskStatus::WaitingOnYou);
+    let decisions = sim.decisions().await;
+    assert_eq!(decisions.len(), 1, "the write asks nothing: {decisions:?}");
+    assert_eq!(decisions[0].tool, OPEN_PULL_REQUEST);
+    assert_eq!(decisions[0].status, DecisionStatus::Pending);
+    let progress = sim.db().read("projects/1/tasks/T-0001.md").await.unwrap();
+    assert_eq!(
+        progress.map(|file| file.content).as_deref(),
+        Some("# T-0001\nPR asked for."),
+        "the progress file was saved"
+    );
+    assert_invariants(&sim, "progress while gated").await;
 }
 
 /// Captured log output.
