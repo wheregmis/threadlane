@@ -1040,6 +1040,12 @@ async fn a_batch_merge_pins_each_head_and_stops_at_the_first_that_moved() {
     );
     assert!(error.0.contains("merged #12"), "{error}");
     assert!(error.0.contains("HTTP 409"), "{error}");
+    assert!(
+        !error
+            .0
+            .contains(threadlane_core::forge::BATCH_MAY_HAVE_CHANGED),
+        "a rejected merge is not linked: {error}"
+    );
     let repo = "--repo=github.test/acme/app";
     assert_eq!(
         gh.invocations(),
@@ -1094,6 +1100,12 @@ async fn a_batch_merge_stops_at_a_pull_request_that_was_only_queued() {
     );
     assert!(error.0.contains("none merged"), "{error}");
     assert!(error.0.contains("reports it OPEN"), "{error}");
+    assert!(
+        error
+            .0
+            .contains(threadlane_core::forge::BATCH_MAY_HAVE_CHANGED),
+        "a queued PR is linked: {error}"
+    );
     let calls = gh.invocations();
     assert_eq!(calls.len(), 2, "#16 is not attempted: {calls:?}");
     assert_eq!(calls[1][..3], ["pr", "view", "15"]);
@@ -1119,7 +1131,12 @@ async fn a_batch_says_a_merge_whose_state_read_failed_may_have_merged() {
         error.0.starts_with("batch stopped at #12"),
         "the hub links the stopped PR from this prefix (#746): {error}"
     );
-    assert!(error.0.contains("may have merged"), "{error}");
+    assert!(
+        error
+            .0
+            .contains(threadlane_core::forge::BATCH_MAY_HAVE_CHANGED),
+        "the hub links this PR: {error}"
+    );
     assert_eq!(gh.invocations().len(), 2, "#16 is not attempted");
 }
 

@@ -323,7 +323,8 @@ async fn a_pull_request_the_task_commented_on_reaches_its_lane() {
 
 /// An approved batch merge or mark-ready links each pull request it handled
 /// to the task, as a single call does (#746); one that stopped partway links
-/// those up to and including the stop, which may have merged.
+/// those before the stop, and the stopped one only when the error says its
+/// merge may have happened.
 #[tokio::test]
 async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
     let github = FakeGithub::default();
@@ -351,9 +352,26 @@ async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
         json!({ "performed": false, "error": "forge: batch stopped at #702, marked #701 ready, the rest not attempted: boom" }),
     )
     .await;
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MERGE,
+        json!({ "repository": "widgets", "pulls": [
+            { "number": 801, "expected_head": head },
+            { "number": 802, "expected_head": head },
+            { "number": 803, "expected_head": head },
+        ] }),
+        json!({ "performed": false, "error": format!(
+            "forge: batch stopped at #802 (expected head {head}{}), merged #801, the rest not \
+             attempted: the merge was requested but its state could not be read",
+            threadlane_core::forge::BATCH_MAY_HAVE_CHANGED,
+        ) }),
+    )
+    .await;
     hub.db.release_lease(&lease).await.unwrap();
     let at = "2026-11-17T08:00:00Z";
-    for number in [601, 602, 701, 702, 703] {
+    for number in [601, 602, 701, 702, 703, 801, 802, 803] {
         github.add_to(
             "acme/widgets",
             &format!("feature-{number}"),
@@ -384,11 +402,12 @@ async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
             "check_run:601",
             "check_run:602",
             "check_run:701",
-            "check_run:702"
+            "check_run:801",
+            "check_run:802"
         ],
         "{events:?}"
     );
-    for number in [601, 602, 701, 702] {
+    for number in [601, 602, 701, 801, 802] {
         assert!(github.calls().contains(&GithubCall::PullRequest {
             target: PullTarget {
                 repository: "acme/widgets".into(),
@@ -517,6 +536,46 @@ async fn a_newly_linked_pull_request_joins_the_cached_page_without_dropping_know
         numbers(pull_requests(&hub, &task).await),
         [901, 902],
         "the new link is read and the known one is kept"
+    );
+}
+
+/// A first page load keeps the pull requests it read when another read
+/// fails, so a later failed read of a known one does not hide it (#746).
+#[tokio::test]
+async fn a_first_page_load_keeps_what_it_read_when_another_read_fails() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    github.set_pull_request("acme/widgets", 801, Ok(conflicted_draft(&"a".repeat(40))));
+    github.set_pull_request("acme/widgets", 802, Err("rate limited".into()));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [801, 802] }),
+        json!({ "performed": true, "summary": "marked #801, #802 ready" }),
+    )
+    .await;
+    let numbers = |pulls: Vec<TaskPullRequest>| -> Vec<u64> {
+        pulls.iter().map(|pull| pull.number).collect()
+    };
+    assert_eq!(numbers(pull_requests(&hub, &task).await), [801]);
+
+    github.set_pull_request("acme/widgets", 801, Err("rate limited".into()));
+    assert_eq!(
+        numbers(pull_requests(&hub, &task).await),
+        [801],
+        "the known pull request stays while #802 is retried"
+    );
+    assert_eq!(
+        github
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, GithubCall::PullRequestState { number: 802, .. }))
+            .count(),
+        2,
+        "the failed read is retried"
     );
 }
 

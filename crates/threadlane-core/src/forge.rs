@@ -26,6 +26,9 @@ pub const CREATE_ISSUE: &str = "create_issue";
 pub const REPORT_LIMITATION: &str = "report_threadlane_limitation";
 /// Merge a registered repository's pull request.
 pub const MERGE: &str = "merge";
+/// Marks a batch merge error whose stopped pull request was requested to
+/// merge, so it may have merged or been queued.
+pub const BATCH_MAY_HAVE_CHANGED: &str = "; this PR may have merged";
 /// The most pull requests one `merge` call may name in `pulls`.
 pub const MAX_MERGE_BATCH: usize = 20;
 /// Mark a registered repository's draft pull request ready for review.

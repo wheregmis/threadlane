@@ -22,20 +22,24 @@ use std::time::Duration;
 
 use threadlane_core::client::{ApiError, PullRequestFiles, TaskCheckRun, TaskPullRequest};
 use threadlane_core::forge::{
-    CLOSE_PULL_REQUEST, COMMENT, EDIT_PULL_REQUEST, MARK_READY, MERGE, REQUEST_REVIEW,
-    RESOLVE_REVIEW_THREAD,
+    BATCH_MAY_HAVE_CHANGED, CLOSE_PULL_REQUEST, COMMENT, EDIT_PULL_REQUEST, MARK_READY, MERGE,
+    REQUEST_REVIEW, RESOLVE_REVIEW_THREAD,
 };
 use threadlane_core::github::{
     DEFAULT_POLL_INTERVAL, Feed, GITHUB_SOURCE, GithubItem, GithubKind, GithubSource,
     PullRequestState, PullTarget, normalize_remote, pull_request_number,
 };
 use threadlane_core::ids::{LaneId, ProjectId, TaskId};
-use threadlane_core::model::{EventKind, Inserted, NewEvent, TaskStatus, Trust};
+use threadlane_core::model::{
+    Decision, EventKind, Inserted, NewEvent, Project, Repository, Task, TaskStatus, Trust,
+};
 use threadlane_core::runtime::steps::github::{
     AFTER_CURSOR, AFTER_FETCH, AFTER_INSERT, AFTER_WAKE,
 };
 use threadlane_core::runtime::{WakeTarget, Waker};
-use threadlane_core::store::{InboxStore, MachineStore, OrgStore, StoreError, TaskStore};
+use threadlane_core::store::{
+    DecisionStore, InboxStore, MachineStore, OrgStore, StoreError, TaskStore,
+};
 use threadlane_core::time::Timestamp;
 use threadlane_store::HubDb;
 
@@ -158,10 +162,12 @@ fn needs_attention(item: &GithubItem) -> bool {
 }
 
 /// The pull requests an approved batch `merge` or `mark_ready` handled, in
-/// order: all of them when it completed, else those up to and including the
-/// one it stopped at, as the runner's error names it ("batch stopped at
-/// #N"). The stopped one may have merged before its state read failed, and
-/// the task page's status read shows which. Empty for any other call.
+/// order: all of them when it completed, else those before the one it
+/// stopped at, as the runner's error names it ("batch stopped at #N"). The
+/// stopped one counts too when the error flags it
+/// ([`BATCH_MAY_HAVE_CHANGED`]): it may have merged before its state read
+/// failed, and the task page's status read shows which. Empty for any other
+/// call.
 fn batch_handled(
     tool: &str,
     arguments: &serde_json::Value,
@@ -193,13 +199,114 @@ fn batch_handled(
         .and_then(|number| number.parse::<u64>().ok());
     match stopped {
         Some(stopped) if listed.contains(&stopped) => {
+            let changed = outcome["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(BATCH_MAY_HAVE_CHANGED));
             let end = listed
                 .iter()
                 .position(|n| *n == stopped)
-                .map_or(0, |at| at + 1);
+                .map_or(0, |at| at + usize::from(changed));
             listed.into_iter().take(end).collect()
         }
         _ => Vec::new(),
+    }
+}
+
+/// Adds to `list` the work `task`'s recorded `decisions` performed, in the
+/// project's `repositories`.
+fn push_task_work(
+    project: &Project,
+    repositories: &[Repository],
+    task: &Task,
+    decisions: &[Decision],
+    list: &mut Vec<Work>,
+) {
+    let lane = if task.status.is_terminal() {
+        project.lead_lane_id
+    } else {
+        task.lane_id
+    };
+    for decision in decisions {
+        let Some(outcome) = decision.outcome.as_ref() else {
+            continue;
+        };
+        let arguments = &decision.arguments;
+        let batch = batch_handled(&decision.tool, arguments, outcome);
+        if outcome["performed"] != true && batch.is_empty() {
+            continue;
+        }
+        let names_pull_request = matches!(
+            decision.tool.as_str(),
+            MERGE
+                | MARK_READY
+                | CLOSE_PULL_REQUEST
+                | EDIT_PULL_REQUEST
+                | RESOLVE_REVIEW_THREAD
+                | REQUEST_REVIEW
+        ) || (decision.tool == COMMENT
+            && arguments["target"] == "pull_request");
+        let name = arguments["repository"].as_str().unwrap_or_default();
+        // Dispatch runs a batch on any repository of the project, attached or not.
+        let any_registered = !batch.is_empty();
+        let targets: Vec<(&str, &str, Option<u64>)> = if !batch.is_empty() {
+            batch.into_iter().map(|n| (name, "", Some(n))).collect()
+        } else {
+            match (outcome["repository"].as_str(), outcome["branch"].as_str()) {
+                (Some(name), Some(branch)) => vec![(
+                    name,
+                    branch,
+                    outcome["pull_request"]
+                        .as_str()
+                        .and_then(pull_request_number),
+                )],
+                _ if names_pull_request => {
+                    match (
+                        arguments["repository"].as_str(),
+                        arguments["number"].as_u64(),
+                    ) {
+                        (Some(name), Some(number)) => vec![(name, "", Some(number))],
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            }
+        };
+        for (name, branch, number) in targets {
+            let Some(repository) = repositories
+                .iter()
+                .find(|repository| {
+                    repository.name == name
+                        && (any_registered || task.repositories.contains(&repository.id))
+                })
+                .and_then(|repository| normalize_remote(&repository.remote_url))
+                .and_then(|key| key.strip_prefix(GITHUB_HOST).map(str::to_owned))
+            else {
+                continue;
+            };
+            match list.iter_mut().find(|work| {
+                work.task == task.id
+                    && work.target.repository == repository
+                    && ((!branch.is_empty() && work.target.branch == branch)
+                        || (number.is_some() && work.target.number == number))
+            }) {
+                Some(work) => {
+                    work.target.number = work.target.number.or(number);
+                    if work.target.branch.is_empty() {
+                        branch.clone_into(&mut work.target.branch);
+                    }
+                }
+                None => list.push(Work {
+                    project: project.id,
+                    lane,
+                    task: task.id,
+                    target: PullTarget {
+                        repository,
+                        branch: branch.to_owned(),
+                        number,
+                    },
+                }),
+            }
+        }
     }
 }
 
@@ -244,97 +351,33 @@ impl Routes {
                 let Some(decisions) = decisions_by_lane.get(&task.lane_id) else {
                     continue;
                 };
-                let (list, lane) = if task.status.is_terminal() {
-                    (&mut routes.ended, project.lead_lane_id)
+                let list = if task.status.is_terminal() {
+                    &mut routes.ended
                 } else {
-                    (&mut routes.work, task.lane_id)
+                    &mut routes.work
                 };
-                for decision in decisions {
-                    let Some(outcome) = decision.outcome.as_ref() else {
-                        continue;
-                    };
-                    let arguments = &decision.arguments;
-                    let batch = batch_handled(&decision.tool, arguments, outcome);
-                    if outcome["performed"] != true && batch.is_empty() {
-                        continue;
-                    }
-                    let names_pull_request = matches!(
-                        decision.tool.as_str(),
-                        MERGE
-                            | MARK_READY
-                            | CLOSE_PULL_REQUEST
-                            | EDIT_PULL_REQUEST
-                            | RESOLVE_REVIEW_THREAD
-                            | REQUEST_REVIEW
-                    ) || (decision.tool == COMMENT
-                        && arguments["target"] == "pull_request");
-                    let name = arguments["repository"].as_str().unwrap_or_default();
-                    // Dispatch runs a batch on any repository of the project, attached or not.
-                    let any_registered = !batch.is_empty();
-                    let targets: Vec<(&str, &str, Option<u64>)> = if !batch.is_empty() {
-                        batch.into_iter().map(|n| (name, "", Some(n))).collect()
-                    } else {
-                        match (outcome["repository"].as_str(), outcome["branch"].as_str()) {
-                            (Some(name), Some(branch)) => vec![(
-                                name,
-                                branch,
-                                outcome["pull_request"]
-                                    .as_str()
-                                    .and_then(pull_request_number),
-                            )],
-                            _ if names_pull_request => {
-                                match (
-                                    arguments["repository"].as_str(),
-                                    arguments["number"].as_u64(),
-                                ) {
-                                    (Some(name), Some(number)) => vec![(name, "", Some(number))],
-                                    _ => continue,
-                                }
-                            }
-                            _ => continue,
-                        }
-                    };
-                    for (name, branch, number) in targets {
-                        let Some(repository) = repositories
-                            .iter()
-                            .find(|repository| {
-                                repository.name == name
-                                    && (any_registered
-                                        || task.repositories.contains(&repository.id))
-                            })
-                            .and_then(|repository| normalize_remote(&repository.remote_url))
-                            .and_then(|key| key.strip_prefix(GITHUB_HOST).map(str::to_owned))
-                        else {
-                            continue;
-                        };
-                        match list.iter_mut().find(|work| {
-                            work.task == task.id
-                                && work.target.repository == repository
-                                && ((!branch.is_empty() && work.target.branch == branch)
-                                    || (number.is_some() && work.target.number == number))
-                        }) {
-                            Some(work) => {
-                                work.target.number = work.target.number.or(number);
-                                if work.target.branch.is_empty() {
-                                    branch.clone_into(&mut work.target.branch);
-                                }
-                            }
-                            None => list.push(Work {
-                                project: project.id,
-                                lane,
-                                task: task.id,
-                                target: PullTarget {
-                                    repository,
-                                    branch: branch.to_owned(),
-                                    number,
-                                },
-                            }),
-                        }
-                    }
-                }
+                push_task_work(&project, &repositories, &task, decisions, list);
             }
         }
         Ok(routes)
+    }
+
+    /// The work of one task, read from its own lane and project only.
+    async fn of_task(db: &HubDb, id: TaskId) -> Result<Vec<Work>, StoreError> {
+        let mut work = Vec::new();
+        let Some(task) = db.task(id).await? else {
+            return Ok(work);
+        };
+        if task.status == TaskStatus::Cancelled {
+            return Ok(work);
+        }
+        let Some(project) = db.project(task.project_id).await? else {
+            return Ok(work);
+        };
+        let repositories = db.repositories(project.id).await?;
+        let decisions = db.lane_decisions(task.lane_id).await?;
+        push_task_work(&project, &repositories, &task, &decisions, &mut work);
+        Ok(work)
     }
 
     /// A fetched target can still be applied to its exact route, or to its
@@ -764,20 +807,17 @@ impl HubCore {
         let Some(source) = self.inner.github.as_ref() else {
             return Ok(cached.unwrap_or_default());
         };
-        let routes = Routes::read(&self.inner.db).await?;
-        let missing: Vec<_> = routes
-            .work
+        let missing: Vec<_> = Routes::of_task(&self.inner.db, task)
+            .await?
             .into_iter()
-            .chain(routes.ended)
             .filter(|work| {
-                work.task == task
-                    && cached.as_ref().is_none_or(|pulls| {
-                        work.target.number.is_some_and(|number| {
-                            !pulls.iter().any(|pull| {
-                                pull.repository == work.target.repository && pull.number == number
-                            })
+                cached.as_ref().is_none_or(|pulls| {
+                    work.target.number.is_some_and(|number| {
+                        !pulls.iter().any(|pull| {
+                            pull.repository == work.target.repository && pull.number == number
                         })
                     })
+                })
             })
             .map(|work| (work, false))
             .collect();
@@ -786,8 +826,9 @@ impl HubCore {
         {
             return Ok(pulls.clone());
         }
+        // Reads that succeeded stay cached; the ones that failed are retried next time.
         if !self.refresh_pull_status(source.as_ref(), &missing).await && cached.is_none() {
-            let partial = self.inner.pull_status.lock().await.remove(&task);
+            let partial = self.inner.pull_status.lock().await.get(&task).cloned();
             return Ok(partial.unwrap_or_default());
         }
         Ok(self

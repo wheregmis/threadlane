@@ -17,8 +17,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::forge::{
-    ApprovedBranch, CommentTarget, Forge, ForgeError, PullRequestImage, PullRequestUpdate,
-    RepositoryAction,
+    ApprovedBranch, BATCH_MAY_HAVE_CHANGED, CommentTarget, Forge, ForgeError, PullRequestImage,
+    PullRequestUpdate, RepositoryAction,
 };
 use threadlane_core::github::{REVIEW_MARKER_PREFIX, normalize_remote};
 use threadlane_core::model::Repository;
@@ -500,6 +500,8 @@ impl GitForge {
         for (number, head) in pulls {
             let merge = self.merge_pull(repo, *number, head, true).await;
             // With a merge queue or auto-merge, `gh pr merge` succeeds having only queued the PR.
+            // Whether a failure may still have merged, or queued, this PR.
+            let uncertain = matches!(merge, Ok(Merge::Requested(_)));
             let merge = match merge {
                 Ok(Merge::Confirmed(_)) => Ok(()),
                 Ok(Merge::Requested(_)) => self
@@ -537,9 +539,15 @@ impl GitForge {
                 } else {
                     format!("merged {}", merged.join(", "))
                 };
+                // The hub links the stopped PR to the task only when this marker says it may have changed.
+                let changed = if uncertain {
+                    BATCH_MAY_HAVE_CHANGED
+                } else {
+                    ""
+                };
                 return Err(ForgeError(format!(
-                    "batch stopped at #{number} (expected head {head}), {done}, the rest not \
-                     attempted: {}",
+                    "batch stopped at #{number} (expected head {head}{changed}), {done}, the rest \
+                     not attempted: {}",
                     error.0
                 )));
             }
