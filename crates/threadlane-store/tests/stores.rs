@@ -141,6 +141,7 @@ async fn reopening_a_file_keeps_data_and_does_not_rebootstrap() {
         let agent = hub
             .create_agent(&NewAgent {
                 skills: skills.clone(),
+                playbooks: vec!["rust-pr-review".into()],
                 ..NewAgent::named("Reviewer", "review")
             })
             .await
@@ -166,6 +167,10 @@ async fn reopening_a_file_keeps_data_and_does_not_rebootstrap() {
         .await
         .unwrap();
     assert_eq!(hub.agent(agent_id).await.unwrap().unwrap().skills, skills);
+    assert_eq!(
+        hub.agent(agent_id).await.unwrap().unwrap().playbooks,
+        vec!["rust-pr-review"]
+    );
     assert_eq!(hub.space().await.unwrap().name, "Work");
     let names: Vec<_> = hub
         .projects()
@@ -1128,6 +1133,7 @@ fn new_task(project: &Project, agent: AgentId, title: &str, depends_on: Vec<Task
         priority: 0,
         created_by_call: Some(format!("call-{}-{title}", project.id)),
         created_at: T0,
+        playbooks: Vec::new(),
     }
 }
 
@@ -3906,6 +3912,95 @@ async fn decision_stats_leave_out_cancelled_decisions() {
     // Ending the task cancels its pending decision: nobody answered or declined it.
     hub.cancel_task(None, task.id, T0).await.unwrap();
     assert_eq!(hub.decision_stats(T0).await.unwrap(), Vec::new());
+}
+
+#[tokio::test]
+async fn agent_and_task_playbooks_and_space_skills_persist() {
+    let hub = hub().await;
+    let general = hub.general_project().await.unwrap();
+    let agent_id = engineer(&hub, &general, 2).await;
+    let mut agent = hub.agent(agent_id).await.unwrap().unwrap();
+    agent.playbooks = vec!["rust-pr-review".into(), "release-notes".into()];
+    let updated_agent = hub.update_agent(&agent).await.unwrap();
+    assert_eq!(
+        updated_agent.playbooks,
+        vec!["rust-pr-review", "release-notes"]
+    );
+
+    let created = hub
+        .create_task(
+            None,
+            &NewTask {
+                playbooks: vec!["rust-pr-review".into()],
+                ..new_task(&general, agent_id, "with playbooks", vec![])
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.playbooks, vec!["rust-pr-review"]);
+
+    let merged = hub
+        .add_task_playbooks(
+            created.id,
+            &[
+                "rust-pr-review".into(),
+                "accessibility-audit".into(),
+                "release-notes".into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        merged.playbooks,
+        vec!["rust-pr-review", "accessibility-audit", "release-notes"]
+    );
+
+    let v1 = hub
+        .write_by_owner("space/skills/rust-pr-review.md", "# Rust PR Review\nv1", T0)
+        .await
+        .unwrap();
+    assert_eq!(v1.version, 1);
+    let v2 = hub
+        .write_by_owner("space/skills/rust-pr-review.md", "# Rust PR Review\nv2", T0)
+        .await
+        .unwrap();
+    assert_eq!(v2.version, 2);
+    let listed = hub.list("space/skills/").await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].content, "# Rust PR Review\nv2");
+    assert_eq!(
+        hub.history("space/skills/rust-pr-review.md")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // A task message's mentions attach with it; a retried duplicate attaches nothing.
+    let to_task = NewEvent {
+        lane_id: created.lane_id,
+        ..message(&general, "with-mention")
+    };
+    let first = hub
+        .insert_task_message(&to_task, created.id, &["lint".into()])
+        .await
+        .unwrap();
+    assert!(matches!(first, Inserted::New(_)));
+    let retried = hub
+        .insert_task_message(&to_task, created.id, &["other".into()])
+        .await
+        .unwrap();
+    assert!(matches!(retried, Inserted::Duplicate(_)));
+    let task = hub.task(created.id).await.unwrap().unwrap();
+    assert_eq!(
+        task.playbooks,
+        vec![
+            "rust-pr-review",
+            "accessibility-audit",
+            "release-notes",
+            "lint"
+        ]
+    );
 }
 
 #[tokio::test]

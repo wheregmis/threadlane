@@ -16,6 +16,7 @@ use crate::{Desktop, Screen, Tab, WorkPage};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PaletteAction {
     Go(Screen),
+    OpenSkills(String),
     SwitchSpace(String),
     Reload,
     ToggleSidebar,
@@ -109,6 +110,21 @@ pub(crate) fn build_sections(state: &AppState) -> Vec<PaletteSection> {
             keywords: vec![name.clone(), "agents".into(), "topology".into()],
             icon: AppIcon::Bot,
             action: PaletteAction::Go(Screen::Agents(Some(name.clone()))),
+        });
+        nav.push(PaletteEntry {
+            label: if multi_space {
+                format!("Skills ({name})")
+            } else {
+                "Skills".into()
+            },
+            keywords: vec![
+                name.clone(),
+                "playbooks".into(),
+                "skills".into(),
+                "templates".into(),
+            ],
+            icon: AppIcon::BookOpen,
+            action: PaletteAction::OpenSkills(name.clone()),
         });
         nav.push(PaletteEntry {
             label: if multi_space {
@@ -379,6 +395,9 @@ impl Desktop {
                     match action {
                         PaletteAction::Go(screen) => {
                             let _ = view.update(cx, |this, cx| this.go(screen, cx));
+                        }
+                        PaletteAction::OpenSkills(space) => {
+                            let _ = view.update(cx, |this, cx| this.open_skill(space, None, cx));
                         }
                         PaletteAction::SwitchSpace(space) => {
                             let _ = view.update(cx, |this, cx| {

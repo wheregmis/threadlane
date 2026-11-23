@@ -11,7 +11,8 @@ use threadlane_core::ids::{
 };
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
-    BackendKind, EventKind, LaneKind, Lease, NewEvent, NewTask, Run, Task, TaskStatus, Trust,
+    BackendKind, EventKind, Inserted, LaneKind, Lease, NewEvent, NewTask, Run, Task, TaskStatus,
+    Trust,
 };
 use threadlane_core::store::{StoreError, StoreResult, TaskStore, TaskUpdate};
 use threadlane_core::time::Timestamp;
@@ -56,7 +57,8 @@ const TERMINAL: &str = "'done', 'failed', 'cancelled'";
 
 const TASK_FIELDS: &str = "id, project_id, lane_id, agent_id, title, goal, repositories,
     parent_task_id, origin, status, priority, created_by_call, last_machine_id, waiting_reason,
-    result, created_at, publication_blocker";
+    result, created_at, publication_blocker, playbooks";
+const TASK_FIELD_COUNT: usize = 18;
 
 fn decode_task(row: &Row, depends_on: Vec<TaskId>) -> StoreResult<Task> {
     let c = Cols(row);
@@ -79,6 +81,7 @@ fn decode_task(row: &Row, depends_on: Vec<TaskId>) -> StoreResult<Task> {
         result: c.opt_json(14)?,
         created_at: c.ts(15)?,
         publication_blocker: c.opt_text(16)?,
+        playbooks: c.de(17)?,
     })
 }
 
@@ -1140,10 +1143,10 @@ pub(crate) async fn insert_task_in(
             conn,
             concat!(
                 "INSERT INTO tasks (id, project_id, lane_id, agent_id, title, goal, repositories,
-                 parent_task_id, origin, status, priority, created_by_call, created_at, space_lead_event)
+                 parent_task_id, origin, status, priority, created_by_call, created_at, space_lead_event, playbooks)
              VALUES (",
                 crate::db::next_id_sql!("tasks"),
-                ", ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) RETURNING id"
+                ", ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) RETURNING id"
             ),
             params![
                 task.project_id.get(),
@@ -1159,6 +1162,7 @@ pub(crate) async fn insert_task_in(
                 task.created_by_call.as_deref(),
                 task.created_at.as_millis(),
                 opt_raw(ask, |id| id.get()),
+                json_text(&task.playbooks)?,
             ],
             |row| Cols(row).id(0),
         )
@@ -1330,7 +1334,7 @@ impl HubDb {
         while let Some(row) = rows.next().await.map_err(crate::db::db_err)? {
             let cols = Cols(&row);
             let id: TaskId = cols.id(0)?;
-            let dependency = cols.opt_id(17)?;
+            let dependency = cols.opt_id(TASK_FIELD_COUNT)?;
             if let Some(task) = tasks.last_mut().filter(|task| task.id == id) {
                 task.depends_on.extend(dependency);
             } else {
@@ -1415,12 +1419,13 @@ impl HubDb {
         };
         while let Some(row) = rows.next().await.map_err(crate::db::db_err)? {
             let cols = Cols(&row);
-            result.total = usize::try_from(cols.i64(18)?).unwrap_or(usize::MAX);
-            result.hidden_finished = usize::try_from(cols.i64(19)?).unwrap_or(usize::MAX);
+            result.total = usize::try_from(cols.i64(TASK_FIELD_COUNT + 1)?).unwrap_or(usize::MAX);
+            result.hidden_finished =
+                usize::try_from(cols.i64(TASK_FIELD_COUNT + 2)?).unwrap_or(usize::MAX);
             let Some(id): Option<TaskId> = cols.opt_id(0)? else {
                 break;
             };
-            let dependency = cols.opt_id(17)?;
+            let dependency = cols.opt_id(TASK_FIELD_COUNT)?;
             if let Some(task) = result.tasks.last_mut().filter(|task| task.id == id) {
                 task.depends_on.extend(dependency);
             } else {
@@ -1563,6 +1568,28 @@ impl TaskStore for HubDb {
         let updated = existing_task(conn, id).await?;
         tx.commit().await?;
         Ok(updated)
+    }
+
+    async fn add_task_playbooks(&self, task_id: TaskId, playbooks: &[String]) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let task = add_playbooks_in(tx.conn(), task_id, playbooks).await?;
+        tx.commit().await?;
+        Ok(task)
+    }
+
+    async fn insert_task_message(
+        &self,
+        event: &NewEvent,
+        task_id: TaskId,
+        playbooks: &[String],
+    ) -> StoreResult<Inserted> {
+        let tx = self.db.begin().await?;
+        let inserted = insert_event_in(tx.conn(), event).await?;
+        if matches!(inserted, Inserted::New(_)) && !playbooks.is_empty() {
+            add_playbooks_in(tx.conn(), task_id, playbooks).await?;
+        }
+        tx.commit().await?;
+        Ok(inserted)
     }
 
     async fn cancel_task(
@@ -1731,4 +1758,30 @@ impl TaskStore for HubDb {
         .await?;
         tx.commit().await
     }
+}
+
+/// Merges `playbooks` onto the task inside the caller's transaction, keeping
+/// order and skipping ones it has.
+async fn add_playbooks_in(
+    conn: &Connection,
+    task_id: TaskId,
+    playbooks: &[String],
+) -> StoreResult<Task> {
+    let mut task = existing_task(conn, task_id).await?;
+    let mut changed = false;
+    for slug in playbooks {
+        if !task.playbooks.contains(slug) {
+            task.playbooks.push(slug.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        exec(
+            conn,
+            "UPDATE tasks SET playbooks = ?1 WHERE id = ?2",
+            params![json_text(&task.playbooks)?, task_id.get()],
+        )
+        .await?;
+    }
+    Ok(task)
 }

@@ -189,6 +189,111 @@ fn custom_model(kind: BackendKind, target: Entity<InputState>, window: &mut Wind
 }
 
 impl Desktop {
+    pub(super) fn playbook_picker(
+        &self,
+        space: &str,
+        editing: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let picked = if editing && let Some(edit) = self.state.agent_edit() {
+            &edit.playbooks
+        } else {
+            &self.state.agent_form().playbooks
+        };
+        let space_skills = self.state.space_skills(space);
+        let manage_space = space.to_owned();
+        let header = h_flex()
+            .justify_between()
+            .items_center()
+            .gap(SM)
+            .child(meta("Skills", cx))
+            .child(
+                button(SharedString::from(format!("manage-skills-{editing}")))
+                    .small()
+                    .ghost()
+                    .icon(AppIcon::BookOpen)
+                    .label("Manage skills")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_skill(manage_space.clone(), None, cx);
+                    })),
+            );
+        if space_skills.is_empty() && picked.is_empty() {
+            return v_flex().gap(XS).child(header).child(meta(
+                if self.state.skills_loading(space) {
+                    "Loading space skills…"
+                } else {
+                    "No space skills yet — create reusable playbooks in Team → Skills."
+                },
+                cx,
+            ));
+        }
+        let mut chips = h_flex().gap(XS).flex_wrap();
+        for skill in space_skills {
+            let slug = skill.slug.clone();
+            let attached = picked.iter().any(|s| s == &slug);
+            let toggle_slug = slug.clone();
+            chips = chips.child({
+                let mut chip = button(SharedString::from(format!(
+                    "agent-playbook-{editing}-{slug}"
+                )))
+                .small()
+                .outline()
+                .selected(attached);
+                if attached {
+                    chip = chip.icon(AppIcon::Check);
+                }
+                chip.label(skill.title.clone())
+                    .tooltip(format!("/skill:{slug} — click to toggle"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let list = if editing {
+                            let Some(edit) = this.state.agent_edit_mut() else {
+                                return;
+                            };
+                            &mut edit.playbooks
+                        } else {
+                            &mut this.state.agent_form_mut().playbooks
+                        };
+                        if let Some(at) = list.iter().position(|s| s == &toggle_slug) {
+                            list.remove(at);
+                        } else {
+                            list.push(toggle_slug.clone());
+                        }
+                        cx.notify();
+                    }))
+            });
+        }
+        // Keep any attached slug whose skill file is missing removable.
+        for slug in picked {
+            if !space_skills.iter().any(|s| &s.slug == slug) {
+                let toggle_slug = slug.clone();
+                chips = chips.child(
+                    button(SharedString::from(format!(
+                        "agent-playbook-missing-{editing}-{slug}"
+                    )))
+                    .small()
+                    .outline()
+                    .selected(true)
+                    .icon(AppIcon::X)
+                    .label(format!("{slug} (missing)"))
+                    .tooltip("This skill file is not present; click to detach.")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let list = if editing {
+                            let Some(edit) = this.state.agent_edit_mut() else {
+                                return;
+                            };
+                            &mut edit.playbooks
+                        } else {
+                            &mut this.state.agent_form_mut().playbooks
+                        };
+                        list.retain(|s| s != &toggle_slug);
+                        cx.notify();
+                    })),
+                );
+            }
+        }
+        v_flex().gap(XS).child(header).child(chips)
+    }
+
     pub(super) fn skill_picker(&self, editing: bool, cx: &mut Context<Self>) -> Div {
         let form = self.state.agent_form();
         let (picked, catalog) = if editing && let Some(edit) = self.state.agent_edit() {
@@ -297,6 +402,7 @@ impl Desktop {
             return;
         };
         self.load_agent_skills(space.into(), Some(agent.into()), cx);
+        self.load_space_skills(space.into(), cx);
         for (input, value) in [
             (&self.agent_edit_name, fields.name),
             (&self.agent_edit_role, fields.role),
@@ -603,6 +709,7 @@ impl Desktop {
                     ),
             )
             .child(backends)
+            .child(self.playbook_picker(&edit.space, true, cx))
             .child(self.skill_picker(true, cx))
             .child(
                 h_flex()

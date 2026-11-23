@@ -411,6 +411,7 @@ async fn lane_inspects_a_task_after_it_has_ended() {
             agent: crate::harness::ENGINEER.into(),
             repositories: Vec::new(),
             depends_on: Vec::new(),
+            playbooks: Vec::new(),
             client_request_id: "inspect-ended-task".into(),
         })
         .await

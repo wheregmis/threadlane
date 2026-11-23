@@ -55,6 +55,7 @@ async fn tasks_the_running_list_and_one_task_show_their_agent_machine_and_runs()
         priority: 0,
         created_by_call: None,
         created_at: hub.clock.now(),
+        playbooks: Vec::new(),
     };
     let fix = hub.db.create_task(None, &new("Fix", vec![])).await.unwrap();
     let docs = hub
@@ -448,6 +449,7 @@ async fn done_task_summaries_report_when_the_hub_recorded_the_result() {
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await

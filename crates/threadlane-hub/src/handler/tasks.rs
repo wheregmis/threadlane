@@ -22,11 +22,15 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
             agent,
             repositories,
             depends_on,
+            playbooks,
             client_request_id,
         } => {
             let title = required("title", &title)?;
             let goal = required("goal", &goal)?;
             let client_request_id = required("client request id", &client_request_id)?;
+            let requested_playbooks =
+                crate::context::normalize_playbooks(playbooks.iter().map(String::as_str))
+                    .map_err(ApiError::Invalid)?;
             let project = api.project_named(project.as_deref()).await?;
             active_project(&project)?;
             let agent = working_agent(api, &project, &agent).await?;
@@ -79,6 +83,11 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                         priority: 0,
                         created_by_call: Some(format!("client:{client_request_id}")),
                         created_at: inner.clock.now(),
+                        playbooks: crate::context::merge_playbooks(
+                            &agent.playbooks,
+                            &requested_playbooks,
+                            goal,
+                        ),
                     },
                 )
                 .await

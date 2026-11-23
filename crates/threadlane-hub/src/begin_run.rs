@@ -23,7 +23,9 @@ use threadlane_core::workspace::ReviewRevision;
 use uuid::Uuid;
 
 use crate::accounts::cooling;
-use crate::context::{PromptParts, appended_instructions, loaded_memory, render_prompt};
+use crate::context::{
+    PromptParts, appended_instructions, loaded_memory, merge_playbooks, render_prompt,
+};
 use crate::dreaming;
 use crate::error::link_error;
 use crate::link::LocalLink;
@@ -402,10 +404,38 @@ impl LocalLink {
                 crate::space_lead::summary(db).await.map_err(link_error)?,
             ));
         }
+        let mut playbooks = Vec::new();
+        if !dreaming {
+            let mut slugs = merge_playbooks(
+                &agent.playbooks,
+                task.as_ref().map_or(&[], |t| t.playbooks.as_slice()),
+                "",
+            );
+            for event in &events {
+                if event.kind == threadlane_core::model::EventKind::UserMessage
+                    && event.trust == threadlane_core::model::Trust::User
+                    && let Some(text) = event.payload.get("text").and_then(Json::as_str)
+                {
+                    for slug in threadlane_core::memory::parse_skill_mentions(text) {
+                        if !slugs.contains(&slug) {
+                            slugs.push(slug);
+                        }
+                    }
+                }
+            }
+            for slug in slugs {
+                let path = threadlane_core::memory::skill_path(&slug);
+                if let Some(file) = db.read(&path).await.map_err(link_error)?
+                    && !file.content.trim().is_empty()
+                {
+                    playbooks.push((slug, file.content));
+                }
+            }
+        }
         let appended_instructions = if dreaming {
             String::new()
         } else {
-            appended_instructions(&agent, lane.kind, &memory)
+            appended_instructions(&agent, lane.kind, &memory, &playbooks)
         };
         let repositories = self
             .task_repositories(
@@ -1069,6 +1099,7 @@ mod tests {
             models,
             tools: json!({}),
             skills: Vec::new(),
+            playbooks: Vec::new(),
             requirements: json!({}),
         }
     }

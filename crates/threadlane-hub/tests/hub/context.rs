@@ -395,3 +395,126 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
         "{lead_appended}"
     );
 }
+
+#[tokio::test]
+async fn space_playbooks_from_agents_tasks_and_mentions_reach_runs() {
+    use threadlane_core::client::{
+        MemoryRequest, OrgReply, OrgRequest, TaskReply, TaskRequest, UserMessage,
+    };
+
+    let hub = TestHub::start().await;
+    hub.hello().await;
+
+    // Author two space skill playbooks (and leave one missing to ensure it is skipped safely).
+    for (path, content) in [
+        (
+            "space/skills/rust-pr-review.md",
+            "# Rust PR Review\n- Check clippy and error paths.",
+        ),
+        (
+            "space/skills/release-notes.md",
+            "# Release Notes\n- Summarize user-facing changes.",
+        ),
+    ] {
+        hub.api
+            .memory(MemoryRequest::Write {
+                project: None,
+                path: path.into(),
+                content: content.into(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let OrgReply::Agent { agent } = hub
+        .api
+        .org(OrgRequest::CreateAgentWithSkills {
+            name: "Reviewer".into(),
+            role: "reviewer".into(),
+            instructions: "Review carefully.".into(),
+            backends: Vec::new(),
+            models: Default::default(),
+            skills: Vec::new(),
+            playbooks: vec!["rust-pr-review".into()],
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected agent");
+    };
+    assert_eq!(agent.playbooks, vec!["rust-pr-review"]);
+
+    hub.api
+        .org(OrgRequest::SetMode {
+            project: None,
+            agent: "Reviewer".into(),
+            mode: Some(Mode::OnRequest),
+        })
+        .await
+        .unwrap();
+
+    let TaskReply::Task { task } = hub
+        .api
+        .tasks(TaskRequest::Create {
+            project: None,
+            title: "Audit change".into(),
+            goal: "Check PR using /skill:missing-playbook too.".into(),
+            agent: "Reviewer".into(),
+            repositories: Vec::new(),
+            depends_on: Vec::new(),
+            playbooks: vec!["rust-pr-review".into()],
+            client_request_id: "t-playbook-1".into(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected task");
+    };
+    assert_eq!(
+        task.playbooks,
+        vec!["rust-pr-review".to_owned(), "missing-playbook".to_owned()]
+    );
+
+    let first = run_with(&*hub.link, &[]).await;
+    assert_eq!(first.task_id, Some(task.id));
+    assert!(
+        first
+            .appended_instructions
+            .contains("Skill playbook, space/skills/rust-pr-review.md:\n# Rust PR Review")
+    );
+    assert!(
+        !first.appended_instructions.contains("missing-playbook"),
+        "{}",
+        first.appended_instructions
+    );
+    consume_notice(&*hub.link).await;
+
+    // Follow-up user message with /skill:release-notes updates task.playbooks and injects it.
+    hub.api
+        .send_message(&UserMessage {
+            project: None,
+            task: Some(task.id),
+            text: "Please also draft /skill:release-notes".into(),
+            images: Vec::new(),
+            client_message_id: "m-skill-followup".into(),
+        })
+        .await
+        .unwrap();
+    let updated = hub.db.task(task.id).await.unwrap().unwrap();
+    assert_eq!(
+        updated.playbooks,
+        vec![
+            "rust-pr-review".to_owned(),
+            "missing-playbook".to_owned(),
+            "release-notes".to_owned(),
+        ]
+    );
+
+    let second = run_with(&*hub.link, &[]).await;
+    assert_eq!(second.task_id, Some(task.id));
+    assert!(
+        second
+            .appended_instructions
+            .contains("Skill playbook, space/skills/release-notes.md:\n# Release Notes")
+    );
+}

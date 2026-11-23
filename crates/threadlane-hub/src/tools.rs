@@ -356,6 +356,12 @@ impl HubTools {
                 .ok_or_else(|| ToolError::Failed(format!("run {} has no agent", run.id)))?,
         };
         self.check_setup(context.project_id, agent_id).await?;
+        let agent = self
+            .db
+            .agent(agent_id)
+            .await
+            .map_err(tool_error)?
+            .ok_or_else(|| ToolError::Failed(format!("agent {agent_id} not found")))?;
         let named = named_repositories(&self.db, context.project_id, object).await?;
         // A subtask inherits its parent's origin, and its repositories if it
         // names none; a lead's task comes from you if the run works on
@@ -414,6 +420,7 @@ impl HubTools {
             priority,
             created_by_call: Some(created_by_call),
             created_at: self.clock.now(),
+            playbooks: crate::context::merge_playbooks(&agent.playbooks, &[], goal),
         };
         let task = if let Some(args) = object.get("pr_review") {
             let target = review_head(&self.db, context.project_id, args).await?;
@@ -1827,6 +1834,7 @@ mod tests {
             result: Some(json!({ "summary": summary, "review": { "feedback": "x" } })),
             created_at: threadlane_core::time::Timestamp::from_millis(0),
             publication_blocker: None,
+            playbooks: vec![],
         };
         let line = task_line(&task);
         let result = line["result"].as_str().unwrap();
