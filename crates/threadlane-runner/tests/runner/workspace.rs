@@ -385,6 +385,54 @@ async fn the_merge_check_names_the_base_and_the_conflicting_files_and_touches_no
 }
 
 #[tokio::test]
+async fn a_pr_review_whose_base_fetch_fails_is_not_pointed_at_origin_base() {
+    let h = Harness::new();
+    let mut s = setup();
+    s.workspaces = GitWorkspaces::new(h.config.lanes_dir.parent().unwrap().join("workspaces"));
+    s.prepare(T1).await;
+    let seed = s.dir.path().join("remotes/app-seed");
+    git(&seed, &["commit", "--allow-empty", "-m", "PR-only commit"]);
+    git(
+        &seed,
+        &["push", &s.repository.remote_url, "HEAD:refs/pull/42/head"],
+    );
+    let head = git(&seed, &["rev-parse", "HEAD"]).trim().to_owned();
+    // The remote has no `gone` branch, so fetching the base fails.
+    h.forge.set_pull_base("gone");
+
+    let mut assignment = assignment(11);
+    assignment.lane_kind = LaneKind::Task;
+    assignment.task_id = Some(T1);
+    assignment.pr_review = Some(PullRequestReview {
+        number: 42,
+        revision: ReviewRevision {
+            repository: s.repository.id,
+            commit: head.clone(),
+        },
+    });
+    assignment.repositories.push(s.repository.clone());
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment)));
+    h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
+    h.link.push_tool(Ok(json!({"finished": true})));
+    h.backend.scripted.push(
+        Script::new()
+            .call("progress", "memory_create", json!({}))
+            .call(
+                "verdict",
+                "finish_task",
+                json!({"reviewed_head":head,"pr_verdict":"approved","summary":"Reviewed"}),
+            )
+            .finish("Reviewed"),
+    );
+    h.runner.work_once().await.unwrap();
+    let prompt = &h.backend.scripted.received()[0].prompt;
+    assert!(prompt.contains("fetching that branch failed"), "{prompt}");
+    assert!(prompt.contains("gh pr view 42"), "{prompt}");
+    assert!(!prompt.contains("git diff origin/gone"), "{prompt}");
+}
+
+#[tokio::test]
 async fn a_standalone_pr_review_fetches_its_head_and_completes_from_a_detached_checkout() {
     let h = Harness::new();
     let mut s = setup();
@@ -398,6 +446,16 @@ async fn a_standalone_pr_review_fetches_its_head_and_completes_from_a_detached_c
         &["push", &s.repository.remote_url, "HEAD:refs/pull/42/head"],
     );
     let head = git(&seed, &["rev-parse", "HEAD"]).trim().to_owned();
+    // The PR merges into `release`, not the registration's tracked `main` (#715).
+    git(
+        &seed,
+        &[
+            "push",
+            &s.repository.remote_url,
+            "HEAD~1:refs/heads/release",
+        ],
+    );
+    h.forge.set_pull_base("release");
 
     let mut assignment = assignment(11);
     assignment.lane_kind = LaneKind::Task;
@@ -428,6 +486,13 @@ async fn a_standalone_pr_review_fetches_its_head_and_completes_from_a_detached_c
     let runs = h.backend.scripted.received();
     let checkout = &runs[0].working_dir;
     assert_ne!(checkout, &task_tree);
+    let prompt = &runs[0].prompt;
+    assert!(prompt.contains("merges into `release`"), "{prompt}");
+    assert!(prompt.contains("tracks `main`"), "{prompt}");
+    assert_eq!(
+        git(checkout, &["rev-parse", "origin/release"]).trim(),
+        git(&seed, &["rev-parse", "HEAD~1"]).trim()
+    );
     assert_eq!(git(checkout, &["rev-parse", "HEAD"]).trim(), head);
     assert_eq!(
         git(checkout, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
@@ -614,11 +679,80 @@ async fn a_published_task_can_push_again_after_the_base_moves() {
     let check = s.bring_in_base(T1).await;
     assert!(check.clean(), "{check:?}");
     assert_eq!(check.base, landed);
-    assert_eq!(git(&path, &["rev-parse", "HEAD"]), published);
+    // Merged, not rebased: the pushed commit stays in the history (#730).
+    git(
+        &path,
+        &["merge-base", "--is-ancestor", published.trim(), "HEAD"],
+    );
+    git(&path, &["merge-base", "--is-ancestor", &landed, "HEAD"]);
 
     std::fs::write(path.join("work.txt"), "updated").unwrap();
     s.checkpoint(T1).await;
     git(&path, &["push", "origin", "HEAD"]);
+}
+
+#[tokio::test]
+async fn a_branch_pushed_onto_another_tasks_pr_is_merged_not_rebased() {
+    let s = setup();
+    let first = s.prepare(T1).await;
+    std::fs::write(first.join("work.txt"), "work").unwrap();
+    s.checkpoint(T1).await;
+    git(&first, &["push", "origin", "HEAD"]);
+
+    // T2 updates T1's PR in place: it merges T1's branch and pushes onto it.
+    let path = s.prepare(T2).await;
+    git(&path, &["merge", "--quiet", "threadlane/T-0001"]);
+    std::fs::write(path.join("fix.txt"), "fix").unwrap();
+    s.checkpoint(T2).await;
+    git(&path, &["push", "origin", "HEAD:threadlane/T-0001"]);
+    let pushed = git(&path, &["rev-parse", "HEAD"]);
+
+    let landed = s.land_on_main("other.txt", "elsewhere");
+    assert!(s.bring_in_base(T2).await.clean());
+    git(
+        &path,
+        &["merge-base", "--is-ancestor", pushed.trim(), "HEAD"],
+    );
+    git(&path, &["merge-base", "--is-ancestor", &landed, "HEAD"]);
+    let preview = s
+        .workspaces
+        .preview_publish(T2, &s.repository, None, "threadlane/T-0001")
+        .await
+        .expect("the push extends the PR head");
+    assert_eq!(preview.revision, git(&path, &["rev-parse", "HEAD"]).trim());
+}
+
+#[tokio::test]
+async fn a_push_that_would_not_extend_the_remote_branch_is_refused_before_approval() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("work.txt"), "work").unwrap();
+    s.checkpoint(T1).await;
+    git(&path, &["push", "origin", "HEAD"]);
+    let pushed = git(&path, &["rev-parse", "HEAD"]);
+
+    // Rewritten after the push, as a rebase would.
+    git(&path, &["commit", "--quiet", "--amend", "-m", "Rewritten"]);
+    let error = s
+        .workspaces
+        .preview_publish(T1, &s.repository, None, "threadlane/T-0001")
+        .await
+        .expect_err("the push cannot land");
+    assert!(error.0.contains("would be rejected"), "{error}");
+    assert!(error.0.contains(pushed.trim()), "{error}");
+    assert!(
+        error.0.contains("git merge origin/threadlane/T-0001"),
+        "{error}"
+    );
+
+    git(
+        &path,
+        &["merge", "--quiet", "--no-edit", "origin/threadlane/T-0001"],
+    );
+    s.workspaces
+        .preview_publish(T1, &s.repository, None, "threadlane/T-0001")
+        .await
+        .expect("merged back in, the push extends the remote");
 }
 
 #[tokio::test]
@@ -675,6 +809,15 @@ async fn the_run_after_an_unfinished_one_is_told_what_its_checkpoint_left_out() 
     assignment.lane_kind = LaneKind::Task;
     assignment.task_id = Some(T1);
     assignment.repositories = vec![s.repository.clone()];
+    // A run whose backend cannot start (no script) is not told: the next one is.
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment.clone())));
+    h.runner.work_once().await.unwrap();
+    assert_ne!(
+        workspaces.checkpoint_notes(T1, repositories).await,
+        "",
+        "kept after a failed start"
+    );
     h.link.grant(lease(LANE));
     h.link.push_begin(Ok(run(assignment)));
     h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
@@ -693,8 +836,147 @@ async fn the_run_after_an_unfinished_one_is_told_what_its_checkpoint_left_out() 
         "{prompt}"
     );
     assert_eq!(
-        workspaces.take_checkpoint_notes(T1, repositories).await,
+        workspaces.checkpoint_notes(T1, repositories).await,
         "",
         "told once"
     );
+}
+
+#[tokio::test]
+async fn an_ended_tasks_worktrees_go_only_once_nothing_in_them_would_be_lost() {
+    let s = setup();
+    let repositories = std::slice::from_ref(&s.repository);
+    let path = s.prepare(T1).await;
+    let task_dir = path.parent().unwrap().to_path_buf();
+    let kept = |reason: Option<String>, what: &str| {
+        let reason = reason.expect("kept");
+        assert!(reason.contains(what), "{reason}");
+    };
+
+    std::fs::write(path.join("work.txt"), "half done").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    s.checkpoint(T1).await;
+    let commit = git(&path, &["rev-parse", "HEAD"]).trim().to_owned();
+    let review = s
+        .workspaces
+        .prepare_review(
+            T1,
+            ReviewCheckout::Submission(RunId(10)),
+            repositories,
+            &[ReviewRevision {
+                repository: s.repository.id,
+                commit: commit.clone(),
+            }],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "no remote branch",
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("work.txt")).unwrap(),
+        "half done"
+    );
+
+    git(&path, &["push", "--quiet", "origin", "threadlane/T-0001"]);
+    std::fs::write(review.join("notes.txt"), "a reviewer's note").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    std::fs::remove_file(review.join("notes.txt")).unwrap();
+
+    git(&path, &["config", "status.showUntrackedFiles", "no"]);
+    std::fs::write(path.join("hidden.txt"), "untracked").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    std::fs::remove_file(path.join("hidden.txt")).unwrap();
+
+    let lib = bare_repository(&s.dir.path().join("remotes"), "lib");
+    git(
+        &path,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            lib.to_str().unwrap(),
+            "lib",
+        ],
+    );
+    git(
+        &path,
+        &["commit", "--quiet", "--no-verify", "-m", "Add lib"],
+    );
+    git(&path, &["push", "--quiet", "origin", "threadlane/T-0001"]);
+    git(&path, &["config", "submodule.lib.ignore", "all"]);
+    std::fs::write(path.join("lib/README.md"), "changed in the submodule").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "uncommitted",
+    );
+    git(&path.join("lib"), &["checkout", "--quiet", "README.md"]);
+    let commit = git(&path, &["rev-parse", "HEAD"]).trim().to_owned();
+
+    std::fs::write(task_dir.join(".handoff-notes"), "not a marker").unwrap();
+    kept(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        "not a known worktree",
+    );
+    std::fs::remove_file(task_dir.join(".handoff-notes")).unwrap();
+
+    assert_eq!(
+        s.workspaces
+            .remove_finished(T1, repositories)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(!task_dir.exists());
+    let clone = s.clones().join(s.repository.id.to_string());
+    assert_eq!(
+        git(&clone, &["rev-parse", "refs/heads/threadlane/T-0001"]).trim(),
+        commit,
+        "the task branch stays"
+    );
+    assert!(
+        !git(&clone, &["worktree", "list", "--porcelain"]).contains("T-0001"),
+        "the worktrees are unregistered"
+    );
+    // Safe to run again, and for a task whose worktree was never set up.
+    for task in [T1, T2] {
+        assert_eq!(
+            s.workspaces
+                .remove_finished(task, repositories)
+                .await
+                .unwrap(),
+            None
+        );
+    }
 }

@@ -176,30 +176,21 @@ impl GitForge {
         Ok(pull)
     }
 
-    /// Replies on and resolves review thread `thread_id` of PR `number`, only
-    /// while the PR head is `expected_head` and contains `fixed_by`, and only a
-    /// thread of that PR. An already resolved thread is left alone, so a retry finishes.
-    async fn resolve_review_thread(
+    /// An error unless `expected_head` contains `fixed_by`.
+    async fn check_contains(
         &self,
-        repo: &str,
+        hostname: &str,
+        name: &str,
         number: std::num::NonZeroU64,
         expected_head: &str,
-        thread_id: &str,
         fixed_by: &str,
-        body: &str,
-    ) -> Result<String, ForgeError> {
-        self.pull_at_head(repo, number, expected_head).await?;
-        let (host, name) = repo
-            .split_once('/')
-            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
-        let hostname = format!("--hostname={host}");
-        let here = Path::new(".");
+    ) -> Result<(), ForgeError> {
         let compare = self
             .gh(
-                here,
+                Path::new("."),
                 args(&[
                     "api",
-                    &hostname,
+                    hostname,
                     "--method=GET",
                     &format!("repos/{name}/compare/{fixed_by}...{expected_head}"),
                 ]),
@@ -211,6 +202,31 @@ impl GitForge {
             return Err(ForgeError(format!(
                 "PR #{number}'s head {expected_head} does not contain {fixed_by}."
             )));
+        }
+        Ok(())
+    }
+
+    /// Replies on and resolves review thread `thread_id` of PR `number`, only
+    /// while the PR head is `expected_head` and contains `fixed_by` (or, without
+    /// it, as declined), and only a thread of that PR. An already resolved thread is left alone, so a retry finishes.
+    async fn resolve_review_thread(
+        &self,
+        repo: &str,
+        number: std::num::NonZeroU64,
+        expected_head: &str,
+        thread_id: &str,
+        fixed_by: Option<&str>,
+        body: &str,
+    ) -> Result<String, ForgeError> {
+        self.pull_at_head(repo, number, expected_head).await?;
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let hostname = format!("--hostname={host}");
+        let here = Path::new(".");
+        if let Some(fixed_by) = fixed_by {
+            self.check_contains(&hostname, name, number, expected_head, fixed_by)
+                .await?;
         }
         let id = format!("id={thread_id}");
         let thread = self
@@ -254,13 +270,19 @@ impl GitForge {
                 "-f",
                 &id,
                 "-f",
-                &format!("body={}\n\nFixed in {fixed_by}.", body.trim_end()),
+                &match fixed_by {
+                    Some(fixed_by) => format!("body={}\n\nFixed in {fixed_by}.", body.trim_end()),
+                    None => format!("body={}\n\nDeclined: not changed.", body.trim_end()),
+                },
             ]),
         )
         .await?;
-        Ok(format!(
-            "Resolved review thread {thread_id} on PR #{number}, fixed in {fixed_by}."
-        ))
+        Ok(match fixed_by {
+            Some(fixed_by) => {
+                format!("Resolved review thread {thread_id} on PR #{number}, fixed in {fixed_by}.")
+            }
+            None => format!("Resolved review thread {thread_id} on PR #{number} as declined."),
+        })
     }
 
     /// Re-requests `reviewers` on PR `number` and posts `comment`, only while
@@ -309,6 +331,70 @@ impl GitForge {
         Ok(format!(
             "Requested a fresh review of PR #{number} at {expected_head}."
         ))
+    }
+
+    /// Merges `pulls` in order, each only if GitHub still sees its pinned
+    /// head, and stops at the first that fails or that GitHub does not then
+    /// report merged, saying which merged.
+    async fn merge_batch(
+        &self,
+        repo: &str,
+        pulls: &[(std::num::NonZeroU64, String)],
+    ) -> Result<String, ForgeError> {
+        let mut merged = Vec::new();
+        for (number, head) in pulls {
+            let merge = self
+                .gh(
+                    Path::new("."),
+                    args(&[
+                        "pr",
+                        "merge",
+                        &number.to_string(),
+                        "--merge",
+                        &format!("--match-head-commit={head}"),
+                        &format!("--repo={repo}"),
+                    ]),
+                )
+                .await;
+            // With a merge queue or auto-merge, `gh pr merge` succeeds having only queued the PR.
+            let merge = match merge {
+                Ok(_) => self
+                    .gh(
+                        Path::new("."),
+                        args(&[
+                            "pr",
+                            "view",
+                            &number.to_string(),
+                            "--json=state",
+                            "--jq=.state",
+                            &format!("--repo={repo}"),
+                        ]),
+                    )
+                    .await
+                    .and_then(|state| match state.trim() {
+                        "MERGED" => Ok(()),
+                        state => Err(ForgeError(format!(
+                            "GitHub reports it {state} after the merge, so it was queued \
+                             (merge queue or auto-merge), not merged"
+                        ))),
+                    }),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = merge {
+                let done = if merged.is_empty() {
+                    "none merged".to_owned()
+                } else {
+                    format!("merged {}", merged.join(", "))
+                };
+                return Err(ForgeError(format!(
+                    "batch stopped at #{number} (expected head {head}), {done}, the rest not \
+                     attempted: {}",
+                    error.0
+                )));
+            }
+            merged.push(format!("#{number}"));
+        }
+        Ok(format!("merged {} in order", merged.join(", ")))
     }
 
     /// Closes PR `number` of `repo` (`host/owner/name`) only while its head
@@ -792,7 +878,14 @@ impl Forge for GitForge {
                 body,
             } => {
                 return self
-                    .resolve_review_thread(&repo, *number, expected_head, thread_id, fixed_by, body)
+                    .resolve_review_thread(
+                        &repo,
+                        *number,
+                        expected_head,
+                        thread_id,
+                        fixed_by.as_deref(),
+                        body,
+                    )
                     .await;
             }
             RepositoryAction::RequestReview {
@@ -805,6 +898,7 @@ impl Forge for GitForge {
                     .request_review(&repo, *number, expected_head, reviewers, comment.as_deref())
                     .await;
             }
+            RepositoryAction::MergeBatch { pulls } => return self.merge_batch(&repo, pulls).await,
             _ => {}
         }
         let mut argv = match action {
@@ -855,7 +949,8 @@ impl Forge for GitForge {
             } => return self.label_issue(&repo, *number, add, remove).await,
             RepositoryAction::ClosePullRequest { .. }
             | RepositoryAction::ResolveReviewThread { .. }
-            | RepositoryAction::RequestReview { .. } => unreachable!("handled above"),
+            | RepositoryAction::RequestReview { .. }
+            | RepositoryAction::MergeBatch { .. } => unreachable!("handled above"),
             RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
             RepositoryAction::AssignIssue { number } => {
                 args(&["issue", "edit", &number.to_string(), "--add-assignee=@me"])
@@ -902,6 +997,33 @@ impl Forge for GitForge {
             .map(str::trim)
             .find(|line| !line.is_empty())
             .map(str::to_owned))
+    }
+
+    async fn pull_request_base(
+        &self,
+        remote: &str,
+        number: std::num::NonZeroU64,
+    ) -> Result<String, ForgeError> {
+        let repo = normalize_remote(remote)
+            .ok_or_else(|| ForgeError("the registered remote is not a forge repository".into()))?;
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let output = self
+            .gh(
+                Path::new("."),
+                args(&[
+                    "api",
+                    &format!("--hostname={host}"),
+                    "--method=GET",
+                    &format!("repos/{name}/pulls/{number}"),
+                    "--jq=.base.ref",
+                ]),
+            )
+            .await?;
+        let base = output.trim();
+        check_branch(base)?;
+        Ok(base.to_owned())
     }
 }
 

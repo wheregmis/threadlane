@@ -139,11 +139,71 @@ pub struct PullRequestState {
     pub head_sha: String,
     pub draft: bool,
     /// GitHub's `mergeable_state`, lowercased: `clean` merges without
-    /// conflicts and with every status passing.
+    /// conflicts and with every status passing, `dirty` has conflicts.
     pub mergeable_state: String,
-    /// The conclusion of each check run on the head commit, `None` while
-    /// one has not finished.
-    pub checks: Vec<Option<String>>,
+    /// Each check run on the head commit.
+    pub checks: Vec<CheckRun>,
+    /// The pull request's page.
+    pub url: String,
+    /// GitHub's `state`: `open` or `closed`.
+    pub state: String,
+    pub merged: bool,
+}
+
+/// One check run on a pull request's head commit.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CheckRun {
+    pub name: String,
+    /// Its conclusion, `None` while it has not finished.
+    pub conclusion: Option<String>,
+}
+
+impl CheckRun {
+    /// A run that is still going, else whether its conclusion passes.
+    #[must_use]
+    pub fn status(&self) -> CheckStatus {
+        match self.conclusion.as_deref() {
+            None => CheckStatus::Running,
+            Some("success" | "neutral" | "skipped") => CheckStatus::Passing,
+            Some(_) => CheckStatus::Failing,
+        }
+    }
+}
+
+/// Where one check run stands, as the desktop shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Passing,
+    Running,
+    Failing,
+}
+
+/// Where a pull request stands, as the desktop shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestStatus {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+/// One file a pull request changes, from `pulls/<n>/files`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PullRequestFile {
+    pub path: String,
+    /// The path before a rename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_path: Option<String>,
+    /// GitHub's `status`: `added`, `removed`, `modified`, `renamed`, ...
+    pub status: String,
+    pub additions: u64,
+    pub deletions: u64,
+    /// The file's unified diff hunks; `None` for a binary file or one too
+    /// large for GitHub to show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
 }
 
 impl PullRequestState {
@@ -153,12 +213,27 @@ impl PullRequestState {
     pub fn green(&self) -> bool {
         self.mergeable_state == "clean"
             && !self.checks.is_empty()
-            && self.checks.iter().all(|conclusion| {
-                matches!(
-                    conclusion.as_deref(),
-                    Some("success" | "neutral" | "skipped")
-                )
-            })
+            && self
+                .checks
+                .iter()
+                .all(|check| check.status() == CheckStatus::Passing)
+    }
+
+    /// Merged, closed, draft or open.
+    #[must_use]
+    pub fn status(&self) -> PullRequestStatus {
+        match (self.merged, self.state.as_str(), self.draft) {
+            (true, _, _) => PullRequestStatus::Merged,
+            (false, "closed", _) => PullRequestStatus::Closed,
+            (false, _, true) => PullRequestStatus::Draft,
+            (false, _, false) => PullRequestStatus::Open,
+        }
+    }
+
+    /// GitHub reports conflicts with the base branch.
+    #[must_use]
+    pub fn conflicted(&self) -> bool {
+        self.mergeable_state == "dirty"
     }
 }
 
@@ -202,6 +277,13 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
         Err(GithubError("this source cannot read issues".to_owned()))
     }
 
+    /// Issue or pull request `number` of `repository` (`owner/name`) for
+    /// reading: its title, state, author, labels, body and comments, as JSON.
+    async fn issue(&self, repository: &str, number: u64) -> Result<serde_json::Value, GithubError> {
+        let _ = (repository, number);
+        Err(GithubError("this source cannot read issues".to_owned()))
+    }
+
     /// Head, draft flag, mergeability and check runs of pull request
     /// `number` of `repository` (`owner/name`).
     async fn pull_request_state(
@@ -209,6 +291,19 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
         repository: &str,
         number: u64,
     ) -> Result<PullRequestState, GithubError> {
+        let _ = (repository, number);
+        Err(GithubError(
+            "this source cannot read pull requests".to_owned(),
+        ))
+    }
+
+    /// Every file pull request `number` of `repository` (`owner/name`)
+    /// changes, with its patch.
+    async fn pull_request_files(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<Vec<PullRequestFile>, GithubError> {
         let _ = (repository, number);
         Err(GithubError(
             "this source cannot read pull requests".to_owned(),
@@ -317,11 +412,12 @@ mod tests {
     fn a_pull_request_is_green_only_when_clean_with_every_check_passed() {
         let green = PullRequestState {
             mergeable_state: "clean".into(),
-            checks: vec![
-                Some("success".into()),
-                Some("skipped".into()),
-                Some("neutral".into()),
-            ],
+            checks: ["success", "skipped", "neutral"]
+                .map(|c| CheckRun {
+                    name: c.into(),
+                    conclusion: Some(c.into()),
+                })
+                .into(),
             ..PullRequestState::default()
         };
         assert!(green.green());
@@ -339,11 +435,44 @@ mod tests {
         ] {
             let pull = PullRequestState {
                 mergeable_state: state.into(),
-                checks: checks.into_iter().map(|c| c.map(str::to_owned)).collect(),
+                checks: checks
+                    .into_iter()
+                    .map(|c| CheckRun {
+                        name: "ci".into(),
+                        conclusion: c.map(str::to_owned),
+                    })
+                    .collect(),
                 ..PullRequestState::default()
             };
             assert!(!pull.green(), "{pull:?}");
         }
+    }
+
+    #[test]
+    fn a_pull_request_status_puts_merged_before_closed_and_closed_before_draft() {
+        let pull = |state: &str, draft, merged| {
+            PullRequestState {
+                state: state.into(),
+                draft,
+                merged,
+                ..PullRequestState::default()
+            }
+            .status()
+        };
+        assert_eq!(pull("open", false, false), PullRequestStatus::Open);
+        assert_eq!(pull("open", true, false), PullRequestStatus::Draft);
+        assert_eq!(pull("closed", true, false), PullRequestStatus::Closed);
+        assert_eq!(pull("closed", false, true), PullRequestStatus::Merged);
+        let check = |conclusion: Option<&str>| {
+            CheckRun {
+                name: "ci".into(),
+                conclusion: conclusion.map(str::to_owned),
+            }
+            .status()
+        };
+        assert_eq!(check(None), CheckStatus::Running);
+        assert_eq!(check(Some("skipped")), CheckStatus::Passing);
+        assert_eq!(check(Some("cancelled")), CheckStatus::Failing);
     }
 
     #[test]

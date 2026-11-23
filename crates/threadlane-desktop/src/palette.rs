@@ -3,6 +3,7 @@
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::{Icon, WindowExt as _};
 use gpui_kit::*;
+use threadlane_core::model::TaskStatus;
 use threadlane_desktop::AppState;
 
 use crate::icons::AppIcon;
@@ -21,6 +22,9 @@ pub(crate) enum PaletteAction {
     ToggleSidebar,
     ShowShortcuts,
     SetAppearance(threadlane_desktop::Appearance),
+    NewTask,
+    RetryTask(String, threadlane_core::ids::TaskId),
+    CancelTask(String, threadlane_core::ids::TaskId),
 }
 
 pub(crate) struct PaletteEntry {
@@ -233,6 +237,43 @@ pub(crate) fn build_sections(state: &AppState) -> Vec<PaletteSection> {
         });
     }
 
+    // Things you can do to a task, not only open it.
+    let mut task_actions = Vec::new();
+    for space in state.spaces() {
+        for summary in &space.tasks {
+            let task = &summary.task;
+            let (verb, action) = if task.status == TaskStatus::Failed {
+                (
+                    "Retry",
+                    PaletteAction::RetryTask(space.name.clone(), task.id),
+                )
+            } else if !task.status.is_terminal() {
+                (
+                    "Cancel",
+                    PaletteAction::CancelTask(space.name.clone(), task.id),
+                )
+            } else {
+                continue;
+            };
+            task_actions.push(PaletteEntry {
+                label: format!("{verb} {} {}", task.id, task.title),
+                keywords: vec![task.id.to_string(), verb.to_lowercase(), "task".into()],
+                icon: if verb == "Retry" {
+                    AppIcon::Play
+                } else {
+                    AppIcon::X
+                },
+                action,
+            });
+        }
+    }
+    if !task_actions.is_empty() {
+        sections.push(PaletteSection {
+            heading: "Task actions",
+            entries: task_actions,
+        });
+    }
+
     // 4. Spaces (only when switching is meaningful)
     if multi_space {
         let selected = state.selected_space().map(|s| s.name.as_str());
@@ -259,6 +300,12 @@ pub(crate) fn build_sections(state: &AppState) -> Vec<PaletteSection> {
     sections.push(PaletteSection {
         heading: "Actions",
         entries: vec![
+            PaletteEntry {
+                label: "New task…".into(),
+                keywords: vec!["create".into(), "quick".into(), "task".into()],
+                icon: AppIcon::ListPlus,
+                action: PaletteAction::NewTask,
+            },
             PaletteEntry {
                 label: "Reload".into(),
                 keywords: vec!["refresh".into(), "sync".into()],
@@ -336,7 +383,7 @@ impl Desktop {
             let view = view.clone();
             let mut palette = Command::new(&command_state)
                 .bordered(false)
-                .placeholder("Jump to a project, task, space, or command…")
+                .placeholder("Jump to a project or task, or run a command…")
                 .max_h(rems(22.))
                 .on_confirm(move |path, window, cx| {
                     let chosen = actions
@@ -363,6 +410,25 @@ impl Desktop {
                                     Some(screen) => this.go(screen, cx),
                                     None => cx.notify(),
                                 }
+                            });
+                        }
+                        PaletteAction::NewTask => {
+                            let _ = view.update(cx, |this, cx| this.quick_create(window, cx));
+                        }
+                        PaletteAction::RetryTask(space, task) => {
+                            let _ = view.update(cx, |this, cx| this.retry_task(space, task, cx));
+                        }
+                        PaletteAction::CancelTask(space, task) => {
+                            // The confirmation opens once the palette has closed.
+                            let view = view.clone();
+                            window.on_next_frame(move |window, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.confirm_action(
+                                        threadlane_desktop::Consequence::CancelTask(space, task),
+                                        window,
+                                        cx,
+                                    );
+                                });
                             });
                         }
                         PaletteAction::Reload => {
@@ -454,6 +520,9 @@ mod tests {
                         tab: Tab::Conversation,
                     })
         }));
+
+        let actions = sections.iter().find(|s| s.heading == "Actions").unwrap();
+        assert_eq!(actions.entries[0].action, PaletteAction::NewTask);
 
         let spaces = sections.iter().find(|s| s.heading == "Spaces").unwrap();
         assert_eq!(spaces.entries.len(), 1);

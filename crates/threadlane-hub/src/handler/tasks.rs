@@ -3,7 +3,7 @@
 //! store calls as the lead's `create_task` and `cancel_task` tools.
 
 use threadlane_core::client::{ApiError, TaskReply, TaskRequest};
-use threadlane_core::model::{Mode, NewTask, TaskOrigin, TaskStatus};
+use threadlane_core::model::{Agent, Mode, NewTask, Project, TaskOrigin, TaskStatus};
 use threadlane_core::runtime::{WakeTarget, Waker as _};
 use threadlane_core::store::{OrgStore, TaskStore, TaskUpdate};
 
@@ -33,26 +33,7 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
                     .map_err(ApiError::Invalid)?;
             let project = api.project_named(project.as_deref()).await?;
             active_project(&project)?;
-            let agent = api.agent_named(&agent).await?;
-            let binding = db
-                .bindings(project.id)
-                .await
-                .map_err(api_error)?
-                .into_iter()
-                .find(|binding| binding.agent_id == agent.id)
-                .ok_or_else(|| {
-                    ApiError::Invalid(format!(
-                        "{} is not bound in project {:?}",
-                        agent.name, project.name
-                    ))
-                })?;
-            let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
-            if binding.effective_mode(ceiling) == Mode::Off {
-                return Err(ApiError::Invalid(format!(
-                    "{} is off in project {:?}",
-                    agent.name, project.name
-                )));
-            }
+            let agent = working_agent(api, &project, &agent).await?;
             let registered = db.repositories(project.id).await.map_err(api_error)?;
             let mut repository_ids = Vec::with_capacity(repositories.len());
             for name in &repositories {
@@ -152,6 +133,23 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
             inner.wake.wake(WakeTarget::Lane(retried.lane_id));
             Ok(TaskReply::Task { task: retried })
         }
+        TaskRequest::Reassign { task: id, agent } => {
+            let task = db
+                .task(id)
+                .await
+                .map_err(api_error)?
+                .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+            let project = db
+                .project(task.project_id)
+                .await
+                .map_err(api_error)?
+                .ok_or_else(|| ApiError::NotFound(format!("task {id}'s project")))?;
+            active_project(&project)?;
+            let agent = working_agent(api, &project, &agent).await?;
+            let reassigned = db.reassign_task(id, agent.id).await.map_err(api_error)?;
+            inner.wake.wake(WakeTarget::Lane(reassigned.lane_id));
+            Ok(TaskReply::Task { task: reassigned })
+        }
         TaskRequest::AttachRepositories {
             task: id,
             repositories,
@@ -204,4 +202,31 @@ pub(super) async fn handle(api: &ClientApi, request: TaskRequest) -> Result<Task
         }
         other => Err(ApiError::Invalid(format!("unsupported request {other:?}"))),
     }
+}
+
+/// The agent named `name`, if a task in `project` can go to it: bound there
+/// and not Off.
+async fn working_agent(api: &ClientApi, project: &Project, name: &str) -> Result<Agent, ApiError> {
+    let db = &api.core.inner.db;
+    let agent = api.agent_named(name).await?;
+    let binding = db
+        .bindings(project.id)
+        .await
+        .map_err(api_error)?
+        .into_iter()
+        .find(|binding| binding.agent_id == agent.id)
+        .ok_or_else(|| {
+            ApiError::Invalid(format!(
+                "{} is not bound in project {:?}",
+                agent.name, project.name
+            ))
+        })?;
+    let ceiling = db.effective_ceiling(project.id).await.map_err(api_error)?;
+    if binding.effective_mode(ceiling) == Mode::Off {
+        return Err(ApiError::Invalid(format!(
+            "{} is off in project {:?}",
+            agent.name, project.name
+        )));
+    }
+    Ok(agent)
 }

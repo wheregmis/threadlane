@@ -7,12 +7,14 @@ use async_trait::async_trait;
 use serde_json::json;
 use tempfile::TempDir;
 use threadlane_client::ClientDirs;
+use threadlane_core::client::TaskPullRequest;
 use threadlane_core::client::{
     Accepted, ApiError, DecisionReply, DecisionRequest, FeedItem, HubApi, HubInfo, MemoryReply,
     MemoryRequest, OrgReply, OrgRequest, OverviewReply, OverviewRequest, PairingReply,
     PairingRequest, RecordedEvent, RunStep, RunSummary, RunUsage, StandingRuleSummary, TaskReply,
     TaskRequest, TimerReply, TimerRequest, UserMessage,
 };
+use threadlane_core::github::{CheckStatus, PullRequestStatus};
 use threadlane_core::ids::{
     AgentId, LaneId, MachineId, OutboxId, RepositoryId, RunId, SessionId, TimerId,
 };
@@ -78,12 +80,19 @@ struct FakeHub {
     rules: Mutex<Vec<StandingRuleSummary>>,
     /// The space's ceiling; Assisted until set.
     ceiling: Mutex<Option<Mode>>,
+    /// Agents whose task creation fails.
+    refused_agents: Mutex<Vec<String>>,
     /// The project ceilings set, by project.
     project_ceilings: Mutex<Vec<(Option<String>, Mode)>>,
     /// The decisions answered with "always".
     always: Mutex<Vec<DecisionId>>,
     /// The hub's default model per backend, as `info` reports it.
     default_models: Mutex<BTreeMap<BackendKind, String>>,
+    /// Each task's pull requests, as `task_pull_requests` answers.
+    pulls: Mutex<BTreeMap<TaskId, Vec<TaskPullRequest>>>,
+    /// Each task's pull request files; a task without any answers like a
+    /// hub from before they could be read.
+    pull_files: Mutex<BTreeMap<TaskId, Vec<threadlane_core::client::PullRequestFiles>>>,
 }
 
 impl FakeHub {
@@ -690,7 +699,7 @@ impl HubApi for FakeHub {
             OverviewRequest::RecordedCount => Ok(OverviewReply::RecordedCount {
                 total: u64::try_from(self.recorded.lock().expect("lock").len()).expect("few"),
             }),
-            OverviewRequest::Task { task } => {
+            OverviewRequest::Task { task } | OverviewRequest::TaskOverview { task } => {
                 let summary = tasks
                     .into_iter()
                     .find(|summary| summary.task.id == task)
@@ -743,6 +752,23 @@ impl HubApi for FakeHub {
                 })
             }
             OverviewRequest::Work => Err(ApiError::Invalid("unknown variant `work`".to_owned())),
+            OverviewRequest::TaskPullRequests { task } => Ok(OverviewReply::TaskPullRequests {
+                pulls: self
+                    .pulls
+                    .lock()
+                    .unwrap()
+                    .get(&task)
+                    .cloned()
+                    .unwrap_or_default(),
+            }),
+            OverviewRequest::TaskPullFiles { task } => self
+                .pull_files
+                .lock()
+                .unwrap()
+                .get(&task)
+                .cloned()
+                .map(|pulls| OverviewReply::TaskPullFiles { pulls })
+                .ok_or_else(|| ApiError::Invalid("unknown variant `task_pull_files`".to_owned())),
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
         }
     }
@@ -947,6 +973,9 @@ impl HubApi for FakeHub {
                 playbooks,
                 ..
             } => {
+                if self.refused_agents.lock().expect("lock").contains(&agent) {
+                    return Err(ApiError::Invalid(format!("{agent} is busy")));
+                }
                 let mut created = task(
                     i64::try_from(tasks.len()).expect("few") + 1,
                     TaskStatus::Queued,
@@ -979,6 +1008,19 @@ impl HubApi for FakeHub {
                     return Err(ApiError::Invalid(format!("task {id} has not failed")));
                 }
                 summary.task.status = TaskStatus::Queued;
+                Ok(TaskReply::Task {
+                    task: summary.task.clone(),
+                })
+            }
+            TaskRequest::Reassign { task: id, agent } => {
+                let summary = tasks
+                    .iter_mut()
+                    .find(|summary| summary.task.id == id)
+                    .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+                if summary.task.status != TaskStatus::Queued {
+                    return Err(ApiError::Invalid(format!("task {id} has started")));
+                }
+                summary.agent = agent;
                 Ok(TaskReply::Task {
                     task: summary.task.clone(),
                 })
@@ -1451,6 +1493,22 @@ fn decisions_and_notices_raise_one_notification_and_messages_none() {
         None,
         "a replayed card does not notify again"
     );
+}
+
+#[test]
+fn a_quiet_decision_raises_no_alert_but_is_new_until_taken() {
+    let mut state = AppState::default();
+    let quiet = item(
+        "work",
+        4,
+        OutboxKind::Decision,
+        json!({ "text": "D-0004: Propose a task?", "decision": "D-0004", "urgent": false }),
+    );
+    assert!(state.is_new_decision(&quiet), "the queue is fetched again");
+    assert_eq!(state.receive(quiet.clone()), None, "no alert");
+    assert!(!state.is_new_decision(&quiet), "a replay fetches nothing");
+    let message = item("work", 5, OutboxKind::Message, json!({ "text": "hi" }));
+    assert!(!state.is_new_decision(&message));
 }
 
 fn said(lines: &[Line]) -> Vec<String> {
@@ -2408,6 +2466,18 @@ async fn the_memory_tab_groups_the_files_the_lead_sees_and_you_change_them_as_yo
             "2 notes · 1 task progress file".to_owned()
         ]
     );
+    assert_eq!(
+        LeadKnows {
+            instructions: true,
+            notes: 2,
+            progress: 0,
+        }
+        .lines(),
+        [
+            "Instructions for this project".to_owned(),
+            "2 notes".to_owned()
+        ]
+    );
 
     // An index is shown, never edited.
     state.select_memory("work", "api", "project/notes/INDEX.md");
@@ -3227,9 +3297,16 @@ async fn a_new_task_goes_to_an_agent_that_is_on_and_waits_for_open_tasks() {
     state.task_form_mut().toggle_dependency(TaskId(1));
     state.task_form_mut().draft_pr = true;
     assert_eq!(
-        state.task_spec("work", "api", "  ", "Make it pass"),
-        Err("Give the task a title and a goal.".to_owned())
+        state.task_spec("work", "api", "Fix it", "  "),
+        Err("Say what the task should do.".to_owned())
     );
+    // Quick create sends only a prompt: its first line, cut short, is the title.
+    let long = format!("{}\nand the rest", "word ".repeat(20));
+    let quick = state
+        .task_spec("work", "api", "  ", &long)
+        .expect("a prompt");
+    assert_eq!(quick.title, format!("{}…", &"word ".repeat(20)[..72]));
+    assert_eq!(quick.goal, long.trim());
     let spec = state
         .task_spec("work", "api", " Fix it ", "Make it pass")
         .expect("complete");
@@ -6175,7 +6252,7 @@ async fn task_header_and_activity_use_journal_clock_and_finished_usage() {
     assert_eq!(
         header.latest.unwrap(),
         LatestStep {
-            text: "Latest: Called Bash · 2 min ago".to_owned(),
+            text: "Called Bash · 2 min ago".to_owned(),
             quiet: false
         }
     );
@@ -8563,4 +8640,736 @@ async fn task_playbooks_appear_in_spec_board_cards_and_header() {
         header.playbooks,
         vec!["rust-pr-review".to_owned(), "release-notes".to_owned()]
     );
+}
+
+fn pull(number: u64, status: PullRequestStatus, conflicted: bool) -> TaskPullRequest {
+    use threadlane_core::client::TaskCheckRun;
+    TaskPullRequest {
+        repository: "acme/api".into(),
+        number,
+        url: format!("https://github.com/acme/api/pull/{number}"),
+        status,
+        head_sha: "a".repeat(40),
+        checks: [
+            ("fmt", CheckStatus::Passing),
+            ("test", CheckStatus::Running),
+            ("clippy", CheckStatus::Passing),
+        ]
+        .map(|(name, status)| TaskCheckRun {
+            name: name.into(),
+            status,
+        })
+        .into(),
+        mergeable_state: if conflicted { "dirty" } else { "clean" }.into(),
+        conflicted,
+        refreshed_at: Timestamp::from_millis(0),
+    }
+}
+
+#[tokio::test]
+async fn a_task_and_its_board_show_each_pull_request_with_its_checks() {
+    let work = FakeHub::new("Work", Vec::new());
+    *work.tasks.lock().unwrap() = vec![
+        task(1, TaskStatus::Done, None),
+        task(2, TaskStatus::Running, None),
+        task(3, TaskStatus::Queued, None),
+    ];
+    work.pulls
+        .lock()
+        .unwrap()
+        .insert(TaskId(2), vec![pull(42, PullRequestStatus::Draft, true)]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+
+    state.apply_task(load_task_overview(&core, "work", TaskId(2)).await);
+    assert!(state.task("work", TaskId(2)).is_some(), "the task loaded");
+    let pulls = state.task_pulls("work", TaskId(2));
+    assert_eq!(pulls.len(), 1);
+    assert_eq!(pull_label(&pulls[0]), "#42 Draft");
+    assert!(pulls[0].conflicted);
+    let pills: Vec<_> = check_counts(&pulls[0].checks)
+        .into_iter()
+        .map(|(status, n)| check_label(status, n))
+        .collect();
+    assert_eq!(pills, ["2 passing", "1 running"]);
+
+    // The board asks for open tasks first, newest first, then ended ones.
+    state.apply_project(load_project(&core, "work", "api").await);
+    let candidates = state.pull_candidates("work", "api");
+    assert_eq!(candidates, [TaskId(3), TaskId(2), TaskId(1)]);
+    work.pulls
+        .lock()
+        .unwrap()
+        .insert(TaskId(1), vec![pull(7, PullRequestStatus::Merged, false)]);
+    state.apply_pulls(load_pulls(&core, "work", candidates).await);
+    assert_eq!(
+        pull_label(&state.task_pulls("work", TaskId(1))[0]),
+        "#7 Merged"
+    );
+    assert!(state.task_pulls("work", TaskId(3)).is_empty());
+
+    // A hub that cannot be reached keeps the strip that was shown.
+    work.down.store(true, Ordering::SeqCst);
+    state.apply_pulls(load_pulls(&core, "work", [TaskId(1)]).await);
+    assert_eq!(state.task_pulls("work", TaskId(1)).len(), 1);
+}
+
+#[tokio::test]
+async fn the_review_walks_a_tasks_files_and_quotes_a_hunk_into_its_draft() {
+    use threadlane_core::github::PullRequestFile;
+    let work = FakeHub::new("Work", Vec::new());
+    let mut done = task(4, TaskStatus::Done, None);
+    // Before its pull request files load, the merge-check preview shows.
+    done.task.result = Some(json!({ "merge": [{
+        "repository": "api",
+        "branch": "main",
+        "base": "b".repeat(40),
+        "conflicts": [],
+        "diff": {
+            "repository": "api",
+            "base_branch": "main",
+            "files": [{ "path": "src/lib.rs", "insertions": 1, "deletions": 1, "binary": false }],
+            "insertions": 1,
+            "deletions": 1,
+            "patch": "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n"
+        }
+    }]}));
+    *work.tasks.lock().unwrap() = vec![done];
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::default();
+    state.apply_task(load_task(&core, "work", TaskId(4)).await);
+    state.open_review("work", TaskId(4));
+    assert!(state.review("work", TaskId(5)).is_none());
+
+    // An older hub cannot list the files: the preview stays.
+    state.apply_pull_files(load_pull_files(&core, "work", TaskId(4)).await);
+    let files = state.review_files("work", TaskId(4));
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].hunks[0].lines.len(), 3);
+
+    // A hub that lists no files says why.
+    work.pull_files
+        .lock()
+        .unwrap()
+        .insert(TaskId(4), Vec::new());
+    state.apply_pull_files(load_pull_files(&core, "work", TaskId(4)).await);
+    assert_eq!(
+        state.pull_files_note("work", TaskId(4)).as_deref(),
+        Some("This task has no pull request yet.")
+    );
+
+    let file = |path: &str, patch: Option<&str>| PullRequestFile {
+        path: path.into(),
+        previous_path: None,
+        status: "modified".into(),
+        additions: 2,
+        deletions: 1,
+        patch: patch.map(str::to_owned),
+    };
+    work.pull_files.lock().unwrap().insert(
+        TaskId(4),
+        vec![
+            threadlane_core::client::PullRequestFiles {
+                repository: "acme/api".into(),
+                number: 42,
+                head_sha: "a".repeat(40),
+                files: vec![
+                    file("src/lib.rs", Some("@@ -3,2 +3,3 @@ fn a\n x\n-y\n+z\n+w\n")),
+                    file("logo.png", None),
+                ],
+            },
+            threadlane_core::client::PullRequestFiles {
+                repository: "acme/web".into(),
+                number: 9,
+                head_sha: "c".repeat(40),
+                files: vec![file("src/lib.rs", None)],
+            },
+        ],
+    );
+    work.pulls.lock().unwrap().insert(
+        TaskId(4),
+        vec![
+            pull(42, PullRequestStatus::Open, false),
+            TaskPullRequest {
+                repository: "acme/web".into(),
+                head_sha: "c".repeat(40),
+                ..pull(9, PullRequestStatus::Open, false)
+            },
+        ],
+    );
+    state.apply_task(load_task(&core, "work", TaskId(4)).await);
+    state.apply_pull_files(load_pull_files(&core, "work", TaskId(4)).await);
+    assert_eq!(state.pull_files_note("work", TaskId(4)), None);
+    assert!(!state.review_files_stale("work", TaskId(4)));
+    let files = state.review_files("work", TaskId(4));
+    assert_eq!(
+        files
+            .iter()
+            .map(|f| (f.repository.as_str(), f.path.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("acme/api", "src/lib.rs"),
+            ("acme/api", "logo.png"),
+            ("acme/web", "src/lib.rs")
+        ],
+        "one path in two repositories stays two files"
+    );
+    assert!(files[1].hunks.is_empty());
+    assert_eq!(
+        quote(&files[2], None),
+        "In acme/web `src/lib.rs` (+2 -1):\n"
+    );
+
+    // A pull request that moves to a new head makes the files stale.
+    work.pulls.lock().unwrap().get_mut(&TaskId(4)).unwrap()[0].head_sha = "d".repeat(40);
+    state.apply_task(load_task(&core, "work", TaskId(4)).await);
+    assert!(state.review_files_stale("work", TaskId(4)));
+
+    // Per-file navigation stays within the files; the layout toggles.
+    state.select_review_file(9);
+    assert_eq!(state.review("work", TaskId(4)).unwrap().file, 2);
+    state.toggle_review_split();
+    assert!(state.review("work", TaskId(4)).unwrap().split);
+
+    let to = Destination::Task("work".into(), TaskId(4));
+    state.edit_draft(&to, "Please fix:");
+    state.quote_into_draft(&to, &quote(&files[0], Some(&files[0].hunks[0])));
+    assert_eq!(
+        state.draft(&to),
+        "Please fix:\n\nIn acme/api `src/lib.rs` @@ -3,2 +3,3 @@ fn a:\n```diff\n x\n-y\n+z\n+w\n```\n\n"
+    );
+    assert!(state.is_send_enabled(&to));
+
+    state.close_review();
+    assert!(state.review("work", TaskId(4)).is_none());
+    assert!(
+        !state.review_files_stale("work", TaskId(4)),
+        "only an open review reloads"
+    );
+}
+
+#[tokio::test]
+async fn an_agent_mention_dispatches_a_task_with_the_thread_and_referenced_tasks() {
+    let work = FakeHub::new("Work", Vec::new());
+    {
+        let mut tasks = work.tasks.lock().expect("lock");
+        tasks.push(task(1, TaskStatus::Running, None));
+        let mut done = task(2, TaskStatus::Done, None);
+        done.task.title = "Fix login".to_owned();
+        done.task.goal = "Make login pass".to_owned();
+        tasks.push(done);
+    }
+    work.bindings.lock().expect("lock").extend([
+        binding("Lead", Mode::OnRequest),
+        binding("Engineer", Mode::Assisted),
+        binding("Reviewer", Mode::Assisted),
+        binding("Idle", Mode::Off),
+    ]);
+    let (dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.set_client_dir(dir.path().to_owned());
+    state.set_hold_messages(false).unwrap();
+    state.apply(refresh(&core).await);
+    state.apply_modes(load_modes(&core, vec![("work".into(), "api".into())]).await);
+    let to = Destination::Lead("work".into(), "api".into());
+
+    let agents = state.mention_agents(&to);
+    let named: Vec<(&str, bool)> = agents.iter().map(|a| (a.name.as_str(), a.busy)).collect();
+    assert_eq!(
+        named,
+        [("Engineer", true), ("Reviewer", false)],
+        "lead and Off left out"
+    );
+    let query = mention_at("@rev", 4).expect("mention");
+    assert!(matches!(
+        state.mention_items(&to, &query).first(),
+        Some(MentionItem::Agent(agent)) if agent.name == "Reviewer"
+    ));
+    let query = mention_at("#login", 6).expect("mention");
+    assert_eq!(
+        state.mention_items(&to, &query),
+        [MentionItem::Task(TaskId(2), "Fix login".to_owned())]
+    );
+
+    state.edit_draft(&to, "check it");
+    assert_eq!(state.mention_hint(&to), None);
+    state.edit_draft(&to, "@Reviewer check #T-0002 please");
+    assert_eq!(state.mention_hint(&to), None, "typed, not picked");
+    state.pick_agent(&to, "Reviewer", 0);
+    assert_eq!(
+        state.mention_hint(&to).as_deref(),
+        Some("Goes to @Reviewer as a new task, not the lead.")
+    );
+    let task_to = Destination::Task("work".into(), TaskId(1));
+    state.edit_draft(&task_to, "@Engineer @Reviewer look");
+    state.pick_agent(&task_to, "Engineer", 0);
+    state.pick_agent(&task_to, "Reviewer", 10);
+    assert_eq!(
+        state.task_hint("work", TaskId(1)),
+        "Goes to @Engineer and @Reviewer as new tasks, not T-0001."
+    );
+
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    assert_eq!(send.dispatch.len(), 1);
+    assert_eq!(
+        state.outgoing().count(),
+        0,
+        "a dispatch is not shown as a message"
+    );
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "");
+    assert!(state.picked_agents(&to).is_empty());
+    let tasks = work.tasks.lock().expect("lock");
+    let created = tasks.last().expect("created");
+    assert_eq!(created.agent, "Reviewer");
+    assert_eq!(created.task.title, "check #T-0002 please");
+    let goal = &created.task.goal;
+    assert!(goal.starts_with("@Reviewer check #T-0002 please"), "{goal}");
+    assert!(goal.contains("Asked from the api chat."), "{goal}");
+    assert!(goal.contains("Referenced T-0002 \"Fix login\""), "{goal}");
+    assert!(goal.contains("Make login pass"), "{goal}");
+}
+
+/// A space `work` with Engineer and Reviewer bound in `api`, its lead chat
+/// as the destination, and holds off.
+async fn mention_space() -> (Arc<FakeHub>, TempDir, ClientCore, AppState, Destination) {
+    let work = FakeHub::new("Work", Vec::new());
+    work.bindings.lock().expect("lock").extend([
+        binding("Lead", Mode::OnRequest),
+        binding("Engineer", Mode::Assisted),
+        binding("Reviewer", Mode::Assisted),
+    ]);
+    let (dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.set_client_dir(dir.path().to_owned());
+    state.set_hold_messages(false).unwrap();
+    state.apply(refresh(&core).await);
+    state.apply_modes(load_modes(&core, vec![("work".into(), "api".into())]).await);
+    (
+        work,
+        dir,
+        core,
+        state,
+        Destination::Lead("work".into(), "api".into()),
+    )
+}
+
+#[tokio::test]
+async fn only_a_picked_agent_chip_dispatches() {
+    let (_work, _dir, _core, mut state, to) = mention_space().await;
+    state.edit_draft(&to, "ask @Reviewer later");
+    assert_eq!(state.mention_hint(&to), None);
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    assert!(send.dispatch.is_empty(), "typed text goes to the lead");
+    assert_eq!(state.outgoing().count(), 1);
+
+    let task_to = to;
+    state.edit_draft(&task_to, "@Reviewer @Engineer look");
+    state.pick_agent(&task_to, "Reviewer", 0);
+    assert_eq!(
+        state.mentioned_agents(&task_to, "@Reviewer @Engineer look"),
+        ["Reviewer"]
+    );
+    state.edit_draft(&task_to, "@Reviewe @Engineer look");
+    assert!(state.picked_agents(&task_to).is_empty(), "editing un-picks");
+    state.edit_draft(&task_to, "@Reviewer @Engineer look");
+    assert!(
+        state.picked_agents(&task_to).is_empty(),
+        "retyping does not re-pick"
+    );
+}
+
+#[tokio::test]
+async fn a_dispatch_with_images_is_blocked_and_keeps_the_draft() {
+    let (work, _dir, _core, mut state, to) = mention_space().await;
+    let image = ImageAttachment::new("shot.png".into(), vec![1, 2, 3]);
+    state.edit_draft(&to, "@Reviewer look at this");
+    state.pick_agent(&to, "Reviewer", 0);
+    state.attach_images(&to, Ok(vec![image.clone()]));
+    let request = state.request_send(to.clone(), Timestamp::from_millis(5_000));
+    assert!(request.immediate.is_none() && request.held.is_none());
+    assert!(
+        state
+            .send_error(&to)
+            .is_some_and(|why| why.contains("can't take images")),
+        "{:?}",
+        state.send_error(&to)
+    );
+    assert_eq!(state.draft(&to), "@Reviewer look at this");
+    assert_eq!(state.draft_images(&to), &[image]);
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+    assert!(work.tasks.lock().expect("lock").is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_dispatch_retries_only_the_agents_that_did_not_start() {
+    let (work, _dir, core, mut state, to) = mention_space().await;
+    work.refused_agents
+        .lock()
+        .expect("lock")
+        .push("Reviewer".into());
+    state.edit_draft(&to, "@Engineer @Reviewer look");
+    state.pick_agent(&to, "Engineer", 0);
+    state.pick_agent(&to, "Reviewer", 10);
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    let (started, result) = send.dispatch(&core).await;
+    assert_eq!(started.len(), 1);
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "@Reviewer look");
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+    let why = state.send_error(&to).expect("error");
+    assert!(
+        why.starts_with("Started T-0001 for @Engineer. @Reviewer did not start"),
+        "{why}"
+    );
+
+    work.refused_agents.lock().expect("lock").clear();
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(6_000))
+        .immediate
+        .expect("sent again");
+    let agents: Vec<&str> = send
+        .dispatch
+        .iter()
+        .map(|spec| spec.agent.as_str())
+        .collect();
+    assert_eq!(agents, ["Reviewer"]);
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "");
+    let created: Vec<String> = work
+        .tasks
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|task| task.agent.clone())
+        .collect();
+    assert_eq!(created, ["Engineer", "Reviewer"]);
+}
+
+#[tokio::test]
+async fn a_retry_after_an_edit_in_flight_starts_the_rest_under_the_same_key() {
+    let (work, _dir, core, mut state, to) = mention_space().await;
+    work.refused_agents
+        .lock()
+        .expect("lock")
+        .push("Reviewer".into());
+    state.edit_draft(&to, "@Engineer @Reviewer look");
+    state.pick_agent(&to, "Engineer", 0);
+    state.pick_agent(&to, "Reviewer", 10);
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    let first_key = send.dispatch[1].request_id.clone();
+    assert!(first_key.is_some());
+    state.edit_draft(&to, "");
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "@Reviewer look");
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+
+    work.refused_agents.lock().expect("lock").clear();
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(6_000))
+        .immediate
+        .expect("sent again");
+    assert_eq!(send.dispatch.len(), 1);
+    assert_eq!(send.dispatch[0].agent, "Reviewer");
+    assert_eq!(
+        send.dispatch[0].request_id, first_key,
+        "a retry reuses the key"
+    );
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "");
+    let created: Vec<String> = work
+        .tasks
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|task| task.agent.clone())
+        .collect();
+    assert_eq!(created, ["Engineer", "Reviewer"]);
+}
+
+#[tokio::test]
+async fn only_the_picked_occurrence_of_an_agent_dispatches() {
+    let (_work, _dir, _core, mut state, to) = mention_space().await;
+    state.edit_draft(&to, "@Reviewer and @Reviewer");
+    state.pick_agent(&to, "Reviewer", 0);
+    state.edit_draft(&to, "@Reviewer, and @Reviewer");
+    assert_eq!(
+        state.picked_agents(&to),
+        ["Reviewer"],
+        "unrelated edit keeps it"
+    );
+    state.edit_draft(&to, "and @Reviewer");
+    assert!(state.picked_agents(&to).is_empty());
+    assert_eq!(
+        state.mention_hint(&to),
+        None,
+        "the typed one does not dispatch"
+    );
+}
+
+#[tokio::test]
+async fn a_finished_dispatch_keeps_a_later_pick_of_the_same_agent() {
+    let (_work, _dir, core, mut state, to) = mention_space().await;
+    state.edit_draft(&to, "@Reviewer look");
+    state.pick_agent(&to, "Reviewer", 0);
+    let send = state
+        .request_send(to.clone(), Timestamp::from_millis(5_000))
+        .immediate
+        .expect("sent now");
+    state.edit_draft(&to, "");
+    state.edit_draft(&to, "@Reviewer again");
+    state.pick_agent(&to, "Reviewer", 0);
+    let (started, result) = send.dispatch(&core).await;
+    state.finish_dispatch(send, &started, result);
+    assert_eq!(state.draft(&to), "@Reviewer again");
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+}
+
+#[tokio::test]
+async fn picking_an_agent_on_a_held_message_starts_a_new_send() {
+    let (_work, _dir, _core, mut state, to) = mention_space().await;
+    state.set_hold_messages(true).unwrap();
+    state.edit_draft(&to, "@Reviewer look");
+    let first = state.request_send(to.clone(), Timestamp::from_millis(5_000));
+    assert!(first.held.is_some());
+    state.pick_agent(&to, "Reviewer", 0);
+    let second = state.request_send(to.clone(), Timestamp::from_millis(5_500));
+    assert!(second.flushed.is_some_and(|send| send.dispatch.is_empty()));
+    assert!(
+        second.held.is_some(),
+        "the dispatch is not dropped as a repeat"
+    );
+    assert_eq!(state.picked_agents(&to), ["Reviewer"]);
+}
+
+#[tokio::test]
+async fn an_agent_name_with_spaces_dispatches_whole() {
+    let (work, _dir, core, mut state, to) = mention_space().await;
+    work.bindings
+        .lock()
+        .expect("lock")
+        .push(binding("Chief of Staff", Mode::Assisted));
+    state.apply_modes(load_modes(&core, vec![("work".into(), "api".into())]).await);
+    state.edit_draft(&to, "@Chief of Staff plan it");
+    state.pick_agent(&to, "Chief of Staff", 0);
+    let dispatch = state.dispatch_specs(
+        &to,
+        "@Chief of Staff plan it",
+        &When {
+            now: Timestamp::from_millis(5_000),
+            offset_minutes: 0,
+        },
+    );
+    assert_eq!(dispatch.len(), 1);
+    assert_eq!(dispatch[0].agent, "Chief of Staff");
+    assert_eq!(dispatch[0].title, "plan it");
+}
+
+#[tokio::test]
+async fn the_live_feed_keeps_files_commands_and_test_results_and_sums_them_up() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(1, TaskStatus::Running, None);
+    let at = |secs: i64| Timestamp::from_millis(secs * 1_000);
+    let step = |kind: &str, description: &str, secs| RunStep {
+        kind: kind.to_owned(),
+        description: description.to_owned(),
+        at: at(secs),
+    };
+    let steps = vec![
+        step("text", "Checking the build.", 1),
+        step("tool_use", "Called Read · src/lib.rs", 2),
+        step("tool_use", "Called Edit · src/lib.rs", 3),
+        step("tool_use", "Called Edit · src/lib.rs", 4),
+        step("tool_use", "Called Bash · cargo test -p app", 5),
+        step("tool_result", "Tool failed", 6),
+        step("tool_use", "Called file_change · src/main.rs", 7),
+        step(
+            "tool_use",
+            "Called command_execution · cargo test -p app",
+            8,
+        ),
+        step("tool_result", "Tool returned", 9),
+        step("tool_use", "Called Bash · git status", 10),
+        step("tool_result", "Tool returned", 11),
+    ];
+    running.latest_step = steps.last().cloned();
+    *work.tasks.lock().unwrap() = vec![running.clone()];
+    *work.task_runs.lock().unwrap() = vec![RunSummary {
+        steps,
+        usage: None,
+        machine: "macbook".to_owned(),
+        run: Run {
+            trace_id: String::new(),
+            id: RunId(1),
+            lane_id: running.task.lane_id,
+            session_id: SessionId(1),
+            machine_id: MachineId(1),
+            lease_epoch: 1,
+            agent_id: Some(running.task.agent_id),
+            backend: Some(BackendKind::Claude),
+            model: None,
+            status: RunStatus::Active,
+            outcome: None,
+            rationale: None,
+            error: None,
+            started_at: at(0),
+            ended_at: None,
+        },
+    }];
+    let (_dir, core) = core(&[("dev", &work)]);
+    let mut state = AppState::default();
+    state.apply_task(load_task(&core, "dev", TaskId(1)).await);
+    let detail = state.task("dev", TaskId(1)).unwrap();
+    let rows = milestones(detail.runs.iter().flat_map(|run| &run.steps));
+    let shown: Vec<_> = rows
+        .iter()
+        .map(|row| (row.kind, row.text.as_str()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (MilestoneKind::File, "src/lib.rs"),
+            (MilestoneKind::File, "src/lib.rs"),
+            (MilestoneKind::Command, "cargo test -p app"),
+            (MilestoneKind::TestsFailed, "cargo test -p app"),
+            (MilestoneKind::File, "src/main.rs"),
+            (MilestoneKind::Command, "cargo test -p app"),
+            (MilestoneKind::TestsPassed, "cargo test -p app"),
+            (MilestoneKind::Command, "git status"),
+        ]
+    );
+    assert_eq!(
+        milestone_summary(&rows),
+        "2 files touched · 3 commands run · tests passing"
+    );
+    assert_eq!(milestone_summary(&[]), "0 files touched · 0 commands run");
+
+    // The pulse line goes amber once the run is quiet for ten minutes.
+    work.now.store(11_000 + 60_000, Ordering::SeqCst);
+    let live = task_header(detail, &work.when()).latest.unwrap();
+    assert_eq!(live.text, "Tool returned · 1 min ago");
+    assert!(!live.quiet);
+    work.now.store(11_000 + 600_000, Ordering::SeqCst);
+    assert!(task_header(detail, &work.when()).latest.unwrap().quiet);
+}
+
+#[tokio::test]
+async fn board_cards_show_the_live_step_and_offer_only_changes_the_hub_makes() {
+    let work = FakeHub::new("Work", Vec::new());
+    let mut running = task(2, TaskStatus::Running, None);
+    running.latest_step = Some(RunStep {
+        kind: "tool_use".to_owned(),
+        description: "Called Bash · cargo test".to_owned(),
+        at: Timestamp::from_millis(0),
+    });
+    let mut reviewed = task(3, TaskStatus::Done, None);
+    reviewed.task.result = Some(json!({"pull_request": "https://github.com/o/r/pull/7"}));
+    *work.tasks.lock().expect("lock") = vec![
+        task(1, TaskStatus::Queued, None),
+        running,
+        reviewed,
+        task(4, TaskStatus::Failed, None),
+    ];
+    work.bindings.lock().expect("lock").extend([
+        binding("Lead", Mode::OnRequest),
+        binding("Engineer", Mode::Assisted),
+        binding("Idle", Mode::Off),
+    ]);
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    state.apply_project(load_project(&core, "work", "api").await);
+    let cards: BTreeMap<_, _> = state
+        .board("work", "api", &when())
+        .into_iter()
+        .flat_map(|column| {
+            column
+                .cards
+                .into_iter()
+                .map(move |card| (card.id, (column.title, card)))
+        })
+        .collect();
+    let (_, queued) = &cards[&TaskId(1)];
+    assert_eq!(queued.agent, "Engineer");
+    assert_eq!(queued.reassign, ["Lead"]);
+    assert_eq!(queued.step, None);
+    let (_, running) = &cards[&TaskId(2)];
+    assert_eq!(running.step.as_deref(), Some("Called Bash · cargo test"));
+    assert!(
+        running.reassign.is_empty(),
+        "a started task keeps its agent"
+    );
+    assert_eq!(running.elapsed.as_deref(), Some("12 min"));
+    let (_, done) = &cards[&TaskId(3)];
+    assert_eq!(
+        done.review.as_deref(),
+        Some("https://github.com/o/r/pull/7")
+    );
+    assert!(!done.can_cancel && !done.can_retry);
+
+    assert_eq!(board_move("Failed", "Queued"), Ok(BoardMove::Retry));
+    assert_eq!(board_move("Running", "Cancelled"), Ok(BoardMove::Cancel));
+    assert_eq!(board_move("Queued", "Queued"), Ok(BoardMove::Stay));
+    for (from, to) in [
+        ("Queued", "Running"),
+        ("Running", "Done"),
+        ("Done", "Queued"),
+        ("Failed", "Cancelled"),
+    ] {
+        assert!(board_move(from, to).is_err(), "{from} → {to}");
+    }
+
+    core.reassign_task(Some("work"), "T-0001", "Lead")
+        .await
+        .expect("reassigned");
+    state.apply_project(load_project(&core, "work", "api").await);
+    let queued = state
+        .board("work", "api", &when())
+        .into_iter()
+        .find(|column| column.title == "Queued")
+        .unwrap();
+    assert_eq!(queued.cards[0].agent, "Lead");
+    assert_eq!(queued.cards[0].reassign, ["Engineer"]);
+    assert!(
+        core.reassign_task(Some("work"), "T-0002", "Lead")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn quick_create_opens_where_you_are_or_in_the_space_chat_project() {
+    let work = FakeHub::new("Work", Vec::new());
+    let (_dir, core) = core(&[("work", &work)]);
+    let mut state = AppState::paired(["work"]);
+    state.apply(refresh(&core).await);
+    assert_eq!(
+        state.quick_create_target(Some(("work", "api"))),
+        Some(("work".to_owned(), "api".to_owned()))
+    );
+    let fallback = state.quick_create_target(None).expect("a project");
+    assert_eq!(fallback.0, "work");
+    assert_eq!(
+        Some(fallback.1.as_str()),
+        state
+            .space("work")
+            .and_then(|space| space.main_chat_project())
+    );
+    assert_eq!(AppState::default().quick_create_target(None), None);
 }

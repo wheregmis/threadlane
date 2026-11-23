@@ -28,6 +28,9 @@ pub struct NewTaskSpec {
     pub playbooks: Vec<String>,
     /// Whether the task's work is kept in a draft pull request.
     pub draft_pr: bool,
+    /// The request key to send; `None` mints a fresh one. A retry that
+    /// reuses it gets the task an earlier attempt created, not a second one.
+    pub request_id: Option<String>,
 }
 
 /// Added to the goal of a task whose work is kept in a draft pull request,
@@ -38,8 +41,8 @@ pull request for it with open_pull_request. Push later changes to it with publis
 leave it a draft. It must be open before you call finish_task.";
 
 impl ClientCore {
-    /// Creates a task of yours in one space, skipping the lead, with a
-    /// fresh request id. `space: None` means the only paired hub.
+    /// Creates a task of yours in one space, skipping the lead, under the
+    /// spec's request id or a fresh one. `space: None` means the only paired hub.
     ///
     /// # Errors
     ///
@@ -72,7 +75,7 @@ impl ClientCore {
             repositories: spec.repositories,
             depends_on: spec.depends_on,
             playbooks: spec.playbooks,
-            client_request_id: uuid::Uuid::new_v4().to_string(),
+            client_request_id: spec.request_id.unwrap_or_else(Self::request_id),
         };
         self.one_task(space, request).await
     }
@@ -104,6 +107,25 @@ impl ClientCore {
     pub async fn retry_task(&self, space: Option<&str>, task: &str) -> Result<Task, ClientError> {
         let id = self.task_id(space, task)?;
         self.one_task(space, TaskRequest::Retry { task: id }).await
+    }
+
+    /// Gives queued task `task` (`T-0142`) of one space, which has never
+    /// run, to `agent`. `None` means the only paired hub.
+    ///
+    /// # Errors
+    ///
+    /// No such hub, several hubs and none named, an id that is not a
+    /// task's, or the hub's error, for example a task that has started.
+    pub async fn reassign_task(
+        &self,
+        space: Option<&str>,
+        task: &str,
+        agent: &str,
+    ) -> Result<Task, ClientError> {
+        let id = self.task_id(space, task)?;
+        let agent = agent.to_owned();
+        self.one_task(space, TaskRequest::Reassign { task: id, agent })
+            .await
     }
 
     /// Attaches registered `repositories` of its project to task `task`

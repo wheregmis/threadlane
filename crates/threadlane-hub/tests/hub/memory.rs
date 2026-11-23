@@ -347,7 +347,7 @@ async fn a_task_run_has_the_memory_tools_too() {
         run.call("v1", MEMORY_VIEW, json!({ "path": "project/tasks" }))
             .await
             .unwrap(),
-        json!({ "files": ["project/tasks/INDEX.md", "project/tasks/T-0001.md"] })
+        json!({ "files": ["project/tasks/T-0001.md"] })
     );
     run.call(
         "c2",

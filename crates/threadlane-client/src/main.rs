@@ -136,7 +136,7 @@ enum Command {
         #[arg(long)]
         note: Option<String>,
         /// Also allow calls like this one from now on: a standing rule for
-        /// this agent, project, tool, and target.
+        /// this tool and target that covers every agent in the project.
         #[arg(long)]
         always: bool,
         /// The decision, for example D-0012.

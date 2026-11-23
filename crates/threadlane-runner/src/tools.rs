@@ -130,7 +130,13 @@ impl LaneTools {
             .map_err(|error| ToolError::Failed(error.to_string()))?;
         let preview = self
             .workspaces
-            .preview_publish(*task, repository, expected_head)
+            .preview_publish(
+                *task,
+                repository,
+                expected_head,
+                &crate::runner::publish_target(*task, name, &arguments)
+                    .map_err(ToolError::InvalidArguments)?,
+            )
             .await
             .map_err(|error| ToolError::Failed(error.to_string()))?;
         arguments[PUBLISH_REVISION] = serde_json::json!(preview.revision);
@@ -160,8 +166,8 @@ impl ToolEndpoint for LaneTools {
             Some(Stop::User) => return Err(ToolError::Blocked("stopped by the user".to_owned())),
             Some(Stop::Shutdown) | None => {}
         }
-        // A run that waits on you does nothing more (Plan.md §9.4); the hub
-        // refuses its ungated calls and gives each gated one its own card.
+        // A run that waits on you can't finish (Plan.md §9.4); the hub still
+        // runs its ungated calls and gives each gated one its own card.
         let arguments = if name == FINISH_TASK {
             self.with_merge_checks(arguments).await
         } else if matches!(

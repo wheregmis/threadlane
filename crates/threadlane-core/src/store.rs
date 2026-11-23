@@ -421,6 +421,10 @@ pub trait TaskStore: Send + Sync {
     /// asking for the retry, with the last error. Refused with
     /// [`StoreError::Conflict`] unless the task has failed.
     async fn retry_task(&self, id: TaskId, now: Timestamp) -> StoreResult<Task>;
+    /// Gives a queued task that has never run to `agent`. Refused with
+    /// [`StoreError::Conflict`] once it has a session, which belongs to the
+    /// agent that started it.
+    async fn reassign_task(&self, id: TaskId, agent: AgentId) -> StoreResult<Task>;
     /// Records the result of the running task whose lane `lease` holds. The
     /// task becomes `done`, and its result is reported, when the run commits.
     /// Recording again replaces the result. Refused with

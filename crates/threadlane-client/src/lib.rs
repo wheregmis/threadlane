@@ -1396,6 +1396,42 @@ impl ClientCore {
         }
     }
 
+    /// The task's pull requests with their checks; none from a hub that
+    /// cannot tell.
+    pub async fn task_pull_requests(
+        &self,
+        space: &str,
+        task: TaskId,
+    ) -> Result<Vec<threadlane_core::client::TaskPullRequest>, ClientError> {
+        match self
+            .overview(Some(space), OverviewRequest::TaskPullRequests { task })
+            .await
+        {
+            Ok((_, OverviewReply::TaskPullRequests { pulls })) => Ok(pulls),
+            Ok((space, _)) => Err(wrong_reply(&space, "task pull requests")),
+            Err(error) if unknown_overview(&error, "task_pull_requests") => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Every file the task's pull requests change, with patches; none from
+    /// a hub that cannot tell.
+    pub async fn task_pull_files(
+        &self,
+        space: &str,
+        task: TaskId,
+    ) -> Result<Vec<threadlane_core::client::PullRequestFiles>, ClientError> {
+        match self
+            .overview(Some(space), OverviewRequest::TaskPullFiles { task })
+            .await
+        {
+            Ok((_, OverviewReply::TaskPullFiles { pulls })) => Ok(pulls),
+            Ok((space, _)) => Err(wrong_reply(&space, "task pull files")),
+            Err(error) if unknown_overview(&error, "task_pull_files") => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// A newest-first page of activity, or fabricated pages from older hubs' full detail.
     pub async fn task_activity(
         &self,

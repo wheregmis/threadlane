@@ -414,12 +414,12 @@ impl Inner {
         let mut performed = self.perform(lane, assignment).await?;
         performed.push_str(&self.bring_in_base(assignment).await);
         performed.push_str(&self.earlier_work(lane, assignment, &working_dir).await);
-        if assignment.review.is_none()
-            && let Some(task) = assignment.task_id
-        {
+        performed.push_str(&self.review_base(assignment, &working_dir).await);
+        let noted = assignment.task_id.filter(|_| assignment.review.is_none());
+        if let Some(task) = noted {
             let notes = self
                 .workspaces
-                .take_checkpoint_notes(task, &assignment.repositories);
+                .checkpoint_notes(task, &assignment.repositories);
             performed.push_str(&notes.await);
         }
         lane.check()?;
@@ -439,6 +439,12 @@ impl Inner {
                 return self.fail(lane, run_id, RunFailure::Error { message }).await;
             }
         };
+        // Told once, and only to a run that started: a failed start keeps them.
+        if let Some(task) = noted {
+            self.workspaces
+                .clear_checkpoint_notes(task, &assignment.repositories)
+                .await;
+        }
         self.reach(AFTER_BACKEND_START)?;
 
         let result = self
@@ -1168,10 +1174,10 @@ impl Inner {
         saved.map_err(|error| error.to_string())
     }
 
-    /// Rebases a task's branches onto their default branches where that
-    /// rebases cleanly (docs/merge-help.md decision 3), and returns what to
+    /// Brings the default branches into a task's branches where that is
+    /// clean (a merge once a branch is shared, #730), and returns what to
     /// tell the session about those it left as they were. A failure costs
-    /// only the rebase: the run starts anyway.
+    /// only that: the run starts anyway.
     async fn bring_in_base(&self, assignment: &RunAssignment) -> String {
         if assignment.review.is_some() {
             return String::new();
@@ -1193,6 +1199,72 @@ impl Inner {
                 String::new()
             }
         }
+    }
+
+    /// For a PR review, the branch the PR merges into as the forge reports it,
+    /// fetched into the checkout, so the reviewer diffs against the real base
+    /// rather than the registration's tracked branch (#715).
+    async fn review_base(&self, assignment: &RunAssignment, checkout: &Path) -> String {
+        let Some(review) = &assignment.pr_review else {
+            return String::new();
+        };
+        let Some(repository) = assignment
+            .repositories
+            .iter()
+            .find(|repo| repo.id == review.revision.repository)
+        else {
+            return String::new();
+        };
+        let number = review.number;
+        let base = match std::num::NonZeroU64::new(number) {
+            Some(n) => {
+                self.forge
+                    .pull_request_base(&repository.remote_url, n)
+                    .await
+            }
+            None => return String::new(),
+        };
+        let base = match base {
+            Ok(base) => base,
+            Err(error) => {
+                return format!(
+                    "\n\nCould not read PR #{number}'s base branch ({error}). Find it with \
+                     `gh pr view {number} --json baseRefName` and diff against it, not against \
+                     {}'s tracked branch {}. Name the base you compared against in your result.\n",
+                    repository.name, repository.default_branch
+                );
+            }
+        };
+        let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
+        let mut note = match crate::workspace::git(
+            Some(checkout),
+            ["fetch", "--quiet", "origin", &refspec],
+        )
+        .await
+        {
+            Ok(_) => format!(
+                "\n\nPR #{number} merges into `{base}`. Review its diff against that base: \
+                 `git diff origin/{base}...HEAD`. Name `{base}` as the base you compared against in your result."
+            ),
+            Err(error) => {
+                warn!(%error, %base, "could not fetch the PR's base branch");
+                // origin/<base> may be missing or stale, so don't point the reviewer at it.
+                format!(
+                    "\n\nPR #{number} merges into `{base}`, but fetching that branch failed ({error}), \
+                     so `origin/{base}` may be missing or stale. Fetch the base yourself \
+                     (`git fetch origin {base}`, or find it with `gh pr view {number} --json baseRefName`) \
+                     before diffing against it. Name the base you compared against in your result."
+                )
+            }
+        };
+        if base != repository.default_branch {
+            note.push_str(&format!(
+                " The registration {} tracks `{}`, not this PR's base: do not diff against it.",
+                repository.name, repository.default_branch
+            ));
+        }
+        note.push('\n');
+        note
     }
 
     /// Reports the usage limit to the hub, which cools the account down.
@@ -1562,8 +1634,8 @@ fn conflict_note(check: &MergeCheck) -> String {
     }
     format!(
         "\n\nThe task branch in {repository} conflicts with {branch} at {base}, in: {files}. \
-         It was not rebased. Rebase it onto {base} (already fetched as origin/{branch}) and \
-         resolve the conflicts during this run.",
+         It was left as it was. Merge {base} into it (git merge origin/{branch}, already \
+         fetched; do not rebase) and resolve the conflicts during this run.",
         repository = check.repository,
         branch = check.branch,
         base = check.base,
@@ -1573,7 +1645,7 @@ fn conflict_note(check: &MergeCheck) -> String {
 
 /// The branch a stored publish call pushes to: the task's own, or for
 /// `publish_branch` with `onto_task` that earlier task's.
-fn publish_target(
+pub(crate) fn publish_target(
     task: threadlane_core::ids::TaskId,
     tool: &str,
     arguments: &Json,

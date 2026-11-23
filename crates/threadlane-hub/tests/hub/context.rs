@@ -383,13 +383,17 @@ async fn a_task_is_given_its_memory_and_its_progress_file_in_a_fresh_session_onl
     assert!(prompt.contains("Next: the footer."));
     assert!(shown < prompt.find("New events").unwrap());
 
-    // The lead is given the task index.
+    // The lead does not preload tasks/INDEX.md, keeping its appended
+    // instructions cache-stable across task progress writes.
     hub.send("m-2", "How is the page?").await;
     let lead = run_with(&*hub.link, &[]).await;
-    assert!(without_space(&lead).ends_with(
-        "Task progress files, listed in project/tasks/INDEX.md:\n\
-         - [Page](T-0001.md): Half done: the layout is in.\n"
-    ));
+    let lead_appended = without_space(&lead);
+    assert!(!lead_appended.contains("tasks/INDEX.md"), "{lead_appended}");
+    assert!(!lead_appended.contains("T-0001.md"), "{lead_appended}");
+    assert!(
+        lead_appended.contains("project/tasks/<task id>.md"),
+        "{lead_appended}"
+    );
 }
 
 #[tokio::test]

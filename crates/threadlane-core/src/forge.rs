@@ -26,6 +26,8 @@ pub const CREATE_ISSUE: &str = "create_issue";
 pub const REPORT_LIMITATION: &str = "report_threadlane_limitation";
 /// Merge a registered repository's pull request.
 pub const MERGE: &str = "merge";
+/// The most pull requests one `merge` call may name in `pulls`.
+pub const MAX_MERGE_BATCH: usize = 20;
 /// Mark a registered repository's draft pull request ready for review.
 pub const MARK_READY: &str = "mark_ready";
 /// Add or remove labels on a registered repository's issue (not a pull request).
@@ -52,7 +54,8 @@ pub const GITHUB_CLI: &str = "github_cli";
 pub const ASSIGN_ISSUE: &str = "assign_issue";
 /// Replace the title and/or body of a registered repository's pull request.
 pub const EDIT_PULL_REQUEST: &str = "edit_pull_request";
-/// Reply to and resolve one review thread of a pull request, naming the fixing commit.
+/// Reply to and resolve one review thread of a pull request, naming the fixing commit
+/// or why its finding was declined.
 pub const RESOLVE_REVIEW_THREAD: &str = "resolve_review_thread";
 /// Ask reviewers, or a review bot by its trigger comment, to review a pull request again.
 pub const REQUEST_REVIEW: &str = "request_review";
@@ -72,6 +75,11 @@ pub enum RepositoryAction {
     Merge {
         number: std::num::NonZeroU64,
         expected_head: String,
+    },
+    /// Merge these pull requests in this order, each only if its head is
+    /// still the paired commit; stop at the first that fails (#692).
+    MergeBatch {
+        pulls: Vec<(std::num::NonZeroU64, String)>,
     },
     /// Mark the numbered draft pull request ready for review.
     MarkReady { number: std::num::NonZeroU64 },
@@ -101,11 +109,13 @@ pub enum RepositoryAction {
     AssignIssue { number: std::num::NonZeroU64 },
     /// If the numbered pull request's head is still `expected_head` and contains
     /// `fixed_by`, reply `body` on its review thread `thread_id` and resolve it.
+    /// With no `fixed_by`, the finding was declined and `body` says why (#713).
     ResolveReviewThread {
         number: std::num::NonZeroU64,
         expected_head: String,
         thread_id: String,
-        fixed_by: String,
+        #[serde(default)]
+        fixed_by: Option<String>,
         body: String,
     },
     /// If the numbered pull request's head is still `expected_head`, re-request
@@ -193,6 +203,13 @@ pub trait Forge: Send + Sync + fmt::Debug {
         worktree: &Path,
         branch: &str,
     ) -> Result<Option<String>, ForgeError>;
+
+    /// The branch pull request `number` of the registered `remote` merges into.
+    async fn pull_request_base(
+        &self,
+        remote: &str,
+        number: std::num::NonZeroU64,
+    ) -> Result<String, ForgeError>;
 }
 
 #[cfg(test)]

@@ -46,9 +46,23 @@ pub struct HubSettings {
     /// How long a decision waits on you before it expires as declined with
     /// "no response" (docs/milestone-9.md decision 8).
     pub decision_expiry: Duration,
-    /// An ended task's worktrees are removed once it has had no run for
-    /// this long; `None` keeps them.
+    /// An ended task's worktrees are removed once nothing in them would be
+    /// lost; worktrees kept for uncommitted or unpushed work are checked
+    /// again after this long. `None` keeps them all.
     pub worktree_cleanup: Option<Duration>,
+    /// Terminal tasks older than this have heavy artifacts (journal, tool calls,
+    /// checkpoints, progress file) compacted; `None` disables compaction.
+    pub task_compaction: Option<Duration>,
+    /// Terminal tasks older than this are pruned from the database; `None`
+    /// disables age-based pruning.
+    pub task_pruning: Option<Duration>,
+    /// Maximum number of terminal tasks kept per project (oldest pruned first);
+    /// `None` disables count-based pruning.
+    pub max_terminal_tasks_per_project: Option<usize>,
+    /// Minimum interval between automatic pruning passes in `sweep_once`.
+    pub pruning_interval: Duration,
+    /// Maximum number of tasks compacted or pruned per pass.
+    pub pruning_batch_size: usize,
 }
 
 impl Default for HubSettings {
@@ -71,6 +85,11 @@ impl Default for HubSettings {
             default_models: HashMap::new(),
             decision_expiry: Duration::from_secs(24 * 60 * 60),
             worktree_cleanup: Some(Duration::from_secs(3 * 24 * 60 * 60)),
+            task_compaction: Some(Duration::from_secs(14 * 24 * 60 * 60)),
+            task_pruning: Some(Duration::from_secs(90 * 24 * 60 * 60)),
+            max_terminal_tasks_per_project: Some(500),
+            pruning_interval: Duration::from_secs(60 * 60),
+            pruning_batch_size: 50,
         }
     }
 }

@@ -268,6 +268,14 @@ impl SessionStore for HubDb {
         {
             return Err(StoreError::Stopped);
         }
+        // An ended task's worktrees may be under cleanup, which checks for
+        // active runs only once; a run must not open after that check.
+        if task::task_of_lane(conn, lease.lane_id)
+            .await?
+            .is_some_and(|task| task.status.is_terminal())
+        {
+            return Err(StoreError::Stopped);
+        }
 
         let session_id: SessionId = match start.session {
             SessionChoice::New => query_one(

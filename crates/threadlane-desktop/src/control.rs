@@ -131,6 +131,19 @@ impl TaskForm {
     }
 }
 
+/// A task title from the first line of its prompt, cut to a board card's
+/// width.
+fn prompt_title(goal: &str) -> String {
+    const LIMIT: usize = 72;
+    let line = goal.lines().next().unwrap_or_default().trim();
+    let mut chars = line.chars();
+    let mut title: String = chars.by_ref().take(LIMIT).collect();
+    if chars.next().is_some() {
+        title.push('…');
+    }
+    title
+}
+
 fn toggle<T: PartialEq>(picked: &mut Vec<T>, value: T) {
     if let Some(at) = picked.iter().position(|known| *known == value) {
         picked.remove(at);
@@ -409,6 +422,23 @@ impl AppState {
         }
     }
 
+    /// Where quick create (`C`) opens the new task form: the project you
+    /// are in, `here`, unless it is archived; otherwise the selected space's
+    /// chat project, or its first project.
+    #[must_use]
+    pub fn quick_create_target(&self, here: Option<(&str, &str)>) -> Option<InSpace<String>> {
+        if let Some((space, project)) = here
+            && !self.is_archived(space, project)
+        {
+            return Some((space.to_owned(), project.to_owned()));
+        }
+        let space = self.selected_space()?;
+        let project = space
+            .main_chat_project()
+            .or_else(|| space.active_projects().next().map(|p| p.name.as_str()))?;
+        Some((space.name.clone(), project.to_owned()))
+    }
+
     /// The "+ New task" form of `project` in `space`, while it is open.
     #[must_use]
     pub fn task_form(&self, space: &str, project: &str) -> Option<&TaskForm> {
@@ -487,10 +517,15 @@ impl AppState {
         let form = self
             .task_form(space, project)
             .ok_or_else(|| "Open the new task form first.".to_owned())?;
-        let (title, goal) = (title.trim(), goal.trim());
-        if title.is_empty() || goal.is_empty() {
-            return Err("Give the task a title and a goal.".to_owned());
+        let goal = goal.trim();
+        if goal.is_empty() {
+            return Err("Say what the task should do.".to_owned());
         }
+        // Quick create asks only for the prompt; its first line names the task.
+        let title = match title.trim() {
+            "" => prompt_title(goal),
+            title => title.to_owned(),
+        };
         let agent = form
             .agent
             .clone()
@@ -498,13 +533,14 @@ impl AppState {
             .ok_or_else(|| "Choose the agent that does it.".to_owned())?;
         Ok(NewTaskSpec {
             project: Some(project.to_owned()),
-            title: title.to_owned(),
+            title,
             goal: goal.to_owned(),
             agent,
             repositories: form.repositories.clone(),
             depends_on: form.depends_on.clone(),
             playbooks: form.playbooks.clone(),
             draft_pr: form.draft_pr,
+            request_id: None,
         })
     }
 

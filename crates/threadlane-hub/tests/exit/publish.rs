@@ -21,12 +21,12 @@ use threadlane_core::model::{
     TaskStatus,
 };
 use threadlane_core::runtime::Step;
-use threadlane_core::store::{DecisionStore, OrgStore, SessionStore};
+use threadlane_core::store::{DecisionStore, OrgStore, SessionStore, TimerStore};
 use threadlane_core::time::Clock;
 use threadlane_core::workspace::Workspaces;
 use threadlane_hub::{
     ASK_USER, FAST_FORWARD_PULL_REQUEST, FINISH_TASK, HubError, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
-    derived_call_key,
+    SET_FOLLOW_UP, derived_call_key,
 };
 use threadlane_runner::{GitWorkspaces, RunnerError};
 use threadlane_testkit::fakes::ForgeCall;
@@ -668,6 +668,43 @@ async fn parallel_gated_calls_each_wait_on_their_own_card() {
     assert_eq!(run.outcome, Some(RunOutcome::Deferred));
     assert_eq!(run.rationale.as_deref(), Some("Waiting on both answers."));
     assert_invariants(&sim, "parallel gated").await;
+}
+
+/// An ungated call after a gated one in the same turn still runs: the
+/// follow-up timer is set while the pull request waits on you (#718).
+#[tokio::test]
+async fn an_ungated_call_after_a_gated_one_still_runs() {
+    let batch = Script::new()
+        .call("toolu_pr", OPEN_PULL_REQUEST, pull_request())
+        .call(
+            "toolu_t",
+            SET_FOLLOW_UP,
+            json!({ "instruction": "Check the pull request.", "in_minutes": 30 }),
+        )
+        .call("toolu_f", FINISH_TASK, json!({ "summary": "Too soon." }))
+        .finish("Waiting on the pull request.");
+    let world = publish_world(World::new().await, batch).await;
+    asks_before_sharing(&world).await;
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Put the page up").await;
+    live(&sim).await.unwrap();
+
+    let task = sim.task("T-0001").await;
+    assert_eq!(task.status, TaskStatus::WaitingOnYou);
+    assert_eq!(task.result, None, "finishing still waits on you");
+    let decisions = sim.decisions().await;
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].tool, OPEN_PULL_REQUEST);
+    assert_eq!(decisions[0].status, DecisionStatus::Pending);
+    let later = sim.clock().now() + Duration::from_secs(31 * 60);
+    let timers = sim.db().due_timers(later).await.unwrap();
+    assert!(
+        timers
+            .iter()
+            .any(|timer| timer.instruction == "Check the pull request."),
+        "the follow-up was set: {timers:?}"
+    );
+    assert_invariants(&sim, "ungated after gated").await;
 }
 
 /// Captured log output.

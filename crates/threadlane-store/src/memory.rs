@@ -3,8 +3,10 @@
 //! and the indexes it changes are rewritten in the same transaction.
 
 use async_trait::async_trait;
-use threadlane_core::ids::RunId;
-use threadlane_core::memory::{INDEX_FILE, check, index_for, not_an_index, render_index};
+use threadlane_core::ids::{ProjectId, RunId, TaskId};
+use threadlane_core::memory::{
+    INDEX_FILE, check, index_for, not_an_index, progress_path, render_index,
+};
 use threadlane_core::model::{MemoryAuthor, MemoryFile};
 use threadlane_core::store::{MemoryStore, StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
@@ -283,6 +285,49 @@ impl HubDb {
         let file = write_owner_in(conn, path, &previous.content, at).await?;
         tx.commit().await?;
         Ok(file)
+    }
+
+    /// Lists live memory files for `project`, excluding progress files of
+    /// terminal (`done`, `failed`, `cancelled`) tasks so finished task notes
+    /// do not bloat UI listings or wire payloads.
+    pub async fn list_active_project_memory(
+        &self,
+        project: ProjectId,
+    ) -> StoreResult<Vec<MemoryFile>> {
+        let conn = self.db.reader()?;
+        let root = format!("projects/{}/", project.get());
+        let tasks_prefix = format!("{root}tasks/");
+        let mut files = query_all(
+            &conn,
+            &format!(
+                "SELECT {VERSION_FIELDS} FROM memory_files f
+                 JOIN memory_versions v ON v.path = f.path AND v.version = f.version
+                 WHERE f.deleted = 0
+                   AND substr(f.path, 1, length(?1)) = ?1
+                   AND substr(f.path, 1, length(?2)) != ?2
+                 ORDER BY f.path"
+            ),
+            params![root.as_str(), tasks_prefix.as_str()],
+            decode_file,
+        )
+        .await?;
+        let active_tasks: Vec<TaskId> = query_all(
+            &conn,
+            "SELECT id FROM tasks
+             WHERE project_id = ?1 AND status NOT IN ('done', 'failed', 'cancelled')
+             ORDER BY id",
+            params![project.get()],
+            |row| Cols(row).id(0),
+        )
+        .await?;
+        for task_id in active_tasks {
+            let path = progress_path(project, task_id);
+            if let Some(file) = live_in(&conn, &path).await? {
+                files.push(file);
+            }
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(files)
     }
 }
 

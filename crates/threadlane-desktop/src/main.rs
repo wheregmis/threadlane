@@ -465,6 +465,7 @@ struct Desktop {
     decision_inputs: HashMap<DecisionKey, (Entity<InputState>, Subscription)>,
     composer: Entity<TextareaState>,
     composer_shown: Option<threadlane_desktop::Destination>,
+    mention: components::composer::MentionPopover,
     machine_limit_saving: bool,
     machine_limit_error: Option<(String, MachineId, String)>,
     pacing_inputs: [Entity<InputState>; 4],
@@ -616,7 +617,7 @@ impl Desktop {
         let repository_remote = field("Clone URL or path on the hub", cx);
         let repository_branch = field("Default branch (main)", cx);
         let task_title = field("Title", cx);
-        let task_goal = field("Goal: what done looks like", cx);
+        let task_goal = field("What should the agent do?", cx);
         let subscriptions = vec![
             cx.subscribe_in(&space_name, window, |this, input, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -794,6 +795,7 @@ impl Desktop {
             decision_inputs: HashMap::new(),
             composer,
             composer_shown: None,
+            mention: Default::default(),
             machine_limit_saving: false,
             machine_limit_error: None,
             pacing_inputs,
@@ -1039,6 +1041,7 @@ impl Desktop {
                         cx,
                     );
                 }
+                let pulls_for = (tab == Tab::Tasks).then(|| (space.clone(), project.clone()));
                 let job = self.tokio.spawn(async move {
                     load_project_tab(
                         &*core.read().await,
@@ -1060,6 +1063,9 @@ impl Desktop {
                                 loaded.keep_refreshed_parts(pending.refreshed);
                             }
                             this.state.apply_project(loaded);
+                            if let Some((space, project)) = pulls_for {
+                                this.load_task_pulls(space, &project, cx);
+                            }
                             cx.notify();
                         }
                         if let Some(pending) = pending {
@@ -1070,14 +1076,18 @@ impl Desktop {
             }
             Screen::Task { space, task } => {
                 self.load_space_skills(space.clone(), cx);
-                if self.state.activity_open(&space, task) {
-                    self.load_task_activity(space.clone(), task, None, cx);
-                }
+                // The feed runs live and summarizes a finished task, so its newest page always loads.
+                self.load_task_activity(space.clone(), task, None, cx);
                 let for_repos = Arc::clone(&core);
                 self.run(
                     async move { load_task_overview(&*core.read().await, &space, task).await },
                     move |this, loaded, cx| {
                         this.state.apply_task(loaded);
+                        if let Screen::Task { space, task } = &this.screen
+                            && this.state.review_files_stale(space, *task)
+                        {
+                            this.load_review_files(space.clone(), *task, cx);
+                        }
                         if let Screen::Task { space, task } = &this.screen
                             && let Some(project) = this
                                 .state
@@ -1209,6 +1219,20 @@ impl Desktop {
         );
     }
 
+    /// Reads the pull request strip of a project's board and list cards.
+    fn load_task_pulls(&mut self, space: String, project: &str, cx: &mut Context<Self>) {
+        let tasks = self.state.pull_candidates(&space, project);
+        if tasks.is_empty() {
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move { threadlane_desktop::load_pulls(&*core.read().await, &space, tasks).await },
+            |this, loaded, _| this.state.apply_pulls(loaded),
+            cx,
+        );
+    }
+
     fn load_task_activity(
         &mut self,
         space: String,
@@ -1262,15 +1286,16 @@ impl Desktop {
             )),
             _ => None,
         };
-        if let Some(alert) = self.state.receive(item) {
-            let decision = matches!(alert, threadlane_desktop::Alert::Decision { .. });
-            if self.state.notifies(&alert) {
-                self.notify(&alert, cx);
-            }
-            // The card carries no creation time or context: ask its hub.
-            if decision && !back {
-                self.refresh(cx);
-            }
+        // The card carries no creation time or context: ask its hub, also
+        // for a decision that waits under Later without an alert.
+        let decision = self.state.is_new_decision(&item);
+        if let Some(alert) = self.state.receive(item)
+            && self.state.notifies(&alert)
+        {
+            self.notify(&alert, cx);
+        }
+        if decision && !back {
+            self.refresh(cx);
         }
         if back {
             self.refresh(cx);
@@ -1377,6 +1402,7 @@ impl Desktop {
         if self.screen != screen {
             self.task_form_return_focus = None;
             self.state.clear_memory_inspection();
+            self.state.close_review();
             self.work.leave();
             self.inbox = screens::Inbox::default();
             self.project_load = None;

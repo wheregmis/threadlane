@@ -250,7 +250,9 @@ impl GitWorkspaces {
         }
     }
 
-    /// Rebases an unpublished, clean worktree onto `base` when it can.
+    /// Brings `base` into a clean worktree when it can: a rebase for a
+    /// branch only this task has, a merge for one already shared, since
+    /// rewriting pushed commits makes the next push to its PR fail (#730).
     /// Returns the files that conflict.
     async fn rebase(
         &self,
@@ -265,15 +267,16 @@ impl GitWorkspaces {
         {
             return Ok(Vec::new());
         }
-        let remote = format!("refs/remotes/origin/{branch}");
-        let published = git(Some(path), ["show-ref", "--verify", "--quiet", &remote])
-            .await
-            .is_ok();
-        if published || !git(Some(path), ["status", "--porcelain"]).await?.is_empty() {
+        if !git(Some(path), ["status", "--porcelain"]).await?.is_empty() {
             return self.conflicts(repository, base, branch).await;
         }
+        let shared = shared(path, base, branch).await?;
         let mut args = COMMITTER.to_vec();
-        args.extend(["rebase", "--quiet", base]);
+        if shared {
+            args.extend(["merge", "--quiet", "--no-edit", base]);
+        } else {
+            args.extend(["rebase", "--quiet", base]);
+        }
         if git(Some(path), args).await.is_ok() {
             return Ok(Vec::new());
         }
@@ -285,7 +288,8 @@ impl GitWorkspaces {
             .lines()
             .map(str::to_owned)
             .collect();
-        git(Some(path), ["rebase", "--abort"]).await?;
+        let abort = if shared { "merge" } else { "rebase" };
+        git(Some(path), [abort, "--abort"]).await?;
         if files.is_empty() {
             files = self.conflicts(repository, base, branch).await?;
         }
@@ -641,16 +645,19 @@ impl Workspaces for GitWorkspaces {
         self.checkpoint_all(task, repositories, message, false)
             .await
     }
-    async fn take_checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) -> String {
-        let mut notes = String::new();
+    async fn checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) -> String {
+        repositories
+            .iter()
+            .filter_map(|repository| {
+                std::fs::read_to_string(self.checkpoint_marker(task, repository)).ok()
+            })
+            .collect()
+    }
+
+    async fn clear_checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) {
         for repository in repositories {
-            let marker = self.checkpoint_marker(task, repository);
-            if let Ok(note) = std::fs::read_to_string(&marker) {
-                notes.push_str(&note);
-                let _ = std::fs::remove_file(&marker);
-            }
+            let _ = std::fs::remove_file(self.checkpoint_marker(task, repository));
         }
-        notes
     }
 
     async fn check_merge(
@@ -719,6 +726,7 @@ impl Workspaces for GitWorkspaces {
         task: TaskId,
         repository: &Repository,
         expected_head: Option<&str>,
+        target: &str,
     ) -> Result<PublishPreview, WorkspaceError> {
         check(repository)?;
         let _repo = self.lock_repository(repository.id).await;
@@ -738,6 +746,7 @@ impl Workspaces for GitWorkspaces {
             diff
         } else {
             let base = self.fetch_base(repository).await?;
+            check_extends_remote(&worktree, target, &revision).await?;
             self.compute_diff_preview(repository, &worktree, &base, &revision)
                 .await?
         };
@@ -776,6 +785,39 @@ impl Workspaces for GitWorkspaces {
 
     async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String> {
         let _repos = self.lock_removal(removal).await;
+        self.remove_locked(removal).await
+    }
+
+    async fn remove_finished(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+    ) -> Result<Option<String>, WorkspaceError> {
+        let removal = WorkspaceRemoval {
+            tasks: vec![task],
+            repositories: repositories
+                .iter()
+                .map(|repository| (repository.id, repository.name.clone()))
+                .collect(),
+            clones: Vec::new(),
+        };
+        let _repos = self.lock_removal(&removal).await;
+        let dir = self.task_dir(task);
+        if let Some(reason) = unsaved_work(&dir, repositories).await? {
+            return Ok(Some(reason));
+        }
+        match self.remove_locked(&removal).await.as_slice() {
+            [] => Ok(None),
+            leftovers => Err(WorkspaceError(format!(
+                "could not remove {}",
+                leftovers.join(", ")
+            ))),
+        }
+    }
+}
+
+impl GitWorkspaces {
+    async fn remove_locked(&self, removal: &WorkspaceRemoval) -> Vec<String> {
         let root = match tokio::fs::canonicalize(&self.root).await {
             Ok(root) => root,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
@@ -803,6 +845,62 @@ impl Workspaces for GitWorkspaces {
         }
         leftovers
     }
+}
+
+/// Whether any of the task's own commits (past `base`) is on another
+/// branch or a remote one: it was pushed, under its own name or onto
+/// another task's PR, or another task merged it in.
+async fn shared(path: &Path, base: &str, branch: &str) -> Result<bool, WorkspaceError> {
+    let own = git(Some(path), ["rev-list", "--count", "HEAD", "--not", base]).await?;
+    let exclude = format!("--exclude={branch}");
+    let alone = git(
+        Some(path),
+        [
+            "rev-list",
+            "--count",
+            "HEAD",
+            "--not",
+            base,
+            "--remotes",
+            &exclude,
+            "--branches",
+        ],
+    )
+    .await?;
+    Ok(own.trim() != alone.trim())
+}
+
+/// Refuses a push of `revision` to `target` that could not land: the
+/// remote branch, as just fetched, has a commit `revision` lacks (#730).
+async fn check_extends_remote(
+    worktree: &Path,
+    target: &str,
+    revision: &str,
+) -> Result<(), WorkspaceError> {
+    let remote = format!("refs/remotes/origin/{target}");
+    let Ok(head) = git(
+        Some(worktree),
+        ["rev-parse", "--verify", "--quiet", &remote],
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let head = head.trim();
+    if git(
+        Some(worktree),
+        ["merge-base", "--is-ancestor", head, revision],
+    )
+    .await
+    .is_ok()
+    {
+        return Ok(());
+    }
+    Err(WorkspaceError(format!(
+        "this push would be rejected: {target} on the remote is at {head}, which the task \
+         branch does not contain, so its history was rewritten or the remote moved. Merge it \
+         in (git merge origin/{target}; do not rebase), then publish again."
+    )))
 }
 
 pub(crate) async fn branch_revision(
@@ -856,6 +954,97 @@ async fn checked_dir(root: &Path, path: &Path) -> Result<bool, WorkspaceError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(io_error("checking", path, &error)),
     }
+}
+
+/// What in the task's directory, review rounds included, would be lost if it
+/// were removed: uncommitted changes, a commit on no remote branch, or a
+/// directory that is not one of `repositories`' worktrees.
+async fn unsaved_work(
+    dir: &Path,
+    repositories: &[Repository],
+) -> Result<Option<String>, WorkspaceError> {
+    let mut sets = vec![dir.to_path_buf()];
+    let mut index = 0;
+    while let Some(set) = sets.get(index).cloned() {
+        index += 1;
+        let mut entries = match tokio::fs::read_dir(&set).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error("reading", &set, &error)),
+        };
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| io_error("reading", &set, &error))?
+        {
+            let path = entry.path();
+            let name = entry.file_name();
+            let is_dir = entry
+                .file_type()
+                .await
+                .map_err(|error| io_error("checking", &path, &error))?
+                .is_dir();
+            let marker = |suffix: &str| {
+                repositories
+                    .iter()
+                    .any(|repository| name == format!(".{}.{suffix}", repository.name).as_str())
+            };
+            if !is_dir && (marker("ready") || marker("checkpoint")) {
+                continue;
+            }
+            if index == 1 && name == ".reviews" && is_dir {
+                let mut rounds = tokio::fs::read_dir(&path)
+                    .await
+                    .map_err(|error| io_error("reading", &path, &error))?;
+                while let Some(round) = rounds
+                    .next_entry()
+                    .await
+                    .map_err(|error| io_error("reading", &path, &error))?
+                {
+                    sets.push(round.path());
+                }
+                continue;
+            }
+            let known = repositories
+                .iter()
+                .any(|repository| name == repository.name.as_str());
+            // Without its `.git` file, git would look in a parent directory.
+            if !known || !is_dir || !path.join(".git").is_file() {
+                return Ok(Some(format!("{} is not a known worktree", path.display())));
+            }
+            // Explicit, so `status.showUntrackedFiles=no` or a submodule's
+            // `ignore = all` cannot hide changes.
+            if !git(
+                Some(&path),
+                [
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ],
+            )
+            .await?
+            .trim()
+            .is_empty()
+            {
+                return Ok(Some(format!("{} has uncommitted changes", path.display())));
+            }
+            if !git(
+                Some(&path),
+                ["rev-list", "--max-count=1", "HEAD", "--not", "--remotes"],
+            )
+            .await?
+            .trim()
+            .is_empty()
+            {
+                return Ok(Some(format!(
+                    "{} has commits on no remote branch",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(None)
 }
 
 async fn remove_task_dir(

@@ -13,7 +13,8 @@ use threadlane_core::adapters::{
 };
 use threadlane_core::forge::{ApprovedBranch, Forge, ForgeError, PullRequestUpdate};
 use threadlane_core::github::{
-    Feed, GithubError, GithubItem, GithubSource, IssueClaim, PullRequestState, PullTarget,
+    Feed, GithubError, GithubItem, GithubSource, IssueClaim, PullRequestFile, PullRequestState,
+    PullTarget,
 };
 use threadlane_core::model::{OutboxMessage, Repository};
 use threadlane_core::runtime::{WakeTarget, Waker};
@@ -361,9 +362,16 @@ pub struct FakeForge {
     opened: Arc<Mutex<Vec<(String, String)>>>,
     /// Reported by [`Forge::logged_in`] inverted, so the default is logged in.
     logged_out: Arc<std::sync::atomic::AtomicBool>,
+    /// Reported by [`Forge::pull_request_base`]; `main` until set.
+    pull_base: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeForge {
+    /// Sets the base branch [`Forge::pull_request_base`] reports.
+    pub fn set_pull_base(&self, base: &str) {
+        *lock(&self.pull_base) = Some(base.to_owned());
+    }
+
     /// Sets what [`Forge::logged_in`] reports; logged in until set.
     pub fn set_logged_in(&self, logged_in: bool) {
         self.logged_out
@@ -476,6 +484,16 @@ impl Forge for FakeForge {
             .find(|(head, _)| head == branch)
             .map(|(_, url)| url.clone()))
     }
+
+    async fn pull_request_base(
+        &self,
+        _remote: &str,
+        _number: std::num::NonZeroU64,
+    ) -> Result<String, ForgeError> {
+        Ok(lock(&self.pull_base)
+            .clone()
+            .unwrap_or_else(|| "main".into()))
+    }
 }
 
 /// One call a [`FakeGithub`] was asked to make. Each is a read: the
@@ -497,6 +515,10 @@ pub enum GithubCall {
         repository: String,
         number: u64,
     },
+    PullRequestFiles {
+        repository: String,
+        number: u64,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -512,8 +534,12 @@ struct GithubState {
     activity: Vec<(String, Vec<GithubItem>, bool)>,
     /// What [`GithubSource::issue_claim`] answers, by `(repository, number)`.
     claims: Vec<(String, u64, Result<IssueClaim, String>)>,
+    /// What [`GithubSource::issue`] answers, by `(repository, number)`.
+    issues: Vec<(String, u64, serde_json::Value)>,
     /// What [`GithubSource::pull_request_state`] answers, by `(repository, number)`.
     pulls: Vec<(String, u64, Result<PullRequestState, String>)>,
+    /// What [`GithubSource::pull_request_files`] answers, by `(repository, number)`.
+    files: Vec<(String, u64, Vec<PullRequestFile>)>,
 }
 
 /// A [`GithubSource`] that touches no network. It records every call, keeps
@@ -563,6 +589,14 @@ impl FakeGithub {
             .push((repository.to_owned(), number, claim));
     }
 
+    /// What [`GithubSource::issue`] answers for `number` of `repository`.
+    /// Unscripted issues fail.
+    pub fn set_issue(&self, repository: &str, number: u64, view: serde_json::Value) {
+        lock(&self.state)
+            .issues
+            .push((repository.to_owned(), number, view));
+    }
+
     /// What [`GithubSource::pull_request_state`] answers for pull request
     /// `number` of `repository`: the state, or the error. Unscripted ones
     /// fail. The latest call wins.
@@ -575,6 +609,19 @@ impl FakeGithub {
         lock(&self.state)
             .pulls
             .push((repository.to_owned(), number, state));
+    }
+
+    /// What [`GithubSource::pull_request_files`] answers for pull request
+    /// `number` of `repository`. Unscripted ones fail. The latest call wins.
+    pub fn set_pull_request_files(
+        &self,
+        repository: &str,
+        number: u64,
+        files: Vec<PullRequestFile>,
+    ) {
+        lock(&self.state)
+            .files
+            .push((repository.to_owned(), number, files));
     }
 
     /// What the feed answers as the interval it asks for.
@@ -677,6 +724,16 @@ impl GithubSource for FakeGithub {
             )
     }
 
+    async fn issue(&self, repository: &str, number: u64) -> Result<serde_json::Value, GithubError> {
+        lock(&self.state)
+            .issues
+            .iter()
+            .rev()
+            .find(|(r, n, _)| r == repository && *n == number)
+            .map(|(_, _, view)| view.clone())
+            .ok_or_else(|| GithubError(format!("no issue {repository}#{number}")))
+    }
+
     async fn pull_request_state(
         &self,
         repository: &str,
@@ -700,5 +757,24 @@ impl GithubSource for FakeGithub {
                 },
                 |(_, _, pull)| pull.clone().map_err(GithubError),
             )
+    }
+
+    async fn pull_request_files(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<Vec<PullRequestFile>, GithubError> {
+        let mut state = lock(&self.state);
+        state.calls.push(GithubCall::PullRequestFiles {
+            repository: repository.to_owned(),
+            number,
+        });
+        state
+            .files
+            .iter()
+            .rev()
+            .find(|(r, n, _)| r == repository && *n == number)
+            .map(|(_, _, files)| files.clone())
+            .ok_or_else(|| GithubError(format!("no files for {repository}#{number}")))
     }
 }

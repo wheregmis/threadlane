@@ -142,8 +142,8 @@ fn is_progress(path: &str) -> bool {
     })
 }
 
-/// The index that lists `path`: `notes/INDEX.md` of its root for a note,
-/// `tasks/INDEX.md` of its project for a progress file. `None` for any other
+/// The index that lists `path`: `notes/INDEX.md` of its root for a note.
+/// `None` for task progress files (read on demand by task ID), any other
 /// file, and for an index itself.
 #[must_use]
 pub fn index_for(path: &str) -> Option<String> {
@@ -157,7 +157,7 @@ pub fn index_for(path: &str) -> Option<String> {
     {
         return Some(format!("{root}/notes/{INDEX_FILE}"));
     }
-    is_progress(path).then(|| format!("{root}/tasks/{INDEX_FILE}"))
+    None
 }
 
 /// The title and description of an indexed file: its first non-blank line,
@@ -260,7 +260,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notes_and_progress_files_have_indexes_and_nothing_else_does() {
+    fn only_notes_have_indexes() {
         for (path, index) in [
             ("space/notes/style.md", Some("space/notes/INDEX.md")),
             ("space/notes/a/b.md", Some("space/notes/INDEX.md")),
@@ -268,10 +268,7 @@ mod tests {
                 "projects/3/notes/build.md",
                 Some("projects/3/notes/INDEX.md"),
             ),
-            (
-                "projects/3/tasks/T-0001.md",
-                Some("projects/3/tasks/INDEX.md"),
-            ),
+            ("projects/3/tasks/T-0001.md", None),
             ("projects/3/notes/INDEX.md", None),
             ("projects/3/instructions.md", None),
             ("projects/3/repos/app.md", None),

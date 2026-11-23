@@ -1618,6 +1618,39 @@ impl TaskStore for HubDb {
         Ok(retried)
     }
 
+    async fn reassign_task(&self, id: TaskId, agent: AgentId) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let task = existing_task(conn, id).await?;
+        if task.status != TaskStatus::Queued {
+            return Err(StoreError::Conflict(format!(
+                "task {id} is {}; only a queued task can be reassigned",
+                task.status
+            )));
+        }
+        let started = query_opt(
+            conn,
+            "SELECT 1 FROM sessions WHERE lane_id = ?1 LIMIT 1",
+            params![task.lane_id.get()],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        if started.is_some() {
+            return Err(StoreError::Conflict(format!(
+                "task {id} has already started; its session stays with its agent"
+            )));
+        }
+        exec(
+            conn,
+            "UPDATE tasks SET agent_id = ?1 WHERE id = ?2",
+            params![agent.get(), id.get()],
+        )
+        .await?;
+        let reassigned = existing_task(conn, id).await?;
+        tx.commit().await?;
+        Ok(reassigned)
+    }
+
     async fn finish_task(&self, lease: &Lease, result: &Json) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
         let conn = tx.conn();

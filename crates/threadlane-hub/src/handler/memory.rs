@@ -79,11 +79,7 @@ pub(super) async fn handle(
     match request {
         MemoryRequest::List { .. } => {
             let mut files = db.list("space/").await.map_err(api_error)?;
-            files.extend(
-                db.list(&format!("projects/{}/", id.get()))
-                    .await
-                    .map_err(api_error)?,
-            );
+            files.extend(db.list_active_project_memory(id).await.map_err(api_error)?);
             Ok(MemoryReply::Files {
                 files: files.into_iter().filter_map(named).collect(),
             })

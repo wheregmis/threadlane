@@ -48,6 +48,8 @@ pub const CANCEL_TASK: &str = "cancel_task";
 pub const RETRY_TASK: &str = "retry_task";
 /// The lead lists the project's tasks.
 pub const LIST_TASKS: &str = "list_tasks";
+/// The lead reads an issue or pull request of a registered repository (#714).
+pub const VIEW_ISSUE: &str = "view_issue";
 pub const PR_REVIEW_STATUS: &str = "pr_review_status";
 /// A task agent reports its task done, with a result.
 pub use threadlane_core::link::FINISH_TASK;
@@ -82,7 +84,7 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | UPDATE_TASK
         | CANCEL_TASK
         | RETRY_TASK
-        | LIST_TASKS
+        | VIEW_ISSUE
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
         FINISH_TASK
         | PUBLISH_BRANCH
@@ -945,13 +947,13 @@ fn merge_refusal(checks: &[MergeCheck]) -> String {
     for check in checks.iter().filter(|check| !check.clean()) {
         let _ = write!(
             message,
-            " In {}, it conflicts with {} at {} in: {}. Rebase onto that commit (git rebase {}, \
-             already fetched as origin/{}), resolve the conflicts, and continue the rebase.",
+            " In {}, it conflicts with {} at {} in: {}. Merge {} in (git merge origin/{}, \
+             already fetched; do not rebase), resolve the conflicts, and commit the merge.",
             check.repository,
             check.branch,
             check.base,
             check.conflicts.join(", "),
-            check.base,
+            check.branch,
             check.branch,
         );
     }
@@ -1468,6 +1470,24 @@ fn task_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         define(
+            VIEW_ISSUE,
+            "Read an issue or pull request of a registered repository: its title, state, \
+             author, labels, body and comments. It only reads, so it needs no approval.",
+            Tier::Read,
+            json!({
+                "type": "object",
+                "properties": {
+                    "repository": {
+                        "type": "string",
+                        "description": "A repository registered in this project."
+                    },
+                    "number": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["repository", "number"],
+                "additionalProperties": false
+            }),
+        ),
+        define(
             PR_REVIEW_STATUS,
             "Look up the existing code review for this exact PR head before assigning or starting review. Returns the task, review status and available feedback.",
             Tier::Read,
@@ -1657,6 +1677,9 @@ impl ToolRegistry for HubTools {
             | REQUEST_REVIEW
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
+            ))),
+            VIEW_ISSUE => Err(ToolError::Blocked(format!(
+                "{name} is answered by the hub's GitHub source"
             ))),
             // The gate always asks: the answer is the outcome.
             ASK_USER => Err(ToolError::Blocked(format!(
@@ -1889,6 +1912,7 @@ mod tests {
                     RETRY_TASK,
                     CANCEL_TASK,
                     LIST_TASKS,
+                    VIEW_ISSUE,
                     PR_REVIEW_STATUS
                 ][..],
                 &memory,
@@ -1901,6 +1925,7 @@ mod tests {
             [
                 &[
                     CREATE_TASK,
+                    LIST_TASKS,
                     PR_REVIEW_STATUS,
                     FINISH_TASK,
                     PUBLISH_BRANCH,

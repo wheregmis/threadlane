@@ -36,6 +36,7 @@ actions!(
         OpenDocumentation,
         Dismiss,
         OpenAddSpace,
+        QuickCreate,
     ]
 );
 
@@ -186,6 +187,11 @@ fn shortcuts() -> Vec<Shortcut> {
             "Add space",
             [KeyBinding::new("g s", OpenAddSpace, Some(OUTSIDE_INPUT))],
         ),
+        shortcut(
+            "Tasks",
+            "New task",
+            [KeyBinding::new("c", QuickCreate, Some(OUTSIDE_INPUT))],
+        ),
     ]
 }
 
@@ -329,6 +335,11 @@ pub(crate) fn install(
         if !window.has_active_dialog(cx) {
             this.keyboard_focus.focus(window, cx);
             this.go(Screen::Settings(None), cx);
+        }
+    });
+    desktop_action(cx, &desktop, |this, _: &QuickCreate, window, cx| {
+        if !window.has_focused_input(cx) && !window.has_active_dialog(cx) {
+            this.quick_create(window, cx);
         }
     });
     desktop_action(cx, &desktop, |this, _: &OpenAddSpace, window, cx| {

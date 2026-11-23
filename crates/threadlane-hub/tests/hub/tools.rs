@@ -204,6 +204,7 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
             threadlane_hub::RETRY_TASK,
             CANCEL_TASK,
             LIST_TASKS,
+            threadlane_hub::VIEW_ISSUE,
             threadlane_hub::PR_REVIEW_STATUS,
             MEMORY_VIEW,
             MEMORY_CREATE,
@@ -267,7 +268,7 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
         "neither an asked nor a blocked call is executed"
     );
 
-    // Once a call waits on you, the run's ungated calls are refused (#675).
+    // Once a call waits on you, the run's ungated calls still run (#718).
     let after = hub
         .link
         .call_tool(
@@ -278,8 +279,8 @@ async fn on_request_a_shared_tool_asks_and_a_forbidden_one_is_blocked() {
             &json!({}),
         )
         .await;
-    assert!(matches!(after, Err(ToolError::Blocked(_))), "{after:?}");
-    assert_eq!(fake.calls().len(), 1);
+    assert_eq!(after, Ok(json!({ "notes": [] })));
+    assert_eq!(fake.calls().len(), 2);
     assert_eq!(
         ToolRegistry::definition(&*hub.core.tools(), "merge_pull_request").map(|d| d.tier),
         Some(Tier::SharedReversible)

@@ -1,21 +1,23 @@
 //! [`HubCore`]: the hub's roles over one database (docs/milestone-1.md §9).
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use threadlane_core::adapters::ChannelAdapter;
-use threadlane_core::client::HubApi;
-use threadlane_core::github::GithubSource;
-use threadlane_core::ids::{LaneId, MachineId, ProjectId};
+use threadlane_core::client::{HubApi, TaskPullRequest};
+use threadlane_core::github::{GithubSource, PullRequestFile};
+use threadlane_core::ids::{LaneId, MachineId, ProjectId, TaskId};
 use threadlane_core::link::HubLink;
+use threadlane_core::model::RunStatus;
 use threadlane_core::runtime::{StepHook, WakeTarget, Waker};
 use threadlane_core::store::{InboxStore, MachineStore, OrgStore, SessionStore, TaskStore};
 use threadlane_core::time::{Clock, Timestamp};
 use threadlane_core::tools::ToolRegistry;
 use threadlane_core::workspace::{WorkspaceRemoval, Workspaces, task_ref};
 use threadlane_runner::GitWorkspaces;
-use threadlane_store::HubDb;
+use threadlane_store::{HubDb, TaskPruningPolicy, TaskPruningReport};
 use threadlane_transport_iroh::{EndpointAddr, Gate};
 
 use crate::defaults::ensure_defaults;
@@ -50,9 +52,19 @@ pub(crate) struct Inner {
     pub(crate) workspaces: Option<PathBuf>,
     pub(crate) workspace_files: Option<Arc<dyn Workspaces>>,
     pub(crate) project_removal: Arc<tokio::sync::Mutex<()>>,
+    /// Ended tasks whose worktrees were kept, and when.
+    pub(crate) kept_worktrees: Arc<tokio::sync::Mutex<HashMap<TaskId, Timestamp>>>,
+    pub(crate) last_pruned: Arc<tokio::sync::Mutex<Option<Timestamp>>>,
     /// When this hub process started, shown to every run (#652).
     pub(crate) started_at: Timestamp,
+    /// Each task's pull requests as GitHub was last read for them.
+    pub(crate) pull_status: Arc<tokio::sync::Mutex<HashMap<TaskId, Vec<TaskPullRequest>>>>,
+    /// Each pull request's changed files, with the head they were read at.
+    pub(crate) pull_files: Arc<tokio::sync::Mutex<PullFiles>>,
 }
+
+/// Changed files by `(owner/name, number)`, with the head they were read at.
+pub(crate) type PullFiles = HashMap<(String, u64), (String, Vec<PullRequestFile>)>;
 
 /// The hub of one space: handler, placement, begin-run, tool gateway,
 /// dispatcher, and lease sweep over one [`HubDb`].
@@ -107,6 +119,10 @@ impl HubCore {
                 workspaces: None,
                 workspace_files: None,
                 project_removal: Arc::default(),
+                kept_worktrees: Arc::default(),
+                last_pruned: Arc::default(),
+                pull_status: Arc::default(),
+                pull_files: Arc::default(),
                 backends: Vec::new(),
             }),
         };
@@ -243,12 +259,13 @@ impl HubCore {
             .ok_or(HubError::NoHubMachine)
     }
 
-    /// Removes the worktrees of ended tasks that have had no run for
-    /// `worktree_cleanup`. Anything uncommitted is committed on the task's
-    /// branch first, so a retried task rebuilds its worktree from the branch.
+    /// Removes the worktrees of ended tasks with no active run once nothing
+    /// in them would be lost (see [`Workspaces::remove_finished`]). A task
+    /// whose worktrees were kept is checked again after `worktree_cleanup`,
+    /// or sooner when it runs again.
     async fn remove_idle_worktrees(&self, now: Timestamp) -> Result<(), HubError> {
         let inner = &self.inner;
-        let (Some(idle), Some(root), Some(files)) = (
+        let (Some(recheck), Some(root), Some(files)) = (
             inner.settings.worktree_cleanup,
             &inner.workspaces,
             &inner.workspace_files,
@@ -268,27 +285,7 @@ impl HubCore {
                 candidate_ids.push(id);
             }
         }
-        if candidate_ids.is_empty() {
-            return Ok(());
-        }
         for id in candidate_ids {
-            let Some(task) = inner.db.task(id).await? else {
-                continue;
-            };
-            if !task.status.is_terminal() {
-                continue;
-            }
-            let last_run = inner
-                .db
-                .lane_runs(task.lane_id)
-                .await?
-                .iter()
-                .map(|run| run.ended_at.unwrap_or(run.started_at))
-                .max()
-                .unwrap_or(task.created_at);
-            if now.saturating_since(last_run) < idle {
-                continue;
-            }
             let _removal = inner.project_removal.lock().await;
             let Some(task) = inner.db.task(id).await? else {
                 continue;
@@ -296,15 +293,17 @@ impl HubCore {
             if !task.status.is_terminal() {
                 continue;
             }
-            let last_run = inner
-                .db
-                .lane_runs(task.lane_id)
-                .await?
+            let runs = inner.db.lane_runs(task.lane_id).await?;
+            if runs.iter().any(|run| run.status == RunStatus::Active) {
+                continue;
+            }
+            let last_run = runs
                 .iter()
-                .map(|run| run.ended_at.unwrap_or(run.started_at))
+                .filter_map(|run| run.ended_at)
                 .max()
                 .unwrap_or(task.created_at);
-            if now.saturating_since(last_run) < idle {
+            let kept = inner.kept_worktrees.lock().await.get(&id).copied();
+            if kept.is_some_and(|kept| kept >= last_run && now.saturating_since(kept) < recheck) {
                 continue;
             }
             let repositories: Vec<_> = inner
@@ -314,28 +313,84 @@ impl HubCore {
                 .into_iter()
                 .filter(|repository| task.repositories.contains(&repository.id))
                 .collect();
-            if let Err(error) = files
-                .checkpoint(
-                    task.id,
-                    &repositories,
-                    "Threadlane: work kept before cleanup",
-                )
-                .await
-            {
-                tracing::warn!(task = %task.id, %error, "kept a worktree whose work could not be committed");
-                continue;
+            match files.remove_finished(task.id, &repositories).await {
+                Ok(None) => {
+                    inner.kept_worktrees.lock().await.remove(&id);
+                    tracing::info!(task = %task.id, "removed an ended task's worktrees");
+                }
+                Ok(Some(reason)) => {
+                    inner.kept_worktrees.lock().await.insert(id, now);
+                    tracing::info!(task = %task.id, %reason, "kept an ended task's worktrees");
+                }
+                Err(error) => {
+                    inner.kept_worktrees.lock().await.insert(id, now);
+                    tracing::warn!(task = %task.id, %error, "could not remove an ended task's worktrees");
+                }
             }
-            let removal = WorkspaceRemoval {
-                tasks: vec![task.id],
-                repositories: repositories
-                    .iter()
-                    .map(|repository| (repository.id, repository.name.clone()))
-                    .collect(),
-                clones: Vec::new(),
-            };
-            let leftovers = files.remove(&removal).await;
-            tracing::info!(task = %task.id, ?leftovers, "removed an ended task's worktrees");
         }
+        Ok(())
+    }
+
+    /// Runs one bounded Tier-2 compaction and Tier-3 pruning pass using the
+    /// hub's configured retention settings and cleans up any pruned tasks'
+    /// local worktrees.
+    ///
+    /// # Errors
+    ///
+    /// A store error.
+    pub async fn prune_tasks_once(&self) -> Result<TaskPruningReport, HubError> {
+        let now = self.inner.clock.now();
+        let settings = &self.inner.settings;
+        let policy = TaskPruningPolicy {
+            compact_before: settings.task_compaction.map(|age| now - age),
+            prune_before: settings.task_pruning.map(|age| now - age),
+            max_terminal_per_project: settings.max_terminal_tasks_per_project,
+            batch_size: settings.pruning_batch_size,
+            ignore_dreaming_barrier: false,
+        };
+        let report = self.inner.db.prune_tasks_batch(policy, now).await?;
+        if !report.workspace_removals.is_empty()
+            && let Some(files) = &self.inner.workspace_files
+        {
+            let _removal = self.inner.project_removal.lock().await;
+            for removal in &report.workspace_removals {
+                let leftovers = files.remove(removal).await;
+                if !leftovers.is_empty() {
+                    tracing::warn!(?removal.tasks, ?leftovers, "leftover workspace files after task prune");
+                }
+            }
+        }
+        if report.compacted_tasks > 0 || report.pruned_tasks > 0 {
+            tracing::info!(
+                compacted = report.compacted_tasks,
+                pruned = report.pruned_tasks,
+                removed_journal_rows = report.removed_journal_rows,
+                removed_tool_calls = report.removed_tool_calls,
+                removed_memory_files = report.removed_memory_files,
+                "completed task pruning pass"
+            );
+        }
+        Ok(report)
+    }
+
+    async fn prune_tasks_if_due(&self, now: Timestamp) -> Result<(), HubError> {
+        let settings = &self.inner.settings;
+        if settings.task_compaction.is_none()
+            && settings.task_pruning.is_none()
+            && settings.max_terminal_tasks_per_project.is_none()
+        {
+            return Ok(());
+        }
+        {
+            let mut last = self.inner.last_pruned.lock().await;
+            if let Some(previous) = *last
+                && now.saturating_since(previous) < settings.pruning_interval
+            {
+                return Ok(());
+            }
+            *last = Some(now);
+        }
+        let _ = self.prune_tasks_once().await?;
         Ok(())
     }
 
@@ -364,6 +419,7 @@ impl HubCore {
             }
         }
         self.remove_idle_worktrees(now).await?;
+        self.prune_tasks_if_due(now).await?;
         Ok(expired)
     }
 

@@ -185,9 +185,12 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
         message: &str,
     ) -> Result<(), WorkspaceError>;
 
-    /// Returns, once, what [`Self::checkpoint_tracked`] committed and left
-    /// out for each repository, to tell the task's next run.
-    async fn take_checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) -> String;
+    /// Returns what [`Self::checkpoint_tracked`] committed and left out for
+    /// each repository, to tell the task's next run.
+    async fn checkpoint_notes(&self, task: TaskId, repositories: &[Repository]) -> String;
+
+    /// Forgets the notes once a run that was told them has started.
+    async fn clear_checkpoint_notes(&self, task: TaskId, repositories: &[Repository]);
 
     /// Fetches each repository's default branch and checks whether the task
     /// branch merges into it cleanly, touching no worktree. A worktree never
@@ -198,9 +201,10 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
         repositories: &[Repository],
     ) -> Result<Vec<MergeCheck>, WorkspaceError>;
 
-    /// Fetches each repository's default branch and rebases the task branch
-    /// onto it when that rebases cleanly; when it would conflict the branch
-    /// is left as it is. Returns where each set-up worktree stands after.
+    /// Fetches each repository's default branch and brings it into the task
+    /// branch when that is clean: a rebase for a branch no other ref has, a
+    /// merge for one already pushed or shared (#730); when it would conflict
+    /// the branch is left as it is. Returns where each set-up worktree stands after.
     async fn bring_in_base(
         &self,
         task: TaskId,
@@ -213,13 +217,26 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
     /// Removes local worktrees and clones, reporting paths it could not remove.
     async fn remove(&self, removal: &WorkspaceRemoval) -> Vec<String>;
 
+    /// Removes an ended task's worktrees, its review rounds included, unless
+    /// one holds uncommitted changes or a commit that no remote branch has.
+    /// The task branch stays. Returns why they were kept, or `None` once they
+    /// are gone (or were never there).
+    async fn remove_finished(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+    ) -> Result<Option<String>, WorkspaceError>;
+
     /// Resolves the task branch and computes its diff against the expected PR
     /// head, or against the default branch when publishing without a PR target.
+    /// Without an expected head it refuses when `target`, the branch pushed
+    /// to, is on the remote at a commit the task branch does not contain.
     async fn preview_publish(
         &self,
         task: TaskId,
         repository: &Repository,
         expected_head: Option<&str>,
+        target: &str,
     ) -> Result<PublishPreview, WorkspaceError>;
 }
 

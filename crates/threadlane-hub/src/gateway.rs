@@ -6,7 +6,7 @@ use std::sync::Arc;
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
 use threadlane_core::ids::{DecisionId, RunId, StandingRuleId};
-use threadlane_core::link::{LinkError, Perform};
+use threadlane_core::link::{FINISH_TASK, LinkError, Perform};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
     Decision, DecisionKind, DecisionOption, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run,
@@ -27,7 +27,8 @@ use crate::memory;
 use crate::publish::approval_options;
 use crate::timers;
 use crate::tools::{
-    ASK_USER, CREATE_TASK, HubTools, derived_call_key, offered_for_review, offered_in, question,
+    ASK_USER, CREATE_TASK, FINISH_REVIEW, HubTools, derived_call_key, offered_for_review,
+    offered_in, question,
 };
 
 /// Key of the envelope a failed call's error is recorded in, so a repeated
@@ -188,36 +189,38 @@ impl LocalLink {
         // A requested task's own step is decided again on its own-work row.
         // Read here, once the call is recorded, so a repeated call replays
         // this outcome instead of reading GitHub again.
-        if dream.is_none()
-            && matches!(asked, Some(Asked::You { .. } | Asked::Review { .. }))
-            && let Some(own) = self.own_work(&lane, tool, arguments).await?
-        {
-            let (verdict, _) = self
-                .gate(&run, &lane, &definition, arguments, &events, Some(own))
-                .await?;
-            asked = match verdict {
-                Verdict::AllowByDefault => Some(Asked::Default),
-                Verdict::Allow { rule: Some(rule) } => Some(Asked::Rule(rule)),
-                Verdict::Review { offers_rule, rule } => Some(Asked::Review {
-                    offers_rule,
-                    proposal: false,
-                    rule,
-                }),
-                Verdict::Ask { offers_rule } => Some(Asked::You {
-                    offers_rule,
-                    proposal: false,
-                }),
-                // The row never allows without a record, nor blocks what the
-                // matrix let through; keep the matrix's answer.
-                Verdict::Allow { rule: None } | Verdict::Block { .. } => asked,
+        if dream.is_none() && matches!(asked, Some(Asked::You { .. } | Asked::Review { .. })) {
+            let regated = match self.own_work(&lane, tool, arguments).await {
+                Ok(Some(own)) => self
+                    .gate(&run, &lane, &definition, arguments, &events, Some(own))
+                    .await
+                    .and_then(|(verdict, _)| own_work_asked(asked, verdict)),
+                Ok(None) => Ok(asked),
+                Err(error) => Err(error),
+            };
+            // The call is recorded: a refusal here finishes it, as a refused run does.
+            asked = match regated {
+                Ok(asked) => asked,
+                Err(refused) => {
+                    if let Some(record) = error_record(&refused) {
+                        db.finish_tool_call(lease, &key, &record, inner.clock.now())
+                            .await
+                            .map_err(tool_error)?;
+                    }
+                    return Err(refused);
+                }
             };
         }
-        // A run that waits on you does nothing more (Plan.md §9.4), but each
-        // further gated call of its turn still gets its own card (#675).
-        if asked.is_none() && self.run_waits(&lane, &run).await? {
+        // A run that waits on you can't finish its work (Plan.md §9.4). Each
+        // further gated call gets its own card (#675), and ungated calls such
+        // as a message or a timer still run (#718).
+        if asked.is_none()
+            && (tool == FINISH_TASK || tool == FINISH_REVIEW)
+            && self.run_waits(&lane, &run).await?
+        {
             let refused = ToolError::Blocked(format!(
-                "{tool} did not run: another call of this run is waiting on you, so nothing \
-                 more runs in this turn. End your turn; call it again when you are resumed."
+                "{tool} did not run: another call of this run is waiting on you. End your \
+                 turn; call it again when you are resumed."
             ));
             if let Some(record) = error_record(&refused) {
                 db.finish_tool_call(lease, &key, &record, inner.clock.now())
@@ -238,6 +241,9 @@ impl LocalLink {
         };
         let outcome = match (asked, dream) {
             (None, Some(event)) => self.core.dream_call(event, &context, tool, arguments).await,
+            (None, None) if tool == crate::VIEW_ISSUE => {
+                crate::publish::view_issue(db, inner.github.as_deref(), &lane, arguments).await
+            }
             (None, None) => inner.tools.execute(&context, tool, arguments.clone()).await,
             (Some(asked), _) => {
                 self.ask(lease, &run, &lane, &key, tool, arguments, asked)
@@ -362,6 +368,69 @@ impl LocalLink {
                             })
                     }));
         Ok(Some(OwnWork { checks_pass }))
+    }
+
+    /// A note for the record when this exact merge was approved and its
+    /// latest attempt failed only because the base branch moved, and GitHub
+    /// still shows the pull request cleanly mergeable at the approved head
+    /// (#724): it is retried under that approval, at most
+    /// [`BASE_MOVED_RETRIES`] times. `None` otherwise, so it is asked again.
+    async fn base_moved_retry(
+        &self,
+        lane: &Lane,
+        arguments: &Json,
+    ) -> Result<Option<String>, ToolError> {
+        let inner = &self.core.inner;
+        let hash = derived_call_key(crate::MERGE, arguments);
+        let attempts: Vec<Decision> = inner
+            .db
+            .lane_decisions(lane.id)
+            .await
+            .map_err(tool_error)?
+            .into_iter()
+            .filter(|d| d.tool == crate::MERGE && d.arguments_hash == hash && d.approved())
+            .collect();
+        let moved = attempts.iter().rev().take_while(|d| base_moved(d)).count();
+        if moved == 0 || moved > BASE_MOVED_RETRIES {
+            return Ok(None);
+        }
+        let (Some(name), Some(number), Some(head)) = (
+            arguments["repository"].as_str(),
+            arguments["number"].as_u64(),
+            arguments[threadlane_core::forge::EXPECTED_HEAD].as_str(),
+        ) else {
+            return Ok(None);
+        };
+        let Some(full_name) = inner
+            .db
+            .repositories(lane.project_id)
+            .await
+            .map_err(tool_error)?
+            .into_iter()
+            .find(|repository| repository.name == name)
+            .and_then(|repository| crate::publish::github_repository(&repository.remote_url))
+        else {
+            return Ok(None);
+        };
+        let Some(github) = inner.github.as_deref() else {
+            return Ok(None);
+        };
+        let Ok(pull) = github.pull_request_state(&full_name, number).await else {
+            return Ok(None);
+        };
+        if pull.head_sha != head || pull.mergeable_state != "clean" {
+            return Ok(None);
+        }
+        let approved = attempts
+            .iter()
+            .rev()
+            .nth(moved - 1)
+            .map_or_else(String::new, |d| d.id.to_string());
+        Ok(Some(format!(
+            "Retry {moved} of {BASE_MOVED_RETRIES} of {approved}, approved at head {head}: \
+             GitHub refused it only because the base branch moved, and the pull request is \
+             still cleanly mergeable at that head."
+        )))
     }
 
     /// Gathers what governs the call and asks the gate (Plan.md §9.1).
@@ -523,6 +592,13 @@ impl LocalLink {
         };
         // Read here, once the call is recorded, so a repeated call replays
         // this outcome instead of reading GitHub again.
+        if tool == crate::MERGE
+            && matches!(asked, Asked::You { .. } | Asked::Review { .. })
+            && let Some(note) = self.base_moved_retry(lane, arguments).await?
+        {
+            proposal.context = format!("{note}\n{}", proposal.context);
+            asked = Asked::Default;
+        }
         if tool == crate::ASSIGN_ISSUE && !matches!(asked, Asked::Dream) {
             match crate::publish::issue_claim(&inner.db, inner.github.as_deref(), lane, arguments)
                 .await?
@@ -970,6 +1046,39 @@ enum Asked {
     Default,
 }
 
+/// What the own-work row's verdict makes of a call the matrix asked about.
+fn own_work_asked(asked: Option<Asked>, verdict: Verdict) -> Result<Option<Asked>, ToolError> {
+    Ok(match verdict {
+        Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
+        Verdict::AllowByDefault => Some(Asked::Default),
+        Verdict::Allow { rule: Some(rule) } => Some(Asked::Rule(rule)),
+        Verdict::Review { offers_rule, rule } => Some(Asked::Review {
+            offers_rule,
+            proposal: false,
+            rule,
+        }),
+        Verdict::Ask { offers_rule } => Some(Asked::You {
+            offers_rule,
+            proposal: false,
+        }),
+        // The row never allows without a record; keep the matrix's answer.
+        Verdict::Allow { rule: None } => asked,
+    })
+}
+
+/// Retries of one approved merge refused only because its base branch moved.
+const BASE_MOVED_RETRIES: usize = 3;
+
+/// An approved merge that GitHub refused only because the base branch moved.
+fn base_moved(d: &Decision) -> bool {
+    d.outcome.as_ref().is_some_and(|o| {
+        o["performed"] == false
+            && o["error"]
+                .as_str()
+                .is_some_and(|e| e.to_ascii_lowercase().contains("base branch was modified"))
+    })
+}
+
 /// An approved limitation report whose filing failed, with its text as approved.
 fn failed_report(d: &Decision) -> bool {
     d.tool == REPORT_LIMITATION
@@ -1032,5 +1141,25 @@ mod tests {
         }
         assert!(error_record(&ToolError::LeaseLost).is_none());
         assert_eq!(replay(json!({"outbox_id": 3})), Ok(json!({"outbox_id": 3})));
+    }
+
+    #[test]
+    fn an_own_work_block_refuses_instead_of_asking() {
+        let asked = Some(Asked::You {
+            offers_rule: false,
+            proposal: false,
+        });
+        assert!(matches!(
+            own_work_asked(asked, Verdict::Block { reason: "off".into() }),
+            Err(ToolError::Blocked(reason)) if reason == "off"
+        ));
+        assert!(matches!(
+            own_work_asked(asked, Verdict::Allow { rule: None }),
+            Ok(Some(Asked::You { .. }))
+        ));
+        assert!(matches!(
+            own_work_asked(asked, Verdict::AllowByDefault),
+            Ok(Some(Asked::Default))
+        ));
     }
 }

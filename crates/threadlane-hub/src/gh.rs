@@ -27,7 +27,8 @@
 //!   its `timeline?per_page=100` for open pull requests that cross-reference it,
 //!   and `user` for the login `gh` reads as;
 //! - a pull request's state, before a task's own step on it: `repos/<owner>/<name>/pulls/<n>`
-//!   for its head, draft flag and `mergeable_state`, and the check runs on its head commit.
+//!   for its head, draft flag and `mergeable_state`, and the check runs on its head commit;
+//! - a pull request's changed files and their patches: `repos/<owner>/<name>/pulls/<n>/files?per_page=100`.
 //!
 //! With `--include` each answer starts with the status line and headers. A
 //! `Link` header's `rel="next"` is followed, as another such GET of the path
@@ -41,8 +42,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::github::{
-    Feed, GithubError, GithubItem, GithubKind, GithubSource, IssueClaim, PullRequestState,
-    PullTarget, REVIEW_MARKER_PREFIX, pull_request_number,
+    CheckRun, Feed, GithubError, GithubItem, GithubKind, GithubSource, IssueClaim, PullRequestFile,
+    PullRequestState, PullTarget, REVIEW_MARKER_PREFIX, pull_request_number,
 };
 use tokio::process::Command;
 
@@ -412,6 +413,50 @@ impl GithubSource for GhSource {
         })
     }
 
+    async fn issue(&self, repository: &str, number: u64) -> Result<Json, GithubError> {
+        if !valid_full_name(repository) {
+            return Err(GithubError(format!(
+                "{repository:?} is not a repository name"
+            )));
+        }
+        let issue = self
+            .get_json(&format!("repos/{repository}/issues/{number}"))
+            .await?;
+        let path = format!("repos/{repository}/issues/{number}/comments?per_page=100");
+        let mut comments = Vec::new();
+        for page in self.get_pages(&[], &path).await? {
+            comments.extend(
+                page.json(&path)?
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|comment| {
+                        serde_json::json!({
+                            "author": text(comment, "/user/login"),
+                            "at": text(comment, "/created_at"),
+                            "body": text(comment, "/body"),
+                        })
+                    }),
+            );
+        }
+        Ok(serde_json::json!({
+            "number": number,
+            "url": text(&issue, "/html_url"),
+            "is_pull_request": !issue["pull_request"].is_null(),
+            "title": text(&issue, "/title"),
+            "state": text(&issue, "/state"),
+            "author": text(&issue, "/user/login"),
+            "labels": issue["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|label| text(label, "/name"))
+                .collect::<Vec<_>>(),
+            "body": text(&issue, "/body"),
+            "comments": comments,
+        }))
+    }
+
     async fn pull_request_state(
         &self,
         repository: &str,
@@ -435,9 +480,12 @@ impl GithubSource for GhSource {
             let page = page.json(&path)?;
             let runs = page.get("check_runs").and_then(Json::as_array);
             checks.extend(runs.into_iter().flatten().map(|run| {
-                (run["status"] == "completed")
-                    .then(|| text(run, "/conclusion"))
-                    .flatten()
+                CheckRun {
+                    name: text(run, "/name").unwrap_or_default(),
+                    conclusion: (run["status"] == "completed")
+                        .then(|| text(run, "/conclusion"))
+                        .flatten(),
+                }
             }));
         }
         Ok(PullRequestState {
@@ -449,7 +497,41 @@ impl GithubSource for GhSource {
                 .unwrap_or_default()
                 .to_ascii_lowercase(),
             checks,
+            url: text(&pull, "/html_url").unwrap_or_default(),
+            state: text(&pull, "/state").unwrap_or_default(),
+            merged: pull["merged"] == true,
         })
+    }
+
+    async fn pull_request_files(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<Vec<PullRequestFile>, GithubError> {
+        if !valid_full_name(repository) {
+            return Err(GithubError(format!(
+                "{repository:?} is not a repository name"
+            )));
+        }
+        let path = format!("repos/{repository}/pulls/{number}/files?per_page=100");
+        let mut files = Vec::new();
+        for page in self.get_every_page(&path).await? {
+            let page = page.json(&path)?;
+            files.extend(
+                page.as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|file| PullRequestFile {
+                        path: text(file, "/filename").unwrap_or_default(),
+                        previous_path: text(file, "/previous_filename"),
+                        status: text(file, "/status").unwrap_or_default(),
+                        additions: file["additions"].as_u64().unwrap_or_default(),
+                        deletions: file["deletions"].as_u64().unwrap_or_default(),
+                        patch: text(file, "/patch"),
+                    }),
+            );
+        }
+        Ok(files)
     }
 }
 
@@ -1391,12 +1473,64 @@ case "$last" in
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn an_issue_view_reads_the_issue_and_its_comments_with_gets_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[
+                (
+                    "repos/acme/widgets/issues/7",
+                    "issue.http",
+                    ok(r#"{"title":"Crash","state":"open","body":"It breaks.",
+                        "html_url":"https://github.com/acme/widgets/pull/7","pull_request":{},
+                        "user":{"login":"alice"},"labels":[{"name":"bug"}]}"#),
+                ),
+                (
+                    "*/comments*",
+                    "comments.http",
+                    ok(
+                        r#"[{"user":{"login":"bob"},"created_at":"2026-11-22T00:00:00Z",
+                        "body":"Plan: fix it."}]"#,
+                    ),
+                ),
+            ],
+        ));
+        let view = source.issue("acme/widgets", 7).await.unwrap();
+        assert_eq!(
+            view,
+            serde_json::json!({
+                "number": 7,
+                "url": "https://github.com/acme/widgets/pull/7",
+                "is_pull_request": true,
+                "title": "Crash",
+                "state": "open",
+                "author": "alice",
+                "labels": ["bug"],
+                "body": "It breaks.",
+                "comments": [
+                    {"author": "bob", "at": "2026-11-22T00:00:00Z", "body": "Plan: fix it."}
+                ],
+            })
+        );
+        for call in calls(dir.path()) {
+            assert!(
+                call.starts_with("api --method GET --include -H Accept: "),
+                "{call}"
+            );
+        }
+        assert!(source.issue("acme/../x", 7).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_pull_request_state_reads_its_head_mergeability_and_every_check_run() {
         let dir = tempfile::tempdir().unwrap();
         let mut pull: Json = serde_json::from_str(PULL).unwrap();
         pull["head"]["repo"] = serde_json::json!({"full_name": "acme/widgets"});
         pull["draft"] = true.into();
         pull["mergeable_state"] = "CLEAN".into();
+        pull["html_url"] = "https://github.com/acme/widgets/pull/529".into();
+        pull["merged"] = false.into();
         let source = GhSource::with_gh(fake_gh_with(
             dir.path(),
             &[
@@ -1416,7 +1550,23 @@ case "$last" in
                 head_sha: "6dcb09b5b57875f334f61aebed695e2e4193db5e".into(),
                 draft: true,
                 mergeable_state: "clean".into(),
-                checks: vec![Some("failure".into()), Some("success".into()), None],
+                checks: vec![
+                    CheckRun {
+                        name: "test".into(),
+                        conclusion: Some("failure".into())
+                    },
+                    CheckRun {
+                        name: "lint".into(),
+                        conclusion: Some("success".into())
+                    },
+                    CheckRun {
+                        name: "build (macos)".into(),
+                        conclusion: None
+                    },
+                ],
+                url: "https://github.com/acme/widgets/pull/529".into(),
+                state: "open".into(),
+                merged: false,
             }
         );
         assert!(!state.green(), "a failed and a running check");
@@ -1429,6 +1579,53 @@ case "$last" in
         );
         assert!(source.pull_request_state("acme/../x", 529).await.is_err());
         assert!(source.pull_request_state("acme/widgets", 7).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pull_request_files_read_each_path_status_count_and_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = serde_json::json!([
+            {"filename": "src/a.rs", "status": "modified", "additions": 2, "deletions": 1,
+             "patch": "@@ -1 +1,2 @@\n-a\n+b\n+c"},
+            {"filename": "logo.png", "status": "renamed", "previous_filename": "old.png",
+             "additions": 0, "deletions": 0},
+        ]);
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[("*/files*", "files.http", ok(&files.to_string()))],
+        ));
+        assert_eq!(
+            source
+                .pull_request_files("acme/widgets", 529)
+                .await
+                .unwrap(),
+            [
+                PullRequestFile {
+                    path: "src/a.rs".into(),
+                    previous_path: None,
+                    status: "modified".into(),
+                    additions: 2,
+                    deletions: 1,
+                    patch: Some("@@ -1 +1,2 @@\n-a\n+b\n+c".into()),
+                },
+                PullRequestFile {
+                    path: "logo.png".into(),
+                    previous_path: Some("old.png".into()),
+                    status: "renamed".into(),
+                    additions: 0,
+                    deletions: 0,
+                    patch: None,
+                },
+            ]
+        );
+        assert_eq!(
+            calls(dir.path()),
+            [
+                "api --method GET --include -H Accept: application/vnd.github+json repos/acme/widgets/pulls/529/files?per_page=100"
+            ]
+        );
+        assert!(source.pull_request_files("acme/../x", 529).await.is_err());
     }
 
     #[cfg(unix)]
