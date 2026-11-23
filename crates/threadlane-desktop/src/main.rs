@@ -473,6 +473,9 @@ struct Desktop {
     task_composer: Entity<TextareaState>,
     /// The Memory tab's editor.
     memory_editor: Entity<TextareaState>,
+    /// The Team -> Skills editor's slug and Markdown content.
+    skill_slug: Entity<InputState>,
+    skill_editor: Entity<TextareaState>,
     dream_cadence: Entity<InputState>,
     /// The Add space form's name and join code.
     space_name: Entity<InputState>,
@@ -481,6 +484,9 @@ struct Desktop {
     shown: mpsc::UnboundedSender<SpaceFeedItem>,
     /// Text to put in the memory editor at the next render.
     fill_editor: Option<String>,
+    /// Text to put in the skills editor at the next render.
+    fill_skill_slug: Option<String>,
+    fill_skill_editor: Option<String>,
     /// Empty the Add space form at the next render.
     clear_join: bool,
     /// The new project form's name and description.
@@ -555,6 +561,13 @@ impl Desktop {
         let composer = components::composer::input("Tell your team what you need…", window, cx);
         let task_composer = components::composer::input("Add to this task…", window, cx);
         let memory_editor = cx.new(|cx| TextareaState::new(window, cx).rows(16));
+        let skill_slug =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. rust-pr-review"));
+        let skill_editor = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(16)
+                .placeholder("# Skill Title\n\nInstructions and checklist…")
+        });
         let agent_edit_instructions = cx.new(|cx| TextareaState::new(window, cx).rows(7));
         let dream_cadence =
             cx.new(|cx| InputState::new(window, cx).placeholder("daily 02:00 or every 6h"));
@@ -788,11 +801,15 @@ impl Desktop {
             pacing_inputs,
             task_composer,
             memory_editor,
+            skill_slug,
+            skill_editor,
             dream_cadence,
             space_name,
             join_code,
             shown,
             fill_editor: None,
+            fill_skill_slug: None,
+            fill_skill_editor: None,
             clear_join: false,
             project_name,
             project_description,
@@ -985,6 +1002,9 @@ impl Desktop {
                         .queue(parts);
                     return;
                 }
+                if matches!(tab, Tab::Conversation | Tab::Tasks) {
+                    self.load_space_skills(space.clone(), cx);
+                }
                 let (fresh_tasks, fresh_lead) = parts;
                 if tab == Tab::Routines {
                     self.load_routines(vec![(space.clone(), project.clone())], cx);
@@ -1055,6 +1075,7 @@ impl Desktop {
                 }));
             }
             Screen::Task { space, task } => {
+                self.load_space_skills(space.clone(), cx);
                 // The feed runs live and summarizes a finished task, so its newest page always loads.
                 self.load_task_activity(space.clone(), task, None, cx);
                 let for_repos = Arc::clone(&core);
@@ -1101,6 +1122,16 @@ impl Desktop {
                 );
             }
             Screen::Agents(scope) => {
+                let skill_spaces: Vec<String> = self
+                    .state
+                    .spaces()
+                    .iter()
+                    .filter(|space| scope.as_deref().is_none_or(|s| s == space.name))
+                    .map(|space| space.name.clone())
+                    .collect();
+                for space in skill_spaces {
+                    self.load_space_skills(space, cx);
+                }
                 let projects = self
                     .state
                     .targets()
@@ -1154,6 +1185,15 @@ impl Desktop {
                 );
             }
             Screen::Home => {
+                let skill_spaces: Vec<String> = self
+                    .state
+                    .spaces()
+                    .iter()
+                    .map(|space| space.name.clone())
+                    .collect();
+                for space in skill_spaces {
+                    self.load_space_skills(space, cx);
+                }
                 let projects = self.state.timeline_projects();
                 self.run(
                     async move { load_timeline(&*core.read().await, projects).await },
@@ -2051,6 +2091,14 @@ impl Render for Desktop {
         }
         if let Some(text) = self.fill_editor.take() {
             self.memory_editor
+                .update(cx, |editor, cx| editor.set_value(text, window, cx));
+        }
+        if let Some(slug) = self.fill_skill_slug.take() {
+            self.skill_slug
+                .update(cx, |field, cx| field.set_value(slug, window, cx));
+        }
+        if let Some(text) = self.fill_skill_editor.take() {
+            self.skill_editor
                 .update(cx, |editor, cx| editor.set_value(text, window, cx));
         }
         if std::mem::take(&mut self.clear_join) {

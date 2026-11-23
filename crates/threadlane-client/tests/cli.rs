@@ -515,6 +515,7 @@ impl HubApi for FakeHub {
                     result: None,
                     created_at: Timestamp::from_millis(1_000),
                     publication_blocker: None,
+                    playbooks: Vec::new(),
                 },
             }),
             other => Err(ApiError::Invalid(format!("unsupported {other:?}"))),
@@ -649,6 +650,7 @@ fn agent(name: &str, role: &str, instructions: &str) -> Agent {
         models: json!({}),
         tools: json!({}),
         skills: Vec::new(),
+        playbooks: Vec::new(),
         requirements: json!({}),
     }
 }
@@ -1849,6 +1851,7 @@ async fn the_cli_edits_an_agent_and_deletes_one_after_its_name_is_typed() {
 
     let changed = |name: Option<&str>, role: Option<&str>| OrgRequest::UpdateAgent {
         skills: None,
+        playbooks: None,
         agent: if name.is_some() { "Reviewer" } else { "Critic" }.to_owned(),
         name: name.map(str::to_owned),
         role: role.map(str::to_owned),

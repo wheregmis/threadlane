@@ -4,6 +4,7 @@ use gpui_kit::component::button::{ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
@@ -19,7 +20,7 @@ use super::agent_edit::backend_picker;
 use super::{empty, gap_line};
 use crate::components::{button, card, count, field, meta, page_header, section};
 use crate::icons::AppIcon;
-use crate::tokens::{FORM_WIDTH, LG, MD, SCROLLBAR_GUTTER, SM, TYPE_META, XL, XS};
+use crate::tokens::{BADGE_RADIUS, FORM_WIDTH, LG, MD, SCROLLBAR_GUTTER, SM, TYPE_META, XL, XS};
 use crate::{Desktop, Screen, Tab};
 
 impl Desktop {
@@ -37,13 +38,16 @@ impl Desktop {
             return self.agent_edit_view(edit, cx).into_any_element();
         }
         let team_mode = self.state.team_view_mode();
+        let scoped = scope.map(str::to_owned);
         let mode_toggle = ButtonGroup::new("team-view-mode").children(
             [
                 (TeamViewMode::Overview, "Agents"),
+                (TeamViewMode::Skills, "Skills"),
                 (TeamViewMode::Topology, "Topology"),
             ]
             .into_iter()
             .map(|(mode, label)| {
+                let scoped = scoped.clone();
                 button(label)
                     .small()
                     .outline()
@@ -51,59 +55,81 @@ impl Desktop {
                     .selected(team_mode == mode)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.set_team_view_mode(mode);
+                        if mode == TeamViewMode::Skills
+                            && let Some(space) = scoped
+                                .clone()
+                                .or_else(|| this.state.skills_space().map(str::to_owned))
+                        {
+                            // The editor writes back to skills_space, so it must name the shown space.
+                            this.state.set_skills_space(&space);
+                            this.sync_selected_skill_editor(&space);
+                            this.load_space_skills(space, cx);
+                        }
                         cx.notify();
                     }))
             }),
         );
 
-        let topology = team_mode == TeamViewMode::Topology;
-        let mut spaces = v_flex()
-            .w_full()
-            .min_w_0()
-            .gap(XL)
-            .when(topology, |body| body.flex_1());
-        for space in self
-            .state
-            .spaces()
-            .iter()
-            .filter(|space| scope.is_none_or(|name| space.name == name))
-        {
-            let mut part = v_flex()
+        let body = if team_mode == TeamViewMode::Skills {
+            self.skills_workspace(scope, when, cx)
+        } else {
+            let topology = team_mode == TeamViewMode::Topology;
+            let mut spaces = v_flex()
+                .w_full()
                 .min_w_0()
-                .gap(MD)
-                .when(topology, |part| part.flex_1());
-            if scope.is_none() {
-                part = part.child(section(space.name.clone()));
-            }
-            if let Some(gap) = space.gap(Part::Agents) {
-                part = part.child(gap_line(&gap, "agents", &space.name, cx));
-            }
-            if topology {
-                let topo = self.state.agent_topology(
-                    &space.name,
-                    self.state.topology_project(&space.name),
-                    when,
-                );
-                if let Some(gap) = space.gap(Part::Projects) {
-                    part = part.child(gap_line(&gap, "projects", &space.name, cx));
+                .gap(XL)
+                .when(topology, |body| body.flex_1());
+            for space in self
+                .state
+                .spaces()
+                .iter()
+                .filter(|space| scope.is_none_or(|name| space.name == name))
+            {
+                let mut part = v_flex()
+                    .min_w_0()
+                    .gap(MD)
+                    .when(topology, |part| part.flex_1());
+                if scope.is_none() {
+                    part = part.child(section(space.name.clone()));
                 }
-                part = part.child(self.agent_topology_view(&space.name, topo, cx));
-            } else {
-                // Give each panel a readable width; flex-wrap stacks them when they
-                // no longer fit side by side, including at larger text sizes.
-                let panel = || v_flex().flex_1().flex_basis(rems(25.)).min_w_0();
-                part = part.child(
-                    h_flex()
-                        .min_w_0()
-                        .items_start()
-                        .flex_wrap()
-                        .gap(XL)
-                        .child(panel().child(self.space_agent_roster(space, cx)))
-                        .child(panel().child(self.space_project_assignments(space, cx))),
-                );
+                if let Some(gap) = space.gap(Part::Agents) {
+                    part = part.child(gap_line(&gap, "agents", &space.name, cx));
+                }
+                if topology {
+                    let topo = self.state.agent_topology(
+                        &space.name,
+                        self.state.topology_project(&space.name),
+                        when,
+                    );
+                    if let Some(gap) = space.gap(Part::Projects) {
+                        part = part.child(gap_line(&gap, "projects", &space.name, cx));
+                    }
+                    part = part.child(self.agent_topology_view(&space.name, topo, cx));
+                } else {
+                    // Give each panel a readable width; flex-wrap stacks them when they
+                    // no longer fit side by side, including at larger text sizes.
+                    let panel = || v_flex().flex_1().flex_basis(rems(25.)).min_w_0();
+                    part = part.child(
+                        h_flex()
+                            .min_w_0()
+                            .items_start()
+                            .flex_wrap()
+                            .gap(XL)
+                            .child(panel().child(self.space_agent_roster(space, cx)))
+                            .child(panel().child(self.space_project_assignments(space, cx))),
+                    );
+                }
+                spaces = spaces.child(part);
             }
-            spaces = spaces.child(part);
-        }
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .overflow_y_scrollbar()
+                .id("agents")
+                .child(spaces.when(!topology, |body| body.pr(SCROLLBAR_GUTTER)))
+                .into_any_element()
+        };
 
         v_flex()
             .flex_1()
@@ -128,15 +154,7 @@ impl Desktop {
                     )
                     .child(div().flex_none().child(mode_toggle)),
             )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .overflow_y_scrollbar()
-                    .id("agents")
-                    .child(spaces.when(!topology, |body| body.pr(SCROLLBAR_GUTTER))),
-            )
+            .child(body)
             .into_any_element()
     }
 
@@ -290,7 +308,19 @@ impl Desktop {
                                     .children(execution.map(|line| {
                                         meta(line, cx).max_w_full().whitespace_normal()
                                     })),
-                            ),
+                            )
+                            .children((!agent.playbooks.is_empty()).then(|| {
+                                h_flex()
+                                    .gap(XS)
+                                    .flex_wrap()
+                                    .children(agent.playbooks.iter().map(|slug| {
+                                        Tag::secondary()
+                                            .small()
+                                            .rounded(BADGE_RADIUS)
+                                            .text_size(TYPE_META)
+                                            .child(format!("/skill:{slug}"))
+                                    }))
+                            })),
                     )
                     .child(
                         button(SharedString::from(format!(
@@ -468,6 +498,7 @@ impl Desktop {
             .child(meta("Instructions", cx))
             .child(field(&self.agent_instructions))
             .child(backends)
+            .child(self.playbook_picker(&space, false, cx))
             .child(self.skill_picker(false, cx))
             .child(
                 div()

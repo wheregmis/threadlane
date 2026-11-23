@@ -12,7 +12,7 @@ use threadlane_core::model::{Agent, Cell, Mode};
 use threadlane_core::tools::Tier;
 use threadlane_desktop::{Activity, add_repository, copy_agent, describe, mode_label};
 
-use crate::Desktop;
+use crate::{Desktop, Screen};
 
 impl Desktop {
     /// Requests a lane stop, then reloads the screen with the hub's lane status.
@@ -72,6 +72,7 @@ impl Desktop {
     pub(crate) fn open_agent_form(&mut self, space: String, cx: &mut Context<Self>) {
         self.state.open_agent_form(&space);
         self.load_agent_skills(space.clone(), None, cx);
+        self.load_space_skills(space.clone(), cx);
         let core = Arc::clone(&self.core);
         self.run(
             async move {
@@ -132,6 +133,7 @@ impl Desktop {
         }
         let backends = self.state.agent_form().backends();
         let skills = self.state.agent_form().skills.clone();
+        let playbooks = self.state.agent_form().playbooks.clone();
         let models = threadlane_core::model::BackendKind::ALL
             .iter()
             .zip(&self.agent_models)
@@ -150,7 +152,7 @@ impl Desktop {
                 let created = core
                     .read()
                     .await
-                    .create_agent_profile(
+                    .create_agent_profile_with_playbooks(
                         Some(&space),
                         &name,
                         &role,
@@ -158,6 +160,7 @@ impl Desktop {
                         &backends,
                         models,
                         skills,
+                        playbooks,
                     )
                     .await;
                 (space, created)
@@ -691,6 +694,228 @@ impl Desktop {
                     )));
                 }
                 Err(error) => this.state.report(Activity::Failed(describe(&error))),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn load_space_skills(&self, space: String, cx: &mut Context<Self>) {
+        let selected = self.state.skill_selected_slug(&space).map(str::to_owned);
+        let core = Arc::clone(&self.core);
+        self.run(
+            async move {
+                threadlane_desktop::load_skills(&*core.read().await, &space, selected).await
+            },
+            |this, loaded, _| {
+                let space = loaded.space.clone();
+                if let Some(content) = this.state.apply_skills(loaded) {
+                    this.fill_editor_for(&space, content);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Fills the shared skill editor only while `space` is the one it shows,
+    /// so a late result for another space can't replace the open skill.
+    fn fill_editor_for(&mut self, space: &str, content: String) {
+        if self.state.skills_space() == Some(space) {
+            self.fill_skill_editor = Some(content);
+        }
+    }
+
+    pub(crate) fn sync_selected_skill_editor(&mut self, space: &str) {
+        if let Some(skill) = self.state.skill_selected(space) {
+            self.fill_skill_editor = Some(skill.content.clone());
+        }
+    }
+
+    pub(crate) fn open_skill(
+        &mut self,
+        space: String,
+        slug: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(slug) = slug {
+            if let Some(content) = self.state.open_skill_view(&space, &slug) {
+                self.fill_skill_editor = Some(content);
+            }
+        } else {
+            self.state.close_agent_edit();
+            self.state.set_skills_space(&space);
+            self.state
+                .set_team_view_mode(threadlane_desktop::TeamViewMode::Skills);
+            self.sync_selected_skill_editor(&space);
+        }
+        self.go(Screen::Agents(Some(space)), cx);
+    }
+
+    pub(crate) fn select_space_skill(
+        &mut self,
+        space: String,
+        slug: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(content) = self.state.select_skill(&space, &slug) {
+            self.fill_skill_editor = Some(content);
+        }
+        self.load_space_skills(space, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn start_new_space_skill(&mut self, space: String, cx: &mut Context<Self>) {
+        self.state.start_new_skill(&space);
+        self.fill_skill_slug = Some(String::new());
+        self.fill_skill_editor = Some("# Skill Title\n\n- Checklist item\n".to_owned());
+        cx.notify();
+    }
+
+    pub(crate) fn save_space_skill(&mut self, space: String, cx: &mut Context<Self>) {
+        let creating = self.state.skill_creating(&space);
+        let slug = if creating {
+            self.skill_slug.read(cx).value().trim().to_ascii_lowercase()
+        } else if let Some(selected) = self.state.skill_selected_slug(&space) {
+            selected.to_owned()
+        } else {
+            return;
+        };
+        if !threadlane_core::memory::is_valid_skill_slug(&slug) {
+            self.state.fail_skill_validation(
+                &space,
+                "Use a lowercase slug with letters, digits, '-' or '_' (no spaces or '/')."
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let content = self.skill_editor.read(cx).value().to_string();
+        if content.trim().is_empty() {
+            self.state.fail_skill_validation(
+                &space,
+                "Add Markdown instructions before saving the skill.".to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        self.submit_skill_write(space, slug, content, cx);
+    }
+
+    pub(crate) fn save_starter_skill(
+        &mut self,
+        space: String,
+        slug: String,
+        content: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.submit_skill_write(space, slug, content, cx);
+    }
+
+    fn submit_skill_write(
+        &mut self,
+        space: String,
+        slug: String,
+        content: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.begin_skill_save(&space) {
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        self.state.report(Activity::Working(format!(
+            "Saving /skill:{slug} in {space}…"
+        )));
+        self.run(
+            async move {
+                threadlane_desktop::save_skill(&*core.read().await, &space, &slug, content).await
+            },
+            |this, changed, cx| {
+                let space = changed.space.clone();
+                match this.state.apply_skill_change(changed) {
+                    Ok((note, next)) => {
+                        this.state.report(Activity::Done(note));
+                        if let Some(text) = next {
+                            this.fill_editor_for(&space, text);
+                        }
+                        this.load_space_skills(space, cx);
+                    }
+                    Err(why) => this.state.report(Activity::Failed(why)),
+                }
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn delete_space_skill(
+        &mut self,
+        space: String,
+        slug: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.begin_skill_save(&space) {
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        self.state.report(Activity::Working(format!(
+            "Deleting /skill:{slug} in {space}…"
+        )));
+        self.run(
+            async move {
+                threadlane_desktop::delete_skill(&*core.read().await, &space, &slug).await
+            },
+            |this, changed, cx| {
+                let space = changed.space.clone();
+                match this.state.apply_skill_change(changed) {
+                    Ok((note, next)) => {
+                        this.state.report(Activity::Done(note));
+                        this.fill_editor_for(&space, next.unwrap_or_default());
+                        this.load_space_skills(space, cx);
+                    }
+                    Err(why) => this.state.report(Activity::Failed(why)),
+                }
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn restore_space_skill_version(
+        &mut self,
+        space: String,
+        slug: String,
+        version: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.begin_skill_save(&space) {
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        self.state.report(Activity::Working(format!(
+            "Restoring /skill:{slug} v{version} in {space}…"
+        )));
+        self.run(
+            async move {
+                threadlane_desktop::restore_skill_version(
+                    &*core.read().await,
+                    &space,
+                    &slug,
+                    version,
+                )
+                .await
+            },
+            |this, changed, cx| {
+                let space = changed.space.clone();
+                match this.state.apply_skill_change(changed) {
+                    Ok((note, next)) => {
+                        this.state.report(Activity::Done(note));
+                        if let Some(text) = next {
+                            this.fill_editor_for(&space, text);
+                        }
+                        this.load_space_skills(space, cx);
+                    }
+                    Err(why) => this.state.report(Activity::Failed(why)),
+                }
             },
             cx,
         );

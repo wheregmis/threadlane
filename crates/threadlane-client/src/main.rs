@@ -460,6 +460,9 @@ enum AgentCommand {
         /// Replace the profile's skill list. Repeat for multiple skills.
         #[arg(long = "skill", value_name = "BACKEND=NAME", value_parser = backend_skill)]
         skills: Vec<threadlane_core::model::SkillBinding>,
+        /// Attach space skill playbooks by slug. Repeat for multiple playbooks.
+        #[arg(long = "playbook", value_name = "SLUG")]
+        playbooks: Vec<String>,
     },
     /// Change an agent; options left out keep their value. It applies from
     /// the agent's next run.
@@ -495,6 +498,12 @@ enum AgentCommand {
         /// Remove every explicit skill binding.
         #[arg(long, conflicts_with = "skills")]
         clear_skills: bool,
+        /// Replace the profile's space skill playbook slugs. Repeat for multiple.
+        #[arg(long = "playbook", value_name = "SLUG")]
+        playbooks: Vec<String>,
+        /// Remove every attached space skill playbook.
+        #[arg(long, conflicts_with = "playbooks")]
+        clear_playbooks: bool,
     },
     /// Delete an agent with its bindings and standing rules, after you type
     /// its name. Finished tasks keep its name.
@@ -808,6 +817,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     instructions,
                     mut backends,
                     skills,
+                    playbooks,
                     models,
                 },
         } => {
@@ -827,7 +837,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 }
             }
             let agent = core
-                .create_agent_profile(
+                .create_agent_profile_with_playbooks(
                     space.as_deref(),
                     &name.unwrap_or_default(),
                     &role.unwrap_or_default(),
@@ -835,6 +845,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     &backends,
                     models.into_iter().collect(),
                     skills,
+                    playbooks,
                 )
                 .await?;
             println!("created agent {} ({})", agent.name, agent.role);
@@ -850,6 +861,8 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                     instructions_file,
                     skills,
                     clear_skills,
+                    playbooks,
+                    clear_playbooks,
                     backends,
                     models,
                 },
@@ -863,6 +876,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
             };
             let request = OrgRequest::UpdateAgent {
                 skills: (clear_skills || !skills.is_empty()).then_some(skills),
+                playbooks: (clear_playbooks || !playbooks.is_empty()).then_some(playbooks),
                 agent,
                 name,
                 role,

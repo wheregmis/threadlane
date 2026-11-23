@@ -570,6 +570,7 @@ mod tests {
                 tools: serde_json::json!({}),
                 requirements: serde_json::json!({}),
                 skills: Vec::new(),
+                playbooks: Vec::new(),
             })
             .await
             .unwrap();
@@ -595,6 +596,7 @@ mod tests {
                 repositories: Vec::new(),
                 parent_task_id: parent,
                 depends_on,
+                playbooks: Vec::new(),
                 origin: TaskOrigin::User,
                 status: TaskStatus::Queued,
                 priority: 0,

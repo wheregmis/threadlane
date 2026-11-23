@@ -31,6 +31,7 @@ pub enum SpaceTasksViewMode {
 pub enum TeamViewMode {
     #[default]
     Overview,
+    Skills,
     Topology,
 }
 

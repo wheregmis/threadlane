@@ -24,6 +24,7 @@ mod project;
 mod routines;
 mod settings;
 pub(crate) mod shell;
+mod skills;
 mod task;
 
 /// What a part shows instead of its contents: that it is loading, or the
@@ -78,6 +79,7 @@ impl Desktop {
                 | Consequence::RevokeRule(..)
                 | Consequence::Unpair(..)
                 | Consequence::DeleteMemory(..)
+                | Consequence::DeleteSkill(..)
         );
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |dialog, _, _| {
@@ -113,6 +115,7 @@ impl Desktop {
             Consequence::DeleteMemory(space, project, path) => {
                 self.write_memory(space, project, path, None, cx)
             }
+            Consequence::DeleteSkill(space, slug) => self.delete_space_skill(space, slug, cx),
             Consequence::SetCeiling(space, Some(project), mode) => {
                 self.set_ceiling(space, project, mode, cx)
             }

@@ -240,6 +240,7 @@ async fn scenario(seed: u64, project_count: usize, rounds: usize) {
                             agent: ENGINEER.into(),
                             repositories: Vec::new(),
                             depends_on: Vec::new(),
+                            playbooks: Vec::new(),
                             client_request_id: key,
                         })
                         .await

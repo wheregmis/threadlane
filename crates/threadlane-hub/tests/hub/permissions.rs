@@ -249,6 +249,7 @@ async fn task_run(hub: &TestHub, project: ProjectId, agent: AgentId) -> (Lease, 
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await
@@ -1040,6 +1041,7 @@ async fn widgets_task(
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await

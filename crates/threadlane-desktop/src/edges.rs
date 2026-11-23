@@ -185,6 +185,7 @@ pub enum Consequence {
     RevokeRule(String, StandingRuleId),
     Unpair(String),
     DeleteMemory(String, String, String),
+    DeleteSkill(String, String),
     SetCeiling(String, Option<String>, Mode),
     ArchiveProject(String, String),
 }
@@ -226,6 +227,19 @@ impl AppState {
                 "This app forgets the space and its key, and you will need to pair again to access its projects and memory here.".to_owned(), "Unpair"),
             Consequence::DeleteMemory(_, _, path) => (format!("Delete {path}?"),
                 "Agents will lose access to this file in current memory.".to_owned(), "Delete file"),
+            Consequence::DeleteSkill(space, slug) => {
+                let title = self
+                    .space_skills(space)
+                    .iter()
+                    .find(|skill| skill.slug == *slug)
+                    .map_or_else(|| format!("/skill:{slug}"), |skill| skill.title.clone());
+                (
+                    format!("Delete \"{title}\"?"),
+                    "Agents and tasks attached to this skill will no longer load its playbook, while its version history is kept."
+                        .to_owned(),
+                    "Delete skill",
+                )
+            }
             Consequence::ArchiveProject(_, project) => (
                 format!("Archive {project}?"),
                 "Work and timers stop, and the project's history stays readable under Archived. Its repository remotes stay registered to this project and unavailable to other spaces.".to_owned(),

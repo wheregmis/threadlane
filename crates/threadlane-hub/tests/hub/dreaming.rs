@@ -626,6 +626,7 @@ async fn dream_reports_go_to_upstream_once_after_approval() {
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await
@@ -1477,6 +1478,7 @@ async fn dream_freezes_membership_and_pages_more_than_twenty_decisions() {
                 priority: 0,
                 created_by_call: None,
                 created_at: hub.clock.now(),
+                playbooks: Vec::new(),
             },
         )
         .await
@@ -1674,6 +1676,7 @@ async fn sessions_keep_cut_tasks_structured_and_can_list_only_recent_ones() {
         priority: 0,
         created_by_call: None,
         created_at: hub.clock.now(),
+        playbooks: Vec::new(),
     };
     let big = hub
         .db
@@ -1825,6 +1828,7 @@ async fn sessions_page_every_task_past_the_old_cap_of_two_hundred() {
                     priority: 0,
                     created_by_call: None,
                     created_at: hub.clock.now(),
+                    playbooks: Vec::new(),
                 },
             )
             .await

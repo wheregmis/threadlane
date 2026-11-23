@@ -49,6 +49,7 @@ mod prose;
 mod review;
 mod routines;
 mod settings;
+mod skills;
 mod tasks;
 mod timeline;
 
@@ -107,6 +108,11 @@ pub use routines::{
 pub use settings::{
     Appearance, Notifications, PACING_FIELDS, PacingField, SETTINGS_FILE, SpaceRow, load_metrics,
     parse_pacing,
+};
+pub use skills::{
+    SKILL_STARTERS, SkillChange, SkillStarter, SkillsLoad, SpaceSkill, append_skill_mention,
+    delete_skill, load_skills, remove_skill_mention, restore_skill_version, save_skill,
+    skill_title, toggle_skill_mention,
 };
 pub use tasks::{
     BoardCard, BoardMove, Changes, Column, InProgress, LatestStep, Milestone, MilestoneKind,
@@ -1325,8 +1331,12 @@ pub struct AppState {
     project_tasks_view: ProjectTasksViewMode,
     /// Active view mode on the space-wide `Tasks` screen (List | Graph).
     space_tasks_view_mode: SpaceTasksViewMode,
-    /// Active view mode on the `Team` screen (Overview | Topology).
+    /// Active view mode on the `Team` screen (Overview | Skills | Topology).
     team_view_mode: TeamViewMode,
+    /// Selected space when viewing the unscoped `Team -> Skills` tab.
+    skills_space: Option<String>,
+    /// Per-space composable skills library state.
+    skills: HashMap<String, skills::SkillsView>,
     /// Optional project scope on the Team Topology canvas, keyed by space name.
     topology_project: HashMap<String, String>,
     /// Currently selected `(space, agent)` on the Team Topology canvas for inline mode dialing.
@@ -2218,6 +2228,10 @@ impl AppState {
         self.tasks.retain(|(space, _), _| space != name);
         self.memory.retain(|(space, _), _| space != name);
         self.dreaming.retain(|(space, _), _| space != name);
+        self.skills.remove(name);
+        if self.skills_space.as_deref() == Some(name) {
+            self.skills_space = None;
+        }
         self.metrics.remove(name);
         self.machine_history.remove(name);
         self.task_activity.retain(|(space, _)| space != name);

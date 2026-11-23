@@ -45,6 +45,8 @@ pub struct AgentForm {
     /// The index in [`BACKENDS`] picked.
     pub backends: usize,
     pub skills: Vec<threadlane_core::model::SkillBinding>,
+    /// Space-wide composable skill playbook slugs attached to this agent.
+    pub playbooks: Vec<String>,
     /// The hub's skills and the backends that could not list theirs.
     pub installed_skills: Option<Result<InstalledSkills, String>>,
     /// What "Start from a template" offers: `None` while the hub has not
@@ -106,6 +108,8 @@ pub struct TaskForm {
     pub repositories: Vec<String>,
     /// The tasks picked that it waits for.
     pub depends_on: Vec<TaskId>,
+    /// Additional space skill playbook slugs picked for this task.
+    pub playbooks: Vec<String>,
     /// Whether the task's work is kept in a draft pull request.
     pub draft_pr: bool,
 }
@@ -119,6 +123,11 @@ impl TaskForm {
     /// Picks `task` to wait for, or drops it if picked.
     pub fn toggle_dependency(&mut self, task: TaskId) {
         toggle(&mut self.depends_on, task);
+    }
+
+    /// Picks `slug` playbook, or drops it if picked.
+    pub fn toggle_playbook(&mut self, slug: &str) {
+        toggle(&mut self.playbooks, slug.to_owned());
     }
 }
 
@@ -273,7 +282,7 @@ pub async fn add_repository(
 ///
 /// The hub's refusal, for example a name it already has.
 pub async fn copy_agent(core: &ClientCore, agent: &Agent, to: &str) -> Result<Agent, ClientError> {
-    core.create_agent_profile(
+    core.create_agent_profile_with_playbooks(
         Some(to),
         &agent.name,
         &agent.role,
@@ -287,6 +296,7 @@ pub async fn copy_agent(core: &ClientCore, agent: &Agent, to: &str) -> Result<Ag
             })
             .collect(),
         agent.skills.clone(),
+        agent.playbooks.clone(),
     )
     .await
 }
@@ -528,6 +538,7 @@ impl AppState {
             agent,
             repositories: form.repositories.clone(),
             depends_on: form.depends_on.clone(),
+            playbooks: form.playbooks.clone(),
             draft_pr: form.draft_pr,
             request_id: None,
         })
