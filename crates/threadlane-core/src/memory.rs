@@ -196,7 +196,7 @@ pub fn check(path: &str, content: &str) -> Result<(), String> {
              loaded into every run: trim it, or move detail into notes, which are read on demand"
         ));
     }
-    if path.starts_with(SKILLS_PREFIX) && !is_skill(path) {
+    if (path.starts_with(SKILLS_PREFIX) && !is_skill(path)) || path == "space/skills" {
         return Err(format!(
             "{path} must be a direct .md file under {SKILLS_PREFIX} with a lowercase slug \
              (letters, digits, '-' or '_', max {MAX_SKILL_SLUG_LEN} bytes)"

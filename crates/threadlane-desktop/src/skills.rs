@@ -265,17 +265,19 @@ pub fn append_skill_mention(text: &str, slug: &str) -> String {
 pub fn remove_skill_mention(text: &str, slug: &str) -> String {
     let needle = format!("/skill:{slug}");
     let mut lines = Vec::new();
+    let is_mention = |token: &str| {
+        token
+            .trim_start_matches(['(', '[', '{', '"', '\''])
+            .trim_end_matches([')', ']', '}', '"', '\'', ',', ';', '.', ':', '!', '?'])
+            .eq_ignore_ascii_case(&needle)
+    };
     for line in text.lines() {
-        let mut kept = Vec::new();
-        for token in line.split_whitespace() {
-            let clean = token
-                .trim_start_matches(['(', '[', '{', '"', '\''])
-                .trim_end_matches([')', ']', '}', '"', '\'', ',', ';', '.', ':', '!', '?']);
-            if clean.eq_ignore_ascii_case(&needle) {
-                continue;
-            }
-            kept.push(token);
+        // Lines without the mention keep their spacing, so code blocks stay indented.
+        if !line.split_whitespace().any(is_mention) {
+            lines.push(line.to_owned());
+            continue;
         }
+        let kept: Vec<&str> = line.split_whitespace().filter(|t| !is_mention(t)).collect();
         lines.push(kept.join(" "));
     }
     let mut joined = lines.join("\n");

@@ -2228,6 +2228,10 @@ impl AppState {
         self.tasks.retain(|(space, _), _| space != name);
         self.memory.retain(|(space, _), _| space != name);
         self.dreaming.retain(|(space, _), _| space != name);
+        self.skills.remove(name);
+        if self.skills_space.as_deref() == Some(name) {
+            self.skills_space = None;
+        }
         self.metrics.remove(name);
         self.machine_history.remove(name);
         self.task_activity.retain(|(space, _)| space != name);

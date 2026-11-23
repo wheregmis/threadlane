@@ -8494,6 +8494,13 @@ async fn space_skills_crud_versioning_rollback_and_mentions() {
         "Audit this diff please"
     );
     assert_eq!(
+        remove_skill_mention(
+            "Run /skill:release-notes\n```py\ndef f():\n    return 1\n```",
+            "release-notes"
+        ),
+        "Run\n```py\ndef f():\n    return 1\n```"
+    );
+    assert_eq!(
         toggle_skill_mention("Ship /skill:release-notes now", "release-notes"),
         "Ship now"
     );

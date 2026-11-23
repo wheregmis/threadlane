@@ -38,6 +38,7 @@ impl Desktop {
             return self.agent_edit_view(edit, cx).into_any_element();
         }
         let team_mode = self.state.team_view_mode();
+        let scoped = scope.map(str::to_owned);
         let mode_toggle = ButtonGroup::new("team-view-mode").children(
             [
                 (TeamViewMode::Overview, "Agents"),
@@ -46,6 +47,7 @@ impl Desktop {
             ]
             .into_iter()
             .map(|(mode, label)| {
+                let scoped = scoped.clone();
                 button(label)
                     .small()
                     .outline()
@@ -54,8 +56,12 @@ impl Desktop {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.set_team_view_mode(mode);
                         if mode == TeamViewMode::Skills
-                            && let Some(space) = this.state.skills_space().map(str::to_owned)
+                            && let Some(space) = scoped
+                                .clone()
+                                .or_else(|| this.state.skills_space().map(str::to_owned))
                         {
+                            // The editor writes back to skills_space, so it must name the shown space.
+                            this.state.set_skills_space(&space);
                             this.sync_selected_skill_editor(&space);
                             this.load_space_skills(space, cx);
                         }

@@ -708,12 +708,21 @@ impl Desktop {
                 threadlane_desktop::load_skills(&*core.read().await, &space, selected).await
             },
             |this, loaded, _| {
+                let space = loaded.space.clone();
                 if let Some(content) = this.state.apply_skills(loaded) {
-                    this.fill_skill_editor = Some(content);
+                    this.fill_editor_for(&space, content);
                 }
             },
             cx,
         );
+    }
+
+    /// Fills the shared skill editor only while `space` is the one it shows,
+    /// so a late result for another space can't replace the open skill.
+    fn fill_editor_for(&mut self, space: &str, content: String) {
+        if self.state.skills_space() == Some(space) {
+            self.fill_skill_editor = Some(content);
+        }
     }
 
     pub(crate) fn sync_selected_skill_editor(&mut self, space: &str) {
@@ -826,7 +835,7 @@ impl Desktop {
                     Ok((note, next)) => {
                         this.state.report(Activity::Done(note));
                         if let Some(text) = next {
-                            this.fill_skill_editor = Some(text);
+                            this.fill_editor_for(&space, text);
                         }
                         this.load_space_skills(space, cx);
                     }
@@ -860,7 +869,7 @@ impl Desktop {
                 match this.state.apply_skill_change(changed) {
                     Ok((note, next)) => {
                         this.state.report(Activity::Done(note));
-                        this.fill_skill_editor = Some(next.unwrap_or_default());
+                        this.fill_editor_for(&space, next.unwrap_or_default());
                         this.load_space_skills(space, cx);
                     }
                     Err(why) => this.state.report(Activity::Failed(why)),
@@ -901,7 +910,7 @@ impl Desktop {
                     Ok((note, next)) => {
                         this.state.report(Activity::Done(note));
                         if let Some(text) = next {
-                            this.fill_skill_editor = Some(text);
+                            this.fill_editor_for(&space, text);
                         }
                         this.load_space_skills(space, cx);
                     }
