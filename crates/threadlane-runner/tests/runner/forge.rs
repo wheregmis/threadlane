@@ -1100,6 +1100,30 @@ async fn a_batch_merge_stops_at_a_pull_request_that_was_only_queued() {
 }
 
 #[tokio::test]
+async fn a_batch_says_a_merge_whose_state_read_failed_may_have_merged() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    std::fs::write(gh.dir.path().join("state_fails"), "").unwrap();
+    let batch = RepositoryAction::MergeBatch {
+        pulls: vec![
+            (12.try_into().unwrap(), "a".repeat(40)),
+            (16.try_into().unwrap(), "b".repeat(40)),
+        ],
+    };
+    let error = forge
+        .apply("https://github.test/acme/app.git", &batch)
+        .await
+        .unwrap_err();
+    assert!(
+        error.0.starts_with("batch stopped at #12"),
+        "the hub links the stopped PR from this prefix (#746): {error}"
+    );
+    assert!(error.0.contains("may have merged"), "{error}");
+    assert_eq!(gh.invocations().len(), 2, "#16 is not attempted");
+}
+
+#[tokio::test]
 async fn an_approved_image_is_pushed_to_its_own_branch_and_commented_once_approved() {
     use threadlane_core::forge::PullRequestImage;
     let dir = tempfile::tempdir().unwrap();

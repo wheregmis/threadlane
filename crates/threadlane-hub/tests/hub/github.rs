@@ -323,7 +323,7 @@ async fn a_pull_request_the_task_commented_on_reaches_its_lane() {
 
 /// An approved batch merge or mark-ready links each pull request it handled
 /// to the task, as a single call does (#746); one that stopped partway links
-/// only those before the stop.
+/// those up to and including the stop, which may have merged.
 #[tokio::test]
 async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
     let github = FakeGithub::default();
@@ -380,10 +380,15 @@ async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
     routed.sort();
     assert_eq!(
         routed,
-        ["check_run:601", "check_run:602", "check_run:701"],
+        [
+            "check_run:601",
+            "check_run:602",
+            "check_run:701",
+            "check_run:702"
+        ],
         "{events:?}"
     );
-    for number in [601, 602, 701] {
+    for number in [601, 602, 701, 702] {
         assert!(github.calls().contains(&GithubCall::PullRequest {
             target: PullTarget {
                 repository: "acme/widgets".into(),
@@ -468,6 +473,50 @@ async fn a_batch_in_an_unattached_repository_shows_on_the_ended_tasks_page() {
             ("acme/tools".to_owned(), 801),
             ("acme/tools".to_owned(), 802)
         ]
+    );
+}
+
+/// A cached task page also reads a pull request an outcome links later,
+/// however the cache was filled, and keeps the known ones when GitHub then
+/// fails to read them (#746).
+#[tokio::test]
+async fn a_newly_linked_pull_request_joins_the_cached_page_without_dropping_known_ones() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    let head = "a".repeat(40);
+    github.set_pull_request("acme/widgets", 901, Ok(conflicted_draft(&head)));
+    github.set_pull_request("acme/widgets", 902, Ok(conflicted_draft(&head)));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "number": 901 }),
+        json!({ "performed": true, "summary": "Completed the repository action." }),
+    )
+    .await;
+    let numbers = |pulls: Vec<TaskPullRequest>| -> Vec<u64> {
+        let mut numbers: Vec<_> = pulls.iter().map(|pull| pull.number).collect();
+        numbers.sort_unstable();
+        numbers
+    };
+    assert_eq!(numbers(pull_requests(&hub, &task).await), [901]);
+
+    github.set_pull_request("acme/widgets", 901, Err("rate limited".into()));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [902] }),
+        json!({ "performed": true, "summary": "marked #902 ready" }),
+    )
+    .await;
+    assert_eq!(
+        numbers(pull_requests(&hub, &task).await),
+        [901, 902],
+        "the new link is read and the known one is kept"
     );
 }
 

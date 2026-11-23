@@ -158,9 +158,10 @@ fn needs_attention(item: &GithubItem) -> bool {
 }
 
 /// The pull requests an approved batch `merge` or `mark_ready` handled, in
-/// order: all of them when it completed, else those before the one it
-/// stopped at, as the runner's error names it ("batch stopped at #N").
-/// Empty for any other call.
+/// order: all of them when it completed, else those up to and including the
+/// one it stopped at, as the runner's error names it ("batch stopped at
+/// #N"). The stopped one may have merged before its state read failed, and
+/// the task page's status read shows which. Empty for any other call.
 fn batch_handled(
     tool: &str,
     arguments: &serde_json::Value,
@@ -192,7 +193,11 @@ fn batch_handled(
         .and_then(|number| number.parse::<u64>().ok());
     match stopped {
         Some(stopped) if listed.contains(&stopped) => {
-            listed.into_iter().take_while(|n| *n != stopped).collect()
+            let end = listed
+                .iter()
+                .position(|n| *n == stopped)
+                .map_or(0, |at| at + 1);
+            listed.into_iter().take(end).collect()
         }
         _ => Vec::new(),
     }
@@ -749,26 +754,41 @@ impl HubCore {
     /// yet, such as one that ended before this hub started, is read from
     /// GitHub and cached, even when it has none. A read that failed for any
     /// of its pull requests is not cached, so it is tried again next time.
+    /// A cached task also reads each linked pull request the cache lacks,
+    /// such as one a recorded outcome just linked, keeping the known ones.
     pub(crate) async fn task_pull_requests(
         &self,
         task: TaskId,
     ) -> Result<Vec<TaskPullRequest>, HubError> {
-        if let Some(pulls) = self.inner.pull_status.lock().await.get(&task) {
+        let cached = self.inner.pull_status.lock().await.get(&task).cloned();
+        let Some(source) = self.inner.github.as_ref() else {
+            return Ok(cached.unwrap_or_default());
+        };
+        let routes = Routes::read(&self.inner.db).await?;
+        let missing: Vec<_> = routes
+            .work
+            .into_iter()
+            .chain(routes.ended)
+            .filter(|work| {
+                work.task == task
+                    && cached.as_ref().is_none_or(|pulls| {
+                        work.target.number.is_some_and(|number| {
+                            !pulls.iter().any(|pull| {
+                                pull.repository == work.target.repository && pull.number == number
+                            })
+                        })
+                    })
+            })
+            .map(|work| (work, false))
+            .collect();
+        if let Some(pulls) = cached.as_ref()
+            && missing.is_empty()
+        {
             return Ok(pulls.clone());
         }
-        if let Some(source) = self.inner.github.as_ref() {
-            let routes = Routes::read(&self.inner.db).await?;
-            let followed: Vec<_> = routes
-                .work
-                .into_iter()
-                .chain(routes.ended)
-                .filter(|work| work.task == task)
-                .map(|work| (work, false))
-                .collect();
-            if !self.refresh_pull_status(source.as_ref(), &followed).await {
-                let partial = self.inner.pull_status.lock().await.remove(&task);
-                return Ok(partial.unwrap_or_default());
-            }
+        if !self.refresh_pull_status(source.as_ref(), &missing).await && cached.is_none() {
+            let partial = self.inner.pull_status.lock().await.remove(&task);
+            return Ok(partial.unwrap_or_default());
         }
         Ok(self
             .inner

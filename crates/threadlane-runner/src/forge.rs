@@ -515,6 +515,13 @@ impl GitForge {
                         ]),
                     )
                     .await
+                    .map_err(|error| {
+                        ForgeError(format!(
+                            "the merge was requested but its state could not be read, so it \
+                             may have merged; check the PR: {}",
+                            error.0
+                        ))
+                    })
                     .and_then(|state| match state.trim() {
                         "MERGED" => Ok(()),
                         state => Err(ForgeError(format!(
