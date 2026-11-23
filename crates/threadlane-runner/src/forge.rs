@@ -43,6 +43,23 @@ pub struct GitForge {
     merge_poll: Duration,
 }
 
+/// What a merge call reported, each with its report.
+enum Merge {
+    /// The asynchronous merge API answered that the PR merged.
+    Confirmed(String),
+    /// `gh pr merge` succeeded, which a merge queue or auto-merge also
+    /// reports for a PR it only queued.
+    Requested(String),
+}
+
+impl Merge {
+    fn into_report(self) -> String {
+        match self {
+            Self::Confirmed(report) | Self::Requested(report) => report,
+        }
+    }
+}
+
 impl Default for GitForge {
     /// Runs the `gh` found on `PATH`.
     fn default() -> Self {
@@ -355,7 +372,7 @@ impl GitForge {
         number: std::num::NonZeroU64,
         head: &str,
         batch: bool,
-    ) -> Result<String, ForgeError> {
+    ) -> Result<Merge, ForgeError> {
         let error = match self
             .gh(
                 Path::new("."),
@@ -371,7 +388,7 @@ impl GitForge {
             .await
         {
             Err(error) if error.0.contains("part of a stack") => error,
-            result => return result,
+            result => return result.map(Merge::Requested),
         };
         if batch {
             let pr = |argv: &[&str]| self.gh(Path::new("."), args(argv));
@@ -443,10 +460,10 @@ impl GitForge {
             match result["status"].as_str() {
                 Some("merged") => {
                     let sha = result["details"]["sha"].as_str().unwrap_or("unknown");
-                    return Ok(format!(
+                    return Ok(Merge::Confirmed(format!(
                         "Merged PR #{number} at {head} through the asynchronous merge API \
                          (part of a stack); merge commit {sha}."
-                    ));
+                    )));
                 }
                 Some("pending") => {
                     let uuid = result["details"]["uuid"].as_str().ok_or_else(|| {
@@ -484,7 +501,8 @@ impl GitForge {
             let merge = self.merge_pull(repo, *number, head, true).await;
             // With a merge queue or auto-merge, `gh pr merge` succeeds having only queued the PR.
             let merge = match merge {
-                Ok(_) => self
+                Ok(Merge::Confirmed(_)) => Ok(()),
+                Ok(Merge::Requested(_)) => self
                     .gh(
                         Path::new("."),
                         args(&[
@@ -1083,7 +1101,12 @@ impl Forge for GitForge {
             RepositoryAction::Merge {
                 number,
                 expected_head,
-            } => return self.merge_pull(&repo, *number, expected_head, false).await,
+            } => {
+                return self
+                    .merge_pull(&repo, *number, expected_head, false)
+                    .await
+                    .map(Merge::into_report);
+            }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
             RepositoryAction::EditPullRequest {
                 number,

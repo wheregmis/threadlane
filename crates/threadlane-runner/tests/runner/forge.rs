@@ -150,6 +150,8 @@ impl FakeGh {
                echo 'GraphQL: Could not resolve to a PullRequest (HTTP 404)' >&2; exit 1\n\
              elif [ \"$1 $2 $3\" = \"pr merge 17\" ]; then\n\
                echo 'GraphQL: This pull request is part of a stack and must be merged using the asynchronous merge REST API (mergePullRequest)' >&2; exit 1\n\
+             elif [ \"$1 $2 $4\" = \"pr view --json=state\" ] && [ -f {record}/state_fails ]; then\n\
+               echo 'gh: timed out' >&2; exit 1\n\
              elif [ \"$1 $2 $3\" = \"pr view 15\" ]; then\n\
                echo OPEN\n\
              elif [ \"$1 $2\" = \"pr view\" ]; then\n\
@@ -1275,6 +1277,34 @@ async fn a_batch_refuses_the_async_merge_while_a_downstack_pull_request_is_open(
     assert!(
         !calls[before..].iter().any(|call| call[0] == "api"),
         "the asynchronous merge is not attempted: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_counts_an_async_merge_as_merged_without_reading_its_state() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        r#"{"status":"merged","details":{"sha":"m3rg3"}}"#,
+    )
+    .unwrap();
+    // A failing state read would stop the batch at #17, which did merge.
+    std::fs::write(gh.dir.path().join("state_fails"), "").unwrap();
+    let batch = RepositoryAction::MergeBatch {
+        pulls: vec![(17.try_into().unwrap(), "a".repeat(40))],
+    };
+    let report = forge
+        .apply("https://github.test/acme/app.git", &batch)
+        .await
+        .unwrap();
+    assert_eq!(report, "merged #17 in order");
+    assert!(
+        !gh.invocations()
+            .iter()
+            .any(|call| call.contains(&"--json=state".to_owned())),
+        "the confirmed merge is not read again"
     );
 }
 

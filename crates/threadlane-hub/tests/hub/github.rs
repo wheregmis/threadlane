@@ -203,6 +203,21 @@ async fn record_performed(
     arguments: serde_json::Value,
     outcome: serde_json::Value,
 ) {
+    let decision = record_begun(hub, task, lease, tool, arguments).await;
+    hub.db
+        .finish_perform(lease, decision, &outcome)
+        .await
+        .unwrap();
+}
+
+/// Records an approved call of `tool` whose perform has begun.
+async fn record_begun(
+    hub: &TestHub,
+    task: &Task,
+    lease: &threadlane_core::model::Lease,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> threadlane_core::ids::DecisionId {
     let decision = hub
         .db
         .open_decision(
@@ -255,10 +270,7 @@ async fn record_performed(
         .begin_perform(lease, decision.id, hub.clock.now())
         .await
         .unwrap();
-    hub.db
-        .finish_perform(lease, decision.id, &outcome)
-        .await
-        .unwrap();
+    decision.id
 }
 
 /// A task that only commented on someone else's pull request #529 is
@@ -381,6 +393,82 @@ async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
             since: None,
         }));
     }
+}
+
+/// A batch can merge in a project repository the task has no worktree in,
+/// and the task page lists its pull requests even when it was read, empty,
+/// before the batch and the task then ended without a poll (#746).
+#[tokio::test]
+async fn a_batch_in_an_unattached_repository_shows_on_the_ended_tasks_page() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let general = hub.general().await;
+    register(&hub, &general, "tools", "https://github.com/acme/tools.git").await;
+    let (task, lease) = leased_task(&hub).await;
+    hub.db.release_lease(&lease).await.unwrap();
+    for number in [801, 802] {
+        github.set_pull_request("acme/tools", number, Ok(conflicted_draft(&"a".repeat(40))));
+    }
+    assert!(
+        pull_requests(&hub, &task).await.is_empty(),
+        "the page caches none"
+    );
+
+    let (lease, run) = crate::common::begin(&*hub.link).await;
+    let head = "a".repeat(40);
+    let decision = record_begun(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MERGE,
+        json!({ "repository": "tools", "pulls": [
+            { "number": 801, "expected_head": head },
+            { "number": 802, "expected_head": head },
+        ] }),
+    )
+    .await;
+    hub.link
+        .finish_perform(
+            &lease,
+            run.run_id,
+            decision,
+            &json!({ "performed": true, "summary": "merged #801, #802 in order" }),
+        )
+        .await
+        .unwrap();
+    for (id, tool, arguments) in [
+        (
+            "p",
+            threadlane_hub::MEMORY_CREATE,
+            json!({ "path": "project/tasks/T-0001.md", "content": "# T-0001\nDone." }),
+        ),
+        (
+            "f",
+            threadlane_hub::FINISH_TASK,
+            json!({ "summary": "Done" }),
+        ),
+    ] {
+        hub.link
+            .call_tool(&lease, run.run_id, Some(id), tool, &arguments)
+            .await
+            .unwrap();
+    }
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+
+    let mut numbers: Vec<_> = pull_requests(&hub, &task)
+        .await
+        .iter()
+        .map(|pull| (pull.repository.clone(), pull.number))
+        .collect();
+    numbers.sort();
+    assert_eq!(
+        numbers,
+        [
+            ("acme/tools".to_owned(), 801),
+            ("acme/tools".to_owned(), 802)
+        ]
+    );
 }
 
 fn item(

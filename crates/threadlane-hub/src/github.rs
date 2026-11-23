@@ -264,6 +264,8 @@ impl Routes {
                     ) || (decision.tool == COMMENT
                         && arguments["target"] == "pull_request");
                     let name = arguments["repository"].as_str().unwrap_or_default();
+                    // Dispatch runs a batch on any repository of the project, attached or not.
+                    let any_registered = !batch.is_empty();
                     let targets: Vec<(&str, &str, Option<u64>)> = if !batch.is_empty() {
                         batch.into_iter().map(|n| (name, "", Some(n))).collect()
                     } else {
@@ -292,7 +294,8 @@ impl Routes {
                             .iter()
                             .find(|repository| {
                                 repository.name == name
-                                    && task.repositories.contains(&repository.id)
+                                    && (any_registered
+                                        || task.repositories.contains(&repository.id))
                             })
                             .and_then(|repository| normalize_remote(&repository.remote_url))
                             .and_then(|key| key.strip_prefix(GITHUB_HOST).map(str::to_owned))

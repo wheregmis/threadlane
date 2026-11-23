@@ -1001,7 +1001,7 @@ impl LocalLink {
         outcome: &Json,
     ) -> Result<(), LinkError> {
         let inner = &self.core.inner;
-        self.check_lease(lease).await?;
+        let lane = self.check_lease(lease).await?;
         self.active_run(lease, run_id).await?;
         if inner
             .db
@@ -1021,6 +1021,17 @@ impl LocalLink {
             .finish_perform(lease, id, outcome)
             .await
             .map_err(link_error)?;
+        // The outcome can name new pull requests, so the task page reads them again.
+        if let Some(task) = inner
+            .db
+            .tasks(lane.project_id)
+            .await
+            .map_err(link_error)?
+            .into_iter()
+            .find(|task| task.lane_id == lane.id)
+        {
+            inner.pull_status.lock().await.remove(&task.id);
+        }
         inner.hook.reach(perform::AFTER_FINISH)?;
         Ok(())
     }
