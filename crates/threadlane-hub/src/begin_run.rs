@@ -483,7 +483,15 @@ impl LocalLink {
                     event.kind == threadlane_core::model::EventKind::UserMessage
                         && event.trust == threadlane_core::model::Trust::User
                 })
-                .flat_map(|event| threadlane_core::attachment::images_in(&event.payload))
+                .flat_map(|event| {
+                    let mut images = threadlane_core::attachment::images_in(&event.payload);
+                    // A lead has no file tools, so it sees a screenshot path only as text (#733).
+                    if lane.kind == LaneKind::Lead && backend != BackendKind::Antigravity {
+                        let text = event.payload["text"].as_str().unwrap_or_default();
+                        attach_path_images(text, &mut images);
+                    }
+                    images
+                })
                 .collect(),
             tools: if dreaming {
                 dreaming::definitions()
@@ -621,6 +629,10 @@ impl LocalLink {
             event.payload["images"]
                 .as_array()
                 .is_some_and(|images| !images.is_empty())
+                || (lane.kind == LaneKind::Lead
+                    && event.kind == threadlane_core::model::EventKind::UserMessage
+                    && event.trust == threadlane_core::model::Trust::User
+                    && !image_paths(event.payload["text"].as_str().unwrap_or_default()).is_empty())
         };
         if let Some(index) = events.iter().position(has_images) {
             events.truncate(index.max(1));
@@ -893,12 +905,159 @@ fn model_for(
         .or_else(|| defaults.get(&backend).cloned())
 }
 
+/// The existing files an owner message names by absolute or `~/` path, in
+/// the order they appear, each with its name as written and its size. Paths
+/// may contain spaces (macOS screenshot names) or shell-escaped spaces.
+fn image_paths(text: &str) -> Vec<(String, std::path::PathBuf, u64)> {
+    let closer = |c: char| c.is_whitespace() || "\"'`)>]".contains(c);
+    // The extension must end the whole path, so `a.png-final.png` is not `a.png`.
+    let ends_path = |rest: &str| {
+        let mut chars = rest.chars();
+        match chars.next() {
+            None => true,
+            Some(c) if closer(c) => true,
+            Some(c) if ",.;:!?".contains(c) => chars.next().is_none_or(closer),
+            Some(_) => false,
+        }
+    };
+    let lower = text.to_ascii_lowercase();
+    let mut ends: Vec<usize> = [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+        .iter()
+        .flat_map(|ext| lower.match_indices(ext).map(|(at, ext)| at + ext.len()))
+        .filter(|&end| ends_path(&text[end..]))
+        .collect();
+    ends.sort_unstable();
+    let boundary = |c: char| c.is_whitespace() || "\"'`(<[".contains(c);
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut found = Vec::new();
+    for end in ends {
+        // Nearest start first, so two paths on a line resolve separately.
+        let starts = text[..end].char_indices().rev().filter(|&(at, c)| {
+            (c == '/' || (c == '~' && text[at + 1..].starts_with('/')))
+                && text[..at].chars().next_back().is_none_or(boundary)
+        });
+        for (start, _) in starts.take(8) {
+            let written = text[start..end].replace("\\ ", " ");
+            let path = match written.strip_prefix("~/") {
+                Some(rest) => match &home {
+                    Some(home) => home.join(rest),
+                    None => continue,
+                },
+                None => written.clone().into(),
+            };
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_file() {
+                found.push((written, path, meta.len()));
+            }
+            break;
+        }
+    }
+    found
+}
+
+/// Adds the valid images an owner message names by path to `images`, the
+/// message's own attachments, within the per-message budget. Files that do
+/// not fit are skipped unread; invalid files and duplicates are skipped.
+fn attach_path_images(text: &str, images: &mut Vec<threadlane_core::attachment::ImageAttachment>) {
+    use threadlane_core::attachment::{
+        ImageAttachment, MAX_IMAGE_BYTES, MAX_IMAGES, check_image_budget, validate_images,
+    };
+    for (written, path, len) in image_paths(text) {
+        let used: usize = images.iter().map(|image| image.bytes().len()).sum();
+        let remaining = MAX_IMAGE_BYTES.saturating_sub(used);
+        if images.len() >= MAX_IMAGES || remaining == 0 {
+            break;
+        }
+        if len > remaining as u64 {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        let image = ImageAttachment::new(written, data);
+        if validate_images(std::slice::from_ref(&image)).is_err()
+            || images.iter().any(|other| other.bytes() == image.bytes())
+        {
+            continue;
+        }
+        images.push(image);
+        // The file may have grown since it was measured.
+        if check_image_budget(images).is_err() {
+            images.pop();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
     use threadlane_core::ids::{AgentId, BindingId, ProjectId};
 
     use super::*;
+
+    #[test]
+    fn a_lead_message_loads_the_images_its_paths_name() {
+        use threadlane_core::attachment::{ImageAttachment, MAX_IMAGE_BYTES};
+        let png = serde_json::from_value::<ImageAttachment>(json!({
+            "name": "t.png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        }))
+        .unwrap()
+        .bytes()
+        .to_vec();
+        let dir = tempfile::tempdir().unwrap();
+        let spaced = dir.path().join("Screen Shot 1.PNG");
+        let plain = dir.path().join("b.png");
+        let fake = dir.path().join("fake.png");
+        // Trailing bytes keep it valid but distinct from `plain`.
+        let other = [png.as_slice(), b"x"].concat();
+        std::fs::write(&spaced, &other).unwrap();
+        std::fs::write(&plain, &png).unwrap();
+        std::fs::write(&fake, b"not an image").unwrap();
+        let escaped = spaced.display().to_string().replace(' ', "\\ ");
+        let text = format!(
+            "See `{}`, then {escaped}. Not {} or {}/missing.png.",
+            plain.display(),
+            fake.display(),
+            dir.path().display()
+        );
+        let load = |text: &str, mut images: Vec<ImageAttachment>| {
+            attach_path_images(text, &mut images);
+            images
+        };
+        let images = load(&text, Vec::new());
+        let names: Vec<_> = images.iter().map(|image| image.name().to_owned()).collect();
+        assert_eq!(
+            names,
+            [plain.display().to_string(), spaced.display().to_string()]
+        );
+        assert_eq!(images[1].bytes(), other);
+        assert!(load("a picture.png, http://x/y.gif", Vec::new()).is_empty());
+
+        // A truncated PNG fails validation; a composer copy is not attached twice.
+        let truncated = dir.path().join("cut.png");
+        std::fs::write(&truncated, &png[..20]).unwrap();
+        let attached = ImageAttachment::new("pasted.png".into(), png.clone());
+        let text = format!("{} {}", truncated.display(), plain.display());
+        assert_eq!(load(&text, vec![attached.clone()]), [attached]);
+
+        // A file that does not fit the remaining budget is skipped.
+        let full = ImageAttachment::new("big".into(), vec![0; MAX_IMAGE_BYTES - 10]);
+        assert_eq!(load(&text, vec![full.clone()]), [full]);
+
+        // Only the whole named path counts, not a `.png` inside it.
+        let prefix = dir.path().join("design.png");
+        let named = dir.path().join("design.png-final.png");
+        std::fs::write(&prefix, &png).unwrap();
+        std::fs::write(&named, &png).unwrap();
+        let found: Vec<_> = image_paths(&format!("look at {}.", named.display()))
+            .into_iter()
+            .map(|(_, path, _)| path)
+            .collect();
+        assert_eq!(found, [named]);
+    }
 
     fn agent(models: Json) -> Agent {
         Agent {

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize, de::Error as _};
 /// the remote transport's 4 MiB request limit with room for the caption.
 pub const MAX_IMAGE_BYTES: usize = 2 << 20;
 
-const MAX_IMAGES: usize = 8;
+/// The images allowed in one message.
+pub const MAX_IMAGES: usize = 8;
 const MAX_DIMENSION: u32 = 8192;
 
 /// An inline chat image. JSON contains base64 data and a display name.
