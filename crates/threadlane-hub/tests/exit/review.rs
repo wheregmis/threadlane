@@ -926,3 +926,56 @@ async fn a_batch_merge_that_does_not_pin_each_pull_once_is_refused() {
         assert!(w.forge.calls().is_empty(), "{pulls}");
     }
 }
+
+#[tokio::test]
+async fn a_batch_mark_ready_takes_one_approval_for_its_ordered_list() {
+    let w = world(
+        MARK_READY,
+        json!({"repository":"app","numbers":[14,12]}),
+        Mode::OnRequest,
+    )
+    .await;
+    w.backend.push_answer(answer("allow"));
+    let sim = w.boot(CrashPlan::new()).await;
+    sim.send("m", "Mark #14 and #12 ready").await;
+    work(&sim).await;
+    let decisions = sim.decisions().await;
+    assert_eq!(decisions.len(), 1);
+    let question = &decisions[0].question;
+    assert!(
+        question.find("1. ").unwrap() < question.find("#14").unwrap()
+            && question.find("#14").unwrap() < question.find("#12").unwrap(),
+        "{question}"
+    );
+    assert!(w.forge.calls().is_empty());
+    drive(&sim, "approve", None).await.unwrap();
+    let calls = w.forge.calls();
+    let [ForgeCall::Apply { action, .. }] = calls.as_slice() else {
+        panic!("expected one batch mark-ready, got {calls:?}");
+    };
+    assert_eq!(
+        action,
+        &RepositoryAction::MarkReadyBatch {
+            numbers: vec![14.try_into().unwrap(), 12.try_into().unwrap()],
+        }
+    );
+    assert_eq!(sim.decisions().await.len(), 1);
+    assert_invariants(&sim, MARK_READY).await;
+}
+
+#[tokio::test]
+async fn a_batch_mark_ready_that_does_not_list_each_pull_once_is_refused() {
+    for numbers in [json!([]), json!([0]), json!([12, 12]), json!(["12"])] {
+        let w = world(
+            MARK_READY,
+            json!({"repository":"app","numbers":numbers}),
+            Mode::Autonomous,
+        )
+        .await;
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Mark them ready").await;
+        work(&sim).await;
+        assert!(sim.decisions().await.is_empty(), "{numbers}");
+        assert!(w.forge.calls().is_empty(), "{numbers}");
+    }
+}
