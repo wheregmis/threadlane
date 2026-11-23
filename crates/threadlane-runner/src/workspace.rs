@@ -310,7 +310,18 @@ impl GitWorkspaces {
                 continue;
             }
             let path = self.worktree(task, repository);
-            let committed = self.commit(&path, task, message, untracked).await?;
+            let committed = match self.commit(&path, task, message, untracked).await {
+                Ok(committed) => committed,
+                Err(error) => {
+                    // The retry is told, so it can bring kept work back (#742).
+                    let note = format!(
+                        "The last run's work in {} could not be committed: {error}\n",
+                        repository.name
+                    );
+                    let _ = std::fs::write(self.checkpoint_marker(task, repository), note);
+                    return Err(error);
+                }
+            };
             if untracked {
                 continue;
             }
@@ -344,13 +355,12 @@ impl GitWorkspaces {
         untracked: bool,
     ) -> Result<Vec<String>, WorkspaceError> {
         let branch = task_branch(task);
-        let head = git(Some(path), ["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
+        // Detached HEAD has no symbolic ref.
+        let head = git(Some(path), ["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .await
+            .unwrap_or_default();
         if head.trim() != branch {
-            return Err(WorkspaceError(format!(
-                "{} is on {:?}, not on its branch {branch}",
-                path.display(),
-                head.trim()
-            )));
+            return_to_branch(path, &branch, head.trim(), message, untracked).await?;
         }
         git(
             Some(path),
@@ -412,6 +422,84 @@ impl GitWorkspaces {
             truncated,
         }))
     }
+}
+
+/// Puts a worktree the agent switched to `head` (a branch, or detached when
+/// empty) back on the task `branch`, keeping its work (#742). Commits made
+/// on top of the task branch move onto it, and uncommitted changes come
+/// along. Commits no other ref has, or uncommitted changes that do not
+/// apply on the task branch, are committed where they are (untracked files
+/// only when `untracked`), kept on a new `<branch>-switched` branch, and the
+/// error names it.
+async fn return_to_branch(
+    path: &Path,
+    branch: &str,
+    head: &str,
+    message: &str,
+    untracked: bool,
+) -> Result<(), WorkspaceError> {
+    let at = if head.is_empty() {
+        "a detached HEAD"
+    } else {
+        head
+    };
+    tracing::warn!(worktree = %path.display(), at, "the worktree left its task branch; switching back");
+    if git(Some(path), ["merge-base", "--is-ancestor", branch, "HEAD"])
+        .await
+        .is_ok()
+    {
+        git(Some(path), ["branch", "--force", branch, "HEAD"]).await?;
+    }
+    // Commits only the switched-to branch (or detached HEAD) holds are the
+    // agent's own; a branch it only inspected shares its commits with a
+    // remote or another branch.
+    // `--all` would include HEAD itself; `--branches` matches `--exclude` under refs/heads/.
+    let own = format!("--exclude={head}");
+    let mut unique = vec!["rev-list", "--max-count=1", "HEAD", "--not"];
+    if !head.is_empty() {
+        unique.push(own.as_str());
+    }
+    unique.extend(["--branches", "--tags", "--remotes"]);
+    if git(Some(path), unique).await?.trim().is_empty()
+        && git(Some(path), ["switch", "--quiet", branch]).await.is_ok()
+    {
+        return Ok(());
+    }
+    git(
+        Some(path),
+        ["add", if untracked { "--all" } else { "--update" }],
+    )
+    .await?;
+    if !git(Some(path), ["diff", "--cached", "--name-only"])
+        .await?
+        .trim()
+        .is_empty()
+    {
+        let mut args = COMMITTER.to_vec();
+        args.extend(["commit", "--quiet", "--no-verify", "--message", message]);
+        git(Some(path), args).await?;
+    }
+    // A new name each time, so an earlier run's kept work stays.
+    let mut saved = format!("{branch}-switched");
+    let mut n = 1;
+    while git(Some(path), ["branch", saved.as_str(), "HEAD"])
+        .await
+        .is_err()
+    {
+        n += 1;
+        if n > 100 {
+            return Err(WorkspaceError(format!(
+                "{} was on {at}, not on its branch {branch}, and no {branch}-switched branch name was free to keep its work",
+                path.display()
+            )));
+        }
+        saved = format!("{branch}-switched-{n}");
+    }
+    git(Some(path), ["switch", "--quiet", branch]).await?;
+    Err(WorkspaceError(format!(
+        "{} was on {at}, not on its branch {branch}, and its work there could not go on the task branch; it is committed on branch {saved}. Merge {saved} into {branch}",
+        path.display()
+    )))
 }
 
 /// Maximum unified diff lines stored in a [`DiffPreview`].
