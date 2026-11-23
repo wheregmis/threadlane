@@ -864,14 +864,14 @@ impl DecisionStore for HubDb {
         }
         let inserted = answer_in(conn, &decision, answer, None).await?;
         if let Some(rule) = rule {
-            exec(
+            let rule_id = query_one(
                 conn,
                 concat!(
                     "INSERT INTO standing_rules (id, project_id, agent_id, tool, pattern, tier,
                      created_from_decision, created_at)
                  VALUES (",
                     crate::db::next_id_sql!("standing_rules"),
-                    ", ?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                    ", ?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id"
                 ),
                 params![
                     rule.project_id.get(),
@@ -882,8 +882,36 @@ impl DecisionStore for HubDb {
                     id.get(),
                     rule.created_at.as_millis(),
                 ],
+                |r| Cols(r).id::<StandingRuleId>(0),
             )
             .await?;
+            for &other in &rule.answers {
+                let Some(covered) = decision_in(conn, other).await? else {
+                    continue;
+                };
+                let approve = covered.options.iter().position(DecisionOption::approves);
+                let (DecisionStatus::Pending, Some(option)) = (covered.status, approve) else {
+                    continue;
+                };
+                answer_in(
+                    conn,
+                    &covered,
+                    &DecisionAnswer {
+                        option: u32::try_from(option).unwrap_or(u32::MAX),
+                        note: None,
+                        standing_rule: false,
+                        answered_at: rule.created_at,
+                    },
+                    Some(rule_id),
+                )
+                .await?;
+                exec(
+                    conn,
+                    "UPDATE standing_rules SET uses = uses + 1 WHERE id = ?1",
+                    params![rule_id.get()],
+                )
+                .await?;
+            }
         }
         tx.commit().await?;
         match inserted {
