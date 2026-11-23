@@ -483,7 +483,20 @@ impl LocalLink {
                     event.kind == threadlane_core::model::EventKind::UserMessage
                         && event.trust == threadlane_core::model::Trust::User
                 })
-                .flat_map(|event| threadlane_core::attachment::images_in(&event.payload))
+                .flat_map(|event| {
+                    let mut images = threadlane_core::attachment::images_in(&event.payload);
+                    // A lead has no file tools, so it sees a screenshot path only as text (#733).
+                    if lane.kind == LaneKind::Lead && backend != BackendKind::Antigravity {
+                        let text = event.payload["text"].as_str().unwrap_or_default();
+                        for image in images_at_paths(text) {
+                            images.push(image);
+                            if threadlane_core::attachment::check_image_budget(&images).is_err() {
+                                images.pop();
+                            }
+                        }
+                    }
+                    images
+                })
                 .collect(),
             tools: if dreaming {
                 dreaming::definitions()
@@ -893,12 +906,93 @@ fn model_for(
         .or_else(|| defaults.get(&backend).cloned())
 }
 
+/// Loads the image files an owner message names by absolute or `~/` path,
+/// in the order they appear. Paths may contain spaces (macOS screenshot
+/// names) or shell-escaped spaces.
+fn images_at_paths(text: &str) -> Vec<threadlane_core::attachment::ImageAttachment> {
+    use threadlane_core::attachment::{ImageAttachment, MAX_IMAGE_BYTES};
+    let lower = text.to_ascii_lowercase();
+    let mut ends: Vec<usize> = [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+        .iter()
+        .flat_map(|ext| lower.match_indices(ext).map(|(at, ext)| at + ext.len()))
+        .filter(|&end| !text[end..].starts_with(|c: char| c.is_alphanumeric()))
+        .collect();
+    ends.sort_unstable();
+    let boundary = |c: char| c.is_whitespace() || "\"'`(<[".contains(c);
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut images: Vec<ImageAttachment> = Vec::new();
+    for end in ends {
+        // Nearest start first, so two paths on a line resolve separately.
+        let starts = text[..end].char_indices().rev().filter(|&(at, c)| {
+            (c == '/' || (c == '~' && text[at + 1..].starts_with('/')))
+                && text[..at].chars().next_back().is_none_or(boundary)
+        });
+        for (start, _) in starts.take(8) {
+            let written = text[start..end].replace("\\ ", " ");
+            let path = match written.strip_prefix("~/") {
+                Some(rest) => match &home {
+                    Some(home) => home.join(rest),
+                    None => continue,
+                },
+                None => written.clone().into(),
+            };
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() || meta.len() > MAX_IMAGE_BYTES as u64 {
+                break;
+            }
+            if let Ok(data) = std::fs::read(&path) {
+                let image = ImageAttachment::new(written, data);
+                if image.format().is_some() && !images.contains(&image) {
+                    images.push(image);
+                }
+            }
+            break;
+        }
+    }
+    images
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
     use threadlane_core::ids::{AgentId, BindingId, ProjectId};
 
     use super::*;
+
+    #[test]
+    fn a_lead_message_loads_the_images_its_paths_name() {
+        let png = serde_json::from_value::<threadlane_core::attachment::ImageAttachment>(json!({
+            "name": "t.png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        }))
+        .unwrap()
+        .bytes()
+        .to_vec();
+        let dir = tempfile::tempdir().unwrap();
+        let spaced = dir.path().join("Screen Shot 1.PNG");
+        let plain = dir.path().join("b.png");
+        let fake = dir.path().join("fake.png");
+        std::fs::write(&spaced, &png).unwrap();
+        std::fs::write(&plain, &png).unwrap();
+        std::fs::write(&fake, b"not an image").unwrap();
+        let escaped = spaced.display().to_string().replace(' ', "\\ ");
+        let text = format!(
+            "See `{}`, then {escaped}. Not {} or {}/missing.png.",
+            plain.display(),
+            fake.display(),
+            dir.path().display()
+        );
+        let images = images_at_paths(&text);
+        let names: Vec<_> = images.iter().map(|image| image.name().to_owned()).collect();
+        assert_eq!(
+            names,
+            [plain.display().to_string(), spaced.display().to_string()]
+        );
+        assert!(images.iter().all(|image| image.bytes() == png));
+        assert!(images_at_paths("a picture.png, http://x/y.gif").is_empty());
+    }
 
     fn agent(models: Json) -> Agent {
         Agent {
