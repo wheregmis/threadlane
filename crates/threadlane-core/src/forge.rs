@@ -26,6 +26,12 @@ pub const CREATE_ISSUE: &str = "create_issue";
 pub const REPORT_LIMITATION: &str = "report_threadlane_limitation";
 /// Merge a registered repository's pull request.
 pub const MERGE: &str = "merge";
+/// Marks a batch merge error whose stopped pull request was requested to
+/// merge, so it may have merged or been queued.
+pub const BATCH_MAY_HAVE_CHANGED: &str = "; this PR may have merged";
+/// Marks a batch mark-ready error whose stopped pull request's request timed
+/// out, so GitHub may have marked it ready.
+pub const BATCH_MAY_BE_READY: &str = "timed out; this PR may be marked ready";
 /// The most pull requests one `merge` call may name in `pulls`.
 pub const MAX_MERGE_BATCH: usize = 20;
 /// Mark a registered repository's draft pull request ready for review.

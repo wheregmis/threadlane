@@ -17,8 +17,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use threadlane_core::forge::{
-    ApprovedBranch, CommentTarget, Forge, ForgeError, PullRequestImage, PullRequestUpdate,
-    RepositoryAction,
+    ApprovedBranch, BATCH_MAY_BE_READY, BATCH_MAY_HAVE_CHANGED, CommentTarget, Forge, ForgeError,
+    PullRequestImage, PullRequestUpdate, RepositoryAction,
 };
 use threadlane_core::github::{REVIEW_MARKER_PREFIX, normalize_remote};
 use threadlane_core::model::Repository;
@@ -26,7 +26,7 @@ use threadlane_core::workspace::{valid_branch_name, valid_commit_id};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
-use crate::workspace::{COMMITTER, check_fast_forward, git, git_command, run};
+use crate::workspace::{COMMITTER, check_fast_forward, git, git_command, run, timed_out};
 
 /// The longest one `gh` command may take.
 const GH_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -41,6 +41,29 @@ pub struct GitForge {
     login: Arc<OnceCell<Option<String>>>,
     /// The wait between polls of an asynchronous merge.
     merge_poll: Duration,
+    /// The longest one `gh` command may take.
+    gh_timeout: Duration,
+}
+
+/// What a merge call reported, each with its report.
+enum Merge {
+    /// The asynchronous merge API answered that the PR merged.
+    Confirmed(String),
+    /// `gh pr merge` succeeded, which a merge queue or auto-merge also
+    /// reports for a PR it only queued.
+    Requested(String),
+    /// GitHub accepted the asynchronous merge, but its result could not be
+    /// read, or a merge request ran out of time, so it may still merge.
+    Accepted(ForgeError),
+}
+
+impl Merge {
+    fn into_report(self) -> Result<String, ForgeError> {
+        match self {
+            Self::Confirmed(report) | Self::Requested(report) => Ok(report),
+            Self::Accepted(error) => Err(error),
+        }
+    }
 }
 
 impl Default for GitForge {
@@ -59,7 +82,15 @@ impl GitForge {
             git: "git".into(),
             login: Arc::default(),
             merge_poll: Duration::from_secs(2),
+            gh_timeout: GH_TIMEOUT,
         }
+    }
+
+    /// Stops each `gh` command after `timeout`.
+    #[must_use]
+    pub fn with_gh_timeout(mut self, timeout: Duration) -> Self {
+        self.gh_timeout = timeout;
+        self
     }
 
     /// Polls an asynchronous merge every `interval`.
@@ -355,23 +386,20 @@ impl GitForge {
         number: std::num::NonZeroU64,
         head: &str,
         batch: bool,
-    ) -> Result<String, ForgeError> {
-        let error = match self
-            .gh(
-                Path::new("."),
-                args(&[
-                    "pr",
-                    "merge",
-                    &number.to_string(),
-                    "--merge",
-                    &format!("--match-head-commit={head}"),
-                    &format!("--repo={repo}"),
-                ]),
-            )
-            .await
-        {
+    ) -> Result<Merge, ForgeError> {
+        let merge = args(&[
+            "pr",
+            "merge",
+            &number.to_string(),
+            "--merge",
+            &format!("--match-head-commit={head}"),
+            &format!("--repo={repo}"),
+        ]);
+        let error = match self.gh(Path::new("."), merge.clone()).await {
             Err(error) if error.0.contains("part of a stack") => error,
-            result => return result,
+            // GitHub may have merged it before the command ran out of time.
+            Err(error) if self.timed_out(&error, &merge) => return Ok(Merge::Accepted(error)),
+            result => return result.map(Merge::Requested),
         };
         if batch {
             let pr = |argv: &[&str]| self.gh(Path::new("."), args(argv));
@@ -409,7 +437,7 @@ impl GitForge {
             .split_once('/')
             .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
         let endpoint = format!("repos/{name}/pulls/{number}/merge-async");
-        let api = |method: &str, extra: &[String], endpoint: String| {
+        let api_args = |method: &str, extra: &[String], endpoint: String| {
             let mut argv = args(&[
                 "api",
                 &format!("--hostname={host}"),
@@ -417,7 +445,7 @@ impl GitForge {
             ]);
             argv.extend(extra.iter().map(OsString::from));
             argv.push(endpoint.into());
-            self.gh(Path::new("."), argv)
+            argv
         };
         let fields = [
             "-f".to_owned(),
@@ -427,46 +455,73 @@ impl GitForge {
             "-f".to_owned(),
             "merge_action=direct_merge".to_owned(),
         ];
-        let mut output = api("PUT", &fields, endpoint.clone())
-            .await
-            .map_err(|async_error| {
-                ForgeError(format!(
+        let accepted = |error: ForgeError| Ok(Merge::Accepted(error));
+        let put = api_args("PUT", &fields, endpoint.clone());
+        let mut output = match self.gh(Path::new("."), put.clone()).await {
+            Ok(output) => output,
+            Err(async_error) => {
+                let timed_out = self.timed_out(&async_error, &put);
+                let error = ForgeError(format!(
                     "{}; the asynchronous merge also failed: {}",
                     error.0, async_error.0
-                ))
-            })?;
+                ));
+                // A PUT that ran out of time may have been accepted.
+                return if timed_out {
+                    accepted(error)
+                } else {
+                    Err(error)
+                };
+            }
+        };
+        // From here GitHub has accepted the merge, so only a terminal status is a rejection.
         // shortcut: polls for about a minute, then reports it still pending; raise if stacks merge slower.
         for poll in 0..=30 {
-            let result: Json = serde_json::from_str(&output)
-                .map_err(|error| ForgeError(format!("invalid merge response: {error}")))?;
+            let result: Json = match serde_json::from_str(&output) {
+                Ok(result) => result,
+                Err(error) => {
+                    return accepted(ForgeError(format!("invalid merge response: {error}")));
+                }
+            };
             let message = result["details"]["message"].as_str().unwrap_or_default();
             match result["status"].as_str() {
                 Some("merged") => {
                     let sha = result["details"]["sha"].as_str().unwrap_or("unknown");
-                    return Ok(format!(
+                    return Ok(Merge::Confirmed(format!(
                         "Merged PR #{number} at {head} through the asynchronous merge API \
                          (part of a stack); merge commit {sha}."
-                    ));
+                    )));
                 }
                 Some("pending") => {
-                    let uuid = result["details"]["uuid"].as_str().ok_or_else(|| {
-                        ForgeError("the pending merge response has no uuid".into())
-                    })?;
+                    let Some(uuid) = result["details"]["uuid"].as_str() else {
+                        return accepted(ForgeError(
+                            "the pending merge response has no uuid".into(),
+                        ));
+                    };
                     if poll == 30 {
                         break;
                     }
                     tokio::time::sleep(self.merge_poll).await;
-                    output = api("GET", &[], format!("{endpoint}/{uuid}")).await?;
+                    let poll = api_args("GET", &[], format!("{endpoint}/{uuid}"));
+                    output = match self.gh(Path::new("."), poll).await {
+                        Ok(output) => output,
+                        Err(error) => return accepted(error),
+                    };
                 }
                 status => {
-                    return Err(ForgeError(format!(
+                    let error = ForgeError(format!(
                         "the asynchronous merge of PR #{number} ended {}: {message}",
                         status.unwrap_or("without a status")
-                    )));
+                    ));
+                    // Only `failed` rejects; `enqueued` (merge queue) or an unknown status may still merge.
+                    return if status == Some("failed") {
+                        Err(error)
+                    } else {
+                        accepted(error)
+                    };
                 }
             }
         }
-        Err(ForgeError(format!(
+        accepted(ForgeError(format!(
             "the asynchronous merge of PR #{number} is still pending; check the PR before retrying"
         )))
     }
@@ -483,8 +538,12 @@ impl GitForge {
         for (number, head) in pulls {
             let merge = self.merge_pull(repo, *number, head, true).await;
             // With a merge queue or auto-merge, `gh pr merge` succeeds having only queued the PR.
+            // Whether a failure may still have merged, or queued, this PR.
+            let uncertain = matches!(merge, Ok(Merge::Requested(_) | Merge::Accepted(_)));
             let merge = match merge {
-                Ok(_) => self
+                Ok(Merge::Confirmed(_)) => Ok(()),
+                Ok(Merge::Accepted(error)) => Err(error),
+                Ok(Merge::Requested(_)) => self
                     .gh(
                         Path::new("."),
                         args(&[
@@ -497,6 +556,13 @@ impl GitForge {
                         ]),
                     )
                     .await
+                    .map_err(|error| {
+                        ForgeError(format!(
+                            "the merge was requested but its state could not be read, so it \
+                             may have merged; check the PR: {}",
+                            error.0
+                        ))
+                    })
                     .and_then(|state| match state.trim() {
                         "MERGED" => Ok(()),
                         state => Err(ForgeError(format!(
@@ -512,9 +578,15 @@ impl GitForge {
                 } else {
                     format!("merged {}", merged.join(", "))
                 };
+                // The hub links the stopped PR to the task only when this marker says it may have changed.
+                let changed = if uncertain {
+                    BATCH_MAY_HAVE_CHANGED
+                } else {
+                    ""
+                };
                 return Err(ForgeError(format!(
-                    "batch stopped at #{number} (expected head {head}), {done}, the rest not \
-                     attempted: {}",
+                    "batch stopped at #{number} (expected head {head}{changed}), {done}, the rest \
+                     not attempted: {}",
                     error.0
                 )));
             }
@@ -537,14 +609,20 @@ impl GitForge {
                 &number.to_string(),
                 &format!("--repo={repo}"),
             ]);
-            if let Err(error) = self.gh(Path::new("."), call).await {
+            if let Err(error) = self.gh(Path::new("."), call.clone()).await {
                 let done = if ready.is_empty() {
                     "none marked ready".to_owned()
                 } else {
                     format!("marked {} ready", ready.join(", "))
                 };
+                // The hub links the stopped PR to the task only when this marker says it may be ready.
+                let changed = if self.timed_out(&error, &call) {
+                    format!(" ({BATCH_MAY_BE_READY})")
+                } else {
+                    String::new()
+                };
                 return Err(ForgeError(format!(
-                    "batch stopped at #{number}, {done}, the rest not attempted: {}",
+                    "batch stopped at #{number}{changed}, {done}, the rest not attempted: {}",
                     error.0
                 )));
             }
@@ -684,9 +762,20 @@ impl GitForge {
     }
 
     async fn gh(&self, worktree: &Path, args: Vec<OsString>) -> Result<String, ForgeError> {
-        run(self.gh_command(worktree, &args), "gh", &args, GH_TIMEOUT)
-            .await
-            .map_err(ForgeError)
+        run(
+            self.gh_command(worktree, &args),
+            "gh",
+            &args,
+            self.gh_timeout,
+        )
+        .await
+        .map_err(ForgeError)
+    }
+
+    /// Whether `error` is `gh` running `args` out of time, so a write it
+    /// made may still have taken effect.
+    fn timed_out(&self, error: &ForgeError, args: &[OsString]) -> bool {
+        error.0 == timed_out("gh", args, self.gh_timeout)
     }
 
     /// Labels an issue through `gh api`. Refuses a pull request, adds only
@@ -1083,7 +1172,12 @@ impl Forge for GitForge {
             RepositoryAction::Merge {
                 number,
                 expected_head,
-            } => return self.merge_pull(&repo, *number, expected_head, false).await,
+            } => {
+                return self
+                    .merge_pull(&repo, *number, expected_head, false)
+                    .await
+                    .and_then(Merge::into_report);
+            }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
             RepositoryAction::EditPullRequest {
                 number,

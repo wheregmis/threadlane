@@ -203,6 +203,21 @@ async fn record_performed(
     arguments: serde_json::Value,
     outcome: serde_json::Value,
 ) {
+    let decision = record_begun(hub, task, lease, tool, arguments).await;
+    hub.db
+        .finish_perform(lease, decision, &outcome)
+        .await
+        .unwrap();
+}
+
+/// Records an approved call of `tool` whose perform has begun.
+async fn record_begun(
+    hub: &TestHub,
+    task: &Task,
+    lease: &threadlane_core::model::Lease,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> threadlane_core::ids::DecisionId {
     let decision = hub
         .db
         .open_decision(
@@ -255,10 +270,7 @@ async fn record_performed(
         .begin_perform(lease, decision.id, hub.clock.now())
         .await
         .unwrap();
-    hub.db
-        .finish_perform(lease, decision.id, &outcome)
-        .await
-        .unwrap();
+    decision.id
 }
 
 /// A task that only commented on someone else's pull request #529 is
@@ -307,6 +319,415 @@ async fn a_pull_request_the_task_commented_on_reaches_its_lane() {
         },
         since: None,
     }));
+}
+
+/// An approved batch merge or mark-ready links each pull request it handled
+/// to the task, as a single call does (#746); one that stopped partway links
+/// those before the stop, and the stopped one only when the error says its
+/// merge may have happened.
+#[tokio::test]
+async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    let head = "a".repeat(40);
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MERGE,
+        json!({ "repository": "widgets", "pulls": [
+            { "number": 601, "expected_head": head },
+            { "number": 602, "expected_head": head },
+        ] }),
+        json!({ "performed": true, "summary": "Completed the repository action. merged #601, #602 in order" }),
+    )
+    .await;
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [701, 702, 703] }),
+        json!({ "performed": false, "error": "forge: batch stopped at #702, marked #701 ready, the rest not attempted: boom" }),
+    )
+    .await;
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MERGE,
+        json!({ "repository": "widgets", "pulls": [
+            { "number": 801, "expected_head": head },
+            { "number": 802, "expected_head": head },
+            { "number": 803, "expected_head": head },
+        ] }),
+        json!({ "performed": false, "error": format!(
+            "forge: batch stopped at #802 (expected head {head}{}), merged #801, the rest not \
+             attempted: the merge was requested but its state could not be read",
+            threadlane_core::forge::BATCH_MAY_HAVE_CHANGED,
+        ) }),
+    )
+    .await;
+    // A definite rejection whose provider detail happens to contain the marker text.
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MERGE,
+        json!({ "repository": "widgets", "pulls": [
+            { "number": 901, "expected_head": head },
+            { "number": 902, "expected_head": head },
+        ] }),
+        json!({ "performed": false, "error": format!(
+            "forge: batch stopped at #902 (expected head {head}), merged #901, the rest not \
+             attempted: rejected (expected head {head}{})",
+            threadlane_core::forge::BATCH_MAY_HAVE_CHANGED,
+        ) }),
+    )
+    .await;
+    // A mark ready that timed out may have taken effect.
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [1001, 1002] }),
+        json!({ "performed": false, "error": format!(
+            "forge: batch stopped at #1001 ({}), none marked ready, the rest not attempted: \
+             gh pr ready 1001 timed out after 120s",
+            threadlane_core::forge::BATCH_MAY_BE_READY,
+        ) }),
+    )
+    .await;
+    hub.db.release_lease(&lease).await.unwrap();
+    let at = "2026-11-17T08:00:00Z";
+    for number in [601, 602, 701, 702, 703, 801, 802, 803, 901, 902, 1001, 1002] {
+        github.add_to(
+            "acme/widgets",
+            &format!("feature-{number}"),
+            GithubItem {
+                branch: Some(format!("feature-{number}")),
+                ..item(
+                    &format!("check_run:{number}"),
+                    GithubKind::CheckResult,
+                    "acme/widgets",
+                    Some(number),
+                    at,
+                )
+            },
+        );
+    }
+
+    hub.core.poll_github_once().await.unwrap();
+    let events = github_events(&hub).await;
+    let mut routed: Vec<_> = events
+        .iter()
+        .filter(|event| event.lane_id == task.lane_id)
+        .map(|event| event.source_event_id.as_str())
+        .collect();
+    routed.sort();
+    assert_eq!(
+        routed,
+        [
+            "check_run:1001",
+            "check_run:601",
+            "check_run:602",
+            "check_run:701",
+            "check_run:801",
+            "check_run:802",
+            "check_run:901"
+        ],
+        "{events:?}"
+    );
+    for number in [601, 602, 701, 801, 802, 901, 1001] {
+        assert!(github.calls().contains(&GithubCall::PullRequest {
+            target: PullTarget {
+                repository: "acme/widgets".into(),
+                branch: String::new(),
+                number: Some(number),
+            },
+            since: None,
+        }));
+    }
+}
+
+/// A batch can merge in a project repository the task has no worktree in,
+/// and the task page lists its pull requests even when it was read, empty,
+/// before the batch and the task then ended without a poll (#746).
+#[tokio::test]
+async fn a_batch_in_an_unattached_repository_shows_on_the_ended_tasks_page() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let general = hub.general().await;
+    register(&hub, &general, "tools", "https://github.com/acme/tools.git").await;
+    let (task, lease) = leased_task(&hub).await;
+    hub.db.release_lease(&lease).await.unwrap();
+    for number in [801, 802] {
+        github.set_pull_request("acme/tools", number, Ok(conflicted_draft(&"a".repeat(40))));
+    }
+    assert!(
+        pull_requests(&hub, &task).await.is_empty(),
+        "the page caches none"
+    );
+
+    let (lease, run) = crate::common::begin(&*hub.link).await;
+    let head = "a".repeat(40);
+    let decision = record_begun(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MERGE,
+        json!({ "repository": "tools", "pulls": [
+            { "number": 801, "expected_head": head },
+            { "number": 802, "expected_head": head },
+        ] }),
+    )
+    .await;
+    hub.link
+        .finish_perform(
+            &lease,
+            run.run_id,
+            decision,
+            &json!({ "performed": true, "summary": "merged #801, #802 in order" }),
+        )
+        .await
+        .unwrap();
+    for (id, tool, arguments) in [
+        (
+            "p",
+            threadlane_hub::MEMORY_CREATE,
+            json!({ "path": "project/tasks/T-0001.md", "content": "# T-0001\nDone." }),
+        ),
+        (
+            "f",
+            threadlane_hub::FINISH_TASK,
+            json!({ "summary": "Done" }),
+        ),
+    ] {
+        hub.link
+            .call_tool(&lease, run.run_id, Some(id), tool, &arguments)
+            .await
+            .unwrap();
+    }
+    hub.link.complete(&lease, run.run_id, None).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+
+    let mut numbers: Vec<_> = pull_requests(&hub, &task)
+        .await
+        .iter()
+        .map(|pull| (pull.repository.clone(), pull.number))
+        .collect();
+    numbers.sort();
+    assert_eq!(
+        numbers,
+        [
+            ("acme/tools".to_owned(), 801),
+            ("acme/tools".to_owned(), 802)
+        ]
+    );
+}
+
+/// A cached task page also reads a pull request an outcome links later,
+/// however the cache was filled, and keeps the known ones when GitHub then
+/// fails to read them (#746).
+#[tokio::test]
+async fn a_newly_linked_pull_request_joins_the_cached_page_without_dropping_known_ones() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    let head = "a".repeat(40);
+    github.set_pull_request("acme/widgets", 901, Ok(conflicted_draft(&head)));
+    github.set_pull_request("acme/widgets", 902, Ok(conflicted_draft(&head)));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "number": 901 }),
+        json!({ "performed": true, "summary": "Completed the repository action." }),
+    )
+    .await;
+    let numbers = |pulls: Vec<TaskPullRequest>| -> Vec<u64> {
+        let mut numbers: Vec<_> = pulls.iter().map(|pull| pull.number).collect();
+        numbers.sort_unstable();
+        numbers
+    };
+    assert_eq!(numbers(pull_requests(&hub, &task).await), [901]);
+
+    github.set_pull_request("acme/widgets", 901, Err("rate limited".into()));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [902] }),
+        json!({ "performed": true, "summary": "marked #902 ready" }),
+    )
+    .await;
+    assert_eq!(
+        numbers(pull_requests(&hub, &task).await),
+        [901, 902],
+        "the new link is read and the known one is kept"
+    );
+}
+
+/// A first page load keeps the pull requests it read when another read
+/// fails, so a later failed read of a known one does not hide it (#746).
+#[tokio::test]
+async fn a_first_page_load_keeps_what_it_read_when_another_read_fails() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    github.set_pull_request("acme/widgets", 801, Ok(conflicted_draft(&"a".repeat(40))));
+    github.set_pull_request("acme/widgets", 802, Err("rate limited".into()));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [801, 802] }),
+        json!({ "performed": true, "summary": "marked #801, #802 ready" }),
+    )
+    .await;
+    let numbers = |pulls: Vec<TaskPullRequest>| -> Vec<u64> {
+        pulls.iter().map(|pull| pull.number).collect()
+    };
+    assert_eq!(numbers(pull_requests(&hub, &task).await), [801]);
+
+    github.set_pull_request("acme/widgets", 801, Err("rate limited".into()));
+    assert_eq!(
+        numbers(pull_requests(&hub, &task).await),
+        [801],
+        "the known pull request stays while #802 is retried"
+    );
+    assert_eq!(
+        github
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, GithubCall::PullRequestState { number: 802, .. }))
+            .count(),
+        2,
+        "the failed read is retried"
+    );
+}
+
+/// A page read still in flight when a poll caches a newer status does not
+/// overwrite it with the older one it read (#746).
+#[tokio::test]
+async fn a_page_read_keeps_a_status_a_poll_cached_while_it_was_reading() {
+    let github = Arc::new(PausedGithub {
+        pause_state: true,
+        ..PausedGithub::default()
+    });
+    let (hub, _) = start(&github.source, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    let head = "a".repeat(40);
+    github
+        .source
+        .set_pull_request("acme/widgets", 901, Ok(conflicted_draft(&head)));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [901] }),
+        json!({ "performed": true, "summary": "marked #901 ready" }),
+    )
+    .await;
+    let page = hub.core.clone().with_github(github.clone()).api();
+    let id = task.id;
+    let reading = tokio::spawn(async move {
+        page.overview(OverviewRequest::TaskPullRequests { task: id })
+            .await
+    });
+    github.entered.notified().await;
+    github.source.set_pull_request(
+        "acme/widgets",
+        901,
+        Ok(PullRequestState {
+            state: "closed".into(),
+            merged: true,
+            ..conflicted_draft(&head)
+        }),
+    );
+    hub.core.poll_github_once().await.unwrap();
+    github.released.notify_one();
+    reading.await.unwrap().unwrap();
+    let pulls = pull_requests(&hub, &task).await;
+    assert_eq!(pulls.len(), 1);
+    assert_eq!(pulls[0].status, PullRequestStatus::Merged);
+}
+
+/// A page read that starts from a cached task replies with the status a
+/// poll cached while it was reading, not the one it started from (#746).
+#[tokio::test]
+async fn a_cached_page_read_replies_with_a_status_a_poll_cached_meanwhile() {
+    let github = Arc::new(PausedGithub {
+        pause_state: true,
+        ..PausedGithub::default()
+    });
+    let (hub, _) = start(&github.source, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    let head = "a".repeat(40);
+    github
+        .source
+        .set_pull_request("acme/widgets", 901, Ok(conflicted_draft(&head)));
+    github
+        .source
+        .set_pull_request("acme/widgets", 902, Ok(conflicted_draft(&head)));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [901] }),
+        json!({ "performed": true, "summary": "marked #901 ready" }),
+    )
+    .await;
+    assert_eq!(
+        pull_requests(&hub, &task).await[0].status,
+        PullRequestStatus::Draft
+    );
+    // A new link makes the page read #902 from GitHub, where it pauses.
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [902] }),
+        json!({ "performed": true, "summary": "marked #902 ready" }),
+    )
+    .await;
+    let page = hub.core.clone().with_github(github.clone()).api();
+    let id = task.id;
+    let reading = tokio::spawn(async move {
+        page.overview(OverviewRequest::TaskPullRequests { task: id })
+            .await
+    });
+    github.entered.notified().await;
+    github.source.set_pull_request(
+        "acme/widgets",
+        901,
+        Ok(PullRequestState {
+            state: "closed".into(),
+            merged: true,
+            ..conflicted_draft(&head)
+        }),
+    );
+    hub.core.poll_github_once().await.unwrap();
+    github.released.notify_one();
+    let OverviewReply::TaskPullRequests { pulls } = reading.await.unwrap().unwrap() else {
+        panic!("not a pull request list");
+    };
+    let status = |number: u64| {
+        pulls
+            .iter()
+            .find(|pull| pull.number == number)
+            .map(|pull| pull.status)
+    };
+    assert_eq!(status(901), Some(PullRequestStatus::Merged), "{pulls:?}");
+    assert_eq!(status(902), Some(PullRequestStatus::Draft), "{pulls:?}");
 }
 
 fn item(
@@ -868,6 +1289,8 @@ struct PausedGithub {
     pause_pull: bool,
     /// Pause reading a notification's activity on `acme/gadgets` instead.
     pause_activity: bool,
+    /// Pause after reading a pull request's state, before answering it.
+    pause_state: bool,
     entered: tokio::sync::Notify,
     released: tokio::sync::Notify,
 }
@@ -882,7 +1305,7 @@ impl PausedGithub {
 #[async_trait::async_trait]
 impl GithubSource for PausedGithub {
     async fn notifications(&self, cursor: Option<&str>) -> Result<Feed, GithubError> {
-        if !self.pause_pull && !self.pause_activity {
+        if !self.pause_pull && !self.pause_activity && !self.pause_state {
             self.pause().await;
         }
         self.source.notifications(cursor).await
@@ -908,6 +1331,18 @@ impl GithubSource for PausedGithub {
             self.pause().await;
         }
         self.source.activity(notification, items).await
+    }
+
+    async fn pull_request_state(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<PullRequestState, GithubError> {
+        let state = self.source.pull_request_state(repository, number).await;
+        if self.pause_state {
+            self.pause().await;
+        }
+        state
     }
 }
 

@@ -1348,14 +1348,10 @@ pub(crate) async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let shown = args
-        .iter()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let shown = shown(args);
     let output = tokio::time::timeout(timeout, command.output())
         .await
-        .map_err(|_| format!("{program} {shown} timed out after {timeout:?}"))?
+        .map_err(|_| timed_out(program, args, timeout))?
         .map_err(|error| format!("could not run {program} {shown}: {error}"))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
@@ -1365,6 +1361,18 @@ pub(crate) async fn run(
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     ))
+}
+
+/// The error [`run`] returns when `program` with `args` runs out of `timeout`.
+pub(crate) fn timed_out(program: &str, args: &[OsString], timeout: Duration) -> String {
+    format!("{program} {} timed out after {timeout:?}", shown(args))
+}
+
+fn shown(args: &[OsString]) -> String {
+    args.iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn create_dir(dir: &Path) -> Result<(), WorkspaceError> {

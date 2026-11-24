@@ -144,12 +144,18 @@ impl FakeGh {
                cat {record}/downstack\n\
              elif [ \"$1 $2\" = \"pr list\" ] && [ -f {record}/created ]; then\n\
                echo 'https://github.test/me/app/pull/7'\n\
+             elif [ \"$1 $3\" = \"pr 18\" ]; then\n\
+               touch {record}/wrote_18; sleep 5\n\
+             elif [ \"$3\" = \"--method=PUT\" ] && [ -f {record}/put_hangs ]; then\n\
+               touch {record}/wrote_put; sleep 5\n\
              elif [ \"$1 $2 $3\" = \"pr merge 13\" ]; then\n\
                echo 'Head branch was modified. Review and try the merge again. (HTTP 409)' >&2; exit 1\n\
              elif [ \"$1 $2 $3\" = \"pr ready 13\" ]; then\n\
                echo 'GraphQL: Could not resolve to a PullRequest (HTTP 404)' >&2; exit 1\n\
              elif [ \"$1 $2 $3\" = \"pr merge 17\" ]; then\n\
                echo 'GraphQL: This pull request is part of a stack and must be merged using the asynchronous merge REST API (mergePullRequest)' >&2; exit 1\n\
+             elif [ \"$1 $2 $4\" = \"pr view --json=state\" ] && [ -f {record}/state_fails ]; then\n\
+               echo 'gh: timed out' >&2; exit 1\n\
              elif [ \"$1 $2 $3\" = \"pr view 15\" ]; then\n\
                echo OPEN\n\
              elif [ \"$1 $2\" = \"pr view\" ]; then\n\
@@ -1032,9 +1038,18 @@ async fn a_batch_merge_pins_each_head_and_stops_at_the_first_that_moved() {
         .apply("https://github.test/acme/app.git", &batch)
         .await
         .unwrap_err();
-    assert!(error.0.contains("stopped at #13"), "{error}");
+    assert!(
+        error.0.starts_with("batch stopped at #13"),
+        "the hub reads this prefix (#746): {error}"
+    );
     assert!(error.0.contains("merged #12"), "{error}");
     assert!(error.0.contains("HTTP 409"), "{error}");
+    assert!(
+        !error
+            .0
+            .contains(threadlane_core::forge::BATCH_MAY_HAVE_CHANGED),
+        "a rejected merge is not linked: {error}"
+    );
     let repo = "--repo=github.test/acme/app";
     assert_eq!(
         gh.invocations(),
@@ -1083,12 +1098,50 @@ async fn a_batch_merge_stops_at_a_pull_request_that_was_only_queued() {
         .apply("https://github.test/acme/app.git", &batch)
         .await
         .unwrap_err();
-    assert!(error.0.contains("stopped at #15"), "{error}");
+    assert!(
+        error.0.starts_with("batch stopped at #15"),
+        "the hub reads this prefix (#746): {error}"
+    );
     assert!(error.0.contains("none merged"), "{error}");
     assert!(error.0.contains("reports it OPEN"), "{error}");
+    assert!(
+        error
+            .0
+            .contains(threadlane_core::forge::BATCH_MAY_HAVE_CHANGED),
+        "a queued PR is linked: {error}"
+    );
     let calls = gh.invocations();
     assert_eq!(calls.len(), 2, "#16 is not attempted: {calls:?}");
     assert_eq!(calls[1][..3], ["pr", "view", "15"]);
+}
+
+#[tokio::test]
+async fn a_batch_says_a_merge_whose_state_read_failed_may_have_merged() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    std::fs::write(gh.dir.path().join("state_fails"), "").unwrap();
+    let batch = RepositoryAction::MergeBatch {
+        pulls: vec![
+            (12.try_into().unwrap(), "a".repeat(40)),
+            (16.try_into().unwrap(), "b".repeat(40)),
+        ],
+    };
+    let error = forge
+        .apply("https://github.test/acme/app.git", &batch)
+        .await
+        .unwrap_err();
+    assert!(
+        error.0.starts_with("batch stopped at #12"),
+        "the hub links the stopped PR from this prefix (#746): {error}"
+    );
+    assert!(
+        error
+            .0
+            .contains(threadlane_core::forge::BATCH_MAY_HAVE_CHANGED),
+        "the hub links this PR: {error}"
+    );
+    assert_eq!(gh.invocations().len(), 2, "#16 is not attempted");
 }
 
 #[tokio::test]
@@ -1273,6 +1326,141 @@ async fn a_batch_refuses_the_async_merge_while_a_downstack_pull_request_is_open(
 }
 
 #[tokio::test]
+async fn a_batch_counts_an_async_merge_as_merged_without_reading_its_state() {
+    use threadlane_core::forge::RepositoryAction;
+    let gh = FakeGh::new();
+    let forge = GitForge::with_gh(gh.program());
+    std::fs::write(
+        gh.dir.path().join("pull.json"),
+        r#"{"status":"merged","details":{"sha":"m3rg3"}}"#,
+    )
+    .unwrap();
+    // A failing state read would stop the batch at #17, which did merge.
+    std::fs::write(gh.dir.path().join("state_fails"), "").unwrap();
+    let batch = RepositoryAction::MergeBatch {
+        pulls: vec![(17.try_into().unwrap(), "a".repeat(40))],
+    };
+    let report = forge
+        .apply("https://github.test/acme/app.git", &batch)
+        .await
+        .unwrap();
+    assert_eq!(report, "merged #17 in order");
+    assert!(
+        !gh.invocations()
+            .iter()
+            .any(|call| call.contains(&"--json=state".to_owned())),
+        "the confirmed merge is not read again"
+    );
+}
+
+/// An asynchronous merge GitHub accepted but whose result was not read may
+/// still merge, so the batch error says so; a merge GitHub ended otherwise
+/// did not (#746).
+#[tokio::test]
+async fn a_batch_says_an_accepted_async_merge_left_unresolved_may_have_merged() {
+    use threadlane_core::forge::{BATCH_MAY_HAVE_CHANGED, RepositoryAction};
+    let batch = RepositoryAction::MergeBatch {
+        pulls: vec![(17.try_into().unwrap(), "a".repeat(40))],
+    };
+    // Each case writes `pending_polls` and `pull.json`; a missing `pull.json` fails the poll.
+    for (case, pending_polls, pull, may_have_merged) in [
+        ("still pending", "100", None, true),
+        ("failed poll", "0", None, true),
+        (
+            "failed",
+            "0",
+            Some(r#"{"status":"failed","details":{"message":"conflict"}}"#),
+            false,
+        ),
+        (
+            "enqueued",
+            "0",
+            Some(r#"{"status":"enqueued","details":{"message":"in the merge queue"}}"#),
+            true,
+        ),
+        ("missing status", "0", Some(r#"{"details":{}}"#), true),
+    ] {
+        let gh = FakeGh::new();
+        let forge = GitForge::with_gh(gh.program()).with_merge_poll(std::time::Duration::ZERO);
+        std::fs::write(gh.dir.path().join("pending_polls"), pending_polls).unwrap();
+        if let Some(pull) = pull {
+            std::fs::write(gh.dir.path().join("pull.json"), pull).unwrap();
+        }
+        let error = forge
+            .apply("https://github.test/acme/app.git", &batch)
+            .await
+            .unwrap_err();
+        assert!(
+            error.0.starts_with("batch stopped at #17"),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            error.0.contains(BATCH_MAY_HAVE_CHANGED),
+            may_have_merged,
+            "{case}: {error}"
+        );
+    }
+}
+
+/// A merge or mark-ready write that runs out of time may have taken effect
+/// on GitHub, so the batch says so; a single call reports the timeout as
+/// before (#746).
+#[tokio::test]
+async fn a_batch_says_a_write_that_timed_out_may_have_taken_effect() {
+    use threadlane_core::forge::{BATCH_MAY_BE_READY, BATCH_MAY_HAVE_CHANGED, RepositoryAction};
+    let remote = "https://github.test/acme/app.git";
+    let head = "a".repeat(40);
+    let gh = FakeGh::new();
+    let forge =
+        GitForge::with_gh(gh.program()).with_gh_timeout(std::time::Duration::from_millis(500));
+    let merge = |number: u64| RepositoryAction::MergeBatch {
+        pulls: vec![
+            (number.try_into().unwrap(), head.clone()),
+            (19.try_into().unwrap(), head.clone()),
+        ],
+    };
+    let stopped = |number: u64| {
+        format!("batch stopped at #{number} (expected head {head}{BATCH_MAY_HAVE_CHANGED})")
+    };
+
+    let error = forge.apply(remote, &merge(18)).await.unwrap_err();
+    assert!(
+        gh.dir.path().join("wrote_18").exists(),
+        "the merge was sent"
+    );
+    assert!(error.0.starts_with(&stopped(18)), "{error}");
+
+    std::fs::write(gh.dir.path().join("put_hangs"), "").unwrap();
+    let error = forge.apply(remote, &merge(17)).await.unwrap_err();
+    assert!(gh.dir.path().join("wrote_put").exists(), "the PUT was sent");
+    assert!(error.0.starts_with(&stopped(17)), "{error}");
+
+    let ready = RepositoryAction::MarkReadyBatch {
+        numbers: vec![18.try_into().unwrap(), 19.try_into().unwrap()],
+    };
+    let error = forge.apply(remote, &ready).await.unwrap_err();
+    assert!(
+        error.0.starts_with(&format!(
+            "batch stopped at #18 ({BATCH_MAY_BE_READY}), none"
+        )),
+        "{error}"
+    );
+
+    let single = RepositoryAction::Merge {
+        number: 18.try_into().unwrap(),
+        expected_head: head.clone(),
+    };
+    let error = forge.apply(remote, &single).await.unwrap_err();
+    assert!(error.0.contains("timed out after 500ms"), "{error}");
+    assert!(
+        !gh.invocations()
+            .iter()
+            .any(|call| call.contains(&"19".to_owned())),
+        "#19 is never attempted"
+    );
+}
+
+#[tokio::test]
 async fn a_batch_mark_ready_goes_in_order_and_stops_at_the_first_that_fails() {
     use threadlane_core::forge::RepositoryAction;
     let gh = FakeGh::new();
@@ -1288,7 +1476,10 @@ async fn a_batch_mark_ready_goes_in_order_and_stops_at_the_first_that_fails() {
         .apply("https://github.test/acme/app.git", &batch)
         .await
         .unwrap_err();
-    assert!(error.0.contains("stopped at #13"), "{error}");
+    assert!(
+        error.0.starts_with("batch stopped at #13"),
+        "the hub reads this prefix (#746): {error}"
+    );
     assert!(error.0.contains("marked #12 ready"), "{error}");
     let repo = "--repo=github.test/acme/app";
     assert_eq!(
