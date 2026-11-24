@@ -192,6 +192,9 @@ pub struct RunRequest {
     pub remove_builtin_tools: bool,
     pub wall_time_limit: Duration,
     pub max_turns: Option<u32>,
+    /// The session ends with this run and is never resumed (a review), so a backend
+    /// need not pay to keep its prompt cache for long.
+    pub single_use: bool,
 }
 
 impl fmt::Debug for RunRequest {

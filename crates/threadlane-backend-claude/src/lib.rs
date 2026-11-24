@@ -247,6 +247,7 @@ impl AgentBackend for ClaudeBackend {
     }
 
     async fn run(&self, mut request: RunRequest) -> Result<Box<dyn BackendRun>, BackendError> {
+        let user_settings = !request.skills.is_empty();
         let warnings = self.apply_skills(&mut request).await?;
         if !request.working_dir.is_dir() {
             return Err(BackendError::Failed(format!(
@@ -287,6 +288,8 @@ impl AgentBackend for ClaudeBackend {
             remove_builtin_tools: request.remove_builtin_tools,
             deny_rules: request.deny_rules,
             max_turns: request.max_turns,
+            user_settings,
+            single_use: request.single_use,
         };
         match ClaudeRun::start(launch, request.session, server, config_dir) {
             Ok(run) => Ok(with_warnings(warnings, Box::new(run))),

@@ -58,6 +58,9 @@ pub(crate) struct Launch {
     pub(crate) remove_builtin_tools: bool,
     pub(crate) deny_rules: Vec<String>,
     pub(crate) max_turns: Option<u32>,
+    /// Load the user's own Claude settings: only a run with bound personal skills needs them.
+    pub(crate) user_settings: bool,
+    pub(crate) single_use: bool,
 }
 
 impl Launch {
@@ -94,8 +97,17 @@ impl Launch {
         if let Some(config) = &self.mcp_config {
             args.extend(["--mcp-config".into(), config.into()]);
         }
+        // An agent gets the system's tools and the repository's own settings, not the
+        // owner's connectors, plugins, hooks and CLAUDE.md: those cost about 20k tokens a
+        // session and steer the agent with instructions written for the owner.
+        args.push("--strict-mcp-config".into());
+        // shortcut: bound skills are personal ones under the user's Claude home, so a run
+        // with any still loads the user's settings; serve them another way to drop this.
+        if !self.user_settings {
+            args.extend(["--setting-sources".into(), "project".into()]);
+        }
         if self.remove_builtin_tools {
-            args.extend(["--tools".into(), "".into(), "--strict-mcp-config".into()]);
+            args.extend(["--tools".into(), "".into()]);
         }
         if !self.deny_rules.is_empty() {
             args.push("--disallowedTools".into());
@@ -126,6 +138,10 @@ impl Launch {
             .kill_on_drop(true);
         if let Some(dir) = &self.config_dir {
             command.env("CLAUDE_CONFIG_DIR", dir);
+        }
+        if self.single_use {
+            // A one-hour cache write costs more than a five-minute one and nothing rereads it.
+            command.env("FORCE_PROMPT_CACHING_5M", "1");
         }
         let prompt = user_input(&self.prompt, &self.images)?;
         let mut child = command.spawn()?;
@@ -532,6 +548,8 @@ mod tests {
             remove_builtin_tools: false,
             deny_rules: Vec::new(),
             max_turns: None,
+            user_settings: false,
+            single_use: false,
         }
     }
 
@@ -570,10 +588,24 @@ mod tests {
                 "--permission-mode",
                 "bypassPermissions",
                 "--resume",
-                "abc"
+                "abc",
+                "--strict-mcp-config",
+                "--setting-sources",
+                "project",
             ]
             .map(OsString::from)
         );
+    }
+
+    #[test]
+    fn a_run_with_bound_skills_keeps_the_user_settings_that_hold_them() {
+        let launch = Launch {
+            user_settings: true,
+            ..launch()
+        };
+        let args = launch.args(&NativeSession::Resume { id: "abc".into() });
+        assert!(!args.contains(&OsString::from("--setting-sources")));
+        assert!(args.contains(&OsString::from("--strict-mcp-config")));
     }
 
     #[test]

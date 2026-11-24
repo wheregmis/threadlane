@@ -79,6 +79,7 @@ fn request(work: &std::path::Path, prompt: &str, session: NativeSession) -> RunR
         remove_builtin_tools: true,
         wall_time_limit: RUN_LIMIT,
         max_turns: Some(4),
+        single_use: false,
     }
 }
 
