@@ -297,6 +297,20 @@ pub trait GithubSource: Send + Sync + fmt::Debug {
         ))
     }
 
+    /// The unresolved review threads of pull request `number` of
+    /// `repository` (`owner/name`), each as JSON with its `id`, `path`,
+    /// `line`, `outdated` flag, and first comment's `author` and `body`.
+    async fn unresolved_review_threads(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<Vec<serde_json::Value>, GithubError> {
+        let _ = (repository, number);
+        Err(GithubError(
+            "this source cannot read review threads".to_owned(),
+        ))
+    }
+
     /// Every file pull request `number` of `repository` (`owner/name`)
     /// changes, with its patch.
     async fn pull_request_files(

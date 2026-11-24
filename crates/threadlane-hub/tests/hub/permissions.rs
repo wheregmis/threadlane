@@ -1054,6 +1054,17 @@ async fn widgets_task(
 /// returned; without, the task ends and the lane is released.
 async fn approve(hub: &TestHub, task: &Task, more: bool) -> (Lease, Option<RunAssignment>) {
     let (lease, implementation) = begin(&*hub.link).await;
+    approve_run(hub, task, lease, implementation, more).await
+}
+
+/// [`approve`] from `implementation`, the task's run already begun.
+async fn approve_run(
+    hub: &TestHub,
+    task: &Task,
+    lease: Lease,
+    implementation: RunAssignment,
+    more: bool,
+) -> (Lease, Option<RunAssignment>) {
     assert_eq!(implementation.task_id, Some(task.id));
     call(
         hub,
@@ -1501,4 +1512,177 @@ async fn a_merge_that_failed_otherwise_or_whose_head_moved_asks_again() {
             "{error} {pull:?}"
         );
     }
+}
+
+/// A hub whose task opened pull request 42 of `widgets` and had its head
+/// [`approved_head`] approved, then a run of General's lead. Returns the
+/// hub, GitHub, and the lead's lease and run.
+async fn lead_after_review() -> (TestHub, FakeGithub, Lease, RunAssignment) {
+    let (hub, github, engineer) = reviewing_hub().await;
+    let general = hub.general().await.id;
+    let widgets = widgets_in(&hub, general, engineer, WIDGETS).await;
+    let task = widgets_task(&hub, general, engineer, widgets, TaskOrigin::User).await;
+    let (lease, implementation) = begin(&*hub.link).await;
+    super::github::record_pull_request(&hub, &task, &lease).await;
+    approve_run(&hub, &task, lease, implementation, false).await;
+    hub.send("m-merge", "Merge pull request 42 once it is ready")
+        .await;
+    let (lease, run) = loop {
+        let lease = hub.link.request_work().await.unwrap().expect("granted");
+        match hub.link.begin_run(&lease).await.unwrap() {
+            Begin::Run(run) if run.lane_kind == threadlane_core::model::LaneKind::Lead => {
+                break (lease, *run);
+            }
+            Begin::Run(run) => {
+                hub.link.complete(&lease, run.run_id, None).await.unwrap();
+            }
+            Begin::Idle => {}
+        }
+        hub.link.release(&lease).await.unwrap();
+    };
+    (hub, github, lease, run)
+}
+
+#[tokio::test]
+async fn the_lead_reads_a_pull_requests_readiness_without_asking() {
+    let (hub, github, lease, run) = lead_after_review().await;
+    let offered: Vec<&str> = run.tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        offered.contains(&threadlane_hub::PR_READINESS),
+        "{offered:?}"
+    );
+    assert!(offered.contains(&threadlane_hub::MERGE), "{offered:?}");
+    let mut pull = widgets_pull("threadlane/T-0001", &approved_head(), "success");
+    pull.checks.push(CheckRun {
+        name: "lint".into(),
+        conclusion: None,
+    });
+    github.set_pull_request("acme/widgets", 42, Ok(pull));
+    github.set_review_threads(
+        "acme/widgets",
+        42,
+        vec![json!({"id": "T1", "path": "src/a.rs", "line": 3, "body": "Handle None."})],
+    );
+    let cards_before = cards(&hub).await;
+    let read = call(
+        &hub,
+        &lease,
+        &run,
+        "ready",
+        threadlane_hub::PR_READINESS,
+        &json!({"repository": "widgets", "number": 42}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["head_sha"], approved_head().as_str());
+    assert_eq!(read["mergeable_state"], "clean");
+    assert_eq!(read["green"], false, "lint is still running");
+    assert_eq!(read["checks"][1]["status"], "running");
+    assert_eq!(read["unresolved_review_threads"][0]["id"], "T1");
+    assert_eq!(read["review"]["review_status"], "approved", "{read}");
+    assert_eq!(cards(&hub).await, cards_before, "reading asks nothing");
+    let other = call(
+        &hub,
+        &lease,
+        &run,
+        "ready-2",
+        threadlane_hub::PR_READINESS,
+        &json!({"repository": "gadgets", "number": 42}),
+    )
+    .await;
+    assert!(
+        matches!(other, Err(ToolError::InvalidArguments(_))),
+        "{other:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_lead_merges_only_the_reviewed_green_head_and_you_approve_it() {
+    let (hub, github, lease, run) = lead_after_review().await;
+    let merge = |head: &str| json!({"repository": "widgets", "number": 42, "expected_head": head});
+    let cards_before = cards(&hub).await;
+    let other = "b".repeat(40);
+    for (id, pull, arguments, why) in [
+        (
+            "moved",
+            widgets_pull("threadlane/T-0001", &other, "success"),
+            merge(&approved_head()),
+            "head",
+        ),
+        (
+            "red",
+            widgets_pull("threadlane/T-0001", &approved_head(), "failure"),
+            merge(&approved_head()),
+            "not green",
+        ),
+        (
+            "unreviewed",
+            widgets_pull("threadlane/T-0001", &other, "success"),
+            merge(&other),
+            "no code review",
+        ),
+    ] {
+        github.set_pull_request("acme/widgets", 42, Ok(pull));
+        let refused = call(&hub, &lease, &run, id, threadlane_hub::MERGE, &arguments).await;
+        assert!(
+            matches!(&refused, Err(ToolError::Blocked(reason)) if reason.contains(why)),
+            "{id}: {refused:?}"
+        );
+        assert_eq!(cards(&hub).await, cards_before, "{id}: nothing reaches you");
+    }
+    github.set_pull_request(
+        "acme/widgets",
+        42,
+        Ok(widgets_pull(
+            "threadlane/T-0001",
+            &approved_head(),
+            "success",
+        )),
+    );
+    let asked = call(
+        &hub,
+        &lease,
+        &run,
+        "ready",
+        threadlane_hub::MERGE,
+        &merge(&approved_head()),
+    )
+    .await;
+    assert_eq!(asked, Err(ToolError::WaitingOnYou));
+    assert_eq!(cards(&hub).await, cards_before + 1, "you are asked");
+    let decision = hub
+        .db
+        .lane_decisions(lease.lane_id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(decision.tool, threadlane_hub::MERGE);
+    decide(
+        &hub,
+        DecisionRequest::Answer {
+            decision: decision.id,
+            option: "approve".into(),
+            note: None,
+        },
+    )
+    .await
+    .unwrap();
+    // The runner merges exactly the head the review approved.
+    let begun = hub
+        .link
+        .begin_perform(&lease, run.run_id, decision.id)
+        .await
+        .unwrap();
+    let threadlane_core::link::Perform::Repository { remote, action } = begun else {
+        panic!("{begun:?}")
+    };
+    assert_eq!(remote, WIDGETS);
+    assert_eq!(
+        action,
+        threadlane_core::forge::RepositoryAction::Merge {
+            number: std::num::NonZeroU64::new(42).unwrap(),
+            expected_head: approved_head(),
+        }
+    );
 }

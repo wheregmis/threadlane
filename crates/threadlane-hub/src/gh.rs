@@ -28,7 +28,10 @@
 //!   and `user` for the login `gh` reads as;
 //! - a pull request's state, before a task's own step on it: `repos/<owner>/<name>/pulls/<n>`
 //!   for its head, draft flag and `mergeable_state`, and the check runs on its head commit;
-//! - a pull request's changed files and their patches: `repos/<owner>/<name>/pulls/<n>/files?per_page=100`.
+//! - a pull request's changed files and their patches: `repos/<owner>/<name>/pulls/<n>/files?per_page=100`;
+//! - its unresolved review threads, for the lead's readiness read: the one
+//!   exception to GET, `gh api graphql` with the fixed query
+//!   [`REVIEW_THREADS_QUERY`], which only reads (REST has no thread state).
 //!
 //! With `--include` each answer starts with the status line and headers. A
 //! `Link` header's `rel="next"` is followed, as another such GET of the path
@@ -53,6 +56,10 @@ const GH_TIMEOUT: Duration = Duration::from_secs(60);
 const ACCEPT: &str = "Accept: application/vnd.github+json";
 /// The most pages one call reads.
 const MAX_PAGES: usize = 10;
+/// The one GraphQL call, a fixed read-only query: REST cannot say whether a
+/// review thread is resolved.
+// shortcut: reads the first 100 threads, enough for any PR seen so far; page with `after` if one has more.
+const REVIEW_THREADS_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:1){nodes{author{login} body}}}}}}}";
 
 /// [`GithubSource`] through `gh api`.
 #[derive(Debug, Clone)]
@@ -77,11 +84,20 @@ impl GhSource {
     /// Runs `gh api --method GET --include <extra> <path>`, kept from
     /// prompting. Returns whether it succeeded, and its standard output.
     async fn get(&self, extra: &[String], path: &str) -> Result<(bool, String), GithubError> {
+        let mut args: Vec<String> = ["api", "--method", "GET", "--include"]
+            .map(str::to_owned)
+            .into();
+        args.extend_from_slice(extra);
+        args.extend(["-H".to_owned(), ACCEPT.to_owned(), path.to_owned()]);
+        self.gh(&args, path).await
+    }
+
+    /// Runs `gh <args>`, kept from prompting. Returns whether it succeeded,
+    /// and its standard output; `path` names the call in errors.
+    async fn gh(&self, args: &[String], path: &str) -> Result<(bool, String), GithubError> {
         let mut command = Command::new(&self.gh);
         command
-            .args(["api", "--method", "GET", "--include"])
-            .args(extra)
-            .args(["-H", ACCEPT, path])
+            .args(args)
             .env("GH_PROMPT_DISABLED", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -501,6 +517,61 @@ impl GithubSource for GhSource {
             state: text(&pull, "/state").unwrap_or_default(),
             merged: pull["merged"] == true,
         })
+    }
+
+    async fn unresolved_review_threads(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<Vec<Json>, GithubError> {
+        let Some((owner, name)) = repository
+            .split_once('/')
+            .filter(|_| valid_full_name(repository))
+        else {
+            return Err(GithubError(format!(
+                "{repository:?} is not a repository name"
+            )));
+        };
+        let args: Vec<String> = [
+            "api".to_owned(),
+            "-f".to_owned(),
+            format!("query={REVIEW_THREADS_QUERY}"),
+            "-f".to_owned(),
+            format!("owner={owner}"),
+            "-f".to_owned(),
+            format!("name={name}"),
+            "-F".to_owned(),
+            format!("number={number}"),
+            "graphql".to_owned(),
+        ]
+        .into();
+        let (ok, output) = self.gh(&args, "graphql reviewThreads").await?;
+        let answer: Json = serde_json::from_str(&output)
+            .map_err(|error| GithubError(format!("gh api graphql printed no JSON: {error}")))?;
+        let threads = answer
+            .pointer("/data/repository/pullRequest/reviewThreads/nodes")
+            .and_then(Json::as_array)
+            .filter(|_| ok && answer.get("errors").is_none())
+            .ok_or_else(|| {
+                GithubError(format!(
+                    "gh api graphql could not read the review threads of {repository}#{number}"
+                ))
+            })?;
+        Ok(threads
+            .iter()
+            .filter(|thread| thread["isResolved"] == false)
+            .map(|thread| {
+                let comment = &thread["comments"]["nodes"][0];
+                serde_json::json!({
+                    "id": thread["id"],
+                    "path": thread["path"],
+                    "line": thread["line"],
+                    "outdated": thread["isOutdated"],
+                    "author": comment["author"]["login"],
+                    "body": comment["body"],
+                })
+            })
+            .collect())
     }
 
     async fn pull_request_files(
@@ -1579,6 +1650,53 @@ case "$last" in
         );
         assert!(source.pull_request_state("acme/../x", 529).await.is_err());
         assert!(source.pull_request_state("acme/widgets", 7).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unresolved_review_threads_come_from_the_fixed_graphql_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = serde_json::json!({"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
+            {"id": "T1", "isResolved": false, "isOutdated": false, "path": "src/a.rs", "line": 3,
+             "comments": {"nodes": [{"author": {"login": "rabbit"}, "body": "Handle None."}]}},
+            {"id": "T2", "isResolved": true, "isOutdated": false, "path": "src/b.rs", "line": 9,
+             "comments": {"nodes": [{"author": {"login": "rabbit"}, "body": "Done."}]}},
+        ]}}}}});
+        let source = GhSource::with_gh(fake_gh_with(
+            dir.path(),
+            &[("graphql", "graphql.json", answer.to_string())],
+        ));
+        assert_eq!(
+            source
+                .unresolved_review_threads("acme/widgets", 42)
+                .await
+                .unwrap(),
+            [
+                serde_json::json!({"id": "T1", "path": "src/a.rs", "line": 3, "outdated": false,
+                "author": "rabbit", "body": "Handle None."})
+            ]
+        );
+        let call = &calls(dir.path())[0];
+        assert!(call.starts_with("api -f query=query("), "{call}");
+        assert!(!call.contains("mutation"), "{call}");
+        assert!(
+            call.ends_with("-f owner=acme -f name=widgets -F number=42 graphql"),
+            "{call}"
+        );
+        assert!(
+            source
+                .unresolved_review_threads("acme/../x", 42)
+                .await
+                .is_err()
+        );
+        let errors = serde_json::json!({"errors": [{"message": "no"}]});
+        std::fs::write(dir.path().join("graphql.json"), errors.to_string()).unwrap();
+        assert!(
+            source
+                .unresolved_review_threads("acme/widgets", 42)
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(unix)]

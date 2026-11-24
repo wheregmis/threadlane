@@ -378,7 +378,7 @@ impl LocalLink {
                 prompt.push_str(&Json::Array(roster).to_string());
             }
             if scan {
-                prompt.push_str("\nFor PR readiness scans, check CI, mergeability and unresolved threads. Before reading a diff or delegating a full PR review, call pr_review_status with the registered repository, number and current full head SHA. Reuse approval and route requested changes back to the original task. If a review is in progress, only its assigned task proceeds. Investigate new findings narrowly.");
+                prompt.push_str("\nFor PR readiness scans, call pr_readiness for the head SHA, checks, mergeability and unresolved review threads. Merge with merge, expected_head set to the head an approved review covers; it is refused unless that head is current and green, and the user approves it. Before reading a diff or delegating a full PR review, call pr_review_status with the registered repository, number and current full head SHA. Reuse approval and route requested changes back to the original task. If a review is in progress, only its assigned task proceeds. Investigate new findings narrowly.");
                 let reviewer =
                     enabled.find(|(member, _)| match inner.settings.reviewer.as_deref() {
                         Some(name) => member.name == name,
