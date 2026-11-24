@@ -242,11 +242,11 @@ async fn a_usage_limit_cools_the_account_down_and_waits_for_the_reset() {
     let at = limited(&hub, None).await;
     assert_eq!(
         hub.db.accounts().await.unwrap()[0].cooldown_until,
-        Some(at + Duration::from_secs(300)),
+        Some(at + Duration::from_secs(30 * 60)),
         "the fallback, when the backend gave no reset time"
     );
     assert_eq!(hub.event(event).await.attempts, 0);
-    hub.clock.advance(Duration::from_secs(300));
+    hub.clock.advance(Duration::from_secs(30 * 60));
     assert!(hub.link.request_work().await.unwrap().is_some(), "reset");
 }
 

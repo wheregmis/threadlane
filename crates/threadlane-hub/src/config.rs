@@ -54,7 +54,7 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             format: LogFormat::Pretty,
-            filter: "info".to_owned(),
+            filter: "info,swarm_discovery=off".to_owned(),
         }
     }
 }
@@ -121,7 +121,9 @@ impl Default for TimingConfig {
             session_max_age_secs: 24 * 60 * 60,
             retry_backoff_base_secs: 10,
             retry_backoff_max_secs: 10 * 60,
-            usage_limit_fallback_secs: 5 * 60,
+            // shortcut: Codex's "try again at 3:45 PM" is not parsed, so this is
+            // its whole cooldown; parse the reset time if 30 minutes wastes quota.
+            usage_limit_fallback_secs: 30 * 60,
             decision_expiry_secs: 24 * 60 * 60,
         }
     }
