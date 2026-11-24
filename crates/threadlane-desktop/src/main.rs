@@ -18,7 +18,7 @@ use std::time::Duration;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState, Undo};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
-use gpui_kit::component::{ActiveTheme as _, Theme, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, Theme, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_client::{ClientCore, ClientDirs, SpaceFeedItem};
 use threadlane_core::client::{ActivityCursor, TaskActivityEntry};
@@ -453,6 +453,9 @@ struct Desktop {
     sidebar_width: Pixels,
     sidebar_resizable: Entity<ResizableState>,
     last_activity_revision: u64,
+    /// The activity that says a hub this app started could not be restarted
+    /// on the app's build: its toast offers to try again.
+    hub_restart_failed: Option<u64>,
     join_error: Option<String>,
     routine_error: Option<String>,
     decision_scroll: ScrollHandle,
@@ -779,6 +782,7 @@ impl Desktop {
             sidebar_width,
             sidebar_resizable,
             last_activity_revision: 0,
+            hub_restart_failed: None,
             join_error: None,
             routine_error: None,
             decision_scroll: ScrollHandle::default(),
@@ -894,6 +898,7 @@ impl Desktop {
                 let app = local_hub::app_build();
                 let statuses = core.read().await.status().await;
                 let mut said = Vec::new();
+                let mut retry = false;
                 for status in statuses {
                     let Ok(info) = status.info else { continue };
                     let socket = match status.reach {
@@ -925,6 +930,7 @@ impl Desktop {
                             .await
                             .map_err(|error| error.to_string())
                             .flatten();
+                            retry |= restarted.is_err();
                             said.push(match restarted {
                                 Ok(()) => (
                                     true,
@@ -942,10 +948,16 @@ impl Desktop {
                         }
                     }
                 }
-                said
+                (said, retry)
             },
-            |this, said, cx| {
+            |this, (said, retry), cx| {
                 if said.is_empty() {
+                    // Asked for from the toast: answer it, as launch stays quiet.
+                    if this.hub_restart_failed.take().is_some() {
+                        this.state.report(Activity::Done(
+                            "No reachable hub needs a restart.".to_owned(),
+                        ));
+                    }
                     return;
                 }
                 let ok = said.iter().all(|(ok, _)| *ok);
@@ -959,6 +971,7 @@ impl Desktop {
                 } else {
                     Activity::Failed(text)
                 });
+                this.hub_restart_failed = retry.then(|| this.state.activity_revision());
                 this.refresh(cx);
             },
             cx,
@@ -2152,13 +2165,29 @@ impl Desktop {
                 window.push_notification(Notification::success(text).id::<ActivityToast>(), cx);
             }
             Activity::Failed(why) => {
-                window.push_notification(
-                    Notification::error(why)
-                        .title("Action failed")
-                        .id::<ActivityToast>()
-                        .autohide(false),
-                    cx,
-                );
+                let mut toast = Notification::error(why)
+                    .title("Action failed")
+                    .id::<ActivityToast>()
+                    .autohide(false);
+                if self.hub_restart_failed == Some(rev) {
+                    let desktop = cx.entity().downgrade();
+                    toast = toast.action(move |_, _, cx| {
+                        let desktop = desktop.clone();
+                        components::button("restart-hub")
+                            .small()
+                            .label("Restart hub")
+                            .on_click(cx.listener(move |toast, _, window, cx| {
+                                toast.dismiss(window, cx);
+                                let _gone = desktop.update(cx, |this, cx| {
+                                    this.state.report(Activity::Working(
+                                        "Restarting the hub…".to_owned(),
+                                    ));
+                                    this.match_hub_builds(cx);
+                                });
+                            }))
+                    });
+                }
+                window.push_notification(toast, cx);
             }
         }
     }
