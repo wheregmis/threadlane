@@ -314,6 +314,9 @@ async fn dreams_learn_from_project_choices_and_give_the_lead_current_evidence() 
     assert!(!lead.prompt.contains("Dreaming decision history"));
     complete(&hub, &lease, &lead).await;
 
+    // After a restart the hub no longer remembers what it sent, so the resumed session is
+    // still told the history is withdrawn, once.
+    let hub = hub.restart(Arc::new(NoHooks)).await;
     set(&hub, None).await;
     hub.send("dreaming-off", "Prepare this week's report").await;
     let (lease, lead) = begin(&*hub.link).await;
@@ -327,6 +330,10 @@ async fn dreams_learn_from_project_choices_and_give_the_lead_current_evidence() 
             .appended_instructions
             .contains("Use a table for weekly reports.")
     );
+    complete(&hub, &lease, &lead).await;
+    hub.send("still-off", "And next week's").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(!lead.prompt.contains("Dreaming decision history"));
     complete(&hub, &lease, &lead).await;
 }
 
