@@ -12,9 +12,7 @@
 
 ### Bug Fixes
 
-* **hub:** name valid tool fields, cool usage limits 30 min, drop undeliverable reviews, mute mDNS log ([6fd433d](https://github.com/wheregmis/threadlane/commit/6fd433d2eb41ed35e31c1bcb62ed34d4601afa81))
 * **hub:** name valid tool fields, cool usage limits 30 min, drop undeliverable reviews, mute mDNS log ([724b03e](https://github.com/wheregmis/threadlane/commit/724b03eb346dfabec70f60554b1c906fc9e29a2a))
-* **hub:** tell a re-review what its earlier rounds asked for ([6be3616](https://github.com/wheregmis/threadlane/commit/6be361646a13f8cebd09b71ddc7e27d875ead4b5))
 * **hub:** tell a re-review what its earlier rounds asked for ([ad71558](https://github.com/wheregmis/threadlane/commit/ad7155848acfa39f4deafd57441a578bc1d0b3a8))
 * keep the app's local hubs on the app's build and refuse a stale hub program before stopping a hub ([#752](https://github.com/wheregmis/threadlane/issues/752)) ([8e96a5d](https://github.com/wheregmis/threadlane/commit/8e96a5db82a47f1ebb680136a12a4f9470d012b8))
 
