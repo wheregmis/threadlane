@@ -485,10 +485,13 @@ impl HubDb {
     ) -> StoreResult<(usize, Vec<i64>)> {
         let conn = self.db.reader()?;
         let after = opt_ts(updated_after);
+        // Count only choices choice_records can still read: a pruned task's answer
+        // otherwise stays counted and the last page never ends (#757).
         let filter = format!(
             "FROM dream_items WHERE project_id=?1 AND kind=?2 AND (kind!='run' OR last_review=0)
             AND (?3 IS NULL OR kind!='task' OR item_id IN
-                (SELECT t.id FROM tasks t WHERE t.project_id=?1 AND {} > ?3))",
+                (SELECT t.id FROM tasks t WHERE t.project_id=?1 AND {} > ?3))
+            AND (kind!='choice' OR item_id IN (SELECT d.id {CHOICES}))",
             task_updated_at()
         );
         // Choices page newest first and tasks page in full, with no cap, so none
