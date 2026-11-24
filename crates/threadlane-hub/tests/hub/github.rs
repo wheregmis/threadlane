@@ -579,6 +579,53 @@ async fn a_first_page_load_keeps_what_it_read_when_another_read_fails() {
     );
 }
 
+/// A page read still in flight when a poll caches a newer status does not
+/// overwrite it with the older one it read (#746).
+#[tokio::test]
+async fn a_page_read_keeps_a_status_a_poll_cached_while_it_was_reading() {
+    let github = Arc::new(PausedGithub {
+        pause_state: true,
+        ..PausedGithub::default()
+    });
+    let (hub, _) = start(&github.source, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    let head = "a".repeat(40);
+    github
+        .source
+        .set_pull_request("acme/widgets", 901, Ok(conflicted_draft(&head)));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [901] }),
+        json!({ "performed": true, "summary": "marked #901 ready" }),
+    )
+    .await;
+    let page = hub.core.clone().with_github(github.clone()).api();
+    let id = task.id;
+    let reading = tokio::spawn(async move {
+        page.overview(OverviewRequest::TaskPullRequests { task: id })
+            .await
+    });
+    github.entered.notified().await;
+    github.source.set_pull_request(
+        "acme/widgets",
+        901,
+        Ok(PullRequestState {
+            state: "closed".into(),
+            merged: true,
+            ..conflicted_draft(&head)
+        }),
+    );
+    hub.core.poll_github_once().await.unwrap();
+    github.released.notify_one();
+    reading.await.unwrap().unwrap();
+    let pulls = pull_requests(&hub, &task).await;
+    assert_eq!(pulls.len(), 1);
+    assert_eq!(pulls[0].status, PullRequestStatus::Merged);
+}
+
 fn item(
     id: &str,
     kind: GithubKind,
@@ -1138,6 +1185,8 @@ struct PausedGithub {
     pause_pull: bool,
     /// Pause reading a notification's activity on `acme/gadgets` instead.
     pause_activity: bool,
+    /// Pause after reading a pull request's state, before answering it.
+    pause_state: bool,
     entered: tokio::sync::Notify,
     released: tokio::sync::Notify,
 }
@@ -1152,7 +1201,7 @@ impl PausedGithub {
 #[async_trait::async_trait]
 impl GithubSource for PausedGithub {
     async fn notifications(&self, cursor: Option<&str>) -> Result<Feed, GithubError> {
-        if !self.pause_pull && !self.pause_activity {
+        if !self.pause_pull && !self.pause_activity && !self.pause_state {
             self.pause().await;
         }
         self.source.notifications(cursor).await
@@ -1178,6 +1227,18 @@ impl GithubSource for PausedGithub {
             self.pause().await;
         }
         self.source.activity(notification, items).await
+    }
+
+    async fn pull_request_state(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<PullRequestState, GithubError> {
+        let state = self.source.pull_request_state(repository, number).await;
+        if self.pause_state {
+            self.pause().await;
+        }
+        state
     }
 }
 

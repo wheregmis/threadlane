@@ -1349,6 +1349,48 @@ async fn a_batch_counts_an_async_merge_as_merged_without_reading_its_state() {
     );
 }
 
+/// An asynchronous merge GitHub accepted but whose result was not read may
+/// still merge, so the batch error says so; a merge GitHub ended otherwise
+/// did not (#746).
+#[tokio::test]
+async fn a_batch_says_an_accepted_async_merge_left_unresolved_may_have_merged() {
+    use threadlane_core::forge::{BATCH_MAY_HAVE_CHANGED, RepositoryAction};
+    let batch = RepositoryAction::MergeBatch {
+        pulls: vec![(17.try_into().unwrap(), "a".repeat(40))],
+    };
+    // Each case writes `pending_polls` and `pull.json`; a missing `pull.json` fails the poll.
+    for (case, pending_polls, pull, may_have_merged) in [
+        ("still pending", "100", None, true),
+        ("failed poll", "0", None, true),
+        (
+            "failed",
+            "0",
+            Some(r#"{"status":"failed","details":{"message":"conflict"}}"#),
+            false,
+        ),
+    ] {
+        let gh = FakeGh::new();
+        let forge = GitForge::with_gh(gh.program()).with_merge_poll(std::time::Duration::ZERO);
+        std::fs::write(gh.dir.path().join("pending_polls"), pending_polls).unwrap();
+        if let Some(pull) = pull {
+            std::fs::write(gh.dir.path().join("pull.json"), pull).unwrap();
+        }
+        let error = forge
+            .apply("https://github.test/acme/app.git", &batch)
+            .await
+            .unwrap_err();
+        assert!(
+            error.0.starts_with("batch stopped at #17"),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            error.0.contains(BATCH_MAY_HAVE_CHANGED),
+            may_have_merged,
+            "{case}: {error}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_batch_mark_ready_goes_in_order_and_stops_at_the_first_that_fails() {
     use threadlane_core::forge::RepositoryAction;

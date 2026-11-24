@@ -50,12 +50,16 @@ enum Merge {
     /// `gh pr merge` succeeded, which a merge queue or auto-merge also
     /// reports for a PR it only queued.
     Requested(String),
+    /// GitHub accepted the asynchronous merge, but its result could not be
+    /// read, so it may still merge.
+    Accepted(ForgeError),
 }
 
 impl Merge {
-    fn into_report(self) -> String {
+    fn into_report(self) -> Result<String, ForgeError> {
         match self {
-            Self::Confirmed(report) | Self::Requested(report) => report,
+            Self::Confirmed(report) | Self::Requested(report) => Ok(report),
+            Self::Accepted(error) => Err(error),
         }
     }
 }
@@ -452,10 +456,16 @@ impl GitForge {
                     error.0, async_error.0
                 ))
             })?;
+        // From here GitHub has accepted the merge, so only a terminal status is a rejection.
+        let accepted = |error: ForgeError| Ok(Merge::Accepted(error));
         // shortcut: polls for about a minute, then reports it still pending; raise if stacks merge slower.
         for poll in 0..=30 {
-            let result: Json = serde_json::from_str(&output)
-                .map_err(|error| ForgeError(format!("invalid merge response: {error}")))?;
+            let result: Json = match serde_json::from_str(&output) {
+                Ok(result) => result,
+                Err(error) => {
+                    return accepted(ForgeError(format!("invalid merge response: {error}")));
+                }
+            };
             let message = result["details"]["message"].as_str().unwrap_or_default();
             match result["status"].as_str() {
                 Some("merged") => {
@@ -466,14 +476,19 @@ impl GitForge {
                     )));
                 }
                 Some("pending") => {
-                    let uuid = result["details"]["uuid"].as_str().ok_or_else(|| {
-                        ForgeError("the pending merge response has no uuid".into())
-                    })?;
+                    let Some(uuid) = result["details"]["uuid"].as_str() else {
+                        return accepted(ForgeError(
+                            "the pending merge response has no uuid".into(),
+                        ));
+                    };
                     if poll == 30 {
                         break;
                     }
                     tokio::time::sleep(self.merge_poll).await;
-                    output = api("GET", &[], format!("{endpoint}/{uuid}")).await?;
+                    output = match api("GET", &[], format!("{endpoint}/{uuid}")).await {
+                        Ok(output) => output,
+                        Err(error) => return accepted(error),
+                    };
                 }
                 status => {
                     return Err(ForgeError(format!(
@@ -483,7 +498,7 @@ impl GitForge {
                 }
             }
         }
-        Err(ForgeError(format!(
+        accepted(ForgeError(format!(
             "the asynchronous merge of PR #{number} is still pending; check the PR before retrying"
         )))
     }
@@ -501,9 +516,10 @@ impl GitForge {
             let merge = self.merge_pull(repo, *number, head, true).await;
             // With a merge queue or auto-merge, `gh pr merge` succeeds having only queued the PR.
             // Whether a failure may still have merged, or queued, this PR.
-            let uncertain = matches!(merge, Ok(Merge::Requested(_)));
+            let uncertain = matches!(merge, Ok(Merge::Requested(_) | Merge::Accepted(_)));
             let merge = match merge {
                 Ok(Merge::Confirmed(_)) => Ok(()),
+                Ok(Merge::Accepted(error)) => Err(error),
                 Ok(Merge::Requested(_)) => self
                     .gh(
                         Path::new("."),
@@ -1120,7 +1136,7 @@ impl Forge for GitForge {
                 return self
                     .merge_pull(&repo, *number, expected_head, false)
                     .await
-                    .map(Merge::into_report);
+                    .and_then(Merge::into_report);
             }
             RepositoryAction::MarkReady { number } => args(&["pr", "ready", &number.to_string()]),
             RepositoryAction::EditPullRequest {

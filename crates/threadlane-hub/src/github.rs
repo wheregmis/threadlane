@@ -483,7 +483,8 @@ impl HubCore {
                 .chain(refresh.into_iter().map(|work| (work, true)))
                 .collect::<Vec<_>>()
         };
-        self.refresh_pull_status(source.as_ref(), &followed).await;
+        self.refresh_pull_status(source.as_ref(), &followed, false)
+            .await;
         pass.inserted += self
             .refresh_github_work(source.as_ref(), followed, &mut lanes)
             .await?;
@@ -744,11 +745,14 @@ impl HubCore {
 
     /// Reads the state of each followed pull request into the status
     /// cache, once per pull request however many tasks follow it. A failed
-    /// read keeps what was cached. Answers whether every read succeeded.
+    /// read keeps what was cached. With `fill_only`, an entry cached while
+    /// the read was in flight, such as a poll's newer status, is kept.
+    /// Answers whether every read succeeded.
     async fn refresh_pull_status(
         &self,
         source: &dyn GithubSource,
         followed: &[(Work, bool)],
+        fill_only: bool,
     ) -> bool {
         let mut complete = true;
         let mut read: HashMap<(&str, u64), Option<TaskPullRequest>> = HashMap::new();
@@ -786,6 +790,7 @@ impl HubCore {
                 .iter_mut()
                 .find(|known| known.repository == pull.repository && known.number == pull.number)
             {
+                Some(_) if fill_only => {}
                 Some(known) => *known = pull,
                 None => pulls.push(pull),
             }
@@ -827,7 +832,11 @@ impl HubCore {
             return Ok(pulls.clone());
         }
         // Reads that succeeded stay cached; the ones that failed are retried next time.
-        if !self.refresh_pull_status(source.as_ref(), &missing).await && cached.is_none() {
+        if !self
+            .refresh_pull_status(source.as_ref(), &missing, true)
+            .await
+            && cached.is_none()
+        {
             let partial = self.inner.pull_status.lock().await.get(&task).cloned();
             return Ok(partial.unwrap_or_default());
         }
