@@ -1895,15 +1895,36 @@ async fn sessions_give_the_reason_each_failed_or_abandoned_run_ended() {
         )
         .await
         .unwrap();
+    let name = hub
+        .db
+        .agents()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == agent)
+        .unwrap()
+        .name;
+    // A backend diagnostic carrying a credential must never reach Dreaming.
+    const SECRET: &str = "sk-live-SYNTHETIC0123456789";
     let (lease, failed) = begin(&*hub.link).await;
     assert_eq!(failed.task_id, Some(task.id));
-    let message = format!("the backend refused the request\n{}", "x".repeat(500));
+    let message = format!("request failed\nAuthorization: Bearer {SECRET}");
     hub.link
         .fail(&lease, failed.run_id, &RunFailure::Error { message })
         .await
         .unwrap();
     hub.link.release(&lease).await.unwrap();
     hub.clock.advance(Duration::from_secs(11));
+    // Twenty more failures that count no attempt, so the oldest is the 22nd.
+    for _ in 0..20 {
+        let (lease, run) = begin(&*hub.link).await;
+        assert_eq!(run.task_id, Some(task.id));
+        hub.link
+            .fail(&lease, run.run_id, &RunFailure::SessionMissing)
+            .await
+            .unwrap();
+        hub.link.release(&lease).await.unwrap();
+    }
     let (_, abandoned) = begin(&*hub.link).await;
     assert_eq!(abandoned.task_id, Some(task.id));
     hub.clock.advance(PAST_LEASE);
@@ -1923,6 +1944,7 @@ async fn sessions_give_the_reason_each_failed_or_abandoned_run_ended() {
     let page = call(&*hub.link, &lease, &dream, SESSIONS, json!({}))
         .await
         .unwrap();
+    assert!(!page.to_string().contains(SECRET), "{page}");
     let run = |id: threadlane_core::ids::RunId| {
         page["runs"]
             .as_array()
@@ -1934,14 +1956,17 @@ async fn sessions_give_the_reason_each_failed_or_abandoned_run_ended() {
     };
     let listed = run(failed.run_id);
     assert_eq!(listed["status"], "failed");
-    let reason = listed["end_reason"].as_str().unwrap();
-    assert!(
-        reason.contains("the backend refused the request xxx") && reason.chars().count() <= 161,
-        "{reason}"
+    assert_eq!(listed["end_code"], "error", "{listed}");
+    assert_eq!(
+        listed["end_reason"],
+        "the run failed; the backend's diagnostic is withheld"
     );
+    assert_eq!(listed["task_id"], task.id.to_string());
+    assert_eq!(listed["agent"], name.as_str());
     let gone = run(abandoned.run_id);
     assert_eq!(gone["status"], "abandoned", "{gone}");
-    assert_eq!(gone["end_reason"], "lease ended");
+    assert_eq!(gone["end_code"], "lease_ended");
+    assert_eq!(gone["agent"], name.as_str());
     let committed = page["runs"]
         .as_array()
         .unwrap()
@@ -1949,27 +1974,38 @@ async fn sessions_give_the_reason_each_failed_or_abandoned_run_ended() {
         .find(|r| r["status"] == "committed")
         .expect("a committed run");
     assert!(committed.get("end_reason").is_none(), "{committed}");
+    assert!(committed.get("agent").is_none(), "{committed}");
 
-    let full = call(
-        &*hub.link,
-        &lease,
-        &dream,
-        SESSIONS,
-        json!({"task_id": task.id.to_string()}),
-    )
-    .await
-    .unwrap();
-    let runs = full["failed_runs"].as_array().unwrap();
-    assert_eq!(runs.len(), 2, "{full}");
-    assert_eq!(runs[0]["run_id"], abandoned.run_id.get());
-    assert_eq!(runs[0]["end_reason"], "lease ended");
-    assert_eq!(runs[1]["status"], "failed");
-    assert!(
-        runs[1]["end_reason"]
-            .as_str()
+    let detail = |offset: usize| {
+        let (link, lease, dream) = (&hub.link, &lease, &dream);
+        async move {
+            call(
+                &**link,
+                lease,
+                dream,
+                SESSIONS,
+                json!({"task_id": task.id.to_string(), "offset": offset, "limit": 20}),
+            )
+            .await
             .unwrap()
-            .contains(&"x".repeat(500)),
-        "{full}"
-    );
+        }
+    };
+    let first = detail(0).await;
+    assert!(!first.to_string().contains(SECRET), "{first}");
+    let runs = first["failed_runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 20, "{first}");
+    assert_eq!(first["failed_runs_total"], 22);
+    assert_eq!(first["failed_runs_next_offset"], 20);
+    assert_eq!(runs[0]["run_id"], abandoned.run_id.get());
+    assert_eq!(runs[0]["end_code"], "lease_ended");
+    assert_eq!(runs[1]["end_code"], "session_missing");
+    let rest = detail(20).await;
+    assert!(!rest.to_string().contains(SECRET), "{rest}");
+    let runs = rest["failed_runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2, "{rest}");
+    assert!(rest.get("failed_runs_next_offset").is_none(), "{rest}");
+    assert_eq!(runs[1]["run_id"], failed.run_id.get());
+    assert_eq!(runs[1]["end_code"], "error");
+    assert_eq!(runs[1]["agent"], name.as_str());
     complete(&hub, &lease, &dream).await;
 }

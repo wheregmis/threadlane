@@ -2,7 +2,7 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::client::{DreamChange, DreamSummary};
-use threadlane_core::ids::{DecisionId, EventId, LaneId, ProjectId, RunId, TimerId};
+use threadlane_core::ids::{DecisionId, EventId, LaneId, ProjectId, RunId, TaskId, TimerId};
 use threadlane_core::model::{
     DecisionAnswer, DecisionOption, Lease, NewTimer, Recurrence, Task, TimerCategory, TimerCreator,
 };
@@ -34,8 +34,53 @@ fn task_updated_at() -> String {
     )
 }
 
-/// The recorded reason a run of `r` ended without committing, else NULL.
-const END_REASON: &str = "CASE WHEN r.status IN ('failed','abandoned','stopped') THEN COALESCE(r.error,'no reason recorded') END";
+/// Runs of `r` that ended without committing.
+const UNFINISHED: &str = "r.status IN ('failed','abandoned','stopped')";
+
+/// A machine code and a fixed summary for why a run with `status` ended,
+/// from the hub-written prefix of its recorded `error` (#750). Backend text
+/// after the prefix, and any unrecognised or historical diagnostic, is
+/// withheld: it can carry credentials and Dreaming hands it to the lead model.
+fn end_reason(status: &str, error: Option<&str>) -> Option<(&'static str, &'static str)> {
+    let error = error.unwrap_or_default();
+    Some(match status {
+        "stopped" => ("stopped_by_user", "stopped by the user"),
+        "abandoned" if error == "stopped by the user" => ("stopped_by_user", "stopped by the user"),
+        "abandoned" => ("lease_ended", "the run's lease ended before it finished"),
+        "failed" if error.starts_with("the backend refused the run") => (
+            "backend_refused",
+            "the backend refused the run's setup, such as its model",
+        ),
+        "failed" if error.starts_with("limit exceeded") => {
+            ("limit_exceeded", "the run hit its wall-time or turn limit")
+        }
+        "failed" if error == "the account reached its usage limit" => {
+            ("usage_limit", "the account reached its usage limit")
+        }
+        "failed" if error == "the backend no longer has the native session" => (
+            "session_missing",
+            "the backend no longer had the native session",
+        ),
+        "failed" if error == "The Reviewer ended without submitting a verdict" => (
+            "no_verdict",
+            "the Reviewer ended without submitting a verdict",
+        ),
+        "failed" if error.is_empty() => ("no_reason", "no reason recorded"),
+        "failed" => (
+            "error",
+            "the run failed; the backend's diagnostic is withheld",
+        ),
+        _ => return None,
+    })
+}
+
+/// Sets `end_code` and `end_reason` on `run` when it ended without committing.
+fn put_end_reason(run: &mut Json, status: &str, error: Option<&str>) {
+    if let Some((code, summary)) = end_reason(status, error) {
+        run["end_code"] = json!(code);
+        run["end_reason"] = json!(summary);
+    }
+}
 
 const CHOICES: &str =
     "FROM decisions d JOIN events e ON e.source='decision' AND e.source_event_id='answer:' || d.id
@@ -598,36 +643,89 @@ impl HubDb {
         .await
     }
 
-    /// Finished run summaries and delivered messages for the selected page.
+    /// Finished run summaries and delivered messages for the selected page,
+    /// with the task and agent of each run that ended without committing.
     pub async fn dream_history(&self, project: ProjectId, ids: &[i64]) -> StoreResult<Vec<Json>> {
-        query_all(&self.db.reader()?, &format!("SELECT r.id,r.session_id,r.outcome,r.rationale,r.status,
+        query_all(&self.db.reader()?, "SELECT r.id,r.session_id,r.outcome,r.rationale,r.status,
             (SELECT json_group_array(json_object('body',json(o.body),'sent_at',o.sent_at)) FROM
                 (SELECT body,sent_at FROM outbox WHERE run_id=r.id AND project_id=?1 AND status='sent' AND kind='message' ORDER BY id) o),
-            {END_REASON}
-            FROM runs r JOIN lanes l ON l.id=r.lane_id WHERE l.project_id=?1 AND r.id IN (SELECT value FROM json_each(?2)) ORDER BY r.id"),
+            r.error,l.task_id,(SELECT name FROM agents WHERE id=r.agent_id)
+            FROM runs r JOIN lanes l ON l.id=r.lane_id WHERE l.project_id=?1 AND r.id IN (SELECT value FROM json_each(?2)) ORDER BY r.id",
             params![project.get(),json!(ids).to_string()], |row|{
                 let c=Cols(row);
-                let mut run = json!({"run_id":c.i64(0)?,"session_id":c.i64(1)?,"outcome":c.opt_text(2)?,"rationale":c.opt_text(3)?,"status":c.text(4)?,"sent_messages":c.json(5)?});
-                if let Some(reason) = c.opt_text(6)? {
-                    run["end_reason"] = json!(reason);
+                let status = c.text(4)?;
+                let mut run = json!({"run_id":c.i64(0)?,"session_id":c.i64(1)?,"outcome":c.opt_text(2)?,"rationale":c.opt_text(3)?,"status":status,"sent_messages":c.json(5)?});
+                put_end_reason(&mut run, &status, c.opt_text(6)?.as_deref());
+                if run.get("end_code").is_some() {
+                    // A lead run has no task.
+                    run["task_id"] = json!(c.opt_id::<TaskId>(7)?.map(|id| id.to_string()));
+                    run["agent"] = json!(c.opt_text(8)?);
                 }
                 Ok(run)
             }).await
     }
 
-    /// The task's runs that ended without committing, newest first, each with
-    /// its recorded reason (#750).
+    /// One page of the task's runs that ended without committing, newest
+    /// first, each with its agent and reason (#750), and how many there are.
     pub async fn dream_task_failures(
         &self,
         project: ProjectId,
         task: i64,
-    ) -> StoreResult<Vec<Json>> {
-        query_all(&self.db.reader()?, &format!("SELECT r.id,r.status,{END_REASON},r.ended_at FROM runs r
-            JOIN tasks t ON t.lane_id=r.lane_id WHERE t.project_id=?1 AND t.id=?2
-            AND ({END_REASON}) IS NOT NULL ORDER BY r.id DESC LIMIT 20"),
-            params![project.get(),task], |row|{
+        offset: usize,
+        limit: usize,
+    ) -> StoreResult<(usize, Vec<Json>)> {
+        let conn = self.db.reader()?;
+        let from = format!(
+            "FROM runs r JOIN tasks t ON t.lane_id=r.lane_id
+            WHERE t.project_id=?1 AND t.id=?2 AND {UNFINISHED}"
+        );
+        let total = query_one(
+            &conn,
+            &format!("SELECT COUNT(*) {from}"),
+            params![project.get(), task],
+            |row| Cols(row).i64(0),
+        )
+        .await?;
+        let runs = query_all(&conn, &format!("SELECT r.id,r.status,r.error,r.ended_at,
+            (SELECT name FROM agents WHERE id=r.agent_id) {from} ORDER BY r.id DESC LIMIT ?3 OFFSET ?4"),
+            params![project.get(),task,limit as i64,offset as i64], |row|{
                 let c=Cols(row);
-                Ok(json!({"run_id":c.i64(0)?,"status":c.text(1)?,"end_reason":c.opt_text(2)?,"ended_at":c.opt_ts(3)?}))
-            }).await
+                let status = c.text(1)?;
+                let mut run = json!({"run_id":c.i64(0)?,"status":status,"agent":c.opt_text(4)?,"ended_at":c.opt_ts(3)?});
+                put_end_reason(&mut run, &status, c.opt_text(2)?.as_deref());
+                Ok(run)
+            }).await?;
+        Ok((usize::try_from(total).unwrap_or_default(), runs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::end_reason;
+
+    #[test]
+    fn end_reasons_keep_only_hub_written_text() {
+        let code = |status, error| end_reason(status, error).map(|(code, _)| code);
+        assert_eq!(code("committed", None), None);
+        assert_eq!(code("stopped", None), Some("stopped_by_user"));
+        assert_eq!(
+            code("abandoned", Some("stopped by the user")),
+            Some("stopped_by_user")
+        );
+        assert_eq!(code("abandoned", Some("lease ended")), Some("lease_ended"));
+        assert_eq!(code("failed", None), Some("no_reason"));
+        assert_eq!(
+            code("failed", Some("limit exceeded: 30m")),
+            Some("limit_exceeded")
+        );
+        let refused = "the backend refused the run: key sk-secret. Change the agent's model";
+        let (code, summary) = end_reason("failed", Some(refused)).unwrap();
+        assert_eq!(code, "backend_refused");
+        assert!(!summary.contains("sk-secret"));
+        assert_eq!(code_of("failed", "token=sk-secret"), "error");
+    }
+
+    fn code_of(status: &str, error: &str) -> &'static str {
+        end_reason(status, Some(error)).unwrap().0
     }
 }

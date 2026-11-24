@@ -83,11 +83,11 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
     tools.push(ToolDefinition {
         name: PROJECT_SESSIONS.to_owned(),
         description: "Read this project's run outcomes, rationales, delivered replies and owner chat \
-                      from unreviewed runs (with a short end_reason for failed, abandoned or stopped ones), project tasks with review evidence and last activity, and \
+                      from unreviewed runs (failed, abandoned or stopped ones with their task, agent, end_code and end_reason), project tasks with review evidence and last activity, and \
                       previous Threadlane reports (first page only). Runs then tasks come in pages, \
                       long texts cut; a cut page gives the offset of the next one. Listed tasks are compact: \
                       title, one-line summary, latest verdict and diff totals, no goal. Pass task_id \
-                      for one task's full record with its review, patches and failed runs' reasons, or updated_after to list only tasks active since then."
+                      for one task's full record with its review, patches and failed runs (paged newest first by offset and limit), or updated_after to list only tasks active since then."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -134,9 +134,6 @@ fn task_record(task: &Task, times: &BTreeMap<i64, Timestamp>) -> Json {
 
 /// The longest one-line text a listed task keeps, so a page holds 50 or more.
 const LISTED_CHARS: usize = 80;
-
-/// The longest end reason a listed run keeps; `task_id` shows it in full.
-const REASON_CHARS: usize = 160;
 
 /// `text` on one line of at most `max` characters. A bare ellipsis: the clip
 /// note's character count would cost a page more than it tells.
@@ -187,7 +184,13 @@ fn compact(full: &Json, review: Option<&Json>) -> Json {
 }
 
 /// One project task in full, with its latest review, for a task a page lists compactly.
-async fn session_task(db: &HubDb, project: ProjectId, reference: &Json) -> Result<Json, ToolError> {
+async fn session_task(
+    db: &HubDb,
+    project: ProjectId,
+    reference: &Json,
+    offset: usize,
+    limit: usize,
+) -> Result<Json, ToolError> {
     let err = crate::error::tool_error;
     let id = crate::tools::task_ref(reference)?;
     let ids = [id.get()];
@@ -199,13 +202,18 @@ async fn session_task(db: &HubDb, project: ProjectId, reference: &Json) -> Resul
         .filter(|task| task.project_id == project)
         .ok_or_else(|| invalid(&format!("no task {id} in this project")))?;
     let mut record = task_record(&task, &times);
-    let failed = db
-        .dream_task_failures(project, id.get())
+    // offset and limit page the failed runs, newest first.
+    let (total, failed) = db
+        .dream_task_failures(project, id.get(), offset, limit)
         .await
         .map_err(err)?;
-    if !failed.is_empty() {
+    if total > 0 {
+        let end = offset.saturating_add(failed.len());
         record["failed_runs"] = json!(failed);
-        page::clip_fields(&mut record["failed_runs"]);
+        record["failed_runs_total"] = json!(total);
+        if end < total {
+            record["failed_runs_next_offset"] = json!(end);
+        }
     }
     if let Some(review) = db
         .dream_reviews(project, &ids)
@@ -534,7 +542,7 @@ impl HubCore {
             let db = &inner.db;
             let err = crate::error::tool_error;
             if let Some(reference) = object.get("task_id") {
-                return session_task(db, project, reference).await;
+                return session_task(db, project, reference, offset, limit).await;
             }
             let updated_after = match object.get("updated_after") {
                 None => None,
@@ -598,9 +606,6 @@ impl HubCore {
                 }
             }
             for item in &mut items {
-                if let Some(reason) = item["end_reason"].as_str() {
-                    item["end_reason"] = json!(short(reason, REASON_CHARS));
-                }
                 item["owner_messages"] = json!(
                     grouped
                         .remove(&item["run_id"].as_i64().unwrap_or_default())
