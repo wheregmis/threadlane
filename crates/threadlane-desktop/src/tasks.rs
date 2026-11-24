@@ -871,6 +871,266 @@ pub fn task_header(detail: &TaskDetail, when: &When) -> TaskHeader {
     }
 }
 
+/// Structured key-value metadata shown in the task inspector's Details section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDetails {
+    /// The agent assigned to the task.
+    pub agent: String,
+    /// The machine running or last used by the task, if any.
+    pub machine: Option<String>,
+    /// The backend of the active or most recent run, if any.
+    pub backend: Option<String>,
+    /// The model requested by the active or most recent run (`"Default"` when a
+    /// backend ran without an explicit model; `None` before any backend runs).
+    pub model: Option<String>,
+    /// Whether `model` is the backend's implicit default rather than an explicit name.
+    pub model_is_default: bool,
+    /// Repositories attached to this task.
+    pub repositories: Vec<String>,
+    /// Compact label for who or what requested the task.
+    pub requested_by: String,
+    /// When the task was created.
+    pub created: String,
+    /// When the active or most recent run started, if any.
+    pub started: Option<String>,
+    /// Elapsed or completed duration label and formatted value, if any.
+    pub duration: Option<(&'static str, String)>,
+    /// Parent task id when this task is a subtask.
+    pub parent: Option<TaskId>,
+    /// Active space skill playbook slugs on this task.
+    pub playbooks: Vec<String>,
+}
+
+/// Builds structured inspector details for a task against the display clock.
+#[must_use]
+pub fn task_details(detail: &TaskDetail, when: &When) -> TaskDetails {
+    let summary = &detail.summary;
+    let running = summary.task.status == TaskStatus::Running
+        || (summary.task.status == TaskStatus::InReview && summary.running_since.is_some());
+    let run = if running {
+        detail
+            .runs
+            .iter()
+            .rfind(|row| row.run.status == RunStatus::Active)
+    } else {
+        detail.runs.last()
+    };
+    let machine = run
+        .map(|row| row.machine.clone())
+        .or_else(|| summary.machine.clone());
+    let backend = run
+        .and_then(|row| row.run.backend)
+        .map(|kind| kind.to_string());
+    let (model, model_is_default) = match run.and_then(|row| row.run.backend) {
+        Some(_) => match run.and_then(|row| row.run.model.as_ref()) {
+            Some(model) => (Some(model.clone()), false),
+            None => (Some("Default".to_owned()), true),
+        },
+        None => (None, false),
+    };
+    let start = if running {
+        summary
+            .running_since
+            .or_else(|| run.map(|row| row.run.started_at))
+    } else {
+        run.map(|row| row.run.started_at)
+    };
+    let duration = if let Some(start) = start {
+        if running {
+            Some(("Running", when.since(start)))
+        } else {
+            run.and_then(|row| row.run.ended_at)
+                .map(|end| ("Duration", duration(end.saturating_since(start))))
+        }
+    } else if summary.task.status == TaskStatus::Queued {
+        Some(("Queued", when.since(summary.task.created_at)))
+    } else {
+        None
+    };
+    TaskDetails {
+        agent: summary.agent.clone(),
+        machine,
+        backend,
+        model,
+        model_is_default,
+        repositories: detail.repositories.clone(),
+        requested_by: requested_by_label(detail),
+        created: when.moment(summary.task.created_at),
+        started: start.map(|at| when.moment(at)),
+        duration,
+        parent: summary.task.parent_task_id,
+        playbooks: summary.task.playbooks.clone(),
+    }
+}
+
+fn requested_by_label(detail: &TaskDetail) -> String {
+    match detail.summary.task.origin {
+        TaskOrigin::User => "You".to_owned(),
+        TaskOrigin::UserRoutine => "Your routine".to_owned(),
+        TaskOrigin::Event => "Outside event".to_owned(),
+        TaskOrigin::Agent => "An agent".to_owned(),
+        TaskOrigin::Accepted => format!(
+            "{} (accepted by you)",
+            detail.proposed_by.as_deref().unwrap_or("An agent")
+        ),
+    }
+}
+
+/// Returns the task's goal when it carries detail beyond the title itself.
+#[must_use]
+pub fn task_goal(detail: &TaskDetail) -> Option<String> {
+    let goal = detail.summary.task.goal.trim();
+    if goal.is_empty() || goal == detail.summary.task.title.trim() {
+        None
+    } else {
+        Some(goal.to_owned())
+    }
+}
+
+/// Visual tone for a terminal task's top outcome banner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskOutcomeTone {
+    /// Completed successfully.
+    Done,
+    /// Ended with a failure.
+    Failed,
+    /// Cancelled before completion.
+    Cancelled,
+}
+
+/// Prominent outcome banner shown near the top of a finished, failed, or cancelled task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskOutcomeBanner {
+    /// Semantic tone for styling and iconography.
+    pub tone: TaskOutcomeTone,
+    /// Short section heading (`"Result"`, `"Task failed"`, or `"Cancelled"`).
+    pub heading: &'static str,
+    /// Summary or error copy.
+    pub body: String,
+}
+
+/// Builds a prominent outcome banner for terminal tasks when useful copy exists.
+#[must_use]
+pub fn task_outcome_banner(detail: &TaskDetail) -> Option<TaskOutcomeBanner> {
+    let task = &detail.summary.task;
+    let result_text = |field: &str| {
+        task.result
+            .as_ref()
+            .and_then(|result| result.get(field))
+            .and_then(Json::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    match task.status {
+        TaskStatus::Done => result_text("summary").map(|body| TaskOutcomeBanner {
+            tone: TaskOutcomeTone::Done,
+            heading: "Result",
+            body,
+        }),
+        TaskStatus::Failed => {
+            let body = result_text("summary")
+                .or_else(|| result_text("error"))
+                .or_else(|| {
+                    detail
+                        .runs
+                        .iter()
+                        .rev()
+                        .find(|row| row.run.status == RunStatus::Failed)
+                        .and_then(|row| row.run.error.as_deref())
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "The task failed without reporting a reason.".to_owned());
+            Some(TaskOutcomeBanner {
+                tone: TaskOutcomeTone::Failed,
+                heading: "Task failed",
+                body,
+            })
+        }
+        TaskStatus::Cancelled => result_text("summary").map(|body| TaskOutcomeBanner {
+            tone: TaskOutcomeTone::Cancelled,
+            heading: "Cancelled",
+            body,
+        }),
+        _ => None,
+    }
+}
+
+/// Structured usage metrics shown in the task inspector's Usage section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskUsage {
+    /// Total number of runs recorded for this task.
+    pub runs: usize,
+    /// Combined duration across all runs, when `runs > 0`.
+    pub total_time: Option<String>,
+    /// Formatted input token total when reported by at least one run.
+    pub input_tokens: Option<String>,
+    /// Formatted output token total when reported by at least one run.
+    pub output_tokens: Option<String>,
+    /// Formatted USD cost total when reported by at least one run.
+    pub cost: Option<String>,
+    /// Quiet explanatory note when runs exist without reported tokens or cost.
+    pub note: Option<&'static str>,
+}
+
+/// Builds structured usage rows for the task inspector against the display clock.
+#[must_use]
+pub fn task_usage(detail: &TaskDetail, when: &When) -> TaskUsage {
+    if detail.runs.is_empty() {
+        return TaskUsage {
+            runs: 0,
+            total_time: None,
+            input_tokens: None,
+            output_tokens: None,
+            cost: None,
+            note: None,
+        };
+    }
+    let took = detail
+        .runs
+        .iter()
+        .map(|run| {
+            let ended = run.run.ended_at.unwrap_or(when.now);
+            ended.saturating_since(run.run.started_at)
+        })
+        .sum();
+    let reported: Vec<_> = detail
+        .runs
+        .iter()
+        .filter_map(|row| row.usage.as_ref())
+        .collect();
+    let sum_tokens = |extract: fn(&threadlane_core::client::RunUsage) -> Option<u64>| {
+        let counts: Vec<_> = reported.iter().filter_map(|u| extract(u)).collect();
+        (!counts.is_empty()).then(|| {
+            let total: u128 = counts.into_iter().map(u128::from).sum();
+            format!(
+                "{} {}",
+                format_count(total),
+                count_form(total, "token", "tokens")
+            )
+        })
+    };
+    let input_tokens = sum_tokens(|u| u.input_tokens);
+    let output_tokens = sum_tokens(|u| u.output_tokens);
+    let mut costs = reported.iter().filter_map(|u| u.cost_usd).peekable();
+    let cost = costs
+        .peek()
+        .is_some()
+        .then(|| format!("${:.4}", costs.sum::<f64>()));
+    let note = (input_tokens.is_none() && output_tokens.is_none() && cost.is_none())
+        .then_some("The backend has not reported tokens or cost.");
+    TaskUsage {
+        runs: detail.runs.len(),
+        total_time: Some(duration(took)),
+        input_tokens,
+        output_tokens,
+        cost,
+        note,
+    }
+}
+
 /// What a live feed row reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MilestoneKind {

@@ -46,6 +46,20 @@ pub(crate) fn input(
     })
 }
 
+/// Compact auto-growing input for the docked task composer.
+pub(crate) fn task_input(
+    placeholder: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<TextareaState> {
+    cx.new(|cx| {
+        TextareaState::new(window, cx)
+            .placeholder(placeholder)
+            .auto_grow(1, 6)
+            .submit_on_enter(sends_on_enter(false, false))
+    })
+}
+
 pub(crate) fn subscribe(
     draft: Draft,
     input: &Entity<TextareaState>,
@@ -418,6 +432,27 @@ impl Desktop {
         picker: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.render_composer_inner(draft, label, picker, None, cx)
+    }
+
+    /// Compact, cleanly bordered composer docked to the task detail main column.
+    pub(crate) fn render_task_composer(
+        &self,
+        label: impl Into<SharedString>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        self.render_composer_inner(Draft::Task, label, None, Some(window), cx)
+    }
+
+    fn render_composer_inner(
+        &self,
+        draft: Draft,
+        label: impl Into<SharedString>,
+        picker: Option<AnyElement>,
+        compact_window: Option<&Window>,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let destination = self.composer_destination();
         let held = destination
             .as_ref()
@@ -573,7 +608,54 @@ impl Desktop {
             .as_ref()
             .filter(|target| matches!(target, Destination::Lead(..)))
             .and_then(|target| self.state.mention_hint(target));
-        composer_surface(cx)
+        let compact = compact_window.is_some();
+        let focused = compact_window
+            .is_some_and(|window| self.draft_input(draft).focus_handle(cx).is_focused(window));
+        let container = if compact {
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .border_1()
+                .border_color(if focused {
+                    cx.theme().ring
+                } else {
+                    cx.theme().input
+                })
+                .bg(cx.theme().muted.opacity(0.35))
+                .rounded(cx.theme().radius_lg)
+        } else {
+            composer_surface(cx)
+        };
+        let textarea = if compact {
+            Textarea::new(self.draft_input(draft))
+                .appearance(false)
+                .bordered(false)
+                .text_size(TYPE_BODY)
+        } else {
+            Textarea::new(self.draft_input(draft))
+                .rounded(FIELD_RADIUS)
+                .bg(surface)
+                .border_color(surface)
+                .text_size(TYPE_BODY)
+        };
+        let send_button = button("send")
+            .primary()
+            .when(compact, |btn| btn.small())
+            .flex_none()
+            .tab_stop(true)
+            .icon(AppIcon::Send)
+            .label(if sending { "Sending…" } else { "Send" })
+            .loading(sending)
+            .disabled(!enabled)
+            .tooltip(crate::keyboard::send_hint(cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.submit_draft(window, cx);
+                this.draft_input(draft).focus_handle(cx).focus(window, cx);
+            }));
+        container
             .relative()
             .capture_action(cx.listener(move |this, _: &MoveUp, window, cx| {
                 if this.mention_key(draft, MentionKey::Up, window, cx) {
@@ -604,11 +686,7 @@ impl Desktop {
             .children(images)
             .children(active_skill_chips)
             .child(
-                Textarea::new(self.draft_input(draft))
-                    .rounded(FIELD_RADIUS)
-                    .bg(surface)
-                    .border_color(surface)
-                    .text_size(TYPE_BODY)
+                textarea
                     .disabled(destination.is_none())
                     .aria_label(label)
                     .on_paste(move |item, _, cx| {
@@ -623,6 +701,7 @@ impl Desktop {
             .child(
                 h_flex()
                     .gap_2()
+                    .items_center()
                     .children(attach_to.map(|target| {
                         icon_button("attach-images", AppIcon::Plus, "Attach images…".to_owned())
                             .tab_stop(true)
@@ -636,21 +715,7 @@ impl Desktop {
                         picker.map(|picker| div().min_w_0().max_w(relative(0.55)).child(picker)),
                     )
                     .child(div().flex_1())
-                    .child(
-                        button("send")
-                            .primary()
-                            .flex_none()
-                            .tab_stop(true)
-                            .icon(AppIcon::Send)
-                            .label(if sending { "Sending…" } else { "Send" })
-                            .loading(sending)
-                            .disabled(!enabled)
-                            .tooltip(crate::keyboard::send_hint(cx))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.submit_draft(window, cx);
-                                this.draft_input(draft).focus_handle(cx).focus(window, cx);
-                            })),
-                    ),
+                    .child(send_button),
             )
             .children(mention_hint.map(|hint| meta(hint, cx)))
             .children(loading_images.then(|| meta("Preparing images…", cx)))

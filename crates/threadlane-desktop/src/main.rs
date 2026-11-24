@@ -459,6 +459,8 @@ struct Desktop {
     join_error: Option<String>,
     routine_error: Option<String>,
     decision_scroll: ScrollHandle,
+    task_inspector_scroll: ScrollHandle,
+    task_inspector_collapsed: bool,
     board_scroll: ScrollHandle,
     dag_scroll: ScrollHandle,
     topo_scroll: ScrollHandle,
@@ -564,7 +566,7 @@ impl Desktop {
         })
         .detach();
         let composer = components::composer::input("Tell your team what you need…", window, cx);
-        let task_composer = components::composer::input("Add to this task…", window, cx);
+        let task_composer = components::composer::task_input("Add to this task…", window, cx);
         let memory_editor = cx.new(|cx| TextareaState::new(window, cx).rows(16));
         let skill_slug =
             cx.new(|cx| InputState::new(window, cx).placeholder("e.g. rust-pr-review"));
@@ -786,6 +788,8 @@ impl Desktop {
             join_error: None,
             routine_error: None,
             decision_scroll: ScrollHandle::default(),
+            task_inspector_scroll: ScrollHandle::default(),
+            task_inspector_collapsed: false,
             board_scroll: ScrollHandle::default(),
             dag_scroll: ScrollHandle::default(),
             topo_scroll: ScrollHandle::default(),
@@ -1530,6 +1534,7 @@ impl Desktop {
                 DecisionScroll::Card
             }));
             self.decision_scroll = ScrollHandle::default();
+            self.task_inspector_scroll = ScrollHandle::default();
             self.board_scroll = ScrollHandle::default();
             self.dag_scroll = ScrollHandle::default();
             self.topo_scroll = ScrollHandle::default();
@@ -2248,7 +2253,7 @@ impl Render for Desktop {
                 project,
                 tab,
             } => self.project(&space, &project, tab, &when, window, cx),
-            Screen::Task { space, task } => self.task(&space, task, &when, cx),
+            Screen::Task { space, task } => self.task(&space, task, &when, window, cx),
             Screen::Agents(scope) => self.agents(scope.as_deref(), &when, cx),
             Screen::SpaceTasks { space } => self.space_tasks(&space, &when, cx),
             Screen::NewProject { space } => self.new_project(&space, cx),
@@ -2266,22 +2271,49 @@ impl Render for Desktop {
         } else {
             body
         };
-        let main_pane = v_flex()
-            .flex_1()
-            .h_full()
-            .min_w_0()
-            .p(LG)
-            .gap(MD)
-            .children(self.sidebar_collapsed.then(|| self.collapsed_nav_strip(cx)))
-            .children(
-                self.state
-                    .connection_banner()
-                    .map(|text| component::alert::Alert::warning("unreachable-spaces", text)),
-            )
-            .children(self.page_connections(&when, cx))
-            // The body takes the spare height so the activity line stays at the bottom.
-            .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
-            .children(self.activity(cx));
+        let task_workspace = matches!(self.screen, Screen::Task { .. }) && !self.state.first_run();
+        let main_pane = if task_workspace {
+            let connection_banner = self
+                .state
+                .connection_banner()
+                .map(|text| component::alert::Alert::warning("unreachable-spaces", text));
+            let page_connections = self.page_connections(&when, cx);
+            let has_banners = connection_banner.is_some() || page_connections.is_some();
+            let mut pane = v_flex().flex_1().h_full().min_w_0();
+            if has_banners {
+                pane = pane.child(
+                    v_flex()
+                        .flex_none()
+                        .w_full()
+                        .px_6()
+                        .py_2()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .children(connection_banner)
+                        .children(page_connections),
+                );
+            }
+            pane.child(v_flex().flex_1().min_h_0().min_w_0().child(body))
+                .children(self.activity(cx).map(|bar| bar.px_6().pb_3()))
+        } else {
+            v_flex()
+                .flex_1()
+                .h_full()
+                .min_w_0()
+                .p(LG)
+                .gap(MD)
+                .children(self.sidebar_collapsed.then(|| self.collapsed_nav_strip(cx)))
+                .children(
+                    self.state
+                        .connection_banner()
+                        .map(|text| component::alert::Alert::warning("unreachable-spaces", text)),
+                )
+                .children(self.page_connections(&when, cx))
+                // The body takes the spare height so the activity line stays at the bottom.
+                .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
+                .children(self.activity(cx))
+        };
 
         let shell: AnyElement = if self.sidebar_collapsed {
             main_pane.into_any_element()
