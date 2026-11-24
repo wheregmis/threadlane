@@ -39,6 +39,9 @@ pub struct Hub {
     _lock: DirLock,
 }
 
+/// Failed deliveries of one GitHub review before the hub drops it.
+const REVIEW_DELIVERY_ATTEMPTS: u32 = 10;
+
 impl Hub {
     /// Creates the data directory if needed, locks it, and opens the database.
     ///
@@ -115,25 +118,39 @@ impl Hub {
 
     async fn deliver_reviews(&self, core: &HubCore) -> anyhow::Result<()> {
         let forge = GitForge::with_gh(&self.config.github.gh);
+        // shortcut: counted in memory, so a hub restart resets the count;
+        // persist it if reviews are ever dropped too late.
+        let mut failures = std::collections::HashMap::<String, u32>::new();
         loop {
             match self.db.pending_github_reviews().await {
                 Ok(reviews) => {
                     for review in reviews {
-                        if forge
+                        let sent = forge
                             .publish_review(
                                 &review.pull_url,
                                 &review.revision,
                                 &review.body,
                                 &review.delivery_key,
                             )
-                            .await
-                            .is_ok()
-                        {
+                            .await;
+                        let dropped = match &sent {
+                            Ok(()) => false,
+                            Err(error) => {
+                                let attempts =
+                                    failures.entry(review.delivery_key.clone()).or_default();
+                                *attempts += 1;
+                                let dropped = *attempts >= REVIEW_DELIVERY_ATTEMPTS;
+                                tracing::warn!(%error, url = %review.pull_url, submission = %review.submission, attempts = *attempts, dropped, "GitHub review delivery failed");
+                                dropped
+                            }
+                        };
+                        if sent.is_ok() || dropped {
+                            failures.remove(&review.delivery_key);
+                            // A review GitHub keeps refusing is dropped the same way,
+                            // or it is retried every 30 seconds for good.
                             if let Err(error) = self.db.delivered_github_review(&review).await {
                                 tracing::error!(%error, submission = %review.submission, "could not record delivered GitHub review");
                             }
-                        } else {
-                            tracing::warn!(url = %review.pull_url, submission = %review.submission, "GitHub review delivery failed; will retry");
                         }
                     }
                 }

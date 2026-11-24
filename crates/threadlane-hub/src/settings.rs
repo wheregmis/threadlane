@@ -80,7 +80,7 @@ impl Default for HubSettings {
             wall_time_limit: Duration::from_secs(30 * 60),
             max_turns: Some(150),
             recent_messages: 5,
-            usage_limit_fallback: Duration::from_secs(5 * 60),
+            usage_limit_fallback: Duration::from_secs(30 * 60),
             scheduler: Duration::from_secs(10),
             default_models: HashMap::new(),
             decision_expiry: Duration::from_secs(24 * 60 * 60),

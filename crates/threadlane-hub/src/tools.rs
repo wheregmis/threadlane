@@ -1224,7 +1224,8 @@ pub(crate) fn fields<'a>(
         .ok_or_else(|| invalid("expected an object"))?;
     match object.keys().find(|key| !allowed.contains(&key.as_str())) {
         Some(unknown) => Err(ToolError::InvalidArguments(format!(
-            "unknown field {unknown:?}"
+            "unknown field {unknown:?}; the fields are: {}",
+            allowed.join(", ")
         ))),
         None => Ok(object),
     }
