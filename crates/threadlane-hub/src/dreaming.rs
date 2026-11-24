@@ -203,16 +203,16 @@ async fn session_task(
         .ok_or_else(|| invalid(&format!("no task {id} in this project")))?;
     let mut record = task_record(&task, &times);
     // offset and limit page the failed runs, newest first.
-    let (total, failed) = db
-        .dream_task_failures(project, id.get(), offset, limit)
+    let all = db
+        .dream_task_failures(project, id.get())
         .await
         .map_err(err)?;
-    if total > 0 {
-        let end = offset.saturating_add(failed.len());
+    if !all.is_empty() {
+        let (failed, next) = page::take(&all, offset, limit);
         record["failed_runs"] = json!(failed);
-        record["failed_runs_total"] = json!(total);
-        if end < total {
-            record["failed_runs_next_offset"] = json!(end);
+        record["failed_runs_total"] = json!(all.len());
+        if let Some(next) = next {
+            record["failed_runs_next_offset"] = json!(next);
         }
     }
     if let Some(review) = db

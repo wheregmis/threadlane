@@ -65,6 +65,14 @@ fn end_reason(status: &str, error: Option<&str>) -> Option<(&'static str, &'stat
             "no_verdict",
             "the Reviewer ended without submitting a verdict",
         ),
+        "failed" if error == "the backend could not start the run: backend not installed" => (
+            "backend_not_installed",
+            "the backend's executable was not found when the run started",
+        ),
+        "failed" if error == "the backend could not start the run: backend not logged in" => (
+            "backend_not_logged_in",
+            "the backend was not logged in when the run started",
+        ),
         "failed" if error.is_empty() => ("no_reason", "no reason recorded"),
         "failed" => (
             "error",
@@ -665,37 +673,25 @@ impl HubDb {
             }).await
     }
 
-    /// One page of the task's runs that ended without committing, newest
-    /// first, each with its agent and reason (#750), and how many there are.
+    /// The task's runs that ended without committing, newest first, each
+    /// with its agent and reason (#750). One statement, so the caller pages a
+    /// consistent set.
+    // shortcut: reads every failure of the task; page in SQL if tasks reach thousands of failures.
     pub async fn dream_task_failures(
         &self,
         project: ProjectId,
         task: i64,
-        offset: usize,
-        limit: usize,
-    ) -> StoreResult<(usize, Vec<Json>)> {
-        let conn = self.db.reader()?;
-        let from = format!(
-            "FROM runs r JOIN tasks t ON t.lane_id=r.lane_id
-            WHERE t.project_id=?1 AND t.id=?2 AND {UNFINISHED}"
-        );
-        let total = query_one(
-            &conn,
-            &format!("SELECT COUNT(*) {from}"),
-            params![project.get(), task],
-            |row| Cols(row).i64(0),
-        )
-        .await?;
-        let runs = query_all(&conn, &format!("SELECT r.id,r.status,r.error,r.ended_at,
-            (SELECT name FROM agents WHERE id=r.agent_id) {from} ORDER BY r.id DESC LIMIT ?3 OFFSET ?4"),
-            params![project.get(),task,limit as i64,offset as i64], |row|{
+    ) -> StoreResult<Vec<Json>> {
+        query_all(&self.db.reader()?, &format!("SELECT r.id,r.status,r.error,r.ended_at,
+            (SELECT name FROM agents WHERE id=r.agent_id) FROM runs r JOIN tasks t ON t.lane_id=r.lane_id
+            WHERE t.project_id=?1 AND t.id=?2 AND {UNFINISHED} ORDER BY r.id DESC"),
+            params![project.get(),task], |row|{
                 let c=Cols(row);
                 let status = c.text(1)?;
                 let mut run = json!({"run_id":c.i64(0)?,"status":status,"agent":c.opt_text(4)?,"ended_at":c.opt_ts(3)?});
                 put_end_reason(&mut run, &status, c.opt_text(2)?.as_deref());
                 Ok(run)
-            }).await?;
-        Ok((usize::try_from(total).unwrap_or_default(), runs))
+            }).await
     }
 }
 
@@ -723,6 +719,13 @@ mod tests {
         assert_eq!(code, "backend_refused");
         assert!(!summary.contains("sk-secret"));
         assert_eq!(code_of("failed", "token=sk-secret"), "error");
+        assert_eq!(
+            code_of(
+                "failed",
+                "the backend could not start the run: backend not installed"
+            ),
+            "backend_not_installed"
+        );
     }
 
     fn code_of(status: &str, error: &str) -> &'static str {

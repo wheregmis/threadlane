@@ -1916,15 +1916,25 @@ async fn sessions_give_the_reason_each_failed_or_abandoned_run_ended() {
     hub.link.release(&lease).await.unwrap();
     hub.clock.advance(Duration::from_secs(11));
     // Twenty more failures that count no attempt, so the oldest is the 22nd.
-    for _ in 0..20 {
+    // The newest of them lost its backend executable before it started.
+    let mut missing = None;
+    for i in 0..20 {
         let (lease, run) = begin(&*hub.link).await;
         assert_eq!(run.task_id, Some(task.id));
-        hub.link
-            .fail(&lease, run.run_id, &RunFailure::SessionMissing)
-            .await
-            .unwrap();
+        let failure = if i == 19 {
+            missing = Some(run.run_id);
+            RunFailure::Error {
+                message: "the backend could not start the run: backend not installed".into(),
+            }
+        } else {
+            RunFailure::SessionMissing
+        };
+        hub.link.fail(&lease, run.run_id, &failure).await.unwrap();
         hub.link.release(&lease).await.unwrap();
     }
+    // That error counts an attempt, so wait out its retry delay.
+    hub.clock.advance(Duration::from_secs(30));
+    let missing = missing.unwrap();
     let (_, abandoned) = begin(&*hub.link).await;
     assert_eq!(abandoned.task_id, Some(task.id));
     hub.clock.advance(PAST_LEASE);
@@ -1967,6 +1977,7 @@ async fn sessions_give_the_reason_each_failed_or_abandoned_run_ended() {
     assert_eq!(gone["status"], "abandoned", "{gone}");
     assert_eq!(gone["end_code"], "lease_ended");
     assert_eq!(gone["agent"], name.as_str());
+    assert_eq!(run(missing)["end_code"], "backend_not_installed");
     let committed = page["runs"]
         .as_array()
         .unwrap()
@@ -1998,7 +2009,9 @@ async fn sessions_give_the_reason_each_failed_or_abandoned_run_ended() {
     assert_eq!(first["failed_runs_next_offset"], 20);
     assert_eq!(runs[0]["run_id"], abandoned.run_id.get());
     assert_eq!(runs[0]["end_code"], "lease_ended");
-    assert_eq!(runs[1]["end_code"], "session_missing");
+    assert_eq!(runs[1]["run_id"], missing.get());
+    assert_eq!(runs[1]["end_code"], "backend_not_installed");
+    assert_eq!(runs[2]["end_code"], "session_missing");
     let rest = detail(20).await;
     assert!(!rest.to_string().contains(SECRET), "{rest}");
     let runs = rest["failed_runs"].as_array().unwrap();
