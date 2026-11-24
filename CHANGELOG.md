@@ -11,7 +11,6 @@
 
 ### Bug Fixes
 
-* **claude:** launch agents without the owner's personal Claude setup ([d923a76](https://github.com/wheregmis/threadlane/commit/d923a76d6a93ccc909f4241f3eea470e63e19079))
 * **claude:** launch agents without the owner's personal Claude setup ([08f8aa9](https://github.com/wheregmis/threadlane/commit/08f8aa9561d0e58680a0bd40a03b9052a2742ca4))
 * **desktop:** offer Restart hub when an app-started hub stays behind ([1a545a2](https://github.com/wheregmis/threadlane/commit/1a545a20ab82a2c87cba73dc5f6d3f76163905d0))
 * **desktop:** offer Restart hub when an app-started hub stays behind, say when a hub is not the app's to restart ([e259f54](https://github.com/wheregmis/threadlane/commit/e259f54c29f1fdefd378bd6745f94defa94753a2))
@@ -19,7 +18,6 @@
 * **hub:** count only readable choices so the decision feed's last page ends ([583fe93](https://github.com/wheregmis/threadlane/commit/583fe93168ae174d80b0a7cbe0d12c511fb9ca93))
 * **hub:** count only readable choices so the decision feed's last page ends ([#757](https://github.com/wheregmis/threadlane/issues/757)) ([f627df4](https://github.com/wheregmis/threadlane/commit/f627df496d74db97bd00480d8bb74754c45a04b7))
 * **hub:** follow-ups to [#758](https://github.com/wheregmis/threadlane/issues/758) — lead context from last message iteration, withdraw history after restart ([392c0c4](https://github.com/wheregmis/threadlane/commit/392c0c460129096128f1a89904e369f932e7a3db))
-* **hub:** stop the lead rereading its preference history on every wake ([a8d5909](https://github.com/wheregmis/threadlane/commit/a8d5909589359224a077f80cfa56d55607ecf2dc))
 * **hub:** stop the lead rereading its preference history on every wake ([e0e53c4](https://github.com/wheregmis/threadlane/commit/e0e53c4fa2b41d7e7e5e3f94101469a3134f790e))
 
 ## [0.1.58](https://github.com/wheregmis/threadlane/compare/v0.1.57...v0.1.58) (2026-11-24)
