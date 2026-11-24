@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use threadlane_core::attachment::ImageAttachment;
 use threadlane_core::client::RunUsage;
 use threadlane_core::ids::RunId;
-use threadlane_core::ids::{EventId, LaneId, ProjectId, TaskId, TimerId};
+use threadlane_core::ids::{EventId, LaneId, ProjectId, SessionId, TaskId, TimerId};
 use threadlane_core::model::{DecisionKind, DecisionOption, NewDecision, Task};
 use threadlane_core::store::{StoreError, StoreResult};
 use threadlane_core::time::Timestamp;
@@ -162,6 +162,22 @@ impl HubDb {
             },
         )
         .await
+    }
+
+    /// Input tokens of the last model request in `session`'s latest finished run: how much
+    /// its next run rereads. Zero when the backend reports no per-request usage, as Codex.
+    pub async fn session_context_tokens(&self, session: SessionId) -> StoreResult<u64> {
+        let sql = "SELECT COALESCE(json_extract(j.entry,'$.usage.usage.iterations[0].input_tokens'),0)
+              + COALESCE(json_extract(j.entry,'$.usage.usage.iterations[0].cache_read_input_tokens'),0)
+              + COALESCE(json_extract(j.entry,'$.usage.usage.iterations[0].cache_creation_input_tokens'),0)
+            FROM journal j JOIN runs r ON r.id=j.run_id
+            WHERE r.session_id=?1 AND json_extract(j.entry,'$.type')='finished'
+            ORDER BY j.run_id DESC, j.seq DESC LIMIT 1";
+        let tokens = query_opt(&self.db.reader()?, sql, params![session.get()], |row| {
+            Cols(row).opt_i64(0)
+        })
+        .await?;
+        Ok(tokens.flatten().map_or(0, |n| n.max(0) as u64))
     }
 
     /// Each finished run's usage in `lane`, counted as `RUN_USAGE` describes for both Task Details

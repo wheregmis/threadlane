@@ -8,7 +8,7 @@ use std::sync::Arc;
 use threadlane_core::adapters::ChannelAdapter;
 use threadlane_core::client::{HubApi, TaskPullRequest};
 use threadlane_core::github::{GithubSource, PullRequestFile};
-use threadlane_core::ids::{LaneId, MachineId, ProjectId, TaskId};
+use threadlane_core::ids::{LaneId, MachineId, ProjectId, SessionId, TaskId};
 use threadlane_core::link::HubLink;
 use threadlane_core::model::RunStatus;
 use threadlane_core::runtime::{StepHook, WakeTarget, Waker};
@@ -61,6 +61,11 @@ pub(crate) struct Inner {
     pub(crate) pull_status: Arc<tokio::sync::Mutex<HashMap<TaskId, Vec<TaskPullRequest>>>>,
     /// Each pull request's changed files, with the head they were read at.
     pub(crate) pull_files: Arc<tokio::sync::Mutex<PullFiles>>,
+    /// The Dreaming summary and choices each lead session was last sent, so a resumed
+    /// session gets it again only when it changes.
+    // shortcut: in memory, so a hub restart resends it once per session, and a run that
+    // never reaches the backend still counts as sent; keep it in the database if either costs.
+    pub(crate) sent_preferences: Arc<tokio::sync::Mutex<HashMap<SessionId, String>>>,
 }
 
 /// Changed files by `(owner/name, number)`, with the head they were read at.
@@ -123,6 +128,7 @@ impl HubCore {
                 last_pruned: Arc::default(),
                 pull_status: Arc::default(),
                 pull_files: Arc::default(),
+                sent_preferences: Arc::default(),
                 backends: Vec::new(),
             }),
         };

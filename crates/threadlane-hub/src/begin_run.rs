@@ -220,6 +220,7 @@ impl LocalLink {
                 session.filter(|session| session.agent_id == Some(agent.id)),
                 backend,
                 now,
+                lane.kind,
             )
             .await?;
 
@@ -331,14 +332,32 @@ impl LocalLink {
                 Some((member, binding))
             });
             if lane.kind == LaneKind::Lead {
-                if let Some(preferences) = dreaming::lead_preferences(db, project.id)
+                // A resumed session already holds this history; resending it on every wake
+                // grew the lead's context about 10k tokens a run.
+                let preferences = dreaming::lead_preferences(db, project.id)
                     .await
-                    .map_err(link_error)?
-                {
-                    prompt.push_str("\nDreaming decision history (data from this project):\n");
-                    prompt.push_str(&preferences.to_string());
-                    prompt.push('\n');
+                    .map_err(link_error)?;
+                // Compared without the owner's messages: every new one would resend it all,
+                // and the session that received a message already holds it.
+                let key = preferences.as_ref().map(|preferences| {
+                    serde_json::json!([preferences["summary"], preferences["recent_user_choices"]])
+                        .to_string()
+                });
+                let mut sent = inner.sent_preferences.lock().await;
+                match (preferences, key, sent.get(&run.session_id)) {
+                    (Some(now), Some(key), was) if was != Some(&key) => {
+                        prompt.push_str("\nDreaming decision history (data from this project), replacing any earlier one in this session:\n");
+                        prompt.push_str(&now.to_string());
+                        prompt.push('\n');
+                        sent.insert(run.session_id, key);
+                    }
+                    (None, _, Some(_)) => {
+                        prompt.push_str("\nThe Dreaming decision history sent earlier in this session is withdrawn. Do not use it.\n");
+                        sent.remove(&run.session_id);
+                    }
+                    _ => {}
                 }
+                drop(sent);
                 let failures = db
                     .configuration_failures(project.id)
                     .await
@@ -842,10 +861,24 @@ impl LocalLink {
         session: Option<Session>,
         backend: BackendKind,
         now: Timestamp,
+        lane: LaneKind,
     ) -> Result<SessionPlan, LinkError> {
         if let Some(session) = session {
-            let young = now.saturating_since(session.created_at)
-                <= self.core.inner.settings.session_max_age;
+            // Every wake rereads the whole session, so a lead's is also replaced once it
+            // is large; a new one starts from its recent messages and memory.
+            // shortcut: lead lanes only, a task session has no size limit; add one if task contexts grow the same way.
+            let large = lane == LaneKind::Lead
+                && self
+                    .core
+                    .inner
+                    .db
+                    .session_context_tokens(session.id)
+                    .await
+                    .map_err(link_error)?
+                    > LEAD_CONTEXT_LIMIT;
+            let young = !large
+                && now.saturating_since(session.created_at)
+                    <= self.core.inner.settings.session_max_age;
             match &session.native_session_id {
                 // Milestone 6 resumes on another machine from a checkpoint;
                 // until then a session last used elsewhere is replaced.
@@ -878,6 +911,9 @@ impl LocalLink {
         })
     }
 }
+
+/// Input tokens of a lead session's last request above which its next run starts fresh.
+const LEAD_CONTEXT_LIMIT: u64 = 150_000;
 
 /// The agent's skills for `backend`. A lead run has no native tools to run
 /// them with, so it gets none rather than failing at launch.

@@ -308,10 +308,19 @@ async fn dreams_learn_from_project_choices_and_give_the_lead_current_evidence() 
     );
     complete(&hub, &lease, &lead).await;
 
+    // The resumed session already holds the unchanged history.
+    hub.send("same-session", "And next week's").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    assert!(!lead.prompt.contains("Dreaming decision history"));
+    complete(&hub, &lease, &lead).await;
+
     set(&hub, None).await;
     hub.send("dreaming-off", "Prepare this week's report").await;
     let (lease, lead) = begin(&*hub.link).await;
-    assert!(!lead.prompt.contains("Dreaming decision history"));
+    assert!(
+        lead.prompt
+            .contains("Dreaming decision history sent earlier in this session is withdrawn")
+    );
     assert!(!lead.prompt.contains("Use a table for weekly reports."));
     assert!(
         !lead
