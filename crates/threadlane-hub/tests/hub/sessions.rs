@@ -158,3 +158,30 @@ fn uuid_v4(id: &str) {
     let parsed = uuid::Uuid::parse_str(id).expect("a UUID");
     assert_eq!(parsed.get_version_num(), 4);
 }
+
+#[tokio::test]
+async fn a_lead_session_grown_past_the_context_limit_is_replaced() {
+    use threadlane_core::model::JournalEntry;
+    use threadlane_core::time::Clock;
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    let mut sessions = Vec::new();
+    // The first run ends on a large request, the second on a small one.
+    for (message, context) in [("m-1", 150_001), ("m-2", 1000), ("m-3", 0)] {
+        hub.send(message, "hello").await;
+        let (lease, run) = crate::common::begin(&*hub.link).await;
+        sessions.push(run.session_id);
+        let finished = JournalEntry {
+            run_id: run.run_id,
+            seq: 1,
+            at: hub.clock.now(),
+            entry: serde_json::json!({"type": "finished",
+                "usage": {"usage": {"iterations": [{"input_tokens": context}]}}}),
+        };
+        hub.link.append(&lease, &[finished]).await.unwrap();
+        hub.link.complete(&lease, run.run_id, None).await.unwrap();
+        hub.link.release(&lease).await.unwrap();
+    }
+    assert_ne!(sessions[1], sessions[0], "past the limit: a new session");
+    assert_eq!(sessions[2], sessions[1], "under it: resumed");
+}

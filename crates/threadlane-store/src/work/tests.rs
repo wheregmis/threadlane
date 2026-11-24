@@ -334,3 +334,22 @@ async fn owner_can_request_changes_then_accept_the_revised_result() {
         TaskStatus::Done
     );
 }
+
+#[tokio::test]
+async fn a_sessions_context_is_its_latest_runs_last_request() {
+    let last = |input: u64| {
+        json!({"usage": {"input_tokens": 999, "iterations": [{"input_tokens": input,
+            "cache_read_input_tokens": 100, "cache_creation_input_tokens": 10}]}})
+        .to_string()
+    };
+    let (a, b, c) = (last(1), last(2), codex(400, 40));
+    let db = usage_db(&[
+        (1, 1, "claude", 10, Some(&a)),
+        (2, 1, "claude", 20, Some(&b)),
+        (3, 2, "codex", 30, Some(&c)),
+    ])
+    .await;
+    assert_eq!(db.session_context_tokens(SessionId(1)).await.unwrap(), 112);
+    assert_eq!(db.session_context_tokens(SessionId(2)).await.unwrap(), 0);
+    assert_eq!(db.session_context_tokens(SessionId(9)).await.unwrap(), 0);
+}
