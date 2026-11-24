@@ -73,7 +73,7 @@ pub(crate) fn plan(name: &str, app: &HubBuild, hub: Option<&HubBuild>, ours: boo
         Standing::Current => Plan::Keep,
         Standing::Behind if ours => Plan::Restart,
         Standing::Behind => Plan::Notice(format!(
-            "The hub of {name} is on {on}; this app is on build {app}. Restart that hub on build {app}."
+            "The hub of {name} is on {on}; this app is on build {app}. This app did not start that hub, so it cannot restart it: restart it on build {app} where it runs."
         )),
         Standing::Ahead => Plan::Notice(format!(
             "The hub of {name} is on {on}, newer than this app's build {app}. Update the app."
@@ -313,7 +313,7 @@ mod tests {
                 notice.contains("this app is on build 0.1.57 (aaaa1111)"),
                 "{notice}"
             );
-            assert!(notice.contains("Restart that hub"), "{notice}");
+            assert!(notice.contains("it cannot restart it"), "{notice}");
         }
         let old = plan("Work", &app, Some(&build("0.1.56", "cbe0ada0")), false);
         assert!(matches!(old, Plan::Notice(notice) if notice.contains("build 0.1.56 (cbe0ada0)")));
