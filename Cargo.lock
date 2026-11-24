@@ -8916,7 +8916,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-backend-antigravity"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -8930,7 +8930,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-backend-claude"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "serde",
@@ -8947,7 +8947,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-backend-codex"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -8972,7 +8972,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-client"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8993,7 +8993,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-core"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9006,7 +9006,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-desktop"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -9024,7 +9024,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-hub"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9053,7 +9053,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-mcp"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "axum",
@@ -9068,7 +9068,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-runner"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -9082,7 +9082,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-store"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "rusqlite",
@@ -9097,7 +9097,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-testkit"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -9107,7 +9107,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-transport-iroh"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "iroh",
@@ -9122,7 +9122,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-transport-local"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "async-trait",
  "serde",
@@ -9136,7 +9136,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-updater"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
