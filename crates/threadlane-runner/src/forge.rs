@@ -368,7 +368,8 @@ impl GitForge {
         )
         .await?;
         Ok(format!(
-            "Created tag {tag} at {commit}. No release was published."
+            "Created ref refs/tags/{tag} at {commit}. No release was published by this call; \
+             the tag may still start the repository's automation."
         ))
     }
 

@@ -315,8 +315,10 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         define(
             CREATE_TAG,
             "Create a tag at a named commit in a registered project repository, such as one that \
-             starts a tag-triggered build, without publishing a release. The commit must already \
-             be on the remote. The user always decides it, for that exact tag and commit. It is \
+             starts a tag-triggered build. It publishes no release itself, but the tag can start the \
+             repository's automation, which may publish one. The commit must already be on the \
+             remote. The user decides each call, for that exact tag and commit; no standing rule \
+             covers it. It is \
              refused if the tag already exists, even at the same commit, or if the commit is not \
              a commit object. End your turn when it waits on \
              the user.",
@@ -1176,7 +1178,11 @@ pub(crate) async fn proposal(
                 )
             }
             threadlane_core::forge::RepositoryAction::CreateTag { tag, commit } => {
-                format!("Create tag {tag} at commit {commit} in {name}? No release is published.")
+                format!(
+                    "Create tag {tag} at commit {commit} in {name}? This publishes no release \
+                     itself, but the tag can start the repository's automation, such as a \
+                     workflow that builds and publishes a release."
+                )
             }
             threadlane_core::forge::RepositoryAction::MergeBatch { pulls } => {
                 let list: Vec<String> = pulls

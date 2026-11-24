@@ -102,7 +102,7 @@ pub struct PullRequestImage<'a> {
 /// Ask reviewers, or a review bot by its trigger comment, to review a pull request again.
 pub const REQUEST_REVIEW: &str = "request_review";
 /// Create a lightweight tag at a named commit on a registered repository,
-/// without publishing a release (#748).
+/// without publishing a release itself (#748).
 pub const CREATE_TAG: &str = "create_tag";
 
 /// A validated shared effect addressed to a registered repository.
@@ -175,7 +175,7 @@ pub enum RepositoryAction {
         comment: Option<String>,
     },
     /// Create tag `tag` at the full commit ID `commit`, only if no tag of
-    /// that name exists; one already at `commit` counts as done.
+    /// that name exists; any existing tag, even at `commit`, is refused.
     CreateTag { tag: String, commit: String },
 }
 

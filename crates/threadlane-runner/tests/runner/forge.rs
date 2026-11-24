@@ -989,7 +989,7 @@ async fn a_tag_is_created_only_at_a_commit_where_none_exists_and_publishes_no_re
         .apply(remote, &tag)
         .await
         .unwrap();
-    assert!(done.contains("Created tag v1.2.3"), "{done}");
+    assert!(done.contains("Created ref refs/tags/v1.2.3 at"), "{done}");
     assert_eq!(
         gh.invocations(),
         [
