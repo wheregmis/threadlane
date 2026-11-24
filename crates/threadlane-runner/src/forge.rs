@@ -337,7 +337,8 @@ impl GitForge {
                     "api",
                     &hostname,
                     "--method=GET",
-                    &format!("repos/{name}/git/ref/tags/{tag}"),
+                    // A literal `+` in the path could be read as a space.
+                    &format!("repos/{name}/git/ref/tags/{}", tag.replace('+', "%2B")),
                 ]),
             )
             .await;
@@ -366,7 +367,19 @@ impl GitForge {
                 &format!("sha={commit}"),
             ]),
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            // Only an HTTP 4xx answer says GitHub refused; anything else (a
+            // dropped connection, a timeout, a 5xx) may follow a created ref.
+            if error.0.contains("(HTTP 4") {
+                error
+            } else {
+                ForgeError::unknown(format!(
+                    "{error}. Tag {tag} may have been created; check refs/tags/{tag} \
+                     before retrying."
+                ))
+            }
+        })?;
         Ok(format!(
             "Created ref refs/tags/{tag} at {commit}. No release was published by this call; \
              the tag may still start the repository's automation."

@@ -15,7 +15,7 @@ use threadlane_core::model::{DecisionOption, Lane};
 use threadlane_core::store::{OrgStore, TaskStore};
 use threadlane_core::tools::{Tier, ToolDefinition, ToolError};
 use threadlane_core::workspace::{
-    task_branch, valid_branch_name, valid_commit_id, valid_repository_name,
+    task_branch, valid_branch_name, valid_commit_id, valid_repository_name, valid_tag_name,
 };
 use threadlane_store::HubDb;
 
@@ -914,7 +914,7 @@ pub(crate) fn repository_action(
             fields(a, &["repository", "tag", "commit"])?;
             let tag = a["tag"]
                 .as_str()
-                .filter(|tag| valid_branch_name(tag))
+                .filter(|tag| valid_tag_name(tag))
                 .ok_or_else(|| invalid("tag must be a plain tag name, as v1.2.3"))?
                 .to_owned();
             Ok(RepositoryAction::CreateTag {
@@ -1501,6 +1501,8 @@ mod tests {
                 commit: head.into(),
             })
         );
+        // Version build metadata is a valid tag name.
+        assert!(tag("v1.31.1+k3s1", head).is_ok());
         for (name, commit) in [
             ("v1", "main"),
             ("v1", "0123456"),

@@ -194,6 +194,24 @@ pub enum CommentTarget {
 #[error("forge: {0}")]
 pub struct ForgeError(pub String);
 
+/// Starts the message of a request that was sent but got no answer.
+const OUTCOME_UNKNOWN: &str = "outcome unknown: ";
+
+impl ForgeError {
+    /// A request that was sent but got no answer, so its effect may have
+    /// happened: recorded as an unknown outcome, never as not performed.
+    #[must_use]
+    pub fn unknown(message: impl fmt::Display) -> Self {
+        Self(format!("{OUTCOME_UNKNOWN}{message}"))
+    }
+
+    /// Whether the effect may have happened (see [`ForgeError::unknown`]).
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        self.0.starts_with(OUTCOME_UNKNOWN)
+    }
+}
+
 /// The approved commit and the branch it may update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApprovedBranch<'a> {

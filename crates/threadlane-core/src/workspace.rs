@@ -306,6 +306,13 @@ pub fn valid_branch_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
 }
 
+/// Whether `name` is a plain tag name: a branch name that may also carry
+/// `+`, as version build metadata does (`v1.31.1+k3s1`).
+#[must_use]
+pub fn valid_tag_name(name: &str) -> bool {
+    valid_branch_name(&name.replace('+', "-"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +331,11 @@ mod tests {
             "a/.b", "x.", "x.lock/y",
         ] {
             assert!(!valid_branch_name(bad), "{bad:?}");
+        }
+        assert!(!valid_branch_name("v1+k3s1"));
+        assert!(valid_tag_name("v1.31.1+k3s1"));
+        for bad in ["", "-+", "x+.lock", "x.lock/+", "a+..b", "a +b", "v1+@{1}"] {
+            assert!(!valid_tag_name(bad), "{bad:?}");
         }
         assert_eq!(task_branch(TaskId(7)), "threadlane/T-0007");
         for id in [1, 7, 142, 12345] {

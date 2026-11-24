@@ -158,6 +158,8 @@ impl FakeGh {
                cat {record}/reviews\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/commits/; then\n\
                cat {record}/commit.json 2>/dev/null || {{ echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }}\n\
+             elif [ \"$3 $4\" = \"--method=POST repos/acme/app/git/refs\" ] && [ -f {record}/refs_error ]; then\n\
+               cat {record}/refs_error >&2; exit 1\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/ref/; then\n\
                cat {record}/ref.json 2>/dev/null || {{ echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }}\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /compare/; then\n\
@@ -1034,6 +1036,52 @@ async fn a_tag_is_created_only_at_a_commit_where_none_exists_and_publishes_no_re
         );
         assert_eq!(gh.invocations(), [get_commit.clone(), get_ref.clone()]);
     }
+
+    // The POST fails: an HTTP 4xx is a refusal; a lost answer may have
+    // created the tag, so its outcome is unknown.
+    for (stderr, unknown) in [
+        ("gh: Reference already exists (HTTP 422)", false),
+        (
+            "Post \"https://api.github.test/\": connection reset by peer",
+            true,
+        ),
+        ("gh: Bad Gateway (HTTP 502)", true),
+    ] {
+        let gh = FakeGh::new();
+        a_commit(&gh);
+        std::fs::write(gh.dir.path().join("refs_error"), stderr).unwrap();
+        let error = GitForge::with_gh(gh.program())
+            .apply(remote, &tag)
+            .await
+            .unwrap_err();
+        assert_eq!(error.is_unknown(), unknown, "{error}");
+        assert!(
+            !unknown || error.0.contains("check refs/tags/v1.2.3"),
+            "{error}"
+        );
+        assert_eq!(gh.invocations().len(), 3, "{stderr}");
+    }
+
+    // Build metadata's `+` is sent encoded in the ref lookup.
+    let gh = FakeGh::new();
+    a_commit(&gh);
+    let build = RepositoryAction::CreateTag {
+        tag: "v1.31.1+k3s1".into(),
+        commit: PR_HEAD.into(),
+    };
+    GitForge::with_gh(gh.program())
+        .apply(remote, &build)
+        .await
+        .unwrap();
+    assert_eq!(
+        gh.invocations()[1],
+        get("repos/acme/app/git/ref/tags/v1.31.1%2Bk3s1")
+    );
+    assert!(
+        gh.invocations()[2].contains(&"ref=refs/tags/v1.31.1+k3s1".to_owned()),
+        "{:?}",
+        gh.invocations()
+    );
 }
 
 #[tokio::test]
