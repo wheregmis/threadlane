@@ -297,14 +297,39 @@ impl GitForge {
     }
 
     /// Creates tag `tag` at `commit` in `repo` (`host/owner/name`) with the Git
-    /// refs API, which never publishes a release. A tag already at `commit`
-    /// counts as done, so a retry finishes; one anywhere else is refused.
+    /// refs API, which never publishes a release. `commit` must name a commit
+    /// object, not an annotated tag, and any existing tag is refused.
     async fn create_tag(&self, repo: &str, tag: &str, commit: &str) -> Result<String, ForgeError> {
         let (host, name) = repo
             .split_once('/')
             .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
         let hostname = format!("--hostname={host}");
         let here = Path::new(".");
+        // The refs API also takes tag-object SHAs, so confirm a commit first.
+        let object = self
+            .gh(
+                here,
+                args(&[
+                    "api",
+                    &hostname,
+                    "--method=GET",
+                    &format!("repos/{name}/git/commits/{commit}"),
+                ]),
+            )
+            .await;
+        let is_commit = match object {
+            Ok(output) => serde_json::from_str::<Json>(&output)
+                .map_err(|error| ForgeError(format!("invalid commit response: {error}")))?["sha"]
+                .as_str()
+                == Some(commit),
+            Err(error) if error.0.contains("(HTTP 404)") || error.0.contains("(HTTP 422)") => false,
+            Err(error) => return Err(error),
+        };
+        if !is_commit {
+            return Err(ForgeError(format!(
+                "{commit} is not a commit on the remote; nothing was changed."
+            )));
+        }
         let live = self
             .gh(
                 here,
@@ -320,15 +345,10 @@ impl GitForge {
             Ok(output) => {
                 let live: Json = serde_json::from_str(&output)
                     .map_err(|error| ForgeError(format!("invalid tag response: {error}")))?;
-                return match live["object"]["sha"].as_str() {
-                    Some(sha) if sha == commit => {
-                        Ok(format!("Tag {tag} already points at {commit}."))
-                    }
-                    sha => Err(ForgeError(format!(
-                        "Tag {tag} already exists at {}; nothing was changed.",
-                        sha.unwrap_or("another object")
-                    ))),
-                };
+                return Err(ForgeError(format!(
+                    "Tag {tag} already exists at {}; nothing was changed.",
+                    live["object"]["sha"].as_str().unwrap_or("another object")
+                )));
             }
             Err(error) if error.0.contains("(HTTP 404)") => {}
             Err(error) => return Err(error),

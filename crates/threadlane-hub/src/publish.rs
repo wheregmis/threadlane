@@ -317,7 +317,8 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
             "Create a tag at a named commit in a registered project repository, such as one that \
              starts a tag-triggered build, without publishing a release. The commit must already \
              be on the remote. The user always decides it, for that exact tag and commit. It is \
-             refused if the tag already exists at another commit. End your turn when it waits on \
+             refused if the tag already exists, even at the same commit, or if the commit is not \
+             a commit object. End your turn when it waits on \
              the user.",
             json!({
                 "type":"object","properties":{
@@ -1502,6 +1503,7 @@ mod tests {
             ("a/../b", head),
             ("v 1", head),
             ("v1.lock", head),
+            ("release.lock/v1", head),
         ] {
             assert!(tag(name, commit).is_err(), "{name} {commit}");
         }

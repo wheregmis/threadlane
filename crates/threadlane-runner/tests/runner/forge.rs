@@ -156,6 +156,8 @@ impl FakeGh {
                echo MERGED\n\
              elif [ \"$3\" = \"--paginate\" ] && [ -f {record}/reviews ]; then\n\
                cat {record}/reviews\n\
+             elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/commits/; then\n\
+               cat {record}/commit.json 2>/dev/null || {{ echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }}\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/ref/; then\n\
                cat {record}/ref.json 2>/dev/null || {{ echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }}\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /compare/; then\n\
@@ -960,25 +962,29 @@ async fn a_fresh_review_is_requested_only_at_the_approved_head() {
 }
 
 #[tokio::test]
-async fn a_tag_is_created_only_where_none_exists_and_publishes_no_release() {
+async fn a_tag_is_created_only_at_a_commit_where_none_exists_and_publishes_no_release() {
     use threadlane_core::forge::RepositoryAction;
     let remote = "https://github.test/acme/app.git";
     let tag = RepositoryAction::CreateTag {
         tag: "v1.2.3".into(),
         commit: PR_HEAD.into(),
     };
-    let get_ref = [
-        "api",
-        "--hostname=github.test",
-        "--method=GET",
-        "repos/acme/app/git/ref/tags/v1.2.3",
-    ]
-    .map(str::to_owned)
-    .to_vec();
+    let get = |path: &str| {
+        ["api", "--hostname=github.test", "--method=GET", path]
+            .map(str::to_owned)
+            .to_vec()
+    };
+    let get_commit = get(&format!("repos/acme/app/git/commits/{PR_HEAD}"));
+    let get_ref = get("repos/acme/app/git/ref/tags/v1.2.3");
     let ref_at = |sha: &str| serde_json::json!({"object": {"sha": sha}}).to_string();
+    let a_commit = |gh: &FakeGh| {
+        let commit = serde_json::json!({"sha": PR_HEAD}).to_string();
+        std::fs::write(gh.dir.path().join("commit.json"), commit).unwrap();
+    };
 
-    // No such tag: the ref is created at the approved commit, and nothing else runs.
+    // A commit with no such tag: the ref is created there, and nothing else runs.
     let gh = FakeGh::new();
+    a_commit(&gh);
     let done = GitForge::with_gh(gh.program())
         .apply(remote, &tag)
         .await
@@ -987,6 +993,7 @@ async fn a_tag_is_created_only_where_none_exists_and_publishes_no_release() {
     assert_eq!(
         gh.invocations(),
         [
+            get_commit.clone(),
             get_ref.clone(),
             [
                 "api",
@@ -1003,28 +1010,30 @@ async fn a_tag_is_created_only_where_none_exists_and_publishes_no_release() {
         ]
     );
 
-    // Already at the approved commit, as on a retry: done, nothing written.
+    // Not a commit, as an annotated tag object's SHA: refused, nothing written.
     let gh = FakeGh::new();
-    std::fs::write(gh.dir.path().join("ref.json"), ref_at(PR_HEAD)).unwrap();
-    let done = GitForge::with_gh(gh.program())
-        .apply(remote, &tag)
-        .await
-        .unwrap();
-    assert!(done.contains("already points at"), "{done}");
-    assert_eq!(gh.invocations(), std::slice::from_ref(&get_ref));
-
-    // At another commit: refused, nothing written.
-    let gh = FakeGh::new();
-    std::fs::write(gh.dir.path().join("ref.json"), ref_at(OLD_HEAD)).unwrap();
     let error = GitForge::with_gh(gh.program())
         .apply(remote, &tag)
         .await
         .unwrap_err();
-    assert!(
-        error.0.contains(&format!("already exists at {OLD_HEAD}")),
-        "{error}"
-    );
-    assert_eq!(gh.invocations(), std::slice::from_ref(&get_ref));
+    assert!(error.0.contains("is not a commit"), "{error}");
+    assert_eq!(gh.invocations(), std::slice::from_ref(&get_commit));
+
+    // Already a tag, at the approved commit or another: refused, nothing written.
+    for at in [PR_HEAD, OLD_HEAD] {
+        let gh = FakeGh::new();
+        a_commit(&gh);
+        std::fs::write(gh.dir.path().join("ref.json"), ref_at(at)).unwrap();
+        let error = GitForge::with_gh(gh.program())
+            .apply(remote, &tag)
+            .await
+            .unwrap_err();
+        assert!(
+            error.0.contains(&format!("already exists at {at}")),
+            "{error}"
+        );
+        assert_eq!(gh.invocations(), [get_commit.clone(), get_ref.clone()]);
+    }
 }
 
 #[tokio::test]

@@ -296,7 +296,7 @@ pub fn valid_branch_name(name: &str) -> bool {
         && name.len() <= 200
         && !name.starts_with(['-', '/', '.'])
         && !name.ends_with(['/', '.'])
-        && !name.ends_with(".lock")
+        && !name.split('/').any(|part| part.ends_with(".lock"))
         && !name.contains("..")
         && !name.contains("//")
         && !name.contains("/.")
@@ -321,7 +321,7 @@ mod tests {
         assert!(valid_branch_name("release/2.1"));
         for bad in [
             "", "-f", "--force", "/x", "x/", "a..b", "a//b", "x.lock", "a@{1}", "a b", ".x",
-            "a/.b", "x.",
+            "a/.b", "x.", "x.lock/y",
         ] {
             assert!(!valid_branch_name(bad), "{bad:?}");
         }
