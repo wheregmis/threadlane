@@ -935,7 +935,7 @@ impl Desktop {
                                 Err(why) => (
                                     false,
                                     format!(
-                                        "The hub of {name} is on {was}; this app is on build {app}. Restarting it failed: {why}."
+                                        "The hub of {name} is on {was}; this app is on build {app}. It was not restarted: {why}."
                                     ),
                                 ),
                             });

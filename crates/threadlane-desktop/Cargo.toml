@@ -17,6 +17,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 jiff.workspace = true
 image = { workspace = true, features = ["bmp", "tiff"] }
 gpui-kit.workspace = true
+semver = "1"
 serde_json.workspace = true
 threadlane-client.workspace = true
 threadlane-core.workspace = true

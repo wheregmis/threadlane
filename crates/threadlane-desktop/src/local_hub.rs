@@ -43,16 +43,14 @@ pub(crate) fn standing(app: &HubBuild, hub: Option<&HubBuild>) -> Standing {
     let Some(hub) = hub else {
         return Standing::Behind;
     };
-    let parse = |version: &str| {
-        version
-            .split('.')
-            .map(str::parse::<u64>)
-            .collect::<Result<Vec<_>, _>>()
-            .ok()
-    };
+    let parse = |version: &str| semver::Version::parse(version).ok();
     match (parse(&hub.version), parse(&app.version)) {
-        (Some(hub), Some(app)) if hub > app => Standing::Ahead,
-        (Some(hub), Some(app)) if hub < app => Standing::Behind,
+        (Some(hub_version), Some(app_version)) => match hub_version.cmp_precedence(&app_version) {
+            std::cmp::Ordering::Greater => Standing::Ahead,
+            std::cmp::Ordering::Less => Standing::Behind,
+            std::cmp::Ordering::Equal if hub.commit == app.commit => Standing::Current,
+            std::cmp::Ordering::Equal => Standing::Behind,
+        },
         _ if hub == app => Standing::Current,
         _ => Standing::Behind,
     }
@@ -213,8 +211,10 @@ pub(crate) fn start(root: &Path, data_dir: &Path, name: &str) -> Result<(), Stri
 /// app's build. Blocks until it answers again.
 pub(crate) fn restart(root: &Path, socket: &Path, name: &str, pid: u32) -> Result<(), String> {
     let data_dir = socket.parent().ok_or("the hub has no data folder")?;
-    // Before stopping it: a missing program must not leave the hub stopped.
-    program(root)?;
+    // Before stopping it: a missing or stale program must not leave the hub
+    // stopped, nor restart it on the build it already runs every launch.
+    let program = program(root)?;
+    replaceable(&app_build(), built(&program).as_ref())?;
     let kill = |signal: &str| {
         Command::new("kill")
             .args([signal, &pid.to_string()])
@@ -246,6 +246,19 @@ pub(crate) fn restart(root: &Path, socket: &Path, name: &str, pid: u32) -> Resul
         "it was started again but is not answering; see {}",
         data_dir.join("hub.log").display()
     ))
+}
+
+/// Whether the hub program, on build `replacement`, may replace a running
+/// hub: only when it is on the app's build or newer. A developer build of the
+/// app beside a hub not rebuilt with it gets this refusal, not a restart loop.
+fn replaceable(app: &HubBuild, replacement: Option<&HubBuild>) -> Result<(), String> {
+    if standing(app, replacement) == Standing::Behind {
+        let on = replacement.map_or_else(|| "an older build".to_owned(), ToString::to_string);
+        return Err(format!(
+            "the hub program beside this app is on {on}, not build {app}; rebuild or reinstall threadlane-hub"
+        ));
+    }
+    Ok(())
 }
 
 /// Starts the hub of every space this app made whose hub is not answering.
@@ -346,6 +359,71 @@ mod tests {
         assert!(!launched_here(root, &work, ""));
         // A folder the app did not make is never ours, whatever runs there.
         assert_eq!(ours(root, Path::new("/srv/hub/hub.sock"), Some(1)), None);
+    }
+
+    #[test]
+    fn versions_compare_by_semver_precedence_with_pre_releases() {
+        let app = build("0.1.57", "aaaa1111");
+        // A pre-release of the next version is newer than this app.
+        assert_eq!(
+            standing(&app, Some(&build("0.1.58-rc.1", "bbbb2222"))),
+            Standing::Ahead
+        );
+        assert_eq!(
+            standing(&app, Some(&build("0.1.57-rc.1", "bbbb2222"))),
+            Standing::Behind
+        );
+        // An app pre-release is older than its release, newer than an earlier rc.
+        let rc = build("0.1.58-rc.2", "cccc3333");
+        assert_eq!(standing(&rc, Some(&build("0.1.58", "d"))), Standing::Ahead);
+        assert_eq!(
+            standing(&rc, Some(&build("0.1.58-rc.1", "d"))),
+            Standing::Behind
+        );
+        assert_eq!(standing(&rc, Some(&build("0.1.57", "d"))), Standing::Behind);
+        assert_eq!(standing(&rc, Some(&rc)), Standing::Current);
+        assert_eq!(
+            standing(&rc, Some(&build("0.1.58-rc.2", "other"))),
+            Standing::Behind
+        );
+    }
+
+    #[test]
+    fn only_a_program_on_the_apps_build_or_newer_replaces_a_hub() {
+        let app = build("0.1.57", "aaaa1111");
+        assert_eq!(replaceable(&app, Some(&app)), Ok(()));
+        assert_eq!(replaceable(&app, Some(&build("0.1.58", "b"))), Ok(()));
+        // A stale dev hub at the same version, or an older or silent one.
+        for stale in [
+            Some(build("0.1.57", "cbe0ada0")),
+            Some(build("0.1.56", "a")),
+            None,
+        ] {
+            let refused = replaceable(&app, stale.as_ref()).unwrap_err();
+            assert!(refused.contains("rebuild or reinstall"), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_stale_installed_hub_is_refused_before_the_hub_is_stopped() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let program = bin.join(HUB);
+        fs::write(&program, "#!/bin/sh\necho threadlane-hub 0.0.1 0123abcd\n").unwrap();
+        let mut perms = fs::metadata(&program).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        fs::set_permissions(&program, perms).unwrap();
+        let mut hub = Command::new("sleep").arg("30").spawn().unwrap();
+        let socket = root.path().join("spaces/Work/hub.sock");
+        let refused = restart(root.path(), &socket, "Work", hub.id()).unwrap_err();
+        assert!(refused.contains("0.0.1 (0123abcd)"), "{refused}");
+        assert!(
+            hub.try_wait().unwrap().is_none(),
+            "the hub must keep running"
+        );
+        hub.kill().unwrap();
+        hub.wait().unwrap();
     }
 
     #[test]
