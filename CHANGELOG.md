@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.58](https://github.com/wheregmis/threadlane/compare/v0.1.57...v0.1.58) (2026-11-24)
+
+
+### Features
+
+* add create_tag to tag a verified commit without publishing a release ([#749](https://github.com/wheregmis/threadlane/issues/749)) ([8e96a5d](https://github.com/wheregmis/threadlane/commit/8e96a5db82a47f1ebb680136a12a4f9470d012b8))
+* link PRs handled by a batch merge or mark_ready to the task's work ([#747](https://github.com/wheregmis/threadlane/issues/747)) ([8e96a5d](https://github.com/wheregmis/threadlane/commit/8e96a5db82a47f1ebb680136a12a4f9470d012b8))
+* show why failed and abandoned runs ended in session review ([#751](https://github.com/wheregmis/threadlane/issues/751)) ([8e96a5d](https://github.com/wheregmis/threadlane/commit/8e96a5db82a47f1ebb680136a12a4f9470d012b8))
+
+
+### Bug Fixes
+
+* **hub:** name valid tool fields, cool usage limits 30 min, drop undeliverable reviews, mute mDNS log ([724b03e](https://github.com/wheregmis/threadlane/commit/724b03eb346dfabec70f60554b1c906fc9e29a2a))
+* **hub:** tell a re-review what its earlier rounds asked for ([ad71558](https://github.com/wheregmis/threadlane/commit/ad7155848acfa39f4deafd57441a578bc1d0b3a8))
+* keep the app's local hubs on the app's build and refuse a stale hub program before stopping a hub ([#752](https://github.com/wheregmis/threadlane/issues/752)) ([8e96a5d](https://github.com/wheregmis/threadlane/commit/8e96a5db82a47f1ebb680136a12a4f9470d012b8))
+
 ## [0.1.57](https://github.com/wheregmis/threadlane/compare/v0.1.56...v0.1.57) (2026-11-23)
 
 
