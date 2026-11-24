@@ -162,6 +162,10 @@ impl FakeGh {
                echo MERGED\n\
              elif [ \"$3\" = \"--paginate\" ] && [ -f {record}/reviews ]; then\n\
                cat {record}/reviews\n\
+             elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/commits/; then\n\
+               cat {record}/commit.json 2>/dev/null || {{ echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }}\n\
+             elif [ \"$3 $4\" = \"--method=POST repos/acme/app/git/refs\" ] && [ -f {record}/refs_error ]; then\n\
+               cat {record}/refs_error >&2; exit 1\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /git/ref/; then\n\
                cat {record}/ref.json 2>/dev/null || {{ echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }}\n\
              elif [ \"$3\" = \"--method=GET\" ] && echo \"$4\" | grep -q /compare/; then\n\
@@ -963,6 +967,127 @@ async fn a_fresh_review_is_requested_only_at_the_approved_head() {
         .await
         .unwrap();
     assert_eq!(gh.invocations().len(), 2);
+}
+
+#[tokio::test]
+async fn a_tag_is_created_only_at_a_commit_where_none_exists_and_publishes_no_release() {
+    use threadlane_core::forge::RepositoryAction;
+    let remote = "https://github.test/acme/app.git";
+    let tag = RepositoryAction::CreateTag {
+        tag: "v1.2.3".into(),
+        commit: PR_HEAD.into(),
+    };
+    let get = |path: &str| {
+        ["api", "--hostname=github.test", "--method=GET", path]
+            .map(str::to_owned)
+            .to_vec()
+    };
+    let get_commit = get(&format!("repos/acme/app/git/commits/{PR_HEAD}"));
+    let get_ref = get("repos/acme/app/git/ref/tags/v1.2.3");
+    let ref_at = |sha: &str| serde_json::json!({"object": {"sha": sha}}).to_string();
+    let a_commit = |gh: &FakeGh| {
+        let commit = serde_json::json!({"sha": PR_HEAD}).to_string();
+        std::fs::write(gh.dir.path().join("commit.json"), commit).unwrap();
+    };
+
+    // A commit with no such tag: the ref is created there, and nothing else runs.
+    let gh = FakeGh::new();
+    a_commit(&gh);
+    let done = GitForge::with_gh(gh.program())
+        .apply(remote, &tag)
+        .await
+        .unwrap();
+    assert!(done.contains("Created ref refs/tags/v1.2.3 at"), "{done}");
+    assert_eq!(
+        gh.invocations(),
+        [
+            get_commit.clone(),
+            get_ref.clone(),
+            [
+                "api",
+                "--hostname=github.test",
+                "--method=POST",
+                "repos/acme/app/git/refs",
+                "-f",
+                "ref=refs/tags/v1.2.3",
+                "-f",
+                &format!("sha={PR_HEAD}"),
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        ]
+    );
+
+    // Not a commit, as an annotated tag object's SHA: refused, nothing written.
+    let gh = FakeGh::new();
+    let error = GitForge::with_gh(gh.program())
+        .apply(remote, &tag)
+        .await
+        .unwrap_err();
+    assert!(error.0.contains("is not a commit"), "{error}");
+    assert_eq!(gh.invocations(), std::slice::from_ref(&get_commit));
+
+    // Already a tag, at the approved commit or another: refused, nothing written.
+    for at in [PR_HEAD, OLD_HEAD] {
+        let gh = FakeGh::new();
+        a_commit(&gh);
+        std::fs::write(gh.dir.path().join("ref.json"), ref_at(at)).unwrap();
+        let error = GitForge::with_gh(gh.program())
+            .apply(remote, &tag)
+            .await
+            .unwrap_err();
+        assert!(
+            error.0.contains(&format!("already exists at {at}")),
+            "{error}"
+        );
+        assert_eq!(gh.invocations(), [get_commit.clone(), get_ref.clone()]);
+    }
+
+    // The POST fails: an HTTP 4xx is a refusal; a lost answer may have
+    // created the tag, so its outcome is unknown.
+    for (stderr, unknown) in [
+        ("gh: Reference already exists (HTTP 422)", false),
+        (
+            "Post \"https://api.github.test/\": connection reset by peer",
+            true,
+        ),
+        ("gh: Bad Gateway (HTTP 502)", true),
+    ] {
+        let gh = FakeGh::new();
+        a_commit(&gh);
+        std::fs::write(gh.dir.path().join("refs_error"), stderr).unwrap();
+        let error = GitForge::with_gh(gh.program())
+            .apply(remote, &tag)
+            .await
+            .unwrap_err();
+        assert_eq!(error.is_unknown(), unknown, "{error}");
+        assert!(
+            !unknown || error.0.contains("check refs/tags/v1.2.3"),
+            "{error}"
+        );
+        assert_eq!(gh.invocations().len(), 3, "{stderr}");
+    }
+
+    // Build metadata's `+` is sent encoded in the ref lookup.
+    let gh = FakeGh::new();
+    a_commit(&gh);
+    let build = RepositoryAction::CreateTag {
+        tag: "v1.31.1+k3s1".into(),
+        commit: PR_HEAD.into(),
+    };
+    GitForge::with_gh(gh.program())
+        .apply(remote, &build)
+        .await
+        .unwrap();
+    assert_eq!(
+        gh.invocations()[1],
+        get("repos/acme/app/git/ref/tags/v1.31.1%2Bk3s1")
+    );
+    assert!(
+        gh.invocations()[2].contains(&"ref=refs/tags/v1.31.1+k3s1".to_owned()),
+        "{:?}",
+        gh.invocations()
+    );
 }
 
 #[tokio::test]

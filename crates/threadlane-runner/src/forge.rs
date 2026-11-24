@@ -327,6 +327,96 @@ impl GitForge {
         })
     }
 
+    /// Creates tag `tag` at `commit` in `repo` (`host/owner/name`) with the Git
+    /// refs API, which never publishes a release. `commit` must name a commit
+    /// object, not an annotated tag, and any existing tag is refused.
+    async fn create_tag(&self, repo: &str, tag: &str, commit: &str) -> Result<String, ForgeError> {
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let hostname = format!("--hostname={host}");
+        let here = Path::new(".");
+        // The refs API also takes tag-object SHAs, so confirm a commit first.
+        let object = self
+            .gh(
+                here,
+                args(&[
+                    "api",
+                    &hostname,
+                    "--method=GET",
+                    &format!("repos/{name}/git/commits/{commit}"),
+                ]),
+            )
+            .await;
+        let is_commit = match object {
+            Ok(output) => serde_json::from_str::<Json>(&output)
+                .map_err(|error| ForgeError(format!("invalid commit response: {error}")))?["sha"]
+                .as_str()
+                == Some(commit),
+            Err(error) if error.0.contains("(HTTP 404)") || error.0.contains("(HTTP 422)") => false,
+            Err(error) => return Err(error),
+        };
+        if !is_commit {
+            return Err(ForgeError(format!(
+                "{commit} is not a commit on the remote; nothing was changed."
+            )));
+        }
+        let live = self
+            .gh(
+                here,
+                args(&[
+                    "api",
+                    &hostname,
+                    "--method=GET",
+                    // A literal `+` in the path could be read as a space.
+                    &format!("repos/{name}/git/ref/tags/{}", tag.replace('+', "%2B")),
+                ]),
+            )
+            .await;
+        match live {
+            Ok(output) => {
+                let live: Json = serde_json::from_str(&output)
+                    .map_err(|error| ForgeError(format!("invalid tag response: {error}")))?;
+                return Err(ForgeError(format!(
+                    "Tag {tag} already exists at {}; nothing was changed.",
+                    live["object"]["sha"].as_str().unwrap_or("another object")
+                )));
+            }
+            Err(error) if error.0.contains("(HTTP 404)") => {}
+            Err(error) => return Err(error),
+        }
+        self.gh(
+            here,
+            args(&[
+                "api",
+                &hostname,
+                "--method=POST",
+                &format!("repos/{name}/git/refs"),
+                "-f",
+                &format!("ref=refs/tags/{tag}"),
+                "-f",
+                &format!("sha={commit}"),
+            ]),
+        )
+        .await
+        .map_err(|error| {
+            // Only an HTTP 4xx answer says GitHub refused; anything else (a
+            // dropped connection, a timeout, a 5xx) may follow a created ref.
+            if error.0.contains("(HTTP 4") {
+                error
+            } else {
+                ForgeError::unknown(format!(
+                    "{error}. Tag {tag} may have been created; check refs/tags/{tag} \
+                     before retrying."
+                ))
+            }
+        })?;
+        Ok(format!(
+            "Created ref refs/tags/{tag} at {commit}. No release was published by this call; \
+             the tag may still start the repository's automation."
+        ))
+    }
+
     /// Re-requests `reviewers` on PR `number` and posts `comment`, only while
     /// its head is `expected_head`.
     async fn request_review(
@@ -1143,6 +1233,9 @@ impl Forge for GitForge {
                     .request_review(&repo, *number, expected_head, reviewers, comment.as_deref())
                     .await;
             }
+            RepositoryAction::CreateTag { tag, commit } => {
+                return self.create_tag(&repo, tag, commit).await;
+            }
             RepositoryAction::MergeBatch { pulls } => return self.merge_batch(&repo, pulls).await,
             RepositoryAction::MarkReadyBatch { numbers } => {
                 return self.mark_ready_batch(&repo, numbers).await;
@@ -1198,7 +1291,8 @@ impl Forge for GitForge {
             | RepositoryAction::ResolveReviewThread { .. }
             | RepositoryAction::RequestReview { .. }
             | RepositoryAction::MergeBatch { .. }
-            | RepositoryAction::MarkReadyBatch { .. } => unreachable!("handled above"),
+            | RepositoryAction::MarkReadyBatch { .. }
+            | RepositoryAction::CreateTag { .. } => unreachable!("handled above"),
             RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
             RepositoryAction::AssignIssue { number } => {
                 args(&["issue", "edit", &number.to_string(), "--add-assignee=@me"])

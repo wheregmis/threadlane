@@ -639,6 +639,15 @@ async fn the_gate_refuses_a_call_it_cannot_ask_about_and_opens_nothing() {
             ATTACH_IMAGE,
             json!({ "repository": "app", "number": 7, "path": "/s.png", "body": "x", IMAGE_BLOB: "a".repeat(40) }),
         ),
+        // create_tag: a branch name for the commit, or a name git could misread.
+        (
+            threadlane_core::forge::CREATE_TAG,
+            json!({ "repository": "app", "tag": "v1", "commit": "main" }),
+        ),
+        (
+            threadlane_core::forge::CREATE_TAG,
+            json!({ "repository": "app", "tag": "../v1", "commit": "a".repeat(40) }),
+        ),
     ]
     .into_iter()
     .enumerate()

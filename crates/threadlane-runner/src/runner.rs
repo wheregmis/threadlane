@@ -950,6 +950,9 @@ impl Inner {
                         Ok(result) => {
                             json!({"performed": true, "summary": format!("Completed the repository action. {}", result.trim())})
                         }
+                        Err(error) if error.is_unknown() => {
+                            json!({"unknown": true, "error": error.to_string()})
+                        }
                         Err(error) => json!({"performed": false, "error": error.to_string()}),
                     };
                     self.reach(perform::AFTER_EFFECT)?;
@@ -1630,7 +1633,8 @@ fn describe(decision: DecisionId, outcome: &Json) -> String {
     };
     if outcome["unknown"] == Json::Bool(true) {
         return format!(
-            "\nOutcome of {decision}: unknown after interruption. Check the repository before retrying.\n"
+            "\nOutcome of {decision}: unknown after interruption. Check the repository before retrying. {}\n",
+            text("error")
         );
     }
     if outcome.get("performed") != Some(&Json::Bool(true)) {

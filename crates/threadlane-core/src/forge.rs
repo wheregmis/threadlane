@@ -107,6 +107,9 @@ pub struct PullRequestImage<'a> {
 
 /// Ask reviewers, or a review bot by its trigger comment, to review a pull request again.
 pub const REQUEST_REVIEW: &str = "request_review";
+/// Create a lightweight tag at a named commit on a registered repository,
+/// without publishing a release itself (#748).
+pub const CREATE_TAG: &str = "create_tag";
 
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -177,6 +180,9 @@ pub enum RepositoryAction {
         reviewers: Vec<String>,
         comment: Option<String>,
     },
+    /// Create tag `tag` at the full commit ID `commit`, only if no tag of
+    /// that name exists; any existing tag, even at `commit`, is refused.
+    CreateTag { tag: String, commit: String },
 }
 
 /// Kind of numbered GitHub item to comment on.
@@ -193,6 +199,24 @@ pub enum CommentTarget {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("forge: {0}")]
 pub struct ForgeError(pub String);
+
+/// Starts the message of a request that was sent but got no answer.
+const OUTCOME_UNKNOWN: &str = "outcome unknown: ";
+
+impl ForgeError {
+    /// A request that was sent but got no answer, so its effect may have
+    /// happened: recorded as an unknown outcome, never as not performed.
+    #[must_use]
+    pub fn unknown(message: impl fmt::Display) -> Self {
+        Self(format!("{OUTCOME_UNKNOWN}{message}"))
+    }
+
+    /// Whether the effect may have happened (see [`ForgeError::unknown`]).
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        self.0.starts_with(OUTCOME_UNKNOWN)
+    }
+}
 
 /// The approved commit and the branch it may update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

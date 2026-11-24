@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::{Value as Json, json};
 use threadlane_core::backend::{AgentBackend, BackendError};
 use threadlane_core::client::{DecisionRequest, OrgReply, OrgRequest};
-use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
+use threadlane_core::forge::{CREATE_TAG, ForgeError, REPORT_LIMITATION, RepositoryAction};
 use threadlane_core::github::IssueClaim;
 use threadlane_core::model::{
     DecisionKind, EventKind, EventStatus, Mode, NewEvent, OutboxKind, Trust,
@@ -822,6 +822,56 @@ async fn closing_a_pull_request_waits_for_approval_of_the_head_it_shows() {
             );
             assert_invariants(&sim, CLOSE_PULL_REQUEST).await;
         }
+    }
+}
+
+#[tokio::test]
+async fn creating_a_tag_waits_for_approval_of_the_tag_and_commit_it_shows() {
+    let tag = "v1.31.1+k3s1";
+    let args = json!({"repository":"site","tag":tag,"commit":HEAD});
+    for (mode, lost) in [
+        (Mode::OnRequest, false),
+        (Mode::Autonomous, false),
+        (Mode::Autonomous, true),
+    ] {
+        let w = world(CREATE_TAG, args.clone(), mode).await.with_github();
+        w.add_github_repository("site", "https://github.com/acme/site.git")
+            .await;
+        w.backend.push_answer(answer("allow"));
+        if lost {
+            w.forge
+                .fail_next_apply(ForgeError::unknown("connection reset by peer"));
+        }
+        let sim = w.boot(CrashPlan::new()).await;
+        sim.send("m", "Tag the release commit").await;
+        work(&sim).await;
+        let decisions = sim.decisions().await;
+        assert_eq!(decisions.len(), 1, "{mode}");
+        let decision = &decisions[0];
+        assert!(!decision.approved(), "{mode}");
+        assert!(!decision.offers_standing_rule, "{mode}");
+        assert!(w.forge.calls().is_empty(), "{mode}");
+        for shown in [tag, HEAD, "site"] {
+            assert!(decision.question.contains(shown), "{shown}");
+        }
+        drive(&sim, "approve", None).await.unwrap();
+        let calls = w.forge.calls();
+        let [ForgeCall::Apply { remote, action }] = calls.as_slice() else {
+            panic!("expected one tag, got {calls:?}");
+        };
+        assert_eq!(remote, "https://github.com/acme/site.git");
+        assert_eq!(
+            action,
+            &RepositoryAction::CreateTag {
+                tag: tag.into(),
+                commit: HEAD.into(),
+            }
+        );
+        // A lost answer is recorded as unknown, not as not performed.
+        let outcome = sim.decisions().await[0].outcome.clone().unwrap();
+        assert_eq!(outcome["unknown"] == json!(true), lost, "{outcome}");
+        assert_eq!(outcome["performed"] == json!(true), !lost, "{outcome}");
+        assert_invariants(&sim, CREATE_TAG).await;
     }
 }
 

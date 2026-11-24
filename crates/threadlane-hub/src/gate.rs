@@ -110,7 +110,10 @@ pub fn may_start_unrequested(mode: Mode) -> bool {
 #[must_use]
 pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
     // A batch merge is approved once for its named, pinned list, never by a standing rule (#692).
-    if tool == crate::MERGE && arguments.get("pulls").is_some() {
+    // A tag is decided each time: a rule would recreate a deleted tag unasked (#748).
+    if (tool == crate::MERGE && arguments.get("pulls").is_some())
+        || tool == threadlane_core::forge::CREATE_TAG
+    {
         return Json::Object(Map::new());
     }
     let mut targets: Map<String, Json> = TARGET_FIELDS
@@ -1032,6 +1035,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_is_asked_every_time_even_with_a_matching_rule() {
+        let arguments = json!({"repository":"app","tag":"v1.0.0","commit":"0".repeat(40)});
+        // A rule stored with the tag's own fields, as an earlier build made.
+        let rules = vec![rule(
+            threadlane_core::forge::CREATE_TAG,
+            arguments.clone(),
+            false,
+        )];
+        let overrides = Overrides::new();
+        for mode in [ON, AS, AU] {
+            let verdict = gate(&GateInput {
+                tool: threadlane_core::forge::CREATE_TAG,
+                tier: Tier::SharedHardToUndo,
+                arguments: &arguments,
+                mode,
+                space_ceiling: AU,
+                project_ceiling: None,
+                overrides: &overrides,
+                rules: &rules,
+                tainted: false,
+                requested: true,
+                new_work: None,
+                own_work: None,
+            });
+            assert_eq!(short(&verdict), V::Ask, "{mode}");
+        }
+    }
+
+    #[test]
     fn work_you_did_not_request_starts_in_assisted_and_autonomous_only() {
         for (mode, ceiling, starts) in [
             (Mode::Off, AU, false),
@@ -1107,6 +1139,13 @@ mod tests {
                 &json!({"repository":"app","number":42,"expected_head":head,"delete_branch":true})
             ),
             json!({"repository":"app","number":42,"expected_head":head})
+        );
+        assert_eq!(
+            rule_pattern(
+                threadlane_core::forge::CREATE_TAG,
+                &json!({"repository":"app","tag":"v1.0.0","commit":head})
+            ),
+            json!({})
         );
         for tool in [crate::RESOLVE_REVIEW_THREAD, crate::REQUEST_REVIEW] {
             assert_eq!(

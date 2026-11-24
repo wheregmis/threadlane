@@ -372,9 +372,16 @@ pub struct FakeForge {
     logged_out: Arc<std::sync::atomic::AtomicBool>,
     /// Reported by [`Forge::pull_request_base`]; `main` until set.
     pull_base: Arc<Mutex<Option<String>>>,
+    /// Returned, once, by the next [`Forge::apply`] after recording it.
+    apply_error: Arc<Mutex<Option<ForgeError>>>,
 }
 
 impl FakeForge {
+    /// Makes the next [`Forge::apply`] record the call, then fail with `error`.
+    pub fn fail_next_apply(&self, error: ForgeError) {
+        *lock(&self.apply_error) = Some(error);
+    }
+
     /// Sets the base branch [`Forge::pull_request_base`] reports.
     pub fn set_pull_base(&self, base: &str) {
         *lock(&self.pull_base) = Some(base.to_owned());
@@ -425,7 +432,10 @@ impl Forge for FakeForge {
             remote: remote.to_owned(),
             action: action.clone(),
         });
-        Ok("done".into())
+        match lock(&self.apply_error).take() {
+            Some(error) => Err(error),
+            None => Ok("done".into()),
+        }
     }
 
     async fn push(&self, worktree: &Path, branch: ApprovedBranch<'_>) -> Result<(), ForgeError> {
