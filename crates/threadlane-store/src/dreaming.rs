@@ -34,6 +34,9 @@ fn task_updated_at() -> String {
     )
 }
 
+/// The recorded reason a run of `r` ended without committing, else NULL.
+const END_REASON: &str = "CASE WHEN r.status IN ('failed','abandoned','stopped') THEN COALESCE(r.error,'no reason recorded') END";
+
 const CHOICES: &str =
     "FROM decisions d JOIN events e ON e.source='decision' AND e.source_event_id='answer:' || d.id
     WHERE d.project_id=?1 AND e.project_id=d.project_id AND d.kind='input' AND d.tool='ask_user'
@@ -597,13 +600,34 @@ impl HubDb {
 
     /// Finished run summaries and delivered messages for the selected page.
     pub async fn dream_history(&self, project: ProjectId, ids: &[i64]) -> StoreResult<Vec<Json>> {
-        query_all(&self.db.reader()?, "SELECT r.id,r.session_id,r.outcome,r.rationale,r.status,
+        query_all(&self.db.reader()?, &format!("SELECT r.id,r.session_id,r.outcome,r.rationale,r.status,
             (SELECT json_group_array(json_object('body',json(o.body),'sent_at',o.sent_at)) FROM
-                (SELECT body,sent_at FROM outbox WHERE run_id=r.id AND project_id=?1 AND status='sent' AND kind='message' ORDER BY id) o)
-            FROM runs r JOIN lanes l ON l.id=r.lane_id WHERE l.project_id=?1 AND r.id IN (SELECT value FROM json_each(?2)) ORDER BY r.id",
+                (SELECT body,sent_at FROM outbox WHERE run_id=r.id AND project_id=?1 AND status='sent' AND kind='message' ORDER BY id) o),
+            {END_REASON}
+            FROM runs r JOIN lanes l ON l.id=r.lane_id WHERE l.project_id=?1 AND r.id IN (SELECT value FROM json_each(?2)) ORDER BY r.id"),
             params![project.get(),json!(ids).to_string()], |row|{
                 let c=Cols(row);
-                Ok(json!({"run_id":c.i64(0)?,"session_id":c.i64(1)?,"outcome":c.opt_text(2)?,"rationale":c.opt_text(3)?,"status":c.text(4)?,"sent_messages":c.json(5)?}))
+                let mut run = json!({"run_id":c.i64(0)?,"session_id":c.i64(1)?,"outcome":c.opt_text(2)?,"rationale":c.opt_text(3)?,"status":c.text(4)?,"sent_messages":c.json(5)?});
+                if let Some(reason) = c.opt_text(6)? {
+                    run["end_reason"] = json!(reason);
+                }
+                Ok(run)
+            }).await
+    }
+
+    /// The task's runs that ended without committing, newest first, each with
+    /// its recorded reason (#750).
+    pub async fn dream_task_failures(
+        &self,
+        project: ProjectId,
+        task: i64,
+    ) -> StoreResult<Vec<Json>> {
+        query_all(&self.db.reader()?, &format!("SELECT r.id,r.status,{END_REASON},r.ended_at FROM runs r
+            JOIN tasks t ON t.lane_id=r.lane_id WHERE t.project_id=?1 AND t.id=?2
+            AND ({END_REASON}) IS NOT NULL ORDER BY r.id DESC LIMIT 20"),
+            params![project.get(),task], |row|{
+                let c=Cols(row);
+                Ok(json!({"run_id":c.i64(0)?,"status":c.text(1)?,"end_reason":c.opt_text(2)?,"ended_at":c.opt_ts(3)?}))
             }).await
     }
 }

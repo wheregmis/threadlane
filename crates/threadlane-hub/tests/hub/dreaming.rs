@@ -1862,3 +1862,114 @@ async fn sessions_page_every_task_past_the_old_cap_of_two_hundred() {
     }
     assert_eq!(ids.len(), 205);
 }
+
+#[tokio::test]
+async fn sessions_give_the_reason_each_failed_or_abandoned_run_ended() {
+    use threadlane_core::link::RunFailure;
+    use threadlane_core::model::{NewTask, TaskOrigin, TaskStatus};
+
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    set(&hub, None).await;
+    let project = hub.general().await;
+    let agent = hub.db.bindings(project.id).await.unwrap()[0].agent_id;
+    let task = hub
+        .db
+        .create_task(
+            None,
+            &NewTask {
+                project_id: project.id,
+                agent_id: agent,
+                title: "Flaky".into(),
+                goal: "Fails then is abandoned".into(),
+                repositories: vec![],
+                parent_task_id: None,
+                depends_on: vec![],
+                origin: TaskOrigin::User,
+                status: TaskStatus::Queued,
+                priority: 0,
+                created_by_call: None,
+                created_at: hub.clock.now(),
+                playbooks: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let (lease, failed) = begin(&*hub.link).await;
+    assert_eq!(failed.task_id, Some(task.id));
+    let message = format!("the backend refused the request\n{}", "x".repeat(500));
+    hub.link
+        .fail(&lease, failed.run_id, &RunFailure::Error { message })
+        .await
+        .unwrap();
+    hub.link.release(&lease).await.unwrap();
+    hub.clock.advance(Duration::from_secs(11));
+    let (_, abandoned) = begin(&*hub.link).await;
+    assert_eq!(abandoned.task_id, Some(task.id));
+    hub.clock.advance(PAST_LEASE);
+    hub.core.sweep_once().await.unwrap();
+    while let Some(lease) = hub.link.request_work().await.unwrap() {
+        let Begin::Run(run) = hub.link.begin_run(&lease).await.unwrap() else {
+            hub.link.release(&lease).await.unwrap();
+            break;
+        };
+        complete(&hub, &lease, &run).await;
+    }
+
+    set(&hub, Some(interval())).await;
+    hub.clock.advance(HOUR);
+    hub.core.schedule_once().await.unwrap();
+    let (lease, dream) = begin(&*hub.link).await;
+    let page = call(&*hub.link, &lease, &dream, SESSIONS, json!({}))
+        .await
+        .unwrap();
+    let run = |id: threadlane_core::ids::RunId| {
+        page["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["run_id"] == id.get())
+            .unwrap_or_else(|| panic!("no run {id} in {page}"))
+            .clone()
+    };
+    let listed = run(failed.run_id);
+    assert_eq!(listed["status"], "failed");
+    let reason = listed["end_reason"].as_str().unwrap();
+    assert!(
+        reason.contains("the backend refused the request xxx") && reason.chars().count() <= 161,
+        "{reason}"
+    );
+    let gone = run(abandoned.run_id);
+    assert_eq!(gone["status"], "abandoned", "{gone}");
+    assert_eq!(gone["end_reason"], "lease ended");
+    let committed = page["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["status"] == "committed")
+        .expect("a committed run");
+    assert!(committed.get("end_reason").is_none(), "{committed}");
+
+    let full = call(
+        &*hub.link,
+        &lease,
+        &dream,
+        SESSIONS,
+        json!({"task_id": task.id.to_string()}),
+    )
+    .await
+    .unwrap();
+    let runs = full["failed_runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2, "{full}");
+    assert_eq!(runs[0]["run_id"], abandoned.run_id.get());
+    assert_eq!(runs[0]["end_reason"], "lease ended");
+    assert_eq!(runs[1]["status"], "failed");
+    assert!(
+        runs[1]["end_reason"]
+            .as_str()
+            .unwrap()
+            .contains(&"x".repeat(500)),
+        "{full}"
+    );
+    complete(&hub, &lease, &dream).await;
+}
