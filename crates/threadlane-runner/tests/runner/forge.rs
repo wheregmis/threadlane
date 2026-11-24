@@ -1368,6 +1368,13 @@ async fn a_batch_says_an_accepted_async_merge_left_unresolved_may_have_merged() 
             Some(r#"{"status":"failed","details":{"message":"conflict"}}"#),
             false,
         ),
+        (
+            "enqueued",
+            "0",
+            Some(r#"{"status":"enqueued","details":{"message":"in the merge queue"}}"#),
+            true,
+        ),
+        ("missing status", "0", Some(r#"{"details":{}}"#), true),
     ] {
         let gh = FakeGh::new();
         let forge = GitForge::with_gh(gh.program()).with_merge_poll(std::time::Duration::ZERO);

@@ -369,9 +369,26 @@ async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
         ) }),
     )
     .await;
+    // A definite rejection whose provider detail happens to contain the marker text.
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MERGE,
+        json!({ "repository": "widgets", "pulls": [
+            { "number": 901, "expected_head": head },
+            { "number": 902, "expected_head": head },
+        ] }),
+        json!({ "performed": false, "error": format!(
+            "forge: batch stopped at #902 (expected head {head}), merged #901, the rest not \
+             attempted: rejected (expected head {head}{})",
+            threadlane_core::forge::BATCH_MAY_HAVE_CHANGED,
+        ) }),
+    )
+    .await;
     hub.db.release_lease(&lease).await.unwrap();
     let at = "2026-11-17T08:00:00Z";
-    for number in [601, 602, 701, 702, 703, 801, 802, 803] {
+    for number in [601, 602, 701, 702, 703, 801, 802, 803, 901, 902] {
         github.add_to(
             "acme/widgets",
             &format!("feature-{number}"),
@@ -403,11 +420,12 @@ async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
             "check_run:602",
             "check_run:701",
             "check_run:801",
-            "check_run:802"
+            "check_run:802",
+            "check_run:901"
         ],
         "{events:?}"
     );
-    for number in [601, 602, 701, 801, 802] {
+    for number in [601, 602, 701, 801, 802, 901] {
         assert!(github.calls().contains(&GithubCall::PullRequest {
             target: PullTarget {
                 repository: "acme/widgets".into(),

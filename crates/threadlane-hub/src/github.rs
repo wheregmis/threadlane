@@ -192,21 +192,29 @@ fn batch_handled(
     if outcome["performed"] == true {
         return listed;
     }
-    let stopped = outcome["error"]
-        .as_str()
-        .and_then(|error| error.split("batch stopped at #").nth(1))
-        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
-        .and_then(|number| number.parse::<u64>().ok());
-    match stopped {
-        Some(stopped) if listed.contains(&stopped) => {
-            let changed = outcome["error"]
+    // The runner's error starts with the batch header, after the hub's optional "forge: ".
+    let error = outcome["error"].as_str().unwrap_or_default();
+    let Some(rest) = error
+        .strip_prefix("forge: ")
+        .unwrap_or(error)
+        .strip_prefix("batch stopped at #")
+    else {
+        return Vec::new();
+    };
+    let digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let (stopped, after) = rest.split_at(digits);
+    let stopped = stopped.parse::<u64>().ok();
+    match stopped.and_then(|stopped| listed.iter().position(|n| *n == stopped)) {
+        Some(at) => {
+            // Only at its place in the header, so provider detail later in the error can't fake it.
+            let changed = arguments["pulls"][at]["expected_head"]
                 .as_str()
-                .is_some_and(|error| error.contains(BATCH_MAY_HAVE_CHANGED));
-            let end = listed
-                .iter()
-                .position(|n| *n == stopped)
-                .map_or(0, |at| at + usize::from(changed));
-            listed.into_iter().take(end).collect()
+                .is_some_and(|head| {
+                    after.starts_with(&format!(" (expected head {head}{BATCH_MAY_HAVE_CHANGED})"))
+                });
+            listed.into_iter().take(at + usize::from(changed)).collect()
         }
         _ => Vec::new(),
     }

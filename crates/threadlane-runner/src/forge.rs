@@ -491,10 +491,16 @@ impl GitForge {
                     };
                 }
                 status => {
-                    return Err(ForgeError(format!(
+                    let error = ForgeError(format!(
                         "the asynchronous merge of PR #{number} ended {}: {message}",
                         status.unwrap_or("without a status")
-                    )));
+                    ));
+                    // Only `failed` rejects; `enqueued` (merge queue) or an unknown status may still merge.
+                    return if status == Some("failed") {
+                        Err(error)
+                    } else {
+                        accepted(error)
+                    };
                 }
             }
         }
