@@ -83,11 +83,11 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
     tools.push(ToolDefinition {
         name: PROJECT_SESSIONS.to_owned(),
         description: "Read this project's run outcomes, rationales, delivered replies and owner chat \
-                      from unreviewed runs, project tasks with review evidence and last activity, and \
+                      from unreviewed runs (failed, abandoned or stopped ones with their task, agent, end_code and end_reason), project tasks with review evidence and last activity, and \
                       previous Threadlane reports (first page only). Runs then tasks come in pages, \
                       long texts cut; a cut page gives the offset of the next one. Listed tasks are compact: \
                       title, one-line summary, latest verdict and diff totals, no goal. Pass task_id \
-                      for one task's full record with its review and patches, or updated_after to list only tasks active since then."
+                      for one task's full record with its review, patches and failed runs (paged newest first by offset and limit), or updated_after to list only tasks active since then."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -135,20 +135,21 @@ fn task_record(task: &Task, times: &BTreeMap<i64, Timestamp>) -> Json {
 /// The longest one-line text a listed task keeps, so a page holds 50 or more.
 const LISTED_CHARS: usize = 80;
 
+/// `text` on one line of at most `max` characters. A bare ellipsis: the clip
+/// note's character count would cost a page more than it tells.
+fn short(text: &str, max: usize) -> String {
+    let text = page::one_line(text, usize::MAX);
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text,
+    }
+}
+
 /// A task as a `project_sessions` page lists it (#680, #703): no goal, its
 /// result in one line, its latest verdict and diff totals over every
 /// repository. `task_id` shows the full record.
 fn compact(full: &Json, review: Option<&Json>) -> Json {
-    // A bare ellipsis: the clip note's character count would cost a page more than it tells.
-    let line = |key: &str| {
-        full[key].as_str().map(|text| {
-            let text = page::one_line(text, usize::MAX);
-            match text.char_indices().nth(LISTED_CHARS) {
-                Some((end, _)) => format!("{}…", &text[..end]),
-                None => text,
-            }
-        })
-    };
+    let line = |key: &str| full[key].as_str().map(|text| short(text, LISTED_CHARS));
     let diffs: Vec<&Json> = full["result"]
         .get(threadlane_core::link::MERGE_CHECKS)
         .and_then(Json::as_array)
@@ -183,7 +184,13 @@ fn compact(full: &Json, review: Option<&Json>) -> Json {
 }
 
 /// One project task in full, with its latest review, for a task a page lists compactly.
-async fn session_task(db: &HubDb, project: ProjectId, reference: &Json) -> Result<Json, ToolError> {
+async fn session_task(
+    db: &HubDb,
+    project: ProjectId,
+    reference: &Json,
+    offset: usize,
+    limit: usize,
+) -> Result<Json, ToolError> {
     let err = crate::error::tool_error;
     let id = crate::tools::task_ref(reference)?;
     let ids = [id.get()];
@@ -195,6 +202,19 @@ async fn session_task(db: &HubDb, project: ProjectId, reference: &Json) -> Resul
         .filter(|task| task.project_id == project)
         .ok_or_else(|| invalid(&format!("no task {id} in this project")))?;
     let mut record = task_record(&task, &times);
+    // offset and limit page the failed runs, newest first.
+    let all = db
+        .dream_task_failures(project, id.get())
+        .await
+        .map_err(err)?;
+    if !all.is_empty() {
+        let (failed, next) = page::take(&all, offset, limit);
+        record["failed_runs"] = json!(failed);
+        record["failed_runs_total"] = json!(all.len());
+        if let Some(next) = next {
+            record["failed_runs_next_offset"] = json!(next);
+        }
+    }
     if let Some(review) = db
         .dream_reviews(project, &ids)
         .await
@@ -522,7 +542,7 @@ impl HubCore {
             let db = &inner.db;
             let err = crate::error::tool_error;
             if let Some(reference) = object.get("task_id") {
-                return session_task(db, project, reference).await;
+                return session_task(db, project, reference, offset, limit).await;
             }
             let updated_after = match object.get("updated_after") {
                 None => None,
