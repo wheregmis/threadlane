@@ -9386,3 +9386,235 @@ async fn quick_create_opens_where_you_are_or_in_the_space_chat_project() {
     );
     assert_eq!(AppState::default().quick_create_target(None), None);
 }
+
+#[test]
+fn task_details_usage_goal_and_outcome_banners_cover_every_task_state() {
+    let make_run = |id: i64,
+                    status: RunStatus,
+                    started_ms: i64,
+                    ended_ms: Option<i64>,
+                    backend: Option<BackendKind>,
+                    model: Option<&str>,
+                    error: Option<&str>,
+                    usage: Option<RunUsage>| RunSummary {
+        run: Run {
+            trace_id: String::new(),
+            id: RunId(id),
+            lane_id: LaneId(1),
+            session_id: SessionId(1),
+            agent_id: Some(AgentId(1)),
+            machine_id: MachineId(1),
+            lease_epoch: 1,
+            backend,
+            model: model.map(str::to_owned),
+            status,
+            outcome: None,
+            rationale: None,
+            error: error.map(str::to_owned),
+            started_at: Timestamp::from_millis(started_ms),
+            ended_at: ended_ms.map(Timestamp::from_millis),
+        },
+        machine: "hub".to_owned(),
+        steps: Vec::new(),
+        usage,
+    };
+
+    // 1. Queued unstarted task with distinct goal and parent.
+    let mut queued_summary = task(13, TaskStatus::Queued, None);
+    queued_summary.machine = None;
+    queued_summary.task.title = "Check and release PR #25".to_owned();
+    queued_summary.task.goal = "Verify CI, tag release, and publish notes.".to_owned();
+    queued_summary.task.parent_task_id = Some(TaskId(10));
+    queued_summary.task.playbooks = vec!["release-checklist".to_owned()];
+    queued_summary.task.created_at = Timestamp::from_millis(9 * 60_000);
+    let queued = TaskDetail {
+        summary: queued_summary,
+        branch: "threadlane/T-0013".to_owned(),
+        repositories: vec!["troes-app".to_owned()],
+        runs: Vec::new(),
+        reviews: Vec::new(),
+        decisions: Vec::new(),
+        related: Vec::new(),
+        messages: Vec::new(),
+        proposed_by: None,
+        stopped: false,
+    };
+    let clock = when(); // now = 12 * 60_000
+    let queued_details = task_details(&queued, &clock);
+    assert_eq!(queued_details.agent, "Engineer");
+    assert_eq!(queued_details.machine, None);
+    assert_eq!(queued_details.backend, None);
+    assert_eq!(queued_details.model, None);
+    assert_eq!(queued_details.repositories, vec!["troes-app"]);
+    assert_eq!(queued_details.requested_by, "You");
+    assert_eq!(queued_details.started, None);
+    assert_eq!(
+        queued_details.duration,
+        Some(("Queued", "3 min".to_owned()))
+    );
+    assert_eq!(queued_details.parent, Some(TaskId(10)));
+    assert_eq!(queued_details.playbooks, vec!["release-checklist"]);
+    assert_eq!(
+        task_goal(&queued).as_deref(),
+        Some("Verify CI, tag release, and publish notes.")
+    );
+    assert_eq!(task_outcome_banner(&queued), None);
+    assert_eq!(
+        task_usage(&queued, &clock),
+        TaskUsage {
+            runs: 0,
+            total_time: None,
+            input_tokens: None,
+            output_tokens: None,
+            cost: None,
+            note: None,
+        }
+    );
+
+    // 2. Running task with explicit model and unreported usage.
+    let mut running = queued.clone();
+    running.summary.task.status = TaskStatus::Running;
+    running.summary.task.goal = "Check and release PR #25".to_owned(); // identical to title -> hidden
+    running.summary.running_since = Some(Timestamp::from_millis(12 * 60_000 - 30_000));
+    running.runs = vec![make_run(
+        1,
+        RunStatus::Active,
+        12 * 60_000 - 30_000,
+        None,
+        Some(BackendKind::Codex),
+        Some("gpt-6.1-terra"),
+        None,
+        None,
+    )];
+    let running_details = task_details(&running, &clock);
+    assert_eq!(running_details.machine.as_deref(), Some("hub"));
+    assert_eq!(running_details.backend.as_deref(), Some("codex"));
+    assert_eq!(running_details.model.as_deref(), Some("gpt-6.1-terra"));
+    assert!(!running_details.model_is_default);
+    assert_eq!(
+        running_details.duration,
+        Some(("Running", "less than a minute".to_owned()))
+    );
+    assert_eq!(task_goal(&running), None);
+    assert_eq!(task_outcome_banner(&running), None);
+    assert_eq!(
+        task_usage(&running, &clock),
+        TaskUsage {
+            runs: 1,
+            total_time: Some("less than a minute".to_owned()),
+            input_tokens: None,
+            output_tokens: None,
+            cost: None,
+            note: Some("The backend has not reported tokens or cost."),
+        }
+    );
+
+    // 3. Done task with default model, accepted proposal origin, multi-run usage, and summary banner.
+    let mut done = running.clone();
+    done.summary.task.status = TaskStatus::Done;
+    done.summary.task.origin = TaskOrigin::Accepted;
+    done.proposed_by = Some("Lead".to_owned());
+    done.summary.task.result = Some(json!({"summary": "Merged PR #25 and tagged v1.4.0."}));
+    done.runs = vec![
+        make_run(
+            1,
+            RunStatus::Committed,
+            0,
+            Some(2 * 60_000),
+            Some(BackendKind::Claude),
+            None,
+            None,
+            Some(RunUsage {
+                input_tokens: Some(1_200),
+                output_tokens: Some(400),
+                cost_usd: Some(0.025),
+            }),
+        ),
+        make_run(
+            2,
+            RunStatus::Committed,
+            3 * 60_000,
+            Some(6 * 60_000),
+            Some(BackendKind::Claude),
+            None,
+            None,
+            Some(RunUsage {
+                input_tokens: Some(800),
+                output_tokens: Some(100),
+                cost_usd: Some(0.015),
+            }),
+        ),
+    ];
+    let done_details = task_details(&done, &clock);
+    assert_eq!(done_details.model.as_deref(), Some("Default"));
+    assert!(done_details.model_is_default);
+    assert_eq!(done_details.requested_by, "Lead (accepted by you)");
+    assert_eq!(
+        done_details.duration,
+        Some(("Duration", "3 min".to_owned()))
+    );
+    assert_eq!(
+        task_outcome_banner(&done),
+        Some(TaskOutcomeBanner {
+            tone: TaskOutcomeTone::Done,
+            heading: "Result",
+            body: "Merged PR #25 and tagged v1.4.0.".to_owned(),
+        })
+    );
+    assert_eq!(
+        task_usage(&done, &clock),
+        TaskUsage {
+            runs: 2,
+            total_time: Some("5 min".to_owned()),
+            input_tokens: Some("2,000 tokens".to_owned()),
+            output_tokens: Some("500 tokens".to_owned()),
+            cost: Some("$0.0400".to_owned()),
+            note: None,
+        }
+    );
+
+    // 4. Failed task falls back to last failed run error, then generic fallback.
+    let mut failed = queued.clone();
+    failed.summary.task.status = TaskStatus::Failed;
+    failed.runs = vec![make_run(
+        1,
+        RunStatus::Failed,
+        0,
+        Some(60_000),
+        Some(BackendKind::Codex),
+        None,
+        Some("runner exited with code 1"),
+        None,
+    )];
+    assert_eq!(
+        task_outcome_banner(&failed),
+        Some(TaskOutcomeBanner {
+            tone: TaskOutcomeTone::Failed,
+            heading: "Task failed",
+            body: "runner exited with code 1".to_owned(),
+        })
+    );
+    failed.runs[0].run.error = None;
+    assert_eq!(
+        task_outcome_banner(&failed),
+        Some(TaskOutcomeBanner {
+            tone: TaskOutcomeTone::Failed,
+            heading: "Task failed",
+            body: "The task failed without reporting a reason.".to_owned(),
+        })
+    );
+
+    // 5. Cancelled task shows banner only when a summary exists.
+    let mut cancelled = queued.clone();
+    cancelled.summary.task.status = TaskStatus::Cancelled;
+    assert_eq!(task_outcome_banner(&cancelled), None);
+    cancelled.summary.task.result = Some(json!({"summary": "Superseded by T-0014."}));
+    assert_eq!(
+        task_outcome_banner(&cancelled),
+        Some(TaskOutcomeBanner {
+            tone: TaskOutcomeTone::Cancelled,
+            heading: "Cancelled",
+            body: "Superseded by T-0014.".to_owned(),
+        })
+    );
+}

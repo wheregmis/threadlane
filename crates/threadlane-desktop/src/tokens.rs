@@ -80,8 +80,16 @@ pub(super) const WINDOW_DEFAULT_WIDTH: Pixels = px(1180.);
 pub(super) const WINDOW_DEFAULT_HEIGHT: Pixels = px(780.);
 /// Maximum height of a scrolling list inside a sidebar.
 pub(super) const SIDEBAR_SECTION_MAX_HEIGHT: Rems = rems(17.5);
-/// Panel width in rems.
-pub(super) const PANEL_WIDTH: Rems = rems(15.625);
+/// Task detail right-hand inspector rail width in rems.
+pub(super) const TASK_INSPECTOR_WIDTH: Rems = rems(18.5);
+/// Minimum width reserved for the task main column before moving the inspector to a sheet.
+pub(super) const TASK_MAIN_MIN_WIDTH: Rems = rems(28.);
+/// Fixed key column width inside the task inspector's Details and Usage rows.
+pub(super) const TASK_DETAIL_LABEL_WIDTH: Rems = rems(6.);
+/// Compact tabular timestamp lane for same-day `HH:MM` timestamps on the task screen.
+pub(super) const TASK_TIME_SHORT_WIDTH: Rems = rems(3.25);
+/// Expanded tabular timestamp lane when any task timestamp includes a date.
+pub(super) const TASK_TIME_LONG_WIDTH: Rems = rems(7.25);
 /// Board column min in logical pixels.
 pub(super) const BOARD_COLUMN_MIN: Pixels = px(152.);
 /// Timestamp width in rems.
@@ -104,9 +112,6 @@ pub(super) const SHORT_FIELD_WIDTH: Rems = rems(5.625);
 pub(super) const ZONE_WIDTH: Rems = rems(16.25);
 /// Space name width in rems.
 pub(super) const SPACE_NAME_WIDTH: Rems = rems(15.);
-
-/// Width at which the task timeline can sit beside its supporting panel.
-pub(super) const TASK_TIMELINE_BASIS: Rems = rems(18.75);
 
 /// Requests fixed-width digits in the active kit font.
 pub(super) static TABULAR: LazyLock<FontFeatures> =

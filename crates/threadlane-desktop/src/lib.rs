@@ -116,10 +116,11 @@ pub use skills::{
 };
 pub use tasks::{
     BoardCard, BoardMove, Changes, Column, InProgress, LatestStep, Milestone, MilestoneKind,
-    Moment, SpaceTaskFilter, SpaceTasksView, TaskGroup, TaskHeader, TaskTriageRow,
-    TaskTriageSection, WorkRow, activity_runs, board_move, changes, chips, merge_state,
-    milestone_summary, milestones, running_elapsed, status_label, task_header, timeline, usage,
-    work_elapsed, work_started,
+    Moment, SpaceTaskFilter, SpaceTasksView, TaskDetails, TaskGroup, TaskHeader, TaskOutcomeBanner,
+    TaskOutcomeTone, TaskTriageRow, TaskTriageSection, TaskUsage, WorkRow, activity_runs,
+    board_move, changes, chips, merge_state, milestone_summary, milestones, running_elapsed,
+    status_label, task_details, task_goal, task_header, task_outcome_banner, task_usage, timeline,
+    usage, work_elapsed, work_started,
 };
 pub use timeline::{
     Spoken, TIMELINE_PAGE, TimelineEntry, TimelineLoad, is_quiet_update, load_timeline,
