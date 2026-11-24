@@ -9,8 +9,8 @@ use threadlane_core::ids::{DecisionId, RunId, StandingRuleId};
 use threadlane_core::link::{FINISH_TASK, LinkError, Perform};
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
-    Decision, DecisionKind, DecisionOption, Lane, Lease, MemoryAuthor, Mode, NewDecision, Run,
-    RunStatus, StandingRule, TaskReviewVerdict, TaskStatus, ToolCallBegin, ToolCallKey, Trust,
+    Decision, DecisionKind, DecisionOption, Lane, LaneKind, Lease, MemoryAuthor, Mode, NewDecision,
+    Run, RunStatus, StandingRule, TaskReviewVerdict, TaskStatus, ToolCallBegin, ToolCallKey, Trust,
 };
 use threadlane_core::runtime::steps::{perform, tool_call as step};
 use threadlane_core::runtime::{WakeTarget, Waker};
@@ -211,6 +211,31 @@ impl LocalLink {
                 }
             };
         }
+        // The lead merges only a green head a review approved, and you still
+        // approve it (#763). Checked once the call is recorded, so a repeat
+        // replays the refusal.
+        if dream.is_none() && lane.kind == LaneKind::Lead && tool == crate::MERGE {
+            let refused = match crate::publish::lead_merge_refusal(
+                db,
+                inner.github.as_deref(),
+                &lane,
+                arguments,
+            )
+            .await
+            {
+                Ok(None) => None,
+                Ok(Some(reason)) => Some(ToolError::Blocked(format!("merge refused: {reason}"))),
+                Err(error) => Some(error),
+            };
+            if let Some(refused) = refused {
+                if let Some(record) = error_record(&refused) {
+                    db.finish_tool_call(lease, &key, &record, inner.clock.now())
+                        .await
+                        .map_err(tool_error)?;
+                }
+                return Err(refused);
+            }
+        }
         // A run that waits on you can't finish its work (Plan.md §9.4). Each
         // further gated call gets its own card (#675), and ungated calls such
         // as a message or a timer still run (#718).
@@ -243,6 +268,9 @@ impl LocalLink {
             (None, Some(event)) => self.core.dream_call(event, &context, tool, arguments).await,
             (None, None) if tool == crate::VIEW_ISSUE => {
                 crate::publish::view_issue(db, inner.github.as_deref(), &lane, arguments).await
+            }
+            (None, None) if tool == crate::PR_READINESS => {
+                crate::publish::pr_readiness(db, inner.github.as_deref(), &lane, arguments).await
             }
             (None, None) => inner.tools.execute(&context, tool, arguments.clone()).await,
             (Some(asked), _) => {
@@ -816,7 +844,10 @@ impl LocalLink {
             } else {
                 let action = crate::publish::repository_action(&decision.tool, &decision.arguments)
                     .map_err(|e| LinkError::Rejected(e.to_string()))?;
-                if lane.kind != threadlane_core::model::LaneKind::Task {
+                // The lead's merge was checked before it was asked (#763).
+                if lane.kind != LaneKind::Task
+                    && !(lane.kind == LaneKind::Lead && decision.tool == crate::MERGE)
+                {
                     return Err(LinkError::Rejected(
                         "repository actions require a task lane".into(),
                     ));

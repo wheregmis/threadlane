@@ -50,6 +50,7 @@ pub const RETRY_TASK: &str = "retry_task";
 pub const LIST_TASKS: &str = "list_tasks";
 /// The lead reads an issue or pull request of a registered repository (#714).
 pub const VIEW_ISSUE: &str = "view_issue";
+pub const PR_READINESS: &str = "pr_readiness";
 pub const PR_REVIEW_STATUS: &str = "pr_review_status";
 /// A task agent reports its task done, with a result.
 pub use threadlane_core::link::FINISH_TASK;
@@ -85,14 +86,16 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | CANCEL_TASK
         | RETRY_TASK
         | VIEW_ISSUE
+        | PR_READINESS
         | crate::space_lead::ASK_PROJECT_LEAD => kind == LaneKind::Lead,
+        // The lead merges only a reviewed, green head, and the owner approves (#763).
+        MERGE => matches!(kind, LaneKind::Task | LaneKind::Lead),
         FINISH_TASK
         | PUBLISH_BRANCH
         | OPEN_PULL_REQUEST
         | FAST_FORWARD_PULL_REQUEST
         | COMMENT
         | CREATE_ISSUE
-        | MERGE
         | MARK_READY
         | LABEL_ISSUE
         | CLOSE_PULL_REQUEST
@@ -1075,7 +1078,7 @@ fn resolve_review_repository<'r>(
 }
 
 /// Names the canonical PR and head it looked up, so a mismatch can be diagnosed (#664).
-fn review_json(target: &PrReviewHead, found: Option<PrReviewStatus>) -> Json {
+pub(crate) fn review_json(target: &PrReviewHead, found: Option<PrReviewStatus>) -> Json {
     let mut json = match found {
         Some(review) => {
             json!({"review_status": review.state, "task_id": review.task.to_string(), "feedback": review.feedback})
@@ -1491,6 +1494,26 @@ fn task_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         define(
+            PR_READINESS,
+            "Read whether a pull request of a registered repository is ready to merge: its \
+             current full head SHA, status, mergeable_state, each check's status, whether it \
+             is green, its unresolved review threads, and the code review of that head. It \
+             only reads, so it needs no approval. Pass its head_sha as merge's expected_head.",
+            Tier::Read,
+            json!({
+                "type": "object",
+                "properties": {
+                    "repository": {
+                        "type": "string",
+                        "description": "A repository registered in this project."
+                    },
+                    "number": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["repository", "number"],
+                "additionalProperties": false
+            }),
+        ),
+        define(
             PR_REVIEW_STATUS,
             "Look up the existing code review for this exact PR head before assigning or starting review. Returns the task, review status and available feedback.",
             Tier::Read,
@@ -1683,7 +1706,7 @@ impl ToolRegistry for HubTools {
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
             ))),
-            VIEW_ISSUE => Err(ToolError::Blocked(format!(
+            VIEW_ISSUE | PR_READINESS => Err(ToolError::Blocked(format!(
                 "{name} is answered by the hub's GitHub source"
             ))),
             // The gate always asks: the answer is the outcome.
@@ -1918,7 +1941,9 @@ mod tests {
                     CANCEL_TASK,
                     LIST_TASKS,
                     VIEW_ISSUE,
-                    PR_REVIEW_STATUS
+                    PR_READINESS,
+                    PR_REVIEW_STATUS,
+                    MERGE
                 ][..],
                 &memory,
                 &[crate::space_lead::ASK_PROJECT_LEAD, REPORT_LIMITATION]

@@ -574,6 +574,8 @@ struct GithubState {
     pulls: Vec<(String, u64, Result<PullRequestState, String>)>,
     /// What [`GithubSource::pull_request_files`] answers, by `(repository, number)`.
     files: Vec<(String, u64, Vec<PullRequestFile>)>,
+    /// What [`GithubSource::unresolved_review_threads`] answers, by `(repository, number)`.
+    threads: Vec<(String, u64, Vec<serde_json::Value>)>,
 }
 
 /// A [`GithubSource`] that touches no network. It records every call, keeps
@@ -656,6 +658,19 @@ impl FakeGithub {
         lock(&self.state)
             .files
             .push((repository.to_owned(), number, files));
+    }
+
+    /// What [`GithubSource::unresolved_review_threads`] answers for pull
+    /// request `number` of `repository`. Unscripted ones fail. The latest call wins.
+    pub fn set_review_threads(
+        &self,
+        repository: &str,
+        number: u64,
+        threads: Vec<serde_json::Value>,
+    ) {
+        lock(&self.state)
+            .threads
+            .push((repository.to_owned(), number, threads));
     }
 
     /// What the feed answers as the interval it asks for.
@@ -791,6 +806,20 @@ impl GithubSource for FakeGithub {
                 },
                 |(_, _, pull)| pull.clone().map_err(GithubError),
             )
+    }
+
+    async fn unresolved_review_threads(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<Vec<serde_json::Value>, GithubError> {
+        lock(&self.state)
+            .threads
+            .iter()
+            .rev()
+            .find(|(r, n, _)| r == repository && *n == number)
+            .map(|(_, _, threads)| threads.clone())
+            .ok_or_else(|| GithubError(format!("no review threads {repository}#{number}")))
     }
 
     async fn pull_request_files(
