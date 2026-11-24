@@ -191,6 +191,15 @@ pub(crate) struct PromptParts<'a> {
 /// The commit the hub was built from, or `unknown` outside a git checkout.
 pub const BUILD_COMMIT: &str = env!("THREADLANE_BUILD_COMMIT");
 
+/// This hub's release version and [BUILD_COMMIT].
+#[must_use]
+pub fn build() -> threadlane_core::client::HubBuild {
+    threadlane_core::client::HubBuild {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        commit: BUILD_COMMIT.to_owned(),
+    }
+}
+
 /// Told to a task run that takes over events an earlier run failed on.
 const RETRY_NOTE: &str = "\nAn earlier run on these events did not finish: it failed or hit its \
 time or turn limit. Its work is committed on your task branch. Check `git log` and the \

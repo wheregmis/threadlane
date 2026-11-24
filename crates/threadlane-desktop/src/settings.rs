@@ -117,6 +117,8 @@ pub struct SpaceRow {
     pub schema_version: Option<i64>,
     /// The installed release version if the hub supports updates.
     pub update_version: Option<String>,
+    /// The build the hub reports running, `0.1.57 (cbe0ada0)`, or why not.
+    pub build: String,
     /// The machine that hosts the hub, as its hub lists it.
     pub host: Option<String>,
     /// `Unix socket /…/hub.sock` or `Network, hub key 1a2b3c4d5e`.
@@ -344,6 +346,15 @@ impl AppState {
                     .info
                     .as_ref()
                     .and_then(|info| info.update_version.clone()),
+                build: space.info.as_ref().map_or_else(
+                    || "not reported yet".to_owned(),
+                    |info| {
+                        info.build.as_ref().map_or_else(
+                            || "older than build reports".to_owned(),
+                            ToString::to_string,
+                        )
+                    },
+                ),
                 host: space
                     .machines
                     .iter()

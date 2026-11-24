@@ -136,6 +136,8 @@ impl HubApi for FakeHub {
             schema_version: 1,
             update_version: None,
             default_models: self.default_models.lock().expect("lock").clone(),
+            build: None,
+            pid: None,
         })
     }
 

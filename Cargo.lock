@@ -9013,6 +9013,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "jiff",
+ "semver",
  "serde_json",
  "tempfile",
  "threadlane-client",

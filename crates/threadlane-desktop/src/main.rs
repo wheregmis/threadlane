@@ -152,7 +152,9 @@ fn main() -> ExitCode {
                     shown,
                     received: feed,
                 };
-                Desktop::new(state, core, tokio, feed, start, window, cx)
+                let mut desktop = Desktop::new(state, core, tokio, feed, start, window, cx);
+                desktop.match_hub_builds(cx);
+                desktop
             })
         });
         match opened {
@@ -880,6 +882,87 @@ impl Desktop {
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.start_refresh(true, cx);
+    }
+
+    /// Brings each hub this app started onto the app's build, and says
+    /// which hubs run another build it leaves alone.
+    fn match_hub_builds(&mut self, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        let root = self.state.client_dir().map(std::path::Path::to_path_buf);
+        self.run(
+            async move {
+                let app = local_hub::app_build();
+                let statuses = core.read().await.status().await;
+                let mut said = Vec::new();
+                for status in statuses {
+                    let Ok(info) = status.info else { continue };
+                    let socket = match status.reach {
+                        threadlane_client::Reach::Socket { socket } => Some(socket),
+                        threadlane_client::Reach::Iroh { .. } => None,
+                    };
+                    let ours = match (&root, &socket) {
+                        (Some(root), Some(socket)) => local_hub::ours(root, socket, info.pid),
+                        _ => None,
+                    };
+                    let name = status.name;
+                    let was = info.build.as_ref().map_or_else(
+                        || "an older build".to_owned(),
+                        |build| format!("build {build}"),
+                    );
+                    match local_hub::plan(&name, &app, info.build.as_ref(), ours.is_some()) {
+                        local_hub::Plan::Keep => {}
+                        local_hub::Plan::Notice(notice) => said.push((false, notice)),
+                        local_hub::Plan::Restart => {
+                            let (Some(root), Some(socket), Some(pid)) =
+                                (root.clone(), socket, ours)
+                            else {
+                                continue;
+                            };
+                            let space = name.clone();
+                            let restarted = tokio::task::spawn_blocking(move || {
+                                local_hub::restart(&root, &socket, &space, pid)
+                            })
+                            .await
+                            .map_err(|error| error.to_string())
+                            .flatten();
+                            said.push(match restarted {
+                                Ok(()) => (
+                                    true,
+                                    format!(
+                                        "Restarted the hub of {name} on build {app}; it was on {was}."
+                                    ),
+                                ),
+                                Err(why) => (
+                                    false,
+                                    format!(
+                                        "The hub of {name} is on {was}; this app is on build {app}. It was not restarted: {why}."
+                                    ),
+                                ),
+                            });
+                        }
+                    }
+                }
+                said
+            },
+            |this, said, cx| {
+                if said.is_empty() {
+                    return;
+                }
+                let ok = said.iter().all(|(ok, _)| *ok);
+                let text = said
+                    .into_iter()
+                    .map(|(_, text)| text)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                this.state.report(if ok {
+                    Activity::Done(text)
+                } else {
+                    Activity::Failed(text)
+                });
+                this.refresh(cx);
+            },
+            cx,
+        );
     }
 
     fn start_refresh(&mut self, explicit: bool, cx: &mut Context<Self>) {

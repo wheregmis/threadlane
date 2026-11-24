@@ -2,11 +2,14 @@
 //!
 //! ```text
 //! threadlane-hub [--data-dir DIR] [run|check]
+//! threadlane-hub --version
 //! ```
 //!
 //! The data directory defaults to `$THREADLANE_HUB_DIR`, then `./.threadlane-dev/hub`.
 //! `run` serves the client interface on `<data dir>/hub.sock` and runs the
 //! hub's roles until Ctrl-C; `check` checks the database and exits.
+//! `--version` prints `threadlane-hub <version> <commit>`, which the desktop
+//! app reads to tell whether the hub binary it launches is current.
 
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
@@ -15,7 +18,7 @@ use anyhow::{Context, bail};
 use threadlane_hub::config::{DataDir, HubConfig};
 use threadlane_hub::{Hub, init_logging};
 
-const USAGE: &str = "usage: threadlane-hub [--data-dir DIR] [run|check]";
+const USAGE: &str = "usage: threadlane-hub [--data-dir DIR] [run|check] | --version";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -34,6 +37,11 @@ fn parse_args() -> anyhow::Result<(DataDir, Command)> {
             }
             "run" => command = Command::Run,
             "check" => command = Command::Check,
+            "--version" => {
+                let build = threadlane_hub::build();
+                println!("threadlane-hub {} {}", build.version, build.commit);
+                std::process::exit(0);
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
