@@ -167,9 +167,14 @@ impl HubDb {
     /// Input tokens of the last model request in `session`'s latest finished run: how much
     /// its next run rereads. Zero when the backend reports no per-request usage, as Codex.
     pub async fn session_context_tokens(&self, session: SessionId) -> StoreResult<u64> {
-        let sql = "SELECT COALESCE(json_extract(j.entry,'$.usage.usage.iterations[0].input_tokens'),0)
-              + COALESCE(json_extract(j.entry,'$.usage.usage.iterations[0].cache_read_input_tokens'),0)
-              + COALESCE(json_extract(j.entry,'$.usage.usage.iterations[0].cache_creation_input_tokens'),0)
+        // The last `message` iteration is the context as it now stands; earlier ones were
+        // smaller and a `compaction` one is not a request the next run rereads.
+        let sql = "SELECT (SELECT COALESCE(json_extract(it.value,'$.input_tokens'),0)
+                + COALESCE(json_extract(it.value,'$.cache_read_input_tokens'),0)
+                + COALESCE(json_extract(it.value,'$.cache_creation_input_tokens'),0)
+              FROM json_each(j.entry,'$.usage.usage.iterations') it
+              WHERE COALESCE(json_extract(it.value,'$.type'),'message')='message'
+              ORDER BY it.key DESC LIMIT 1)
             FROM journal j JOIN runs r ON r.id=j.run_id
             WHERE r.session_id=?1 AND json_extract(j.entry,'$.type')='finished'
             ORDER BY j.run_id DESC, j.seq DESC LIMIT 1";

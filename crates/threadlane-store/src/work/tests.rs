@@ -353,3 +353,34 @@ async fn a_sessions_context_is_its_latest_runs_last_request() {
     assert_eq!(db.session_context_tokens(SessionId(2)).await.unwrap(), 0);
     assert_eq!(db.session_context_tokens(SessionId(9)).await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn a_sessions_context_is_its_last_message_iteration() {
+    // A run that grew past the lead limit and then compacted: the context is the last
+    // `message` iteration, not the first or the compaction.
+    let grown = json!({"usage": {"iterations": [
+        {"type": "message", "input_tokens": 10, "cache_read_input_tokens": 90_000},
+        {"type": "message", "input_tokens": 10, "cache_read_input_tokens": 160_000},
+        {"type": "compaction", "input_tokens": 170_000},
+    ]}})
+    .to_string();
+    let compacted = json!({"usage": {"iterations": [
+        {"type": "message", "input_tokens": 5, "cache_read_input_tokens": 160_000},
+        {"type": "compaction", "input_tokens": 160_000},
+        {"type": "message", "input_tokens": 5, "cache_creation_input_tokens": 20_000},
+    ]}})
+    .to_string();
+    let db = usage_db(&[
+        (1, 1, "claude", 10, Some(&grown)),
+        (2, 2, "claude", 20, Some(&compacted)),
+    ])
+    .await;
+    assert_eq!(
+        db.session_context_tokens(SessionId(1)).await.unwrap(),
+        160_010
+    );
+    assert_eq!(
+        db.session_context_tokens(SessionId(2)).await.unwrap(),
+        20_005
+    );
+}

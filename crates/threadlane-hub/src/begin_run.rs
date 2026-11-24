@@ -343,6 +343,9 @@ impl LocalLink {
                     serde_json::json!([preferences["summary"], preferences["recent_user_choices"]])
                         .to_string()
                 });
+                // An empty entry means the session holds no history. A session resumed with no
+                // entry may have been sent one before a hub restart, so it is told it is withdrawn.
+                let resumed = plan.new_native_id.is_none();
                 let mut sent = inner.sent_preferences.lock().await;
                 match (preferences, key, sent.get(&run.session_id)) {
                     (Some(now), Some(key), was) if was != Some(&key) => {
@@ -351,9 +354,9 @@ impl LocalLink {
                         prompt.push('\n');
                         sent.insert(run.session_id, key);
                     }
-                    (None, _, Some(_)) => {
+                    (None, _, was) if was.map_or(resumed, |was| !was.is_empty()) => {
                         prompt.push_str("\nThe Dreaming decision history sent earlier in this session is withdrawn. Do not use it.\n");
-                        sent.remove(&run.session_id);
+                        sent.insert(run.session_id, String::new());
                     }
                     _ => {}
                 }
