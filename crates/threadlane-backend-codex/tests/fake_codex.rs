@@ -180,6 +180,7 @@ impl Fake {
             remove_builtin_tools: false,
             wall_time_limit: Duration::from_secs(60),
             max_turns: None,
+            single_use: false,
         }
     }
 

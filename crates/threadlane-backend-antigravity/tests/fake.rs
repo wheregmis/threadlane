@@ -34,6 +34,7 @@ if read -r prompt; then touch delivered; fi
         deny_rules: Vec::new(),
         wall_time_limit: Duration::from_secs(5),
         max_turns: Some(1),
+        single_use: false,
     };
     let mut run = backend.run(request).await.unwrap();
     assert_eq!(run.next_event().await, Some(BackendEvent::SessionMissing));
@@ -87,6 +88,7 @@ echo '{"event":"result","result":{"status":"SUCCESS"}}'
         deny_rules: Vec::new(),
         wall_time_limit: Duration::from_secs(5),
         max_turns: Some(1),
+        single_use: false,
     };
     assert!(
         matches!(backend.run(request.clone()).await, Err(error) if error.to_string().contains("require native tools"))

@@ -113,6 +113,7 @@ impl Fake {
             remove_builtin_tools: false,
             wall_time_limit: Duration::from_secs(60),
             max_turns: None,
+            single_use: false,
         }
     }
 
@@ -422,9 +423,11 @@ async fn start_passes_every_option() {
         "You are the lead.",
         "--mcp-config",
         &mcp_path,
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
         "--tools",
         "",
-        "--strict-mcp-config",
         "--disallowedTools",
         "Bash(git push:*)",
         "Bash(gh pr merge:*)",
@@ -518,6 +521,9 @@ async fn resume_passes_only_what_was_asked_for() {
         "bypassPermissions",
         "--resume",
         SESSION,
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -785,6 +791,7 @@ async fn a_missing_program_is_not_installed() {
         remove_builtin_tools: false,
         wall_time_limit: Duration::from_secs(1),
         max_turns: None,
+        single_use: false,
     };
     assert_eq!(
         backend.run(request).await.map(drop),

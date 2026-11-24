@@ -673,6 +673,7 @@ mod tests {
             remove_builtin_tools: true,
             wall_time_limit: Duration::from_secs(600),
             max_turns: Some(40),
+            single_use: false,
         }
     }
 

@@ -1196,6 +1196,7 @@ impl Inner {
             remove_builtin_tools: assignment.remove_builtin_tools,
             wall_time_limit: assignment.wall_time_limit,
             max_turns: assignment.max_turns,
+            single_use: assignment.review.is_some(),
         }
     }
 

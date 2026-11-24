@@ -70,6 +70,7 @@ async fn resumed_lead_calls_the_new_endpoint_with_remembered_text() {
                 session: session.clone(),
                 deny_rules: Vec::new(),
                 max_turns: None,
+                single_use: false,
                 wall_time_limit: Duration::from_secs(90),
             })
             .await

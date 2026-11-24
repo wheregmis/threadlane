@@ -124,6 +124,7 @@ impl Conformance {
             remove_builtin_tools: false,
             wall_time_limit: self.limit,
             max_turns: Some(8),
+            single_use: false,
         }
     }
 
