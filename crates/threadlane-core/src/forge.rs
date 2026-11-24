@@ -101,6 +101,9 @@ pub struct PullRequestImage<'a> {
 
 /// Ask reviewers, or a review bot by its trigger comment, to review a pull request again.
 pub const REQUEST_REVIEW: &str = "request_review";
+/// Create a lightweight tag at a named commit on a registered repository,
+/// without publishing a release (#748).
+pub const CREATE_TAG: &str = "create_tag";
 
 /// A validated shared effect addressed to a registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -171,6 +174,9 @@ pub enum RepositoryAction {
         reviewers: Vec<String>,
         comment: Option<String>,
     },
+    /// Create tag `tag` at the full commit ID `commit`, only if no tag of
+    /// that name exists; one already at `commit` counts as done.
+    CreateTag { tag: String, commit: String },
 }
 
 /// Kind of numbered GitHub item to comment on.

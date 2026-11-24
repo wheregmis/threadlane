@@ -960,6 +960,74 @@ async fn a_fresh_review_is_requested_only_at_the_approved_head() {
 }
 
 #[tokio::test]
+async fn a_tag_is_created_only_where_none_exists_and_publishes_no_release() {
+    use threadlane_core::forge::RepositoryAction;
+    let remote = "https://github.test/acme/app.git";
+    let tag = RepositoryAction::CreateTag {
+        tag: "v1.2.3".into(),
+        commit: PR_HEAD.into(),
+    };
+    let get_ref = [
+        "api",
+        "--hostname=github.test",
+        "--method=GET",
+        "repos/acme/app/git/ref/tags/v1.2.3",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let ref_at = |sha: &str| serde_json::json!({"object": {"sha": sha}}).to_string();
+
+    // No such tag: the ref is created at the approved commit, and nothing else runs.
+    let gh = FakeGh::new();
+    let done = GitForge::with_gh(gh.program())
+        .apply(remote, &tag)
+        .await
+        .unwrap();
+    assert!(done.contains("Created tag v1.2.3"), "{done}");
+    assert_eq!(
+        gh.invocations(),
+        [
+            get_ref.clone(),
+            [
+                "api",
+                "--hostname=github.test",
+                "--method=POST",
+                "repos/acme/app/git/refs",
+                "-f",
+                "ref=refs/tags/v1.2.3",
+                "-f",
+                &format!("sha={PR_HEAD}"),
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        ]
+    );
+
+    // Already at the approved commit, as on a retry: done, nothing written.
+    let gh = FakeGh::new();
+    std::fs::write(gh.dir.path().join("ref.json"), ref_at(PR_HEAD)).unwrap();
+    let done = GitForge::with_gh(gh.program())
+        .apply(remote, &tag)
+        .await
+        .unwrap();
+    assert!(done.contains("already points at"), "{done}");
+    assert_eq!(gh.invocations(), std::slice::from_ref(&get_ref));
+
+    // At another commit: refused, nothing written.
+    let gh = FakeGh::new();
+    std::fs::write(gh.dir.path().join("ref.json"), ref_at(OLD_HEAD)).unwrap();
+    let error = GitForge::with_gh(gh.program())
+        .apply(remote, &tag)
+        .await
+        .unwrap_err();
+    assert!(
+        error.0.contains(&format!("already exists at {OLD_HEAD}")),
+        "{error}"
+    );
+    assert_eq!(gh.invocations(), std::slice::from_ref(&get_ref));
+}
+
+#[tokio::test]
 async fn a_base_missing_from_the_remote_is_refused_before_anything_is_pushed() {
     let dir = tempfile::tempdir().unwrap();
     let (worktree, remote) = worktree_with_work(dir.path()).await;

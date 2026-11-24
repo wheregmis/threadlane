@@ -150,6 +150,14 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
     {
         targets.insert(threadlane_core::forge::EXPECTED_HEAD.into(), head.clone());
     }
+    // A standing rule for a tag covers only that tag at that commit.
+    if tool == threadlane_core::forge::CREATE_TAG {
+        for field in ["tag", "commit"] {
+            if let Some(value) = arguments.get(field) {
+                targets.insert(field.into(), value.clone());
+            }
+        }
+    }
     Json::Object(targets)
 }
 
@@ -1107,6 +1115,13 @@ mod tests {
                 &json!({"repository":"app","number":42,"expected_head":head,"delete_branch":true})
             ),
             json!({"repository":"app","number":42,"expected_head":head})
+        );
+        assert_eq!(
+            rule_pattern(
+                threadlane_core::forge::CREATE_TAG,
+                &json!({"repository":"app","tag":"v1.0.0","commit":head})
+            ),
+            json!({"repository":"app","tag":"v1.0.0","commit":head})
         );
         for tool in [crate::RESOLVE_REVIEW_THREAD, crate::REQUEST_REVIEW] {
             assert_eq!(

@@ -101,7 +101,8 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | EDIT_PULL_REQUEST
         | RESOLVE_REVIEW_THREAD
         | REQUEST_REVIEW
-        | ATTACH_IMAGE => kind == LaneKind::Task,
+        | ATTACH_IMAGE
+        | threadlane_core::forge::CREATE_TAG => kind == LaneKind::Task,
         _ => true,
     }
 }
@@ -1677,6 +1678,7 @@ impl ToolRegistry for HubTools {
             | RESOLVE_REVIEW_THREAD
             | REQUEST_REVIEW
             | ATTACH_IMAGE
+            | threadlane_core::forge::CREATE_TAG
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
             ))),
@@ -1944,7 +1946,8 @@ mod tests {
                     EDIT_PULL_REQUEST,
                     RESOLVE_REVIEW_THREAD,
                     REQUEST_REVIEW,
-                    ATTACH_IMAGE
+                    ATTACH_IMAGE,
+                    threadlane_core::forge::CREATE_TAG
                 ][..],
                 &memory,
                 &[REPORT_LIMITATION]

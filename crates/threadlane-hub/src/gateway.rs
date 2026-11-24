@@ -803,6 +803,7 @@ impl LocalLink {
                 | crate::EDIT_PULL_REQUEST
                 | crate::RESOLVE_REVIEW_THREAD
                 | crate::REQUEST_REVIEW
+                | threadlane_core::forge::CREATE_TAG
                 | REPORT_LIMITATION
         ) {
             let (remote, action) = if decision.tool == REPORT_LIMITATION {

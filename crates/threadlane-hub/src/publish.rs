@@ -5,10 +5,10 @@
 
 use serde_json::{Value as Json, json};
 use threadlane_core::forge::{
-    ASSIGN_ISSUE, ATTACH_IMAGE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, EDIT_PULL_REQUEST,
-    EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, IMAGE_BLOB, LABEL_ISSUE, MARK_READY,
-    MAX_LABELS, MAX_MERGE_BATCH, MERGE, ONTO_TASK, OPEN_PULL_REQUEST, PUBLISH_BRANCH,
-    REQUEST_REVIEW, RESOLVE_REVIEW_THREAD, valid_label_name,
+    ASSIGN_ISSUE, ATTACH_IMAGE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, CREATE_TAG,
+    EDIT_PULL_REQUEST, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, IMAGE_BLOB,
+    LABEL_ISSUE, MARK_READY, MAX_LABELS, MAX_MERGE_BATCH, MERGE, ONTO_TASK, OPEN_PULL_REQUEST,
+    PUBLISH_BRANCH, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD, valid_label_name,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -62,7 +62,12 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         // The owner judges whether a reviewer's thread is fixed and when a fresh review is due.
         tier: if matches!(
             name,
-            MERGE | CLOSE_PULL_REQUEST | GITHUB_CLI | RESOLVE_REVIEW_THREAD | REQUEST_REVIEW
+            MERGE
+                | CLOSE_PULL_REQUEST
+                | GITHUB_CLI
+                | RESOLVE_REVIEW_THREAD
+                | REQUEST_REVIEW
+                | CREATE_TAG
         ) {
             Tier::SharedHardToUndo
         } else {
@@ -305,6 +310,22 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                     "caption":{"type":"string","description":"One line of alt text, without brackets. Defaults to \"screenshot\"."}
                 },
                 "required":["repository","number","path"],"additionalProperties":false
+            }),
+        ),
+        define(
+            CREATE_TAG,
+            "Create a tag at a named commit in a registered project repository, such as one that \
+             starts a tag-triggered build, without publishing a release. The commit must already \
+             be on the remote. The user always decides it, for that exact tag and commit. It is \
+             refused if the tag already exists at another commit. End your turn when it waits on \
+             the user.",
+            json!({
+                "type":"object","properties":{
+                    "repository":repository,
+                    "tag":{"type":"string","description":"The tag name, as v0.1.58."},
+                    "commit":{"type":"string","description":"The full commit SHA to tag."}
+                },
+                "required":["repository","tag","commit"],"additionalProperties":false
             }),
         ),
     ]
@@ -886,6 +907,18 @@ pub(crate) fn repository_action(
                 comment,
             })
         }
+        CREATE_TAG => {
+            fields(a, &["repository", "tag", "commit"])?;
+            let tag = a["tag"]
+                .as_str()
+                .filter(|tag| valid_branch_name(tag))
+                .ok_or_else(|| invalid("tag must be a plain tag name, as v1.2.3"))?
+                .to_owned();
+            Ok(RepositoryAction::CreateTag {
+                tag,
+                commit: commit("commit")?,
+            })
+        }
         _ => Err(invalid("unknown repository action")),
     }
 }
@@ -980,6 +1013,7 @@ pub(crate) async fn proposal(
             | RESOLVE_REVIEW_THREAD
             | REQUEST_REVIEW
             | ATTACH_IMAGE
+            | CREATE_TAG
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -1067,9 +1101,12 @@ pub(crate) async fn proposal(
             | EDIT_PULL_REQUEST
             | RESOLVE_REVIEW_THREAD
             | REQUEST_REVIEW
+            | CREATE_TAG
     ) {
         let action = repository_action(tool, arguments)?;
-        if tool == ASSIGN_ISSUE && github_repository(&repository.remote_url).is_none() {
+        if matches!(tool, ASSIGN_ISSUE | CREATE_TAG)
+            && github_repository(&repository.remote_url).is_none()
+        {
             return Err(invalid("the registered remote is not a GitHub repository"));
         }
         // `owner/repo#N` links to the right repository in a multi-repository project.
@@ -1136,6 +1173,9 @@ pub(crate) async fn proposal(
                      its head is still {expected_head}?",
                     asks.join(" and ")
                 )
+            }
+            threadlane_core::forge::RepositoryAction::CreateTag { tag, commit } => {
+                format!("Create tag {tag} at commit {commit} in {name}? No release is published.")
             }
             threadlane_core::forge::RepositoryAction::MergeBatch { pulls } => {
                 let list: Vec<String> = pulls
@@ -1436,6 +1476,44 @@ pub(crate) fn plain_text(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tag_needs_a_plain_name_and_a_full_commit() {
+        use threadlane_core::forge::RepositoryAction;
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        let tag = |tag: &str, commit: &str| {
+            repository_action(
+                CREATE_TAG,
+                &json!({"repository":"app","tag":tag,"commit":commit}),
+            )
+        };
+        assert_eq!(
+            tag("v1.2.3", head),
+            Ok(RepositoryAction::CreateTag {
+                tag: "v1.2.3".into(),
+                commit: head.into(),
+            })
+        );
+        for (name, commit) in [
+            ("v1", "main"),
+            ("v1", "0123456"),
+            ("", head),
+            ("-f", head),
+            ("a/../b", head),
+            ("v 1", head),
+            ("v1.lock", head),
+        ] {
+            assert!(tag(name, commit).is_err(), "{name} {commit}");
+        }
+        assert!(
+            repository_action(
+                CREATE_TAG,
+                &json!({"repository":"app","tag":"v1","commit":head,"release":true})
+            )
+            .is_err(),
+            "no other field, such as a release flag"
+        );
+    }
 
     #[test]
     fn review_actions_need_full_heads_a_thread_id_and_something_to_ask() {

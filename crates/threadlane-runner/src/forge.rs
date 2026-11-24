@@ -296,6 +296,62 @@ impl GitForge {
         })
     }
 
+    /// Creates tag `tag` at `commit` in `repo` (`host/owner/name`) with the Git
+    /// refs API, which never publishes a release. A tag already at `commit`
+    /// counts as done, so a retry finishes; one anywhere else is refused.
+    async fn create_tag(&self, repo: &str, tag: &str, commit: &str) -> Result<String, ForgeError> {
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let hostname = format!("--hostname={host}");
+        let here = Path::new(".");
+        let live = self
+            .gh(
+                here,
+                args(&[
+                    "api",
+                    &hostname,
+                    "--method=GET",
+                    &format!("repos/{name}/git/ref/tags/{tag}"),
+                ]),
+            )
+            .await;
+        match live {
+            Ok(output) => {
+                let live: Json = serde_json::from_str(&output)
+                    .map_err(|error| ForgeError(format!("invalid tag response: {error}")))?;
+                return match live["object"]["sha"].as_str() {
+                    Some(sha) if sha == commit => {
+                        Ok(format!("Tag {tag} already points at {commit}."))
+                    }
+                    sha => Err(ForgeError(format!(
+                        "Tag {tag} already exists at {}; nothing was changed.",
+                        sha.unwrap_or("another object")
+                    ))),
+                };
+            }
+            Err(error) if error.0.contains("(HTTP 404)") => {}
+            Err(error) => return Err(error),
+        }
+        self.gh(
+            here,
+            args(&[
+                "api",
+                &hostname,
+                "--method=POST",
+                &format!("repos/{name}/git/refs"),
+                "-f",
+                &format!("ref=refs/tags/{tag}"),
+                "-f",
+                &format!("sha={commit}"),
+            ]),
+        )
+        .await?;
+        Ok(format!(
+            "Created tag {tag} at {commit}. No release was published."
+        ))
+    }
+
     /// Re-requests `reviewers` on PR `number` and posts `comment`, only while
     /// its head is `expected_head`.
     async fn request_review(
@@ -1054,6 +1110,9 @@ impl Forge for GitForge {
                     .request_review(&repo, *number, expected_head, reviewers, comment.as_deref())
                     .await;
             }
+            RepositoryAction::CreateTag { tag, commit } => {
+                return self.create_tag(&repo, tag, commit).await;
+            }
             RepositoryAction::MergeBatch { pulls } => return self.merge_batch(&repo, pulls).await,
             RepositoryAction::MarkReadyBatch { numbers } => {
                 return self.mark_ready_batch(&repo, numbers).await;
@@ -1104,7 +1163,8 @@ impl Forge for GitForge {
             | RepositoryAction::ResolveReviewThread { .. }
             | RepositoryAction::RequestReview { .. }
             | RepositoryAction::MergeBatch { .. }
-            | RepositoryAction::MarkReadyBatch { .. } => unreachable!("handled above"),
+            | RepositoryAction::MarkReadyBatch { .. }
+            | RepositoryAction::CreateTag { .. } => unreachable!("handled above"),
             RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
             RepositoryAction::AssignIssue { number } => {
                 args(&["issue", "edit", &number.to_string(), "--add-assignee=@me"])
