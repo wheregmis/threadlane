@@ -2022,3 +2022,84 @@ async fn sessions_give_the_reason_each_failed_or_abandoned_run_ended() {
     assert_eq!(runs[1]["agent"], name.as_str());
     complete(&hub, &lease, &dream).await;
 }
+
+/// #757: a pruned task's answer must not stay counted, or the last page loops.
+#[tokio::test]
+async fn pruned_choices_leave_the_count_so_paging_ends() {
+    let hub = TestHub::start().await;
+    hub.hello().await;
+    set(&hub, None).await;
+    let project = hub.general().await;
+    let agent = hub
+        .db
+        .create_agent(&threadlane_core::model::NewAgent::named(
+            "Engineer", "engineer",
+        ))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&threadlane_core::model::NewBinding {
+            project_id: project.id,
+            agent_id: agent.id,
+            mode: Some(threadlane_core::model::Mode::OnRequest),
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    hub.send("task", "Build the report page.").await;
+    let (lease, lead) = begin(&*hub.link).await;
+    call(
+        &*hub.link,
+        &lease,
+        &lead,
+        "create_task",
+        json!({"title":"page","goal":"page is done","agent":"Engineer"}),
+    )
+    .await
+    .unwrap();
+    complete(&hub, &lease, &lead).await;
+    let (lease, task_run) = begin(&*hub.link).await;
+    let task = task_run.task_id.expect("a task run asks");
+    ask_and_answer(&hub, &lease, &task_run, "From task").await;
+    for index in 0..2 {
+        hub.send(&format!("lead-{index}"), "Prepare a weekly report.")
+            .await;
+        let (lease, lead) = begin(&*hub.link).await;
+        ask_and_answer(&hub, &lease, &lead, &format!("Lead {index}")).await;
+    }
+    hub.db
+        .cancel_task(None, task, hub.clock.now())
+        .await
+        .unwrap();
+    // The lead hears of the cancel before the dream starts.
+    let (lease, lead) = begin(&*hub.link).await;
+    complete(&hub, &lease, &lead).await;
+    set(&hub, Some(interval())).await;
+    assert_eq!(dream_choices(&hub, 50, 1).await[0]["total"], 3);
+
+    let report = hub
+        .db
+        .prune_tasks_batch(
+            threadlane_store::TaskPruningPolicy {
+                compact_before: None,
+                prune_before: Some(hub.clock.now() + HOUR * 24),
+                max_terminal_per_project: None,
+                batch_size: 50,
+                ignore_dreaming_barrier: true,
+            },
+            hub.clock.now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.pruned_tasks, 1);
+
+    let pages = dream_choices(&hub, 1, 10).await;
+    let read: usize = pages
+        .iter()
+        .map(|page| page["recent_user_choices"].as_array().unwrap().len())
+        .sum();
+    assert_eq!(pages[0]["total"], 2);
+    assert_eq!(read, 2, "{pages:?}");
+    assert_eq!(pages.last().unwrap()["more_remain"], false);
+}

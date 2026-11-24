@@ -106,7 +106,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         name: PROJECT_DECISIONS.to_owned(),
         description: "Read this project's user answers to choice questions from every run type, \
                       unread choices first, then newest first. Includes the options, selected answer, \
-                      decision and run IDs, and any note. total counts every answer; more_remain says \
+                      decision and run IDs, and any note. total counts every answer that can still be read; more_remain says \
                       whether a later page exists, and next_offset gives it."
             .to_owned(),
         input_schema: json!({"type":"object","properties":{"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":200}},"additionalProperties":false}),
