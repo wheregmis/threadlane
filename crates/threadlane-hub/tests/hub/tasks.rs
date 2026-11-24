@@ -292,6 +292,13 @@ async fn independent_review_sends_changes_back_and_completes_the_same_task() {
         panic!("second review never started")
     };
     assert_eq!(final_review.review.as_ref().unwrap().submission, fix.run_id);
+    assert!(
+        final_review
+            .prompt
+            .split_once("review round 2")
+            .is_some_and(|(_, earlier)| earlier.contains("Include the totals")),
+        "a later round is told what the earlier one asked for"
+    );
     call(
         &hub,
         &lease,
