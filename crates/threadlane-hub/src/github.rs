@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use threadlane_core::client::{ApiError, PullRequestFiles, TaskCheckRun, TaskPullRequest};
 use threadlane_core::forge::{
-    BATCH_MAY_HAVE_CHANGED, CLOSE_PULL_REQUEST, COMMENT, EDIT_PULL_REQUEST, MARK_READY, MERGE,
-    REQUEST_REVIEW, RESOLVE_REVIEW_THREAD,
+    BATCH_MAY_BE_READY, BATCH_MAY_HAVE_CHANGED, CLOSE_PULL_REQUEST, COMMENT, EDIT_PULL_REQUEST,
+    MARK_READY, MERGE, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD,
 };
 use threadlane_core::github::{
     DEFAULT_POLL_INTERVAL, Feed, GITHUB_SOURCE, GithubItem, GithubKind, GithubSource,
@@ -166,7 +166,8 @@ fn needs_attention(item: &GithubItem) -> bool {
 /// stopped at, as the runner's error names it ("batch stopped at #N"). The
 /// stopped one counts too when the error flags it
 /// ([`BATCH_MAY_HAVE_CHANGED`]): it may have merged before its state read
-/// failed, and the task page's status read shows which. Empty for any other
+/// failed or timed out, and the task page's status read shows which; a
+/// timed-out mark ready flags it with [`BATCH_MAY_BE_READY`]. Empty for any other
 /// call.
 fn batch_handled(
     tool: &str,
@@ -209,11 +210,16 @@ fn batch_handled(
     match stopped.and_then(|stopped| listed.iter().position(|n| *n == stopped)) {
         Some(at) => {
             // Only at its place in the header, so provider detail later in the error can't fake it.
-            let changed = arguments["pulls"][at]["expected_head"]
-                .as_str()
-                .is_some_and(|head| {
-                    after.starts_with(&format!(" (expected head {head}{BATCH_MAY_HAVE_CHANGED})"))
-                });
+            let changed = match tool {
+                MERGE => arguments["pulls"][at]["expected_head"]
+                    .as_str()
+                    .is_some_and(|head| {
+                        after.starts_with(&format!(
+                            " (expected head {head}{BATCH_MAY_HAVE_CHANGED})"
+                        ))
+                    }),
+                _ => after.starts_with(&format!(" ({BATCH_MAY_BE_READY})")),
+            };
             listed.into_iter().take(at + usize::from(changed)).collect()
         }
         _ => Vec::new(),
@@ -816,34 +822,40 @@ impl HubCore {
         &self,
         task: TaskId,
     ) -> Result<Vec<TaskPullRequest>, HubError> {
-        let cached = self.inner.pull_status.lock().await.get(&task).cloned();
         let Some(source) = self.inner.github.as_ref() else {
-            return Ok(cached.unwrap_or_default());
+            let cache = self.inner.pull_status.lock().await;
+            return Ok(cache.get(&task).cloned().unwrap_or_default());
         };
-        let missing: Vec<_> = Routes::of_task(&self.inner.db, task)
-            .await?
-            .into_iter()
-            .filter(|work| {
-                cached.as_ref().is_none_or(|pulls| {
-                    work.target.number.is_some_and(|number| {
-                        !pulls.iter().any(|pull| {
-                            pull.repository == work.target.repository && pull.number == number
+        let routes = Routes::of_task(&self.inner.db, task).await?;
+        // Read the cache only after the routes, so a reply never carries a status a poll replaced meanwhile.
+        let (missing, cold) = {
+            let cache = self.inner.pull_status.lock().await;
+            let cached = cache.get(&task);
+            let missing: Vec<_> = routes
+                .into_iter()
+                .filter(|work| {
+                    cached.is_none_or(|pulls| {
+                        work.target.number.is_some_and(|number| {
+                            !pulls.iter().any(|pull| {
+                                pull.repository == work.target.repository && pull.number == number
+                            })
                         })
                     })
                 })
-            })
-            .map(|work| (work, false))
-            .collect();
-        if let Some(pulls) = cached.as_ref()
-            && missing.is_empty()
-        {
-            return Ok(pulls.clone());
-        }
+                .map(|work| (work, false))
+                .collect();
+            if let Some(pulls) = cached
+                && missing.is_empty()
+            {
+                return Ok(pulls.clone());
+            }
+            (missing, cached.is_none())
+        };
         // Reads that succeeded stay cached; the ones that failed are retried next time.
         if !self
             .refresh_pull_status(source.as_ref(), &missing, true)
             .await
-            && cached.is_none()
+            && cold
         {
             let partial = self.inner.pull_status.lock().await.get(&task).cloned();
             return Ok(partial.unwrap_or_default());

@@ -144,6 +144,10 @@ impl FakeGh {
                cat {record}/downstack\n\
              elif [ \"$1 $2\" = \"pr list\" ] && [ -f {record}/created ]; then\n\
                echo 'https://github.test/me/app/pull/7'\n\
+             elif [ \"$1 $3\" = \"pr 18\" ]; then\n\
+               touch {record}/wrote_18; sleep 5\n\
+             elif [ \"$3\" = \"--method=PUT\" ] && [ -f {record}/put_hangs ]; then\n\
+               touch {record}/wrote_put; sleep 5\n\
              elif [ \"$1 $2 $3\" = \"pr merge 13\" ]; then\n\
                echo 'Head branch was modified. Review and try the merge again. (HTTP 409)' >&2; exit 1\n\
              elif [ \"$1 $2 $3\" = \"pr ready 13\" ]; then\n\
@@ -1396,6 +1400,64 @@ async fn a_batch_says_an_accepted_async_merge_left_unresolved_may_have_merged() 
             "{case}: {error}"
         );
     }
+}
+
+/// A merge or mark-ready write that runs out of time may have taken effect
+/// on GitHub, so the batch says so; a single call reports the timeout as
+/// before (#746).
+#[tokio::test]
+async fn a_batch_says_a_write_that_timed_out_may_have_taken_effect() {
+    use threadlane_core::forge::{BATCH_MAY_BE_READY, BATCH_MAY_HAVE_CHANGED, RepositoryAction};
+    let remote = "https://github.test/acme/app.git";
+    let head = "a".repeat(40);
+    let gh = FakeGh::new();
+    let forge =
+        GitForge::with_gh(gh.program()).with_gh_timeout(std::time::Duration::from_millis(500));
+    let merge = |number: u64| RepositoryAction::MergeBatch {
+        pulls: vec![
+            (number.try_into().unwrap(), head.clone()),
+            (19.try_into().unwrap(), head.clone()),
+        ],
+    };
+    let stopped = |number: u64| {
+        format!("batch stopped at #{number} (expected head {head}{BATCH_MAY_HAVE_CHANGED})")
+    };
+
+    let error = forge.apply(remote, &merge(18)).await.unwrap_err();
+    assert!(
+        gh.dir.path().join("wrote_18").exists(),
+        "the merge was sent"
+    );
+    assert!(error.0.starts_with(&stopped(18)), "{error}");
+
+    std::fs::write(gh.dir.path().join("put_hangs"), "").unwrap();
+    let error = forge.apply(remote, &merge(17)).await.unwrap_err();
+    assert!(gh.dir.path().join("wrote_put").exists(), "the PUT was sent");
+    assert!(error.0.starts_with(&stopped(17)), "{error}");
+
+    let ready = RepositoryAction::MarkReadyBatch {
+        numbers: vec![18.try_into().unwrap(), 19.try_into().unwrap()],
+    };
+    let error = forge.apply(remote, &ready).await.unwrap_err();
+    assert!(
+        error.0.starts_with(&format!(
+            "batch stopped at #18 ({BATCH_MAY_BE_READY}), none"
+        )),
+        "{error}"
+    );
+
+    let single = RepositoryAction::Merge {
+        number: 18.try_into().unwrap(),
+        expected_head: head.clone(),
+    };
+    let error = forge.apply(remote, &single).await.unwrap_err();
+    assert!(error.0.contains("timed out after 500ms"), "{error}");
+    assert!(
+        !gh.invocations()
+            .iter()
+            .any(|call| call.contains(&"19".to_owned())),
+        "#19 is never attempted"
+    );
 }
 
 #[tokio::test]

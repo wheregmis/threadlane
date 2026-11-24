@@ -386,9 +386,23 @@ async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
         ) }),
     )
     .await;
+    // A mark ready that timed out may have taken effect.
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [1001, 1002] }),
+        json!({ "performed": false, "error": format!(
+            "forge: batch stopped at #1001 ({}), none marked ready, the rest not attempted: \
+             gh pr ready 1001 timed out after 120s",
+            threadlane_core::forge::BATCH_MAY_BE_READY,
+        ) }),
+    )
+    .await;
     hub.db.release_lease(&lease).await.unwrap();
     let at = "2026-11-17T08:00:00Z";
-    for number in [601, 602, 701, 702, 703, 801, 802, 803, 901, 902] {
+    for number in [601, 602, 701, 702, 703, 801, 802, 803, 901, 902, 1001, 1002] {
         github.add_to(
             "acme/widgets",
             &format!("feature-{number}"),
@@ -416,6 +430,7 @@ async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
     assert_eq!(
         routed,
         [
+            "check_run:1001",
             "check_run:601",
             "check_run:602",
             "check_run:701",
@@ -425,7 +440,7 @@ async fn pull_requests_a_batch_handled_reach_the_tasks_lane() {
         ],
         "{events:?}"
     );
-    for number in [601, 602, 701, 801, 802, 901] {
+    for number in [601, 602, 701, 801, 802, 901, 1001] {
         assert!(github.calls().contains(&GithubCall::PullRequest {
             target: PullTarget {
                 repository: "acme/widgets".into(),
@@ -642,6 +657,77 @@ async fn a_page_read_keeps_a_status_a_poll_cached_while_it_was_reading() {
     let pulls = pull_requests(&hub, &task).await;
     assert_eq!(pulls.len(), 1);
     assert_eq!(pulls[0].status, PullRequestStatus::Merged);
+}
+
+/// A page read that starts from a cached task replies with the status a
+/// poll cached while it was reading, not the one it started from (#746).
+#[tokio::test]
+async fn a_cached_page_read_replies_with_a_status_a_poll_cached_meanwhile() {
+    let github = Arc::new(PausedGithub {
+        pause_state: true,
+        ..PausedGithub::default()
+    });
+    let (hub, _) = start(&github.source, Arc::new(NoHooks)).await;
+    let (task, lease) = leased_task(&hub).await;
+    let head = "a".repeat(40);
+    github
+        .source
+        .set_pull_request("acme/widgets", 901, Ok(conflicted_draft(&head)));
+    github
+        .source
+        .set_pull_request("acme/widgets", 902, Ok(conflicted_draft(&head)));
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [901] }),
+        json!({ "performed": true, "summary": "marked #901 ready" }),
+    )
+    .await;
+    assert_eq!(
+        pull_requests(&hub, &task).await[0].status,
+        PullRequestStatus::Draft
+    );
+    // A new link makes the page read #902 from GitHub, where it pauses.
+    record_performed(
+        &hub,
+        &task,
+        &lease,
+        threadlane_hub::MARK_READY,
+        json!({ "repository": "widgets", "numbers": [902] }),
+        json!({ "performed": true, "summary": "marked #902 ready" }),
+    )
+    .await;
+    let page = hub.core.clone().with_github(github.clone()).api();
+    let id = task.id;
+    let reading = tokio::spawn(async move {
+        page.overview(OverviewRequest::TaskPullRequests { task: id })
+            .await
+    });
+    github.entered.notified().await;
+    github.source.set_pull_request(
+        "acme/widgets",
+        901,
+        Ok(PullRequestState {
+            state: "closed".into(),
+            merged: true,
+            ..conflicted_draft(&head)
+        }),
+    );
+    hub.core.poll_github_once().await.unwrap();
+    github.released.notify_one();
+    let OverviewReply::TaskPullRequests { pulls } = reading.await.unwrap().unwrap() else {
+        panic!("not a pull request list");
+    };
+    let status = |number: u64| {
+        pulls
+            .iter()
+            .find(|pull| pull.number == number)
+            .map(|pull| pull.status)
+    };
+    assert_eq!(status(901), Some(PullRequestStatus::Merged), "{pulls:?}");
+    assert_eq!(status(902), Some(PullRequestStatus::Draft), "{pulls:?}");
 }
 
 fn item(
