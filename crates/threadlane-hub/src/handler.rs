@@ -339,6 +339,8 @@ impl HubApi for ClientApi {
                 .iter()
                 .map(|(backend, model)| (*backend, model.clone()))
                 .collect(),
+            build: Some(crate::context::build()),
+            pid: Some(std::process::id()),
         })
     }
 

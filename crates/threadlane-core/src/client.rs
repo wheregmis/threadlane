@@ -41,6 +41,26 @@ pub struct HubInfo {
     /// missing here runs its own default model.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub default_models: BTreeMap<BackendKind, String>,
+    /// The build the hub runs. `None` from a hub older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<HubBuild>,
+    /// The hub's process id, so the app that started it can restart it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+}
+
+/// A release version and the commit it was built from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubBuild {
+    pub version: String,
+    pub commit: String,
+}
+
+impl fmt::Display for HubBuild {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let commit = self.commit.get(..8).unwrap_or(&self.commit);
+        write!(f, "{} ({commit})", self.version)
+    }
 }
 
 /// An update request can select a release version, never a download location.

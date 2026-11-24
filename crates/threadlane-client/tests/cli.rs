@@ -122,6 +122,8 @@ impl HubApi for FakeHub {
             schema_version: 1,
             update_version: None,
             default_models: Default::default(),
+            build: None,
+            pid: None,
         })
     }
 

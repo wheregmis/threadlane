@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+# The hub's script: the app compares its own commit with the hub's.
+build = "../threadlane-hub/build.rs"
 
 [[bin]]
 name = "threadlane-desktop"

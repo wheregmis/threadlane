@@ -92,6 +92,11 @@ impl Desktop {
                         row.schema_version
                             .map_or_else(unknown, |version| version.to_string()),
                     ))
+                    .child(line(
+                        "Hub build",
+                        row.build
+                            .unwrap_or_else(|| "older than build reports".to_owned()),
+                    ))
                     .child(line("Hosted on", row.host.unwrap_or_else(unknown)))
                     .child(line(
                         "Reached by",
@@ -210,7 +215,7 @@ impl Desktop {
                             })),
                     )
                     .child(line("Client directory", dir))
-                    .child(line("Version", env!("CARGO_PKG_VERSION").to_owned()))
+                    .child(line("Build", crate::local_hub::app_build().to_string()))
                     .child(self.update_controls(None, None, cx)),
             )
             .into_any_element()

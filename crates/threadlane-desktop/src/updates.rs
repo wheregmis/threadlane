@@ -28,9 +28,6 @@ impl Desktop {
     ) -> Div {
         let scope = space.map(str::to_owned);
         let mut controls = v_flex().gap(XS);
-        if let Some(version) = hub_version {
-            controls = controls.child(meta(format!("Hub version {version}"), cx));
-        }
         if space.map_or(!self.desktop_updatable, |_| hub_version.is_none()) {
             return controls.child(meta(
                 "In-app updates require an official release package.",
