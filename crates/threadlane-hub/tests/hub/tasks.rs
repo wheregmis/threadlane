@@ -2866,3 +2866,122 @@ async fn a_queued_task_that_never_ran_can_go_to_another_working_agent() {
     );
     assert_eq!(task(&hub, "T-0001").await.agent_id, writer.id);
 }
+
+#[tokio::test]
+async fn a_queued_task_held_by_a_usage_limit_can_go_to_another_agent() {
+    // #776: a task whose only run stopped at its account's usage limit has
+    // not started, so the lead, or you, may give it to another agent.
+    let (hub, lead_lease, lead) = lead_run(2).await;
+    call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_1",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    let writer = hub
+        .db
+        .create_agent(&NewAgent::named("Writer", "writer"))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: hub.general().await.id,
+            agent_id: writer.id,
+            mode: Some(Mode::OnRequest),
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.agent_name, ENGINEER);
+    let blocked_session = run.session_id;
+    hub.link
+        .fail(&lease, run.run_id, &RunFailure::UsageLimit)
+        .await
+        .unwrap();
+    hub.link.release(&lease).await.unwrap();
+    let queued = task(&hub, "T-0001").await;
+    assert_eq!(queued.status, TaskStatus::Queued);
+
+    // Without an agent there is nothing to retry: the task did not fail.
+    let unnamed = call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_2",
+        RETRY_TASK,
+        json!({ "task_id": "T-0001" }),
+    )
+    .await;
+    assert!(
+        matches!(&unnamed, Err(ToolError::InvalidArguments(why)) if why.contains("name another agent")),
+        "{unnamed:?}"
+    );
+    let moved = call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_3",
+        RETRY_TASK,
+        json!({ "task_id": "T-0001", "agent": "Writer" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(moved["status"], "queued", "{moved}");
+    assert_eq!(task(&hub, "T-0001").await.agent_id, writer.id);
+    // You can move it too, from the app.
+    let TaskReply::Task { task: back } = hub
+        .api
+        .tasks(TaskRequest::Reassign {
+            task: queued.id,
+            agent: ENGINEER.to_owned(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("a task");
+    };
+    assert_eq!(back.agent_id, queued.agent_id);
+    call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_4",
+        RETRY_TASK,
+        json!({ "task_id": "T-0001", "agent": "Writer" }),
+    )
+    .await
+    .unwrap();
+
+    // The new agent starts a session of its own; once it has worked on the
+    // task, the task stays with it.
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.task_id, Some(queued.id));
+    assert_eq!(run.agent_name, "Writer");
+    assert_ne!(run.session_id, blocked_session);
+    let failure = RunFailure::Error {
+        message: "the build broke".into(),
+    };
+    hub.link.fail(&lease, run.run_id, &failure).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+    let started = call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_5",
+        RETRY_TASK,
+        json!({ "task_id": "T-0001", "agent": ENGINEER }),
+    )
+    .await;
+    assert!(
+        matches!(&started, Err(why) if why.to_string().contains("already started")),
+        "{started:?}"
+    );
+    assert_eq!(task(&hub, "T-0001").await.agent_id, writer.id);
+}

@@ -11,8 +11,8 @@ use threadlane_core::ids::{
 };
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
-    BackendKind, EventKind, Inserted, LaneKind, Lease, NewEvent, NewTask, Run, Task, TaskStatus,
-    Trust,
+    BackendKind, EventKind, Inserted, LaneKind, Lease, NewEvent, NewTask, Run, RunStatus,
+    SessionStatus, Task, TaskStatus, Trust,
 };
 use threadlane_core::store::{StoreError, StoreResult, TaskStore, TaskUpdate};
 use threadlane_core::time::Timestamp;
@@ -32,6 +32,11 @@ pub(crate) const TASK_WAKE_SOURCE: &str = "task-wake";
 /// The `waiting_reason` of a task that may not start for lack of a model
 /// account (Plan.md §5.3 "blocked, not failed").
 pub const BLOCKED_REASON: &str = "blocked: every model account it can use is at its usage limit";
+
+/// The `error` the hub records on a run that ended because its account
+/// reached its usage limit (Plan.md §5.3). Such a run did no work, so a task
+/// whose only runs ended so has not started and may still be reassigned (#776).
+pub const USAGE_LIMIT_ERROR: &str = "the account reached its usage limit";
 
 /// The `waiting_reason` of a task with repositories offered to a machine
 /// that is not logged in to `gh` (Plan.md §5.4 item 5).
@@ -493,6 +498,60 @@ struct LeadRetry<'a> {
 /// else the lead's, which only a configuration failure allows, on the agent
 /// it names or the same one. The lead's retry of a task in review whose
 /// Reviewer failed on its configuration queues that review round again.
+/// Gives a queued task that has not started to `agent`. A task has started
+/// once a run on its lane did anything but stop at a usage limit: that
+/// session stays with its agent. Runs that only hit a usage limit did no
+/// work, so their sessions close and the new agent starts fresh (#776).
+async fn reassign_in(conn: &Connection, id: TaskId, agent: AgentId) -> StoreResult<Task> {
+    let task = existing_task(conn, id).await?;
+    if task.status != TaskStatus::Queued {
+        return Err(StoreError::Conflict(format!(
+            "task {id} is {}; only a queued task can be reassigned",
+            task.status
+        )));
+    }
+    let started = query_opt(
+        conn,
+        "SELECT 1 FROM sessions s WHERE s.lane_id = ?1 AND (
+             NOT EXISTS (SELECT 1 FROM runs r WHERE r.session_id = s.id)
+             OR EXISTS (SELECT 1 FROM runs r WHERE r.session_id = s.id
+                 AND NOT (r.status = ?2 AND r.error IS ?3)))
+         LIMIT 1",
+        params![
+            task.lane_id.get(),
+            RunStatus::Failed.as_str(),
+            USAGE_LIMIT_ERROR
+        ],
+        |row| Cols(row).i64(0),
+    )
+    .await?;
+    if started.is_some() {
+        return Err(StoreError::Conflict(format!(
+            "task {id} has already started; its session stays with its agent"
+        )));
+    }
+    if task.agent_id == agent {
+        return Ok(task);
+    }
+    exec(
+        conn,
+        "UPDATE sessions SET status = ?1 WHERE lane_id = ?2 AND status = ?3",
+        params![
+            SessionStatus::Closed.as_str(),
+            task.lane_id.get(),
+            SessionStatus::Open.as_str()
+        ],
+    )
+    .await?;
+    exec(
+        conn,
+        "UPDATE tasks SET agent_id = ?1 WHERE id = ?2",
+        params![agent.get(), id.get()],
+    )
+    .await?;
+    existing_task(conn, id).await
+}
+
 async fn retry_in(
     conn: &Connection,
     id: TaskId,
@@ -1241,6 +1300,23 @@ impl HubDb {
         Ok(retried)
     }
 
+    /// The lead gives a queued task that has not started, such as one held
+    /// by its agent's usage limit, to another agent of its project (#776).
+    pub async fn lead_reassign_task(
+        &self,
+        lease: &Lease,
+        id: TaskId,
+        agent: AgentId,
+    ) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let task = existing_task(conn, id).await?;
+        check_run_lease(conn, Some(lease), task.project_id).await?;
+        let reassigned = reassign_in(conn, id, agent).await?;
+        tx.commit().await?;
+        Ok(reassigned)
+    }
+
     /// Tasks in `project` whose backend refused their agent's setup and that
     /// nobody has retried yet: failed ones, and ones in review whose
     /// Reviewer's was refused, listed with that failure as their result;
@@ -1620,33 +1696,7 @@ impl TaskStore for HubDb {
 
     async fn reassign_task(&self, id: TaskId, agent: AgentId) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        let task = existing_task(conn, id).await?;
-        if task.status != TaskStatus::Queued {
-            return Err(StoreError::Conflict(format!(
-                "task {id} is {}; only a queued task can be reassigned",
-                task.status
-            )));
-        }
-        let started = query_opt(
-            conn,
-            "SELECT 1 FROM sessions WHERE lane_id = ?1 LIMIT 1",
-            params![task.lane_id.get()],
-            |row| Cols(row).i64(0),
-        )
-        .await?;
-        if started.is_some() {
-            return Err(StoreError::Conflict(format!(
-                "task {id} has already started; its session stays with its agent"
-            )));
-        }
-        exec(
-            conn,
-            "UPDATE tasks SET agent_id = ?1 WHERE id = ?2",
-            params![agent.get(), id.get()],
-        )
-        .await?;
-        let reassigned = existing_task(conn, id).await?;
+        let reassigned = reassign_in(tx.conn(), id, agent).await?;
         tx.commit().await?;
         Ok(reassigned)
     }
