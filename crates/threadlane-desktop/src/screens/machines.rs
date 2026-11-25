@@ -45,8 +45,6 @@ impl Desktop {
             .w_full()
             .max_w(READING_WIDTH)
             .mx_auto()
-            .pr(SCROLLBAR_GUTTER)
-            .pb_4()
             .gap(SM)
             .child(
                 button("back-to-machines")
@@ -69,10 +67,16 @@ impl Desktop {
                 .w_full()
                 .id("machine-detail")
                 .overflow_y_scrollbar()
-                .child(page.child(match gap {
-                    Some(gap) => gap_line(&gap, "the machine", space, cx),
-                    None => empty(EmptyRegion::Machines, cx),
-                }))
+                .child(
+                    div()
+                        .w_full()
+                        .pr(SCROLLBAR_GUTTER)
+                        .pb_4()
+                        .child(page.child(match gap {
+                            Some(gap) => gap_line(&gap, "the machine", space, cx),
+                            None => empty(EmptyRegion::Machines, cx),
+                        })),
+                )
                 .into_any_element();
         };
         let report = detail.report;
@@ -206,7 +210,7 @@ impl Desktop {
             .w_full()
             .id("machine-detail")
             .overflow_y_scrollbar()
-            .child(page)
+            .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(page))
             .into_any_element()
     }
 
@@ -284,8 +288,6 @@ impl Desktop {
             .w_full()
             .max_w(READING_WIDTH)
             .gap_6()
-            .pr_2()
-            .pb_2()
             .child(page_header("Machines", summary, None));
         if self.state.spaces().is_empty() {
             screen = screen.child(empty(EmptyRegion::Pairing, cx));
@@ -561,9 +563,16 @@ impl Desktop {
         v_flex()
             .flex_1()
             .min_h_0()
+            .w_full()
             .id("machines")
             .overflow_y_scrollbar()
-            .child(screen.mx_auto())
+            .child(
+                div()
+                    .w_full()
+                    .pr(SCROLLBAR_GUTTER)
+                    .pb_4()
+                    .child(screen.mx_auto()),
+            )
             .into_any_element()
     }
 
@@ -573,8 +582,6 @@ impl Desktop {
             .w_full()
             .max_w(READING_WIDTH)
             .mx_auto()
-            .pr(SCROLLBAR_GUTTER)
-            .pb_4()
             .gap(SM)
             .child(heading("Add space"))
             .child(card(cx).child(self.join_form(cx)));
@@ -584,7 +591,7 @@ impl Desktop {
             .w_full()
             .id("add-space")
             .overflow_y_scrollbar()
-            .child(content)
+            .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(content))
             .into_any_element()
     }
 
@@ -703,8 +710,6 @@ impl Desktop {
             .w_full()
             .max_w(READING_WIDTH)
             .mx_auto()
-            .pr(SCROLLBAR_GUTTER)
-            .pb_4()
             .gap(XL)
             .child(heading("Pair this app with a hub"))
             .child(div().text_color(muted).child(
@@ -729,7 +734,7 @@ impl Desktop {
             .w_full()
             .id("first-run")
             .overflow_y_scrollbar()
-            .child(content)
+            .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(content))
             .into_any_element()
     }
 }

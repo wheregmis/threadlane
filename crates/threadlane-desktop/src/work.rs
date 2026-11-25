@@ -335,22 +335,14 @@ impl Desktop {
                     choice
                 }
             }));
-        let sidebar = if self.sidebar_collapsed {
-            Pixels::ZERO
-        } else {
-            self.sidebar_width
-        };
-        let content_width = (window.viewport_size().width - sidebar - LG * 2. - SM)
-            .min(READING_WIDTH.to_pixels(window.rem_size()));
-        // Leave room for the numeric columns and a readable agent column.
-        let compact = content_width < window.rem_size() * 40.;
+        let compact = usage_is_compact(
+            window.viewport_size().width,
+            window.rem_size(),
+            self.sidebar_collapsed,
+            self.sidebar_width,
+        );
         let border = cx.theme().border;
-        let mut body = v_flex()
-            .w_full()
-            .max_w(READING_WIDTH)
-            .mx_auto()
-            .pr_2()
-            .pb_2();
+        let mut body = v_flex().w_full().max_w(READING_WIDTH).mx_auto();
         match &self.work.data {
             Some(Ok(OverviewReply::SpaceUsage { groups })) => {
                 let runs = groups.iter().map(|g| u128::from(g.runs)).sum();
@@ -432,33 +424,36 @@ impl Desktop {
                     .child(meta(error.clone(), cx))
                     .child(meta("Refresh to try again, or choose another period.", cx));
             }
-            _ => body = body.child("The hub returned an unexpected response."),
+            _ => body = body.child(meta("The hub returned an unexpected response.", cx)),
         }
         v_flex()
             .flex_1()
             .min_h_0()
+            .w_full()
             .gap_4()
             .child(
-                v_flex()
-                    .w_full()
-                    .max_w(READING_WIDTH)
-                    .mx_auto()
-                    .pr_2()
-                    .gap_2()
-                    .child(page_header(
-                        "Space usage",
-                        Some(meta(space.to_owned(), cx)),
-                        Some(h_flex().child(refresh.tab_stop(true))),
-                    ))
-                    .child(range),
+                div().flex_none().w_full().pr(SCROLLBAR_GUTTER).child(
+                    v_flex()
+                        .w_full()
+                        .max_w(READING_WIDTH)
+                        .mx_auto()
+                        .gap_2()
+                        .child(page_header(
+                            "Space usage",
+                            Some(meta(space.to_owned(), cx)),
+                            Some(h_flex().child(refresh.tab_stop(true))),
+                        ))
+                        .child(range),
+                ),
             )
             .child(
                 v_flex()
                     .id("work-content")
                     .flex_1()
                     .min_h_0()
+                    .w_full()
                     .overflow_y_scrollbar()
-                    .child(body),
+                    .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(body)),
             )
             .into_any_element()
     }
@@ -884,42 +879,81 @@ impl Desktop {
                         cx,
                     ));
             }
-            _ => body = body.child("The hub returned an unexpected response."),
+            _ => body = body.child(meta("The hub returned an unexpected response.", cx)),
         }
         v_flex()
             .flex_1()
             .min_h_0()
+            .w_full()
             .gap(LG)
-            .child(page_header(
-                page.title(),
-                Some(meta(header, cx)),
-                Some(h_flex().child(refresh)),
-            ))
+            .child(
+                div()
+                    .flex_none()
+                    .w_full()
+                    .pr(SCROLLBAR_GUTTER)
+                    .child(page_header(
+                        page.title(),
+                        Some(meta(header, cx)),
+                        Some(h_flex().child(refresh)),
+                    )),
+            )
             .child(
                 v_flex()
                     .id("work-content")
                     .min_h_0()
                     .flex_1()
+                    .w_full()
                     .overflow_y_scrollbar()
                     .child(
-                        body.w_full()
-                            .max_w(READING_WIDTH)
+                        div()
+                            .w_full()
                             .pr(SCROLLBAR_GUTTER)
-                            .pb_4(),
+                            .pb_4()
+                            .child(body.w_full().max_w(READING_WIDTH)),
                     ),
             )
             .into_any_element()
     }
 }
 
+/// Switches the usage breakdown to compact stacked rows when the content area
+/// cannot hold the agent name and numeric columns comfortably at the current
+/// zoom and sidebar width.
+fn usage_is_compact(
+    viewport_width: Pixels,
+    rem: Pixels,
+    sidebar_collapsed: bool,
+    sidebar_width: Pixels,
+) -> bool {
+    let sidebar = if sidebar_collapsed {
+        Pixels::ZERO
+    } else {
+        sidebar_width
+    };
+    let content_width =
+        (viewport_width - sidebar - LG * 2. - SCROLLBAR_GUTTER).min(READING_WIDTH.to_pixels(rem));
+    content_width < rem * 40.
+}
+
 #[cfg(test)]
 mod usage_tests {
-    use super::reported_cost;
+    use gpui_kit::px;
+
+    use super::{reported_cost, usage_is_compact};
 
     #[test]
     fn missing_cost_differs_from_reported_zero() {
         assert_eq!(reported_cost(0.0, 0), "—");
         assert_eq!(reported_cost(0.0, 2), "USD 0.0000");
         assert_eq!(reported_cost(1.2345, 1), "USD 1.2345");
+    }
+
+    #[test]
+    fn usage_compact_breakpoint_tracks_sidebar_width_and_zoom() {
+        assert!(!usage_is_compact(px(1180.), px(16.), false, px(220.)));
+        assert!(usage_is_compact(px(880.), px(16.), false, px(220.)));
+        assert!(!usage_is_compact(px(880.), px(16.), true, px(220.)));
+        assert!(usage_is_compact(px(1040.), px(16.), false, px(400.)));
+        assert!(usage_is_compact(px(1180.), px(24.), false, px(220.)));
     }
 }

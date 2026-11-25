@@ -837,8 +837,8 @@ impl Desktop {
                         button("topo-dial-project")
                             .small()
                             .outline()
-                            .icon(AppIcon::ChevronDown)
                             .label(label)
+                            .dropdown_caret(true)
                             .dropdown_menu(move |mut menu, _, _| {
                                 for p in &projects {
                                     let (s, p, v) = (space_p.clone(), p.clone(), view.clone());
@@ -947,7 +947,7 @@ impl Desktop {
                     .w_full()
                     .flex_1()
                     // Floor keeps each canvas usable when several spaces stack.
-                    .min_h(px(280.0))
+                    .min_h(rems(17.5))
                     .rounded(ROW_RADIUS)
                     .border_1()
                     .border_color(cx.theme().border)

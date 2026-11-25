@@ -18,8 +18,6 @@ impl Desktop {
             .w_full()
             .max_w(COMPACT_FORM_WIDTH)
             .mx_auto()
-            .pr(SCROLLBAR_GUTTER)
-            .pb_4()
             .gap(MD)
             .child(heading(format!("New project in {space}")))
             .child(meta(
@@ -68,7 +66,7 @@ impl Desktop {
             .w_full()
             .id("new-project")
             .overflow_y_scrollbar()
-            .child(form)
+            .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(form))
             .into_any_element()
     }
 }

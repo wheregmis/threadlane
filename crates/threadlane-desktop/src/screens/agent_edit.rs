@@ -20,7 +20,9 @@ use threadlane_desktop::{Activity, AgentEdit, AgentFields, BACKENDS, Tab, descri
 use super::project::mode_name;
 use crate::components::{button, card, field, meta, page_header, section};
 use crate::icons::AppIcon;
-use crate::tokens::{FIELD_RADIUS, FORM_WIDTH, LG, MD, ROW_RADIUS, SM, Status, TYPE_BODY, XS};
+use crate::tokens::{
+    FIELD_RADIUS, FORM_WIDTH, LG, MD, ROW_RADIUS, SCROLLBAR_GUTTER, SM, Status, TYPE_BODY, XS,
+};
 use crate::{Desktop, Screen};
 
 /// Backend order and per-backend models, shared by the create and edit forms.
@@ -785,6 +787,9 @@ impl Desktop {
                     .id("agent-editor")
                     .child(
                         h_flex()
+                            .w_full()
+                            .pr(SCROLLBAR_GUTTER)
+                            .pb_4()
                             .gap(MD)
                             .items_start()
                             .flex_wrap()

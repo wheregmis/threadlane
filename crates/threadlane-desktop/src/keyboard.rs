@@ -381,29 +381,31 @@ impl Desktop {
         let show_jump =
             self.state
                 .conversation_has_newer(space, project, self.conversation_at_bottom);
-        crate::components::decision_scroller("conversation", lines, &self.decision_scroll).when(
-            show_jump,
-            |viewport| {
-                viewport.child(
-                    div()
-                        .absolute()
-                        .bottom(MD)
-                        .w_full()
-                        .pr(SCROLLBAR_GUTTER)
-                        .flex()
-                        .justify_center()
-                        .child(
-                            crate::components::button("jump-latest")
-                                .small()
-                                .rounded_full()
-                                .tab_stop(true)
-                                .icon(crate::icons::AppIcon::ArrowDown)
-                                .label("Jump to latest")
-                                .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx))),
-                        ),
-                )
-            },
+        crate::components::decision_scroller(
+            "conversation",
+            div().w_full().child(lines),
+            &self.decision_scroll,
         )
+        .when(show_jump, |viewport| {
+            viewport.child(
+                div()
+                    .absolute()
+                    .bottom(MD)
+                    .w_full()
+                    .pr(SCROLLBAR_GUTTER)
+                    .flex()
+                    .justify_center()
+                    .child(
+                        crate::components::button("jump-latest")
+                            .small()
+                            .rounded_full()
+                            .tab_stop(true)
+                            .icon(crate::icons::AppIcon::ArrowDown)
+                            .label("Jump to latest")
+                            .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx))),
+                    ),
+            )
+        })
     }
 
     pub(super) fn show_shortcuts(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -434,6 +436,7 @@ impl Desktop {
             }
             dialog.title("Keyboard shortcuts").width(FORM_WIDTH).child(
                 list.max_h(window.viewport_size().height * SHORTCUTS_HEIGHT_FRACTION)
+                    .pr(SCROLLBAR_GUTTER)
                     .overflow_y_scrollbar()
                     .id("shortcut-list"),
             )

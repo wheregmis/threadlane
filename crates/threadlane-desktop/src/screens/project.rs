@@ -511,7 +511,10 @@ impl Desktop {
                 }
             }
         }
-        list.overflow_y_scrollbar().into_any_element()
+        list.pr(SCROLLBAR_GUTTER)
+            .pb_4()
+            .overflow_y_scrollbar()
+            .into_any_element()
     }
 
     pub(crate) fn project(
@@ -850,6 +853,7 @@ impl Desktop {
                         .small()
                         .primary()
                         .label("Answer")
+                        .dropdown_caret(true)
                         .dropdown_menu(move |mut menu, _, _| {
                             for option in &options {
                                 let (space, id, option, view) =
@@ -1134,6 +1138,8 @@ impl Desktop {
                     .flex_1()
                     .min_h_0()
                     .gap(XS)
+                    .pr(SCROLLBAR_GUTTER)
+                    .pb_4()
                     .overflow_y_scrollbar()
                     .id("project-tasks-list");
                 for summary in ordered {
@@ -1379,8 +1385,6 @@ impl Desktop {
             .w_full()
             .max_w(READING_WIDTH)
             .mx_auto()
-            .pr(SCROLLBAR_GUTTER)
-            .pb_4()
             .gap(XL)
             .child(side)
             .child(machines);
@@ -1390,7 +1394,7 @@ impl Desktop {
             .w_full()
             .overflow_y_scrollbar()
             .id("setup")
-            .child(content)
+            .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(content))
             .into_any_element()
     }
 
@@ -2217,6 +2221,8 @@ impl Desktop {
             .w(MEMORY_LIST_WIDTH)
             .flex_none()
             .h_full()
+            .pr(SCROLLBAR_GUTTER)
+            .pb_4()
             .overflow_y_scrollbar()
             .id("memory-list")
             .gap(SM);
@@ -2259,6 +2265,8 @@ impl Desktop {
             .flex_1()
             .min_w_0()
             .h_full()
+            .pr(SCROLLBAR_GUTTER)
+            .pb_4()
             .overflow_y_scrollbar()
             .id("memory-file")
             .gap(SM);
@@ -2560,8 +2568,6 @@ impl Desktop {
             .w_full()
             .max_w(READING_WIDTH)
             .mx_auto()
-            .pr(SCROLLBAR_GUTTER)
-            .pb_4()
             .gap(MD)
             .child(
                 h_flex()
@@ -2778,7 +2784,7 @@ impl Desktop {
             .w_full()
             .overflow_y_scrollbar()
             .id("project-team")
-            .child(rows)
+            .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(rows))
             .into_any_element()
     }
 

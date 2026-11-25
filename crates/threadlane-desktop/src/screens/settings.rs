@@ -48,8 +48,6 @@ impl Desktop {
             .w_full()
             .max_w(READING_WIDTH)
             .mx_auto()
-            .pr(SCROLLBAR_GUTTER)
-            .pb_4()
             .gap(XL)
             .child(heading(if scope.is_some() {
                 "Space settings"
@@ -117,7 +115,7 @@ impl Desktop {
                 .w_full()
                 .id("settings")
                 .overflow_y_scrollbar()
-                .child(screen)
+                .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(screen))
                 .into_any_element();
         }
         let notifications = self.state.notifications();
@@ -225,7 +223,7 @@ impl Desktop {
             .w_full()
             .id("settings")
             .overflow_y_scrollbar()
-            .child(screen)
+            .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(screen))
             .into_any_element()
     }
 }
