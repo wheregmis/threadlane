@@ -620,9 +620,16 @@ impl HubTools {
                     task.id
                 ))
             })?;
+            let run = self.run(context).await?;
             let reassigned = self
                 .db
-                .lead_reassign_task(&context.lease, task.id, agent)
+                .lead_reassign_task(
+                    &context.lease,
+                    task.id,
+                    agent,
+                    &effect_key(context, &run, RETRY_TASK, arguments),
+                    self.clock.now(),
+                )
                 .await
                 .map_err(tool_error)?;
             self.waker.wake(WakeTarget::Lane(reassigned.lane_id));
