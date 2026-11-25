@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.1.60](https://github.com/wheregmis/threadlane/compare/v0.1.59...v0.1.60) (2026-11-25)
+
+
+### Bug Fixes
+
+* use jiff 1.0's Timestamp::to_zoned_datetime ([08edabc](https://github.com/wheregmis/threadlane/commit/08edabc0caecb3faea3367999c15e2757c837ede))
+
+
+### Build System
+
+* **deps:** bump clap from 4.6.8 to 4.6.9 ([a50b3ef](https://github.com/wheregmis/threadlane/commit/a50b3ef1b9db438bd538e9e594a54b2024a3c0df))
+* **deps:** bump clap from 4.6.8 to 4.6.9 ([b490eb9](https://github.com/wheregmis/threadlane/commit/b490eb958327edeeedd06a4e045b848e1e863165))
+* **deps:** bump hotpath from 0.30.3 to 0.33.0 ([0b3b155](https://github.com/wheregmis/threadlane/commit/0b3b155d56ce2a832c12b89fda7f76756c7af754))
+* **deps:** bump hotpath from 0.30.3 to 0.33.0 ([bf1e566](https://github.com/wheregmis/threadlane/commit/bf1e56629551c761c357e1a6ba21aee750f42d20))
+* **deps:** bump iroh from 1.4.1 to 1.5.0 ([de24da5](https://github.com/wheregmis/threadlane/commit/de24da5e4a6bda3e57bdf531a7a4d78ea27ce6c6))
+* **deps:** bump iroh from 1.4.1 to 1.5.0 ([c088d4f](https://github.com/wheregmis/threadlane/commit/c088d4f79a513e08c7341102f7a0a83df3af092a))
+* **deps:** bump jdx/mr-boxington-action from 1.7.3 to 1.7.4 ([a42123b](https://github.com/wheregmis/threadlane/commit/a42123b6931bff142c84645130c8c9709f300789))
+* **deps:** bump jdx/mr-boxington-action from 1.7.3 to 1.7.4 ([f41a407](https://github.com/wheregmis/threadlane/commit/f41a40772aadc9663e6c4925a173649df7bbff62))
+* **deps:** bump jiff from 0.2.45 to 1.0.2 ([65ae9fa](https://github.com/wheregmis/threadlane/commit/65ae9fa929e32b855819d0d302821a9e7cd1b25b))
+* **deps:** bump jiff from 0.2.45 to 1.0.2 ([71b6341](https://github.com/wheregmis/threadlane/commit/71b6341efdbab9b1ef547b7f56924a9b1946eb82))
+* **deps:** bump minisign-verify from 0.2.5 to 0.3.0 ([9fd786c](https://github.com/wheregmis/threadlane/commit/9fd786ce8c84186c705bbd87bb192ceb13d103e5))
+* **deps:** bump minisign-verify from 0.2.5 to 0.3.0 ([9bfc9fb](https://github.com/wheregmis/threadlane/commit/9bfc9fb14d0ed8161b3cc24537b44a388fe1e19a))
+* **deps:** bump toml from 1.2.1+spec-1.1.0 to 1.2.2+spec-1.1.0 ([b98eec3](https://github.com/wheregmis/threadlane/commit/b98eec3f082d5c27125c313064b569bf13c99d19))
+* **deps:** bump toml from 1.2.1+spec-1.1.0 to 1.2.2+spec-1.1.0 ([793c855](https://github.com/wheregmis/threadlane/commit/793c855d04a78117804161a3895abb154d2969cb))
+* **deps:** bump turso from 0.8.3 to 0.8.4 ([6a96bb9](https://github.com/wheregmis/threadlane/commit/6a96bb961fecc78b3dde2b0df3a280d88ba42e89))
+* **deps:** bump turso from 0.8.3 to 0.8.4 ([6f424be](https://github.com/wheregmis/threadlane/commit/6f424be9939596a9efc8de2cbfa061c3a3f9cc51))
+
 ## [0.1.59](https://github.com/wheregmis/threadlane/compare/v0.1.58...v0.1.59) (2026-11-24)
 
 
