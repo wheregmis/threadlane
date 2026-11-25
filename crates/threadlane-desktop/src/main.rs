@@ -1193,11 +1193,14 @@ impl Desktop {
                                 .state
                                 .task(space, *task)
                                 .map(|detail| detail.summary.project.clone())
-                            && this.state.project_gap(
-                                space,
-                                &project,
-                                threadlane_desktop::Part::Repositories,
-                            ) == Some(threadlane_desktop::Gap::Loading)
+                            && this
+                                .state
+                                .project_gap(
+                                    space,
+                                    &project,
+                                    threadlane_desktop::Part::Repositories,
+                                )
+                                .is_some()
                         {
                             let space = space.clone();
                             let core = Arc::clone(&for_repos);

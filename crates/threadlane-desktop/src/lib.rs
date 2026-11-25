@@ -2673,7 +2673,16 @@ impl AppState {
             view.tasks = take(&mut view.answers, Part::Tasks, tasks);
         }
         if let Some(repositories) = repositories {
-            view.repositories = take(&mut view.answers, Part::Repositories, repositories);
+            match repositories {
+                Ok(listed) => {
+                    view.answers.insert(Part::Repositories, Answer::Answered);
+                    view.repositories = listed;
+                }
+                Err(error) => {
+                    view.answers
+                        .insert(Part::Repositories, Answer::Failed(describe(&error)));
+                }
+            }
         }
         if let Some(bindings) = bindings {
             view.bindings = take(&mut view.answers, Part::Bindings, bindings);
@@ -2714,7 +2723,16 @@ impl AppState {
             .projects
             .entry((space.to_owned(), project.to_owned()))
             .or_default();
-        view.repositories = take(&mut view.answers, Part::Repositories, repositories);
+        match repositories {
+            Ok(listed) => {
+                view.answers.insert(Part::Repositories, Answer::Answered);
+                view.repositories = listed;
+            }
+            Err(error) => {
+                view.answers
+                    .insert(Part::Repositories, Answer::Failed(describe(&error)));
+            }
+        }
     }
 
     /// The `owner/repo` a bare `#N` in `project` refers to: its only GitHub

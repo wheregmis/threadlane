@@ -20,7 +20,7 @@ use crate::menus::{
     GoHome, NavigateBack, NavigateForward, OpenPalette, OpenSettings, SidebarShortcut,
     ToggleSidebar, shortcut_hint,
 };
-use crate::tokens::{BAR_HEIGHT, LG, MD, ROW_HEIGHT, SM, Status, TYPE_EMPHASIS, XS};
+use crate::tokens::{BADGE_RADIUS, BAR_HEIGHT, LG, MD, ROW_HEIGHT, SM, Status, TYPE_EMPHASIS, XS};
 use crate::{Desktop, Screen, Tab};
 
 struct NavigationRow {
@@ -281,7 +281,7 @@ impl Desktop {
                             .min_w_0()
                             .text_size(TYPE_EMPHASIS)
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(img(logo()).size(px(20.)).rounded(px(5.)).flex_none())
+                            .child(img(logo()).size_5().rounded(BADGE_RADIUS).flex_none())
                             .child(div().min_w_0().truncate().child("Threadlane")),
                     )
                     .child(

@@ -23,7 +23,10 @@ use crate::components::{
 use crate::icons::AppIcon;
 use crate::keyboard::DecisionScroll;
 use crate::menus::{FocusComposer, shortcut_hint};
-use crate::tokens::{LG, MD, READING_WIDTH, ROW_HEIGHT, SCROLLBAR_GUTTER, SM, TYPE_BODY, XS};
+use crate::tokens::{
+    INBOX_DETAIL_MIN_WIDTH, INBOX_LIST_WIDTH, LG, MD, READING_WIDTH, ROW_HEIGHT, SCROLLBAR_GUTTER,
+    SM, TYPE_BODY, XS,
+};
 use crate::{Desktop, Screen};
 
 /// How many failed tasks Inbox shows before folding behind "Show all".
@@ -31,6 +34,23 @@ const INBOX_FAILURES_SHOWN: usize = 3;
 
 /// How many recent messages Inbox shows before folding behind "Show more".
 const INBOX_RECENT_SHOWN: usize = 3;
+
+/// Uses the two-column queue layout when the main pane can comfortably hold both
+/// the queue list and a readable decision card at the current zoom and sidebar width.
+fn inbox_uses_split(
+    viewport_width: Pixels,
+    rem: Pixels,
+    sidebar_collapsed: bool,
+    sidebar_width: Pixels,
+) -> bool {
+    let left = if sidebar_collapsed {
+        Pixels::ZERO
+    } else {
+        sidebar_width
+    };
+    let available = viewport_width - left - LG * 2.;
+    available >= (INBOX_LIST_WIDTH + INBOX_DETAIL_MIN_WIDTH).to_pixels(rem) + LG
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum InboxTab {
@@ -100,34 +120,59 @@ impl Desktop {
             )
             .child(Tab::new().aria_label("Activity").child("Activity"));
         let wide_split = self.inbox.tab == InboxTab::NeedsYou
-            && window.viewport_size().width >= px(1060.)
+            && inbox_uses_split(
+                window.viewport_size().width,
+                window.rem_size(),
+                self.sidebar_collapsed,
+                self.sidebar_width,
+            )
             && pending > 0;
         let content = match self.inbox.tab {
             InboxTab::NeedsYou => self.inbox_needs_you(when, wide_split, cx),
             InboxTab::Activity => self.inbox_activity(when, cx),
         };
+        let scrolled = div().w_full().child(
+            content
+                .w_full()
+                .min_w_0()
+                .when(!wide_split, |body| body.max_w(READING_WIDTH).mx_auto()),
+        );
         v_flex()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .w_full()
-            .when(!wide_split, |page| page.max_w(READING_WIDTH).self_center())
             .gap(MD)
             .child(
-                v_flex()
+                div().flex_none().w_full().pr(SCROLLBAR_GUTTER).child(
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .when(!wide_split, |header| header.max_w(READING_WIDTH).mx_auto())
+                        .gap(SM)
+                        .child(page_header("Inbox", None, Some(h_flex().child(message))))
+                        .child(tabs)
+                        .children(
+                            (self.state.spaces().len() > 1).then(|| self.inbox_space_filter(cx)),
+                        ),
+                ),
+            )
+            .child(decision_scroller("home", scrolled, &self.decision_scroll))
+            .children(self.inbox.composing.then(|| {
+                div()
                     .flex_none()
-                    .gap(SM)
-                    .mr(SCROLLBAR_GUTTER)
-                    .child(page_header("Inbox", None, Some(h_flex().child(message))))
-                    .child(tabs)
-                    .children((self.state.spaces().len() > 1).then(|| self.inbox_space_filter(cx))),
-            )
-            .child(decision_scroller("home", content, &self.decision_scroll))
-            .children(
-                self.inbox
-                    .composing
-                    .then(|| self.home_composer(cx).mr(SCROLLBAR_GUTTER)),
-            )
+                    .w_full()
+                    .pt_2()
+                    .pr(SCROLLBAR_GUTTER)
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        self.home_composer(window, cx)
+                            .w_full()
+                            .min_w_0()
+                            .when(!wide_split, |dock| dock.max_w(READING_WIDTH).mx_auto()),
+                    )
+            }))
             .into_any_element()
     }
 
@@ -241,7 +286,7 @@ impl Desktop {
         }
         let current = state.current_decision().map(DecisionKey::from);
         if wide_split && !queued_decisions.is_empty() {
-            let mut queue_list = v_flex().w(rems(20.)).flex_none().gap(XS);
+            let mut queue_list = v_flex().w(INBOX_LIST_WIDTH).flex_none().gap(XS);
             let mut active_card = None;
             for (index, queued) in queued_decisions.iter().enumerate() {
                 if AppState::later_starts(&queued_decisions, index) {
@@ -729,7 +774,7 @@ impl Desktop {
         cx.notify();
     }
 
-    fn home_composer(&self, cx: &mut Context<Self>) -> Div {
+    fn home_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let recipient = self.state.target().map(|current| {
             self.to_picker(
                 current,
@@ -763,7 +808,7 @@ impl Desktop {
                         })),
                     ),
             )
-            .child(self.render_composer(Draft::Lead, "Message the lead", None, cx))
+            .child(self.render_composer(Draft::Lead, "Message the lead", None, window, cx))
     }
 }
 
@@ -845,12 +890,23 @@ fn inbox_row(
 
 #[cfg(test)]
 mod tests {
-    use super::update_title;
+    use gpui_kit::px;
+
+    use super::{inbox_uses_split, update_title};
 
     #[test]
     fn compact_updates_use_the_first_nonblank_line() {
         assert_eq!(update_title("\n  ## Result \nMore detail", false), "Result");
         assert_eq!(update_title("#578 was merged", false), "#578 was merged");
         assert_eq!(update_title("   ", true), "Image attachment");
+    }
+
+    #[test]
+    fn inbox_split_responds_to_sidebar_width_and_zoom() {
+        assert!(inbox_uses_split(px(1180.), px(16.), false, px(220.)));
+        assert!(!inbox_uses_split(px(1060.), px(16.), false, px(220.)));
+        assert!(inbox_uses_split(px(1060.), px(16.), true, px(220.)));
+        assert!(!inbox_uses_split(px(1180.), px(16.), false, px(380.)));
+        assert!(!inbox_uses_split(px(1180.), px(22.), false, px(220.)));
     }
 }

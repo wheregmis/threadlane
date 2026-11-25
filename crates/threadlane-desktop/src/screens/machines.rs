@@ -21,7 +21,8 @@ use crate::components::{
 };
 use crate::icons::AppIcon;
 use crate::tokens::{
-    READING_WIDTH, ROW_RADIUS, SM, SPACE_NAME_WIDTH, Status, TABULAR, TYPE_BODY, XL, XS,
+    READING_WIDTH, ROW_RADIUS, SCROLLBAR_GUTTER, SM, SPACE_NAME_WIDTH, Status, TABULAR, TYPE_BODY,
+    XL, XS,
 };
 use crate::{Desktop, Screen, Tab};
 
@@ -41,16 +42,20 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut page = v_flex()
-            .flex_1()
-            .min_h_0()
             .w_full()
             .max_w(READING_WIDTH)
-            .self_center()
+            .mx_auto()
+            .pr(SCROLLBAR_GUTTER)
+            .pb_4()
             .gap(SM)
-            .overflow_y_scrollbar()
-            .id("machine-detail")
             .child(
-                link("back-to-machines", "All machines".to_owned())
+                button("back-to-machines")
+                    .ghost()
+                    .small()
+                    .self_start()
+                    .tab_stop(true)
+                    .icon(AppIcon::ArrowLeft)
+                    .label("All machines")
                     .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Machines, cx))),
             );
         let Some(detail) = self.state.machine_detail(space, id, when) else {
@@ -58,11 +63,16 @@ impl Desktop {
                 .state
                 .space(space)
                 .and_then(|space| space.gap(Part::Machines));
-            return page
-                .child(match gap {
+            return v_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .id("machine-detail")
+                .overflow_y_scrollbar()
+                .child(page.child(match gap {
                     Some(gap) => gap_line(&gap, "the machine", space, cx),
                     None => empty(EmptyRegion::Machines, cx),
-                })
+                }))
                 .into_any_element();
         };
         let report = detail.report;
@@ -170,7 +180,8 @@ impl Desktop {
                     .child(gap_line(&gap, "machine runs", space, cx))
             }
         }
-        page.child(section("Tools"))
+        let page = page
+            .child(section("Tools"))
             .child(if detail.tools_reported {
                 h_flex().gap(XS).flex_wrap().children(
                     report
@@ -188,7 +199,14 @@ impl Desktop {
                     .accounts
                     .into_iter()
                     .map(|account| status_badge(account, Status::Idle, cx)),
-            )
+            );
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .id("machine-detail")
+            .overflow_y_scrollbar()
+            .child(page)
             .into_any_element()
     }
 
@@ -489,9 +507,9 @@ impl Desktop {
             }
             for client in &space.clients {
                 let state = if client.is_active() {
-                    "admitted"
+                    "Admitted"
                 } else {
-                    "revoked"
+                    "Revoked"
                 };
                 paired = paired.child(
                     h_flex()
@@ -551,17 +569,22 @@ impl Desktop {
 
     /// The pairing screen the space switcher opens.
     pub(crate) fn add_space(&self, cx: &mut Context<Self>) -> AnyElement {
+        let content = v_flex()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .mx_auto()
+            .pr(SCROLLBAR_GUTTER)
+            .pb_4()
+            .gap(SM)
+            .child(heading("Add space"))
+            .child(card(cx).child(self.join_form(cx)));
         v_flex()
             .flex_1()
             .min_h_0()
             .w_full()
-            .max_w(READING_WIDTH)
-            .self_center()
-            .overflow_y_scrollbar()
             .id("add-space")
-            .gap(SM)
-            .child(heading("Add space"))
-            .child(card(cx).child(self.join_form(cx)))
+            .overflow_y_scrollbar()
+            .child(content)
             .into_any_element()
     }
 
@@ -676,14 +699,12 @@ impl Desktop {
         let step = |title: &'static str, text: &'static str| {
             card(cx).child(section(title)).child(meta(text, cx))
         };
-        v_flex()
-            .flex_1()
-            .min_h_0()
+        let content = v_flex()
             .w_full()
             .max_w(READING_WIDTH)
-            .self_center()
-            .overflow_y_scrollbar()
-            .id("first-run")
+            .mx_auto()
+            .pr(SCROLLBAR_GUTTER)
+            .pb_4()
             .gap(XL)
             .child(heading("Pair this app with a hub"))
             .child(div().text_color(muted).child(
@@ -701,7 +722,14 @@ impl Desktop {
                         .rounded(ROW_RADIUS)
                         .child(command),
                 ),
-            )
+            );
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .id("first-run")
+            .overflow_y_scrollbar()
+            .child(content)
             .into_any_element()
     }
 }

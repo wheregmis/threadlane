@@ -451,6 +451,15 @@ impl Desktop {
         if window.has_focused_input(cx) {
             self.keyboard_focus.focus(window, cx);
             self.scroll_to_decision.set(DecisionScroll::Card);
+        } else if let Screen::Task { space, task } = &self.screen
+            && self.state.review(space, *task).is_some()
+        {
+            self.state.close_review();
+        } else if let Screen::Project { space, project, .. } = self.screen.clone()
+            && self.state.task_form(&space, &project).is_some()
+        {
+            self.hide_new_task_form(&space, &project, window, cx);
+            return;
         } else {
             self.scroll_to_decision.set(DecisionScroll::None);
             self.state.clear_current_decision();

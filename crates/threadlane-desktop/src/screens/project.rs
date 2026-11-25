@@ -47,13 +47,18 @@ pub(super) const MODES: [(Mode, &str); 4] = [
 ];
 
 /// Keep at least 24 rem for the chat when both rails fit.
-fn chat_details_in_sheet(viewport_width: Pixels, rem: Pixels, sidebar_collapsed: bool) -> bool {
+fn chat_details_in_sheet(
+    viewport_width: Pixels,
+    rem: Pixels,
+    sidebar_collapsed: bool,
+    sidebar_width: Pixels,
+) -> bool {
     let left = if sidebar_collapsed {
         Pixels::ZERO
     } else {
-        SIDEBAR_WIDTH
+        sidebar_width
     };
-    let available = (viewport_width - left - LG * 2.).min(READING_WIDTH.to_pixels(rem));
+    let available = viewport_width - left - LG * 2.;
     available - SIDEBAR_WIDTH - LG < rem * 24.
 }
 
@@ -113,6 +118,7 @@ impl Desktop {
                 .outline()
                 .icon(AppIcon::ListPlus)
                 .label("New task…")
+                .dropdown_caret(true)
                 .dropdown_menu(move |mut menu, _, _| {
                     for project in &projects {
                         let (space, project, view) =
@@ -247,8 +253,8 @@ impl Desktop {
                             .small()
                             .outline()
                             .selected(filter.project.is_some())
-                            .icon(AppIcon::ChevronDown)
                             .label(label)
+                            .dropdown_caret(true)
                             .dropdown_menu(move |mut menu, _, _| {
                                 let (space_all, entity_all) = (in_space.clone(), entity.clone());
                                 menu = menu.item(PopupMenuItem::new("All projects").on_click(
@@ -293,8 +299,8 @@ impl Desktop {
                             .small()
                             .outline()
                             .selected(filter.agent.is_some())
-                            .icon(AppIcon::ChevronDown)
                             .label(label)
+                            .dropdown_caret(true)
                             .dropdown_menu(move |mut menu, _, _| {
                                 let (space_all, entity_all) = (in_space.clone(), entity.clone());
                                 menu = menu.item(PopupMenuItem::new("All agents").on_click(
@@ -531,11 +537,15 @@ impl Desktop {
                 .min_h_0()
                 .min_w_0()
                 .w_full()
-                .max_w(READING_WIDTH)
-                .self_center()
                 .gap(MD)
-                .child(page_header("Chat", Some(context), actions))
-                .child(self.conversation_tab(space, project, when, false, cx))
+                .child(
+                    div().flex_none().w_full().pr(SCROLLBAR_GUTTER).child(
+                        page_header("Chat", Some(context), actions)
+                            .max_w(READING_WIDTH)
+                            .mx_auto(),
+                    ),
+                )
+                .child(self.conversation_tab(space, project, when, false, window, cx))
                 .into_any_element();
         }
         let (in_space, named) = (space.to_owned(), project.to_owned());
@@ -596,7 +606,9 @@ impl Desktop {
                     window.viewport_size().width,
                     window.rem_size(),
                     self.sidebar_collapsed,
+                    self.sidebar_width,
                 ),
+                window,
                 cx,
             ),
             Tab::Memory => self.memory_tab(space, project, when, cx),
@@ -748,17 +760,7 @@ impl Desktop {
             .child(bar)
             .children(lead_error)
             .children(form)
-            .child(
-                v_flex()
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .when(tab == Tab::Conversation, |body| {
-                        body.max_w(READING_WIDTH).self_center()
-                    })
-                    .child(body),
-            )
+            .child(v_flex().w_full().flex_1().min_h_0().min_w_0().child(body))
             .into_any_element()
     }
 
@@ -1373,17 +1375,22 @@ impl Desktop {
             );
         }
 
+        let content = v_flex()
+            .w_full()
+            .max_w(READING_WIDTH)
+            .mx_auto()
+            .pr(SCROLLBAR_GUTTER)
+            .pb_4()
+            .gap(XL)
+            .child(side)
+            .child(machines);
         v_flex()
             .flex_1()
             .min_h_0()
             .w_full()
-            .max_w(READING_WIDTH)
-            .self_center()
             .overflow_y_scrollbar()
             .id("setup")
-            .gap(XL)
-            .child(side)
-            .child(machines)
+            .child(content)
             .into_any_element()
     }
 
@@ -1411,6 +1418,7 @@ impl Desktop {
         project: &str,
         when: &When,
         details_in_sheet: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -1447,8 +1455,15 @@ impl Desktop {
             has_header = true;
             history = history.child(gap_line(&gap, "conversation", space, cx));
         }
-        let mut lines = v_flex().gap(MD).children(has_header.then_some(history));
         let main_chat = self.is_main_chat(space, project);
+        let mut lines = v_flex()
+            .w_full()
+            .min_w_0()
+            .max_w(READING_WIDTH)
+            .when(main_chat, |el| el.mx_auto())
+            .gap(MD)
+            .pb_2()
+            .children(has_header.then_some(history));
         let conversation = self.state.conversation(space, project, when);
         if conversation.is_empty()
             && self
@@ -1499,7 +1514,7 @@ impl Desktop {
                             .items_center()
                             .children(icon.map(|ic| {
                                 h_flex()
-                                    .size(px(22.))
+                                    .size(rems(1.375))
                                     .flex_none()
                                     .items_center()
                                     .justify_center()
@@ -1974,15 +1989,24 @@ impl Desktop {
                             },
                             cx,
                         );
-                        self.render_composer(
-                            threadlane_desktop::Draft::Lead,
-                            "Message the lead",
-                            Some(picker),
-                            cx,
-                        )
-                        .flex_none()
-                        .w_auto()
-                        .mr(SCROLLBAR_GUTTER)
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .pt_2()
+                            .pr(SCROLLBAR_GUTTER)
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                self.render_composer(
+                                    threadlane_desktop::Draft::Lead,
+                                    "Message the lead",
+                                    Some(picker),
+                                    window,
+                                    cx,
+                                )
+                                .max_w(READING_WIDTH)
+                                .when(main_chat, |el| el.mx_auto()),
+                            )
                     })),
             )
             .children(side)
@@ -2533,14 +2557,11 @@ impl Desktop {
             }),
         );
         let mut rows = v_flex()
-            .flex_1()
-            .min_h_0()
-            .min_w_0()
             .w_full()
             .max_w(READING_WIDTH)
-            .self_center()
-            .overflow_y_scrollbar()
-            .id("project-team")
+            .mx_auto()
+            .pr(SCROLLBAR_GUTTER)
+            .pb_4()
             .gap(MD)
             .child(
                 h_flex()
@@ -2750,7 +2771,15 @@ impl Desktop {
                     ),
             );
         }
-        rows.into_any_element()
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .w_full()
+            .overflow_y_scrollbar()
+            .id("project-team")
+            .child(rows)
+            .into_any_element()
     }
 
     fn add_project_agent(
@@ -2778,6 +2807,7 @@ impl Desktop {
                 .small()
                 .icon(AppIcon::UserPlus)
                 .label("Add agent")
+                .dropdown_caret(true)
                 .dropdown_menu(move |mut menu, _, _| {
                     // A new agent follows the project's mode.
                     for agent in &available {
@@ -2833,7 +2863,8 @@ impl Desktop {
                     let choices = statement.choices.clone();
                     button(SharedString::from(format!("cell-{agent}-{index}")))
                         .small()
-                        .label(format!("{} ▾", statement.cell))
+                        .label(statement.cell.clone())
+                        .dropdown_caret(true)
                         .accessibility_label(format!(
                             "{}: {}. Change it",
                             statement.what, statement.cell
@@ -3083,7 +3114,7 @@ impl Desktop {
         self.show_new_task_form(&space, &project, window, cx);
     }
 
-    fn hide_new_task_form(
+    pub(crate) fn hide_new_task_form(
         &mut self,
         space: &str,
         project: &str,
@@ -3467,14 +3498,22 @@ impl Desktop {
     ) -> Div {
         let muted = cx.theme().muted_foreground;
         let (in_space, named) = (space.to_owned(), project.to_owned());
-        let mark = if recorded.open { "▾" } else { "▸" };
         let mut part = v_flex().gap(XS).pt(SM).child(
-            link("recorded-toggle", format!("{mark} {}", recorded.title)).on_click(cx.listener(
-                move |this, _, _, cx| {
+            button("recorded-toggle")
+                .ghost()
+                .small()
+                .self_start()
+                .tab_stop(true)
+                .icon(if recorded.open {
+                    AppIcon::ChevronDown
+                } else {
+                    AppIcon::ChevronRight
+                })
+                .label(recorded.title)
+                .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.toggle_recorded(&in_space, &named);
                     cx.notify();
-                },
-            )),
+                })),
         );
         if recorded.open {
             part = part.child(
@@ -3526,15 +3565,41 @@ fn handoff_preview(text: &str) -> String {
 
 #[cfg(test)]
 mod chat_details_tests {
-    use super::{chat_details_in_sheet, px};
+    use super::{SIDEBAR_WIDTH, chat_details_in_sheet, px};
 
     #[test]
     fn narrow_chat_uses_drawer_without_changing_global_sidebar() {
-        assert!(chat_details_in_sheet(px(640.), px(16.), false));
-        assert!(chat_details_in_sheet(px(760.), px(16.), false));
-        assert!(!chat_details_in_sheet(px(760.), px(16.), true));
-        assert!(!chat_details_in_sheet(px(1024.), px(16.), false));
-        assert!(chat_details_in_sheet(px(1024.), px(24.), false));
+        assert!(chat_details_in_sheet(
+            px(640.),
+            px(16.),
+            false,
+            SIDEBAR_WIDTH
+        ));
+        assert!(chat_details_in_sheet(
+            px(760.),
+            px(16.),
+            false,
+            SIDEBAR_WIDTH
+        ));
+        assert!(!chat_details_in_sheet(
+            px(760.),
+            px(16.),
+            true,
+            SIDEBAR_WIDTH
+        ));
+        assert!(!chat_details_in_sheet(
+            px(1024.),
+            px(16.),
+            false,
+            SIDEBAR_WIDTH
+        ));
+        assert!(chat_details_in_sheet(
+            px(1024.),
+            px(24.),
+            false,
+            SIDEBAR_WIDTH
+        ));
+        assert!(chat_details_in_sheet(px(1024.), px(16.), false, px(400.)));
     }
 }
 
