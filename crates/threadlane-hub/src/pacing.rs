@@ -42,7 +42,7 @@ impl Quiet {
     pub(crate) fn end_at(&self, at: Timestamp) -> Result<Option<Timestamp>, String> {
         let fail = |error: jiff::Error| error.to_string();
         let instant = jiff::Timestamp::from_millisecond(at.as_millis()).map_err(fail)?;
-        let today = instant.to_zoned(self.zone.clone()).date();
+        let today = instant.to_zoned_datetime(self.zone.clone()).date();
         for day in [today, today.yesterday().map_err(fail)?] {
             let starts = boundary(&self.zone, day.to_datetime(self.start), false)?;
             let last_day = if self.start > self.end {
