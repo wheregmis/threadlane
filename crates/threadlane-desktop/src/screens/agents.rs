@@ -173,6 +173,7 @@ impl Desktop {
                 .small()
                 .ghost()
                 .icon(AppIcon::Copy)
+                .dropdown_caret(true)
                 .min_w_0()
                 .max_w_full()
                 .accessibility_label(label.clone())
@@ -449,6 +450,7 @@ impl Desktop {
                 .outline()
                 .icon(AppIcon::FileText)
                 .label("Start from a template")
+                .dropdown_caret(true)
                 .disabled(offered.is_empty())
                 .dropdown_menu(move |mut menu, _, _| {
                     for template in &offered {

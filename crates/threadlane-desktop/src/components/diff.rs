@@ -14,7 +14,7 @@ use crate::icons::AppIcon;
 use crate::tokens::{BADGE_RADIUS, MD, ROW_RADIUS, SM, Status, TABULAR, TYPE_META, XS, XXS};
 
 /// Max height of the expanded unified diff viewport before scrolling.
-const DIFF_MAX_HEIGHT: Pixels = px(280.);
+const DIFF_MAX_HEIGHT: Rems = rems(17.5);
 
 impl Desktop {
     /// Renders a compact file-stat summary with an expandable unified diff

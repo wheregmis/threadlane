@@ -16,13 +16,13 @@ use threadlane_desktop::{
     DiffLine, LineKind, ReviewFile, check_counts, check_label, pull_label, quote, side_by_side,
 };
 
-use super::{button, card, meta, section, status_badge};
+use super::{button, card, icon_button, meta, section, status_badge};
 use crate::Desktop;
 use crate::icons::AppIcon;
 use crate::tokens::{ROW_RADIUS, SM, Status, TABULAR, TYPE_META, XS, XXS};
 
 /// The file list's width beside the diff.
-const FILE_LIST_WIDTH: Pixels = px(240.);
+const FILE_LIST_WIDTH: Rems = rems(15.);
 /// The width of one line-number gutter.
 const GUTTER_WIDTH: Rems = rems(2.75);
 
@@ -169,23 +169,21 @@ impl Desktop {
                             ),
                     )
                     .child(
-                        button("review-previous")
-                            .small()
-                            .ghost()
-                            .icon(AppIcon::ArrowLeft)
-                            .accessibility_label("Previous file")
-                            .disabled(selected == 0)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.select_review_file(selected.saturating_sub(1));
-                                cx.notify();
-                            })),
+                        icon_button(
+                            "review-previous",
+                            AppIcon::ArrowLeft,
+                            "Previous file".into(),
+                        )
+                        .tab_stop(true)
+                        .disabled(selected == 0)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.select_review_file(selected.saturating_sub(1));
+                            cx.notify();
+                        })),
                     )
                     .child(
-                        button("review-next")
-                            .small()
-                            .ghost()
-                            .icon(AppIcon::ArrowRight)
-                            .accessibility_label("Next file")
+                        icon_button("review-next", AppIcon::ArrowRight, "Next file".into())
+                            .tab_stop(true)
                             .disabled(selected + 1 >= count)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.state.select_review_file(selected + 1);
@@ -207,11 +205,8 @@ impl Desktop {
                             })),
                     )
                     .child(
-                        button("review-close")
-                            .small()
-                            .ghost()
-                            .icon(AppIcon::X)
-                            .accessibility_label("Close the review")
+                        icon_button("review-close", AppIcon::X, "Close review".into())
+                            .tab_stop(true)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.close_review();
                                 cx.notify();
@@ -420,7 +415,7 @@ fn unified_row(line: &DiffLine, cx: &App) -> Div {
         .when_some(bg, |row, bg| row.bg(bg))
         .child(gutter(line.old, cx))
         .child(gutter(line.new, cx))
-        .child(div().w(px(12.)).flex_none().text_color(fg).child(sign))
+        .child(div().w_3().flex_none().text_color(fg).child(sign))
         .child(text(&line.text).text_color(fg))
 }
 

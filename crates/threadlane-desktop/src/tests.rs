@@ -9618,3 +9618,94 @@ fn task_details_usage_goal_and_outcome_banners_cover_every_task_state() {
         })
     );
 }
+
+#[test]
+fn fast_forward_pull_request_updates_changes_state_and_standing_rule_copy() {
+    let mut detail = TaskDetail {
+        summary: task(12, TaskStatus::Done, None),
+        branch: "threadlane/T-0012".to_owned(),
+        repositories: vec!["app".to_owned()],
+        runs: Vec::new(),
+        reviews: Vec::new(),
+        decisions: Vec::new(),
+        related: Vec::new(),
+        messages: Vec::new(),
+        proposed_by: None,
+        stopped: false,
+    };
+    let mut ff = decision(9, 1_000);
+    ff.tool = "fast_forward_pull_request".to_owned();
+    detail.decisions.push(ff.clone());
+    assert_eq!(changes(&detail).state, "Waiting on you to push (D-0009)");
+
+    ff.status = DecisionStatus::Answered;
+    ff.answer = Some(json!({ "option": 0 }));
+    ff.outcome = Some(json!({
+        "performed": true,
+        "repository": "app",
+        "branch": "feature/fix",
+        "pull_request": "https://github.com/acme/app/pull/42",
+    }));
+    detail.decisions = vec![ff];
+    let pushed = changes(&detail);
+    assert_eq!(pushed.state, "Pushed · pull request opened");
+    assert_eq!(
+        pushed.pull_request.as_deref(),
+        Some("https://github.com/acme/app/pull/42")
+    );
+    assert_eq!(
+        allows("fast_forward_pull_request", &json!({ "repository": "app" })),
+        "fast-forward pull requests in app"
+    );
+}
+
+#[test]
+fn failed_repository_refresh_preserves_known_repositories_for_prose_links() {
+    let mut state = AppState::paired(["work"]);
+    state.project_created(
+        "work",
+        ProjectSummary {
+            id: ProjectId(1),
+            name: "api".into(),
+            is_general: false,
+            paused: false,
+            mode_ceiling: None,
+            archived: false,
+        },
+    );
+    state.apply_repositories(
+        "work",
+        "api",
+        Ok(vec![Repository {
+            id: RepositoryId(1),
+            project_id: ProjectId(1),
+            name: "app".into(),
+            remote_url: "https://github.com/acme/app.git".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        }]),
+    );
+    assert_eq!(
+        state.github_repository("work", "api").as_deref(),
+        Some("acme/app")
+    );
+    assert_eq!(state.project_gap("work", "api", Part::Repositories), None);
+
+    // A transient error records the gap so retry can run, without wiping known repos.
+    state.apply_repositories(
+        "work",
+        "api",
+        Err(ClientError::Unreachable {
+            space: "work".into(),
+            reason: "restarting".into(),
+        }),
+    );
+    assert!(matches!(
+        state.project_gap("work", "api", Part::Repositories),
+        Some(Gap::Failed(_))
+    ));
+    assert_eq!(
+        state.github_repository("work", "api").as_deref(),
+        Some("acme/app")
+    );
+}

@@ -5,11 +5,11 @@ use crate::{
     describe,
     icons::AppIcon,
     local_zone,
-    tokens::{LG, MD, READING_WIDTH, SIDEBAR_WIDTH, SM},
+    tokens::{LG, MD, READING_WIDTH, SCROLLBAR_GUTTER, SM},
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonGroup, ButtonVariants as _},
     h_flex,
     input::InputState,
     scroll::ScrollableElement as _,
@@ -98,7 +98,7 @@ pub(super) struct WorkView {
 
 impl WorkView {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search outputs…"));
         Self {
             data: None,
             loading: false,
@@ -338,7 +338,7 @@ impl Desktop {
         let sidebar = if self.sidebar_collapsed {
             Pixels::ZERO
         } else {
-            SIDEBAR_WIDTH
+            self.sidebar_width
         };
         let content_width = (window.viewport_size().width - sidebar - LG * 2. - SM)
             .min(READING_WIDTH.to_pixels(window.rem_size()));
@@ -628,6 +628,9 @@ impl Desktop {
         };
         let refresh = button("refresh-work")
             .small()
+            .outline()
+            .tab_stop(true)
+            .icon(AppIcon::RotateCcw)
             .label("Refresh")
             .disabled(self.work.loading)
             .on_click(cx.listener(|this, _, _, cx| {
@@ -639,13 +642,15 @@ impl Desktop {
         }
         match (&self.work.data, page) {
             (None, _) => body = body.child(meta("Loading…", cx)),
-            (Some(Err(error)), _) => body = body.child(error.clone()),
+            (Some(Err(error)), _) => {
+                body = body.child(meta(error.clone(), cx).text_color(cx.theme().danger));
+            }
             (
                 Some(Ok(OverviewReply::RoutineHistory { rows })),
                 WorkPage::History { timer, before },
             ) => {
                 if rows.is_empty() {
-                    body = body.child("No occurrences on this page.");
+                    body = body.child(meta("No occurrences on this page.", cx));
                 }
                 for row in rows {
                     body = body.child(self.occurrence_row(space, row, when, cx));
@@ -678,11 +683,12 @@ impl Desktop {
             (Some(Ok(OverviewReply::Agenda { recent, upcoming })), _) => {
                 let tomorrow = matches!(page, WorkPage::Tomorrow(_));
                 body = body.child(
-                    h_flex()
-                        .gap(SM)
+                    ButtonGroup::new("agenda-range")
                         .child(
                             self.work_link("week", "Next 7 days", space, WorkPage::Agenda, cx)
-                                .disabled(!tomorrow),
+                                .outline()
+                                .tab_stop(true)
+                                .selected(!tomorrow),
                         )
                         .child(
                             self.work_link(
@@ -692,7 +698,9 @@ impl Desktop {
                                 WorkPage::Tomorrow(self.work.zone.clone()),
                                 cx,
                             )
-                            .disabled(tomorrow),
+                            .outline()
+                            .tab_stop(true)
+                            .selected(tomorrow),
                         ),
                 );
                 body = body.child(meta(
@@ -700,7 +708,7 @@ impl Desktop {
                     cx,
                 ));
                 if upcoming.is_empty() {
-                    body = body.child("No routines due.");
+                    body = body.child(meta("No routines due.", cx));
                 }
                 for (index, row) in upcoming.iter().enumerate() {
                     let overlap = index
@@ -732,7 +740,7 @@ impl Desktop {
                 }
                 body = body.child(section("Recent runs"));
                 if recent.is_empty() {
-                    body = body.child("No recorded runs.");
+                    body = body.child(meta("No recorded runs.", cx));
                 }
                 for row in recent {
                     body = body.child(self.work_link(
@@ -785,7 +793,7 @@ impl Desktop {
                         ),
                 );
                 if rows.is_empty() {
-                    body = body.child("No matching outputs.");
+                    body = body.child(meta("No matching outputs.", cx));
                 } else {
                     body = body.child(meta("Most recent 100 matches", cx));
                 }
@@ -893,7 +901,12 @@ impl Desktop {
                     .min_h_0()
                     .flex_1()
                     .overflow_y_scrollbar()
-                    .child(body.max_w(READING_WIDTH)),
+                    .child(
+                        body.w_full()
+                            .max_w(READING_WIDTH)
+                            .pr(SCROLLBAR_GUTTER)
+                            .pb_4(),
+                    ),
             )
             .into_any_element()
     }

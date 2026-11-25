@@ -115,6 +115,7 @@ impl Desktop {
                     .small()
                     .icon(AppIcon::CalendarPlus)
                     .label("New routine…")
+                    .dropdown_caret(true)
                     .dropdown_menu(move |mut menu, _, _| {
                         for (space, project) in &targets {
                             let (space, project, view) =
@@ -355,7 +356,7 @@ impl Desktop {
                         .small()
                         .ghost()
                         .label("More")
-                        .icon(AppIcon::ChevronDown)
+                        .dropdown_caret(true)
                         .accessibility_label(format!("More actions for routine {id}"))
                         .dropdown_menu(move |menu, _, cx| {
                             let cancel = cancel.clone();
@@ -541,6 +542,7 @@ impl Desktop {
             .small()
             .outline()
             .label(policy_label(grace))
+            .dropdown_caret(true)
             .accessibility_label(format!("Missed run policy: {}", policy_label(grace)))
             .dropdown_menu(move |mut menu, _, _| {
                 for minutes in [None, Some(5), Some(15), Some(30), Some(60)] {
