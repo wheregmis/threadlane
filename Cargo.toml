@@ -45,7 +45,7 @@ rusqlite = { version = "0.43", features = ["bundled"] }
 tempfile = "3"
 # Pinned: iroh's API changes between releases. No default features: no
 # portmapper (it talks to the router) and no metrics; ring for TLS.
-iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
+iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring"] }
 # Local discovery, which iroh keeps in this separate crate.
 iroh-mdns-address-lookup = "=0.6.1"
 # Pinned: the one time-zone dependency (docs/milestone-8.md §1 decision 2).
