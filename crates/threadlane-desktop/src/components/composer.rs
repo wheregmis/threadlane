@@ -19,9 +19,9 @@ use threadlane_desktop::{
     toggle_skill_mention,
 };
 
-use super::{button, chat_images, composer_surface, icon_button, meta, status_dot};
+use super::{button, chat_images, icon_button, meta, status_dot};
 use crate::icons::AppIcon;
-use crate::tokens::{COMPOSER_MAX_ROWS, FIELD_RADIUS, SM, Status, TYPE_BODY, TYPE_META, XS};
+use crate::tokens::{COMPOSER_MAX_ROWS, SM, Status, TYPE_BODY, TYPE_META, XS, XXS};
 use crate::{Desktop, Screen, Tab};
 
 /// The open `@`/`#` popover of one composer: the token being typed and the
@@ -328,14 +328,15 @@ impl Desktop {
             .bottom_full()
             .left_0()
             .mb(XS)
-            .w(px(320.))
+            .w(rems(20.))
             .max_w_full()
             .p(XS)
-            .gap(px(2.))
-            .rounded(FIELD_RADIUS)
+            .gap(XXS)
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
             .shadow_md()
             .child(
                 div()
@@ -355,9 +356,8 @@ impl Desktop {
                     .gap(SM)
                     .px(SM)
                     .py(XS)
-                    .rounded(FIELD_RADIUS)
+                    .rounded(cx.theme().radius)
                     .min_w_0()
-                    .cursor_pointer()
                     .when(index == selected, |row| row.bg(cx.theme().muted))
                     .hover(|row| row.bg(cx.theme().muted));
                 let row = match &item {
@@ -430,9 +430,10 @@ impl Desktop {
         draft: Draft,
         label: impl Into<SharedString>,
         picker: Option<AnyElement>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        self.render_composer_inner(draft, label, picker, None, cx)
+        self.render_composer_inner(draft, label, picker, false, window, cx)
     }
 
     /// Compact, cleanly bordered composer docked to the task detail main column.
@@ -442,7 +443,7 @@ impl Desktop {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        self.render_composer_inner(Draft::Task, label, None, Some(window), cx)
+        self.render_composer_inner(Draft::Task, label, None, true, window, cx)
     }
 
     fn render_composer_inner(
@@ -450,7 +451,8 @@ impl Desktop {
         draft: Draft,
         label: impl Into<SharedString>,
         picker: Option<AnyElement>,
-        compact_window: Option<&Window>,
+        compact: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let destination = self.composer_destination();
@@ -559,7 +561,6 @@ impl Desktop {
         });
         let paste_to = attach_to.clone();
         let view = cx.weak_entity();
-        let surface = cx.theme().muted;
         let images = attach_to.as_ref().and_then(|target| {
             let images = self.state.draft_images(target);
             (!images.is_empty()).then(|| {
@@ -608,39 +609,26 @@ impl Desktop {
             .as_ref()
             .filter(|target| matches!(target, Destination::Lead(..)))
             .and_then(|target| self.state.mention_hint(target));
-        let compact = compact_window.is_some();
-        let focused = compact_window
-            .is_some_and(|window| self.draft_input(draft).focus_handle(cx).is_focused(window));
-        let container = if compact {
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .border_1()
-                .border_color(if focused {
-                    cx.theme().ring
-                } else {
-                    cx.theme().input
-                })
-                .bg(cx.theme().muted.opacity(0.35))
-                .rounded(cx.theme().radius_lg)
-        } else {
-            composer_surface(cx)
-        };
-        let textarea = if compact {
-            Textarea::new(self.draft_input(draft))
-                .appearance(false)
-                .bordered(false)
-                .text_size(TYPE_BODY)
-        } else {
-            Textarea::new(self.draft_input(draft))
-                .rounded(FIELD_RADIUS)
-                .bg(surface)
-                .border_color(surface)
-                .text_size(TYPE_BODY)
-        };
+        let focused = self.draft_input(draft).focus_handle(cx).is_focused(window);
+        let container = v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .px_3()
+            .when(compact, |el| el.py_2())
+            .when(!compact, |el| el.py_3())
+            .border_1()
+            .border_color(if focused {
+                cx.theme().ring
+            } else {
+                cx.theme().input
+            })
+            .bg(cx.theme().muted.opacity(0.35))
+            .rounded(cx.theme().radius_lg);
+        let textarea = Textarea::new(self.draft_input(draft))
+            .appearance(false)
+            .bordered(false)
+            .text_size(TYPE_BODY);
         let send_button = button("send")
             .primary()
             .when(compact, |btn| btn.small())

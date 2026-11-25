@@ -20,7 +20,9 @@ use threadlane_desktop::{Activity, AgentEdit, AgentFields, BACKENDS, Tab, descri
 use super::project::mode_name;
 use crate::components::{button, card, field, meta, page_header, section};
 use crate::icons::AppIcon;
-use crate::tokens::{FIELD_RADIUS, FORM_WIDTH, LG, MD, ROW_RADIUS, SM, Status, TYPE_BODY, XS};
+use crate::tokens::{
+    FIELD_RADIUS, FORM_WIDTH, LG, MD, ROW_RADIUS, SCROLLBAR_GUTTER, SM, Status, TYPE_BODY, XS,
+};
 use crate::{Desktop, Screen};
 
 /// Backend order and per-backend models, shared by the create and edit forms.
@@ -42,6 +44,7 @@ pub(super) fn backend_picker(
                 button(SharedString::from(format!("{id}-{label}")))
                     .outline()
                     .label(current.clone())
+                    .dropdown_caret(true)
                     .accessibility_label(format!("{label}, {current}"))
                     .dropdown_menu(move |mut menu, _, _| {
                         for (name, index) in &choices {
@@ -86,7 +89,7 @@ pub(super) fn backend_picker(
                 button(SharedString::from(format!("{id}-{kind}-models")))
                     .outline()
                     .label(current.clone())
-                    .icon(AppIcon::ChevronDown)
+                    .dropdown_caret(true)
                     .accessibility_label(format!("{kind} model, {current}"))
                     .dropdown_menu(move |mut menu, _, cx| {
                         let selected = target.read(cx).value();
@@ -172,6 +175,7 @@ fn custom_model(kind: BackendKind, target: Entity<InputState>, window: &mut Wind
         input.set_value(value, window, cx);
         input
     });
+    let focus = draft.focus_handle(cx);
     window.open_alert_dialog(cx, move |dialog, _, _| {
         let (draft, target) = (draft.clone(), target.clone());
         dialog
@@ -186,6 +190,7 @@ fn custom_model(kind: BackendKind, target: Entity<InputState>, window: &mut Wind
                 true
             })
     });
+    window.on_next_frame(move |window, cx| focus.focus(window, cx));
 }
 
 impl Desktop {
@@ -352,6 +357,7 @@ impl Desktop {
                 .small()
                 .outline()
                 .label(format!("{kind} skills ({count})"))
+                .dropdown_caret(true)
                 .disabled(choices.is_empty())
                 .dropdown_menu(move |mut menu, _, _| {
                     for (skill, label, selected) in &choices {
@@ -509,6 +515,7 @@ impl Desktop {
             return;
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Exact agent name"));
+        let focus = input.focus_handle(cx);
         cx.observe_in(&input, window, |_, _, window, _| window.refresh())
             .detach();
         let view = cx.entity().downgrade();
@@ -562,6 +569,7 @@ impl Desktop {
                         ),
                 )
         });
+        window.on_next_frame(move |window, cx| focus.focus(window, cx));
     }
 
     fn delete_agent(&mut self, space: String, agent: String, cx: &mut Context<Self>) {
@@ -779,6 +787,9 @@ impl Desktop {
                     .id("agent-editor")
                     .child(
                         h_flex()
+                            .w_full()
+                            .pr(SCROLLBAR_GUTTER)
+                            .pb_4()
                             .gap(MD)
                             .items_start()
                             .flex_wrap()

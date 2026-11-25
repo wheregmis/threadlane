@@ -1356,8 +1356,12 @@ fn origin(detail: &TaskDetail) -> String {
     .to_owned()
 }
 
-/// The tools whose approved call pushes the task's branch.
-const PUBLISHING: [&str; 2] = ["publish_branch", "open_pull_request"];
+/// The tools whose approved call pushes the task's branch or fast-forwards a pull request.
+const PUBLISHING: [&str; 3] = [
+    "publish_branch",
+    "open_pull_request",
+    "fast_forward_pull_request",
+];
 
 /// The task screen's "Usage" card: how many runs, how long they took, and
 /// what the hub says of tokens and cost.

@@ -19,7 +19,7 @@ use crate::Desktop;
 use crate::components::{button, card, field, heading, meta, section};
 use crate::icons::AppIcon;
 use crate::menus::{DarkAppearance, LightAppearance, SystemAppearance};
-use crate::tokens::{LABEL_WIDTH, MD, READING_WIDTH, SM, TYPE_BODY, XL, XS};
+use crate::tokens::{LABEL_WIDTH, MD, READING_WIDTH, SCROLLBAR_GUTTER, SM, TYPE_BODY, XL, XS};
 
 impl Desktop {
     pub(crate) fn settings(
@@ -45,13 +45,9 @@ impl Desktop {
         };
         let unknown = || "not reported yet".to_owned();
         let mut screen = v_flex()
-            .flex_1()
-            .min_h_0()
             .w_full()
             .max_w(READING_WIDTH)
-            .self_center()
-            .overflow_y_scrollbar()
-            .id("settings")
+            .mx_auto()
             .gap(XL)
             .child(heading(if scope.is_some() {
                 "Space settings"
@@ -113,7 +109,14 @@ impl Desktop {
             );
         }
         if scope.is_some() {
-            return screen.into_any_element();
+            return v_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .id("settings")
+                .overflow_y_scrollbar()
+                .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(screen))
+                .into_any_element();
         }
         let notifications = self.state.notifications();
         let toggle = |id: &'static str, label: &'static str, on: bool, decisions: bool| {
@@ -159,7 +162,7 @@ impl Desktop {
                     window.dispatch_action(action, cx);
                 }
             });
-        screen
+        let screen = screen
             .child(
                 card(cx).child(section("Appearance")).child(
                     h_flex()
@@ -213,7 +216,14 @@ impl Desktop {
                     .child(line("Client directory", dir))
                     .child(line("Build", crate::local_hub::app_build().to_string()))
                     .child(self.update_controls(None, None, cx)),
-            )
+            );
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .id("settings")
+            .overflow_y_scrollbar()
+            .child(div().w_full().pr(SCROLLBAR_GUTTER).pb_4().child(screen))
             .into_any_element()
     }
 }

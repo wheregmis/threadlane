@@ -29,8 +29,6 @@ pub(super) const SCROLL_END_TOLERANCE: Pixels = px(4.);
 pub(super) const SCROLLBAR_GUTTER: Pixels = Scrollbar::width();
 /// Visible rows before the composer starts scrolling internally.
 pub(super) const COMPOSER_MAX_ROWS: usize = 8;
-/// Composer radius in logical pixels.
-pub(super) const COMPOSER_RADIUS: Pixels = px(24.);
 /// Field radius in logical pixels.
 pub(super) const FIELD_RADIUS: Pixels = px(10.);
 /// Row radius in logical pixels.
@@ -84,6 +82,10 @@ pub(super) const SIDEBAR_SECTION_MAX_HEIGHT: Rems = rems(17.5);
 pub(super) const TASK_INSPECTOR_WIDTH: Rems = rems(18.5);
 /// Minimum width reserved for the task main column before moving the inspector to a sheet.
 pub(super) const TASK_MAIN_MIN_WIDTH: Rems = rems(28.);
+/// Inbox split queue list width in rems.
+pub(super) const INBOX_LIST_WIDTH: Rems = rems(20.);
+/// Minimum width reserved for the Inbox decision detail column in split layout.
+pub(super) const INBOX_DETAIL_MIN_WIDTH: Rems = rems(32.);
 /// Fixed key column width inside the task inspector's Details and Usage rows.
 pub(super) const TASK_DETAIL_LABEL_WIDTH: Rems = rems(6.);
 /// Compact tabular timestamp lane for same-day `HH:MM` timestamps on the task screen.

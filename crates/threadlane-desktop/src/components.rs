@@ -21,8 +21,8 @@ mod review;
 
 use crate::icons::AppIcon;
 use crate::tokens::{
-    BADGE_RADIUS, BAR_HEIGHT, COMPOSER_RADIUS, CONTROL_HEIGHT, DOT_SIZE, ICON_BUTTON_RADIUS, MD,
-    ROW_HEIGHT, SCROLLBAR_GUTTER, SM, SMALL_CONTROL_HEIGHT, Status, TABULAR, TYPE_BODY, TYPE_META,
+    BADGE_RADIUS, BAR_HEIGHT, CONTROL_HEIGHT, DOT_SIZE, ICON_BUTTON_RADIUS, MD, ROW_HEIGHT,
+    SCROLLBAR_GUTTER, SM, SMALL_CONTROL_HEIGHT, Status, TABULAR, TYPE_BODY, TYPE_META,
     TYPE_SECTION, TYPE_TITLE, XS, XXL, XXS,
 };
 
@@ -46,19 +46,6 @@ pub(super) fn icon_button(id: impl Into<ElementId>, icon: AppIcon, name: String)
 /// Standard single-line field. Inherits the active theme's corner radius.
 pub(super) fn field(state: &Entity<InputState>) -> Input {
     Input::new(state).text_size(TYPE_BODY)
-}
-
-/// Shared composer surface.
-fn composer_surface(cx: &App) -> Div {
-    v_flex()
-        .w_full()
-        .min_w_0()
-        .gap_2()
-        .p_2()
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().muted)
-        .rounded(COMPOSER_RADIUS)
 }
 
 /// A kit Badge anchored on a small tinted circle.
