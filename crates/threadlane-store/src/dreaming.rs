@@ -54,7 +54,7 @@ fn end_reason(status: &str, error: Option<&str>) -> Option<(&'static str, &'stat
         "failed" if error.starts_with("limit exceeded") => {
             ("limit_exceeded", "the run hit its wall-time or turn limit")
         }
-        "failed" if error == "the account reached its usage limit" => {
+        "failed" if error == crate::task::USAGE_LIMIT_ERROR => {
             ("usage_limit", "the account reached its usage limit")
         }
         "failed" if error == "the backend no longer has the native session" => (

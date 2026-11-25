@@ -611,6 +611,30 @@ impl HubTools {
             }
             None => None,
         };
+        // A queued task that has not started, such as one held by its
+        // agent's usage limit, goes to the agent named (#776).
+        if task.status == TaskStatus::Queued {
+            let agent = agent.ok_or_else(|| {
+                ToolError::InvalidArguments(format!(
+                    "{} is queued, not failed; name another agent to reassign it",
+                    task.id
+                ))
+            })?;
+            let run = self.run(context).await?;
+            let reassigned = self
+                .db
+                .lead_reassign_task(
+                    &context.lease,
+                    task.id,
+                    agent,
+                    &effect_key(context, &run, RETRY_TASK, arguments),
+                    self.clock.now(),
+                )
+                .await
+                .map_err(tool_error)?;
+            self.waker.wake(WakeTarget::Lane(reassigned.lane_id));
+            return Ok(task_json(&reassigned));
+        }
         let run = self.run(context).await?;
         let retried = self
             .db
@@ -1421,7 +1445,9 @@ fn task_definitions() -> Vec<ToolDefinition> {
             "Retry a task that failed because its backend refused the agent's setup, such as \
              its model, or a task in review whose Reviewer failed that way, which queues the \
              review again. Name another agent to reassign the task or the review, or none once \
-             the agent is fixed. The tasks waiting for it stay blocked until it is done.",
+             the agent is fixed. The tasks waiting for it stay blocked until it is done. Naming \
+             an agent also reassigns a queued task that has not started, such as one blocked \
+             because its agent's model account is at its usage limit.",
             Tier::Local,
             json!({
                 "type": "object",

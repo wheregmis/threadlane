@@ -8,8 +8,8 @@ use threadlane_core::forge::REPORT_LIMITATION;
 use threadlane_core::ids::{AgentId, TaskId};
 use threadlane_core::link::{Begin, RunAssignment, RunFailure};
 use threadlane_core::model::{
-    EventKind, EventStatus, LaneKind, Lease, Mode, NewAgent, NewBinding, NewTask, RunOutcome, Task,
-    TaskOrigin, TaskStatus, Trust,
+    EventKind, EventStatus, JournalEntry, LaneKind, Lease, Mode, NewAgent, NewBinding, NewTask,
+    RunOutcome, Task, TaskOrigin, TaskStatus, Trust,
 };
 use threadlane_core::runtime::NoHooks;
 use threadlane_core::store::{InboxStore, OrgStore, OutboxStore, TaskStore};
@@ -2865,4 +2865,307 @@ async fn a_queued_task_that_never_ran_can_go_to_another_working_agent() {
         "{started:?}"
     );
     assert_eq!(task(&hub, "T-0001").await.agent_id, writer.id);
+}
+
+#[tokio::test]
+async fn a_queued_task_held_by_a_usage_limit_can_go_to_another_agent() {
+    // #776: a task whose only run stopped at its account's usage limit has
+    // not started, so the lead, or you, may give it to another agent.
+    let (hub, lead_lease, lead) = lead_run(2).await;
+    call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_1",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    let writer = hub
+        .db
+        .create_agent(&NewAgent::named("Writer", "writer"))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: hub.general().await.id,
+            agent_id: writer.id,
+            mode: Some(Mode::OnRequest),
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.agent_name, ENGINEER);
+    let blocked_session = run.session_id;
+    // The session starting and the limit itself are not work.
+    journal(
+        &hub,
+        &lease,
+        &run,
+        &[
+            json!({"type": "session_started", "native_session_id": "native-1"}),
+            json!({"type": "usage_limit", "resets_at": null}),
+        ],
+    )
+    .await;
+    hub.link
+        .fail(&lease, run.run_id, &RunFailure::UsageLimit)
+        .await
+        .unwrap();
+    hub.link.release(&lease).await.unwrap();
+    let queued = task(&hub, "T-0001").await;
+    assert_eq!(queued.status, TaskStatus::Queued);
+
+    // Without an agent there is nothing to retry: the task did not fail.
+    let unnamed = call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_2",
+        RETRY_TASK,
+        json!({ "task_id": "T-0001" }),
+    )
+    .await;
+    assert!(
+        matches!(&unnamed, Err(ToolError::InvalidArguments(why)) if why.contains("name another agent")),
+        "{unnamed:?}"
+    );
+    let moved = call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_3",
+        RETRY_TASK,
+        json!({ "task_id": "T-0001", "agent": "Writer" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(moved["status"], "queued", "{moved}");
+    assert_eq!(task(&hub, "T-0001").await.agent_id, writer.id);
+    // You can move it too, from the app.
+    let TaskReply::Task { task: back } = hub
+        .api
+        .tasks(TaskRequest::Reassign {
+            task: queued.id,
+            agent: ENGINEER.to_owned(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("a task");
+    };
+    assert_eq!(back.agent_id, queued.agent_id);
+    call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_4",
+        RETRY_TASK,
+        json!({ "task_id": "T-0001", "agent": "Writer" }),
+    )
+    .await
+    .unwrap();
+
+    // The new agent starts a session of its own; once it has worked on the
+    // task, the task stays with it.
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.task_id, Some(queued.id));
+    assert_eq!(run.agent_name, "Writer");
+    assert_ne!(run.session_id, blocked_session);
+    let failure = RunFailure::Error {
+        message: "the build broke".into(),
+    };
+    hub.link.fail(&lease, run.run_id, &failure).await.unwrap();
+    hub.link.release(&lease).await.unwrap();
+    let started = call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_5",
+        RETRY_TASK,
+        json!({ "task_id": "T-0001", "agent": ENGINEER }),
+    )
+    .await;
+    assert!(
+        matches!(&started, Err(why) if why.to_string().contains("already started")),
+        "{started:?}"
+    );
+    assert_eq!(task(&hub, "T-0001").await.agent_id, writer.id);
+}
+
+/// Mirrors `entries` into `run`'s journal, as the runner does.
+async fn journal(hub: &TestHub, lease: &Lease, run: &RunAssignment, entries: &[Json]) {
+    let at = hub.clock.now();
+    let entries: Vec<JournalEntry> = entries
+        .iter()
+        .zip(1..)
+        .map(|(entry, seq)| JournalEntry {
+            run_id: run.run_id,
+            seq,
+            at,
+            entry: entry.clone(),
+        })
+        .collect();
+    hub.link.append(lease, &entries).await.unwrap();
+}
+
+/// A queued task whose lead may reassign it, and a Writer to reassign it to.
+async fn writer(hub: &TestHub) -> AgentId {
+    let writer = hub
+        .db
+        .create_agent(&NewAgent::named("Writer", "writer"))
+        .await
+        .unwrap();
+    hub.db
+        .bind(&NewBinding {
+            project_id: hub.general().await.id,
+            agent_id: writer.id,
+            mode: Some(Mode::OnRequest),
+            is_lead: false,
+            max_parallel: 1,
+        })
+        .await
+        .unwrap();
+    writer.id
+}
+
+#[tokio::test]
+async fn a_usage_limit_after_a_tool_call_keeps_the_task_with_its_agent() {
+    // #778 review: the run used a tool, and the runner kept its file
+    // changes, before the account reached its limit. The session holds that
+    // conversation, so the task has started and stays with its agent.
+    let (hub, lead_lease, lead) = lead_run(2).await;
+    call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_1",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    writer(&hub).await;
+    let (lease, run) = begin(&*hub.link).await;
+    assert_eq!(run.agent_name, ENGINEER);
+    journal(
+        &hub,
+        &lease,
+        &run,
+        &[
+            json!({"type": "session_started", "native_session_id": "native-1"}),
+            json!({"type": "tool_use", "call_id": "c1", "name": "Edit", "input": {"file": "page.rs"}}),
+            json!({"type": "tool_result", "call_id": "c1", "output": "ok", "is_error": false}),
+            json!({"type": "usage_limit", "resets_at": null}),
+        ],
+    )
+    .await;
+    hub.link
+        .fail(&lease, run.run_id, &RunFailure::UsageLimit)
+        .await
+        .unwrap();
+    hub.link.release(&lease).await.unwrap();
+    let queued = task(&hub, "T-0001").await;
+    assert_eq!(queued.status, TaskStatus::Queued);
+
+    let moved = call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_2",
+        RETRY_TASK,
+        json!({ "task_id": "T-0001", "agent": "Writer" }),
+    )
+    .await;
+    assert!(
+        matches!(&moved, Err(why) if why.to_string().contains("already started")),
+        "{moved:?}"
+    );
+    let from_app = hub
+        .api
+        .tasks(TaskRequest::Reassign {
+            task: queued.id,
+            agent: "Writer".to_owned(),
+        })
+        .await;
+    assert!(from_app.is_err(), "{from_app:?}");
+    assert_eq!(task(&hub, "T-0001").await.agent_id, queued.agent_id);
+    // Its session stays open for the agent to go on with.
+    let (lease, rerun) = begin(&*hub.link).await;
+    assert_eq!(rerun.task_id, Some(queued.id));
+    assert_eq!(rerun.agent_name, ENGINEER);
+    assert_eq!(rerun.session_id, run.session_id);
+    hub.link.release(&lease).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_repeated_reassignment_from_a_resumed_lead_session_keeps_your_choice() {
+    // #778 review: the lead reassigns a task held by a usage limit, then you
+    // choose another agent. The lead's runner dies, and its resumed session
+    // repeats the call with the same id in a new run: that changes nothing.
+    let (hub, lead_lease, lead) = lead_run(2).await;
+    call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_1",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    let writer = writer(&hub).await;
+    let (lease, run) = begin(&*hub.link).await;
+    hub.link
+        .fail(&lease, run.run_id, &RunFailure::UsageLimit)
+        .await
+        .unwrap();
+    hub.link.release(&lease).await.unwrap();
+    let engineer = task(&hub, "T-0001").await.agent_id;
+
+    let reassign = json!({ "task_id": "T-0001", "agent": "Writer" });
+    call(
+        &hub,
+        &lead_lease,
+        &lead,
+        "toolu_2",
+        RETRY_TASK,
+        reassign.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(task(&hub, "T-0001").await.agent_id, writer);
+    let TaskReply::Task { task: chosen } = hub
+        .api
+        .tasks(TaskRequest::Reassign {
+            task: task(&hub, "T-0001").await.id,
+            agent: ENGINEER.to_owned(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("a task");
+    };
+    assert_eq!(chosen.agent_id, engineer);
+
+    hub.clock.advance(PAST_LEASE);
+    hub.core.sweep_once().await.unwrap();
+    let (lease, rerun) = loop {
+        let (lease, next) = begin(&*hub.link).await;
+        if next.lane_kind == LaneKind::Lead {
+            break (lease, next);
+        }
+        hub.link.release(&lease).await.unwrap();
+    };
+    assert_eq!(rerun.session_id, lead.session_id);
+    assert_ne!(rerun.run_id, lead.run_id);
+    let repeated = call(&hub, &lease, &rerun, "toolu_2", RETRY_TASK, reassign)
+        .await
+        .unwrap();
+    assert_eq!(repeated["status"], "queued", "{repeated}");
+    assert_eq!(task(&hub, "T-0001").await.agent_id, engineer, "your choice");
 }

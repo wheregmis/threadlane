@@ -187,7 +187,7 @@ impl LocalLink {
             // The account call cooled the account down; placement holds
             // the lane until one is free (Plan.md §5.3), so no backoff.
             RunFailure::UsageLimit => (
-                "the account reached its usage limit".to_owned(),
+                threadlane_store::USAGE_LIMIT_ERROR.to_owned(),
                 RetryPolicy {
                     count_attempt: false,
                     max_attempts: inner.settings.max_attempts,

@@ -11,8 +11,8 @@ use threadlane_core::ids::{
 };
 use threadlane_core::memory::progress_path;
 use threadlane_core::model::{
-    BackendKind, EventKind, Inserted, LaneKind, Lease, NewEvent, NewTask, Run, Task, TaskStatus,
-    Trust,
+    BackendKind, EventKind, Inserted, LaneKind, Lease, NewEvent, NewTask, Run, RunStatus,
+    SessionStatus, Task, TaskStatus, Trust,
 };
 use threadlane_core::store::{StoreError, StoreResult, TaskStore, TaskUpdate};
 use threadlane_core::time::Timestamp;
@@ -32,6 +32,11 @@ pub(crate) const TASK_WAKE_SOURCE: &str = "task-wake";
 /// The `waiting_reason` of a task that may not start for lack of a model
 /// account (Plan.md §5.3 "blocked, not failed").
 pub const BLOCKED_REASON: &str = "blocked: every model account it can use is at its usage limit";
+
+/// The `error` the hub records on a run that ended because its account
+/// reached its usage limit (Plan.md §5.3). A task whose only runs ended so
+/// before doing any work has not started and may still be reassigned (#776).
+pub const USAGE_LIMIT_ERROR: &str = "the account reached its usage limit";
 
 /// The `waiting_reason` of a task with repositories offered to a machine
 /// that is not logged in to `gh` (Plan.md §5.4 item 5).
@@ -489,6 +494,152 @@ struct LeadRetry<'a> {
     call_key: &'a str,
 }
 
+/// Gives a queued task that has not started to `agent`. A task has started
+/// once a run on its lane did any work: anything but stop at a usage limit
+/// before its agent used a tool or wrote a word. That session stays with its
+/// agent. Runs that only hit a usage limit did no work, so their sessions
+/// close and the new agent starts fresh (#776).
+///
+/// With `lead`, the lead's tool call key and the time: the call is recorded
+/// on the task's lane in the same transaction, and repeating it, even from a
+/// resumed session in a later run, returns the task as it is before its
+/// state is checked again. Without `lead`, the
+/// user's reassignment to the agent it already has changes nothing.
+async fn reassign_in(
+    conn: &Connection,
+    id: TaskId,
+    agent: AgentId,
+    lead: Option<(&str, Timestamp)>,
+) -> StoreResult<Task> {
+    let task = existing_task(conn, id).await?;
+    if let Some((call_key, _)) = lead
+        && lead_call_done(conn, id, call_key).await?
+    {
+        return Ok(task);
+    }
+    if task.status != TaskStatus::Queued {
+        return Err(StoreError::Conflict(format!(
+            "task {id} is {}; only a queued task can be reassigned",
+            task.status
+        )));
+    }
+    if has_started(conn, &task).await? {
+        return Err(StoreError::Conflict(format!(
+            "task {id} has already started; its session stays with its agent"
+        )));
+    }
+    if task.agent_id == agent {
+        if lead.is_some() {
+            return Err(StoreError::Conflict(format!(
+                "task {id} is already assigned to that agent; name another agent"
+            )));
+        }
+        return Ok(task);
+    }
+    exec(
+        conn,
+        "UPDATE sessions SET status = ?1 WHERE lane_id = ?2 AND status = ?3",
+        params![
+            SessionStatus::Closed.as_str(),
+            task.lane_id.get(),
+            SessionStatus::Open.as_str()
+        ],
+    )
+    .await?;
+    exec(
+        conn,
+        "UPDATE tasks SET agent_id = ?1 WHERE id = ?2",
+        params![agent.get(), id.get()],
+    )
+    .await?;
+    if let Some((call_key, now)) = lead {
+        insert_event_in(
+            conn,
+            &NewEvent {
+                project_id: task.project_id,
+                lane_id: task.lane_id,
+                source: TASK_SOURCE.to_owned(),
+                source_event_id: reassign_key(id, call_key),
+                kind: EventKind::System,
+                payload: json!({
+                    "text": format!(
+                        "The project lead reassigned {id} to you before it started. \
+                         Start it from the beginning."
+                    ),
+                    "call_key": call_key,
+                }),
+                trust: Trust::System,
+                requested: task.origin.is_requested(),
+                session_ref: None,
+                decision_ref: None,
+                reply_to_ref: None,
+                received_at: now,
+            },
+        )
+        .await?;
+    }
+    existing_task(conn, id).await
+}
+
+/// The event recording the lead's reassignment of task `id` by `call_key`.
+fn reassign_key(id: TaskId, call_key: &str) -> String {
+    format!("reassign:{}:{call_key}", id.get())
+}
+
+/// Whether the lead's `retry_task` call `call_key` already retried or
+/// reassigned task `id`. The two share one tool, so a repeated call, even
+/// from a resumed session in a later run, does neither again.
+async fn lead_call_done(conn: &Connection, id: TaskId, call_key: &str) -> StoreResult<bool> {
+    let reassigned = query_opt(
+        conn,
+        "SELECT 1 FROM events WHERE source = ?1 AND source_event_id = ?2",
+        params![TASK_SOURCE, reassign_key(id, call_key)],
+        |row| Cols(row).i64(0),
+    )
+    .await?;
+    if reassigned.is_some() {
+        return Ok(true);
+    }
+    let retries: Vec<Json> = query_all(
+        conn,
+        "SELECT payload FROM events WHERE source = ?1 AND source_event_id LIKE ?2",
+        params![TASK_SOURCE, format!("retry:{}:%", id.get())],
+        |row| Cols(row).json(0),
+    )
+    .await?;
+    Ok(retries
+        .iter()
+        .any(|payload| payload["call_key"] == call_key))
+}
+
+/// Whether queued `task` has started: a session on its lane has no run yet,
+/// or one of its runs did not fail at a usage limit, or did work before it
+/// did. Work is a hub tool call or a mirrored entry other than the session
+/// starting, a turn boundary, a warning or the usage limit itself; the runner
+/// keeps a failed run's file changes, and the session holds its conversation.
+async fn has_started(conn: &Connection, task: &Task) -> StoreResult<bool> {
+    let started = query_opt(
+        conn,
+        "SELECT 1 FROM sessions s WHERE s.lane_id = ?1 AND (
+             NOT EXISTS (SELECT 1 FROM runs r WHERE r.session_id = s.id)
+             OR EXISTS (SELECT 1 FROM runs r WHERE r.session_id = s.id AND (
+                 NOT (r.status = ?2 AND r.error IS ?3)
+                 OR EXISTS (SELECT 1 FROM tool_calls c WHERE c.run_id = r.id)
+                 OR EXISTS (SELECT 1 FROM journal j WHERE j.run_id = r.id
+                     AND COALESCE(json_extract(j.entry, '$.type'), '') NOT IN
+                         ('session_started', 'turn_boundary', 'warning', 'usage_limit')))))
+         LIMIT 1",
+        params![
+            task.lane_id.get(),
+            RunStatus::Failed.as_str(),
+            USAGE_LIMIT_ERROR
+        ],
+        |row| Cols(row).i64(0),
+    )
+    .await?;
+    Ok(started.is_some())
+}
+
 /// Queues failed task `id` again: the user's retry when `lead` is `None`,
 /// else the lead's, which only a configuration failure allows, on the agent
 /// it names or the same one. The lead's retry of a task in review whose
@@ -502,17 +653,7 @@ async fn retry_in(
     let task = existing_task(conn, id).await?;
     if let Some(lead) = &lead {
         check_run_lease(conn, Some(lead.lease), task.project_id).await?;
-        let earlier: Vec<Json> = query_all(
-            conn,
-            "SELECT payload FROM events WHERE source = ?1 AND source_event_id LIKE ?2",
-            params![TASK_SOURCE, format!("retry:{}:%", id.get())],
-            |row| Cols(row).json(0),
-        )
-        .await?;
-        if earlier
-            .iter()
-            .any(|payload| payload["call_key"] == lead.call_key)
-        {
+        if lead_call_done(conn, id, lead.call_key).await? {
             return Ok(task);
         }
     }
@@ -1241,6 +1382,27 @@ impl HubDb {
         Ok(retried)
     }
 
+    /// The lead gives a queued task that has not started, such as one held
+    /// by its agent's usage limit, to another agent of its project (#776).
+    /// Repeating the call `call_key` reassigns once and returns the task as
+    /// it is, even after the user has since chosen another agent.
+    pub async fn lead_reassign_task(
+        &self,
+        lease: &Lease,
+        id: TaskId,
+        agent: AgentId,
+        call_key: &str,
+        now: Timestamp,
+    ) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let conn = tx.conn();
+        let task = existing_task(conn, id).await?;
+        check_run_lease(conn, Some(lease), task.project_id).await?;
+        let reassigned = reassign_in(conn, id, agent, Some((call_key, now))).await?;
+        tx.commit().await?;
+        Ok(reassigned)
+    }
+
     /// Tasks in `project` whose backend refused their agent's setup and that
     /// nobody has retried yet: failed ones, and ones in review whose
     /// Reviewer's was refused, listed with that failure as their result;
@@ -1620,33 +1782,7 @@ impl TaskStore for HubDb {
 
     async fn reassign_task(&self, id: TaskId, agent: AgentId) -> StoreResult<Task> {
         let tx = self.db.begin().await?;
-        let conn = tx.conn();
-        let task = existing_task(conn, id).await?;
-        if task.status != TaskStatus::Queued {
-            return Err(StoreError::Conflict(format!(
-                "task {id} is {}; only a queued task can be reassigned",
-                task.status
-            )));
-        }
-        let started = query_opt(
-            conn,
-            "SELECT 1 FROM sessions WHERE lane_id = ?1 LIMIT 1",
-            params![task.lane_id.get()],
-            |row| Cols(row).i64(0),
-        )
-        .await?;
-        if started.is_some() {
-            return Err(StoreError::Conflict(format!(
-                "task {id} has already started; its session stays with its agent"
-            )));
-        }
-        exec(
-            conn,
-            "UPDATE tasks SET agent_id = ?1 WHERE id = ?2",
-            params![agent.get(), id.get()],
-        )
-        .await?;
-        let reassigned = existing_task(conn, id).await?;
+        let reassigned = reassign_in(tx.conn(), id, agent, None).await?;
         tx.commit().await?;
         Ok(reassigned)
     }
