@@ -313,7 +313,10 @@ impl GithubSource for GhSource {
                 .await?,
             );
         }
-        items.retain(|item| since.is_none_or(|since| item.at.as_str() >= since));
+        // A passed check held back earlier may be older than the cursor by now.
+        items.retain(|item| {
+            passed_check(item) || since.is_none_or(|since| item.at.as_str() >= since)
+        });
         items.sort_by(|a, b| a.at.cmp(&b.at));
         Ok(items)
     }
@@ -919,19 +922,24 @@ pub(crate) fn settled_check_runs(
             .flatten()
             .any(|run| run["status"] != "completed");
     let mut items = parse_check_runs(answer, target);
-    let passed = |item: &GithubItem| {
-        ["success", "skipped", "neutral"]
-            .iter()
-            .any(|conclusion| item.title.ends_with(&format!(": {conclusion}")))
-    };
     if running {
-        items.retain(|item| !passed(item));
+        items.retain(|item| !passed_check(item));
     } else if let Some(settled) = items.iter().map(|item| item.at.clone()).max() {
-        for item in items.iter_mut().filter(|item| passed(item)) {
+        for item in items.iter_mut().filter(|item| passed_check(item)) {
             item.at.clone_from(&settled);
         }
     }
     items
+}
+
+/// Whether `item` is a check that passed, was skipped or was neutral. Such a
+/// result is delivered whatever the cursor says, since it may have been held
+/// back past it; the event's id keeps it from arriving twice.
+pub(crate) fn passed_check(item: &GithubItem) -> bool {
+    item.kind == GithubKind::CheckResult
+        && ["success", "skipped", "neutral"]
+            .iter()
+            .any(|conclusion| item.title.ends_with(&format!(": {conclusion}")))
 }
 
 /// The finished check runs of a `check-runs` answer.

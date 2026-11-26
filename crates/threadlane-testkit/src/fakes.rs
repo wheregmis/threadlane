@@ -726,7 +726,10 @@ impl GithubSource for FakeGithub {
                     // A target known by number only is read on its pull request's items.
                     && (*branch == target.branch
                         || (target.branch.is_empty() && item.pull_request == target.number))
-                    && since.is_none_or(|since| item.at.as_str() >= since)
+                    // As `gh` does: a passed check may have been held back past the cursor.
+                    && ((item.kind == threadlane_core::github::GithubKind::CheckResult
+                        && item.title.ends_with(": success"))
+                        || since.is_none_or(|since| item.at.as_str() >= since))
             })
             .map(|(_, _, item)| item.clone())
             .collect();

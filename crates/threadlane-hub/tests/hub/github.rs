@@ -1020,6 +1020,44 @@ async fn activity_on_a_finished_tasks_pull_request_reaches_the_lead_with_its_det
 }
 
 #[tokio::test]
+async fn a_passed_check_held_back_past_the_cursor_still_arrives_once() {
+    let github = FakeGithub::default();
+    let (hub, _) = start(&github, Arc::new(NoHooks)).await;
+    task_with_pull_request(&hub).await;
+    // A comment arrives while the passed check waits for another to finish.
+    github.add_to(
+        "acme/widgets",
+        BRANCH,
+        GithubItem {
+            branch: Some(BRANCH.into()),
+            ..item(
+                "comment:1",
+                GithubKind::Comment,
+                "acme/widgets",
+                Some(42),
+                "2026-11-17T08:05:00Z",
+            )
+        },
+    );
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    // Released later, it finished before the cursor the comment left.
+    github.add_to(
+        "acme/widgets",
+        BRANCH,
+        GithubItem {
+            title: "lint: success".into(),
+            ..check("check_run:1", "2026-11-17T08:00:00Z")
+        },
+    );
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 1);
+    assert_eq!(hub.core.poll_github_once().await.unwrap().inserted, 0);
+    assert_eq!(
+        ids(&github_events(&hub).await),
+        ["comment:1", "check_run:1"]
+    );
+}
+
+#[tokio::test]
 async fn the_same_item_twice_inserts_once_and_an_unchanged_answer_nothing() {
     let github = FakeGithub::default();
     let (hub, _) = start(&github, Arc::new(NoHooks)).await;
