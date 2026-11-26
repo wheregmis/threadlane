@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.61](https://github.com/wheregmis/threadlane/compare/v0.1.60...v0.1.61) (2026-11-26)
+
+
+### Features
+
+* let a lead wake reopen a finished task in its own lane, session and branch ([#781](https://github.com/wheregmis/threadlane/issues/781)) ([cdc8b78](https://github.com/wheregmis/threadlane/commit/cdc8b78e9c0f98dca144f8ccb3650b7e0057e692))
+* let task agents file issues in unregistered upstream repositories, approved by the user each time ([#780](https://github.com/wheregmis/threadlane/issues/780), [#779](https://github.com/wheregmis/threadlane/issues/779)) ([cdc8b78](https://github.com/wheregmis/threadlane/commit/cdc8b78e9c0f98dca144f8ccb3650b7e0057e692))
+
+
+### Bug Fixes
+
+* install test fake programs with cp so a spawn never hits ETXTBSY ([#783](https://github.com/wheregmis/threadlane/issues/783)) ([cdc8b78](https://github.com/wheregmis/threadlane/commit/cdc8b78e9c0f98dca144f8ccb3650b7e0057e692))
+* let a queued task held by a usage limit be reassigned to another agent ([#778](https://github.com/wheregmis/threadlane/issues/778), [#776](https://github.com/wheregmis/threadlane/issues/776)) ([cdc8b78](https://github.com/wheregmis/threadlane/commit/cdc8b78e9c0f98dca144f8ccb3650b7e0057e692))
+* wake a task once when its checks settle, not once per passed check ([#782](https://github.com/wheregmis/threadlane/issues/782)) ([cdc8b78](https://github.com/wheregmis/threadlane/commit/cdc8b78e9c0f98dca144f8ccb3650b7e0057e692))
+
 ## [0.1.60](https://github.com/wheregmis/threadlane/compare/v0.1.59...v0.1.60) (2026-11-25)
 
 
