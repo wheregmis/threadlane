@@ -1407,6 +1407,7 @@ async fn each_lane_kind_is_offered_only_its_tools_and_the_hub_refuses_the_others
             threadlane_hub::REQUEST_REVIEW,
             threadlane_core::forge::ATTACH_IMAGE,
             threadlane_core::forge::CREATE_TAG,
+            threadlane_core::forge::FILE_UPSTREAM_ISSUE,
             MEMORY_VIEW,
             MEMORY_CREATE,
             MEMORY_EDIT,

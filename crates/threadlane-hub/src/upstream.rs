@@ -67,7 +67,10 @@ impl Filing {
 
 /// Checks a call's shape, without the project.
 pub(crate) fn parse(args: &Json) -> Result<Filing, ToolError> {
-    fields(args, &["upstream", "title", "body", INCLUDE_PROJECT_DETAILS])?;
+    fields(
+        args,
+        &["upstream", "title", "body", INCLUDE_PROJECT_DETAILS],
+    )?;
     let upstream = args["upstream"]
         .as_str()
         .map(str::trim)
@@ -167,9 +170,18 @@ pub(crate) fn private_details(
 pub(crate) fn credential(text: &str) -> bool {
     text.contains("PRIVATE KEY")
         || words(text).any(|word| {
-            ["ghp_", "gho_", "ghs_", "ghu_", "github_pat_", "sk-", "xox", "AKIA"]
-                .iter()
-                .any(|prefix| word.starts_with(prefix) && word.len() >= prefix.len() + 16)
+            [
+                "ghp_",
+                "gho_",
+                "ghs_",
+                "ghu_",
+                "github_pat_",
+                "sk-",
+                "xox",
+                "AKIA",
+            ]
+            .iter()
+            .any(|prefix| word.starts_with(prefix) && word.len() >= prefix.len() + 16)
         })
 }
 
@@ -182,9 +194,7 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
 /// `T-0123` or `D-0123`.
 fn threadlane_id(word: &str) -> bool {
     word.split_once('-').is_some_and(|(kind, digits)| {
-        matches!(kind, "T" | "D")
-            && digits.len() >= 4
-            && digits.chars().all(|c| c.is_ascii_digit())
+        matches!(kind, "T" | "D") && digits.len() >= 4 && digits.chars().all(|c| c.is_ascii_digit())
     })
 }
 
@@ -209,7 +219,9 @@ pub(crate) async fn proposal(
 ) -> Result<Proposal, ToolError> {
     let filing = parse(arguments)?;
     let task_id = lane.task_id.ok_or_else(|| {
-        ToolError::Blocked(format!("{FILE_UPSTREAM_ISSUE} is available only in a task lane"))
+        ToolError::Blocked(format!(
+            "{FILE_UPSTREAM_ISSUE} is available only in a task lane"
+        ))
     })?;
     let task = db
         .task(task_id)
@@ -229,8 +241,7 @@ pub(crate) async fn proposal(
     let text = format!("{}\n{}", filing.title, filing.body);
     if credential(&text) {
         return Err(ToolError::Blocked(
-            "the issue text contains what looks like a credential; remove it and call again"
-                .into(),
+            "the issue text contains what looks like a credential; remove it and call again".into(),
         ));
     }
     let project = db
@@ -349,7 +360,10 @@ mod tests {
         assert!(check("orchards and orchardist").is_empty());
         assert_eq!(
             check("see acme-private/orchard-app#4"),
-            ["the project name \"Orchard\"", "the registered repository \"orchard-app\""]
+            [
+                "the project name \"Orchard\"",
+                "the registered repository \"orchard-app\""
+            ]
         );
         assert_eq!(
             check("ACME-private owns it"),
