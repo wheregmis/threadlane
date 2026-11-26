@@ -66,6 +66,48 @@ pub(super) fn prepare_clipboard_images(
     Ok(images)
 }
 
+const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+
+/// The image file a paste names, when the whole pasted text is one absolute
+/// path (optionally quoted or a `file://` URL) to a readable image file.
+pub(super) fn pasted_image_path(text: &str) -> Option<PathBuf> {
+    let text = text.trim();
+    if text.contains(['\n', '\r']) {
+        return None;
+    }
+    let text = ['"', '\'']
+        .into_iter()
+        .find_map(|quote| text.strip_prefix(quote)?.strip_suffix(quote))
+        .unwrap_or(text);
+    let path = PathBuf::from(match text.strip_prefix("file://") {
+        Some(url) => percent_decode(url.strip_prefix("localhost").unwrap_or(url))?,
+        None => text.to_owned(),
+    });
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    (path.is_absolute()
+        && IMAGE_EXTENSIONS.contains(&extension.as_str())
+        && File::open(&path)
+            .and_then(|file| file.metadata())
+            .is_ok_and(|meta| meta.is_file()))
+    .then_some(path)
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let mut bytes = Vec::new();
+    let mut rest = text.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' {
+            let hex = std::str::from_utf8(tail.get(..2)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &tail[2..];
+        } else {
+            bytes.push(byte);
+            rest = tail;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
 pub(super) fn read_images(paths: Vec<PathBuf>) -> Result<Vec<ImageAttachment>, String> {
     let mut images = Vec::new();
     let mut remaining = MAX_IMAGE_BYTES;
@@ -241,7 +283,7 @@ mod tests {
     use gpui_kit::{Image, ImageFormat};
     use threadlane_core::attachment::MAX_IMAGE_BYTES;
 
-    use super::{copy_clipboard_images, prepare_clipboard_images};
+    use super::{copy_clipboard_images, pasted_image_path, prepare_clipboard_images, read_images};
 
     fn clipboard_image(
         pixels: &image::DynamicImage,
@@ -306,5 +348,50 @@ mod tests {
             let error = prepare_clipboard_images(vec![input]).unwrap_err();
             assert!(error.starts_with("Could not decode"));
         }
+    }
+
+    #[test]
+    fn pasted_text_naming_an_image_file_resolves_to_its_path() {
+        let dir = std::env::temp_dir().join(format!("threadlane-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Screenshot 2026-11-26 at 09.17.27.PNG");
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&path, png.into_inner()).unwrap();
+        let text = path.to_str().unwrap();
+        let url = format!("file://{}", text.replace(' ', "%20"));
+        for pasted in [
+            text.to_owned(),
+            format!("  {text}\n"),
+            format!("\"{text}\""),
+            format!("'{text}'"),
+            url.clone(),
+            format!("file://localhost{}", text.replace(' ', "%20")),
+        ] {
+            assert_eq!(pasted_image_path(&pasted), Some(path.clone()), "{pasted:?}");
+        }
+        let images = read_images(vec![pasted_image_path(&url).unwrap()]).unwrap();
+        assert_eq!(images[0].name(), "Screenshot 2026-11-26 at 09.17.27.PNG");
+
+        let text_file = dir.join("notes.txt");
+        std::fs::write(&text_file, "hi").unwrap();
+        for pasted in [
+            dir.join("missing.png").to_str().unwrap().to_owned(),
+            text_file.to_str().unwrap().to_owned(),
+            format!("look at {text}"),
+            format!("{text}\n{text}"),
+            "Screenshot.png".to_owned(),
+            "file://%ZZ.png".to_owned(),
+        ] {
+            assert_eq!(pasted_image_path(&pasted), None, "{pasted:?}");
+        }
+        std::fs::create_dir_all(dir.join("folder.png")).unwrap();
+        assert_eq!(
+            pasted_image_path(dir.join("folder.png").to_str().unwrap()),
+            None
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

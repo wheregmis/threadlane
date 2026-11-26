@@ -678,12 +678,10 @@ impl Desktop {
                     .disabled(destination.is_none())
                     .aria_label(label)
                     .on_paste(move |item, _, cx| {
-                        if let Some(target) = &paste_to {
-                            let _ = view.update(cx, |this, cx| {
-                                this.paste_images(target, item, cx);
-                            });
-                        }
-                        false
+                        paste_to.as_ref().is_some_and(|target| {
+                            view.update(cx, |this, cx| this.paste_images(target, item, cx))
+                                .unwrap_or(false)
+                        })
                     }),
             )
             .child(
@@ -777,7 +775,14 @@ impl Desktop {
         .detach();
     }
 
-    fn paste_images(&mut self, target: &Destination, item: &ClipboardItem, cx: &mut Context<Self>) {
+    /// Attaches pasted images, or the image file a pasted path names. Returns
+    /// whether the paste was consumed, so its text is not inserted.
+    fn paste_images(
+        &mut self,
+        target: &Destination,
+        item: &ClipboardItem,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let images: Vec<_> = item
             .entries()
             .iter()
@@ -786,22 +791,32 @@ impl Desktop {
                 _ => None,
             })
             .collect();
-        if images.is_empty() {
-            return;
-        }
-        self.state.loading_images(target);
-        let images = match chat_images::copy_clipboard_images(&images) {
-            Ok(images) => images,
-            Err(error) => {
-                self.state.attach_images(target, Err(error));
-                cx.notify();
-                return;
-            }
+        // Only a pasted path is consumed; clipboard images keep any text alongside them.
+        let from_path = images.is_empty();
+        let checked = if from_path {
+            let Some(path) = item
+                .text()
+                .as_deref()
+                .and_then(chat_images::pasted_image_path)
+            else {
+                return false;
+            };
+            self.state.loading_images(target);
+            cx.background_spawn(async move { chat_images::read_images(vec![path]) })
+        } else {
+            self.state.loading_images(target);
+            let images = match chat_images::copy_clipboard_images(&images) {
+                Ok(images) => images,
+                Err(error) => {
+                    self.state.attach_images(target, Err(error));
+                    cx.notify();
+                    return false;
+                }
+            };
+            cx.background_spawn(async move { chat_images::prepare_clipboard_images(images) })
         };
         let target = target.clone();
         cx.notify();
-        let checked =
-            cx.background_spawn(async move { chat_images::prepare_clipboard_images(images) });
         cx.spawn(async move |this, cx| {
             let images = checked.await;
             let _ = this.update(cx, |this, cx| {
@@ -810,6 +825,7 @@ impl Desktop {
             });
         })
         .detach();
+        from_path
     }
 
     pub(crate) fn submit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
